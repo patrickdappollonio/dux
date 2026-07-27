@@ -139,6 +139,63 @@ describe("startup-command log viewer store actions", () => {
     )
   })
 
+  it("openStartupLogs marks the viewer agent-scoped", async () => {
+    const mod = await loadStore()
+    mod.openStartupLogs("s1")
+    expect(mod.getSnapshot().startupLogsScope).toBe("agent")
+  })
+
+  it("openProjectStartupLogs loads the PROJECT-scoped listing", async () => {
+    const mod = await loadStore()
+    mod.openProjectStartupLogs("p1")
+    expect(mod.getSnapshot().startupLogsTarget).toBe("p1")
+    expect(mod.getSnapshot().startupLogsScope).toBe("project")
+    expect(mod.getSnapshot().startupLogsLoading).toBe(true)
+
+    await vi.waitFor(() =>
+      expect(mod.getSnapshot().startupLogsLoading).toBe(false),
+    )
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/projects/p1/startup-logs",
+      expect.objectContaining({ method: "GET" }),
+    )
+    const s = mod.getSnapshot()
+    expect(s.startupLogsEntries.map((e) => e.name)).toEqual(["b.log", "a.log"])
+    expect(s.startupLogsSelected?.name).toBe("b.log")
+    expect(s.startupLogsError).toBe(null)
+  })
+
+  it("selectStartupLog follows the open scope to the project content endpoint", async () => {
+    const mod = await loadStore()
+    mod.openProjectStartupLogs("p1")
+    await vi.waitFor(() =>
+      expect(mod.getSnapshot().startupLogsLoading).toBe(false),
+    )
+
+    mod.selectStartupLog("a.log")
+    await vi.waitFor(() =>
+      expect(mod.getSnapshot().startupLogsSelected?.name).toBe("a.log"),
+    )
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/projects/p1/startup-logs/content?name=a.log",
+      expect.objectContaining({ method: "GET" }),
+    )
+    // The agent-scoped endpoint must not have been touched for a project view.
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      "/api/v1/sessions/p1/startup-logs/content?name=a.log",
+      expect.anything(),
+    )
+  })
+
+  it("closing a project view resets the scope back to agent", async () => {
+    const mod = await loadStore()
+    mod.openProjectStartupLogs("p1")
+    mod.closeStartupLogs()
+    const s = mod.getSnapshot()
+    expect(s.startupLogsTarget).toBe(null)
+    expect(s.startupLogsScope).toBe("agent")
+  })
+
   it("ignores a late listing reply once the viewer has closed", async () => {
     const mod = await loadStore()
     mod.openStartupLogs("s1") // fires the in-flight list fetch

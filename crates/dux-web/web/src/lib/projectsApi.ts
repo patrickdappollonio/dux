@@ -18,6 +18,8 @@ import type {
   InspectKind,
   ProjectView,
   ProjectWorktreeEntryView,
+  StartupLogContent,
+  StartupLogsList,
 } from "./types"
 
 // A failed projects REST call. `status` is the HTTP status (0 for a network/
@@ -121,6 +123,25 @@ export const projectsApi = {
     request<{ entries: ProjectWorktreeEntryView[] }>(
       "GET",
       `/api/v1/projects/${encodeURIComponent(id)}/worktrees`,
+    ),
+  // List the PROJECT-scoped startup-command log files: every run across every
+  // agent of the project, newest first, with the newest file's contents
+  // pre-loaded. The agent-scoped counterpart is `sessionsApi.startupLogs`; both
+  // return the same `StartupLogsList` shape, which is what lets one dialog serve
+  // both scopes.
+  startupLogs: (id: string) =>
+    request<StartupLogsList>(
+      "GET",
+      `/api/v1/projects/${encodeURIComponent(id)}/startup-logs`,
+    ),
+  // Read one project-scoped startup-command log file by name (empty name returns
+  // the newest run in the project).
+  startupLogContent: (id: string, name?: string) =>
+    request<StartupLogContent>(
+      "GET",
+      `/api/v1/projects/${encodeURIComponent(id)}/startup-logs/content${
+        name ? `?name=${encodeURIComponent(name)}` : ""
+      }`,
     ),
   // Branch pre-flight for the add-project flow: inspect a candidate repo path and
   // report its current branch + a non-default-branch warning. Replaces the retired

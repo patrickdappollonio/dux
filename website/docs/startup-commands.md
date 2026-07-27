@@ -76,7 +76,8 @@ A few things to know:
   launches the agent; it does not block you.
 - Every run produces a timestamped log file under the dux config directory:
   `startup-command-logs/<project-id>/<session-id>/`. You can browse these from
-  the command palette (TUI) or an agent's actions menu (web UI).
+  the command palette (TUI) or a row's actions menu (web UI), for a single agent
+  or for every agent in a project at once.
 
 ### Configuring and running from the app
 
@@ -88,7 +89,9 @@ you do not have to leave the app to manage them:
   agent*, and *read startup command logs*.
 - **Web UI (server mode):** each agent's actions (`⋯`) menu carries
   *Configure startup command*, *Configure environment variables*, *Rerun
-  startup command*, and *Startup command logs*. Because env and startup commands
+  startup command*, and *Startup command logs*. A project's `⋯` menu carries
+  *Startup command logs for all agents*, the same viewer widened to every run in
+  the project. Because env and startup commands
   are project-scoped, the first two edit the agent's whole project (and the
   change is written back to `config.toml`); global env stays in the cog menu's
   Configuration submenu. *Rerun startup command* re-runs the project's startup command in that

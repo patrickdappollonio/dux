@@ -185,8 +185,12 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         action: Action::ReadStartupCommandLogs,
         name: "read-startup-command-logs",
         description: "Read startup command logs for the selected agent or project",
-        // TUI-only: opens server-side log files in a local viewer (a server-side
-        // footgun on the web; no remote log viewer is built).
+        // Both scopes exist on the web too, as row-menu actions rather than one
+        // command: the agent scope in the agent row's menu, the project scope in
+        // the project row's menu (they read the same files over
+        // `GET /api/v1/{sessions,projects}/:id/startup-logs`). The older
+        // "TUI-only, no remote log viewer" note here was already false for the
+        // agent scope and is now false for both.
     },
     PaletteCommand {
         action: Action::FocusAgent,

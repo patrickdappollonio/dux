@@ -91,6 +91,14 @@ export type MobileScreen = "home" | "terminal" | "changes"
 export type FirstLoadScreen = "welcome" | "whats_new"
 
 /**
+ * Which set of startup-command runs the log viewer is showing: one agent's own
+ * runs, or every run across every agent of a project. The TS mirror of
+ * `dux_core::startup::StartupCommandLogScope`, which is the one place the two
+ * meanings are defined; the server serves each scope from its own route.
+ */
+export type StartupLogsScope = "agent" | "project"
+
+/**
  * The open first-load dialog. ONE dialog serves both screens; only the text and
  * the two buttons differ, so this carries the union of what either needs.
  */
@@ -250,9 +258,18 @@ export interface DuxState {
   // dialog resolves the owning project from the session id.
   agentStartupCommandTarget: string | null
   agentEnvTarget: string | null
-  // The agent (session) whose startup-command log viewer is open, or null. The
-  // log files + the displayed file's contents are fetched over REST into the
-  // fields below when the viewer opens (mirroring the attach-worktree listing).
+  // The entity whose startup-command log viewer is open, or null. The log files
+  // + the displayed file's contents are fetched over REST into the fields below
+  // when the viewer opens (mirroring the attach-worktree listing).
+  //
+  // `startupLogsTarget` is a SESSION id in "agent" scope and a PROJECT id in
+  // "project" scope, matching `dux_core::startup::StartupCommandLogScope`: an
+  // agent's own runs, or every run across every agent of a project. The scope
+  // picks the REST client (sessionsApi vs projectsApi) and the dialog's title,
+  // subtitle, empty state and vanished-target lookup. It is a separate field
+  // rather than a tagged target so the agent-scope callers and their tests keep
+  // reading a plain id.
+  startupLogsScope: StartupLogsScope
   startupLogsTarget: string | null
   startupLogsEntries: StartupLogEntry[]
   startupLogsSelected: StartupLogContent | null
@@ -575,6 +592,7 @@ let state: DuxState = {
   projectSettingsTarget: null,
   agentStartupCommandTarget: null,
   agentEnvTarget: null,
+  startupLogsScope: "agent",
   startupLogsTarget: null,
   startupLogsEntries: [],
   startupLogsSelected: null,
@@ -2519,22 +2537,40 @@ export function closeAgentEnv(): void {
   setState({ agentEnvTarget: null })
 }
 
-// Open the startup-command log viewer for an agent and fetch its log files (with
-// the newest file's contents pre-loaded). A reply is ignored once the viewer has
-// closed or retargeted, so a late frame can't repopulate a stale viewer (the
-// browse/attach-worktree precedent).
-export function openStartupLogs(sessionId: string): void {
+// Whether the viewer is still pointed at the (scope, id) a reply was issued for.
+// Both halves matter: session ids and project ids live in separate namespaces,
+// so an id alone could theoretically match across a scope switch and let a late
+// agent-scope reply repopulate a project-scope viewer.
+function startupLogsStillTargets(
+  scope: StartupLogsScope,
+  id: string,
+): boolean {
+  return state.startupLogsScope === scope && state.startupLogsTarget === id
+}
+
+// The REST pair for a scope. The two clients return the same shapes, which is
+// what lets one viewer (and one set of store actions) serve both.
+function startupLogsClient(scope: StartupLogsScope) {
+  return scope === "project" ? projectsApi : sessionsApi
+}
+
+// Open the startup-command log viewer for `id` in `scope` and fetch its log
+// files (with the newest file's contents pre-loaded). A reply is ignored once
+// the viewer has closed or retargeted, so a late frame can't repopulate a stale
+// viewer (the browse/attach-worktree precedent).
+function loadStartupLogs(scope: StartupLogsScope, id: string): void {
   setState({
-    startupLogsTarget: sessionId,
+    startupLogsScope: scope,
+    startupLogsTarget: id,
     startupLogsEntries: [],
     startupLogsSelected: null,
     startupLogsError: null,
     startupLogsLoading: true,
   })
-  sessionsApi
-    .startupLogs(sessionId)
+  startupLogsClient(scope)
+    .startupLogs(id)
     .then((res) => {
-      if (state.startupLogsTarget !== sessionId) return
+      if (!startupLogsStillTargets(scope, id)) return
       setState({
         startupLogsEntries: res.entries,
         startupLogsSelected: res.selected,
@@ -2543,7 +2579,7 @@ export function openStartupLogs(sessionId: string): void {
       })
     })
     .catch((e) => {
-      if (state.startupLogsTarget !== sessionId) return
+      if (!startupLogsStillTargets(scope, id)) return
       setState({
         startupLogsLoading: false,
         startupLogsError:
@@ -2554,19 +2590,33 @@ export function openStartupLogs(sessionId: string): void {
     })
 }
 
-// Switch the viewer to a different log file (fetches that file's contents).
+// Agent scope: one agent's runs, from the agent row's ⋯ menu.
+export function openStartupLogs(sessionId: string): void {
+  loadStartupLogs("agent", sessionId)
+}
+
+// Project scope: every run across every agent of the project, from the project
+// row's ⋯ menu. The TUI reaches the same scope by running
+// `read-startup-command-logs` with a project (not an agent) selected.
+export function openProjectStartupLogs(projectId: string): void {
+  loadStartupLogs("project", projectId)
+}
+
+// Switch the viewer to a different log file (fetches that file's contents from
+// whichever scope is open).
 export function selectStartupLog(name: string): void {
-  const sessionId = state.startupLogsTarget
-  if (!sessionId) return
+  const id = state.startupLogsTarget
+  if (!id) return
+  const scope = state.startupLogsScope
   setState({ startupLogsLoading: true, startupLogsError: null })
-  sessionsApi
-    .startupLogContent(sessionId, name)
+  startupLogsClient(scope)
+    .startupLogContent(id, name)
     .then((res) => {
-      if (state.startupLogsTarget !== sessionId) return
+      if (!startupLogsStillTargets(scope, id)) return
       setState({ startupLogsSelected: res, startupLogsLoading: false })
     })
     .catch((e) => {
-      if (state.startupLogsTarget !== sessionId) return
+      if (!startupLogsStillTargets(scope, id)) return
       setState({
         startupLogsLoading: false,
         startupLogsError:
@@ -2579,6 +2629,9 @@ export function selectStartupLog(name: string): void {
 
 export function closeStartupLogs(): void {
   setState({
+    // Back to the default scope, so a closed viewer never leaves "project"
+    // behind for a later agent-scope open to trip over.
+    startupLogsScope: "agent",
     startupLogsTarget: null,
     startupLogsEntries: [],
     startupLogsSelected: null,

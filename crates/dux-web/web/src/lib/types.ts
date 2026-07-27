@@ -171,7 +171,9 @@ export interface SessionView {
   last_focused_tab?: string | null
 }
 
-/** One startup-command log file for an agent (see `GET /sessions/:id/startup-logs`). */
+/** One startup-command log file. Shared by both scopes of the viewer: the agent
+ * one (`GET /sessions/:id/startup-logs`) and the project one
+ * (`GET /projects/:id/startup-logs`, every run across every agent). */
 export interface StartupLogEntry {
   name: string
   /** RFC 3339 last-modified time, or null when unavailable. */
@@ -184,9 +186,10 @@ export interface StartupLogContent {
   content: string
 }
 
-/** The startup-command log listing for an agent: every log file (newest first)
- * plus the newest file's contents pre-loaded (`selected` is null when there are
- * no logs yet). */
+/** The startup-command log listing for one scope (an agent, or a whole project):
+ * every log file in it, newest first, plus the newest file's contents pre-loaded
+ * (`selected` is null when the scope has no logs yet). Both routes return this
+ * same shape, which is what lets one dialog serve both. */
 export interface StartupLogsList {
   entries: StartupLogEntry[]
   selected: StartupLogContent | null

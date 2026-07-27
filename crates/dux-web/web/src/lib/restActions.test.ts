@@ -272,6 +272,25 @@ describe("projectsApi", () => {
     expect(lastCall(fetchMock).url).toBe("/api/v1/projects/p1/checkout-default")
   })
 
+  // Project-SCOPE startup logs: every run across every agent of the project,
+  // the counterpart to sessionsApi's agent-scope pair above.
+  it("startupLogs/startupLogContent GET the project-scoped log endpoints", async () => {
+    const fetchMock = stubOkFetch(200, { entries: [], selected: null })
+    await projectsApi.startupLogs("p1")
+    expect(lastCall(fetchMock).url).toBe("/api/v1/projects/p1/startup-logs")
+    expect(lastCall(fetchMock).method).toBe("GET")
+
+    await projectsApi.startupLogContent("p1", "a b.log")
+    expect(lastCall(fetchMock).url).toBe(
+      "/api/v1/projects/p1/startup-logs/content?name=a%20b.log",
+    )
+    // No name asks for the newest run, with no query string at all.
+    await projectsApi.startupLogContent("p1")
+    expect(lastCall(fetchMock).url).toBe(
+      "/api/v1/projects/p1/startup-logs/content",
+    )
+  })
+
   it("throws a typed ProjectsApiError on non-2xx", async () => {
     vi.stubGlobal(
       "fetch",

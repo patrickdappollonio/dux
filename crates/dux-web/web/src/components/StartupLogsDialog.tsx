@@ -17,18 +17,31 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
+import type { StartupLogsScope } from "@/lib/store"
 import {
   closeStartupLogs,
   selectStartupLog,
   useDux,
 } from "@/lib/store"
 
-// View an agent's startup-command logs (the web counterpart to the TUI's
+// View startup-command logs (the web counterpart to the TUI's
 // `read-startup-command-logs`). Each run of the project startup command writes a
 // timestamped log file; this lists them (newest first) and shows the selected
 // file's contents. The list + contents are fetched into the store when the viewer
-// opens (see `openStartupLogs`); a Select switches between runs.
-function StartupLogsBody({ sessionId }: { sessionId: string }) {
+// opens (see `openStartupLogs` / `openProjectStartupLogs`); a Select switches
+// between runs.
+//
+// ONE dialog serves both scopes of `StartupCommandLogScope`. Only the naming
+// differs, and it MUST differ: a user who opens an agent's runs and then a
+// project's could not otherwise tell the two lists apart, so the title says
+// which entity and the subtitle says how wide the list is.
+function StartupLogsBody({
+  scope,
+  targetId,
+}: {
+  scope: StartupLogsScope
+  targetId: string
+}) {
   const {
     spine,
     startupLogsEntries,
@@ -37,18 +50,25 @@ function StartupLogsBody({ sessionId }: { sessionId: string }) {
     startupLogsError,
   } = useDux()
 
-  const session = spine?.sessions.find((s) => s.id === sessionId)
-  const agentName = session?.title || session?.branch_name || "agent"
+  const project = spine?.projects.find((p) => p.id === targetId)
+  const session = spine?.sessions.find((s) => s.id === targetId)
+  const isProject = scope === "project"
+  const title = isProject
+    ? `Startup command logs: ${project?.name || "project"} (all agents)`
+    : `Startup command logs: ${session?.title || session?.branch_name || "agent"}`
+  const description = isProject
+    ? "Output from each run of the project startup command across every agent in this project, newest first."
+    : "Output from each run of the project startup command in this agent's worktree, newest first."
+  const emptyMessage = isProject
+    ? "No startup command logs yet. Run the startup command for an agent in this project to generate one."
+    : "No startup command logs yet. Run the startup command for this agent to generate one."
   const hasLogs = startupLogsEntries.length > 0
 
   return (
     <DialogContent showCloseButton={false} className="sm:max-w-3xl">
       <DialogHeader>
-        <DialogTitle>Startup command logs — {agentName}</DialogTitle>
-        <DialogDescription>
-          Output from each run of the project startup command in this agent's
-          worktree, newest first.
-        </DialogDescription>
+        <DialogTitle>{title}</DialogTitle>
+        <DialogDescription>{description}</DialogDescription>
       </DialogHeader>
 
       {startupLogsError ? (
@@ -61,8 +81,7 @@ function StartupLogsBody({ sessionId }: { sessionId: string }) {
         </div>
       ) : !hasLogs ? (
         <div className="flex h-64 items-center justify-center px-6 text-center text-sm text-muted-foreground">
-          No startup command logs yet. Run the startup command for this agent to
-          generate one.
+          {emptyMessage}
         </div>
       ) : (
         <div className="grid gap-3">
@@ -109,14 +128,20 @@ function StartupLogsBody({ sessionId }: { sessionId: string }) {
 }
 
 export function StartupLogsDialog() {
-  const { startupLogsTarget, spine } = useDux()
-  const session = spine?.sessions.find((s) => s.id === startupLogsTarget)
-  // Closes the dialog when the agent vanishes from the ViewModel: the logs
-  // belong to the agent's worktree, and a deleted agent's logs are gone. See
-  // the hook.
+  const { startupLogsScope, startupLogsTarget, spine } = useDux()
+  // Closes the dialog when the entity it is scoped to vanishes from the
+  // ViewModel: the logs belong to a deleted agent's worktree, or to a removed
+  // project, and either way they are gone. The lookup MUST follow the scope,
+  // because resolving a project id against the session list would find nothing
+  // and slam a perfectly valid project view shut on its first frame. See the
+  // hook.
+  const targetExists =
+    startupLogsScope === "project"
+      ? spine?.projects.some((p) => p.id === startupLogsTarget) === true
+      : spine?.sessions.some((s) => s.id === startupLogsTarget) === true
   const open = useVanishedTargetGuard(
     startupLogsTarget !== null,
-    session !== undefined,
+    targetExists,
     closeStartupLogs,
   )
 
@@ -128,7 +153,7 @@ export function StartupLogsDialog() {
       }}
     >
       {open && startupLogsTarget !== null && (
-        <StartupLogsBody sessionId={startupLogsTarget} />
+        <StartupLogsBody scope={startupLogsScope} targetId={startupLogsTarget} />
       )}
     </Dialog>
   )

@@ -11,6 +11,7 @@ import {
   openDeleteProject,
   openProjectInfo,
   openProjectSettings,
+  openProjectStartupLogs,
   openRemoveProject,
   pullProject,
   useDux,
@@ -23,6 +24,7 @@ import {
   GitBranch,
   GitPullRequest,
   Info,
+  ScrollText,
   Settings,
   SquareTerminal,
   Trash2,
@@ -92,6 +94,15 @@ export function ProjectMenuItems({ id }: { id: string }) {
           <DropdownMenuItem onClick={() => openProjectSettings(id)}>
             <Settings />
             Project settings…
+          </DropdownMenuItem>
+          {/* PROJECT scope of the startup-command log viewer: every run across
+              every agent of this project. The agent row's ⋯ menu carries the
+              AGENT scope as the plainer "Startup command logs…", so this one
+              spells out how wide it is; the two must never read alike. Not
+              destructive, so no confirmation. */}
+          <DropdownMenuItem onClick={() => openProjectStartupLogs(id)}>
+            <ScrollText />
+            Startup command logs for all agents…
           </DropdownMenuItem>
           <DropdownMenuSeparator />
           {/* The destructive cascade (also deletes agents' worktrees on disk).
