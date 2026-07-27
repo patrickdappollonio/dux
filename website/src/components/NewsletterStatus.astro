@@ -1,0 +1,39 @@
+---
+// Shared shell for the newsletter status pages (post-subscribe and
+// post-confirm). Keeps both pages visually identical: hero-style grid
+// background, centered card, pill + heading + copy + actions via slots.
+interface Props {
+  pill: string;
+}
+
+const { pill } = Astro.props;
+---
+
+<section class="relative overflow-hidden py-20 sm:py-32">
+  <div class="absolute inset-0 grid-bg pointer-events-none opacity-60"></div>
+
+  <div class="container-app relative">
+    <div class="card mx-auto max-w-2xl p-8 text-center sm:p-12">
+      <img
+        src="/dux-logo.png"
+        alt="dux: a duck conductor with a baton"
+        width="72"
+        height="72"
+        class="mx-auto h-18 w-18 object-contain drop-shadow-[0_0_24px_rgba(0,212,255,0.25)]"
+      />
+      <span class="pill mt-6">{pill}</span>
+      <h1 class="heading mt-4 text-3xl font-bold tracking-tight sm:text-4xl">
+        <slot name="title" />
+      </h1>
+      <div class="mt-4 leading-relaxed text-[color:var(--color-muted)]">
+        <slot name="body" />
+      </div>
+      <div class="mt-8 flex flex-wrap items-center justify-center gap-3">
+        <slot name="actions" />
+      </div>
+      <p class="mt-6 text-xs text-[color:var(--color-dim)]">
+        <slot name="footnote" />
+      </p>
+    </div>
+  </div>
+</section>

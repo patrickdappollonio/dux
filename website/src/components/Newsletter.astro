@@ -1,0 +1,38 @@
+---
+// Buttondown newsletter signup for the homepage. Posts directly to the
+// Buttondown embed endpoint, no client-side JS required.
+---
+
+<section class="anchor-offset py-16 sm:py-24" id="newsletter">
+  <div class="container-app">
+    <div class="card p-8 sm:p-12">
+      <div class="mx-auto max-w-2xl text-center">
+        <span class="pill">▸ the newsletter</span>
+        <h2 class="heading mt-3 text-3xl font-bold tracking-tight sm:text-4xl">
+          Get dux news in your <span class="text-[color:var(--color-accent)]">inbox</span>
+        </h2>
+        <p class="mt-4 leading-relaxed text-[color:var(--color-muted)]">
+          New releases, new tricks, and the occasional behind-the-scenes.
+          No spam, no daily drip. Unsubscribe whenever.
+        </p>
+        <form
+          action="https://buttondown.com/api/emails/embed-subscribe/getduxapp"
+          method="post"
+          class="embeddable-buttondown-form mx-auto mt-8 flex w-full max-w-md flex-col gap-3 sm:flex-row"
+        >
+          <label for="bd-email" class="sr-only">Enter your email</label>
+          <input
+            type="email"
+            name="email"
+            id="bd-email"
+            required
+            placeholder="you@example.com"
+            autocomplete="email"
+            class="w-full flex-1 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-panel-2)] px-4 py-2.5 text-sm text-[color:var(--color-text)] placeholder:text-[color:var(--color-dim)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-accent)] focus-visible:ring-offset-2 focus-visible:ring-offset-[color:var(--color-ink)]"
+          />
+          <button type="submit" class="btn-primary shrink-0">Subscribe</button>
+        </form>
+      </div>
+    </div>
+  </div>
+</section>
