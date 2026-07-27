@@ -439,6 +439,14 @@ pub struct PtyClient {
     writer: PtyWriter,
     terminal: Arc<Mutex<TerminalState>>,
     child: Box<dyn Child + Send + Sync>,
+    /// The child's exit status the first time [`PtyClient::try_wait`] observed
+    /// it, plus when that reap happened. `Child::try_wait` yields the status
+    /// EXACTLY ONCE (the second call sees no zombie and returns `None`), so
+    /// without this cache the first caller to poll consumes the status out from
+    /// under every later one. The reap instant is what lets callers tell
+    /// "the child just died" from "the child died a while ago and this PTY's
+    /// read side is still being held open by something else".
+    reaped: Option<(portable_pty::ExitStatus, Instant)>,
     exited: Arc<AtomicBool>,
     has_output: Arc<AtomicBool>,
     /// Set by the reader thread or scroll/resize methods when the terminal
@@ -702,6 +710,7 @@ impl PtyClient {
             writer,
             terminal,
             child,
+            reaped: None,
             exited,
             has_output,
             dirty,
@@ -1245,9 +1254,32 @@ impl PtyClient {
         self.terminal.lock().is_ok_and(|t| t.has_mouse_mode())
     }
 
-    /// Non-blocking check of the child's exit status.
+    /// Non-blocking check of the child's exit status, memoized.
+    ///
+    /// The underlying `Child::try_wait` reaps the zombie and so yields the
+    /// status exactly once; every later call returns `None`. Several call sites
+    /// poll the same client (the exit prune, the shutdown sweep, the
+    /// terminating-PTY reaper, tests), so the raw behaviour means whichever one
+    /// polls first silently steals the status. This caches the first observed
+    /// status and replays it, making the call idempotent: once a child has been
+    /// reaped, `try_wait` keeps saying so.
     pub fn try_wait(&mut self) -> Option<portable_pty::ExitStatus> {
-        self.child.try_wait().ok().flatten()
+        if let Some((status, _)) = &self.reaped {
+            return Some(status.clone());
+        }
+        let status = self.child.try_wait().ok().flatten()?;
+        self.reaped = Some((status.clone(), Instant::now()));
+        Some(status)
+    }
+
+    /// When this client's child was first observed to have exited, or `None` if
+    /// it has not been reaped yet (i.e. no [`PtyClient::try_wait`] call has seen
+    /// a status). Note this is the REAP instant, which is not the same moment as
+    /// [`PtyClient::is_exited`] flipping: the child can die while the PTY read
+    /// side is still open, so callers that need the child's output fully
+    /// ingested must wait for `is_exited`, and use this only to bound that wait.
+    pub fn reaped_at(&self) -> Option<Instant> {
+        self.reaped.as_ref().map(|(_, at)| *at)
     }
 
     /// Returns the PID of the shell process spawned in this PTY.
@@ -3243,6 +3275,54 @@ mod tests {
             );
             thread::sleep(std::time::Duration::from_millis(20));
         }
+    }
+
+    #[test]
+    fn try_wait_memoizes_the_reap_so_a_second_caller_still_sees_the_status() {
+        // The raw `Child::try_wait` reaps the zombie and yields the status
+        // EXACTLY ONCE; every later call returns `None`. Several engine call
+        // sites poll the same client each tick (the exit prune, the shutdown
+        // sweep, the terminating-PTY reaper), so without memoization whichever
+        // one polls first silently steals the exit code from the rest, and the
+        // exit message that needs it reports "unknown". `reaped_at` must be
+        // stamped by that first observation and stay put.
+        let args = vec!["-c".to_string(), "exit 7".to_string()];
+        let mut client =
+            PtyClient::spawn("/bin/sh", &args, Path::new("."), 5, 40, 100).expect("spawn pty");
+
+        let deadline = Instant::now() + std::time::Duration::from_secs(3);
+        while client.try_wait().is_none() {
+            assert!(Instant::now() < deadline, "child did not exit in time");
+            thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        let first = client
+            .reaped_at()
+            .expect("the reap instant must be stamped");
+        for _ in 0..3 {
+            let status = client.try_wait().expect("the status must be replayed");
+            assert_eq!(status.exit_code(), 7, "the replayed status must be exact");
+            assert!(!status.success());
+            assert_eq!(
+                client.reaped_at(),
+                Some(first),
+                "the reap instant must be the FIRST observation, not the latest poll"
+            );
+        }
+    }
+
+    #[test]
+    fn reaped_at_is_none_while_the_child_is_alive() {
+        // `reaped_at` is the clock the prune's drain grace runs off, so it must
+        // stay unset until a `try_wait` actually observes an exit.
+        let mut client = PtyClient::spawn("cat", &[], Path::new("."), 5, 40, 100).expect("spawn");
+        assert_eq!(client.reaped_at(), None, "never polled: no reap yet");
+        assert!(client.try_wait().is_none(), "cat is still running");
+        assert_eq!(
+            client.reaped_at(),
+            None,
+            "a poll that found no exit must not stamp a reap instant"
+        );
     }
 
     #[test]
