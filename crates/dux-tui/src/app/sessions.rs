@@ -2442,12 +2442,29 @@ impl App {
         self.select_startup_command_log(actual_index);
     }
 
+    /// The log file the "open in the OS" actions act on.
+    ///
+    /// Both surfaces bind those actions, so both have to be asked, and the
+    /// PICKER wins when it is open because it is the one on top. Resolving only
+    /// from the viewer was a real bug: the picker reported "No startup command
+    /// log is selected." with a row plainly highlighted. It went unnoticed
+    /// because nothing outside tests could open the picker; opening it on the
+    /// read-logs journey is what makes the path reachable.
+    pub(crate) fn selected_startup_command_log_path(&self) -> Option<PathBuf> {
+        match &self.prompt {
+            PromptState::StartupCommandLogs(prompt) => prompt
+                .entries
+                .get(prompt.selected)
+                .map(|entry| entry.path.clone()),
+            _ => self
+                .startup_log_viewer
+                .as_ref()
+                .and_then(|viewer| viewer.path.clone()),
+        }
+    }
+
     pub(crate) fn open_selected_startup_command_log(&mut self) {
-        let Some(path) = self
-            .startup_log_viewer
-            .as_ref()
-            .and_then(|viewer| viewer.path.clone())
-        else {
+        let Some(path) = self.selected_startup_command_log_path() else {
             self.set_error("No startup command log is selected.");
             return;
         };
@@ -2456,9 +2473,7 @@ impl App {
 
     pub(crate) fn open_selected_startup_command_log_folder(&mut self) {
         let Some(path) = self
-            .startup_log_viewer
-            .as_ref()
-            .and_then(|viewer| viewer.path.as_ref())
+            .selected_startup_command_log_path()
             .and_then(|path| path.parent().map(Path::to_path_buf))
         else {
             self.set_error("No startup command log folder is selected.");

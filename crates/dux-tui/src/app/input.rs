@@ -17155,6 +17155,56 @@ cyan = "#00ffff"
         assert_eq!(viewer.content, "new log");
     }
 
+    /// Reproduction of a shipped bug: the "open in the OS" actions resolved
+    /// their path from the fullscreen VIEWER, so with the picker open and a run
+    /// plainly highlighted they reported "No startup command log is selected."
+    /// It survived because nothing outside tests could open the picker.
+    #[test]
+    fn the_open_actions_resolve_the_pickers_own_selection() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::StartupCommandLogs(startup_command_logs_prompt());
+        assert!(
+            app.startup_log_viewer.is_none(),
+            "the picker is the only surface open, which is the bug's setup"
+        );
+
+        app.select_startup_command_log(1);
+
+        assert_eq!(
+            app.selected_startup_command_log_path(),
+            Some(PathBuf::from("/tmp/install.log")),
+            "the picker's highlighted run is what the open actions act on"
+        );
+        assert_eq!(
+            app.selected_startup_command_log_path()
+                .as_deref()
+                .and_then(std::path::Path::parent),
+            Some(std::path::Path::new("/tmp")),
+            "and the folder action reaches its directory"
+        );
+    }
+
+    /// The viewer keeps answering when it is the surface that is open, so the
+    /// fix adds the picker rather than swapping one surface for the other.
+    #[test]
+    fn the_open_actions_still_resolve_the_viewers_path_when_no_picker_is_open() {
+        let mut app = test_app(default_bindings());
+        app.startup_log_viewer = Some(StartupLogViewer {
+            scope_label: "project \"demo\"".to_string(),
+            path: Some(PathBuf::from("/tmp/viewer.log")),
+            display_name: "viewer.log".to_string(),
+            content: String::new(),
+            scroll_offset: 0,
+            search: TextInput::new(),
+            searching: false,
+        });
+
+        assert_eq!(
+            app.selected_startup_command_log_path(),
+            Some(PathBuf::from("/tmp/viewer.log"))
+        );
+    }
+
     #[test]
     fn startup_log_fullscreen_search_scrolls_to_match() {
         let mut app = test_app(default_bindings());
