@@ -7911,8 +7911,39 @@ impl App {
             self.clamp_terminal_cursor();
             self.focus = FocusPane::Left;
         } else if return_to_projects {
+            // Snap the sidebar to Projects so the agent you are looking at is
+            // the visible selection, but do NOT take focus. Minimizing means
+            // "stop typing at the agent", not "leave this pane": everything a
+            // user reaches for next (tab switching, scrolling, the diff
+            // toggle) is Center-scope, so stealing focus made all of it dead
+            // until they Tab-ed back, with nothing on screen saying why.
+            //
+            // The focus steal was added so a single toggle key could re-enter
+            // the agent from the sidebar. That is no longer load-bearing: the
+            // center handler routes the exit action through the same
+            // activation as the focus action, which re-enters interactive
+            // whenever the provider is live, so the toggle works from here
+            // too. `custom_exit_interactive_key_reopens_a_minimized_agent`
+            // pins it.
+            //
+            // A single-tab agent keeps the ORIGINAL behaviour and returns to
+            // Projects, because with only one tab there is nothing to switch
+            // between and the old muscle memory still applies.
+            //
+            // The test is the TAB COUNT, deliberately, not whether the strip
+            // is on screen. Those two come apart: `ui.always_show_tab_strip`
+            // draws the strip for a single-tab agent, and keying off the strip
+            // would then hold focus on the center pane for an agent with
+            // nothing to switch to, making a display preference silently
+            // change where the keyboard lands.
             self.left_section = LeftSection::Projects;
-            self.focus = FocusPane::Left;
+            let multi_tab = self
+                .selected_session()
+                .map(|s| s.id.clone())
+                .is_some_and(|id| self.session_tab_ids(&id).len() > 1);
+            if !multi_tab {
+                self.focus = FocusPane::Left;
+            }
         }
         self.set_info("Exited interactive mode.");
     }
@@ -15972,9 +16003,18 @@ cyan = "#00ffff"
         assert_eq!(app.focus, FocusPane::Left);
     }
 
+    /// Minimizing a MULTI-TAB agent leaves focus on the pane you were in.
+    ///
+    /// Jumping to the sidebar made the Center-scope tab keys dead the instant
+    /// you minimized, with nothing on screen explaining why. The sidebar still
+    /// SNAPS to Projects so the agent you are looking at is the visible
+    /// selection, but it does not steal focus to do it. A single-tab agent
+    /// keeps the original behaviour; see the test below.
     #[test]
-    fn exit_interactive_from_agent_overlay_returns_to_projects() {
+    fn exit_interactive_from_a_multi_tab_agent_keeps_focus_on_the_agent_pane() {
         let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        seed_input_tab(&mut app, &session_id, "tab-2", "claude", 1);
         app.focus = FocusPane::Center;
         app.left_section = LeftSection::Terminals;
         app.input_target = InputTarget::Agent;
@@ -15987,11 +16027,103 @@ cyan = "#00ffff"
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
         assert_eq!(app.session_surface, SessionSurface::Agent);
         assert_eq!(app.left_section, LeftSection::Projects);
-        assert_eq!(app.focus, FocusPane::Left);
+        assert_eq!(
+            app.focus,
+            FocusPane::Center,
+            "minimizing must not move focus off the pane the user was in"
+        );
+    }
+
+    /// A SINGLE-tab agent still returns to Projects on minimize.
+    ///
+    /// This is the pre-existing behaviour, kept deliberately: with no tab
+    /// strip on screen there is nothing to switch between, so the Center-scope
+    /// tab keys buy nothing and the older habit of landing back in the agent
+    /// list is the more useful one.
+    #[test]
+    fn exit_interactive_from_a_single_tab_agent_returns_to_projects() {
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        assert_eq!(
+            app.session_tab_ids(&session_id).len(),
+            1,
+            "the fixture must be a single-tab agent or this proves nothing"
+        );
+        app.focus = FocusPane::Center;
+        app.left_section = LeftSection::Terminals;
+        app.input_target = InputTarget::Agent;
+        app.session_surface = SessionSurface::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+
+        app.process_raw_input_bytes(&[0x07]).unwrap();
+
+        assert_eq!(app.left_section, LeftSection::Projects);
+        assert_eq!(
+            app.focus,
+            FocusPane::Left,
+            "a single-tab agent keeps returning to the agent list"
+        );
+    }
+
+    /// The focus rule reads the TAB COUNT, not whether the strip is drawn.
+    ///
+    /// `ui.always_show_tab_strip` puts the strip on screen for a single-tab
+    /// agent. If the rule keyed off the strip, turning that preference on
+    /// would silently start holding focus on the center pane for an agent with
+    /// nothing to switch to. A display preference must not move the keyboard.
+    #[test]
+    fn always_showing_the_tab_strip_does_not_change_where_focus_lands() {
+        let mut app = test_app(default_bindings());
+        app.engine.config.ui.always_show_tab_strip = true;
+        let session_id = app.engine.sessions[0].id.clone();
+        assert_eq!(
+            app.session_tab_ids(&session_id).len(),
+            1,
+            "the fixture must be a single-tab agent or this proves nothing"
+        );
+        app.focus = FocusPane::Center;
+        app.input_target = InputTarget::Agent;
+        app.session_surface = SessionSurface::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+
+        app.exit_interactive_mode();
+
+        assert_eq!(
+            app.focus,
+            FocusPane::Left,
+            "one tab is one tab, however the strip is configured to render"
+        );
+    }
+
+    /// The Center-scope tab keys are reachable straight after minimizing.
+    ///
+    /// This is the concrete cost of the old focus jump: the tab keys are
+    /// Center-scope, so landing on the sidebar meant neither the Ctrl arrows
+    /// nor the plain ones did anything until you Tab-ed back.
+    #[test]
+    fn a_tab_key_works_immediately_after_minimizing_an_agent() {
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        seed_input_tab(&mut app, &session_id, "tab-2", "claude", 1);
+        app.center_mode = CenterMode::Agent;
+        app.focus = FocusPane::Center;
+        app.input_target = InputTarget::Agent;
+        app.session_surface = SessionSurface::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+
+        app.exit_interactive_mode();
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))
+            .expect("handle arrow");
+
+        assert_eq!(
+            app.focused_tab_id(&session_id),
+            "tab-2",
+            "the tab key must land without a detour through the sidebar"
+        );
     }
 
     #[test]
-    fn custom_exit_interactive_key_reopens_minimized_agent_from_projects() {
+    fn custom_exit_interactive_key_reopens_a_minimized_agent() {
         let bindings = bindings_with_overrides(&[(Action::ExitInteractive, &["home"])]);
         let mut app = test_app(bindings);
         let session_id = app.engine.sessions[0].id.clone();
@@ -16017,8 +16149,16 @@ cyan = "#00ffff"
 
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
         assert_eq!(app.left_section, LeftSection::Projects);
-        assert_eq!(app.focus, FocusPane::Left);
+        assert_eq!(
+            app.focus,
+            FocusPane::Left,
+            "single-tab agent, so this one still lands in the agent list"
+        );
 
+        // The two-way toggle re-enters from wherever focus landed. Pinned from
+        // the sidebar here; the multi-tab path leaves focus on the center pane
+        // and re-enters through the same activation, which is why dropping the
+        // focus steal there was safe.
         app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE))
             .unwrap();
 
