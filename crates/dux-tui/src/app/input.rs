@@ -12966,6 +12966,58 @@ not_a_real_action = ["x"]
         );
     }
 
+    /// A plain horizontal arrow switches tabs in the non-interactive center
+    /// pane. It is a default alongside the Ctrl arrow because a modified arrow
+    /// is not universally deliverable: some terminals, multiplexers and SSH
+    /// setups never send a distinct Ctrl-Left/Ctrl-Right, leaving those users
+    /// with no tab key at all. Both must work, and the plain one must reach
+    /// the binding only from the Center scope, which is non-interactive by
+    /// construction, so an interactive PTY still gets its own arrows.
+    #[test]
+    fn a_plain_horizontal_arrow_switches_tabs_in_the_windowed_center_pane() {
+        for (key, expected) in [(KeyCode::Right, "tab-2"), (KeyCode::Left, "tab-2")] {
+            let mut app = test_app(default_bindings());
+            let session_id = app.engine.sessions[0].id.clone();
+            seed_input_tab(&mut app, &session_id, "tab-2", "claude", 1);
+            app.center_mode = CenterMode::Agent;
+            app.focus = FocusPane::Center;
+
+            assert_eq!(
+                app.focused_tab_id(&session_id),
+                session_id,
+                "the fixture must start on the session-slot tab or this proves nothing"
+            );
+
+            app.handle_key(KeyEvent::new(key, KeyModifiers::NONE))
+                .expect("handle arrow");
+
+            assert_eq!(
+                app.focused_tab_id(&session_id),
+                expected,
+                "{key:?} must move to the other tab of a two-tab agent"
+            );
+        }
+    }
+
+    /// The Ctrl arrows keep working; the plain ones are additive, not a swap.
+    #[test]
+    fn the_ctrl_arrows_still_switch_tabs() {
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        seed_input_tab(&mut app, &session_id, "tab-2", "claude", 1);
+        app.center_mode = CenterMode::Agent;
+        app.focus = FocusPane::Center;
+
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL))
+            .expect("handle ctrl-right");
+
+        assert_eq!(
+            app.focused_tab_id(&session_id),
+            "tab-2",
+            "Ctrl-Right must still switch tabs"
+        );
+    }
+
     /// The maximized agent renders no tab strip, so a frame drawn while it is
     /// up must leave no clickable tab rects behind. This is the RENDERER half
     /// of the defence (`render_overlay` clears the registry).

@@ -428,9 +428,17 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         ],
     },
     // ── Agent tabs (Center-scope; non-interactive only) ───────────
+    // The plain horizontal arrows are defaults alongside the Ctrl ones because a
+    // modified arrow is not universally deliverable: some terminals, multiplexers
+    // and SSH setups never send a distinct Ctrl-Left/Ctrl-Right, so a user with
+    // one of those had no key at all for this. They are safe to bind HERE and
+    // only here: Center scope is reached solely in non-interactive mode, so an
+    // interactive PTY still receives its own arrows verbatim, and no other
+    // Center-scope action claims them (Resize, Browser and Dialog bind the plain
+    // arrows, but each of those short-circuits before the Center dispatch).
     BindingDef {
         action: Action::NextTab,
-        default_keys: &[key!(ctrl - Right)],
+        default_keys: &[key!(ctrl - Right), key!(Right)],
         scopes: &[BindingScope::Center],
         help: Some(HelpEntry {
             section: "Agent pane",
@@ -440,7 +448,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
     },
     BindingDef {
         action: Action::PrevTab,
-        default_keys: &[key!(ctrl - Left)],
+        default_keys: &[key!(ctrl - Left), key!(Left)],
         scopes: &[BindingScope::Center],
         help: Some(HelpEntry {
             section: "Agent pane",
