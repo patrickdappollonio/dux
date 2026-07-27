@@ -4672,6 +4672,9 @@ impl App {
                 let search_key = self.bindings.label_for(Action::SearchToggle);
                 let open_file_key = self.bindings.label_for(Action::OpenStartupCommandLogFile);
                 let open_folder_key = self.bindings.label_for(Action::OpenStartupCommandLogFolder);
+                let focus_key = self
+                    .bindings
+                    .label_for_text_field_dialog(Action::ToggleSelection);
                 bottom_spans.extend(self.theme.key_badge_default(&move_keys));
                 bottom_spans.push(Span::styled(
                     " logs  ",
@@ -4702,6 +4705,16 @@ impl App {
                     " Open folder  ",
                     Style::default().fg(self.theme.hint_desc_fg),
                 ));
+                // The focus key, named through the bindings and skipping any
+                // key the filter would type instead. Without it the Close
+                // button is reachable but undiscoverable.
+                if let Some(focus_key) = &focus_key {
+                    bottom_spans.extend(self.theme.key_badge_default(focus_key));
+                    bottom_spans.push(Span::styled(
+                        " focus  ",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    ));
+                }
                 bottom_spans.extend(self.theme.key_badge_default(&close_key));
                 bottom_spans.push(Span::styled(
                     " close",
@@ -4828,11 +4841,16 @@ impl App {
                         frame.set_cursor_position((cursor_x, filter_inner.y));
                     }
                 }
+                let list_focused = prompt.focus == StartupCommandLogFocus::List;
                 let list_block = Block::default()
                     .title(" Runs ")
                     .borders(Borders::ALL)
                     .border_set(border::ROUNDED)
-                    .border_style(Style::default().fg(self.theme.overlay_border))
+                    // Focus you cannot see is not focus: the Runs block owns
+                    // one of the two focus stops, so its border says whether
+                    // it holds it. The row highlight cannot say it instead, a
+                    // selection is a value and stays visible either way.
+                    .border_style(self.theme.overlay_field_border_style(list_focused))
                     .style(Style::default().bg(self.theme.overlay_bg));
                 let list_inner = list_block.inner(list_area);
                 StatefulWidget::render(
@@ -4918,7 +4936,7 @@ impl App {
                     .state(button_state_for(
                         ButtonPressedTarget::StartupCommandLogsClose,
                         self.pressed_button,
-                        false,
+                        prompt.focus == StartupCommandLogFocus::Close,
                         true,
                     ))
                     .render(frame, close_area, &self.theme);
@@ -13449,6 +13467,7 @@ mod tests {
             searching: false,
             content,
             scroll_offset: scroll,
+            focus: StartupCommandLogFocus::List,
         });
         let mut terminal = Terminal::new(TestBackend::new(size.0, size.1)).expect("terminal");
         terminal
@@ -14151,6 +14170,7 @@ mod tests {
                 searching,
                 content: String::new(),
                 scroll_offset: 0,
+                focus: StartupCommandLogFocus::List,
             })
         };
 

@@ -641,6 +641,7 @@ mod tests {
             searching: false,
             content: String::new(),
             scroll_offset: 0,
+            focus: StartupCommandLogFocus::List,
         });
         assert_eq!(
             modal_spec(&logs).map(|spec| spec.family),
@@ -722,7 +723,7 @@ mod tests {
         ConfirmNonDefaultBranchFocus, DeleteAgentFocus, KillRunningAction, KillRunningFocus,
         KillRunningPrompt, MacroEditFocus, MacroEditState, NameNewAgentFocus, PendingMacroDelete,
         PickProjectWorktreePrompt, ProjectChooserIntent, RenameSessionFocus, SearchableList,
-        StartupCommandLogPrompt,
+        StartupCommandLogFocus, StartupCommandLogPrompt,
     };
     use crate::model::ProviderKind;
     use dux_core::worker::{BranchWarningKind, CreateAgentRequest, NonDefaultBranchAction};
@@ -915,6 +916,7 @@ mod tests {
                     searching: false,
                     content: String::new(),
                     scroll_offset: 0,
+                    focus: StartupCommandLogFocus::List,
                 }),
             ),
             (

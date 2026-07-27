@@ -731,6 +731,7 @@ impl App {
                     searching: false,
                     content: listing.content,
                     scroll_offset: 0,
+                    focus: StartupCommandLogFocus::List,
                 });
                 // Domain only: the overlay is now up. The "Opened N startup
                 // command log run(s)…" confirmation (resolving the busy) rides

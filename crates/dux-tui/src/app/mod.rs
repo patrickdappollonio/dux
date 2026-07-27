@@ -988,6 +988,33 @@ pub(crate) struct ChangeThemePrompt {
     pub(crate) current: String,
 }
 
+/// The startup-log picker's focus ring.
+///
+/// It is the second Picker (after [`KillRunningFocus`]) that pairs a list with
+/// a footer button, so it follows that precedent rather than inventing a
+/// second pattern: focus is a two-stop ring, and search is a MODE layered over
+/// the list rather than a stop of its own (`Cancel`/`Apply` pickers do the
+/// same; see `set_kill_running_search_cursor_from_mouse`).
+///
+/// The picker's other two interactive regions are deliberately NOT stops. The
+/// Output pane has no focus-dependent behaviour to gain one: it is a Picker,
+/// so the vertical keys always move the SELECTION and the paging keys always
+/// scroll the Output, whichever stop holds focus. A stop that changes nothing
+/// is focus theatre, and it would cost the user a Tab press on the way to the
+/// only control that needs focus to be operable at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StartupCommandLogFocus {
+    List,
+    Close,
+}
+
+impl StartupCommandLogFocus {
+    /// The declared ring, in visual order, for `components::focus_ring`. Both
+    /// stops are always present: the Runs list is drawn even when it is empty
+    /// (it says so), and the Close button is never conditional.
+    pub(crate) const RING: [(Self, bool); 2] = [(Self::List, true), (Self::Close, true)];
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct StartupCommandLogPrompt {
     pub(crate) scope_label: String,
@@ -997,6 +1024,7 @@ pub(crate) struct StartupCommandLogPrompt {
     pub(crate) searching: bool,
     pub(crate) content: String,
     pub(crate) scroll_offset: u16,
+    pub(crate) focus: StartupCommandLogFocus,
 }
 
 #[derive(Clone, Debug)]
@@ -1334,12 +1362,11 @@ pub(crate) enum PromptState {
     /// selection, and the click mapping assumed one screen row per run when
     /// each run draws two. Both are fixed and pinned.
     ///
-    /// Still open, and worth knowing before extending it: it has four
-    /// interactive regions (the filter, the Runs list, the Output body, the
-    /// Close button) and no focus concept, so its Close button is unreachable
-    /// by keyboard. Every other way out works (the close-overlay key, a click
-    /// on the button, a click outside), so this is a gap rather than a trap,
-    /// but a focus model is the honest fix.
+    /// It has four interactive regions (the filter, the Runs list, the Output
+    /// body, the Close button) and its focus model is
+    /// [`StartupCommandLogFocus`], a two-stop ring over the list and the
+    /// button. Read that type's doc before adding a stop: the other two
+    /// regions are unfocusable on purpose.
     StartupCommandLogs(StartupCommandLogPrompt),
     /// The project chooser: lists every project (agent-less included) so a
     /// project-scoped action can target one when the flat agent list has no

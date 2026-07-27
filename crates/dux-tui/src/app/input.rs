@@ -3003,6 +3003,19 @@ impl App {
             let PromptState::StartupCommandLogs(prompt) = &mut self.prompt else {
                 return Ok(false);
             };
+            // Space acts on whatever holds focus (the hardcoded accessibility
+            // convention, not a binding). Only the Close button is a control
+            // Space can act ON; with the list focused there is nothing to
+            // activate, so Space keeps falling through to the Center scope's
+            // scroll, which is what it has always done here.
+            if !prompt.searching
+                && key.code == KeyCode::Char(' ')
+                && prompt.focus == StartupCommandLogFocus::Close
+            {
+                self.prompt = PromptState::None;
+                self.startup_log_selection = None;
+                return Ok(false);
+            }
             match startup_logs_action
                 .or(palette_action)
                 .or(dialog_action)
@@ -3012,6 +3025,20 @@ impl App {
                 Some(Action::CloseOverlay) => {
                     self.prompt = PromptState::None;
                     self.startup_log_selection = None;
+                }
+                // Movement moves FOCUS and nothing else. The action resolves
+                // through the Dialog scope, so it is whatever the user has
+                // bound (Tab/Shift-Tab and the horizontal keys by default) and
+                // never a hardcoded key. While the search row is up the field
+                // has already claimed the horizontal keys for its caret, so
+                // only the Tab pair reaches here, exactly as in a text-field
+                // modal.
+                Some(Action::ToggleSelection) => {
+                    prompt.focus = next_focus(
+                        &StartupCommandLogFocus::RING,
+                        prompt.focus,
+                        !focus_move_is_reverse(key),
+                    );
                 }
                 Some(Action::SearchToggle) => {
                     prompt.searching = true;
@@ -3046,14 +3073,23 @@ impl App {
                 Some(Action::ScrollLineUp) => {
                     scroll_startup_command_log(prompt, body, -1);
                 }
-                // A Picker's confirm key acts on the SELECTION. Here that means
-                // promoting the highlighted run to the fullscreen viewer for
-                // full-screen reading. The separate "open file" binding still
-                // hands the run to the OS opener; the two are different
-                // destinations and must not share a key.
-                Some(Action::OpenEntry | Action::Confirm) => {
-                    self.promote_startup_command_log_to_fullscreen();
-                }
+                // A Picker's confirm key acts on the SELECTION while the list
+                // holds focus. Here that means promoting the highlighted run
+                // to the fullscreen viewer for full-screen reading. The
+                // separate "open file" binding still hands the run to the OS
+                // opener; the two are different destinations and must not
+                // share a key. With the footer button focused, confirm
+                // activates that button instead, which is the whole reason the
+                // ring exists.
+                Some(Action::OpenEntry | Action::Confirm) => match prompt.focus {
+                    StartupCommandLogFocus::List => {
+                        self.promote_startup_command_log_to_fullscreen();
+                    }
+                    StartupCommandLogFocus::Close => {
+                        self.prompt = PromptState::None;
+                        self.startup_log_selection = None;
+                    }
+                },
                 Some(Action::OpenStartupCommandLogFile) => {
                     self.open_selected_startup_command_log();
                 }
@@ -5229,6 +5265,10 @@ impl App {
             prompt.filter.cursor =
                 cursor_from_single_line_position(&prompt.filter.text, input_area, 0, column);
             prompt.searching = true;
+            // Search is a mode over the list, not a stop of its own, so a
+            // click into the filter leaves focus where the mode belongs. Same
+            // as `set_kill_running_search_cursor_from_mouse`.
+            prompt.focus = StartupCommandLogFocus::List;
         }
     }
 
@@ -6590,6 +6630,12 @@ impl App {
             PromptMouseTarget::StartupCommandLogItem(index) => {
                 let double_click =
                     self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
+                // Focus follows the click BEFORE the click acts, so the next
+                // keystroke lands on the region the user just pointed at
+                // rather than on whatever held focus a moment ago.
+                if let PromptState::StartupCommandLogs(prompt) = &mut self.prompt {
+                    prompt.focus = StartupCommandLogFocus::List;
+                }
                 self.select_startup_command_log_visual_index(index);
                 if double_click {
                     self.open_selected_startup_command_log();
@@ -6881,8 +6927,14 @@ impl App {
                 self.prompt = PromptState::None;
                 false
             }
+            // The clicked button takes focus first, so a click and the focused
+            // confirm key are the same act reaching the same place.
             ButtonPressedTarget::StartupCommandLogsClose => {
+                if let PromptState::StartupCommandLogs(prompt) = &mut self.prompt {
+                    prompt.focus = StartupCommandLogFocus::Close;
+                }
                 self.prompt = PromptState::None;
+                self.startup_log_selection = None;
                 false
             }
             // The clicked pill takes focus first, so the shared activation path
@@ -7981,7 +8033,7 @@ mod tests {
         OverlayCheckbox, OverlayCheckboxId, OverlayMouseLayout, PickProjectWorktreePrompt,
         ProcessInfo, ProjectChooserIntent, ProjectWorktreeEntry, PromptState, PullTarget,
         RenameSessionFocus, ResourceKind, ResourceStats, RightSection, RuntimeTargetId,
-        SearchableList, StartupCommandLogPrompt, TextInput, WorkerEvent,
+        SearchableList, StartupCommandLogFocus, StartupCommandLogPrompt, TextInput, WorkerEvent,
     };
     use crate::app::{StartupLogViewer, pick_project_matches};
     use crate::clipboard::Clipboard;
@@ -8401,6 +8453,7 @@ not_a_real_action = ["x"]
                 .collect::<Vec<_>>()
                 .join("\n"),
             scroll_offset: 0,
+            focus: StartupCommandLogFocus::List,
         }
     }
 
@@ -22067,6 +22120,7 @@ cyan = "#00ffff"
             searching: true,
             content: String::new(),
             scroll_offset: 0,
+            focus: StartupCommandLogFocus::List,
         });
 
         let query = |app: &App| match &app.prompt {
@@ -22814,6 +22868,7 @@ cyan = "#00ffff"
             searching: true,
             content: String::new(),
             scroll_offset: 0,
+            focus: StartupCommandLogFocus::List,
         });
         render_once(&mut app);
 
@@ -22933,6 +22988,122 @@ cyan = "#00ffff"
         let viewer = app.startup_log_viewer.as_ref().expect("promoted viewer");
         assert_eq!(viewer.display_name, older);
         assert_eq!(viewer.content, "old log");
+    }
+
+    /// Gap: the picker drew a Close button no keystroke could reach. Every
+    /// other way out worked (the close key, an outside click, a click on the
+    /// button), so the button was decoration for anyone on a keyboard.
+    ///
+    /// With a focus concept the focus key lands on it and the confirm key
+    /// CLOSES, rather than promoting the highlighted run to the viewer.
+    #[test]
+    fn the_startup_log_picker_close_button_is_reachable_by_keyboard() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::StartupCommandLogs(startup_command_logs_prompt());
+        install_startup_command_logs_overlay(&mut app, 2);
+
+        tap(&mut app, KeyCode::Tab);
+        tap(&mut app, KeyCode::Enter);
+
+        assert!(
+            matches!(app.prompt, PromptState::None),
+            "the picker must be closed"
+        );
+        assert!(
+            app.startup_log_viewer.is_none(),
+            "confirming the focused Close button must CLOSE, not promote the run"
+        );
+    }
+
+    /// Space acts on whatever has focus. With focus on Close that is the
+    /// button; the output pane's Space-scrolls behaviour must not eat it.
+    #[test]
+    fn the_startup_log_picker_close_button_answers_to_space() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::StartupCommandLogs(startup_command_logs_prompt());
+        install_startup_command_logs_overlay(&mut app, 2);
+
+        tap(&mut app, KeyCode::Tab);
+        tap(&mut app, KeyCode::Char(' '));
+
+        assert!(
+            matches!(app.prompt, PromptState::None),
+            "Space must activate the focused Close button"
+        );
+        assert!(app.startup_log_viewer.is_none());
+    }
+
+    /// Focus you cannot see is not focus: moving focus onto Close must change
+    /// what the Close button LOOKS like. Coordinates come from the rect the
+    /// renderer published, never from a string offset.
+    #[test]
+    fn the_startup_log_pickers_focused_close_button_renders_as_focused() {
+        fn close_button_cells(app: &mut App) -> Vec<ratatui::buffer::Cell> {
+            use ratatui::Terminal;
+            use ratatui::backend::TestBackend;
+            let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
+            terminal
+                .draw(|frame| app.render(frame))
+                .expect("render frame");
+            let buf = terminal.backend().buffer().clone();
+            let OverlayMouseLayout::StartupCommandLogs { close_button, .. } =
+                app.overlay_layout.active
+            else {
+                panic!("expected the startup-log picker layout");
+            };
+            (close_button.y..close_button.y + close_button.height)
+                .flat_map(|y| {
+                    (close_button.x..close_button.x + close_button.width)
+                        .map(move |x| (x, y))
+                        .collect::<Vec<_>>()
+                })
+                .map(|(x, y)| buf[(x, y)].clone())
+                .collect()
+        }
+
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::StartupCommandLogs(startup_command_logs_prompt());
+        let unfocused = close_button_cells(&mut app);
+
+        tap(&mut app, KeyCode::Tab);
+        let focused = close_button_cells(&mut app);
+
+        assert_ne!(
+            unfocused, focused,
+            "the Close button must render differently once it holds focus"
+        );
+    }
+
+    /// A click moves focus to the region it hits BEFORE acting on it, so a
+    /// click on a run leaves the confirm key promoting that run rather than
+    /// firing the Close button focus happened to be sitting on.
+    #[test]
+    fn a_click_on_a_startup_log_run_takes_focus_back_from_the_close_button() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::StartupCommandLogs(startup_command_logs_prompt());
+        render_once(&mut app);
+
+        tap(&mut app, KeyCode::Tab);
+        let OverlayMouseLayout::StartupCommandLogs { list, .. } = app.overlay_layout.active else {
+            panic!("expected the startup-log picker layout");
+        };
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: list.x + 1,
+            row: list.y + 2,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert_eq!(
+            startup_logs_prompt(&app).focus,
+            StartupCommandLogFocus::List,
+            "the clicked region must take focus"
+        );
+        tap(&mut app, KeyCode::Enter);
+        assert!(
+            app.startup_log_viewer.is_some(),
+            "so the confirm key promotes the clicked run instead of closing"
+        );
     }
 
     /// The resource monitor's row cursor must answer to the movement BINDINGS,
