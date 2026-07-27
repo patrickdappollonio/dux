@@ -206,8 +206,20 @@ pub(crate) fn modal_spec(prompt: &PromptState) -> Option<ModalSpec> {
         PromptState::AgentInfo(_)
         | PromptState::AddProjectFailed { .. }
         | PromptState::FirstLoad(_)
-        | PromptState::DebugInput { .. }
-        | PromptState::StartupCommandLogs(_) => ModalSpec::new(Report, false, false),
+        | PromptState::DebugInput { .. } => ModalSpec::new(Report, false, false),
+
+        // The startup-log modal was declared a Report on the same mistake, and
+        // for the same reason it was never caught: while nothing outside tests
+        // could open it, no user could notice that its keys did not mean what
+        // Report says they mean. They never did. It renders a `ListState`
+        // cursor over the runs, its vertical keys move that SELECTION (the
+        // OUTPUT pane scrolls on the paging keys, which is why the vertical
+        // keys are free), it carries a filter, and its confirm key acts on the
+        // selection by promoting that run to the fullscreen viewer. Rows plus a
+        // selection cursor plus a confirm key that acts on the selection is a
+        // Picker. Its one button is a Close, a way out and not a commit, which
+        // is why the confirm-button claim stays false.
+        PromptState::StartupCommandLogs(_) => ModalSpec::new(Picker, false, false),
 
         // The resource monitor LOOKS like a report and was declared one, but
         // the declaration did not match the code. It renders a `ListState`
@@ -608,6 +620,38 @@ mod tests {
             Some(ModalFamily::Picker),
             "rows plus a selection cursor plus a confirm key acting on the \
              selection is a Picker"
+        );
+    }
+
+    /// The startup-log modal is a Picker, not a Report, for exactly the reasons
+    /// the resource monitor is. It was declared a Report while nothing could
+    /// open it, and "read-only body, vertical keys scroll it, nothing to focus"
+    /// was never what its code did: it renders a `ListState` cursor over the
+    /// runs, its vertical keys move that SELECTION (the body scrolls on the
+    /// paging keys instead), it carries a filter, and its confirm key acts on
+    /// the selection by promoting that run to the fullscreen viewer. Opening it
+    /// on the read-logs journey is what made the mislabel reachable.
+    #[test]
+    fn the_startup_log_modal_is_a_picker() {
+        let logs = PromptState::StartupCommandLogs(StartupCommandLogPrompt {
+            scope_label: "demo".to_string(),
+            entries: Vec::new(),
+            selected: 0,
+            filter: TextInput::new(),
+            searching: false,
+            content: String::new(),
+            scroll_offset: 0,
+        });
+        assert_eq!(
+            modal_spec(&logs).map(|spec| spec.family),
+            Some(ModalFamily::Picker),
+            "rows plus a selection cursor plus a confirm key acting on the \
+             selection is a Picker"
+        );
+        assert!(
+            !prompt_has_multiline_field(&logs),
+            "its one field is the filter, which is a type-immediately search \
+             row and must stay single-line"
         );
     }
 
