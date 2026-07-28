@@ -411,3 +411,65 @@ export function copyOnSelectAction(ctx: CopyOnSelectContext): CopyOnSelectAction
   if (ctx.dragged && ctx.mouseTrackingMode !== "none" && !ctx.hintShown) return "hint"
   return "ignore"
 }
+
+/** What an OSC 8 hyperlink activation should do. */
+export type LinkActivateAction = "open" | "ignore"
+
+/**
+ * The slice of the `MouseEvent` xterm hands `linkHandler.activate` that decides
+ * whether the gesture was a click on the link at all. Both fields matter because
+ * xterm's Linkifier reads NEITHER: it activates the link on every `mouseup` that
+ * lands on it, whatever the button and however many clicks deep the gesture is.
+ */
+export interface LinkActivateEvent {
+  /** `MouseEvent.button`: 0 primary, 1 middle, 2 secondary. */
+  button: number
+  /**
+   * `MouseEvent.detail`: the running click count of the current multi-click
+   * gesture (1 for a plain click, 2 for the second click of a double-click, ...).
+   * Synthetic and assistive-technology events may report 0.
+   */
+  detail: number
+}
+
+/** The runtime context an activation is judged against. */
+export interface LinkActivateContext {
+  /** The `capabilities.hyperlinks` preference (default on). */
+  hyperlinks: boolean
+  /** The URI xterm resolved from the OSC 8 sequence. */
+  uri: string
+}
+
+/** Only these two schemes are ever handed to the browser. */
+const OPENABLE_SCHEME = /^https?:\/\//i
+
+/**
+ * Decides whether a hyperlink activation opens a tab.
+ *
+ * xterm's Linkifier fires `activate` from its `mouseup` listener with no button
+ * or click-count check, which produced two user-visible bugs:
+ *
+ *  - DOUBLE-CLICK OPENED TWICE. Double-clicking is how you select a word in a
+ *    terminal, and a triple-click selects the line; each of those extra mouseups
+ *    activated the link again, so one ordinary select gesture over a URL spawned
+ *    two or three tabs. Only the FIRST click of a gesture is a click, so `detail`
+ *    above 1 is the tail of a selection and never an open.
+ *  - NON-PRIMARY BUTTONS OPENED IT. In dux a right-click over the terminal is the
+ *    PASTE gesture, so right-clicking on a link pasted AND opened a tab; a
+ *    middle-click (the X11 primary-selection paste) did the same. Neither button
+ *    means "follow this link".
+ *
+ * The scheme gate is defence in depth: xterm already filters to http(s) unless
+ * `allowNonHttpProtocols` is set (we never set it), but the decision to hand an
+ * agent-emitted string to `window.open` should be legible in one place.
+ */
+export function linkActivateAction(
+  ev: LinkActivateEvent,
+  ctx: LinkActivateContext,
+): LinkActivateAction {
+  if (!ctx.hyperlinks) return "ignore"
+  if (ev.button !== 0) return "ignore"
+  if (ev.detail > 1) return "ignore"
+  if (!OPENABLE_SCHEME.test(ctx.uri)) return "ignore"
+  return "open"
+}

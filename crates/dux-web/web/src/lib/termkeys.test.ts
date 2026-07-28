@@ -10,6 +10,9 @@ import {
   ctrlByte,
   ESC,
   LF,
+  linkActivateAction,
+  type LinkActivateContext,
+  type LinkActivateEvent,
   pageKeySeq,
   sgrClickSeq,
   sgrWheelSeq,
@@ -517,5 +520,60 @@ describe("copyOnSelectAction", () => {
         ctx({ selection: "hello", dragged: true, mouseTrackingMode: "any" }),
       ),
     ).toBe("copy")
+  })
+})
+
+describe("linkActivateAction", () => {
+  const ev = (over: Partial<LinkActivateEvent> = {}): LinkActivateEvent => ({
+    button: 0,
+    detail: 1,
+    ...over,
+  })
+  const ctx = (over: Partial<LinkActivateContext> = {}): LinkActivateContext => ({
+    hyperlinks: true,
+    uri: "https://example.com",
+    ...over,
+  })
+
+  it("opens a plain primary click on an http(s) link", () => {
+    expect(linkActivateAction(ev(), ctx())).toBe("open")
+    expect(linkActivateAction(ev(), ctx({ uri: "http://example.com" }))).toBe("open")
+    expect(linkActivateAction(ev(), ctx({ uri: "HTTPS://EXAMPLE.COM" }))).toBe("open")
+  })
+
+  it("ignores the repeat clicks of a double- or triple-click", () => {
+    // Selecting a word (double) or a line (triple) is the gesture; xterm fires
+    // an activation on every mouseup of it, and only the first is a click.
+    expect(linkActivateAction(ev({ detail: 2 }), ctx())).toBe("ignore")
+    expect(linkActivateAction(ev({ detail: 3 }), ctx())).toBe("ignore")
+  })
+
+  it("treats a detail-less activation as a single click", () => {
+    // Synthetic and assistive-technology events can carry detail 0.
+    expect(linkActivateAction(ev({ detail: 0 }), ctx())).toBe("open")
+  })
+
+  it("ignores non-primary buttons", () => {
+    // Right-click is dux's paste gesture and middle-click is the X11 primary
+    // paste; neither means "follow this link".
+    expect(linkActivateAction(ev({ button: 1 }), ctx())).toBe("ignore")
+    expect(linkActivateAction(ev({ button: 2 }), ctx())).toBe("ignore")
+  })
+
+  it("ignores everything when the hyperlinks preference is off", () => {
+    expect(linkActivateAction(ev(), ctx({ hyperlinks: false }))).toBe("ignore")
+  })
+
+  it("ignores schemes other than http and https", () => {
+    for (const uri of [
+      "javascript:alert(1)",
+      "file:///etc/passwd",
+      "data:text/html,<script>",
+      "ftp://example.com",
+      "vscode://file/tmp",
+      "  https://example.com",
+    ]) {
+      expect(linkActivateAction(ev(), ctx({ uri }))).toBe("ignore")
+    }
   })
 })

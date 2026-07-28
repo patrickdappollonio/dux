@@ -33,6 +33,7 @@ import {
   copyOnSelectAction,
   ESC,
   LF,
+  linkActivateAction,
   pageKeySeq,
   sgrClickSeq,
   sgrWheelSeq,
@@ -559,13 +560,21 @@ export function TerminalPane(props: TerminalPaneProps) {
       macOptionClickForcesSelection: true,
       // Make OSC 8 hyperlinks the agent emits clickable. xterm 6's built-in
       // linkHandler resolves real OSC 8 links (unlike the web-links addon, which
-      // regex-scans for bare URLs). Gated to http(s) and to the hyperlinks
-      // preference; opened with noopener,noreferrer so the new tab can't reach
-      // back into the app.
+      // regex-scans for bare URLs). Opened with noopener,noreferrer so the new
+      // tab can't reach back into the app.
+      //
+      // WHICH activations count is decided by the pure `linkActivateAction`:
+      // xterm's Linkifier fires this from a bare `mouseup` with no button or
+      // click-count check, so without the filter the second click of a
+      // double-click (the select-a-word gesture) opened a SECOND tab, and a
+      // right-click opened one on top of dux's own paste. See the helper.
       linkHandler: {
-        activate: (_event, uri) => {
-          if (!hyperlinksRef.current) return
-          if (!/^https?:\/\//i.test(uri)) return
+        activate: (event, uri) => {
+          const action = linkActivateAction(
+            { button: event.button, detail: event.detail },
+            { hyperlinks: hyperlinksRef.current, uri },
+          )
+          if (action !== "open") return
           window.open(uri, "_blank", "noopener,noreferrer")
         },
       },
