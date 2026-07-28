@@ -124,9 +124,12 @@ pub struct BootstrapView {
     /// edit dialog.
     pub global_env: std::collections::BTreeMap<String, String>,
     /// Mirrors `config.ui.status_clear_seconds`. The web honors it for toast
-    /// auto-dismiss: an info/success toast clears this many seconds after it
-    /// arrives (0 disables auto-clear, matching the TUI's tone-aware policy).
-    /// Warning/error toasts ignore it and persist until replaced.
+    /// auto-dismiss, and every tone dismisses: an info/success toast clears
+    /// this many seconds after it arrives, a warning at twice that and an error
+    /// at four times, so this one value grades them all. 0 disables auto-clear
+    /// for those final states. (A busy toast is not a final state: the web
+    /// retires it on its own fixed leak guard, comfortably longer than
+    /// `statusline::BUSY_TIMEOUT`.)
     pub status_clear_seconds: u16,
     /// Mirrors `config.server.title`: the operator-chosen display name for this
     /// dux instance. The web shows it as the browser tab title and the brand

@@ -337,7 +337,7 @@ fn config_schema() -> Vec<ConfigEntry> {
         ConfigEntry::Field {
             key: "status_clear_seconds",
             comment: Some(CommentSource::Static(
-                "# Seconds before a transient status-line message auto-clears.\n# Applies to success/info confirmations only; busy/pending messages stay\n# until the operation finishes, and warnings/errors stay until replaced.\n# Set to 0 to disable auto-clear (messages persist until the next one).",
+                "# Seconds before a transient status message auto-clears.\n# In the TUI status line this applies to success/info confirmations only;\n# busy/pending messages stay until the operation finishes, and warnings and\n# errors stay until replaced.\n# In the web UI every toast dismisses itself, and this is the base window:\n# warnings stay up twice as long and errors four times as long, so this one\n# number grades all of them.\n# Set to 0 to disable auto-clear (messages persist until the next one).",
             )),
             value_fn: |c| FieldValue::U16(c.ui.status_clear_seconds),
         },

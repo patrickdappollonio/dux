@@ -486,8 +486,11 @@ pub struct UiConfig {
     /// above the internal ceiling are clamped with a warning. Default 20.
     pub agent_tabs_max: u16,
     /// Seconds before a transient status-line message (a success/info
-    /// confirmation) auto-clears. Busy/pending and warning/error messages are
-    /// unaffected — they persist until replaced. 0 disables auto-clear entirely.
+    /// confirmation) auto-clears. In the TUI's status line, busy/pending and
+    /// warning/error messages are unaffected: they persist until replaced. The
+    /// web's toasts use this as a base for every tone (warning 2x, error 4x),
+    /// because a toast you have to click away is friction a status line is not.
+    /// 0 disables auto-clear entirely.
     pub status_clear_seconds: u16,
     pub branch_sync_interval: u16,
     pub show_diff_line_numbers: bool,

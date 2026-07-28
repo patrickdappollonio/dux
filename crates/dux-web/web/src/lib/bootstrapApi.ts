@@ -93,9 +93,10 @@ export interface Bootstrap {
   /** Global environment variables applied to every spawned agent/terminal. */
   global_env: Record<string, string>
   /** Mirrors `config.ui.status_clear_seconds`: how long an info/success toast
-   * stays before auto-clearing. 0 means "never auto-clear" (sticky like a
-   * warning/error). The web computes its info-toast duration from this; older
-   * servers omit it, so consumers fall back to 6. */
+   * stays before auto-clearing. It is the BASE for every tone, not just
+   * info/success: `lib/statusToast.ts` scales warning and error off it. 0 means
+   * "never auto-clear" for final states. Older servers omit it, so consumers
+   * fall back to 6. */
   status_clear_seconds: number
   /** The operator-chosen display name for this dux instance (`config.server
    * .title`). Shown as the browser tab title and the projects-pane wordmark.

@@ -196,7 +196,7 @@ export const SETTING_GROUPS: SettingGroup[] = [
         key: "ui.status_clear_seconds",
         label: "Status message auto-clear",
         description:
-          "Seconds before a success/info status toast auto-clears. Warning and error toasts are unaffected, they persist until replaced.",
+          "Seconds before a success/info status toast auto-clears. Warnings stay up twice as long and errors four times as long, so this one number moves all of them. Set it to 0 to keep status toasts on screen until you dismiss them.",
         surface: "both",
         control: {
           kind: "number",
