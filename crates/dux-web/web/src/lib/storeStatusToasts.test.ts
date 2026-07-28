@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
+import { BUSY_TOAST_MAX_MS } from "./statusToast"
+
 // Mock sonner before importing the store so the store's top-level
 // `import { toast } from "sonner"` picks up our spies.
 vi.mock("sonner", () => {
@@ -133,11 +135,12 @@ describe("engine status → sonner toast routing", () => {
     const mod = await loadStore()
     const { toast } = await import("sonner")
 
-    // Busy arrives first — should fire toast.loading with Infinity duration.
+    // Busy arrives first, and should fire toast.loading capped by the leak guard,
+    // never at Infinity (a dropped socket would otherwise strand the spinner).
     status(mod, "pull", "busy", "Pulling…")
     expect(toast.loading).toHaveBeenCalledWith("Pulling…", {
       id: "pull",
-      duration: Infinity,
+      duration: BUSY_TOAST_MAX_MS,
     })
 
     // Success replaces it on the same id — should fire toast.success with 6s.
@@ -152,25 +155,25 @@ describe("engine status → sonner toast routing", () => {
     expect(toast.dismiss).toHaveBeenCalledWith("pull")
   })
 
-  it("error status fires toast.error with Infinity duration", async () => {
+  it("error status auto-dismisses, on the longest final window", async () => {
     const mod = await loadStore()
     const { toast } = await import("sonner")
 
     status(mod, "push", "error", "Push failed.")
     expect(toast.error).toHaveBeenCalledWith("Push failed.", {
       id: "push",
-      duration: Infinity,
+      duration: 24000,
     })
   })
 
-  it("warning status fires toast.warning with Infinity duration", async () => {
+  it("warning status auto-dismisses, between the info and error windows", async () => {
     const mod = await loadStore()
     const { toast } = await import("sonner")
 
     status(mod, "warn-key", "warning", "Careful!")
     expect(toast.warning).toHaveBeenCalledWith("Careful!", {
       id: "warn-key",
-      duration: Infinity,
+      duration: 12000,
     })
   })
 
@@ -193,7 +196,7 @@ describe("engine status → sonner toast routing", () => {
     status(mod, null, "busy", "Uploading…")
     expect(toast.loading).toHaveBeenCalledWith("Uploading…", {
       id: "dux-anon-status",
-      duration: Infinity,
+      duration: BUSY_TOAST_MAX_MS,
     })
 
     // Clear dismisses the anonymous slot.
@@ -244,7 +247,7 @@ describe("engine status → sonner toast routing", () => {
     })
   })
 
-  it("status_clear_seconds of 0 makes info toasts sticky (Infinity)", async () => {
+  it("status_clear_seconds of 0 makes every final toast sticky (Infinity)", async () => {
     statusClearSeconds = 0
     const mod = await loadStoreWithBootstrap()
     const { toast } = await import("sonner")
@@ -254,6 +257,59 @@ describe("engine status → sonner toast routing", () => {
       id: "k",
       duration: Infinity,
     })
+    status(mod, "k2", "error", "Sticky error.")
+    expect(toast.error).toHaveBeenCalledWith("Sticky error.", {
+      id: "k2",
+      duration: Infinity,
+    })
+  })
+
+  it("status_clear_seconds of 0 still caps a busy toast at the leak guard", async () => {
+    // The opt-out covers final states only. A busy is not a final: leaving it
+    // immortal is the stranded-spinner bug, so the guard always applies.
+    statusClearSeconds = 0
+    const mod = await loadStoreWithBootstrap()
+    const { toast } = await import("sonner")
+
+    status(mod, "k", "busy", "Working…")
+    expect(toast.loading).toHaveBeenCalledWith("Working…", {
+      id: "k",
+      duration: BUSY_TOAST_MAX_MS,
+    })
+  })
+
+  it("scales the warning and error windows off a custom status_clear_seconds", async () => {
+    statusClearSeconds = 10
+    const mod = await loadStoreWithBootstrap()
+    const { toast } = await import("sonner")
+
+    status(mod, "w", "warning", "Careful.")
+    expect(toast.warning).toHaveBeenCalledWith("Careful.", {
+      id: "w",
+      duration: 20000,
+    })
+    status(mod, "e", "error", "Broken.")
+    expect(toast.error).toHaveBeenCalledWith("Broken.", {
+      id: "e",
+      duration: 40000,
+    })
+  })
+
+  it("no status tone ever produces a toast that lives forever by default", async () => {
+    // The user-visible contract: with the default window every tone, including
+    // busy, error and an unknown tone the server might add later, dismisses.
+    const mod = await loadStore()
+    const { toast } = await import("sonner")
+    const fired = [toast.success, toast.error, toast.warning, toast.loading]
+
+    for (const tone of ["info", "success", "warning", "error", "busy", "mystery"]) {
+      status(mod, `t-${tone}`, tone, `message for ${tone}`)
+    }
+    const durations = fired.flatMap((fn) =>
+      vi.mocked(fn).mock.calls.map((call) => (call[1] as { duration: number }).duration),
+    )
+    expect(durations.length).toBeGreaterThan(0)
+    for (const d of durations) expect(d).toBeLessThan(Infinity)
   })
 
   it("uses the 6s default window for info toasts when status_clear_seconds is the default", async () => {
@@ -280,7 +336,7 @@ describe("engine status → sonner toast routing", () => {
     status(mod, "delete:s1", "busy", 'Removing worktree for agent "x"…')
     expect(toast.loading).toHaveBeenCalledWith('Removing worktree for agent "x"…', {
       id: "delete:s1",
-      duration: Infinity,
+      duration: BUSY_TOAST_MAX_MS,
     })
 
     // The async success final reuses the same id, swapping spinner → check.

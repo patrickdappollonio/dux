@@ -30,6 +30,7 @@ import {
   fetchBootstrap,
 } from "./bootstrapApi"
 import { firstLoadApi } from "./firstLoadApi"
+import { statusToastDuration } from "./statusToast"
 import { attentionCount, formatTabTitle } from "./attention"
 import { applyAttentionFavicon } from "./favicon"
 import { resolveInstanceTitle } from "./instanceTitle"
@@ -1331,8 +1332,11 @@ const ANON_TOAST_ID = "dux-anon-status"
 // Route a keyed (or anonymous) engine status to both the status bar and a
 // sonner toast. The key acts as the sonner id so updates re-render in place
 // (busy → success swaps the spinner without a new toast) and clears can dismiss
-// by id. Busy must not auto-dismiss before its final state arrives, so its
-// duration is Infinity.
+// by id.
+//
+// Every tone auto-dismisses; the window is graded by severity off the user's
+// `ui.status_clear_seconds` and computed by `statusToastDuration`, which owns
+// the policy (including the busy leak guard and the `0` opt-out).
 function showStatusToast(
   key: string | null | undefined,
   tone: string,
@@ -1340,14 +1344,7 @@ function showStatusToast(
 ): void {
   if (!message) return
   const id = key ?? ANON_TOAST_ID // no key → stable anonymous-slot id
-  // Info/success toasts auto-clear after the configured window
-  // (`config.ui.status_clear_seconds`, default 6); 0 disables auto-clear so they
-  // stay sticky like a warning/error. Busy/warning/error never auto-dismiss
-  // (their final state replaces them). A missing bootstrap (pre-load) falls back
-  // to the 6s default.
-  const secs = state.bootstrap?.status_clear_seconds ?? 6
-  const infoDuration = secs === 0 ? Infinity : secs * 1000
-  const duration = tone === "info" ? infoDuration : Infinity
+  const duration = statusToastDuration(tone, state.bootstrap?.status_clear_seconds)
   const opts = { id, duration }
   if (tone === "error") toast.error(message, opts)
   else if (tone === "warning") toast.warning(message, opts)
