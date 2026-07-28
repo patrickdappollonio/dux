@@ -433,6 +433,15 @@ function AgentFlatRow({
                         prIconHoverClass(session.pr.state),
                       )}
                       onClick={(event) => {
+                        // `stopPropagation` keeps the click off the row's own
+                        // select handler. `preventDefault` is what keeps this to
+                        // ONE tab: the anchor already carries `target="_blank"`,
+                        // so without it the browser follows the href as well and
+                        // the explicit `window.open` below opens a second tab.
+                        // The open stays explicit because this anchor is nested
+                        // inside the row's button, where the native default is
+                        // not dependable.
+                        event.preventDefault()
                         event.stopPropagation()
                         window.open(session.pr!.url, "_blank", "noopener")
                       }}

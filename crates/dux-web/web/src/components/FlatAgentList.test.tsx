@@ -411,3 +411,44 @@ describe("FlatAgentList drag from any sort mode", () => {
     expect(reorderTerminalsMock).toHaveBeenCalledWith(["t-z", "t-a"])
   })
 })
+
+// The PR chip is an anchor whose click handler ALSO calls window.open (the
+// anchor is nested inside the row's button, where relying on the native default
+// alone is not dependable). Exactly one of the two may run, or the click opens
+// two tabs.
+describe("FlatAgentList PR chip", () => {
+  it("opens the PR once, suppressing the anchor's own navigation", () => {
+    const open = vi.fn()
+    vi.stubGlobal("open", open)
+    mockState = makeState("name")
+    mockState.spine!.sessions[0].pr = {
+      number: 42,
+      url: "https://github.com/o/r/pull/42",
+      title: "Some PR",
+      state: "open",
+    } as SessionView["pr"]
+    render(<FlatAgentList handlers={handlers} />)
+    const chip = screen.getByLabelText("PR #42 (open)")
+    const click = new MouseEvent("click", { bubbles: true, cancelable: true })
+    fireEvent(chip, click)
+    expect(open).toHaveBeenCalledTimes(1)
+    // Unprevented, the browser follows the `target="_blank"` href as well and
+    // the user gets a second tab.
+    expect(click.defaultPrevented).toBe(true)
+  })
+
+  it("does not select the agent when the PR chip is clicked", () => {
+    vi.stubGlobal("open", vi.fn())
+    mockState = makeState("name")
+    mockState.spine!.sessions[0].pr = {
+      number: 42,
+      url: "https://github.com/o/r/pull/42",
+      title: "Some PR",
+      state: "open",
+    } as SessionView["pr"]
+    render(<FlatAgentList handlers={handlers} />)
+    handlers.onSelectSession.mockClear()
+    fireEvent.click(screen.getByLabelText("PR #42 (open)"))
+    expect(handlers.onSelectSession).not.toHaveBeenCalled()
+  })
+})
