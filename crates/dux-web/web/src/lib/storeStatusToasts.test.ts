@@ -312,6 +312,91 @@ describe("engine status → sonner toast routing", () => {
     for (const d of durations) expect(d).toBeLessThan(Infinity)
   })
 
+  // sonner never auto-closes a `loading` toast: its close timer bails on
+  // `toast.type === 'loading'`, so the duration handed to `toast.loading` is
+  // inert (pinned in components/ui/sonner.test.tsx). The store therefore owns
+  // the busy dismissal itself, and these are the tests for that timer.
+  describe("busy toast leak guard", () => {
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    it("dismisses a busy toast whose final never arrives", async () => {
+      const mod = await loadStore()
+      const { toast } = await import("sonner")
+      vi.useFakeTimers()
+
+      status(mod, "pull", "busy", "Pulling…")
+      vi.advanceTimersByTime(BUSY_TOAST_MAX_MS - 1)
+      expect(toast.dismiss).not.toHaveBeenCalled()
+      vi.advanceTimersByTime(1)
+      expect(toast.dismiss).toHaveBeenCalledWith("pull")
+    })
+
+    it("cancels the guard once the keyed final replaces the spinner", async () => {
+      // The final already owns the toast and carries its own window; letting a
+      // stale guard fire would yank a success or error off the screen early.
+      const mod = await loadStore()
+      const { toast } = await import("sonner")
+      vi.useFakeTimers()
+
+      status(mod, "pull", "busy", "Pulling…")
+      status(mod, "pull", "error", "Pull failed.")
+      vi.advanceTimersByTime(BUSY_TOAST_MAX_MS * 2)
+      expect(toast.dismiss).not.toHaveBeenCalled()
+    })
+
+    it("cancels the guard when an explicit clear dismisses the toast", async () => {
+      const mod = await loadStore()
+      const { toast } = await import("sonner")
+      vi.useFakeTimers()
+
+      status(mod, "pull", "busy", "Pulling…")
+      statusCleared(mod, "pull")
+      expect(toast.dismiss).toHaveBeenCalledTimes(1)
+      vi.advanceTimersByTime(BUSY_TOAST_MAX_MS * 2)
+      // Still just the explicit clear: the guard did not fire a second dismiss.
+      expect(toast.dismiss).toHaveBeenCalledTimes(1)
+    })
+
+    it("restarts the guard for a fresh busy on the same key", async () => {
+      // A retry re-uses the key. The first busy's guard must not survive to
+      // kill the second spinner mid-operation.
+      const mod = await loadStore()
+      const { toast } = await import("sonner")
+      vi.useFakeTimers()
+
+      status(mod, "pull", "busy", "Pulling…")
+      vi.advanceTimersByTime(BUSY_TOAST_MAX_MS - 1000)
+      status(mod, "pull", "busy", "Pulling, still…")
+      vi.advanceTimersByTime(1000)
+      expect(toast.dismiss).not.toHaveBeenCalled()
+      vi.advanceTimersByTime(BUSY_TOAST_MAX_MS - 1000)
+      expect(toast.dismiss).toHaveBeenCalledWith("pull")
+    })
+
+    it("guards the anonymous busy slot too", async () => {
+      const mod = await loadStore()
+      const { toast } = await import("sonner")
+      vi.useFakeTimers()
+
+      status(mod, null, "busy", "Uploading…")
+      vi.advanceTimersByTime(BUSY_TOAST_MAX_MS)
+      expect(toast.dismiss).toHaveBeenCalledWith("dux-anon-status")
+    })
+
+    it("arms no guard for a final tone, which sonner already retires on its own", async () => {
+      const mod = await loadStore()
+      const { toast } = await import("sonner")
+      vi.useFakeTimers()
+
+      status(mod, "k", "info", "Done.")
+      status(mod, "k2", "warning", "Careful.")
+      vi.advanceTimersByTime(BUSY_TOAST_MAX_MS * 2)
+      expect(toast.dismiss).not.toHaveBeenCalled()
+    })
+  })
+
   it("uses the 6s default window for info toasts when status_clear_seconds is the default", async () => {
     // The `?? 6` fallback covers both the pre-load (null bootstrap) window and a
     // config whose status_clear_seconds is the default 6 — either way, 6000ms.
