@@ -5,11 +5,32 @@ group: Getting started
 order: 1
 ---
 
-`dux` is a terminal UI for running multiple AI coding agents in parallel, one git
-worktree each. It spawns the real CLI for each agent (Claude Code, Codex, Copilot,
-OpenCode, or anything else you can run in a terminal) inside an embedded
-pseudo-terminal. No protocol layer, no adapters, no JSON-RPC. Just the tools you
-already use, side by side, each in its own branch.
+`dux` runs multiple AI coding agents in parallel, one git worktree each. It spawns
+the real CLI for each agent (Claude Code, Codex, Copilot, OpenCode, or anything
+else you can run in a terminal) inside an embedded pseudo-terminal. No protocol
+layer, no adapters, no JSON-RPC. Just the tools you already use, side by side,
+each in its own branch.
+
+## Two front ends, one engine
+
+dux has two front ends over one engine: a terminal UI and a web UI. Both are first
+class, and both are staying. They share the same projects, the same agents, the
+same worktrees and the same config file, so an agent you start in one is the same
+agent in the other.
+
+They are not identical, on purpose. Each surface does what its medium is good at.
+The terminal gives you full keyboard control, rebindable keys, a command palette
+and themes. The browser gives you reach: any device on your network, including a
+phone, plus editing files in the page and desktop notifications. Where a
+capability only makes sense on one side, it lives on one side, and the page that
+covers it says why.
+
+To know whether something is available where you are, the surface itself is the
+answer: the terminal's help overlay and command palette list what it can do, and
+the browser's cog menu and row menus list what it can do.
+
+The web UI is [server mode](/docs/server-mode), started with `dux server` or
+flipped on from a running TUI. Everything on this page is true of both.
 
 ## The mental model
 
@@ -29,7 +50,7 @@ walk away and reconnect later.
 
 ## The three panes
 
-The window is split into three panes:
+Both front ends lay the workspace out the same way, in three panes:
 
 - The **left pane** lists your agents in a single flat list, most-active first,
   with a search filter and a project chooser for creating or targeting a project.
@@ -37,10 +58,13 @@ The window is split into three panes:
   view when you want to review changes.
 - The **right pane** shows the files an agent has changed, with diffs.
 
-`Tab` and `Shift-Tab` move between panes, and that's the primary way you get around.
-Every pane has its own local key combinations, and the authoritative list of every
-binding lives in the in-app help overlay (press `?`). Everything is rebindable; see
-[Configuration](/docs/configuration) for how.
+In the terminal UI, `Tab` and `Shift-Tab` move between panes, and that's the
+primary way you get around. Every pane has its own local key combinations, and the
+authoritative list of every binding lives in the in-app help overlay (press `?`).
+Everything is rebindable; see [Configuration](/docs/configuration) for how. In the
+browser the same three panes are click-driven, with a collapsible sidebar and a
+resizable Changes split; see
+[The workspace in the browser](/docs/web-workspace).
 
 ## Where dux keeps its files
 

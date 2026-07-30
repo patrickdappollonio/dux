@@ -7,15 +7,18 @@ order: 10
 
 An agent in dux is a CLI tool running in its own git worktree on its own branch.
 Every agent is isolated: two agents on the same project can work simultaneously
-without touching each other's files, and switching between them is just a
-keystroke. Before you can create agents, you need at least one project added to
-dux (see the project browser, accessible via the `add-project` palette command
-in the TUI, or the dedicated Add-project button in the web UI).
+without touching each other's files, and switching between them is instant. Before
+you can create agents, you need at least one project added to dux: the Add-project
+button in the browser, or the `add-project` command in the terminal UI's palette.
+Either one opens a project browser over the same filesystem.
 
-Every action below is reachable from the command palette. Each also has a
-default keybinding you can view (and rebind) in the in-app help overlay (`?`),
-so this guide names the stable palette commands rather than keys that you might
-have remapped.
+All four creation paths below work from both front ends, and this guide describes
+them once for both, because what dux actually does is identical either way. Only
+the way you reach an action differs, so each section names both: in the browser it
+is a button or an entry in a row's `⋯` menu, and in the terminal UI it is a command
+palette entry. Palette commands also have default keybindings you can view and
+rebind in the in-app help overlay (`?`); this guide names the stable command rather
+than a key you might have remapped.
 
 ## The mental model
 
@@ -52,8 +55,9 @@ enable_randomized_pet_name_by_default = false
 
 ## Creating a new agent from scratch
 
-Run the `new-agent` palette command and pick a project from the chooser (every
-project is listed, including ones with no agents yet). dux inspects that
+In the browser, open a project's `⋯` menu and pick **New agent…**. In the terminal
+UI, run the `new-agent` palette command and pick a project from the chooser (every
+project is listed, including ones with no agents yet). Either way dux inspects that
 project's current branch in the background, then opens the naming prompt.
 
 On confirmation, dux runs `git worktree add -b <name> <path> <leading-branch>`,
@@ -98,19 +102,21 @@ and embedded-repository contents, and empty directories.
 
 ## Creating an agent from a GitHub PR
 
-Run the `new-agent-from-pr` palette command and pick a project from the chooser. This path is
-only available when the `gh` CLI is installed, authenticated (`gh auth login`),
-and the `github_integration` setting is enabled (it defaults to `true`):
+In the browser, that is **New agent from PR…** in a project's `⋯` menu; in the
+terminal UI, the `new-agent-from-pr` palette command, then a project from the
+chooser. This path is only available when the `gh` CLI is installed, authenticated
+(`gh auth login`), and the `github_integration` setting is enabled (it defaults to
+`true`):
 
 ```toml
 [ui]
 github_integration = true
 ```
 
-dux checks `gh` availability at startup. If it is missing or not authenticated,
-the `new-agent-from-pr` command is hidden from the palette entirely.
+dux checks `gh` availability at startup. If it is missing or not authenticated, the
+path is hidden outright on both front ends: no palette command, no menu entry.
 
-When you trigger the command, dux opens a prompt where you can paste a GitHub PR
+When you trigger it, dux opens a prompt where you can paste a GitHub PR
 URL or type a PR number. After you confirm, dux:
 
 1. Fetches the PR's head ref into a local branch using
@@ -143,10 +149,10 @@ dux pauses PR checks until it recovers and tells you in the status line.
 
 ## Creating an agent from an existing worktree
 
-Run the `new-agent-from-worktree` palette command and pick a project from the
-chooser. dux opens a picker that lists every git worktree it finds for that
-project's repository.
-Worktrees are grouped into two categories:
+In the browser, that is **New agent from existing worktree…** in a project's `⋯`
+menu; in the terminal UI, the `new-agent-from-worktree` palette command, then a
+project from the chooser. dux opens a picker that lists every git worktree it finds
+for that project's repository. Worktrees are grouped into two categories:
 
 - **Managed worktrees**: worktrees already under dux's `worktrees/` directory.
   If one has no agent yet, dux attaches a new session to it without touching the
@@ -166,7 +172,9 @@ selected; the error "That worktree already has an agent." is shown if you try.
 
 ## Forking an existing agent
 
-Select an agent in the left pane and run the `fork-agent` palette command.
+Forking starts from an existing agent rather than a project. In the browser, open
+that agent's `⋯` menu and pick **Fork agent…**; in the terminal UI, select the agent
+in the left pane and run the `fork-agent` palette command.
 Forking creates a brand-new worktree branched from the source agent's current
 `HEAD` commit, then copies the uncommitted and untracked changes across so the
 fork starts where the original agent is right now. Files matched by
@@ -198,10 +206,13 @@ in `[defaults]`:
 provider = "claude"
 ```
 
-You can change the global default at any time with the `change-default-provider`
-palette command, or change just one project's default with
-`change-project-default-provider`. To swap the provider on a specific existing
-agent after creation, use `change-agent-provider`.
+All three levels are editable from either front end. In the terminal UI they are the
+`change-default-provider`, `change-project-default-provider`, and
+`change-agent-provider` palette commands. In the browser, the global default is the
+**Default provider for new agents** row in **Preferences…**, a project's default
+lives in **Project settings…** on its `⋯` menu, and an agent's provider in **Change
+provider…** on its own `⋯` menu. Swapping an agent's provider never yanks a running
+session out from under itself; it takes effect the next time that tab launches.
 
 ## Auto-reopening agents on startup
 
@@ -219,10 +230,12 @@ id   = "a4f3..."
 auto_reopen_agents = true
 ```
 
-You can toggle either level without editing the file directly: use
-`toggle-project-auto-reopen-agents` from the palette to flip the selected
-project's setting, or `toggle-agent-auto-reopen` to flip a single agent's
-behaviour. Changes take effect the next time dux starts.
+You can toggle every level without editing the file directly. In the terminal UI,
+`toggle-project-auto-reopen-agents` flips the selected project's setting and
+`toggle-agent-auto-reopen` flips a single agent's. In the browser, the global switch
+is a **Preferences…** row, the project one is in **Project settings…**, and an
+agent's own is **Enable/Disable agent auto-reopen** on its `⋯` menu. Changes take
+effect the next time dux starts.
 
 If an agent's provider command is not found when dux tries to reopen it, the
 worktree is left intact and the error is shown in the status bar; the agent

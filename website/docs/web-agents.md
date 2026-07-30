@@ -5,12 +5,12 @@ group: Server mode
 order: 64
 ---
 
-Server mode is not a read-only dashboard. You can run the whole agent lifecycle
-from the browser: spin one up, fork it, adopt an orphaned worktree, retarget its
-provider, and tear it down, all with the same worktree-per-agent model the TUI
-uses. If the core ideas of projects, agents, and providers are new to you, start
-with [Creating agents](/docs/creating-agents), then come back for the browser
-specifics.
+The whole agent lifecycle runs from the browser: spin one up, fork it, adopt an
+orphaned worktree, retarget its provider, and tear it down. Every agent is a real
+git worktree on its own branch, exactly as it is anywhere else in dux, so a browser
+where you have no terminal at all is still a full workspace and not a dashboard over
+one. This page is the click-by-click version; the concepts behind projects, agents,
+and providers are laid out in [Creating agents](/docs/creating-agents).
 
 ## Adding a project
 

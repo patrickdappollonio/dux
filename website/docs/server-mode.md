@@ -5,11 +5,22 @@ group: Server mode
 order: 60
 ---
 
-Everything dux does in your terminal, it can also do in a browser. Server mode
-serves a web UI of the very same workspace: the same projects, the same agents on
-the same worktrees, the same live engine driving the same PTYs. Nothing is
-mirrored or re-synced. You open a URL and you are looking straight at the running
-engine, from your laptop, your phone, or a tablet on the couch.
+dux has two front ends over one engine: a terminal UI and a web UI. Both are first
+class, and both are staying. Server mode is the web one, and it serves the very
+same workspace: the same projects, the same agents on the same worktrees, the same
+live engine driving the same PTYs, and the same config file. Nothing is mirrored or
+re-synced. You open a URL and you are looking straight at the running engine, from
+your laptop, your phone, or a tablet on the couch. An agent you start in one front
+end is the same agent in the other.
+
+The two are not identical, on purpose. Each surface does what its medium is good
+at. The terminal gives you full keyboard control, rebindable keys, a command
+palette and themes. The browser gives you reach: any device on your network,
+including a phone, plus editing files in the page and desktop notifications. Where
+a capability only makes sense on one side, it lives on one side, and the page that
+covers it says why. To know whether something is available where you are, the
+surface itself is the answer: the terminal's help overlay and command palette list
+what it can do, and the browser's cog menu and row menus list what it can do.
 
 That is the whole idea: **one workspace, many screens.** Start an agent from the
 TUI at your desk, walk away, and pick the exact same session up on your phone. Two
@@ -63,9 +74,9 @@ during that wait skips the grace period and exits immediately.
 Only one `dux server` (or `dux` TUI) can run against a given config directory at
 a time: both acquire the same single-instance lock, so starting a second one
 against the same directory fails fast with a clear "already running" message
-instead of two processes fighting over the same SQLite database. If you want
-both the TUI and the browser open on the same live engine, use the in-app flip
-below rather than starting a second process.
+instead of two processes fighting over the same SQLite database. So one process
+serves one front end at a time. The in-app flip below is how you move a running
+workspace from one to the other without restarting anything.
 
 ### Flip a running TUI into the browser
 
@@ -78,8 +89,10 @@ The flip is graceful. Your **agents keep running the entire time** (no relaunch,
 no lost conversations), the live engine is simply handed to the web server
 in-process. Your terminal turns into a themed dux status screen showing the serve
 URLs and an activity panel. Press `q` or `Esc` there to drop back into the TUI
-around the same still-running engine, so you can bounce between the two surfaces
-as much as you like. `Ctrl-c` quits the whole process.
+around the same still-running engine; that stops serving the web UI, so it is a
+hand-back rather than a second window, and you can flip again whenever you like.
+`Ctrl-c` quits the whole process. Your agents keep running through every one of
+these transitions.
 
 One difference worth filing away: **`dux server` honors your configured
 `[server] host` and `--bind`, but the in-app flip always serves loopback plus

@@ -5,14 +5,15 @@ group: Server mode
 order: 61
 ---
 
-Open the server URL and you land in a workspace that mirrors the TUI, redrawn for
-a browser. If you know the three-pane TUI, you already know your way around. If you
-have never touched dux, this is a fine place to start, because the browser puts
-everything one click away.
+Open the server URL and you land in the workspace: your projects, your agents, and
+their live terminals, all click-driven. This is one of dux's two front ends, and it
+is a complete one. If you have never touched dux, this is a fine place to start,
+because the browser puts everything a click away. If you know the terminal UI, the
+shape will be familiar, because both front ends lay the workspace out the same way.
 
 ## The layout
 
-On a desktop-width screen it is three panes, same as the TUI:
+On a desktop-width screen it is three panes:
 
 - A collapsible **left sidebar** lists your agents in a single flat list, no
   longer grouped by project, with the dormant ones tucked into a collapsible
@@ -28,15 +29,19 @@ On a desktop-width screen it is three panes, same as the TUI:
   full width. See [Git without leaving the browser](/docs/web-git).
 
 A slim header up top shows breadcrumbs (agent, provider, project, branch) and a
-**cog** button that opens the app menu. There is no in-app `?` help overlay in the
-browser the way there is in the TUI, and no command palette either: the cog menu
-is your map. It holds your preferences, the configuration dialogs, and the
-actions that apply to the whole workspace rather than to one thing. It has no
-keyboard shortcut on purpose. Tab reaches it, Enter opens it, the arrow keys move
-through it, and Escape closes it. Anything that acts on a *specific* agent,
-project, or file lives in the `⋯` menu on that row instead.
+**cog** button that opens the app menu. The cog menu is the browser's map: it holds
+your preferences, the configuration dialogs, and the actions that apply to the whole
+workspace rather than to one thing. Anything that acts on a *specific* agent,
+project, or file lives in the `⋯` menu on that row instead, right next to the thing
+it acts on. Between those two, everything the web UI can do is discoverable by
+pointing at it, which is the browser's idiom for what the terminal UI reaches
+through its command palette and `?` overlay. The cog menu deliberately has no
+keyboard shortcut. Tab reaches it, Enter opens it, the arrow keys move through it,
+and Escape closes it.
 
-The web UI is dark-only today. There is no theme picker in the browser.
+The web UI is dark-only. Themes are a terminal UI feature: the browser ships one
+tuned dark palette, and it does not follow your system or browser light/dark
+preference.
 
 ## Deep links
 
