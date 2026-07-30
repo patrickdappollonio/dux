@@ -413,6 +413,22 @@ impl Drop for PtyWriter {
 /// Shared subscriber list: id-tagged senders fanned out by the PTY reader loop.
 type SubscriberList = Arc<Mutex<Vec<(u64, std::sync::mpsc::Sender<Vec<u8>>)>>>;
 
+/// Hand one chunk of raw PTY output to every live subscriber, pruning senders
+/// whose receiver has hung up. Cheap no-op when there are none.
+///
+/// The caller MUST already hold the terminal lock: the fan-out and the ingest of
+/// the same chunk are one atomic step with respect to
+/// [`PtyClient::subscribe_with_repaint`], which holds that same lock while it
+/// registers a subscriber and snapshots the grid. See the comment at the reader's
+/// call site for why.
+fn fan_out_to_subscribers(subscribers: &SubscriberList, data: &[u8]) {
+    if let Ok(mut subs) = subscribers.lock()
+        && !subs.is_empty()
+    {
+        subs.retain(|(_, tx)| tx.send(data.to_vec()).is_ok());
+    }
+}
+
 /// RAII guard returned by [`PtyClient::subscribe`] and
 /// [`PtyClient::subscribe_with_repaint`]. Dropping it immediately removes the
 /// subscriber from the fan-out list without waiting for the next PTY output.
@@ -828,66 +844,87 @@ impl PtyClient {
                         }
                     }
 
-                    // Fan raw bytes out to web subscribers before the TUI-only
-                    // scroll-pause branch, so web clients stream independently.
-                    // Prune hung-up receivers. Cheap no-op when there are none.
-                    if let Ok(mut subs) = subscribers.lock()
-                        && !subs.is_empty()
-                    {
-                        subs.retain(|(_, tx)| tx.send(data.to_vec()).is_ok());
-                    }
+                    // Take the terminal lock BEFORE the subscriber fan-out and
+                    // hold it across both, so "this chunk reached the
+                    // subscribers" and "this chunk reached the grid (or the
+                    // pause buffer)" are ONE atomic step as far as
+                    // `subscribe_with_repaint` can tell. That is what makes a
+                    // fresh connection see every byte exactly once.
+                    //
+                    // The fan-out used to run outside this lock, and the gap was
+                    // not the "few bytes" the old comment claimed: `Mutex` is not
+                    // fair, so the reader barges: it releases the lock, reads the
+                    // next chunk and re-acquires while a subscriber that has
+                    // ALREADY registered is still parked in the futex waiting for
+                    // its snapshot. Every chunk that lands in that window is fanned
+                    // out to that subscriber AND parsed into the grid it is about to
+                    // be handed, so the client renders the snapshot's tail and then
+                    // a replay of bytes already inside it (measured: thousands of
+                    // duplicated lines, which reads as a jump forward followed by a
+                    // jump back). Duplication is invisible in a full-screen TUI that
+                    // repaints over itself; line-oriented output appends, so it is
+                    // corruption. Keep the two under one lock.
+                    //
+                    // A poisoned terminal mutex means some other thread panicked
+                    // while holding it. Nothing here can fix that, but the fan-out
+                    // is independent of the grid, so keep streaming to web clients
+                    // exactly as this loop did before and skip only the ingest.
+                    let Ok(mut terminal) = terminal.lock() else {
+                        fan_out_to_subscribers(&subscribers, data);
+                        continue;
+                    };
+                    fan_out_to_subscribers(&subscribers, data);
 
-                    // Fast-path check: if paused, buffer instead of parsing.
-                    // The definitive check happens inside the pending_bytes
-                    // lock below to synchronize with resume_ingestion.
+                    // If the TUI is scrolled back, buffer instead of parsing. The
+                    // definitive check happens inside the pending_bytes lock to
+                    // synchronize with `resume_ingestion`.
                     if scroll_paused.load(Ordering::Acquire)
                         && let Ok(mut pending) = pending_bytes.lock()
                     {
-                        // Re-check under the lock: resume_ingestion flips the
-                        // flag while holding this same lock, so if we observe
-                        // paused=true here it will stay true until we release.
+                        // Re-check under the lock: `resume_ingestion` flips the flag
+                        // while holding both this lock and the terminal lock we are
+                        // holding, so if we observe paused=true here it will stay
+                        // true until we release.
                         if scroll_paused.load(Ordering::Acquire) {
                             append_with_cap(&mut pending, data, PAUSE_BUFFER_CAP);
                             received_data.store(true, Ordering::Release);
                             continue;
                         }
-                        // Fell through — pause was just lifted; drop the lock
-                        // and feed this chunk through the normal path.
+                        // Fell through: pause was just lifted, so feed this chunk
+                        // through the normal path below.
                     }
 
-                    if let Ok(mut terminal) = terminal.lock() {
-                        let replies = terminal.process(data);
-                        dirty.store(true, Ordering::Release);
-                        // Streaming/"working" signal: only a VISIBLE content change
-                        // counts as the agent producing output. OSC status sequences
-                        // (OSC 9;4 progress) and other non-rendering bytes advance the
-                        // parser without changing the grid, so they must not read as
-                        // activity — `is_agent_streaming` consults them only as a
-                        // fallback. The raw `dirty` flag above still fires for
-                        // rendering regardless.
-                        if terminal.take_visible_change() {
-                            received_data.store(true, Ordering::Release);
-                        }
-                        // Capture the visibility transition while we still hold the
-                        // terminal lock, then release it BEFORE handing the parser's
-                        // replies to the writer. Holding `terminal` across the write
-                        // is what let a stalled writer freeze the drain loop (and,
-                        // with it, every session): the reader must always return to
-                        // `read()` promptly so the child can never block on output.
-                        let newly_visible =
-                            !has_output.load(Ordering::Acquire) && terminal.has_visible_output();
-                        drop(terminal);
-                        if !replies.is_empty() {
-                            // Same non-blocking, drop-with-log policy as user input
-                            // (`PtyWriter::send`). Replies are tiny and the queue is
-                            // large, so a drop here needs a wedged writer AND a full
-                            // queue — practically unreachable, but logged if it ever
-                            // happens so a desynced child is diagnosable.
-                            pty_queue_send(&writer_tx, replies);
-                        }
-                        if newly_visible {
-                            has_output.store(true, Ordering::Release);
-                        }
+                    let replies = terminal.process(data);
+                    dirty.store(true, Ordering::Release);
+                    // Streaming/"working" signal: only a VISIBLE content change
+                    // counts as the agent producing output. OSC status sequences
+                    // (OSC 9;4 progress) and other non-rendering bytes advance the
+                    // parser without changing the grid, so they must not read as
+                    // activity — `is_agent_streaming` consults them only as a
+                    // fallback. The raw `dirty` flag above still fires for
+                    // rendering regardless.
+                    if terminal.take_visible_change() {
+                        received_data.store(true, Ordering::Release);
+                    }
+                    // Capture the visibility transition while we still hold the
+                    // terminal lock, then release it BEFORE handing the parser's
+                    // replies to the writer. Holding `terminal` across the write
+                    // is what let a stalled writer freeze the drain loop (and,
+                    // with it, every session): the reader must always return to
+                    // `read()` promptly so the child can never block on output.
+                    let newly_visible =
+                        !has_output.load(Ordering::Acquire) && terminal.has_visible_output();
+                    drop(terminal);
+                    if !replies.is_empty() {
+                        // Same non-blocking, drop-with-log policy as user input
+                        // (`PtyWriter::send`). Replies are tiny and the queue is
+                        // large, so a drop here needs a wedged writer AND a full
+                        // queue — practically unreachable, but logged if it ever
+                        // happens so a desynced child is diagnosable.
+                        pty_queue_send(&writer_tx, replies);
+                    }
+                    if newly_visible {
+                        has_output.store(true, Ordering::Release);
                     }
                 }
                 Err(err) => {
@@ -978,19 +1015,41 @@ impl PtyClient {
 
     /// Subscribe and also return a synthesized ANSI repaint of the current
     /// screen, so a freshly-connected client can prime its terminal before the
-    /// live stream arrives. The subscriber is registered *before* the snapshot
-    /// is taken, so no bytes are lost; a newly-connecting client may briefly see
-    /// a few bytes both in the repaint and the first streamed chunk — harmless
-    /// and self-correcting for redraw-heavy TUIs.
+    /// live stream arrives.
+    ///
+    /// Registration and the snapshot happen under ONE hold of the terminal lock,
+    /// which the reader thread also holds across its fan-out plus ingest of each
+    /// chunk (see `spawn_reader`). That makes the handoff exact: every chunk is
+    /// either wholly before this subscriber existed (so it is in the repaint and
+    /// not in the channel) or wholly after (so it is in the channel and not in the
+    /// repaint). The client therefore sees each byte exactly once, in order, with
+    /// nothing lost.
+    ///
+    /// The repaint carries the grid PLUS any bytes still sitting in the pause
+    /// buffer. While the TUI is scrolled back the reader fans chunks out and
+    /// buffers them unparsed, so they are already past the fan-out point but not
+    /// yet in the grid: a subscriber that registers now will never be sent them,
+    /// and they are the exact continuation of the grid, so they belong on the end
+    /// of the repaint. (If that buffer previously overflowed its cap, the oldest
+    /// bytes it dropped are gone for the TUI too; nothing here can recover them.)
     ///
     /// Returns `(guard, repaint_bytes, receiver)`. Hold the guard for the
     /// connection's lifetime; dropping it removes the subscriber immediately.
     pub fn subscribe_with_repaint(
         &self,
     ) -> (PtyViewerGuard, Vec<u8>, std::sync::mpsc::Receiver<Vec<u8>>) {
-        let (guard, rx) = self.subscribe();
         let terminal = self.terminal.lock().expect("terminal mutex poisoned");
-        let repaint = terminal.reconnect_repaint();
+        // Order within the lock is immaterial (the reader cannot run either step
+        // while we hold it), so keep registering first: the receiver exists before
+        // anything is read off the grid.
+        let (guard, rx) = self.subscribe();
+        let mut repaint = terminal.reconnect_repaint();
+        // Lock order is terminal -> pending_bytes, matching the reader and
+        // `resume_ingestion`, so a drain cannot interleave and hand these bytes to
+        // the grid between the two reads (which would duplicate them).
+        if let Ok(pending) = self.pending_bytes.lock() {
+            repaint.extend_from_slice(&pending.buf);
+        }
         drop(terminal);
         (guard, repaint, rx)
     }
@@ -3373,6 +3432,353 @@ mod tests {
                  subscribe, got {other:?}"
             ),
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // Replay handoff: a freshly connected client must see every byte of the
+    // child's output EXACTLY ONCE, in order, with nothing lost.
+    //
+    // The failure these pin is not cosmetic. `subscribe_with_repaint` hands a
+    // client a snapshot of the grid plus a live byte stream, and if a chunk can
+    // land in BOTH the client renders the snapshot's tail and then a replay of
+    // bytes already inside it: for line-oriented output that appends, so the log
+    // reads as a jump forward followed by a jump back. If a chunk can land in
+    // NEITHER, the agent's output is silently lost, which is worse.
+    // ---------------------------------------------------------------------
+
+    /// A shell that emits one `L<n>` line per line we write to it, so a test
+    /// decides exactly when output is produced and never sleeps on a guess.
+    /// `stty -echo` keeps the line discipline from echoing our own writes back,
+    /// so the child's output is only the lines it prints.
+    const LINE_ECHOER: &str =
+        "stty -echo; while IFS= read -r n; do printf 'L%s\\r\\n' \"$n\"; done";
+
+    fn spawn_line_echoer(scrollback: usize) -> PtyClient {
+        let args = vec!["-c".to_string(), LINE_ECHOER.to_string()];
+        PtyClient::spawn("/bin/sh", &args, Path::new("."), 6, 40, scrollback).expect("spawn pty")
+    }
+
+    /// Drop ANSI escape sequences so the remaining bytes are the text a client
+    /// would end up displaying.
+    fn strip_ansi(bytes: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut i = 0usize;
+        while i < bytes.len() {
+            if bytes[i] == 0x1b && i + 1 < bytes.len() {
+                match bytes[i + 1] {
+                    // CSI: parameters then a final byte in 0x40..=0x7e.
+                    b'[' => {
+                        let mut j = i + 2;
+                        while j < bytes.len() && !(0x40..=0x7e).contains(&bytes[j]) {
+                            j += 1;
+                        }
+                        i = j.saturating_add(1);
+                    }
+                    // OSC: terminated by BEL or ST.
+                    b']' => {
+                        let mut j = i + 2;
+                        while j < bytes.len() && bytes[j] != 0x07 {
+                            if bytes[j] == 0x1b && j + 1 < bytes.len() && bytes[j + 1] == b'\\' {
+                                j += 1;
+                                break;
+                            }
+                            j += 1;
+                        }
+                        i = j.saturating_add(1);
+                    }
+                    _ => i += 2,
+                }
+                continue;
+            }
+            out.push(bytes[i]);
+            i += 1;
+        }
+        out
+    }
+
+    /// Every `L<n>` id in `bytes`, in the order it appears. Callers pass the
+    /// repaint and the live stream CONCATENATED, so a line split across the
+    /// junction (the grid ends mid-number and the stream carries the rest) reads
+    /// back as the one id it really is.
+    fn line_ids(bytes: &[u8]) -> Vec<u64> {
+        let text = String::from_utf8_lossy(&strip_ansi(bytes)).to_string();
+        let raw = text.as_bytes();
+        let mut ids = Vec::new();
+        let mut i = 0usize;
+        while i < raw.len() {
+            if raw[i] == b'L' {
+                let mut j = i + 1;
+                while j < raw.len() && raw[j].is_ascii_digit() {
+                    j += 1;
+                }
+                if j > i + 1 {
+                    ids.push(text[i + 1..j].parse::<u64>().expect("digits"));
+                    i = j;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+        ids
+    }
+
+    /// Poll `cond` until it holds, returning whether it ever did.
+    fn wait_until(timeout: std::time::Duration, mut cond: impl FnMut() -> bool) -> bool {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if cond() {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    /// Drain everything currently queued on a subscriber's receiver.
+    fn drain(rx: &std::sync::mpsc::Receiver<Vec<u8>>, settle: std::time::Duration) -> Vec<u8> {
+        let mut out = Vec::new();
+        while let Ok(chunk) = rx.recv_timeout(settle) {
+            out.extend_from_slice(&chunk);
+        }
+        out
+    }
+
+    #[test]
+    fn a_chunk_ingested_between_registering_and_snapshotting_is_not_replayed_twice() {
+        // Construct the duplication window deterministically instead of racing for
+        // it. A subscriber is parked between "registered" and "snapshot taken" by
+        // holding the terminal lock it needs; meanwhile ingestion is PAUSED, which
+        // is a real dux state (a TUI operator scrolled back) in which the reader
+        // fans a chunk out to that subscriber WITHOUT needing the terminal lock. We
+        // then hand those same bytes to the grid ourselves, exactly as
+        // `resume_ingestion` would, while still holding the lock. Releasing it
+        // gives the parked subscriber a snapshot that already contains bytes queued
+        // on its channel.
+        //
+        // In the wild the same window is opened by plain lock unfairness: the
+        // reader releases the terminal lock, reads the next chunk and re-acquires
+        // while the subscriber is still parked in the futex, so the overlap is
+        // bounded only by how long the subscriber is starved (measured at thousands
+        // of lines on a busy PTY). The pause path just makes the size of the window
+        // ours to choose.
+        let client = spawn_line_echoer(500);
+        client.write_bytes(b"1\r").expect("write");
+        wait_for_viewport(&client, "L1");
+        client.pause_ingestion();
+
+        // `PtyClient` is not `Sync`, so the orchestration runs on a helper thread
+        // holding only the shared handles while THIS thread makes the real
+        // `subscribe_with_repaint` call under test.
+        let terminal = Arc::clone(&client.terminal);
+        let pending = Arc::clone(&client.pending_bytes);
+        let paused = Arc::clone(&client.scroll_paused);
+        let subscribers = Arc::clone(&client.subscribers);
+        let writer_tx = client.writer.tx.clone().expect("writer thread alive");
+        let (holding_tx, holding_rx) = std::sync::mpsc::channel::<()>();
+
+        let helper = thread::spawn(move || {
+            let mut held = terminal.lock().expect("terminal mutex poisoned");
+            // Only now may the subscriber try to snapshot, so it is guaranteed to
+            // park on this lock rather than sail through.
+            holding_tx.send(()).expect("main thread alive");
+
+            // Pre-fix the subscriber registers and THEN parks here, so this
+            // resolves immediately. Post-fix it parks BEFORE registering (that is
+            // the fix), so the window cannot be constructed and this times out.
+            let constructed = wait_until(std::time::Duration::from_millis(500), || {
+                !subscribers
+                    .lock()
+                    .expect("subscribers mutex poisoned")
+                    .is_empty()
+            });
+            if !constructed {
+                paused.store(false, Ordering::Release);
+                return false;
+            }
+
+            // Produce lines that the reader fans out to the parked subscriber.
+            // Ingestion is paused, so it can do that without the terminal lock we
+            // are holding.
+            for n in 2..=6 {
+                pty_queue_send(&writer_tx, format!("{n}\r").into_bytes());
+            }
+            assert!(
+                wait_until(std::time::Duration::from_secs(5), || {
+                    pending
+                        .lock()
+                        .expect("pending mutex poisoned")
+                        .buf
+                        .windows(3)
+                        .any(|w| w == b"L6\r")
+                }),
+                "the reader never buffered the lines it fanned out"
+            );
+            // Hand those same bytes to the grid, exactly as `resume_ingestion`
+            // does, while the subscriber still waits for its snapshot.
+            let bytes = {
+                let mut pending = pending.lock().expect("pending mutex poisoned");
+                std::mem::take(&mut pending.buf)
+            };
+            paused.store(false, Ordering::Release);
+            held.process(&bytes);
+            true
+        });
+
+        holding_rx.recv().expect("helper thread alive");
+        let (_guard, repaint, rx) = client.subscribe_with_repaint();
+        let constructed = helper.join().expect("helper thread");
+
+        if !constructed {
+            // Nothing was in flight, so send the same lines through the ordinary
+            // path and hold the invariant to the same standard.
+            for n in 2..=6 {
+                client
+                    .write_bytes(format!("{n}\r").as_bytes())
+                    .expect("write");
+            }
+            wait_for_viewport(&client, "L6");
+        }
+
+        let mut combined = strip_ansi(&repaint);
+        combined.extend_from_slice(&drain(&rx, std::time::Duration::from_millis(200)));
+        assert_eq!(
+            line_ids(&combined),
+            vec![1, 2, 3, 4, 5, 6],
+            "a freshly connected client must see each line exactly once and in \
+             order (its whole byte stream reads {:?})",
+            String::from_utf8_lossy(&combined),
+        );
+    }
+
+    #[test]
+    fn a_repaint_carries_the_bytes_still_sitting_in_the_pause_buffer() {
+        // The loss direction of the same missing atomicity. While the TUI is
+        // scrolled back the reader fans chunks out and buffers them UNPARSED, so
+        // they are already past the fan-out point but not yet in the grid: a
+        // client that connects now will never be sent them, and a repaint built
+        // from the grid alone does not contain them either, so they vanish. The
+        // repaint has to carry the pause buffer as its tail.
+        let client = spawn_line_echoer(500);
+        client.write_bytes(b"1\r").expect("write");
+        wait_for_viewport(&client, "L1");
+
+        client.pause_ingestion();
+        for n in 2..=4 {
+            client
+                .write_bytes(format!("{n}\r").as_bytes())
+                .expect("write");
+        }
+        assert!(
+            wait_until(std::time::Duration::from_secs(5), || {
+                client
+                    .pending_bytes
+                    .lock()
+                    .expect("pending mutex poisoned")
+                    .buf
+                    .windows(3)
+                    .any(|w| w == b"L4\r")
+            }),
+            "the reader never buffered the paused lines"
+        );
+
+        let (_guard, repaint, rx) = client.subscribe_with_repaint();
+
+        // Resuming parses the buffered bytes into the grid; it deliberately does
+        // NOT re-send them to subscribers, so a repaint that skipped them has lost
+        // them for good.
+        client.resume_ingestion();
+        client.write_bytes(b"5\r").expect("write");
+        assert!(
+            wait_until(std::time::Duration::from_secs(5), || client
+                .snapshot()
+                .cells
+                .iter()
+                .any(|c| c.symbol == "5")),
+            "the child never echoed the last line"
+        );
+
+        let mut combined = strip_ansi(&repaint);
+        combined.extend_from_slice(&drain(&rx, std::time::Duration::from_millis(200)));
+        assert_eq!(
+            line_ids(&combined),
+            vec![1, 2, 3, 4, 5],
+            "lines buffered by the scrollback pause must reach a client that \
+             connects while they are buffered (got {:?})",
+            String::from_utf8_lossy(&combined),
+        );
+    }
+
+    #[test]
+    fn many_clients_attaching_to_a_busy_pty_each_get_a_seamless_stream() {
+        // The user-visible reproduction: a real, continuously streaming,
+        // line-oriented PTY with clients attaching while it runs. For every
+        // attach, the repaint and the first live chunk must join seamlessly, with
+        // no id repeated and none skipped. Before the fix this failed within the
+        // first few dozen attaches (measured: 5 of 78 attaches overlapped, one by
+        // more than three thousand lines).
+        // Enough lines that the child cannot possibly finish before the checks
+        // below do, even on a loaded machine; the loop leaves as soon as it has
+        // seen enough attaches and dropping the client kills the child.
+        let total = 400_000u64;
+        let script =
+            format!("i=1; while [ $i -le {total} ]; do echo \"L$i\"; i=$((i+1)); done; echo END");
+        let args = vec!["-c".to_string(), script];
+        let client =
+            PtyClient::spawn("/bin/sh", &args, Path::new("."), 6, 40, 500_000).expect("spawn pty");
+        assert!(
+            wait_until(std::time::Duration::from_secs(10), || client.has_output()),
+            "the child never produced any output"
+        );
+
+        let wanted = 25usize;
+        let mut attaches = 0usize;
+        let mut checked = 0usize;
+        let deadline = Instant::now() + std::time::Duration::from_secs(30);
+        while checked < wanted && Instant::now() < deadline {
+            attaches += 1;
+            let (guard, repaint, rx) = client.subscribe_with_repaint();
+            if line_ids(&repaint).is_empty() {
+                drop(guard);
+                continue;
+            }
+            // The next live chunk, if the child is still running.
+            let Ok(chunk) = rx.recv_timeout(std::time::Duration::from_millis(500)) else {
+                drop(guard);
+                break;
+            };
+            drop(guard);
+
+            let mut joined = strip_ansi(&repaint);
+            joined.extend_from_slice(&chunk);
+            let ids = line_ids(&joined);
+            if ids.len() < 3 {
+                continue;
+            }
+            // The last id may be a number the chunk cut in half; ignore it.
+            let ids = &ids[..ids.len() - 1];
+            for (i, pair) in ids.windows(2).enumerate() {
+                assert_eq!(
+                    pair[1],
+                    pair[0] + 1,
+                    "attach {attaches} handed a client a discontinuity at index {i}: \
+                     L{} is followed by L{} (repaint tail {:?}, first live chunk {:?})",
+                    pair[0],
+                    pair[1],
+                    String::from_utf8_lossy(&strip_ansi(
+                        &repaint[repaint.len().saturating_sub(60)..]
+                    )),
+                    String::from_utf8_lossy(&chunk[..chunk.len().min(60)]),
+                );
+            }
+            checked += 1;
+        }
+        assert_eq!(
+            checked, wanted,
+            "only {checked} of {wanted} attaches could be checked (attempted \
+             {attaches}), which is too few to mean anything"
+        );
     }
 
     #[test]
