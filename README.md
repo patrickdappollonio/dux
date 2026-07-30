@@ -4,7 +4,7 @@
 
 <img src="assets/dux-logo.png" width="200" align="right" />
 
-Your AI agents deserve a proper office. **dux** (pronounced "dooks") is a terminal UI that lets you run multiple AI coding agents side by side, each in its own git worktree, with full companion terminals, macros, commit generation, and a command palette that knows more tricks than you do.
+Your AI agents deserve a proper office. **dux** (pronounced "dooks") runs multiple AI coding agents side by side, each in its own git worktree, with companion terminals, provider tabs, macros, and a full git staging area. Drive it from a terminal, or run `dux server` and drive the same workspace from a browser, phone included.
 
 No protocol layers. No adapters. No JSON-RPC. Just real CLIs running in real terminals.
 
@@ -17,6 +17,16 @@ Oh, and it's fast and consumes low resources: more RAM is left for Claude, Codex
 Most AI coding tools give you one agent in one directory. dux gives you **unlimited agents across unlimited worktrees**, all visible at once. Spawn five agents on five branches and let them work in parallel. Fork a session to try a different approach without losing the original. Run several provider tabs inside a single agent to point, say, Claude and Codex at the very same checkout at once. Open companion terminals next to your agents for builds, tests, or just poking around.
 
 Every agent runs through a PTY, the same pseudo-terminal your shell uses. That means the CLI tool (Claude, Codex, Copilot, OpenCode, or literally anything else) runs exactly like it would in your regular terminal. Your MCP servers, hooks, skills, slash commands, and permission dialogs all work. We don't mess with your setup.
+
+## Two Front Ends, One Engine
+
+dux has two front ends over one engine: a terminal UI and a web UI. Both are first class, and both are staying. They share the same projects, the same agents, the same worktrees and the same config file, so an agent you start in one is the same agent in the other.
+
+They are not identical, on purpose. Each surface does what its medium is good at. The terminal gives you full keyboard control, rebindable keys, a command palette that knows more tricks than you do, and themes. The browser gives you reach: any device on your network, including a phone, plus editing files in the page and desktop notifications. Where a capability only makes sense on one side, it lives on one side, and the page that covers it says why.
+
+You won't find a per-feature comparison table here, because a table like that is stale the week after it's written. The app is the reference: in the terminal, the help overlay and the command palette; in the browser, the cog menu and the row `⋯` menus.
+
+One thing worth knowing before you point a browser at anything: **there is no login.** No password, no token, no user accounts. dux is single-tenant by design, so everyone who can reach the address shares one workspace and can drive any agent, browse the server's filesystem, and edit your files. Loopback (the default), your own tailnet, or a reverse proxy you authenticate yourself are the safe shapes. A public address is not one. [Server Mode](#server-mode) has the details.
 
 ## Install
 
@@ -78,7 +88,7 @@ dux organizes work around **projects** (git repos) and **agents** (worktree sess
 
 Already have a Git worktree you want dux to use? The `new-agent-from-worktree` command in the palette lets you pick a project from the chooser and then choose from its existing worktrees. If the worktree is already managed by dux, dux reuses it and reconnects like a continuable session; if it's outside dux's managed worktree directory, dux copies it into a fresh managed worktree first so the original checkout is left alone.
 
-The interface has three panes:
+In the terminal UI, the interface has three panes:
 
 - **Left:** a flat list of your agents, most-active first, with search and a project chooser
 - **Center:** the agent's live terminal output (or a file diff)
@@ -103,9 +113,11 @@ When a provider supports resume args, dux can auto-reopen agents that were still
 
 Switch providers from the command palette. dux sticks to one agent per worktree, so provider changes happen in place:
 
-- **`change-agent-provider`** swaps the *selected* worktree's provider on next launch. If the agent is still running, dux records your choice and warns you — the running agent keeps going until you exit and relaunch it, at which point it spawns with the new provider. If you've used that provider on this worktree before, dux passes its `resume_args` so you pick up the previous conversation instead of starting fresh.
+- **`change-agent-provider`** swaps the *selected* worktree's provider on next launch. If the agent is still running, dux records your choice and warns you: the running agent keeps going until you exit and relaunch it, at which point it spawns with the new provider. dux tells you when you pick whether that relaunch will land in the provider's previous conversation or start fresh.
 - **`change-default-provider`** picks the global fallback provider for *new* agent sessions in projects without a project-specific override. Existing agents keep their current provider; to move a running one, use `change-agent-provider` after stopping it.
 - **`change-project-default-provider`** picks the provider future agents should use for the selected project only, or lets that project inherit the global fallback again.
+
+Resuming is decided at launch time, per provider, and never pinned when you choose one. dux passes a provider's `resume_args` only when that provider defines them, when it has already run in this worktree, and when no other tab of the same agent is currently running or launching that same provider (two tabs of one provider would both reach for the same most-recent conversation, so the second one starts fresh). Copilot ships without `resume_args` on purpose, because its own continue flag resumes the most recent session globally rather than per directory, so a Copilot tab always starts fresh.
 
 The header shows `default provider: …` when the selected project inherits the global fallback. If a project has its own override, the header shows `project provider: …` plus `global default: …`. It also adds `current provider: …` when the selected agent is using a different one, so you always know which CLI you're talking to.
 
@@ -209,6 +221,30 @@ Each one suppresses only the *automatic* appearance. `disable_release_notes` add
 ### Command Palette
 
 Press the palette key and you get fuzzy-searchable access to every action in dux, including features that don't have dedicated keybindings. Sort agents, toggle UI elements, open the resource monitor, rename sessions, edit macros, and more. If you forget a keybinding, just open the palette.
+
+### Server Mode
+
+Everything dux does in your terminal, it can do in a browser:
+
+```bash
+dux server
+```
+
+That serves the same workspace, not a copy of it and not a dashboard bolted on the side: the same `config.toml`, the same projects, the same agents on the same worktrees. Nothing is mirrored or re-synced, because there is nothing to mirror to. Only one dux runs against a dux directory at a time, so what the browser shows you is the engine itself and the PTYs it is driving, not a snapshot of them. Open the URL from your laptop, your phone, or a tablet on the couch. Start an agent at your desk, walk away, pick that exact session up somewhere else.
+
+You get the workspace, not a read-only view of it: attach to any agent's terminal and its provider tabs, spawn companion and project terminals, create, fork and adopt agents, stage and commit and push, review diffs, edit any file in a worktree with a real editor right in the page (your `config.toml` included), add a project by browsing the server's filesystem, and get desktop notifications when an agent wants you.
+
+Already in the TUI with agents running? You don't need a second process, and you couldn't have one anyway: a TUI and a `dux server` both take the same single-instance lock on your dux directory, so whichever starts second fails fast instead of two processes fighting over one SQLite database. Run the `start-web-server` palette command instead and the TUI hands its live engine straight to the web server in place. Your agents keep running, no relaunch and no lost conversations; your terminal becomes a status screen, and leaving that screen drops you back into the TUI around the same still-running engine.
+
+**How it binds.** By default `dux server` binds `127.0.0.1:8080`, loopback only, so nothing leaves the machine. If the `tailscale` CLI is around it also binds this machine's Tailscale address on the same port, so your own tailnet devices reach dux over WireGuard. That leg is opt-out (`tailscale_enabled = false` under `[server]`, or `--no-tailscale` for a single run), and when Tailscale isn't there dux warns and serves the configured host only. `--bind <ADDR:PORT>` sets an exact socket, `--port <PORT>` overrides just the port. A required address that can't bind is fatal and says so; the Tailscale leg failing to bind is only a warning. The in-app flip always serves loopback plus Tailscale and never a custom host, so reach for `dux server` when you need a specific interface.
+
+**And there is no login.** None: no password, no token, no user accounts. dux is a single-tenant, trusted-access tool, and server mode is honest about that instead of pretending otherwise. Everyone who can reach the address shares one workspace: they can drive any agent or terminal, browse the server's filesystem, edit files in your worktrees, and see every session. That's deliberate, and it means access control is entirely a question of where you bind.
+
+The safe shapes are loopback (the default), your own tailnet, or a reverse proxy you put in front and authenticate yourself, which is also where TLS would live, since dux itself serves plain HTTP. The shape that isn't safe is a LAN or public address, `--bind 0.0.0.0:8080` and friends: that puts your agents and your worktrees in reach of anyone who can hit it. dux prints a loud warning before it does that, but the warning is the only thing standing there. Don't serve it to anyone you wouldn't hand a shell on that machine.
+
+Two defenses do always run, and they're about hostile web pages rather than about users: a Host-header allowlist, so a malicious site can't DNS-rebind your browser into the server, and a same-origin check on socket upgrades and on every write request, so another site can't ride along. Both are automatic. If you reach dux by a name rather than an IP literal, a tailnet MagicDNS name or a proxy hostname, add it to `allowed_hosts` under `[server]` or the host guard answers `403`.
+
+The rest of `[server]` tunes presentation and limits: console color, the per-request access log, the shutdown grace period, and per-class WebSocket connection caps. As ever, each key explains itself inline in your config file.
 
 ### Configuration
 
