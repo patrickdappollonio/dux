@@ -1,0 +1,221 @@
+---
+// The web-UI section: what server mode is, what it looks like, and the answer to
+// the question every developer asks straight after "drive your agents from a
+// browser", which is "hosted where, reachable by whom, and is there a login".
+//
+// SCREENSHOTS ARE OPTIONAL AND REAL.
+// This section is built to receive two genuine captures. Neither is in the
+// repository yet, and nothing here fakes one: `publicPng` returns null when a
+// file is absent and the figure is skipped, so the section renders complete
+// without them and gains the images the moment they land in `public/`.
+//
+//   public/dux-web-desktop.png  a landscape capture of the web UI on a desktop
+//                               browser, sidebar + terminal pane + changes pane
+//                               visible. Target 2560x1600 (2x of 1280x800).
+//                               Any 16:10-ish landscape size works; the markup
+//                               reads the real dimensions off the file.
+//
+//   public/dux-web-phone.png    a PORTRAIT capture of the mobile shell on a
+//                               phone, ideally showing an agent's terminal with
+//                               the accessory bar and compose bar. Target
+//                               1170x2532 (iPhone native).
+//
+// PNG only (the size is read from the PNG header). `npm run prep` writes a
+// `.webp` sibling for each automatically, and this picks it up when present.
+import { publicPng } from "../lib/public-image";
+
+const desktop = publicPng("dux-web-desktop");
+const phone = publicPng("dux-web-phone");
+
+// The startup banner, reproduced from the real one so it is not invented:
+// `dux-web`'s banner renderer prints one indented `➜ <label>: <url>` row per
+// bound listener (crates/dux-web/src/console.rs), and the labels are
+// "Local (loopback)" for the loopback leg and "Tailscale" for the best-effort
+// tailnet leg (crates/dux-web/src/lib.rs). 100.64.0.5 stands in for a tailnet
+// address; Tailscale hands those out of 100.64.0.0/10.
+const bannerRows = [
+  { label: "Local (loopback)", url: "http://127.0.0.1:8080" },
+  { label: "Tailscale", url: "http://100.64.0.5:8080" },
+];
+---
+
+<section id="web" class="anchor-offset py-16 sm:py-24">
+  <div class="container-app">
+    <div class="max-w-2xl">
+      <span class="pill">▸ remote work</span>
+      <h2 class="heading mt-3 text-3xl font-bold tracking-tight sm:text-4xl">
+        Same office. <span class="text-[color:var(--color-pink)]">Any window.</span>
+      </h2>
+      <p class="mt-4 text-[color:var(--color-muted)] leading-relaxed">
+        dux has two front ends over one engine: a terminal UI and a web UI. Both are
+        first class, and both are staying. They share the same projects, the same
+        agents, the same worktrees and the same config file, so an agent you start
+        in one is the same agent in the other.
+      </p>
+      <p class="mt-4 text-[color:var(--color-muted)] leading-relaxed">
+        One dux owns your dux directory at a time, so moving between the two is a
+        hand-off rather than a second window: a palette command hands the running
+        engine straight to the web server, and leaving that screen drops you back
+        into the terminal around the same still-running engine. Nothing relaunches
+        and no conversation is lost. Browsers, though, are plural. Point as many at
+        the workspace as you like and they all see the same session at the same
+        moment.
+      </p>
+      <p class="mt-4 text-[color:var(--color-muted)] leading-relaxed">
+        You will not find a feature-by-feature table of the two here, because a
+        table like that is stale the week after it is written. Each surface tells
+        you what it can do: in the terminal, the help overlay and the command
+        palette; in the browser, the cog menu and the row menus.
+      </p>
+    </div>
+
+    {
+      (desktop || phone) && (
+        <div class="mt-10 grid items-start gap-6 lg:grid-cols-[1.55fr_0.45fr]">
+          {desktop && (
+            <figure class="min-w-0">
+              <div
+                class="overflow-hidden rounded-xl border border-[color:var(--color-border)]"
+                style="box-shadow: 0 0 0 1px color-mix(in oklab, var(--color-pink) 8%, transparent), 0 30px 80px -30px color-mix(in oklab, var(--color-pink) 26%, transparent);"
+              >
+                <picture>
+                  {desktop.webp && <source srcset={desktop.webp} type="image/webp" />}
+                  <img
+                    src={desktop.src}
+                    alt="The dux web UI in a desktop browser: a sidebar of projects, agent sessions and terminals, an agent's live terminal in the center, and the changed-files pane on the right."
+                    width={desktop.width}
+                    height={desktop.height}
+                    loading="lazy"
+                    class="block w-full bg-[color:var(--color-ink)]"
+                  />
+                </picture>
+              </div>
+              <figcaption class="mt-3 text-center mono text-[11px] text-[color:var(--color-dim)]">
+                the browser · same workspace · same live PTYs
+              </figcaption>
+            </figure>
+          )}
+          {phone && (
+            <figure class="mx-auto min-w-0 max-w-[280px] lg:max-w-none">
+              <div
+                class="overflow-hidden rounded-xl border border-[color:var(--color-border)]"
+                style="box-shadow: 0 0 0 1px color-mix(in oklab, var(--color-accent) 8%, transparent), 0 30px 80px -30px color-mix(in oklab, var(--color-accent) 26%, transparent);"
+              >
+                <picture>
+                  {phone.webp && <source srcset={phone.webp} type="image/webp" />}
+                  <img
+                    src={phone.src}
+                    alt="The dux web UI on a phone in portrait: an agent's terminal filling the screen with the accessory key bar and compose bar below it."
+                    width={phone.width}
+                    height={phone.height}
+                    loading="lazy"
+                    class="block w-full bg-[color:var(--color-ink)]"
+                  />
+                </picture>
+              </div>
+              <figcaption class="mt-3 text-center mono text-[11px] text-[color:var(--color-dim)]">
+                and the couch
+              </figcaption>
+            </figure>
+          )}
+        </div>
+      )
+    }
+
+    <div class="mt-12 grid gap-6 lg:grid-cols-[0.95fr_1.05fr] lg:gap-10">
+      <div class="term relative self-start">
+        <div class="term-bar">
+          <span class="term-dot" style="background:#ff5f56"></span>
+          <span class="term-dot" style="background:#febc2e"></span>
+          <span class="term-dot" style="background:#28c840"></span>
+          <span class="ml-3 mono text-[11px] text-[color:var(--color-dim)]">what you type</span>
+        </div>
+        {/* One element per line rather than a <pre>: inside a <pre> every space
+            in this file's own indentation would be significant and land in the
+            rendered output. Here whitespace collapses, the indent is padding,
+            and each row scrolls instead of wrapping. */}
+        <div class="overflow-x-auto bg-[color:var(--color-ink)] p-4 sm:p-5">
+          <div class="mono w-max text-[12px] leading-relaxed sm:text-[13px]">
+            <div class="whitespace-nowrap">
+              <span class="text-[color:var(--color-dim)]">$</span>{" "}
+              <span class="text-[color:var(--color-text)]">dux server</span>
+            </div>
+            {
+              bannerRows.map((row) => (
+                <div class="whitespace-nowrap pl-3">
+                  <span class="text-[color:var(--color-pink)]">➜</span>{" "}
+                  <span class="text-[color:var(--color-muted)]">{row.label}:</span>{" "}
+                  <span class="text-[color:var(--color-accent)]">{row.url}</span>
+                </div>
+              ))
+            }
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <h3 class="heading text-xl font-bold tracking-tight sm:text-2xl">
+          Where it runs, and who can reach it
+        </h3>
+        <p class="mt-3 text-sm text-[color:var(--color-muted)] leading-relaxed">
+          It runs on your machine. dux serves the web UI itself, out of the same
+          binary, and there is no cloud in the middle of it.
+        </p>
+        <ul class="mt-4 space-y-3 text-sm text-[color:var(--color-muted)]">
+          <li class="flex gap-3">
+            <span class="mt-0.5 shrink-0 text-[color:var(--color-pink)]">✦</span>
+            <span>
+              <strong class="text-[color:var(--color-text)]">Loopback by default.</strong>
+              <span class="mono text-[color:var(--color-text)]">dux server</span> binds
+              <span class="mono text-[color:var(--color-text)]">127.0.0.1:8080</span>, so
+              out of the box nothing leaves the machine.
+            </span>
+          </li>
+          <li class="flex gap-3">
+            <span class="mt-0.5 shrink-0 text-[color:var(--color-pink)]">✦</span>
+            <span>
+              <strong class="text-[color:var(--color-text)]">Your tailnet, if you have one.</strong>
+              When the <span class="mono text-[color:var(--color-text)]">tailscale</span> CLI
+              is around, dux also binds this machine's Tailscale address on the same
+              port, so your own devices reach it over WireGuard. That leg is opt-out.
+            </span>
+          </li>
+          <li class="flex gap-3">
+            <span class="mt-0.5 shrink-0 text-[color:var(--color-pink)]">✦</span>
+            <span>
+              <strong class="text-[color:var(--color-text)]">There is no login.</strong>
+              No password, no token, no accounts. dux is single-tenant on purpose and
+              server mode says so rather than pretending otherwise.
+            </span>
+          </li>
+          <li class="flex gap-3">
+            <span class="mt-0.5 shrink-0 text-[color:var(--color-pink)]">✦</span>
+            <span>
+              <strong class="text-[color:var(--color-text)]">So everyone who can reach it shares one workspace.</strong>
+              They can drive any agent or terminal, browse the server's filesystem,
+              and edit files in your worktrees. Access control is entirely a question
+              of where you bind.
+            </span>
+          </li>
+          <li class="flex gap-3">
+            <span class="mt-0.5 shrink-0 text-[color:var(--color-warning)]">⚠</span>
+            <span>
+              <strong class="text-[color:var(--color-text)]">Bind wider and dux says so, loudly.</strong>
+              Point it at a LAN or public address and the banner tells you it is
+              reachable with no login and that anyone who gets there controls your
+              agents and worktrees. Loopback, your tailnet, or a reverse proxy you
+              authenticate yourself are the safe shapes.
+            </span>
+          </li>
+        </ul>
+        <a
+          href="/docs/server-mode"
+          class="mt-5 inline-flex items-center gap-1.5 text-sm text-[color:var(--color-muted)] hover:text-[color:var(--color-accent)]"
+        >
+          the whole story, flags and every <span class="mono">[server]</span> key
+          <span aria-hidden="true">→</span>
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
