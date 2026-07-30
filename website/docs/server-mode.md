@@ -22,10 +22,15 @@ covers it says why. To know whether something is available where you are, the
 surface itself is the answer: the terminal's help overlay and command palette list
 what it can do, and the browser's cog menu and row menus list what it can do.
 
-That is the whole idea: **one workspace, many screens.** Start an agent from the
-TUI at your desk, walk away, and pick the exact same session up on your phone. Two
-browser tabs on two devices see the same terminal at the same moment. There is one
-workspace and everyone pointed at it shares it.
+That is the whole idea: **one workspace, many screens.** As many browsers as you
+like can be pointed at it at once, and two devices see the same terminal at the same
+moment; there is one workspace and everyone pointed at it shares it. Start an agent
+at your desk in the terminal UI, hand the workspace to the browser with the flip
+below, walk away, and pick that exact session up on your phone with it still running.
+
+The one thing you cannot do is sit in both front ends simultaneously, because one dux
+process owns a config directory at a time. Moving between them is a hand-off, not a
+second window, and the next section is how you do it.
 
 ## Two ways to start it
 
@@ -110,7 +115,8 @@ Access control is delegated to where you bind and who can reach it.
 - **Tailscale, opt-out.** When `tailscale_enabled` is on (it is by default), dux
   also binds your machine's Tailscale address, so your own tailnet devices can
   reach it over WireGuard. Anyone on your tailnet can drive your agents, with no
-  further gate, so treat your tailnet as trusted.
+  further gate, so treat your tailnet as trusted. See
+  [Reaching dux over Tailscale](/docs/tailscale).
 - **Anything wider is on you.** Binding a LAN or public address (say
   `--bind 0.0.0.0:8080`) puts your agents and worktrees in reach of anyone who
   can hit that address, with no login in front. dux prints a loud warning before
@@ -211,3 +217,6 @@ they have rows in **Preferences…**.
   and review diffs.
 - [Agents from the browser](/docs/web-agents): create, fork, adopt, and manage
   agents and their provider tabs.
+- [Reaching dux over Tailscale](/docs/tailscale): how the tailnet address is found
+  and bound, why a MagicDNS name needs `allowed_hosts`, and what plain HTTP costs
+  you in the browser.

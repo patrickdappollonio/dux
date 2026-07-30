@@ -29,8 +29,10 @@ To know whether something is available where you are, the surface itself is the
 answer: the terminal's help overlay and command palette list what it can do, and
 the browser's cog menu and row menus list what it can do.
 
-The web UI is [server mode](/docs/server-mode), started with `dux server` or
-flipped on from a running TUI. Everything on this page is true of both.
+The web UI is [server mode](/docs/server-mode), started with `dux server` or flipped
+on from a running terminal UI. You run one front end at a time (one dux process owns
+your config directory), and moving between them is a hand-off that leaves your agents
+running. Everything else on this page is true of both.
 
 ## The mental model
 
@@ -79,6 +81,12 @@ state), `dux.log` (logs, the first place to look when something misbehaves), and
 
 ## Where to go next
 
+- [Server mode overview](/docs/server-mode): the web UI, how to start it, and the
+  no-login trust model to understand before you expose it.
+- [The workspace in the browser](/docs/web-workspace): the browser layout, its
+  terminals, and the phone experience.
+- [Reaching dux over Tailscale](/docs/tailscale): open your workspace on your phone,
+  and the caveats that come with it.
 - [Configuration](/docs/configuration): the config file, where it lives, and how
   it expands environment variables.
 - [First run & what's new](/docs/first-run-and-whats-new): the welcome screen a

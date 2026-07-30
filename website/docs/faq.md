@@ -1,6 +1,6 @@
 ---
 title: FAQ
-description: Quick answers to the small questions about platforms, providers, config, themes, and keybindings.
+description: Quick answers to the small questions about platforms, providers, server mode and the browser, config, themes, and keybindings.
 group: Reference
 order: 100
 ---
@@ -84,6 +84,43 @@ agent-opened PRs; skip it and dux quietly disables anything GitHub.
 
 See [Recommended tools](/docs/recommended-tools) for providers, MCP servers,
 and skills that pair well with dux.
+
+## Server mode & the browser
+
+### Do I have to keep a terminal open to use dux in a browser?
+
+No. `dux server` runs the web UI on its own, with no terminal UI in front of it, so
+it is happy under `systemd`, `tmux`, or anything else that keeps a process alive. See
+[Server mode overview](/docs/server-mode).
+
+### Is there a login?
+
+No. There is no password, no token, and no user accounts, on purpose: dux is a
+single-tenant, trusted-access tool. Anyone who can reach the port gets the whole
+workspace, including typing into your agents. That is why it binds `127.0.0.1` by
+default. See [the trust model](/docs/server-mode#the-trust-model-stated-plainly).
+
+### Is server mode a hosted service? Does my code leave my machine?
+
+Neither. There is no dux cloud and no account to make. `dux server` is the same
+binary serving a web UI from your own machine, over your own network, and your repos
+never leave it. Your agents' own CLIs talk to whatever AI providers they always talk
+to; dux adds no traffic of its own.
+
+### Can I run the terminal UI and the browser at the same time?
+
+Not simultaneously, and you do not need to. One dux process owns a config directory
+at a time (they share a single-instance lock), so a second one fails fast rather than
+two processes fighting over the same database. Instead you hand the workspace across:
+the `start-web-server` palette command flips a running terminal UI into serving the
+browser, and pressing `q` there hands it back. Your agents keep running through every
+transition. See [Two ways to start it](/docs/server-mode#two-ways-to-start-it).
+
+### Can I reach it from my phone?
+
+Yes. dux binds your Tailscale address by default, so any device on your tailnet can
+open it. Read [Reaching dux over Tailscale](/docs/tailscale) first, because there is
+no login in front of it.
 
 ## Configuration
 
