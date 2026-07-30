@@ -694,7 +694,74 @@ fn patch_macros(doc: &mut DocumentMut, macros: &MacrosConfig) {
     }
 }
 
+/// The keys [`patch_projects`] writes itself. Everything else it finds in an
+/// existing `[[projects]]` entry belongs to the user (a hand-added note, a key
+/// from a newer dux, a fork's own setting) and is carried over verbatim, except
+/// for [`PROJECT_KEYS_DROPPED_ON_WRITE`].
+const PROJECT_MANAGED_KEYS: &[&str] = &[
+    "id",
+    "path",
+    "name",
+    "default_provider",
+    "auto_reopen_agents",
+    "startup_command",
+    "env",
+];
+
+/// Project keys dux once wrote to config and now keeps in SQLite instead. These
+/// are DROPPED on every write rather than carried over: `leading_branch` is
+/// autodetected runtime state, and leaving it in portable config pins the
+/// detection (CLAUDE.md, "Keep derived project state in SQLite"). The loader
+/// still reads it to repair SQLite, which is why it stays a `ProjectConfig`
+/// field; only the writer refuses to emit it.
+const PROJECT_KEYS_DROPPED_ON_WRITE: &[&str] = &["leading_branch"];
+
+/// Every key the user's own `[[projects]]` entries carry that this writer does
+/// not manage, indexed by project `id` so it survives projects being added,
+/// removed, or reordered between saves.
+///
+/// Captured BEFORE the rebuild below. `patch_projects` replaces the whole array
+/// of tables (it has to: a project can be removed, and per-project keys are
+/// optional, so there is no in-place edit that covers every case), and without
+/// this capture that replacement silently deleted anything the user had put
+/// there. Each key is carried with its own [`Key`], so a comment attached to it
+/// travels along, exactly as in [`merge_unmanaged_keys`].
+fn unmanaged_project_keys(doc: &DocumentMut) -> BTreeMap<String, Vec<(Key, Item)>> {
+    let mut carried: BTreeMap<String, Vec<(Key, Item)>> = BTreeMap::new();
+    let Some(existing) = doc.get("projects").and_then(Item::as_array_of_tables) else {
+        return carried;
+    };
+    for table in existing.iter() {
+        // No `id` means nothing to match the rebuilt entry against, so there is
+        // no safe place to put the extras back. A project without an id also
+        // cannot round-trip through `ProjectConfig`, so this cannot happen for a
+        // config dux itself wrote.
+        let Some(id) = table.get("id").and_then(Item::as_str) else {
+            continue;
+        };
+        let names: Vec<String> = table
+            .iter()
+            .map(|(key, _)| key.to_string())
+            .filter(|key| {
+                !PROJECT_MANAGED_KEYS.contains(&key.as_str())
+                    && !PROJECT_KEYS_DROPPED_ON_WRITE.contains(&key.as_str())
+            })
+            .collect();
+        if names.is_empty() {
+            continue;
+        }
+        let entry = carried.entry(id.to_string()).or_default();
+        for name in names {
+            if let Some((key, item)) = table.get_key_value(&name) {
+                entry.push((key.clone(), item.clone()));
+            }
+        }
+    }
+    carried
+}
+
 fn patch_projects(doc: &mut DocumentMut, projects: &[ProjectConfig]) {
+    let mut carried = unmanaged_project_keys(doc);
     let _ = doc.remove("projects");
     if projects.is_empty() {
         return;
@@ -723,6 +790,14 @@ fn patch_projects(doc: &mut DocumentMut, projects: &[ProjectConfig]) {
                 inline.insert(name, Value::String(Formatted::new(value.clone())));
             }
             table["env"] = toml_edit::value(Value::InlineTable(inline));
+        }
+        // Put the user's own keys back, after the ones dux manages. `remove` so a
+        // duplicate id (which the project sync rejects, but which a hand-edited
+        // file can hold) contributes its extras once rather than to every entry.
+        if let Some(extras) = carried.remove(&project.id) {
+            for (key, item) in extras {
+                table.insert_formatted(&key, item);
+            }
         }
         array.push(table);
     }
@@ -1462,6 +1537,123 @@ unknown_key = \"untouched\"
         assert_eq!(project.startup_command.as_deref(), Some("npm install"));
         assert_eq!(project.auto_reopen_agents, Some(true));
         assert_eq!(project.env.get("KEY").map(String::as_str), Some("value"));
+    }
+
+    /// A project entry is REBUILT on every save, so anything the user put in it
+    /// that dux does not manage has to be captured first or it is deleted. This
+    /// was a real loss: an upgrade test caught `custom_note` vanishing from a
+    /// hand-edited `[[projects]]` block on the first save after the upgrade.
+    #[test]
+    fn patch_keeps_a_hand_added_key_inside_a_project_entry() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        fs::write(
+            &config_path,
+            "[[projects]]\n\
+             id = \"project-1\"\n\
+             path = \"/home/user/project\"\n\
+             # why this project matters\n\
+             custom_note = \"hand added\"\n",
+        )
+        .expect("write initial");
+
+        let mut config = Config::default();
+        config.projects.push(ProjectConfig {
+            id: "project-1".to_string(),
+            path: "/home/user/project".to_string(),
+            name: Some("renamed".to_string()),
+            default_provider: None,
+            leading_branch: None,
+            auto_reopen_agents: None,
+            startup_command: None,
+            env: BTreeMap::new(),
+        });
+
+        patch_config_file(&config_path, &config).expect("patch");
+
+        let saved = fs::read_to_string(&config_path).expect("read back");
+        assert!(
+            saved.contains("custom_note = \"hand added\""),
+            "the hand-added key was deleted by the save: {saved}"
+        );
+        // The comment lives on the key's decor, so it travels with it.
+        assert!(
+            saved.contains("# why this project matters"),
+            "the comment attached to the carried key was lost: {saved}"
+        );
+        // ...and the managed edit still landed.
+        let parsed: Config = toml::from_str(&saved).expect("reparse");
+        assert_eq!(parsed.projects[0].name.as_deref(), Some("renamed"));
+    }
+
+    /// The carry must not resurrect `leading_branch`. It is a `ProjectConfig`
+    /// field the loader reads (to repair SQLite) and the writer deliberately
+    /// omits, so "not a managed key" is not enough to decide it belongs to the
+    /// user.
+    #[test]
+    fn patch_still_drops_leading_branch_rather_than_carrying_it_over() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        fs::write(
+            &config_path,
+            "[[projects]]\nid = \"project-1\"\npath = \"/p\"\nleading_branch = \"trunk\"\n",
+        )
+        .expect("write initial");
+
+        let mut config = Config::default();
+        config.projects.push(ProjectConfig {
+            id: "project-1".to_string(),
+            path: "/p".to_string(),
+            name: None,
+            default_provider: None,
+            leading_branch: Some("trunk".to_string()),
+            auto_reopen_agents: None,
+            startup_command: None,
+            env: BTreeMap::new(),
+        });
+
+        patch_config_file(&config_path, &config).expect("patch");
+
+        let saved = fs::read_to_string(&config_path).expect("read back");
+        assert!(
+            !saved.contains("leading_branch"),
+            "derived branch state must never be pinned back into config: {saved}"
+        );
+    }
+
+    /// The carry is keyed by project id, not by position, so removing the first
+    /// of two projects must not move the second one's keys onto a stranger.
+    #[test]
+    fn carried_project_keys_follow_the_id_when_a_project_is_removed() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        fs::write(
+            &config_path,
+            "[[projects]]\nid = \"a\"\npath = \"/a\"\nnote_a = 1\n\n\
+             [[projects]]\nid = \"b\"\npath = \"/b\"\nnote_b = 2\n",
+        )
+        .expect("write initial");
+
+        let mut config = Config::default();
+        config.projects.push(ProjectConfig {
+            id: "b".to_string(),
+            path: "/b".to_string(),
+            name: None,
+            default_provider: None,
+            leading_branch: None,
+            auto_reopen_agents: None,
+            startup_command: None,
+            env: BTreeMap::new(),
+        });
+
+        patch_config_file(&config_path, &config).expect("patch");
+
+        let saved = fs::read_to_string(&config_path).expect("read back");
+        assert!(saved.contains("note_b = 2"), "{saved}");
+        assert!(
+            !saved.contains("note_a"),
+            "a removed project's keys must go with it: {saved}"
+        );
     }
 
     #[test]
