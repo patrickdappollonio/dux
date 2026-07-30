@@ -70,6 +70,8 @@ Grab the latest release for your platform from the [Releases](https://github.com
 - **`git`** — dux is built around git worktrees, so git is non-negotiable. If it's not on your PATH, dux won't get very far.
 - **`gh` CLI** *(optional)* — authenticate it with your GitHub account and dux can pull PR statuses, check details, and show them right in the interface. Not required, but you'll miss it once you've tried it.
 
+Building from source instead? `cargo build` is the whole story, though it also builds the React web UI (which is compiled into the binary), so you'll want Node 22+ on your PATH. [`CONTRIBUTING.md`](CONTRIBUTING.md) has the details, including how to skip the web UI build if you only care about the Rust side.
+
 ## How It Works
 
 dux organizes work around **projects** (git repos) and **agents** (worktree sessions). When you create an agent, dux branches off a new git worktree so the agent has its own isolated copy of the code. No conflicts with your main checkout, no stepping on other agents' changes.

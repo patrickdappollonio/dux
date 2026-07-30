@@ -8,6 +8,25 @@ permissions:
   contents: write
 
 jobs:
+  # A release binary with no web UI is the failure this guard exists to prevent.
+  # DUX_DISABLE_UI_BUILD makes crates/dux-web/build.rs skip the React build, which
+  # would produce four platform archives serving a "web UI not built" notice page.
+  # Every build job needs this one, so the hatch cannot ship.
+  no-ui-build-hatch:
+    name: Reject DUX_DISABLE_UI_BUILD
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if the frontend-build escape hatch is set
+        run: |
+          set -euo pipefail
+          if [ -n "${DUX_DISABLE_UI_BUILD:-}" ]; then
+            echo "DUX_DISABLE_UI_BUILD is set to '${DUX_DISABLE_UI_BUILD}' in this workflow's" >&2
+            echo "environment. It skips the React build, so every release archive would ship" >&2
+            echo "a placeholder page instead of the web UI. Refusing to build a release." >&2
+            exit 1
+          fi
+          echo "OK: DUX_DISABLE_UI_BUILD is not set; the web UI will be built in."
+
   prepare-release:
     name: Prepare release metadata
     runs-on: ubuntu-latest
@@ -39,7 +58,7 @@ jobs:
 
   build:
     name: Build ${{ matrix.archive }}
-    needs: prepare-release
+    needs: [prepare-release, no-ui-build-hatch]
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -89,6 +108,15 @@ jobs:
 
       - name: Package
         run: tar czf ${{ matrix.archive }} -C target/${{ matrix.target }}/release dux
+
+      # Start the archive that is about to be uploaded and confirm it really serves
+      # the web UI: a page referencing a content-hashed bundle, that bundle
+      # downloading, and a WebSocket upgrade completing. Placed BEFORE the upload so
+      # a failure means nothing ships. See the script header for why this is the last
+      # line of defence rather than the primary gate (the tag already exists by now)
+      # and for the one matrix entry it can only skip.
+      - name: Smoke-test the packaged archive
+        run: .github/scripts/smoke_archive.sh ${{ matrix.archive }} ${{ matrix.target }}
 
       - name: Upload to release
         env:
