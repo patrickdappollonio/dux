@@ -4,12 +4,51 @@ on:
   push:
 
 jobs:
+  # `cargo test` compiles dux-web, whose build script builds the React frontend and
+  # embeds it in the binary. DUX_DISABLE_UI_BUILD makes that build script skip the
+  # frontend entirely, and a skipped frontend also makes the static-serving tests
+  # SKIP rather than assert. So with the hatch set this whole workflow can report
+  # green while proving nothing about the web UI. Refuse it outright.
+  #
+  # This mirrors the guard in pr.yml. It has to exist separately because that
+  # workflow runs only on pull_request, so a direct push to a branch never reaches
+  # it and would otherwise be unguarded.
+  no-ui-build-hatch:
+    name: Reject DUX_DISABLE_UI_BUILD
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if the frontend-build escape hatch is set
+        run: |
+          set -euo pipefail
+          if [ -n "${DUX_DISABLE_UI_BUILD:-}" ]; then
+            echo "DUX_DISABLE_UI_BUILD is set to '${DUX_DISABLE_UI_BUILD}' in this workflow's" >&2
+            echo "environment. It skips the React build, so the binary would carry no web UI" >&2
+            echo "and the static-serving tests would skip instead of asserting. Remove it." >&2
+            exit 1
+          fi
+          echo "OK: DUX_DISABLE_UI_BUILD is not set; the frontend will be built."
+
   test:
     runs-on: ubuntu-latest
+    # Gated, not merely accompanied: a sibling job that fails does not stop this
+    # one reporting green, and green-without-a-web-UI is what the guard prevents.
+    needs: no-ui-build-hatch
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+
+      # Node is REQUIRED here, not incidental. `cargo test` builds dux-web, and a
+      # failed frontend build is now a hard build failure rather than a warning, so
+      # this job cannot pass without a working npm. The runner image happens to ship
+      # Node, which meant this worked before it was declared; relying on that is how
+      # an image update turns into a confusing build-script failure. Pin it to the
+      # same version pr.yml uses so the two cannot drift.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: crates/dux-web/web/package-lock.json
 
       - uses: Swatinem/rust-cache@v2
 
