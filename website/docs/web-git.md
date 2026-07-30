@@ -80,5 +80,5 @@ so a single blip usually clears itself before you notice. If it does not, dux
 shows a "Couldn't load changes" card with a Refresh button, and a warning toast
 fires once the failures persist across several attempts, so you are never left
 guessing why the pane went quiet. All of this rides the same engine and the same
-worktrees the TUI uses, so a commit you make in the browser is simply a commit,
+worktrees the terminal UI uses, so a commit you make in the browser is simply a commit,
 visible everywhere.

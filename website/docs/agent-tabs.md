@@ -11,8 +11,8 @@ editing the *same* checkout. That's what agent tabs are for: a single agent can
 hold several provider sessions side by side, all pointed at its one git worktree.
 
 Tabs live in a strip at the top of the agent's terminal. A brand-new agent has
-exactly one tab and looks no different from before; the strip only shows up once
-you add a second.
+exactly one tab, and the strip stays out of the way until you add a second, so a
+single-session agent is just a terminal with nothing extra above it.
 
 ## Every tab is equal
 
@@ -21,7 +21,7 @@ in the agent's shared worktree, and they all look and behave the same. Add one,
 close one, switch between them freely.
 
 Add a tab with the `+` button on the strip. On the web it spawns the project's
-default provider immediately. In the TUI, adding a tab (the `+` button, the
+default provider immediately. In the terminal UI, adding a tab (the `+` button, the
 new-agent-tab command, or the equivalent key) opens a picker so you can choose
 which configured provider the new tab runs, with the project default
 preselected; when only one provider is configured it skips the picker and just

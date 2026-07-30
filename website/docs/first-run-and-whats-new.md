@@ -78,7 +78,7 @@ it. What happens next depends on *why*:
 Neither screen is a one-shot you can lose. Both are available whenever you want
 them:
 
-- **In the terminal app:** the command palette has `show-welcome-screen` and
+- **In the terminal UI:** the command palette has `show-welcome-screen` and
   `show-release-notes`. Neither has a keybinding, because a read-once screen does
   not deserve a hotkey.
 - **In the browser (server mode):** the cog menu has **Welcome screen…** and

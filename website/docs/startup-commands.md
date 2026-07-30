@@ -76,7 +76,7 @@ A few things to know:
   launches the agent; it does not block you.
 - Every run produces a timestamped log file under the dux config directory:
   `startup-command-logs/<project-id>/<session-id>/`. You can browse these from
-  the command palette (TUI) or a row's actions menu (web UI), for a single agent
+  the command palette (terminal UI) or a row's actions menu (web UI), for a single agent
   or for every agent in a project at once.
 
 ### Configuring and running from the app

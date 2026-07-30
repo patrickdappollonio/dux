@@ -1,6 +1,6 @@
 ---
 title: Ordering the sidebar
-description: Sort your agents and terminals by activity, name, or recency, or hand-place them exactly how you like, by dragging in the browser or with the move commands in the TUI. Terminals ride the same sort as agents.
+description: Sort your agents and terminals by activity, name, or recency, or hand-place them exactly how you like, by dragging in the browser or with the move commands in the terminal UI. Terminals ride the same sort as agents.
 group: Guides
 order: 12
 ---
@@ -15,7 +15,7 @@ control, not one per kind.
 
 ## The sidebar, top to bottom
 
-Agents sit up top; terminals get their own section below them. In the TUI those
+Agents sit up top; terminals get their own section below them. In the terminal UI those
 are two panes; on the web they're two labelled groups (the Terminals group is
 collapsible and lives right under the agents). Dormant agents fold away into a
 collapsible "Inactive" tail so finished work isn't in your face.

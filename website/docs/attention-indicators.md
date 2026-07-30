@@ -5,16 +5,17 @@ group: Guides
 order: 35
 ---
 
-An agent can sit blocked for an hour, patiently waiting for you to say "yes, run
-that command" while its sidebar row looks exactly like a happily-working one. dux
-fixes that. When an agent needs you, it says so, and now dux listens.
+An agent that is blocked on you looks a lot like an agent that is busy. Both sit
+there with output on screen, and one of them has been waiting an hour for you to say
+"yes, run that command." So dux listens for the moment an agent asks, and says so
+where you are actually looking.
 
 ## What you see
 
 When an agent pauses for you, the indicator lights up wherever you happen to be
 looking:
 
-- **In the TUI**, a blinking accent-colored dot (`●`) takes over the agent's status
+- **In the terminal UI**, a blinking accent-colored dot (`●`) takes over the agent's status
   dot in the sidebar, cyan in the default theme: two quick blinks, a steady hold,
   repeat. It wins over the working spinner, so an agent that is streaming its
   permission prompt still reads as "needs you," not just "busy."
@@ -57,8 +58,8 @@ agent tells that terminal. It watches for two things:
 
 There is no formal "I need attention" protocol in the terminal world, so detection
 is best-effort by nature. What an agent emits depends on the agent, and on whether
-it recognizes the terminal it is running in. That last point is why dux can now
-present a real terminal identity to the agent (see
+it recognizes the terminal it is running in. That last point is why dux presents a
+real terminal identity to the agent (see
 [Terminal capabilities](/docs/terminal-capabilities)): an agent that thinks it is
 running in a bare, unknown terminal often emits nothing at all.
 
@@ -119,15 +120,16 @@ attention_grace_seconds = 3
 Turn `attention_on_bell` off if a chatty tool inside your agent's session (a test
 runner, tab completion) rings the bell for reasons that are not really about you.
 Turn `attention_indicator` off to silence the whole feature everywhere.
-`attention_grace_seconds` now covers both surfaces. In the TUI it rides on your
+`attention_grace_seconds` covers both surfaces. In the terminal UI it rides on your
 terminal telling dux when its window gains or loses focus (DEC focus reporting,
 which kitty, ghostty, WezTerm, iTerm2, foot, alacritty, and xterm all speak): dux
 stops clearing the focused agent's flag while your window is unfocused, then holds
 the indicators for this many seconds once you switch back. Running inside tmux? Add
 `set -g focus-events on` to your `~/.tmux.conf` so tmux forwards those focus events
 (note tmux reports focus per pane, so switching tmux panes away from dux reads as
-unfocused too). A terminal that never reports focus simply keeps the pre-grace
-behavior: dux assumes you are always looking, exactly as before.
+unfocused too). On a terminal that never reports focus the grace window simply does
+not apply: dux assumes you are always looking, and a focused agent's flag clears
+immediately as usual.
 
 By default this feature stays inside dux: bells rung inside an agent's session are
 consumed by dux's embedded terminal and not re-forwarded to the terminal you run

@@ -158,8 +158,8 @@ validates and clamps every value before saving, and every connected browser
 refreshes automatically once it's written.
 
 Not every `[ui]`/`[capabilities]` field is here: settings that only affect the
-terminal app, like the TUI theme or the diff viewer's tab width and line
-numbers, stay TUI-only and aren't exposed in this web panel. Keybindings,
+terminal UI, like its theme or the diff viewer's tab width and line
+numbers, aren't exposed in this web panel. Keybindings,
 provider commands, and project identity also stay in the raw config file (or
 their own dedicated dialogs) by design; in the web UI, use the cog menu's
 **Configuration → Edit config file…** for anything not covered.

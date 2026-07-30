@@ -5,22 +5,22 @@ group: Guides
 order: 36
 ---
 
-dux runs each agent inside an embedded terminal. That is great for isolation, but
-it used to make dux a capability black hole in both directions: agents could not
-tell what terminal they were really in, and anything they emitted (a desktop
-notification, a clipboard write, a clickable link) vanished into dux and went no
-further. The `[capabilities]` section fixes both directions.
+dux runs each agent inside an embedded terminal. That is great for isolation, but an
+embedded terminal is also a natural capability black hole in both directions: on its
+own, an agent cannot tell what terminal it is really in, and anything it emits (a
+desktop notification, a clipboard write, a clickable link) would vanish into dux and
+go no further. The `[capabilities]` section opens both directions.
 
 ## The identity problem, in one sentence
 
 Agents decide whether to send desktop notifications by sniffing environment
 variables to figure out which terminal they are in. If dux hands an agent a bare,
 unrecognized terminal, several agents (Claude Code among them) quietly send
-nothing. Under a kitty-plus-tmux setup the agent would see `TERM_PROGRAM=tmux` and
-give up, which is exactly why notifications could look "broken" through no fault of
-your own.
+nothing. Under a kitty-plus-tmux setup a naive answer would leave the agent seeing
+`TERM_PROGRAM=tmux`, at which point it gives up, which is exactly how notifications
+come to look "broken" through no fault of your own.
 
-So dux now tells the agent, honestly, what terminal it is really sitting in.
+So dux tells the agent, honestly, what terminal it is really sitting in.
 
 ## Terminal identity
 
@@ -31,20 +31,20 @@ terminal_identity = "auto"
 
 The modes:
 
-- **`auto`** (the default) does the right thing per surface. In the TUI it
+- **`auto`** (the default) does the right thing per surface. In the terminal UI it
   **mirrors your real terminal**, even seeing through tmux (more on that below). On
   the headless web server, where there is no host terminal to mirror, it presents
   **ghostty**, an identity the browser terminal renders well.
 - **`mirror`** always mirrors the real host terminal, including the tmux
   see-through.
 - **`ghostty`**, **`iterm2`**, or **`kitty`** force that identity outright. Handy
-  when you want the web UI (or a plain TUI) to look like a specific terminal to
+  when you want the web UI (or the terminal UI) to look like a specific terminal to
   every agent. Note that `kitty` also sets `TERM=xterm-kitty`, which expects the
   kitty terminfo entry to be installed. If some program misrenders, that is why;
   `ghostty` and `iterm2` leave your `TERM` alone.
-- **`none`** changes nothing. The agent inherits dux's environment exactly as it
-  was before this feature existed. Reach for this if a forced identity ever
-  confuses a tool.
+- **`none`** presents nothing at all. The agent inherits dux's own environment
+  untouched, which means agents like Claude Code will likely detect an unknown
+  terminal and stay quiet. Reach for this if a forced identity ever confuses a tool.
 
 ### Seeing through tmux
 
@@ -68,8 +68,8 @@ clipboard_passthrough = "focused"
 
 - **`passthrough`** is the **TUI-only** master switch for sending an agent's
   notification, progress, and clipboard escape sequences onward to your host
-  terminal. Turn it off to keep everything the agent emits inside dux, the way it
-  was before. It has no effect on the web UI, which uses `web_notifications` and
+  terminal. Turn it off to keep everything the agent emits sealed inside dux. It has
+  no effect on the web UI, which uses `web_notifications` and
   `clipboard_passthrough` instead.
 - **`clipboard_passthrough`** governs the touchy one, `OSC 52` clipboard writes, on
   **both surfaces**: `"focused"` (only the agent tab you are actually looking at can
@@ -145,8 +145,7 @@ prints one of these escape codes can, in principle, forge a notification or a
 clipboard write. The blast radius is small (one notification, one clipboard write),
 every switch above can narrow or close it, and the clipboard default already limits
 writes to the agent you are focused on. If you would rather keep everything sealed
-inside dux, the full "back where you started" set turns every switch off, each
-scoped to its surface:
+inside dux, the fully-closed set turns every switch off, each scoped to its surface:
 
 ```toml
 [capabilities]
