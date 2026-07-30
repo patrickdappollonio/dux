@@ -1,0 +1,25 @@
+---
+// The pink "what's new" stamp for the hero. One definition, rendered twice by
+// Hero.astro (floating at the large breakpoint, in flow below it), so the two
+// placements can never drift apart.
+//
+// Pink on purpose: cyan (--color-accent) is already carrying the headline glow
+// and the primary button, so a cyan badge would read as more of the same thing.
+// Renders nothing when WHATS_NEW_BADGE is null, which is how the badge retires.
+import { WHATS_NEW_BADGE, WHATS_NEW_HREF } from "../lib/version";
+---
+
+{
+  WHATS_NEW_BADGE && (
+    <a
+      href={WHATS_NEW_HREF}
+      class="inline-flex items-center gap-1.5 whitespace-nowrap rounded-full border border-[color:var(--color-pink)]/50 bg-[color:var(--color-pink)]/10 px-2.5 py-1 text-[11px] font-semibold text-[color:var(--color-pink)] backdrop-blur transition-colors hover:border-[color:var(--color-pink)] hover:bg-[color:var(--color-pink)]/20"
+    >
+      <span
+        aria-hidden="true"
+        class="h-1.5 w-1.5 shrink-0 rounded-full bg-[color:var(--color-pink)]"
+      />
+      new · {WHATS_NEW_BADGE}
+    </a>
+  )
+}
