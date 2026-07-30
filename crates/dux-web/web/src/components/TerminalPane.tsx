@@ -1094,6 +1094,16 @@ export function TerminalPane(props: TerminalPaneProps) {
     // rebuilds the buffer cleanly. The very FIRST open starts from an empty buffer
     // (a fresh terminal), so it needs no reset — only opens after the first do.
     //
+    // `reset()` clears every private MODE too (mouse tracking, bracketed paste,
+    // cursor visibility, autowrap, application cursor keys), and the child emitted
+    // those once at its own startup and never repeats them, so nothing on the live
+    // stream puts them back. The repaint therefore carries an explicit mode-restore
+    // tail from the server (`dux_core::pty::mode_restore_sequence`). Do not try to
+    // infer modes here from what the replay draws. Without it a reconnect landed on
+    // a full-screen agent with `mouseTrackingMode === "none"`, and the touch-scroll
+    // forward path below (gated on exactly that) returned before it read the finger
+    // delta, so a finger drag did nothing at all until a hard refresh.
+    //
     // On mobile the socket reconnects constantly, so two defensive guards keep a
     // replay from ever stacking (Mechanism A):
     //  1. Idempotency by generation. The `connected` frame tags each replay with a

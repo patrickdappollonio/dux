@@ -170,6 +170,78 @@ pub fn synthesize_repaint(snapshot: &TerminalSnapshot, alt_screen: bool) -> Vec<
     out.into_bytes()
 }
 
+/// DECSET/DECRST sequences that re-assert the child's private terminal MODES on
+/// a client that has just (re)connected.
+///
+/// A repaint rebuilds CELLS. Modes are not cells: the child enabled them once,
+/// at its own startup, and never emits them again. A reconnecting web client
+/// resets its terminal before applying the replay, so without this block it comes
+/// back with a correct-looking screen and default modes. The visible symptom was
+/// touch scrolling over a full-screen agent: the web pane forwards a finger drag
+/// as SGR wheel reports only while the app has mouse tracking on, so a lost mode
+/// left a drag with nowhere to go and the gesture did nothing at all.
+///
+/// Both polarities are always emitted so the result is a full assignment rather
+/// than a set of deltas against an assumed-default client. That makes the block
+/// correct for a client that was NOT freshly reset (a client switching between
+/// PTYs, say) at a cost of well under 100 bytes on a frame that can carry a
+/// hundred thousand replayed lines.
+///
+/// Deliberately absent: origin mode (`?6`) and insert mode (`?4`). The repaint
+/// paints with absolute cursor addressing and never re-asserts a scroll region,
+/// so restoring origin mode without its margins would misplace every subsequent
+/// write. They stay at the client's defaults, which is what the repaint itself
+/// assumed while painting.
+fn mode_restore_sequence(mode: TermMode) -> String {
+    let mut out = String::with_capacity(96);
+    let mut set = |code: u16, on: bool| {
+        out.push_str("\x1b[?");
+        out.push_str(&code.to_string());
+        out.push(if on { 'h' } else { 'l' });
+    };
+    set(1, mode.contains(TermMode::APP_CURSOR));
+    set(7, mode.contains(TermMode::LINE_WRAP));
+    set(25, mode.contains(TermMode::SHOW_CURSOR));
+    // The three mouse-TRACKING modes are one escalating setting on the receiving
+    // end, not three independent flags: xterm.js keeps a single active protocol
+    // and a DECRST of ANY of 1000/1002/1003 drops it to none, so emitting the
+    // disables after the enable would silently undo the enable (measured: a
+    // `1000l 1002h 1003l` block leaves `mouseTrackingMode === "none"`). Emit
+    // every unset one first and the set one(s) last, ascending, so the most
+    // capable tracking mode is what lands. When the child has none set, all three
+    // disables go out: alacritty_terminal DOES treat them as independent bits, so
+    // a single 1000l would leave a stale 1002 alive on a re-used client.
+    let tracking = [
+        (1000u16, TermMode::MOUSE_REPORT_CLICK),
+        (1002, TermMode::MOUSE_DRAG),
+        (1003, TermMode::MOUSE_MOTION),
+    ];
+    for (code, flag) in tracking {
+        if !mode.contains(flag) {
+            set(code, false);
+        }
+    }
+    for (code, flag) in tracking {
+        if mode.contains(flag) {
+            set(code, true);
+        }
+    }
+    set(1004, mode.contains(TermMode::FOCUS_IN_OUT));
+    // The mouse ENCODING modes are independent of the protocol above and of each
+    // other, so plain both-polarity assignment is correct here.
+    set(1005, mode.contains(TermMode::UTF8_MOUSE));
+    set(1006, mode.contains(TermMode::SGR_MOUSE));
+    set(1007, mode.contains(TermMode::ALTERNATE_SCROLL));
+    set(2004, mode.contains(TermMode::BRACKETED_PASTE));
+    // Application keypad has no DECSET form; it is the two-byte DECKPAM/DECKPNM.
+    out.push_str(if mode.contains(TermMode::APP_KEYPAD) {
+        "\x1b="
+    } else {
+        "\x1b>"
+    });
+    out
+}
+
 fn sgr_sequence(fg: CellColor, bg: CellColor, modifier: CellModifier) -> String {
     let mut params: Vec<String> = Vec::new();
     if modifier.bold {
@@ -1839,7 +1911,13 @@ impl TerminalState {
     /// repaints overwrite the viewport without ever scrolling.
     fn reconnect_repaint(&self) -> Vec<u8> {
         if self.is_alt_screen() {
-            return synthesize_repaint(&self.snapshot(), true);
+            let mut out = synthesize_repaint(&self.snapshot(), true);
+            // Cells alone are not the terminal's state: re-assert the child's
+            // private modes so a client that reset before applying the replay
+            // (every web reconnect does) comes back with mouse tracking,
+            // bracketed paste and cursor visibility intact.
+            out.extend_from_slice(mode_restore_sequence(*self.term.mode()).as_bytes());
+            return out;
         }
 
         let renderable = self.term.renderable_content();
@@ -1963,6 +2041,10 @@ impl TerminalState {
         if let Some(point) = cursor {
             out.push_str(&format!("\x1b[{};{}H", point.line + 1, point.column.0 + 1));
         }
+        // Last, so the `?7h` this replay forced on above (to rebuild soft-wrapped
+        // rows through the client's own autowrap) is put back to whatever the
+        // child actually has, alongside the rest of its private modes.
+        out.push_str(&mode_restore_sequence(*self.term.mode()));
         out.into_bytes()
     }
 
@@ -2820,11 +2902,199 @@ mod tests {
         assert!(terminal.is_alt_screen());
 
         // On the alt screen there is no scrollback to replay, so the reconnect
-        // repaint must be byte-identical to the viewport-only repaint.
-        assert_eq!(
-            terminal.reconnect_repaint(),
-            synthesize_repaint(&terminal.snapshot(), true),
+        // repaint is the viewport-only repaint plus the private-mode restore a
+        // reconnecting client needs (`synthesize_repaint` takes a snapshot, which
+        // carries cells and no modes, so it cannot emit that block itself).
+        let mut expected = synthesize_repaint(&terminal.snapshot(), true);
+        expected.extend_from_slice(mode_restore_sequence(*terminal.term.mode()).as_bytes());
+        assert_eq!(terminal.reconnect_repaint(), expected);
+    }
+
+    // A reconnecting web client resets its terminal before applying the replay,
+    // so every private MODE the child enabled at its own startup is gone by the
+    // time the replay lands. Modes are terminal state, not cell content, so a
+    // repaint that only redraws cells leaves the client silently mismatched:
+    // with mouse tracking lost, the web pane's touch-scroll forward path (which
+    // is gated on `mouseTrackingMode !== "none"`) has nothing to forward to and
+    // a finger drag over a full-screen agent does nothing at all.
+    #[test]
+    fn reconnect_repaint_restores_private_modes_on_the_alt_screen() {
+        let mut src = TerminalState::with_scrollback(6, 20, 100);
+        // A full-screen agent's startup: alt screen, button+drag mouse tracking
+        // in SGR encoding, bracketed paste, application cursor keys, and a
+        // hidden cursor.
+        src.process(b"\x1b[?1049h\x1b[?1002h\x1b[?1006h\x1b[?2004h\x1b[?1h\x1b[?25l");
+        src.process(b"alt content");
+        assert!(src.is_alt_screen());
+        assert!(src.has_mouse_mode());
+
+        // The client resets, then applies the replay: a FRESH terminal is
+        // exactly the state the replay has to rebuild from.
+        let mut dst = TerminalState::with_scrollback(6, 20, 100);
+        dst.process(&src.reconnect_repaint());
+
+        assert!(dst.is_alt_screen(), "replay must restore the alt screen");
+        assert!(
+            dst.has_mouse_mode(),
+            "replay must re-assert the child's mouse tracking mode",
         );
+        assert!(
+            dst.term.mode().contains(TermMode::MOUSE_DRAG),
+            "replay must re-assert button-event (1002) tracking specifically",
+        );
+        assert!(
+            dst.term.mode().contains(TermMode::SGR_MOUSE),
+            "replay must re-assert SGR (1006) mouse encoding",
+        );
+        assert!(
+            dst.term.mode().contains(TermMode::BRACKETED_PASTE),
+            "replay must re-assert bracketed paste",
+        );
+        assert!(
+            dst.term.mode().contains(TermMode::APP_CURSOR),
+            "replay must re-assert application cursor keys",
+        );
+        assert!(
+            !dst.term.mode().contains(TermMode::SHOW_CURSOR),
+            "replay must re-assert a hidden cursor",
+        );
+    }
+
+    // Same contract on the main screen, where the replay is a line stream rather
+    // than a positioned repaint. A shell that turned autowrap OFF or enabled
+    // bracketed paste must come back that way too.
+    #[test]
+    fn reconnect_repaint_restores_private_modes_on_the_main_screen() {
+        let mut src = TerminalState::with_scrollback(6, 20, 100);
+        src.process(b"\x1b[?2004h\x1b[?1000h\x1b[?1006h\x1b[?7l");
+        src.process(b"prompt$ ");
+        assert!(!src.is_alt_screen());
+
+        let mut dst = TerminalState::with_scrollback(6, 20, 100);
+        dst.process(&src.reconnect_repaint());
+
+        assert!(
+            dst.term.mode().contains(TermMode::BRACKETED_PASTE),
+            "replay must re-assert bracketed paste on the main screen",
+        );
+        assert!(
+            dst.term.mode().contains(TermMode::MOUSE_REPORT_CLICK),
+            "replay must re-assert click (1000) tracking on the main screen",
+        );
+        assert!(
+            dst.term.mode().contains(TermMode::SGR_MOUSE),
+            "replay must re-assert SGR mouse encoding on the main screen",
+        );
+        assert!(
+            !dst.term.mode().contains(TermMode::LINE_WRAP),
+            "replay must restore autowrap-off after using autowrap to rebuild \
+             soft-wrapped rows",
+        );
+    }
+
+    // Modes are restored from the emulator's tracked flags, never guessed, and a
+    // child that set nothing must get the default terminal back rather than a
+    // block of stale mode sets.
+    #[test]
+    fn reconnect_repaint_restores_default_modes_when_the_child_set_none() {
+        let mut src = TerminalState::with_scrollback(6, 20, 100);
+        src.process(b"plain output\r\n");
+
+        // A client left over from a DIFFERENT app (mouse tracking and bracketed
+        // paste on) must be put back to the defaults this child actually has.
+        let mut dst = TerminalState::with_scrollback(6, 20, 100);
+        dst.process(b"\x1b[?1002h\x1b[?1006h\x1b[?2004h\x1b[?25l");
+        dst.process(&src.reconnect_repaint());
+
+        assert!(
+            !dst.has_mouse_mode(),
+            "replay must clear stale mouse tracking"
+        );
+        assert!(
+            !dst.term.mode().contains(TermMode::SGR_MOUSE),
+            "replay must clear stale SGR mouse encoding",
+        );
+        assert!(
+            !dst.term.mode().contains(TermMode::BRACKETED_PASTE),
+            "replay must clear stale bracketed paste",
+        );
+        assert!(
+            dst.term.mode().contains(TermMode::SHOW_CURSOR),
+            "replay must restore a visible cursor",
+        );
+        assert!(
+            dst.term.mode().contains(TermMode::LINE_WRAP),
+            "replay must restore autowrap-on",
+        );
+    }
+
+    #[test]
+    fn mode_restore_sequence_emits_both_polarities() {
+        let all_off = mode_restore_sequence(TermMode::empty());
+        assert!(all_off.contains("\x1b[?1000l"), "{all_off:?}");
+        assert!(all_off.contains("\x1b[?1006l"), "{all_off:?}");
+        assert!(all_off.contains("\x1b[?2004l"), "{all_off:?}");
+        assert!(all_off.contains("\x1b[?25l"), "{all_off:?}");
+        assert!(all_off.contains("\x1b[?7l"), "{all_off:?}");
+        assert!(all_off.contains("\x1b>"), "{all_off:?}");
+
+        let on = mode_restore_sequence(
+            TermMode::MOUSE_MOTION
+                | TermMode::SGR_MOUSE
+                | TermMode::BRACKETED_PASTE
+                | TermMode::SHOW_CURSOR
+                | TermMode::LINE_WRAP
+                | TermMode::APP_KEYPAD
+                | TermMode::FOCUS_IN_OUT
+                | TermMode::ALTERNATE_SCROLL,
+        );
+        assert!(on.contains("\x1b[?1003h"), "{on:?}");
+        assert!(on.contains("\x1b[?1006h"), "{on:?}");
+        assert!(on.contains("\x1b[?2004h"), "{on:?}");
+        assert!(on.contains("\x1b[?25h"), "{on:?}");
+        assert!(on.contains("\x1b[?7h"), "{on:?}");
+        assert!(on.contains("\x1b[?1004h"), "{on:?}");
+        assert!(on.contains("\x1b[?1007h"), "{on:?}");
+        assert!(on.contains("\x1b="), "{on:?}");
+
+        // Cursor addressing modes are deliberately NOT restored: the repaint
+        // paints with absolute positions and never re-asserts a scroll region,
+        // so re-enabling origin mode would misplace every later write.
+        assert!(!on.contains("\x1b[?6"), "{on:?}");
+        assert!(!all_off.contains("\x1b[?6"), "{all_off:?}");
+    }
+
+    // The receiving terminal folds 1000/1002/1003 into ONE active mouse protocol
+    // and a disable of any of them clears it, so a disable emitted after the
+    // enable silently undoes it. Pin the ordering: every disable in the tracking
+    // family must precede every enable.
+    #[test]
+    fn mode_restore_sequence_enables_mouse_tracking_after_its_disables() {
+        for (flag, enable) in [
+            (TermMode::MOUSE_REPORT_CLICK, "\x1b[?1000h"),
+            (TermMode::MOUSE_DRAG, "\x1b[?1002h"),
+            (TermMode::MOUSE_MOTION, "\x1b[?1003h"),
+        ] {
+            let seq = mode_restore_sequence(flag);
+            let enable_at = seq.find(enable).unwrap_or_else(|| {
+                panic!("{enable:?} missing from {seq:?}");
+            });
+            for disable in ["\x1b[?1000l", "\x1b[?1002l", "\x1b[?1003l"] {
+                if let Some(at) = seq.find(disable) {
+                    assert!(
+                        at < enable_at,
+                        "{disable:?} must precede {enable:?} in {seq:?}",
+                    );
+                }
+            }
+            // Exactly one tracking mode is enabled, so nothing can re-escalate
+            // or downgrade it after the fact.
+            let enables = ["\x1b[?1000h", "\x1b[?1002h", "\x1b[?1003h"]
+                .iter()
+                .filter(|e| seq.contains(**e))
+                .count();
+            assert_eq!(enables, 1, "{seq:?}");
+        }
     }
 
     #[test]
@@ -3036,8 +3306,11 @@ mod tests {
         terminal.process(b"\x1b[3;5H"); // move cursor to row 3, col 5 (1-based)
 
         let replay = String::from_utf8(terminal.reconnect_repaint()).unwrap();
+        // The cursor position is the last thing painted; only the mode-restore
+        // block (which never moves the cursor) follows it.
+        let modes = mode_restore_sequence(*terminal.term.mode());
         assert!(
-            replay.ends_with("\x1b[3;5H"),
+            replay.ends_with(&format!("\x1b[3;5H{modes}")),
             "replay should restore the cursor position; full replay: {replay:?}"
         );
     }
