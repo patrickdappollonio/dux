@@ -6,7 +6,15 @@
 //! [`EngineHandle::apply_wire_scoped`] with a per-connection [`StatusScope`]
 //! derived from the optional `X-Connection-Id` header (the Phase 4 pattern).
 //!
-//! Routes (all gated):
+//! Every route is served plainly: dux has NO authentication, so none of these
+//! ever 401s. The open access is deliberate (the single-tenant trusted-access
+//! model in CLAUDE.md), and the app-wide guards are not authentication: a
+//! Host-header allowlist stops a malicious web page rebinding DNS into this
+//! server, and the same-origin check stops another site driving these verbs from a
+//! visitor's browser, but a client sending no `Origin` (curl, a script) bypasses
+//! it by design. Any client that can reach the address can rewrite `config.toml`.
+//!
+//! Routes:
 //! - `PUT  /api/v1/macros`           — replace the macro set wholesale.
 //! - `PUT  /api/v1/global-env`       — replace the workspace-wide env map.
 //! - `PUT  /api/v1/ui/changes-pane`  — set the Changes-pane visibility flag.
@@ -45,7 +53,7 @@ use dux_core::wire::{SettingsPatch, WireCommand, WireMacroEntry};
 use crate::rest_common::scope_from_headers;
 use crate::server::AppState;
 
-/// The gated config-mutation routes.
+/// The config-mutation routes.
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/v1/macros", put(update_macros))
@@ -429,7 +437,8 @@ struct WriteRawConfigBody {
 }
 
 /// `GET /api/v1/config/raw`. Return the raw `config.toml` text for the Monaco
-/// editor. Reading is gated like every other config route but takes no body. A
+/// editor. Served like every other config route (no authentication) but takes no
+/// body. A
 /// read failure (permission/IO, or the engine being gone) is a `503` so the
 /// editor surfaces an error instead of opening on blank content.
 async fn read_raw_config(State(state): State<AppState>) -> Response {

@@ -2,7 +2,17 @@
 //! server side: the startup gate, the pending screen held in memory, dismissal,
 //! and the on-demand release-notes read.
 //!
-//! Routes (all gated):
+//! Both routes are served plainly: dux has NO authentication, so neither ever
+//! 401s. The open access is deliberate (the single-tenant trusted-access model in
+//! CLAUDE.md), and the app-wide guards are not authentication: a Host-header
+//! allowlist stops a malicious web page rebinding DNS into this server, and the
+//! same-origin check stops another site driving the dismissal from a visitor's
+//! browser, but a client sending no `Origin` (curl, a script) bypasses it by
+//! design. (The "gate" this module talks about below is the FIRST-LOAD gate, a
+//! per-launch decision about which welcome screen to show. It has nothing to do
+//! with access control.)
+//!
+//! Routes:
 //! - `POST /api/v1/first-load/dismiss` — record the running version as seen and
 //!   drop the pending screen.
 //! - `GET  /api/v1/release-notes`      — fetch the running version's notes ON
@@ -92,7 +102,7 @@ impl FirstLoadState {
     }
 }
 
-/// The gated first-load routes.
+/// The first-load routes.
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/v1/first-load/dismiss", post(dismiss_first_load))

@@ -116,7 +116,7 @@ struct OpenedEditor {
     editor: String,
 }
 
-/// The gated editor file routes, merged into the authenticated sub-router. These
+/// The editor file routes. These
 /// are path-keyed: the session id is the `:id` path segment under
 /// `/api/v1/sessions/:id/files/*`, validated by `id_within_bound` and resolved to
 /// a worktree at the top of each handler (mirroring the other resource-nested REST

@@ -15,8 +15,16 @@
 //! tree" (and unlike a filesystem canonicalize check it correctly accepts
 //! deleted files, which appear in status but no longer exist on disk).
 //!
-//! All routes are merged into the authenticated (gated) sub-router in `server.rs`
-//! — see [`crate::server`]'s router doc and `gated_data_route_is_401_without_session`.
+//! All routes are served plainly, like every other API route. dux has NO
+//! authentication of any kind, so nothing here ever 401s: the open access is
+//! deliberate, the single-tenant trusted-access model documented in CLAUDE.md.
+//! Two app-wide guards apply (see [`crate::server::build_app`]'s middleware
+//! doc): a Host-header allowlist, which stops a malicious web page from rebinding
+//! DNS into this server, and the same-origin check on mutating verbs, which stops
+//! another site driving these POSTs from a visitor's browser. Neither is
+//! authentication, and a client that sends no `Origin` header (curl, a script)
+//! bypasses the origin check by design, so any client that can reach the address
+//! can commit, push and discard in every worktree.
 
 use std::path::{Path, PathBuf};
 
@@ -49,7 +57,7 @@ struct CommitOp {
 /// commit message and guards against runaway clients.
 const MAX_COMMIT_MSG_LEN: usize = 65_536;
 
-/// The gated git-mutation routes, merged into the authenticated sub-router. These
+/// The git-mutation routes. These
 /// are path-keyed: the session id is the `:id` path segment under
 /// `/api/v1/sessions/:id/git/*`, validated by `id_within_bound` and then resolved
 /// to a worktree at the top of each handler (mirroring the other resource-nested

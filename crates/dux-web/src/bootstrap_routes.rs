@@ -14,8 +14,12 @@
 //! - 503 if the engine actor is gone (the handle round-trip failed), so a dead
 //!   engine is distinguishable from a real (always-non-empty) payload.
 //!
-//! Merged into the authenticated (gated) sub-router in `server.rs`, so an
-//! unauthenticated request 401s before reaching this handler.
+//! Served like every other API route. dux has NO authentication of any kind, so
+//! nothing here ever 401s. That open access is deliberate: the single-tenant
+//! trusted-access model documented in CLAUDE.md. The two app-wide guards are a
+//! Host-header allowlist, which stops a malicious web page from rebinding DNS
+//! into this server, and a same-origin check that applies to MUTATIONS only, so
+//! this GET is not behind it. Neither guard is authentication.
 
 use axum::{
     Json, Router,
@@ -27,7 +31,7 @@ use axum::{
 
 use crate::server::AppState;
 
-/// The gated bootstrap read route.
+/// The bootstrap read route.
 pub fn routes() -> Router<AppState> {
     Router::new().route("/api/v1/bootstrap", get(get_bootstrap))
 }

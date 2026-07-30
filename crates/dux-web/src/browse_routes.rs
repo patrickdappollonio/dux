@@ -1,7 +1,7 @@
 //! Two stateless "utility" reads the add-project / new-agent dialogs need
 //! (Phase 6 of the REST-first migration). These used to ride the retired `/ws`
 //! request/reply pairs (`browse_dir` → `dir_entries`, `generate_agent_name` →
-//! `agent_name`); they are now plain authenticated GETs.
+//! `agent_name`); they are now plain unauthenticated GETs.
 //!
 //! - `GET /api/v1/browse?path=` — directory listing for the add-project picker.
 //!   An absent (or empty) `path` resolves the configured `defaults.start_directory`
@@ -12,8 +12,32 @@
 //!   new-agent dialog's randomized-name preview (reuses `git::docker_style_name`).
 //!
 //! The filesystem read runs OFF the async reactor (`spawn_blocking`), following
-//! the old handler's precedent. Merged into the authenticated (gated) sub-router
-//! in `server.rs`, so an unauthenticated request 401s before reaching here.
+//! the old handler's precedent.
+//!
+//! # Access model: read this before extending `?path=`
+//!
+//! `GET /api/v1/browse` has NO authentication, NO root restriction and NO
+//! sandbox: any client that can reach the server can list ANY directory the
+//! server process can read, anywhere on the host, by passing an absolute
+//! `?path=`. That is deliberate, not an oversight. dux is single-tenant
+//! trusted-access (CLAUDE.md): the picker exists so the operator can point the
+//! server at any repo on their own machine, and every client is assumed to be
+//! that operator.
+//!
+//! The app-wide guards are NOT authentication and do not narrow what is
+//! browsable:
+//!
+//! - A **Host-header allowlist** stops a malicious web page from rebinding DNS to
+//!   this server's address and reaching it through the victim's browser.
+//! - A **same-origin check** stops another site driving these routes from a
+//!   visitor's browser, but it applies to MUTATIONS only, so it covers
+//!   `POST /api/v1/browse/mkdir` and NOT the `GET` listings above. A client that
+//!   sends no `Origin` header at all (curl, a script) skips it by design.
+//!
+//! So the only real boundary is who can reach the listening address: keep it on
+//! loopback, a trusted tailnet, or behind an authenticating proxy. Do not add a
+//! feature here that assumes mutually-distrusting web users without first
+//! designing the per-user isolation model CLAUDE.md calls for.
 
 use axum::{
     Json, Router,
@@ -31,7 +55,7 @@ use crate::server::AppState;
 /// string, never a legitimate directory path.
 const MAX_PATH_LEN: usize = 4096;
 
-/// The gated utility read routes.
+/// The utility read routes.
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/v1/browse", get(browse))

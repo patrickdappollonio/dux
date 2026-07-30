@@ -2467,8 +2467,9 @@ mod tests {
     }
 
     /// Boot a minimal headless engine handle for routing-only tests. The handle
-    /// just needs to exist — the gated request 401s before it ever reaches the
-    /// engine.
+    /// just needs to exist: these tests assert on routing and the middleware
+    /// (host allowlist / origin check), which answer before the request would
+    /// reach the engine.
     fn test_engine_handle(tmp: &std::path::Path) -> crate::engine_actor::EngineHandle {
         let paths = dux_core::config::DuxPaths {
             root: tmp.to_path_buf(),

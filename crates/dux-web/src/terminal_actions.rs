@@ -4,7 +4,15 @@
 //! `/ws/projects/:id/terminals/:tid/pty` (see `server.rs`); these routes manage
 //! only the terminal's lifecycle.
 //!
-//! Routes (all gated; an unauthenticated request 401s before the handler):
+//! Every route is served plainly: dux has NO authentication, so none of these
+//! ever 401s. The open access is deliberate (the single-tenant trusted-access
+//! model in CLAUDE.md), and the app-wide guards are not authentication: a
+//! Host-header allowlist stops a malicious web page rebinding DNS into this
+//! server, and the same-origin check stops another site driving these verbs from a
+//! visitor's browser, but a client sending no `Origin` (curl, a script) bypasses
+//! it by design.
+//!
+//! Routes:
 //! - `POST   /api/v1/sessions/:id/terminals`       — create a companion terminal,
 //!   returning `{ "terminal_id", "label" }` (201 + `Location`). 404 when `:id` is
 //!   not a known session.
@@ -39,7 +47,7 @@ use crate::git_routes::resolve_worktree;
 use crate::rest_common::{id_within_bound, scope_from_headers, unknown_session};
 use crate::server::AppState;
 
-/// The gated companion-terminal routes. Session terminals nest under
+/// The companion-terminal routes. Session terminals nest under
 /// `/sessions/:id` and project terminals under `/projects/:id`, so the owner is
 /// resolved/validated from the path, exactly like the other resource-nested REST
 /// routes.

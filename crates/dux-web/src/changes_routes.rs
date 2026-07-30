@@ -9,8 +9,12 @@
 //! - 409 + `Retry-After` on a git lock/rebase error (logged first by the service);
 //!   409 (not 503) because proxies may reroute a 503.
 //!
-//! Merged into the authenticated (gated) sub-router in `server.rs`, so an
-//! unauthenticated request 401s before reaching this handler.
+//! Served like every other API route. dux has NO authentication of any kind, so
+//! nothing here ever 401s. That open access is deliberate: the single-tenant
+//! trusted-access model documented in CLAUDE.md. The two app-wide guards are a
+//! Host-header allowlist, which stops a malicious web page from rebinding DNS
+//! into this server, and a same-origin check that applies to MUTATIONS only, so
+//! this GET is not behind it. Neither guard is authentication.
 
 use axum::{
     Json, Router,
@@ -44,7 +48,7 @@ struct ChangesResponseBody {
     unstaged: Vec<ChangedFileView>,
 }
 
-/// The gated changed-files read route.
+/// The changed-files read route.
 pub fn routes() -> Router<AppState> {
     Router::new().route("/api/v1/sessions/{id}/changes", get(get_changes))
 }

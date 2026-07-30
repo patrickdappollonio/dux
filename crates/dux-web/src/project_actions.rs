@@ -4,7 +4,15 @@
 //! matching [`WireCommand`] via [`EngineHandle::apply_wire_scoped`]. The legacy
 //! `/ws` `Command` path keeps working in parallel during the migration.
 //!
-//! Routes (all gated):
+//! Every route is served plainly: dux has NO authentication, so none of these
+//! ever 401s. The open access is deliberate (the single-tenant trusted-access
+//! model in CLAUDE.md), and the app-wide guards are not authentication: a
+//! Host-header allowlist stops a malicious web page rebinding DNS into this
+//! server, and the same-origin check stops another site driving these verbs from a
+//! visitor's browser, but a client sending no `Origin` (curl, a script) bypasses
+//! it by design.
+//!
+//! Routes:
 //! - `POST   /api/v1/projects`                 — add (body `{path, name?,
 //!   checkout_default?}`); `Idempotency-Key` honored.
 //! - `DELETE /api/v1/projects/:id`             — remove (does not touch the checkout).
@@ -35,7 +43,7 @@ use crate::rest_common::{
 use crate::server::AppState;
 use crate::session_actions::outcome_is_error;
 
-/// The gated project-action routes. The literal `/reorder` segment is registered
+/// The project-action routes. The literal `/reorder` segment is registered
 /// alongside `:id`; axum's matcher prefers static segments over `:id`. (The
 /// `GET /api/v1/projects` read lives in `spine_routes`; axum merges the per-path
 /// method routers, so `POST` here coexists with it.)

@@ -4,7 +4,15 @@
 //! the agent's LAST live tab detaches the agent. (The distinct agent-level
 //! "Detach agent" action, which stops every tab at once, is `POST .../kill`.)
 //!
-//! Routes (all gated; an unauthenticated request 401s before the handler):
+//! Every route is served plainly: dux has NO authentication, so none of these
+//! ever 401s. The open access is deliberate (the single-tenant trusted-access
+//! model in CLAUDE.md), and the app-wide guards are not authentication: a
+//! Host-header allowlist stops a malicious web page rebinding DNS into this
+//! server, and the same-origin check stops another site driving these verbs from a
+//! visitor's browser, but a client sending no `Origin` (curl, a script) bypasses
+//! it by design.
+//!
+//! Routes:
 //! - `POST   /api/v1/sessions/:id/tabs`            — create a tab running
 //!   `{ "provider"? }` (the session's project default when omitted). 201 +
 //!   `{ "tab_id", "provider" }`. 404 when `:id` is unknown; 400 when the provider

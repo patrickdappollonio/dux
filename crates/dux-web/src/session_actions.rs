@@ -5,7 +5,15 @@
 //! [`EngineHandle::apply_wire_scoped`]. The connection id is the one `/ws/events`
 //! hands the client in its `connected` handshake frame.
 //!
-//! Routes (all gated; an unauthenticated request 401s before the handler):
+//! Every route is served plainly: dux has NO authentication, so none of these
+//! ever 401s. The open access is deliberate (the single-tenant trusted-access
+//! model in CLAUDE.md), and the app-wide guards are not authentication: a
+//! Host-header allowlist stops a malicious web page rebinding DNS into this
+//! server, and the same-origin check stops another site driving these verbs from a
+//! visitor's browser, but a client sending no `Origin` (curl, a script) bypasses
+//! it by design.
+//!
+//! Routes:
 //! - `POST   /api/v1/sessions`                     — create (body discriminator:
 //!   `new` | `fork` | `from_worktree` | `from_pr`); `Idempotency-Key` honored.
 //! - `DELETE /api/v1/sessions/:id`                 — delete (`?delete_worktree=`).
@@ -35,7 +43,7 @@ use crate::rest_common::{
 };
 use crate::server::AppState;
 
-/// The gated session-action routes. The literal `/reorder` segment is registered
+/// The session-action routes. The literal `/reorder` segment is registered
 /// alongside the parameterized `:id` routes; axum's matcher prefers static
 /// segments over `:id`, so `POST /api/v1/sessions/reorder` never resolves to the
 /// `:id` handlers. (The `GET /api/v1/sessions/:id` read lives in `spine_routes`;

@@ -1,7 +1,7 @@
 //! REST reads scoped to a single project (Phase 6 of the REST-first migration).
 //! These used to ride the retired `/ws` request/reply pairs
 //! (`list_project_worktrees` → `project_worktrees`, `inspect_project_path` →
-//! `project_path_inspection`); they are now plain authenticated GETs.
+//! `project_path_inspection`); they are now plain unauthenticated GETs.
 //!
 //! - `GET /api/v1/projects/:id/worktrees` — the project's adoptable managed
 //!   worktree candidates for the "Attach worktree" picker. 404 for an unknown
@@ -12,9 +12,13 @@
 //!   registered project yet, so it is inspected straight off the filesystem).
 //!
 //! Both shell to git, so the classification/inspection runs OFF the async reactor
-//! (`spawn_blocking`), following the old handlers' precedent. Merged into the
-//! authenticated (gated) sub-router in `server.rs`, so an unauthenticated request
-//! 401s before reaching here.
+//! (`spawn_blocking`), following the old handlers' precedent. Served like every
+//! other API route: dux has NO authentication of any kind, so nothing here ever
+//! 401s. That open access is deliberate, the single-tenant trusted-access model
+//! documented in CLAUDE.md. The two app-wide guards are a Host-header allowlist,
+//! which stops a malicious web page from rebinding DNS into this server, and a
+//! same-origin check that applies to MUTATIONS only, so these GETs are not behind
+//! it. Neither guard is authentication.
 //!
 //! NOTE: `/api/v1/projects/inspect` (a static segment) coexists with
 //! `/api/v1/projects/:id` (the parameterized PATCH/DELETE in
@@ -39,7 +43,7 @@ use crate::server::AppState;
 /// the bound used by the directory browser).
 const MAX_PATH_LEN: usize = 4096;
 
-/// The gated project read routes.
+/// The project read routes.
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/v1/projects/inspect", get(inspect_path))

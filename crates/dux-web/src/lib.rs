@@ -49,7 +49,7 @@ pub mod terminal_actions;
 pub mod web_assets;
 
 /// Crate-wide test helpers shared by the per-module route test suites (a single
-/// headless engine handle + a gated router builder), so each REST route module
+/// headless engine handle + a plain router builder), so each REST route module
 /// can exercise its handlers without duplicating the bootstrap recipe.
 #[cfg(test)]
 pub(crate) mod test_support;
