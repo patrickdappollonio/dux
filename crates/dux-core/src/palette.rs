@@ -52,7 +52,12 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         action: Action::ToggleProject,
         name: "toggle-project",
         description: "Collapse or expand the selected project's agents",
-        // Per-project: web collapses/expands projects directly in the sidebar.
+        // TUI-only: the web sidebar has no project grouping to collapse. It
+        // replaced the project -> agents tree with one flat, ordered agent list
+        // (`lib/flatList.ts`), so there is no project header and no per-project
+        // expand state; its collapsible sections are Terminals and the quiet
+        // tail. The older "web collapses/expands projects in the sidebar" note
+        // was false.
     },
     PaletteCommand {
         action: Action::NewAgent,
@@ -115,8 +120,11 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         action: Action::ChangeDefaultProvider,
         name: "change-default-provider",
         description: "Change the global default provider for new agents in projects without a project-specific override",
-        // TUI-only: the web has no wire command or UI for the global default
-        // provider; project defaults are edited per project instead.
+        // GLOBAL: the web has it as the "Default provider for new agents" row in
+        // the Preferences dialog (`settingsDescriptors.ts`, key
+        // `defaults.provider`), written through the settings PATCH in
+        // `config_routes.rs`. The older "the web has no wire command or UI for
+        // this" note was false in both halves.
     },
     PaletteCommand {
         action: Action::ChangeProjectDefaultProvider,
@@ -128,7 +136,9 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         action: Action::ChangeTheme,
         name: "change-theme",
         description: "Switch the dux color theme",
-        // TUI-only: the web has no theme switcher (it follows the browser/CSS).
+        // TUI-only: the web has no theme switcher because it is pinned DARK (it
+        // does not follow the browser, as this note used to say: `main.tsx` force-
+        // adds the `.dark` class and the light tokens are inert).
     },
     PaletteCommand {
         action: Action::ReloadConfig,
@@ -179,7 +189,9 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         action: Action::RerunStartupCommandOnAgent,
         name: "rerun-startup-command-on-agent",
         description: "Rerun the selected agent's startup command",
-        // Per-session: not surfaced as a global web command.
+        // Per-session: the web has it as "Rerun startup command" in the agent's ⋯
+        // menu (`POST /api/v1/sessions/:id/rerun-startup-command`). Not a GLOBAL
+        // web command, which is all the older note meant, but it read as "absent".
     },
     PaletteCommand {
         action: Action::ReadStartupCommandLogs,
@@ -196,7 +208,10 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         action: Action::FocusAgent,
         name: "show-agent",
         description: "Show and focus the selected agent",
-        // Per-session: web's "Switch session" group selects an agent.
+        // Per-session: on the web an agent is selected by clicking its sidebar or
+        // mobile-hub row (`selectSession` in `store.ts`), including from the
+        // collapsed icon rail. There is no named "Switch session" group anywhere
+        // in the web UI, which is what this note used to claim.
     },
     PaletteCommand {
         action: Action::OpenProjectBrowser,
@@ -209,21 +224,38 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         action: Action::CopyPath,
         name: "copy-path",
         description: "Copy the selected agent's worktree path",
-        // TUI-only: a server-side filesystem path is meaningless to copy in a
-        // remote browser.
+        // Per-session: the web has it as "Copy local path" in the agent's ⋯ menu
+        // (`FlatAgentList.tsx`), copying `session.worktree_path` off the spine.
+        // The older "TUI-only, a server-side path is meaningless in a remote
+        // browser" note was false: the common case is a browser on the same
+        // machine, where the path is exactly what the user wants to paste into a
+        // terminal.
     },
     PaletteCommand {
         action: Action::OpenWorktreeInEditor,
         name: "open-worktree",
         description: "Open the selected agent worktree in the configured editor",
-        // TUI-only: launches a local editor on the server host (server-side
-        // footgun; nothing the browser can do).
+        // NEAR-EQUIVALENT, not absent: the web DOES spawn an editor on the server
+        // host, from the code editor's "Open editor" control
+        // (`EditorOverlay.tsx` -> `POST /api/v1/sessions/:id/files/open-in-editor`
+        // -> `editor::launch_editor`). Two real differences, so this is not the
+        // same command: it opens the CURRENTLY OPEN FILE, never the worktree root
+        // (the handler requires the path to exist in the worktree), and the
+        // control appears only while a file tab is open, disabled with an
+        // explanatory tooltip unless `window.location.hostname` is a local
+        // address (`lib/localAccess.ts`), since spawning a GUI editor only helps
+        // when the server is the user's own machine. The older "TUI-only, nothing
+        // the browser can do" note was false.
     },
     PaletteCommand {
         action: Action::ChooseWorktreeEditor,
         name: "open-worktree-with",
         description: "Choose which editor should open the selected agent worktree",
-        // TUI-only: same server-side editor launch as `open-worktree`.
+        // NEAR-EQUIVALENT, same shape as `open-worktree` above: the web's "Open
+        // editor" control IS an editor picker (`lib/editors.ts` lists the
+        // choices, and the handler honors an explicit pick or falls back to the
+        // configured editor). Same two differences: it targets the open FILE
+        // rather than the worktree root, and it is local-access gated.
     },
     PaletteCommand {
         action: Action::RefreshProject,
@@ -273,8 +305,11 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         action: Action::ToggleSidebar,
         name: "toggle-sidebar",
         description: "Collapse or expand the projects sidebar",
-        // TUI-only: web layout is responsive; focus is the mode, no manual
-        // pane collapse command.
+        // GLOBAL: the web collapses its sidebar too, via the `SidebarTrigger`
+        // button and a Cmd/Ctrl-B chord (`components/ui/sidebar.tsx`); collapsed
+        // it renders an icon rail rather than nothing. Desktop only, since the
+        // mobile shell mounts no sidebar. The older "web layout is responsive, no
+        // manual pane collapse" note was false.
     },
     PaletteCommand {
         action: Action::ToggleGitPane,
@@ -355,8 +390,11 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         action: Action::DeleteProject,
         name: "delete-project",
         description: "Remove the selected project and its sessions",
-        // TUI-only (audit decision): web offers remove-only (keeps files), not
-        // a destructive project-and-sessions delete.
+        // Per-project: the web offers BOTH, as separate items in the project's ⋯
+        // menu (`ProjectMenuItems.tsx`) with separate confirmations: "Remove
+        // project…" keeps the files, "Delete project…" is this destructive
+        // cascade (`DELETE /api/v1/projects/:id?delete_worktrees=true`). The
+        // older "web offers remove-only" note was false.
     },
     PaletteCommand {
         action: Action::RemoveProject,
@@ -370,8 +408,13 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         description: "Cycle the agent-list sort mode (active, updated, created, name)",
         // GLOBAL: a display-only sort over the shared `config.ui.agent_sort`; no
         // target. Cycles the five TUI modes (active, updated, created, name A to Z,
-        // name Z to A); it never reorders the stored order. Web equivalent: the
-        // sidebar's sort control (which also offers the web-only "manual" mode).
+        // name Z to A); it never reorders the stored order. Web near-equivalent:
+        // the APP MENU's "Sort agents by" group (`appMenu.ts`), not a sidebar
+        // control, and it is a different thing in two ways: it offers three keys
+        // (recently updated, created, name) rather than these five, and it is a
+        // ONE-SHOT reorder that computes an order and POSTs it as the user's
+        // manual drag order, so there is no persisted sort key and no selectable
+        // "manual" mode to offer.
     },
     PaletteCommand {
         action: Action::RemoveGitPane,
@@ -408,7 +451,11 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         action: Action::ResourceMonitor,
         name: "resource-monitor",
         description: "Show CPU and memory usage for dux and all running agents",
-        // TUI-only (audit decision): the resource monitor is not built for web.
+        // GLOBAL: the web has it as the app menu's "Task Manager…"
+        // (`appMenu.ts` -> `TaskManagerDialog.tsx`), reading the same per-process
+        // CPU/RSS rows over `GET /api/v1/resources`. The older "not built for
+        // web" note was false, and contradicted the `kill-running` note below,
+        // which already described this same dialog.
     },
     PaletteCommand {
         action: Action::ToggleGithubIntegration,
@@ -451,8 +498,10 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         // gated by a confirmation dialog.
     },
     // ── Manual reordering ─────────────────────────────────────────
-    // The TUI equivalent of the web's drag-to-reorder. The web has no palette;
-    // it reorders by dragging within each group, so these have no web counterpart.
+    // The TUI equivalent of the web's drag-to-reorder. The web has no palette; it
+    // reorders by dragging, over one flat agent list rather than within project
+    // groups (`lib/flatList.ts`), with terminals dragged inside their own
+    // section. So these have no web counterpart.
     PaletteCommand {
         action: Action::MoveAgentUp,
         name: "move-agent-up",
