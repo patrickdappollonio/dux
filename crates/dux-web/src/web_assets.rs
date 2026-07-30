@@ -14,6 +14,28 @@ use rust_embed::RustEmbed;
 #[folder = "web/dist"]
 struct WebAssets;
 
+/// True when this binary was compiled with `DUX_DISABLE_UI_BUILD` set and there
+/// was no previously built `web/dist` to embed, so the page served at `/` is
+/// build.rs's "web UI not built" notice rather than the real single-page app.
+///
+/// `build.rs` sets `DUX_UI_BUILD_SKIPPED=1` exactly on that path (and declares
+/// `cargo:rerun-if-env-changed=DUX_DISABLE_UI_BUILD` so toggling the hatch is not
+/// masked by cargo's build-script cache). Two consumers read this back: the
+/// `dux server` startup banner, which turns it into a warning row, and the static
+/// serving tests, which SKIP with a printed reason rather than pass on a page
+/// that is not a build.
+pub const fn ui_build_skipped() -> bool {
+    option_env!("DUX_UI_BUILD_SKIPPED").is_some()
+}
+
+/// Operator-facing warning for a binary built without the web UI. Shown as a
+/// startup banner row and logged to `dux.log`, because the person who can fix
+/// this is the one who launched the server, and they may never open a browser.
+/// The served page carries the same message for whoever does open one.
+pub const UI_NOT_BUILT_WARNING: &str = "This binary was built with DUX_DISABLE_UI_BUILD set, so it contains NO web UI. \
+     Every page serves a notice explaining that. Rebuild without DUX_DISABLE_UI_BUILD \
+     (run `npm ci` in crates/dux-web/web first) to serve the real web UI.";
+
 /// Cache policy per request path. Vite fingerprints everything under `assets/`
 /// with a content hash in the filename, so a changed bundle is a changed URL and
 /// those files can be cached forever. Everything that is NOT content-addressed

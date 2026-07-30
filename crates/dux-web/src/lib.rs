@@ -83,6 +83,26 @@ pub fn run_server(paths: DuxPaths, plan: ServerPlan, version: String) -> Result<
     run_plain_http(paths, plan.addrs, version)
 }
 
+/// Log a WARN when this binary has no web UI compiled in (built with
+/// `DUX_DISABLE_UI_BUILD` and no previously built `web/dist`).
+///
+/// The message lands in THREE places on purpose, because the two audiences are
+/// different people who look in different places:
+/// - the served page itself (build.rs's notice page), for whoever opens a browser,
+///   possibly on a phone, with no access to this terminal;
+/// - the `dux server` startup banner (a ⚠ row), for the operator who launched it
+///   and can rebuild;
+/// - `dux.log`, which is the ONLY one of the three the TUI flip path reaches: the
+///   flip keeps its themed status screen and must not print to stdout, so it has
+///   no banner to carry the row.
+///
+/// Called by both serve entry points so neither can forget it.
+fn warn_if_ui_not_built() {
+    if web_assets::ui_build_skipped() {
+        dux_core::logger::warn(&format!("[server] {}", web_assets::UI_NOT_BUILT_WARNING));
+    }
+}
+
 /// Build the `dux server` console from the engine's loaded config: detect color
 /// from `[server] color` (warning on an unrecognized value, then honoring it as
 /// `auto`), construct a real stdout console, and read the `access_log` toggle.
@@ -208,14 +228,19 @@ async fn bind_plan_addrs(addrs: &[PlanAddr]) -> Result<(Vec<BoundListener>, Vec<
 /// - a required non-loopback leg (an explicit `--bind` public/LAN entry) →
 ///   "Listen"
 ///
-/// Best-effort bind degradations (a busy Tailscale address) become ⚠ rows. Pure
-/// (over `(SocketAddr, bool)` pairs, not the live listeners) so it is
-/// unit-testable without binding sockets.
+/// Best-effort bind degradations (a busy Tailscale address) become ⚠ rows, and so
+/// does a binary built with `DUX_DISABLE_UI_BUILD` (`ui_not_built`): the operator
+/// who launched the server is the one who can rebuild it, and they may never open
+/// a browser to see the notice page. It is listed FIRST because "there is no web
+/// UI in here" outranks any per-address degradation. Pure (over
+/// `(SocketAddr, bool)` pairs and a bool, not the live listeners or the compiled-in
+/// flag) so it is unit-testable without binding sockets or rebuilding.
 fn plain_http_banner(
     version: &str,
     bound: &[(SocketAddr, bool)],
     bind_warnings: &[String],
     security_note: Option<String>,
+    ui_not_built: bool,
 ) -> Banner {
     let listeners = bound
         .iter()
@@ -233,10 +258,15 @@ fn plain_http_banner(
             }
         })
         .collect();
+    let mut warnings = Vec::with_capacity(bind_warnings.len() + 1);
+    if ui_not_built {
+        warnings.push(crate::web_assets::UI_NOT_BUILT_WARNING.to_string());
+    }
+    warnings.extend(bind_warnings.iter().cloned());
     Banner {
         version: version.to_string(),
         mode: "plain HTTP".to_string(),
-        warnings: bind_warnings.to_vec(),
+        warnings,
         listeners,
         security_note,
     }
@@ -315,6 +345,7 @@ pub fn safety_note(addrs: &[PlanAddr]) -> Option<String> {
 }
 
 fn run_plain_http(paths: DuxPaths, addrs: Vec<PlanAddr>, version: String) -> Result<()> {
+    warn_if_ui_not_built();
     let engine = bootstrap::bootstrap_engine(&paths)?;
     // Build the vite-style CLI console (color from [server] color) + the access-log
     // toggle before the engine moves into the actor thread.
@@ -364,6 +395,7 @@ fn run_plain_http(paths: DuxPaths, addrs: Vec<PlanAddr>, version: String) -> Res
             &banner_legs,
             &bind_warnings,
             note,
+            web_assets::ui_build_skipped(),
         ));
 
         // Spawn the engine on its own std thread (it runs the synchronous engine
@@ -625,6 +657,7 @@ pub fn serve_with_engine(
     mut on_tick: impl FnMut() -> ServerTick,
     mut on_shutdown_status: impl FnMut(&str),
 ) -> Result<(Engine, ServerExit)> {
+    warn_if_ui_not_built();
     // The flip owns the terminal with its themed status screen, so this console
     // writes NOTHING to stdout — but it captures every lifecycle event into the
     // shared ring that drives the status screen's Activity panel.
@@ -1199,7 +1232,7 @@ mod tests {
             (addr("100.64.0.5:8080"), false), // best-effort → Tailscale
             (addr("203.0.113.7:8080"), true), // required non-loopback → Listen
         ];
-        let banner = plain_http_banner("0.1.0", &legs, &[], None);
+        let banner = plain_http_banner("0.1.0", &legs, &[], None, false);
         assert_eq!(banner.mode, "plain HTTP");
         assert_eq!(banner.listeners.len(), 3);
         assert_eq!(banner.listeners[0].label, "Local (loopback)");
@@ -1212,8 +1245,37 @@ mod tests {
     fn plain_http_banner_carries_degradation_warnings() {
         let legs = vec![(addr("127.0.0.1:8080"), true)];
         let warnings = vec!["Tailscale: 100.64.0.1:8080 busy -- serving without it".to_string()];
-        let banner = plain_http_banner("0.1.0", &legs, &warnings, None);
+        let banner = plain_http_banner("0.1.0", &legs, &warnings, None, false);
         assert_eq!(banner.warnings, warnings);
+    }
+
+    #[test]
+    fn plain_http_banner_warns_when_the_web_ui_was_not_built_in() {
+        // A binary built with DUX_DISABLE_UI_BUILD serves a notice page instead of
+        // the app. The operator who launched the server may never open a browser,
+        // so the banner has to say it, and say it FIRST.
+        let legs = vec![(addr("127.0.0.1:8080"), true)];
+        let bind_warnings = vec!["Tailscale leg busy".to_string()];
+        let banner = plain_http_banner("0.1.0", &legs, &bind_warnings, None, true);
+        assert_eq!(banner.warnings.len(), 2, "both warnings must survive");
+        assert_eq!(banner.warnings[0], crate::web_assets::UI_NOT_BUILT_WARNING);
+        assert_eq!(banner.warnings[1], bind_warnings[0]);
+        assert!(
+            banner.warnings[0].contains("DUX_DISABLE_UI_BUILD"),
+            "the warning must name the variable that caused it: {}",
+            banner.warnings[0]
+        );
+    }
+
+    #[test]
+    fn plain_http_banner_omits_the_ui_warning_for_a_normal_build() {
+        let legs = vec![(addr("127.0.0.1:8080"), true)];
+        let banner = plain_http_banner("0.1.0", &legs, &[], None, false);
+        assert!(
+            banner.warnings.is_empty(),
+            "a normal build must produce no warning rows: {:?}",
+            banner.warnings
+        );
     }
 
     #[test]
