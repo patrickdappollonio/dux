@@ -30,6 +30,27 @@ pub struct ParsedBody {
     pub sections: Vec<String>,
 }
 
+impl ParsedBody {
+    /// Whether there is anything to render UNDER the title.
+    ///
+    /// The headline is deliberately excluded: both screens render it as their
+    /// title, so a release whose body is only a headline leaves the body area
+    /// empty, and an empty body area with no explanation is the failure this
+    /// predicate exists to detect. See [`ReleaseNotes::has_renderable_body`],
+    /// which is the one the screens actually call.
+    pub fn has_renderable_body(&self) -> bool {
+        has_content(&self.paragraphs) || has_content(&self.sections)
+    }
+}
+
+/// Whether any entry carries non-whitespace text. A vector of empty strings is
+/// not content: a release heading that was entirely inline markup collapses to
+/// `""`, and rendering that as a lone blank bullet is the same empty screen with
+/// extra steps.
+fn has_content(entries: &[String]) -> bool {
+    entries.iter().any(|entry| !entry.trim().is_empty())
+}
+
 /// Splits a release body into headline, intro paragraphs, and feature titles.
 ///
 /// Stops at the SECOND `## ` heading, which is where GitHub's auto-generated
@@ -174,6 +195,30 @@ pub struct ReleaseNotes {
     /// The release's own web page. Taken from the API's `html_url` when present,
     /// falling back to the releases index.
     pub html_url: String,
+}
+
+/// What the what's-new screen says when [`ReleaseNotes::has_renderable_body`] is
+/// false: the release exists, its body had nothing the screen could read, and the
+/// full notes are one click away. Never an empty pane with no explanation.
+///
+/// The TUI renders this string directly. The web keeps its own copy in
+/// `FirstLoadDialog.tsx` (a TS surface cannot import a Rust const); if you reword
+/// one, reword the other.
+pub const NO_NOTES_EXPLANATION: &str =
+    "This release published no notes we could read. Open the full notes to see what changed.";
+
+impl ReleaseNotes {
+    /// Whether the what's-new screen has anything to render under its title.
+    ///
+    /// `false` means the release body was empty, or shaped in a way the parser
+    /// could not read as prose or feature titles (see the required format in
+    /// `CONTRIBUTING.md`). BOTH surfaces must then show an explanation and a link
+    /// to the full notes instead of an empty pane: the TUI does it in
+    /// `whats_new_lines`, and the web in `FirstLoadDialog`. Living here rather
+    /// than being re-derived per surface is what keeps them saying the same thing.
+    pub fn has_renderable_body(&self) -> bool {
+        has_content(&self.paragraphs) || has_content(&self.sections)
+    }
 }
 
 /// The subset of GitHub's release payload dux reads. `#[serde(default)]` on the
@@ -811,6 +856,290 @@ mod tests {
             !n.paragraphs.iter().any(|p| p.contains("brew install")),
             "{n:#?}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // The shapes a human actually publishes.
+    //
+    // The parser is a two-level heading reader, not a Markdown parser, so most
+    // of these degrade rather than fail. Each test says what the screen ends up
+    // showing, because that is the thing that breaks for every user who updates.
+    // The format the parser needs is stated in CONTRIBUTING.md; these tests are
+    // what keeps that statement true.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_body_with_no_headings_at_all_becomes_intro_prose() {
+        // The commonest human shape: someone types two sentences and publishes.
+        // There is no headline, so the screen falls back to a generic title, and
+        // the prose is still shown.
+        let n = parse_release_body("Fixes the thing that broke.\n\nAlso faster now.\n");
+        assert_eq!(n.headline, "");
+        assert_eq!(
+            n.paragraphs,
+            vec!["Fixes the thing that broke.", "Also faster now."]
+        );
+        assert!(n.sections.is_empty());
+        assert!(n.has_renderable_body(), "prose is worth rendering");
+    }
+
+    #[test]
+    fn a_body_that_is_only_a_headline_leaves_the_screen_with_nothing_but_a_title() {
+        // Very reachable: dux's release workflow APPENDS `## Installation`, and
+        // GitHub prepends `## What's Changed`, so a one-line human headline plus
+        // that boilerplate parses to a headline and nothing else. Both screens
+        // must say so rather than showing a blank body.
+        let n = parse_release_body("## Quieter plumbing\n\n## What's Changed\n* a PR\n");
+        assert_eq!(n.headline, "Quieter plumbing");
+        assert!(n.paragraphs.is_empty(), "{n:#?}");
+        assert!(n.sections.is_empty(), "{n:#?}");
+        assert!(
+            !n.has_renderable_body(),
+            "a headline alone is not a body; the screen owes the reader an explanation"
+        );
+    }
+
+    #[test]
+    fn a_heading_at_the_wrong_level_is_read_as_prose_hashes_and_all() {
+        // `#` and `####` are not the two levels the parser knows, so they are
+        // neither headline nor section. Nothing is lost, but the `#` characters
+        // are shown literally, which is visibly wrong and is exactly why the
+        // required format is written down.
+        let n = parse_release_body("# Big title\n\nSome prose.\n\n#### Deep thing\n");
+        assert_eq!(n.headline, "", "an h1 is not the headline");
+        assert_eq!(
+            n.paragraphs,
+            vec!["# Big title", "Some prose.", "#### Deep thing"]
+        );
+        assert!(n.sections.is_empty());
+    }
+
+    #[test]
+    fn a_heading_with_no_space_after_the_hashes_is_read_as_prose() {
+        // `strip_prefix("## ")` requires the space. `##Title` is legal Markdown
+        // to some renderers and is not recognized here.
+        let n = parse_release_body("##Title\n\n###Feature\n");
+        assert_eq!(n.headline, "");
+        assert_eq!(n.paragraphs, vec!["##Title", "###Feature"]);
+        assert!(n.sections.is_empty());
+    }
+
+    #[test]
+    fn a_body_that_is_only_a_link_keeps_the_link_text_and_drops_the_target() {
+        let n = parse_release_body("[Read the full notes](https://example.invalid/notes)\n");
+        assert_eq!(n.paragraphs, vec!["Read the full notes"]);
+        assert_eq!(n.headline, "");
+        assert!(n.has_renderable_body());
+    }
+
+    #[test]
+    fn a_body_that_is_only_whitespace_is_the_same_as_an_empty_one() {
+        for raw in ["", "\n", "   \n\t\n  ", "\r\n\r\n"] {
+            let n = parse_release_body(raw);
+            assert_eq!(n, ParsedBody::default(), "{raw:?} should parse to nothing");
+            assert!(!n.has_renderable_body(), "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn sections_before_any_top_heading_hand_the_headline_to_the_boilerplate() {
+        // A REAL trap, and the reason the required format has to be written down
+        // rather than assumed. When the human forgets the leading `## ` line, the
+        // FIRST `## ` in the file is GitHub's own "What's Changed", so that
+        // becomes the headline. The parse does NOT stop there (the `break` fires
+        // on the SECOND top heading, not the first), so any `### ` inside the
+        // machine-written tail is merged into the feature list as though the human
+        // had written it. That is measured, not inferred: an earlier version of
+        // this test asserted the tail was dropped and was wrong.
+        let body = "\
+### First feature
+Its description.
+
+### Second feature
+Its description.
+
+## What's Changed
+* a PR by @someone
+
+### Bumped a dependency
+";
+        let n = parse_release_body(body);
+        assert_eq!(
+            n.headline, "What's Changed",
+            "the boilerplate heading is promoted to the headline"
+        );
+        assert_eq!(
+            n.sections,
+            vec!["First feature", "Second feature", "Bumped a dependency"],
+            "boilerplate subsections are merged into the feature list: {n:#?}"
+        );
+        // The commit bullets themselves are still dropped, because prose is only
+        // collected before the first feature section.
+        assert!(
+            !n.paragraphs.iter().any(|p| p.contains("a PR by")),
+            "{n:#?}"
+        );
+    }
+
+    #[test]
+    fn a_leading_top_heading_is_what_protects_the_feature_list_from_the_boilerplate() {
+        // The same body as above with the one required line restored. This is the
+        // format CONTRIBUTING.md asks for, and it is the difference between a
+        // correct screen and a wrong one.
+        let body = "\
+## The real headline
+
+### First feature
+Its description.
+
+## What's Changed
+* a PR by @someone
+
+### Bumped a dependency
+";
+        let n = parse_release_body(body);
+        assert_eq!(n.headline, "The real headline");
+        assert_eq!(n.sections, vec!["First feature"]);
+    }
+
+    #[test]
+    fn an_unterminated_code_fence_swallows_the_rest_of_the_body_without_panicking() {
+        // A fence opened and never closed flips `in_code` on and nothing turns it
+        // off, so everything after it is dropped. Degradation, not a crash, and
+        // the headline before it still survives.
+        let n = parse_release_body("## Title\n\nIntro.\n\n```toml\nkey = 1\n\n### Lost feature\n");
+        assert_eq!(n.headline, "Title");
+        assert_eq!(n.paragraphs, vec!["Intro."]);
+        assert!(n.sections.is_empty(), "{n:#?}");
+    }
+
+    #[test]
+    fn prose_after_the_first_feature_section_is_deliberately_dropped() {
+        // The screen shows feature TITLES only; the bodies belong on the release
+        // page. Pinned because it looks like a bug from the outside.
+        let n = parse_release_body(
+            "## Title\n\nIntro.\n\n### A feature\n\nThe long explanation.\n\n### Another\n",
+        );
+        assert_eq!(n.paragraphs, vec!["Intro."]);
+        assert_eq!(n.sections, vec!["A feature", "Another"]);
+    }
+
+    #[test]
+    fn a_very_long_body_is_parsed_whole_and_left_for_the_screen_to_scroll() {
+        // No truncation here on purpose: both screens scroll, and silently
+        // dropping half a release's features would be worse than a long scroll.
+        // The cap that matters is on the HTTP read (`MAX_BODY_BYTES`).
+        let mut body = String::from("## Title\n\n");
+        for i in 0..500 {
+            body.push_str(&format!("Paragraph {i} with some prose in it.\n\n"));
+            body.push_str(&format!("### Feature number {i}\n\n"));
+        }
+        let n = parse_release_body(&body);
+        assert_eq!(n.headline, "Title");
+        // Only prose BEFORE the first `###` is kept, so exactly one paragraph.
+        assert_eq!(n.paragraphs, vec!["Paragraph 0 with some prose in it."]);
+        assert_eq!(n.sections.len(), 500);
+        assert_eq!(n.sections[499], "Feature number 499");
+    }
+
+    #[test]
+    fn a_headline_or_section_that_is_only_markup_collapses_to_nothing_rather_than_panicking() {
+        // `strip_inline_markup` can empty a heading out entirely. An empty
+        // headline is handled (the screens fall back), and an empty SECTION is a
+        // blank bullet, which is ugly but harmless. Pinned so it stays harmless.
+        let n = parse_release_body("## **__**\n\n### ``\n");
+        assert_eq!(n.headline, "");
+        assert_eq!(n.sections, vec![""]);
+    }
+
+    #[test]
+    fn a_body_of_only_crlf_lines_parses_the_same_as_lf() {
+        // GitHub stores release bodies with CRLF line endings. `str::lines`
+        // strips the `\r`, and every branch trims, so the two must agree.
+        let lf = parse_release_body("## Title\n\nIntro.\n\n### A feature\n");
+        let crlf = parse_release_body("## Title\r\n\r\nIntro.\r\n\r\n### A feature\r\n");
+        assert_eq!(lf, crlf);
+    }
+
+    #[test]
+    fn has_renderable_body_is_true_exactly_when_there_is_something_under_the_title() {
+        // The predicate both screens use to decide whether to show the
+        // "no notes" explanation, so its boundaries are worth stating outright.
+        assert!(!ReleaseNotes::default().has_renderable_body());
+        assert!(
+            !ReleaseNotes {
+                headline: "Only a title".to_string(),
+                ..Default::default()
+            }
+            .has_renderable_body(),
+            "a headline is rendered as the dialog title, not as the body"
+        );
+        assert!(
+            ReleaseNotes {
+                paragraphs: vec!["prose".to_string()],
+                ..Default::default()
+            }
+            .has_renderable_body()
+        );
+        assert!(
+            ReleaseNotes {
+                sections: vec!["a feature".to_string()],
+                ..Default::default()
+            }
+            .has_renderable_body()
+        );
+        // Whitespace-only entries are not content. A release body that produced
+        // one empty section used to count as a body and render a lone blank
+        // bullet with no explanation.
+        assert!(
+            !ReleaseNotes {
+                sections: vec![String::new(), "   ".to_string()],
+                paragraphs: vec!["  ".to_string()],
+                ..Default::default()
+            }
+            .has_renderable_body()
+        );
+    }
+
+    #[test]
+    fn no_release_body_shape_makes_the_parser_panic() {
+        // A blunt guard over the whole shape space, including the byte-slicing
+        // hazards: multi-byte punctuation, lone surrogates' worth of emoji, very
+        // long single lines, and heading markers with nothing after them.
+        let shapes = [
+            "",
+            "#",
+            "##",
+            "## ",
+            "###",
+            "### ",
+            "#### ",
+            "```",
+            "```\n```",
+            "## \u{1F986}\n### \u{65E5}\u{672C}\u{8A9E}\n",
+            "[",
+            "]",
+            "[](",
+            "[]()",
+            "## [](\n",
+            "\0",
+            "## Title\u{0}\n\u{7f}",
+            "---\n***\n",
+            "* a\n* b\n",
+            "> quoted\n",
+            "| a | b |\n|---|---|\n",
+            "<!-- comment -->\n",
+            "<h2>html heading</h2>\n",
+        ];
+        for shape in shapes {
+            let n = parse_release_body(shape);
+            // Touch every field so nothing is lazily unevaluated.
+            let _ = (n.headline.len(), n.paragraphs.len(), n.sections.len());
+            let _ = n.has_renderable_body();
+        }
+        // ...and one pathologically long single line.
+        let long = "a".repeat(200_000);
+        let _ = parse_release_body(&long);
     }
 
     #[test]

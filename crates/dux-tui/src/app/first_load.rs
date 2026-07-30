@@ -380,6 +380,21 @@ pub(crate) fn whats_new_lines(
         lines.push(Line::from(""));
     }
 
+    // A release whose body had nothing the parser could read gets an explanation
+    // and stops here. The guard is `has_renderable_body`, NOT `lines.is_empty()`:
+    // a headline alone makes `lines` non-empty while leaving the body blank, and
+    // that shape is what GitHub's own `## What's Changed` plus the release
+    // workflow's appended `## Installation` leave behind when the human writes a
+    // one-line headline and no prose. See `dux_core::release_notes` for the
+    // format a release body has to follow.
+    if !notes.has_renderable_body() {
+        lines.push(Line::from(Span::styled(
+            dux_core::release_notes::NO_NOTES_EXPLANATION.to_string(),
+            Style::default().fg(colors.body),
+        )));
+        return lines;
+    }
+
     for para in &notes.paragraphs {
         for l in wrap(para, w) {
             lines.push(Line::from(Span::styled(
@@ -409,15 +424,6 @@ pub(crate) fn whats_new_lines(
         }
     }
 
-    // A release with an empty body is not an error (see
-    // `release_notes::from_api`): the modal still shows its title and its link,
-    // so say so rather than rendering a blank pane.
-    if lines.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "This release published no notes. Open the full notes to see its commits.".to_string(),
-            Style::default().fg(colors.body),
-        )));
-    }
     lines
 }
 
@@ -1360,6 +1366,81 @@ mod tests {
             !lines.is_empty(),
             "an empty pane is not an acceptable state"
         );
+        assert!(
+            flatten(&lines).contains(dux_core::release_notes::NO_NOTES_EXPLANATION),
+            "{:?}",
+            flatten(&lines)
+        );
+    }
+
+    /// REGRESSION. The empty-body guard used to be `lines.is_empty()`, which is
+    /// FALSE the moment a headline exists, so a release body that parsed to a
+    /// headline and nothing else rendered a title above a blank pane with no
+    /// explanation. That shape is very reachable: GitHub prepends
+    /// `## What's Changed` and the release workflow appends `## Installation`, so
+    /// a one-line human headline is all the parser is left with.
+    #[test]
+    fn a_release_whose_body_is_only_a_headline_still_explains_itself() {
+        let notes = ReleaseNotes {
+            version: "v0.7.0".to_string(),
+            headline: "Quieter plumbing, louder failures".to_string(),
+            html_url: "https://example.invalid/v0.7.0".to_string(),
+            ..Default::default()
+        };
+        assert!(
+            !notes.has_renderable_body(),
+            "the fixture must be the shape under test"
+        );
+        let text = flatten(&whats_new_lines(&notes, 60, &colors()));
+        assert!(
+            text.contains(dux_core::release_notes::NO_NOTES_EXPLANATION),
+            "a blank body with no explanation: {text:?}"
+        );
+    }
+
+    /// A release body that parsed to one EMPTY section (a `### **__**` heading
+    /// collapses to `""` once inline markup is stripped) rendered the "In this
+    /// release" label above a single blank bullet. That is an empty screen with
+    /// extra steps, so it takes the explanation path too.
+    #[test]
+    fn a_release_whose_only_section_is_blank_explains_itself_rather_than_showing_a_bullet() {
+        let notes = ReleaseNotes {
+            version: "v0.7.0".to_string(),
+            sections: vec![String::new()],
+            ..Default::default()
+        };
+        let text = flatten(&whats_new_lines(&notes, 60, &colors()));
+        assert!(
+            text.contains(dux_core::release_notes::NO_NOTES_EXPLANATION),
+            "{text:?}"
+        );
+        assert!(
+            !text.contains(IN_THIS_RELEASE),
+            "a label over nothing is worse than no label: {text:?}"
+        );
+    }
+
+    /// Real notes must NOT take the explanation path.
+    #[test]
+    fn a_release_with_real_notes_never_shows_the_no_notes_explanation() {
+        let text = flatten(&whats_new_lines(&sample_notes(), 60, &colors()));
+        assert!(
+            !text.contains(dux_core::release_notes::NO_NOTES_EXPLANATION),
+            "{text:?}"
+        );
+    }
+
+    fn flatten(lines: &[Line<'static>]) -> String {
+        lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// REGRESSION. The approved mock rendered the tagline and the release

@@ -16,6 +16,7 @@ import {
   type FirstLoadDialogState,
 } from "@/lib/store"
 import type { Bootstrap } from "@/lib/bootstrapApi"
+import { hasRenderableBody, NO_NOTES_EXPLANATION } from "@/lib/releaseNotes"
 
 // THE first-load dialog: the first-run welcome AND the post-upgrade what's-new
 // screen. ONE renderer, deliberately — the two screens share a frame and differ
@@ -279,6 +280,15 @@ function WhatsNewContent({ state }: { state: FirstLoadDialogState }) {
       ) : state.error !== null ? (
         // A real error in the body, not just a toast that may have auto-cleared.
         <p className="text-sm text-destructive">{state.error}</p>
+      ) : notes && !hasRenderableBody(notes) ? (
+        // The release exists but its body had nothing the server-side parser could
+        // read as prose or feature titles. The headline above is still the title,
+        // so without this the dialog is a title, two buttons, and a blank middle.
+        // Reachable without anyone doing anything unusual: GitHub prepends
+        // `## What's Changed` and the release workflow appends `## Installation`,
+        // so a one-line human headline is all the parser is left with. The
+        // required format is written down in CONTRIBUTING.md.
+        <p className="text-sm text-muted-foreground">{NO_NOTES_EXPLANATION}</p>
       ) : notes ? (
         <>
           {notes.paragraphs.map((p, i) => (

@@ -9,6 +9,7 @@ import {
 } from "@testing-library/react"
 
 import type { Bootstrap } from "@/lib/bootstrapApi"
+import { NO_NOTES_EXPLANATION } from "@/lib/releaseNotes"
 import type { DuxState, FirstLoadDialogState } from "@/lib/store"
 
 // The ONE dialog serves both screens, so what matters here is the SELECTION:
@@ -301,6 +302,54 @@ describe("FirstLoadDialog", () => {
       expect(open.hasAttribute("href")).toBe(false)
       expect(open.hasAttribute("disabled")).toBe(true)
       expect(within(footer()).queryByRole("link")).toBeNull()
+    })
+
+    // REGRESSION. The body rendered `notes.paragraphs` and `notes.sections` and
+    // nothing else, so a release whose body parsed to a headline alone produced a
+    // dialog with a title, two buttons, and an entirely blank middle. That shape
+    // is reachable without anyone doing anything unusual: GitHub prepends
+    // `## What's Changed` and the release workflow appends `## Installation`, so a
+    // one-line human headline is all the server-side parser is left with.
+    it("explains itself when the release body had nothing the parser could read", () => {
+      seed({
+        screen: "whats_new",
+        notes: {
+          ...NOTES,
+          headline: "Quieter plumbing, louder failures",
+          paragraphs: [],
+          sections: [],
+        },
+      })
+      render(<FirstLoadDialog />)
+
+      // The headline is still the title.
+      expect(screen.getByText("Quieter plumbing, louder failures")).toBeTruthy()
+      expect(screen.getByText(NO_NOTES_EXPLANATION)).toBeTruthy()
+      // No label over an empty list.
+      expect(screen.queryByText("In this release")).toBeNull()
+      expect(screen.queryByRole("list")).toBeNull()
+      // The escape hatch the copy points at is really there.
+      expect(
+        within(footer()).getByRole("link", { name: /open full notes/i }),
+      ).toBeTruthy()
+    })
+
+    it("explains itself when the only feature title collapsed to nothing", () => {
+      // A `### **__**` heading strips to "", which used to render the "In this
+      // release" label above one blank bullet.
+      seed({
+        screen: "whats_new",
+        notes: { ...NOTES, paragraphs: [], sections: [""] },
+      })
+      render(<FirstLoadDialog />)
+      expect(screen.getByText(NO_NOTES_EXPLANATION)).toBeTruthy()
+      expect(screen.queryByText("In this release")).toBeNull()
+    })
+
+    it("never shows the no-notes explanation when there are real notes", () => {
+      seed({ screen: "whats_new", notes: NOTES })
+      render(<FirstLoadDialog />)
+      expect(screen.queryByText(NO_NOTES_EXPLANATION)).toBeNull()
     })
 
     it("shows a failed fetch in the body, not just as a vanished toast", () => {
