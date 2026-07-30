@@ -155,12 +155,27 @@ fn run_app(mut app: app::App) -> Result<TuiExit> {
 }
 
 pub fn print_help() {
-    println!(
-        "dux\n\n\
+    println!("{}", help_text());
+}
+
+/// The `dux --help` body. Split out of [`print_help`] so the text is a value the
+/// tests can assert on: a `println!` straight to stdout is not checkable, which
+/// is how `dux server` stayed missing from the listing while being a real
+/// subcommand.
+pub fn help_text() -> &'static str {
+    "dux\n\n\
          Terminal UI for AI worktree sessions.\n\n\
          Usage:\n\
           dux              Launch the TUI\n\
+          dux server       Serve the web UI over the headless engine\n\
           dux config       Manage the configuration file\n\n\
+         Server subcommand:\n\
+          dux server                     Serve on the configured host and port\n\
+          dux server --bind <ADDR:PORT>  Bind this exact address instead\n\
+          dux server --port <PORT>       Override the port only\n\
+          dux server --no-tailscale      Skip Tailscale detection this run\n\
+          There is no login: everyone who can reach the address shares this\n\
+          workspace, so keep a non-loopback bind on a network you trust.\n\n\
          Config subcommands:\n\
           dux config path          Print the config file path\n\
           dux config diff          Show settings that differ from defaults\n\
@@ -181,7 +196,6 @@ pub fn print_help() {
          Session state is stored in:\n\
            macOS: ~/.dux/sessions.sqlite3\n\
            Linux: $XDG_CONFIG_HOME/dux/sessions.sqlite3 or ~/.config/dux/sessions.sqlite3"
-    );
 }
 
 fn acquire_lock_or_exit(path: &Path) -> lockfile::SingleInstanceLock {
@@ -191,5 +205,51 @@ fn acquire_lock_or_exit(path: &Path) -> lockfile::SingleInstanceLock {
             eprintln!("{err}");
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `dux server` is a real subcommand (`crates/dux/src/main.rs` dispatches on
+    /// it), so `--help` must list it next to the TUI and `config`. Without this,
+    /// an installed user has no way to discover the web UI exists.
+    #[test]
+    fn help_lists_the_server_subcommand() {
+        let help = help_text();
+        assert!(
+            help.contains("dux server"),
+            "--help must name the `dux server` subcommand:\n{help}"
+        );
+    }
+
+    /// The flags `parse_server_args` already accepts must be discoverable from
+    /// the top-level help, not only from `dux server --help`.
+    #[test]
+    fn help_names_the_server_flags() {
+        let help = help_text();
+        for flag in ["--bind", "--port", "--no-tailscale"] {
+            assert!(
+                help.contains(flag),
+                "--help must mention the `dux server` flag {flag}:\n{help}"
+            );
+        }
+    }
+
+    /// The trust model currently appears only deep in the docs. `--help` is the
+    /// one place a user is guaranteed to look, so it must say that there is no
+    /// login and that everyone who can reach the address shares the workspace.
+    #[test]
+    fn help_states_the_server_has_no_login() {
+        let help = help_text();
+        assert!(
+            help.contains("no login"),
+            "--help must state that the server has no login:\n{help}"
+        );
+        assert!(
+            help.contains("shares"),
+            "--help must state that reachable clients share the workspace:\n{help}"
+        );
     }
 }
