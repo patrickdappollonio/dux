@@ -4,12 +4,13 @@ import Header from "../../components/Header.astro";
 import Footer from "../../components/Footer.astro";
 import { getPublishedPosts } from "../../lib/blog";
 import PostMeta from "../../components/PostMeta.astro";
+import { BLOG_DESCRIPTION } from "../../lib/site";
 
 const posts = await getPublishedPosts();
 
 const pageTitle = "Blog | getdux.app";
-const description =
-  "Updates, release notes, and what's being worked on in dux, the terminal UI for running AI coding agents in parallel.";
+// Shared with the RSS feed (lib/site.ts) so the two never disagree.
+const description = BLOG_DESCRIPTION;
 ---
 
 <Layout title={pageTitle} description={description} emitStructuredData={false}>

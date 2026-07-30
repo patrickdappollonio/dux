@@ -1,0 +1,21 @@
+// The site-wide title and meta description, in one place.
+//
+// These were previously duplicated verbatim between Layout.astro's prop
+// defaults and index.astro's local constants, which is exactly how a site ends
+// up describing its own product two different ways. Both now import from here,
+// so the homepage and every fallback page say the same thing.
+//
+// What the description has to get right, in this order: what dux does, that you
+// drive it from a terminal OR a browser, and the no-protocol-layer point. The
+// last one is the actual differentiator, so it never gets cut for length.
+
+export const SITE_TITLE =
+  "dux: run multiple Claude Code, Codex & Copilot agents in parallel, terminal or browser | getdux.app";
+
+export const SITE_DESCRIPTION =
+  "dux runs multiple AI coding agents (Claude Code, Codex, Copilot, OpenCode, or any CLI) in parallel, one git worktree each. Drive it from a terminal, or run dux server and drive the same workspace from a browser, phone included. Real CLIs, real PTYs, no protocol layers.";
+
+// The blog and its RSS feed share a description too. Kept alongside the site
+// strings so a change to how dux describes itself lands in one edit.
+export const BLOG_DESCRIPTION =
+  "Updates, release notes, and what's being worked on in dux, the workspace for running AI coding agents in parallel from a terminal or a browser.";

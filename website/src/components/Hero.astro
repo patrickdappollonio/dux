@@ -1,6 +1,14 @@
 ---
 import InstallTabs from "./InstallTabs.astro";
 import Stats from "./Stats.astro";
+import WhatsNewBadge from "./WhatsNewBadge.astro";
+import { getLatestVersion } from "../lib/version";
+
+// Read at build time from the repository's latest published release, so the
+// pill cannot go stale. `null` on any lookup failure, in which case the pill
+// simply drops the version segment. See src/lib/version.ts for why it is derived
+// rather than written down.
+const version = await getLatestVersion("patrickdappollonio/dux");
 ---
 
 <section class="relative overflow-hidden pt-12 pb-20 sm:pt-20 sm:pb-28">
@@ -9,7 +17,7 @@ import Stats from "./Stats.astro";
   <div class="container-app relative">
     <div class="grid items-center gap-10 lg:grid-cols-[1.05fr_0.95fr] lg:gap-14">
       <div class="min-w-0">
-        <div class="mb-5 flex items-center gap-3">
+        <div class="mb-5 flex flex-wrap items-center gap-3">
           <img
             src="/dux-logo.png"
             alt="dux: a duck conductor with a baton"
@@ -19,26 +27,40 @@ import Stats from "./Stats.astro";
           />
           <span class="pill">
             <span class="h-1.5 w-1.5 rounded-full bg-[color:var(--color-success)] animate-pulse"></span>
-            v0.5 · macOS + Linux + WSL
+            {version && <>{version} · </>}macOS + Linux + WSL
           </span>
+          {/* In-flow placement of the what's-new stamp. Below `lg` the headline
+              runs the full width of the container, so a floating badge would
+              collide with the wrapped text; it sits beside the version pill
+              instead. Hidden at `lg` and up, where the floating copy below
+              takes over. */}
+          <span class="lg:hidden"><WhatsNewBadge /></span>
         </div>
 
-        <h1 class="heading mt-5 text-4xl font-bold leading-[1.05] tracking-tight sm:text-5xl lg:text-6xl">
-          Your AI agents
-          <br class="hidden sm:block" />
-          deserve a
-          <span class="relative inline-block"
-            ><span class="relative z-10 text-[color:var(--color-accent)] glow-text">proper office</span
-            ><span
-              aria-hidden="true"
-              class="absolute -bottom-1 left-0 right-0 h-2 bg-[color:var(--color-accent)]/20 -skew-x-12 -z-0"
-            ></span></span>.
-        </h1>
+        {/* `relative` so the floating what's-new stamp can anchor to the top
+            right of the heading box, i.e. the end of the first headline line.
+            It is a sibling of the <h1>, deliberately not placed over "proper
+            office": that phrase already carries the glow and the skewed
+            underline bar, and a badge on top of it fights both. */}
+        <div class="relative mt-5">
+          <h1 class="heading text-4xl font-bold leading-[1.05] tracking-tight sm:text-5xl lg:pr-44 lg:text-6xl">
+            Your AI agents
+            <br class="hidden sm:block" />
+            deserve a
+            <span class="relative inline-block"
+              ><span class="relative z-10 text-[color:var(--color-accent)] glow-text">proper office</span
+              ><span
+                aria-hidden="true"
+                class="absolute -bottom-1 left-0 right-0 h-2 bg-[color:var(--color-accent)]/20 -skew-x-12 -z-0"
+              ></span></span>.
+          </h1>
+          <span class="absolute right-0 top-0 hidden lg:inline-flex"><WhatsNewBadge /></span>
+        </div>
 
         <p class="mt-6 max-w-xl text-base leading-relaxed text-[color:var(--color-muted)] sm:text-lg">
           <strong class="text-[color:var(--color-text)]">dux</strong>
           <span class="text-[color:var(--color-dim)]">(pronounced "<em>dooks</em>")</span>
-          is a terminal UI for orchestrating multiple AI coding agents in parallel, each in its own git worktree. No protocol layers. No adapters. Just real CLIs in real terminals. And it's all yours to tune: every setting, down to every keybinding dux controls, is <strong class="text-[color:var(--color-text)]">configurable</strong> and documented inline in the config file.
+          runs multiple AI coding agents in parallel, each in its own git worktree. Drive it from your terminal, or run <span class="mono text-[color:var(--color-text)]">dux server</span> and drive the very same workspace from a browser, phone included. No protocol layers. No adapters. Just real CLIs in real terminals. And it's all yours to tune: every setting, down to every keybinding dux controls, is <strong class="text-[color:var(--color-text)]">configurable</strong> and documented inline in the config file.
         </p>
 
         <div class="mt-8 flex flex-wrap items-center gap-3">
@@ -67,11 +89,15 @@ import Stats from "./Stats.astro";
           </a>
         </div>
 
+        {/* Two columns, so this list only ever grows by an EVEN number or the
+            last row goes ragged. It is six items; make it eight. */}
         <ul class="mt-8 grid grid-cols-2 gap-x-6 gap-y-2 text-xs text-[color:var(--color-dim)] sm:text-sm">
           <li class="flex items-center gap-2"><span class="text-[color:var(--color-success)]">✓</span> Claude, Codex, Copilot, OpenCode</li>
           <li class="flex items-center gap-2"><span class="text-[color:var(--color-success)]">✓</span> Any CLI as a provider</li>
           <li class="flex items-center gap-2"><span class="text-[color:var(--color-success)]">✓</span> Git worktree per agent</li>
           <li class="flex items-center gap-2"><span class="text-[color:var(--color-success)]">✓</span> Full git staging area</li>
+          <li class="flex items-center gap-2"><span class="text-[color:var(--color-success)]">✓</span> Terminal UI and web UI, one engine</li>
+          <li class="flex items-center gap-2"><span class="text-[color:var(--color-success)]">✓</span> Same workspace from your phone</li>
         </ul>
       </div>
 

@@ -4,6 +4,7 @@ import Header from "../components/Header.astro";
 import Hero from "../components/Hero.astro";
 import Asciinema from "../components/Asciinema.astro";
 import Manifesto from "../components/Manifesto.astro";
+import WebUI from "../components/WebUI.astro";
 import RealCLI from "../components/RealCLI.astro";
 import FeatureGrid from "../components/FeatureGrid.astro";
 import ConfigPeek from "../components/ConfigPeek.astro";
@@ -12,11 +13,12 @@ import LatestPosts from "../components/LatestPosts.astro";
 import Contributors from "../components/Contributors.astro";
 import Newsletter from "../components/Newsletter.astro";
 import Footer from "../components/Footer.astro";
+import { SITE_TITLE, SITE_DESCRIPTION } from "../lib/site";
 
-const title =
-  "dux: run multiple Claude Code, Codex & Copilot agents in parallel | getdux.app";
-const description =
-  "dux is a fast terminal UI that runs multiple AI coding agents (Claude Code, Codex, Copilot, OpenCode, or any CLI) in parallel across git worktrees. Real CLIs, real PTYs, no protocol layers. Maximum throughput, minimum context switching.";
+// The homepage carries the canonical title and description. Both live in
+// lib/site.ts so this page and Layout.astro's fallbacks cannot drift apart.
+const title = SITE_TITLE;
+const description = SITE_DESCRIPTION;
 ---
 
 <Layout title={title} description={description}>
@@ -26,6 +28,7 @@ const description =
     <Newsletter />
     <Asciinema />
     <Manifesto />
+    <WebUI />
     <RealCLI />
     <FeatureGrid />
     <ConfigPeek />

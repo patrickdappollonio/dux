@@ -1,7 +1,7 @@
 {
   "name": "dux · getdux.app",
   "short_name": "dux",
-  "description": "A terminal UI for running multiple AI coding agents in parallel across git worktrees.",
+  "description": "Run multiple AI coding agents in parallel, one git worktree each, from a terminal or a browser.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
