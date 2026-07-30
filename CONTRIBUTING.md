@@ -104,6 +104,58 @@ Every change should come with unit tests, and integration tests where that is
 feasible and low-lift. When you are fixing a bug, aim to prove the diagnosis with
 a failing test before you fix it.
 
+## Writing a release body
+
+**dux parses its own release notes and shows them to every user who updates.** On
+the first launch after an upgrade it fetches the GitHub release for the tag it is
+running and renders it as a "what's new" screen (the TUI modal and the web
+`FirstLoadDialog`). The parser is `dux_core::release_notes::parse_release_body`,
+and it is a two-level heading reader, **not** a Markdown renderer. Shape the body
+wrong and the screen is wrong for everyone.
+
+The format is short:
+
+```markdown
+## A headline that reads like a sentence
+
+One or two paragraphs of intro prose.
+
+### The first thing that changed
+
+Whatever detail you like here.
+
+### The second thing that changed
+
+More detail.
+```
+
+The rules, and what breaks if you skip one:
+
+- **The body MUST begin with a single `## ` line.** That line becomes the screen's
+  title. Skip it and the first `## ` in the file is GitHub's own
+  `## What's Changed`, so *that* becomes the headline, and any `### ` in the
+  machine-written tail is merged into your feature list.
+- **Feature titles are `### ` lines.** They are rendered as a bulleted
+  "In this release" list.
+- **`# `, `#### `, and `##Title` (no space) are not headings to this parser.** They
+  land in the intro prose with their `#` characters shown literally.
+- **Only the prose before the first `### ` is shown.** The body text under each
+  feature is deliberately dropped: the screen shows titles and links to the full
+  notes for the rest.
+- **The parse stops at the SECOND `## ` line.** That is how GitHub's
+  `## What's Changed` and the release workflow's appended `## Installation` are
+  kept off the screen. Do not use `## ` for anything of your own.
+- **Close every code fence.** An unterminated ` ``` ` swallows the rest of the
+  body.
+- **A body of only a headline shows no notes.** It is handled (both screens say
+  "This release published no notes we could read" and point at the full notes),
+  but it is not what you want for a release people are upgrading into.
+
+A malformed body never panics and never blanks the screen; the failure mode is a
+screen that says less than it should. `crates/dux-core/src/release_notes.rs` holds
+a test per shape above, so if you change the parser those tests are the contract
+to read first.
+
 ## Interactive testing
 
 Ask for a smoke test rather than assuming one: `cargo run` starts the TUI, and
