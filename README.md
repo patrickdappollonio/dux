@@ -71,9 +71,20 @@ curl -sSfL https://github.com/patrickdappollonio/dux/releases/latest/download/in
 curl -sSfL https://github.com/patrickdappollonio/dux/releases/latest/download/install.sh | DUX_VERSION=v0.1.0 bash
 ```
 
+The script checks the downloaded archive against the SHA-256 checksum published beside it and refuses to install anything if the two disagree. Releases published before checksums existed do not have one, and the script says so loudly and carries on.
+
 **Binary download:**
 
 Grab the latest release for your platform from the [Releases](https://github.com/patrickdappollonio/dux/releases) page. Extract it, drop the `dux` binary somewhere on your `PATH`, and run it. On first launch, dux creates a fully commented config file. That file *is* the documentation.
+
+Every release also carries a `<archive>.sha256` next to each archive and a combined `dux-checksums.txt`, both in the format `sha256sum -c` (and macOS's `shasum -a 256 -c`) reads directly:
+
+```bash
+# From a directory holding the downloaded archives
+sha256sum -c dux-checksums.txt
+```
+
+Worth being straight about what that buys you: it catches a corrupt or truncated download, and it gives you a value you can compare out of band. It is not tamper protection. The checksums are unsigned and served from the same place as the archives, so anyone able to replace an archive could replace its checksum too. Signing would be the answer to that, and dux does not sign releases yet.
 
 ## Prerequisites
 

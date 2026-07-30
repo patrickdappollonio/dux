@@ -5,11 +5,13 @@ on:
     paths:
       - "install.sh"
       - ".github/workflows/install-script-ci.yml"
+      - ".github/scripts/test_install_checksum.sh"
   push:
     branches: [main]
     paths:
       - "install.sh"
       - ".github/workflows/install-script-ci.yml"
+      - ".github/scripts/test_install_checksum.sh"
 
 concurrency:
   group: install-script-${{ github.ref }}
@@ -19,6 +21,21 @@ permissions:
   contents: read
 
 jobs:
+  # Offline, no release needed: builds a real archive and drives install.sh's
+  # checksum verification through every outcome, including that a mismatch leaves
+  # the install directory empty. The `install` job below cannot show that, because
+  # it installs a REAL release and so only ever sees the happy path (or, for
+  # releases published before checksums existed, the missing-checksum warning).
+  verify-checksum-logic:
+    name: Checksum verification unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax-check install.sh
+        run: bash -n install.sh
+      - name: Run checksum verification tests
+        run: bash .github/scripts/test_install_checksum.sh
+
   install:
     name: Install ${{ matrix.name }}
     runs-on: ubuntu-latest

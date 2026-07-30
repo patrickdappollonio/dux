@@ -109,6 +109,31 @@ jobs:
       - name: Package
         run: tar czf ${{ matrix.archive }} -C target/${{ matrix.target }}/release dux
 
+      # One "<archive>.sha256" beside each archive, in sha256sum's own format
+      # (hex digest, two spaces, file name) so `sha256sum -c` and `shasum -a 256
+      # -c` both accept it unchanged.
+      #
+      # Be honest about what this is for: it lets install.sh detect a corrupt or
+      # truncated download, and it gives a value anyone can check by hand. It is
+      # not tamper protection. Whoever could replace an archive on the release
+      # page could replace this file next to it just as easily. Signing is what
+      # would defend against that and is not in place.
+      #
+      # Linux runners have sha256sum, macOS runners have shasum, so pick
+      # whichever exists rather than assuming one.
+      - name: Checksum the archive
+        run: |
+          set -euo pipefail
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${{ matrix.archive }}" > "${{ matrix.archive }}.sha256"
+          elif command -v shasum >/dev/null 2>&1; then
+            shasum -a 256 "${{ matrix.archive }}" > "${{ matrix.archive }}.sha256"
+          else
+            echo "Neither sha256sum nor shasum is available on this runner." >&2
+            exit 1
+          fi
+          cat "${{ matrix.archive }}.sha256"
+
       # Start the archive that is about to be uploaded and confirm it really serves
       # the web UI: a page referencing a content-hashed bundle, that bundle
       # downloading, and a WebSocket upgrade completing. Placed BEFORE the upload so
@@ -121,15 +146,73 @@ jobs:
       - name: Upload to release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload ${{ github.event.release.tag_name }} ${{ matrix.archive }}
+        run: |
+          gh release upload ${{ github.event.release.tag_name }} \
+            ${{ matrix.archive }} ${{ matrix.archive }}.sha256
 
+      # The .sha256 rides along so the combined-checksums job can concatenate the
+      # four of them without recomputing anything.
       - name: Upload archive artifact
         uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.archive }}
-          path: ${{ matrix.archive }}
+          path: |
+            ${{ matrix.archive }}
+            ${{ matrix.archive }}.sha256
           retention-days: 1
           if-no-files-found: error
+
+  # A single dux-checksums.txt holding all four lines, for a human who wants to
+  # verify a download by hand: `sha256sum -c dux-checksums.txt` in a directory
+  # holding the archives. The installer deliberately does NOT use this file, it
+  # fetches the per-archive .sha256 instead, so the install path never has to
+  # wait on a job that only finishes after the whole matrix does.
+  #
+  # Same honesty as above: this is corruption detection and a value to check out
+  # of band, not tamper protection. It is unsigned and served from the same place
+  # as the archives.
+  checksums:
+    name: Publish combined checksums
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download release archive artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist/artifacts
+          merge-multiple: true
+
+      - name: Combine per-archive checksums
+        run: |
+          set -euo pipefail
+          # Exported before the glob below, since it is the SHELL's locale that
+          # decides the expansion order, not cat's.
+          export LC_ALL=C
+          cd dist/artifacts
+          # The glob sorts, so the file is byte-stable regardless of the order
+          # the matrix jobs happened to finish in.
+          cat *.sha256 > dux-checksums.txt
+          echo "Combined checksums:"
+          cat dux-checksums.txt
+          # Four archives in the matrix, so four lines. A short file means a
+          # matrix job silently produced nothing.
+          lines="$(wc -l < dux-checksums.txt)"
+          if [ "$lines" -ne 4 ]; then
+            echo "Expected 4 checksum lines, got ${lines}." >&2
+            exit 1
+          fi
+          sha256sum -c dux-checksums.txt
+
+      # No checkout in this job, so gh cannot infer the repo from a git remote.
+      # GH_REPO tells it explicitly.
+      - name: Upload combined checksums to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release upload ${{ github.event.release.tag_name }} \
+            dist/artifacts/dux-checksums.txt
 
   build-npm-package:
     name: Build npm package
