@@ -45,6 +45,11 @@ let spineBody: Spine = makeSpine([])
 // A mutable backing store for `location.hash` so the store's `history.replaceState`
 // mirror actually round-trips (the reconnect re-arm reads `location.hash`).
 const hashRef = { value: "" }
+// Every URL the store PUSHED. A reconnect restores a position the browser is
+// already parked on, so it must never add an entry: a flaky connection would
+// otherwise grow the back stack one entry per drop, and Back would stop being
+// one press from home.
+let pushedUrls: string[] = []
 
 const fetchMock = vi.fn(async (url: string) => {
   const u = String(url)
@@ -89,6 +94,7 @@ class FakeWebSocket {
 beforeEach(() => {
   spineBody = makeSpine([])
   hashRef.value = ""
+  pushedUrls = []
   vi.stubGlobal("localStorage", {
     getItem: () => null,
     setItem: () => {},
@@ -96,9 +102,13 @@ beforeEach(() => {
   })
   vi.stubGlobal("window", { addEventListener: () => {} })
   vi.stubGlobal("history", {
-    go: () => {},
     // Mirror what the real hash router does: an "#..." target lands in the hash;
-    // the bare home path clears it.
+    // the bare home path clears it. Both writers are stubbed because the router
+    // pushes when the destination is a different screen and replaces otherwise.
+    pushState: (_s: unknown, _t: string, url: string) => {
+      pushedUrls.push(String(url))
+      hashRef.value = url.startsWith("#") ? url : ""
+    },
     replaceState: (_s: unknown, _t: string, url: string) => {
       hashRef.value = url.startsWith("#") ? url : ""
     },
@@ -194,6 +204,47 @@ describe("reconnect preserves a deep-linked agent route", () => {
       tabId: "s1",
     })
     expect(hashRef.value).toBe("#/agent/s1")
+    // A reconnect restores a position the browser is already parked on, so
+    // nothing here may push: a flaky link would otherwise deepen the back stack
+    // once per drop.
+    expect(pushedUrls).toEqual([])
+  })
+
+  it("restores the changes screen, not just the agent, after the eject", async () => {
+    // The arming used to read the hash with `parseSelectionHash`, whose regexes
+    // are anchored, so `#/agent/s1/changes` parsed as null and the reconnect
+    // armed NOTHING: the transient eject then left the user on home for good.
+    // Arming through `parseRoute` fixes the parse; carrying the `changes` flag
+    // through to the restore is what keeps the screen from downgrading to the
+    // terminal.
+    const mod = await loadStore("#/agent/s1/changes", [
+      { id: "s1", project_id: "p1", status: "active" },
+    ])
+    expect(mod.getSnapshot().mobileScreen).toBe("changes")
+    await consumeBootOpen(mod)
+
+    spineBody = makeSpine([{ id: "s1", project_id: "p1", status: "detached" }])
+    mod.eventsSocket.onOpen()
+    await settle()
+
+    mod.ejectSelectionForReconnect()
+    expect(mod.getSnapshot().selectedTarget).toBeNull()
+    expect(hashRef.value).toBe("")
+
+    spineBody = makeSpine([{ id: "s1", project_id: "p1", status: "active" }])
+    mod.eventsSocket.onEvent({ event: "sessions.changed" })
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().selectedTarget).not.toBeNull()
+    })
+
+    expect(mod.getSnapshot().selectedTarget).toEqual({
+      kind: "agent",
+      sessionId: "s1",
+      tabId: "s1",
+    })
+    expect(mod.getSnapshot().mobileScreen).toBe("changes")
+    expect(hashRef.value).toBe("#/agent/s1/changes")
+    expect(pushedUrls).toEqual([])
   })
 
   it("does not undo a deliberate home navigation made during the armed window", async () => {
@@ -256,6 +307,10 @@ describe("reconnect preserves a deep-linked agent route", () => {
       tabId: "s1",
     })
     expect(hashRef.value).toBe("#/agent/s1")
+    // A reconnect restores a position the browser is already parked on, so
+    // nothing here may push: a flaky link would otherwise deepen the back stack
+    // once per drop.
+    expect(pushedUrls).toEqual([])
   })
 })
 
@@ -267,17 +322,18 @@ describe("reconnect deep-link guard rails", () => {
     await consumeBootOpen(mod)
 
     // Reconnect while s1 has been deleted (gone from the spine entirely). The
-    // prune ejects to home; the re-armed intent must drop, not force it back.
+    // prune navigates to the next active agent; the re-armed intent must drop,
+    // not force the deleted one back.
     spineBody = makeSpine([{ id: "s2", project_id: "p1", status: "active" }])
     mod.eventsSocket.onOpen()
     await settle()
-    expect(mod.getSnapshot().selectedTarget).toBeNull()
+    expect(mod.getSnapshot().selectedSessionId).toBe("s2")
 
     // A later spine (still no s1) must not conjure it back either.
     spineBody = makeSpine([{ id: "s2", project_id: "p1", status: "active" }])
     mod.eventsSocket.onEvent({ event: "sessions.changed" })
     await settle()
-    expect(mod.getSnapshot().selectedTarget).toBeNull()
+    expect(mod.getSnapshot().selectedSessionId).toBe("s2")
   })
 
   it("stays on home when the user was on home before the drop", async () => {
@@ -382,6 +438,10 @@ describe("reconnect deep-link guard rails", () => {
       terminalId: "pt1",
       owner: { kind: "project", projectId: "p1" },
     })
+    // A reconnect restores a position the browser is already parked on, so
+    // nothing here may push: a flaky link would otherwise deepen the back stack
+    // once per drop.
+    expect(pushedUrls).toEqual([])
   })
 
   it("restores an extra-tab deep link across a reconnect", async () => {

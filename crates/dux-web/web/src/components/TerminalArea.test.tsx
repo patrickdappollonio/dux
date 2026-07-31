@@ -156,6 +156,19 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
+describe("TerminalArea not-found route", () => {
+  it("says the agent is gone rather than showing the idle welcome screen", () => {
+    // The welcome screen means "nothing is selected", which is the wrong story
+    // for a URL that names a specific agent the workspace no longer has.
+    mockState = makeState({
+      routeNotFound: { kind: "agent", sessionId: "s9" },
+    })
+    render(<TerminalArea />)
+    expect(screen.getByText("Agent not found")).toBeTruthy()
+    expect(screen.getByText("s9")).toBeTruthy()
+  })
+})
+
 describe("TerminalArea dormant-tab gating (G-T4)", () => {
   it("renders the DormantTabCard and opens NO PTY socket for a focused dormant extra tab", async () => {
     mockState = makeState({

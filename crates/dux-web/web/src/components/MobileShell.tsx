@@ -2,6 +2,7 @@ import { ChevronLeft, Ellipsis, GitPullRequest, Settings } from "lucide-react"
 import { Suspense, useState } from "react"
 
 import { AddProjectSplitButton } from "@/components/AddProjectSplitButton"
+import { AgentNotFound } from "@/components/AgentNotFound"
 import { NewAgentSplitButton } from "@/components/NewAgentSplitButton"
 import { AppMenuSheet } from "@/components/AppMenuSheet"
 import { ChangedFiles } from "@/components/ChangedFiles"
@@ -21,7 +22,8 @@ import {
 import { isExtraTabDormant, shouldShowTabStrip } from "@/lib/agentTabs"
 import { resolveInstanceTitle } from "@/lib/instanceTitle"
 import {
-  mobileNavigate,
+  navigateUp,
+  openChangesScreen,
   selectSession,
   selectTerminal,
   useDux,
@@ -31,11 +33,11 @@ import type { TerminalOwnerRef } from "@/lib/store"
 import { terminalTitle } from "@/lib/terminals"
 import { cn } from "@/lib/utils"
 
-// Tapping a session on the hub focuses it AND drives the spoke navigation, so the
-// user lands on the full-screen terminal in one tap.
+// Tapping a session on the hub focuses it, and focusing something IS the
+// terminal screen: the screen is derived from the URL the selection writes, so
+// there is no second navigation call to make here.
 function selectAndOpen(sessionId: string): void {
   selectSession(sessionId)
-  mobileNavigate("terminal")
 }
 
 function selectTerminalAndOpen(
@@ -43,7 +45,6 @@ function selectTerminalAndOpen(
   owner: TerminalOwnerRef,
 ): void {
   selectTerminal(terminalId, owner)
-  mobileNavigate("terminal")
 }
 
 // The hub: the shared flat agent list at touch size, mirroring the desktop
@@ -122,12 +123,15 @@ function TerminalScreen() {
     return (
       <div className="flex h-full min-h-0 flex-col overflow-hidden">
         <header className="flex h-11 shrink-0 items-center gap-2 border-b px-3">
+          {/* Up to the hub, by name. A relative history step would walk out
+              of the app whenever this screen is the entry the browser opened
+              on, which a deep link makes routine. */}
           <Button
             variant="ghost"
             size="icon"
             className="size-10 shrink-0"
             aria-label="Back"
-            onClick={() => history.back()}
+            onClick={() => navigateUp()}
           >
             <ChevronLeft />
           </Button>
@@ -179,12 +183,13 @@ function TerminalScreen() {
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
       <header className="flex h-11 shrink-0 items-center gap-2 border-b px-3">
+        {/* Up to the hub, by name (see the project-terminal header above). */}
         <Button
           variant="ghost"
           size="icon"
           className="size-10 shrink-0"
           aria-label="Back"
-          onClick={() => history.back()}
+          onClick={() => navigateUp()}
         >
           <ChevronLeft />
         </Button>
@@ -215,7 +220,7 @@ function TerminalScreen() {
           size="sm"
           className="min-h-10 shrink-0"
           aria-label={`${changeCount} changed files`}
-          onClick={() => mobileNavigate("changes")}
+          onClick={() => openChangesScreen()}
         >
           ±{changeCount}
         </Button>
@@ -286,12 +291,15 @@ function ChangesScreen() {
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
       <header className="flex h-12 shrink-0 items-center gap-2 border-b px-3">
+        {/* Up from changes is the agent it belongs to, not a history step:
+            a deep link straight to `#/agent/<sid>/changes` pushed nothing, so
+            stepping from here leaves the app. */}
         <Button
           variant="ghost"
           size="icon"
           className="size-11 shrink-0"
           aria-label="Back"
-          onClick={() => history.back()}
+          onClick={() => navigateUp()}
         >
           <ChevronLeft />
         </Button>
@@ -304,9 +312,17 @@ function ChangesScreen() {
   )
 }
 
+// The screen the URL names, plus the one screen the URL cannot name: a route
+// pointing at an agent that no longer exists. Not-found is checked first for
+// readability, not because the branches compete: `setRouteNotFound` commits
+// `mobileScreen: "home"` in the same patch, and `setState` clears the flag on
+// any patch that carries a target, so "not-found AND terminal/changes" is not a
+// state that occurs. What the check does have to stay ahead of is the HUB,
+// which is the fallthrough at the bottom rather than a test of its own.
 export function MobileShell() {
-  const { mobileScreen } = useDux()
+  const { mobileScreen, routeNotFound } = useDux()
 
+  if (routeNotFound) return <AgentNotFound sessionId={routeNotFound.sessionId} />
   if (mobileScreen === "terminal") return <TerminalScreen />
   if (mobileScreen === "changes") return <ChangesScreen />
   return <HomeScreen />

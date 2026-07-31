@@ -121,6 +121,43 @@ export function sortQuietTail(
     .filter((session): session is SessionView => session !== undefined)
 }
 
+// The agent to land on when the focused one vanishes (deleted here or by another
+// client). "Next" is read off the SAME ordering the user is looking at: the main
+// (active) bucket in the current sort mode, exactly what `FlatAgentList` renders
+// above the quiet tail. `previous` is the session list as it was while the gone
+// agent still existed, which is what gives "next" a position to count from;
+// `current` is the list that just arrived. The scan starts after the gone agent
+// and wraps, so deleting the last row lands on the first one rather than on
+// nothing. Only ACTIVE agents are candidates: a detached or exited agent has no
+// live process to land in, so it stays in the quiet tail where it belongs.
+// Returns null when no active agent is left, which the caller renders as home.
+export function nextActiveSessionId(
+  previous: SessionView[],
+  current: SessionView[],
+  goneSessionId: string,
+  key: FlatSortKey,
+): string | null {
+  const candidates = sortMainSessions(partitionQuiet(current).main, key).map(
+    (session) => session.id,
+  )
+  if (candidates.length === 0) return null
+  const candidateSet = new Set(candidates)
+  const before = sortMainSessions(partitionQuiet(previous).main, key).map(
+    (session) => session.id,
+  )
+  const at = before.indexOf(goneSessionId)
+  // The gone agent was not in the active bucket (it was quiet, or this client
+  // never saw it): there is no position to count from, so take the first row.
+  if (at === -1) return candidates[0]
+  for (let step = 1; step <= before.length; step++) {
+    const id = before[(at + step) % before.length]
+    if (candidateSet.has(id)) return id
+  }
+  // Every agent that shared the old active bucket is gone too; fall back to
+  // whatever the new list starts with.
+  return candidates[0]
+}
+
 // NOTE: agent order is now a single GLOBAL flat order (agents are independent of
 // project grouping). A drag is a plain `moveItem` over the complete session id
 // list, sent via `reorderAgents` — see FlatAgentList's handleDragEnd. The old

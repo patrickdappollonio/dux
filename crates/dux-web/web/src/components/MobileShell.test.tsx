@@ -11,10 +11,20 @@ import type { DuxState } from "@/lib/store"
 // network request.
 let mockState: DuxState
 const addTabMock = vi.fn()
+// `navigateUp` is spied on so the Back chevrons can be asserted to name a
+// destination rather than step the browser's history (see the up-navigation
+// suite at the bottom of this file).
+const navigateUpMock = vi.fn()
 vi.mock("@/lib/store", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/store")>()
-  return { ...actual, useDux: () => mockState, addTab: addTabMock }
+  return {
+    ...actual,
+    useDux: () => mockState,
+    addTab: addTabMock,
+    navigateUp: navigateUpMock,
+  }
 })
+const historyBack = vi.fn()
 
 // jsdom lacks localStorage/fetch/matchMedia as globals; the real store boots on
 // import. Stub them before the component (and the store behind it) loads so the
@@ -108,11 +118,17 @@ function makeSessionSpine(tabCount: number): DuxState["spine"] {
 beforeEach(() => {
   installBootStubs()
   addTabMock.mockClear()
+  navigateUpMock.mockClear()
+  historyBack.mockClear()
+  // jsdom's own history is real; replace only `back` so a stray relative step
+  // is observable instead of silently doing nothing.
+  vi.spyOn(history, "back").mockImplementation(historyBack)
 })
 
 afterEach(() => {
   cleanup()
   vi.unstubAllGlobals()
+  vi.restoreAllMocks()
 })
 
 describe("MobileShell home row agent ⋯ menu — Add tab (G7)", () => {
@@ -280,5 +296,97 @@ describe("MobileShell drawer header", () => {
     })
     render(<MobileShell />)
     expect(screen.getByText("dux")).toBeTruthy()
+  })
+})
+
+// The in-app Back chevrons and the not-found screen's way out are UP controls,
+// not history steps. A deep-link boot pushes nothing, so on those screens dux's
+// own first entry IS the screen being shown, and a relative step from there
+// leaves the application: the reported bug, through a different door. Each
+// control names its destination instead and lets the store rewrite the URL.
+describe("MobileShell up navigation never steps history", () => {
+  function upState(overrides: Record<string, unknown> = {}): DuxState {
+    return makeState({
+      spine: makeSessionSpine(1),
+      bootstrap: {
+        title: "dux",
+        dux_version: "v1",
+        available_providers: ["claude"],
+      },
+      selectedTarget: { kind: "agent", sessionId: "s1", tabId: "s1" },
+      selectedSessionId: "s1",
+      mobileScreen: "terminal",
+      changes: { sessionId: "s1", phase: "loaded", staged: [], unstaged: [] },
+      startedDormantTabs: [],
+      terminalEpoch: 0,
+      ...overrides,
+    } as unknown as Partial<DuxState>)
+  }
+
+  it("sends the agent screen's chevron up instead of back", () => {
+    mockState = upState()
+    render(<MobileShell />)
+    fireEvent.click(screen.getByLabelText("Back"))
+    expect(historyBack).not.toHaveBeenCalled()
+    expect(navigateUpMock).toHaveBeenCalledTimes(1)
+  })
+
+  it("sends the project terminal screen's chevron up instead of back", () => {
+    mockState = upState({
+      spine: {
+        projects: [
+          {
+            id: "p1",
+            name: "Repo",
+            path: "/tmp/p1",
+            default_provider: "claude",
+            terminals: [{ id: "pt-1", label: "Terminal 2" }],
+          },
+        ],
+        sessions: [],
+        sidebar: { groups: [], agentless_start: null },
+      },
+      selectedTarget: {
+        kind: "terminal",
+        terminalId: "pt-1",
+        owner: { kind: "project", projectId: "p1" },
+      },
+      selectedSessionId: null,
+    })
+    render(<MobileShell />)
+    fireEvent.click(screen.getByLabelText("Back"))
+    expect(historyBack).not.toHaveBeenCalled()
+    expect(navigateUpMock).toHaveBeenCalledTimes(1)
+  })
+
+  it("sends the changes screen's chevron up instead of back", () => {
+    mockState = upState({ mobileScreen: "changes" })
+    render(<MobileShell />)
+    fireEvent.click(screen.getByLabelText("Back"))
+    expect(historyBack).not.toHaveBeenCalled()
+    expect(navigateUpMock).toHaveBeenCalledTimes(1)
+  })
+
+  it("leaves the not-found screen without keeping it in history", () => {
+    // Arriving at not-found is a correction of a bad URL, not a position worth
+    // keeping: pushing home from here would put the user's next Back straight
+    // back onto the dead end they just left.
+    mockState = makeState({ routeNotFound: { kind: "agent", sessionId: "s9" } })
+    render(<MobileShell />)
+    fireEvent.click(screen.getByText("Back to agents"))
+    expect(navigateUpMock).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe("MobileShell not-found screen", () => {
+  it("says the agent is gone instead of quietly showing the hub", () => {
+    // A URL naming a deleted agent: the route has no target, so without this
+    // branch the shell would fall through to the hub while the address bar
+    // still named an agent that is not on screen.
+    mockState = makeState({ routeNotFound: { kind: "agent", sessionId: "s9" } })
+    render(<MobileShell />)
+    expect(screen.getByText("Agent not found")).toBeTruthy()
+    expect(screen.getByText("s9")).toBeTruthy()
+    expect(screen.queryByText("agent sessions")).toBeNull()
   })
 })

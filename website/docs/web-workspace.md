@@ -52,9 +52,33 @@ link to a teammate on the same instance and they land exactly where you are:
 - An extra provider tab is `#/agent/<sessionId>/tab/<tabId>`.
 - A companion terminal is `#/agent/<sessionId>/terminal/<terminalId>`.
 - A project terminal is `#/project/<projectId>/terminal/<terminalId>`.
+- The phone's Changes screen is the same link with `/changes` on the end.
 
-The links survive a reload and keep your browser back button working sensibly,
-which matters most on the phone.
+The URL is the whole story of where you are, which is what makes the browser's
+back button behave: every move to a different screen adds one entry, so Back
+always returns you to the previous screen rather than doing nothing. Moves that
+stay on the same screen do not stack up: switching between agents or tabs,
+reconnecting after the wifi drops, and following a link back to where you already
+were all rewrite the one entry instead of adding another.
+
+Back is only ever your own Back: dux never presses it for you. The phone's back
+chevron is an **up** control, so it takes you one level up (Changes to its agent,
+an agent to the home screen) and can never step out of dux onto whatever page you
+were on before it, which is exactly what a deep link opened in a fresh tab used
+to do. Going up is a move like any other, so it adds its own entry and Back
+returns you to the screen you just left.
+
+Follow a link to an agent that has since been deleted and you get a plain
+**Agent not found** screen rather than a silent bounce to the home screen. It
+gives way on its own if that agent turns up in the workspace again. Its way out
+is the one move that does not add an entry, since a bad address is not a place
+worth keeping: leaving it corrects the URL rather than stacking on top of it, so
+Back cannot drop you straight back onto the dead end. If the agent
+you are watching is deleted out from under you, dux moves you to the next active
+agent, or home when there is not one. A link to a terminal that has since closed
+is not an error, since terminals come and go: it lands you on the agent that
+owned it, or on the home screen for a terminal that belonged to a project rather
+than an agent, and tidies the address bar to match.
 
 ## Adding projects
 

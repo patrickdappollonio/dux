@@ -1,5 +1,6 @@
 import { Suspense } from "react"
 
+import { AgentNotFound } from "@/components/AgentNotFound"
 import { AgentTabsStrip } from "@/components/AgentTabsStrip"
 import { ChunkBoundary } from "@/components/ChunkBoundary"
 import { DormantTabCard } from "@/components/DormantTabCard"
@@ -25,7 +26,15 @@ export function TerminalArea() {
     selectedTarget,
     terminalEpoch,
     startedDormantTabs,
+    routeNotFound,
   } = useDux()
+
+  // The URL names an agent this workspace does not have (a stale bookmark, or
+  // Back landing on a deleted agent). Say so rather than showing the idle
+  // welcome screen, which would read as "nothing was selected".
+  if (routeNotFound) {
+    return <AgentNotFound sessionId={routeNotFound.sessionId} />
+  }
 
   // Idle center pane: the duck + logo + a tip, exactly like the TUI's welcome
   // screen. It vanishes the moment a target is selected (the loading state is

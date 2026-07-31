@@ -4,6 +4,7 @@ import {
   activeFirstSessions,
   displayedSessionOrder,
   FLAT_SORT_LABELS,
+  nextActiveSessionId,
   partitionQuiet,
   quietTailForcedOpen,
   sortMainSessions,
@@ -256,5 +257,60 @@ describe("stateWord", () => {
       stateWord(makeSession({ id: "a", status: "exited", typing: true, working: true }))
         .label,
     ).toBe("Exited")
+  })
+})
+
+describe("nextActiveSessionId", () => {
+  const previous = [
+    makeSession({ id: "a" }),
+    makeSession({ id: "b" }),
+    makeSession({ id: "c" }),
+  ]
+
+  it("picks the row after the gone agent in the displayed order", () => {
+    const current = [previous[0], previous[2]]
+    expect(nextActiveSessionId(previous, current, "b", "manual")).toBe("c")
+  })
+
+  it("wraps to the first row when the last agent goes", () => {
+    // A create and a delete landing in the SAME spine is what makes the wrap
+    // load-bearing: "d" is new and now heads the list, so the "every neighbour
+    // is gone too" fallback would answer "d". Only walking off the end of the
+    // old order and back round to the top reaches "a", the row that follows the
+    // last one. With `current` merely a subset of `previous`, both routes agree
+    // and the wrap can be deleted without a single test noticing.
+    const created = makeSession({ id: "d" })
+    const current = [created, previous[0], previous[1]]
+    expect(nextActiveSessionId(previous, current, "c", "manual")).toBe("a")
+  })
+
+  it("skips a detached neighbour and keeps walking", () => {
+    const detached = makeSession({ id: "c", status: "detached" })
+    const current = [previous[0], detached]
+    expect(nextActiveSessionId(previous, current, "b", "manual")).toBe("a")
+  })
+
+  it("returns null when nothing active is left", () => {
+    const current = [makeSession({ id: "c", status: "detached" })]
+    expect(nextActiveSessionId(previous, current, "b", "manual")).toBeNull()
+  })
+
+  it("follows the active-first order rather than the raw list order", () => {
+    // "active" floats working agents to the top, so the displayed order is
+    // c, a, b, d and losing c lands on a, the row that was directly under it.
+    const ordered = [
+      makeSession({ id: "a" }),
+      makeSession({ id: "b" }),
+      makeSession({ id: "c", working: true }),
+      makeSession({ id: "d" }),
+    ]
+    const current = [ordered[0], ordered[1], ordered[3]]
+    expect(nextActiveSessionId(ordered, current, "c", "active")).toBe("a")
+  })
+
+  it("takes the first row when the gone agent was not in the active bucket", () => {
+    const quiet = makeSession({ id: "z", status: "exited" })
+    const before = [...previous, quiet]
+    expect(nextActiveSessionId(before, previous, "z", "manual")).toBe("a")
   })
 })

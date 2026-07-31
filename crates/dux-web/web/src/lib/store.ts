@@ -6,9 +6,9 @@ import { git } from "./git"
 import { projectsApi, type PatchProjectBody } from "./projectsApi"
 import { existingBranchConflict, sessionsApi, SessionsApiError } from "./sessionsApi"
 
-import { ordersMatch } from "./reorder"
+import { ordersMatch, reorderById } from "./reorder"
 import { sortedSessionIds, type SortKey } from "./sortSessions"
-import type { FlatSortKey } from "./flatList"
+import { nextActiveSessionId, type FlatSortKey } from "./flatList"
 import { EventsSocket } from "./eventsSocket"
 import { getActivePtySocket } from "./ptySocket"
 import { notifyPtyOwner, resetPtyOwnerEpochs } from "./ptyOwnership"
@@ -58,6 +58,7 @@ import type {
   EventsServerMessage,
   MacroView,
   ProjectWorktreeEntryView,
+  SessionView,
   StartupLogContent,
   StartupLogEntry,
 } from "./types"
@@ -87,6 +88,14 @@ export type SelectedTarget =
 // hub ("home"), the focused terminal, or the changed-files view. Desktop never
 // reads this — it renders all three panes at once.
 export type MobileScreen = "home" | "terminal" | "changes"
+
+// A route the URL names but the workspace cannot resolve. Only agents get one:
+// a session id is stable and a link to one is worth telling the truth about,
+// whereas terminal ids are ephemeral by design and fall back to their owner.
+export interface RouteNotFound {
+  kind: "agent"
+  sessionId: string
+}
 
 /** Which of the two first-load screens the dialog is showing. */
 export type FirstLoadScreen = "welcome" | "whats_new"
@@ -431,9 +440,16 @@ export interface DuxState {
   // there is no set-state-in-effect. Empty draft when closed.
   macrosDialogOpen: boolean
   macrosDraft: MacroView[]
-  // Which screen the mobile shell is showing. Always "home" on desktop, which
-  // ignores it. Only the mobile UI advances it past "home".
+  // Which screen the mobile shell is showing. DERIVED from the route, never kept
+  // independently of it: no focused target is home, a focused target is the
+  // terminal screen, and the changes screen is a `/changes` suffix on the
+  // target's hash. Desktop maintains it the same way and simply ignores it.
   mobileScreen: MobileScreen
+  // Set when the URL names an agent this workspace does not have, which happens
+  // on a stale bookmark and on pressing Back onto an agent that has since been
+  // deleted. The surfaces render `AgentNotFound` for it rather than quietly
+  // pretending the link said nothing. Null whenever the route resolves.
+  routeNotFound: RouteNotFound | null
   // Optimistic drag-and-drop ordering overlays (see `applyPendingOrders`). Each
   // is set the moment a drag ends and cleared once the server's next spine
   // confirms the new order (or an error status arrives). Null when no reorder is
@@ -637,6 +653,7 @@ let state: DuxState = {
   macrosDialogOpen: false,
   macrosDraft: [],
   mobileScreen: "home",
+  routeNotFound: null,
   pendingSessionOrder: null,
   pendingProjectOrder: null,
   pendingAgentOrder: null,
@@ -661,8 +678,21 @@ function emit(): void {
   for (const listener of listeners) listener()
 }
 
+// The screen and the not-found flag are DERIVED from the focused target, never
+// tracked beside it, so a patch that changes the target settles both in the same
+// commit: clearing the target lands on home, focusing one lands on the terminal
+// screen, and either way the route now resolves so nothing is missing. A patch
+// that states `mobileScreen` or `routeNotFound` outright wins, which is how the
+// changes screen opens and how a URL naming a deleted agent is recorded.
 function setState(patch: Partial<DuxState>): void {
-  state = { ...state, ...patch }
+  const next = { ...state, ...patch }
+  if ("selectedTarget" in patch) {
+    if (!("mobileScreen" in patch)) {
+      next.mobileScreen = patch.selectedTarget ? "terminal" : "home"
+    }
+    if (!("routeNotFound" in patch)) next.routeNotFound = null
+  }
+  state = next
   emit()
 }
 
@@ -1004,14 +1034,28 @@ let loadSpineSeq = 0
 // surfaces as an unhandled rejection.
 function loadSpine(): void {
   const seq = ++loadSpineSeq
-  fetchSpine()
-    .then((s) => applySpine(s, seq))
-    .catch((err) => {
+  fetchSpine().then(
+    (s) => {
+      // Applying is not fetching, and the two failures need different names:
+      // folding a throw from the apply into the rejection handler below would
+      // report a perfectly good fetch as a failed one and send whoever reads
+      // the console after the wrong thing. This is a backstop for the apply as a
+      // whole, NOT the history-write guard: a refused history call is caught at
+      // the write itself (`syncUrl`), because the apply is only one of many
+      // paths that write the URL and the rest are user clicks.
+      try {
+        applySpine(s, seq)
+      } catch (err) {
+        console.warn("[dux] spine apply failed", err)
+      }
+    },
+    (err) => {
       // Keep the previous spine (null on first boot); an event or reconnect will
       // retry. Warn so a persistently-failing fetch (e.g. a first boot that stays
       // empty) is visible in the console rather than silent.
       console.warn("[dux] spine fetch failed; will retry on reconnect", err)
-    })
+    },
+  )
 }
 
 // Apply a freshly fetched spine. This is the single place the projects/sessions/
@@ -1034,6 +1078,10 @@ function applySpine(rawSpine: Spine, seq: number): void {
   // older server that omits the field degrades to an empty strip rather than
   // throwing on the `session.tabs` derefs downstream.
   const spine = rawSpine
+  // The outgoing session list, captured before `setState` swaps the spine. A
+  // vanished agent picks its replacement from this ordering (see
+  // `navigateAfterVanish`), since the new list no longer holds its position.
+  const previousSessions = state.spine?.sessions ?? []
   // Clear the "explicitly started" latch for any tab whose process is now live.
   // The latch only bridges the click->process-up gap; once the process is up it
   // is no longer needed, and dropping it means a *later* exit (has_live_process
@@ -1056,8 +1104,15 @@ function applySpine(rawSpine: Spine, seq: number): void {
   // present in this spine (so prune leaves it alone), and it is a one-shot that
   // self-clears, so it never fights a create-focus or a later refetch.
   restoreDeepLink(spine)
+  // Retire a not-found screen the moment this spine proves its URL right again.
+  // Its position relative to the focus step below is not load-bearing: a
+  // freshly created agent wins the focus either way, because `focusNewlyCreatedSession`
+  // running second simply overwrites the retry's selection, and running first
+  // clears `routeNotFound` (any patch carrying a target does, see `setState`),
+  // which makes the retry return immediately. Reading in URL-then-create order.
+  retryRouteNotFound(spine)
   focusNewlyCreatedSession(spine)
-  pruneSelectionIfGone(spine)
+  pruneSelectionIfGone(spine, previousSessions)
   pruneEditorStateIfGone(spine)
   // Re-restore a reconnect deep-link once its agent is present and back to
   // `active`, undoing a transient exit-eject that fired during the reconnect.
@@ -1153,10 +1208,13 @@ function reconcilePendingTerminalOrder(
   return ordersMatch(serverIds, pending) ? null : pending
 }
 
-// Clear the selection when its target no longer exists in the latest spine.
-// Agents persist after exiting (their session stays, marked detached), so they
-// only vanish on deletion; terminals are removed outright when their PTY exits.
-function pruneSelectionIfGone(spine: Spine): void {
+// Move the user to a real destination when what they were looking at no longer
+// exists in the latest spine. Agents persist after exiting (their session stays,
+// marked detached), so they only vanish on deletion; terminals are removed
+// outright when their PTY exits. `previous` is the session list from the spine
+// before this one, which is what gives the gone agent a position to pick a
+// neighbour from.
+function pruneSelectionIfGone(spine: Spine, previous: SessionView[]): void {
   const target = state.selectedTarget
   if (!target) return
   if (target.kind === "agent") {
@@ -1167,12 +1225,25 @@ function pruneSelectionIfGone(spine: Spine): void {
     // heal path). A gone extra tab falls back to the session-slot tab rather than
     // ejecting the user to the welcome screen.
     if (!session) {
-      selectSession(null)
+      navigateAfterVanish(spine, previous, target.sessionId)
     } else if (
       target.tabId !== target.sessionId &&
       !session.tabs.some((t) => t.id === target.tabId)
     ) {
-      selectSession(target.sessionId)
+      // A REWRITE, like every other vanish path: the user did not ask to leave
+      // the tab, so this must not push an entry they never created and leave the
+      // dead tab's entry sitting underneath it. `changes` is carried across
+      // because changed files are session-scoped, so the screen the user is
+      // reading survives the tab going away under it.
+      //
+      // Belt and braces, again: carrying `changes` is exactly what keeps the
+      // SCREEN the same, so `syncUrl` would replace here with or without the
+      // argument. It stays because it is the sentence above, written down.
+      selectSessionRoute(
+        target.sessionId,
+        "replace",
+        state.mobileScreen === "changes",
+      )
     }
     return
   }
@@ -1190,12 +1261,48 @@ function pruneSelectionIfGone(spine: Spine): void {
           .find((p) => p.id === owner.projectId)
           ?.terminals.some((t) => t.id === target.terminalId) ?? false)
   if (!stillExists) {
-    // `selectSession(null)` clears the target and, on mobile, unwinds the spoke
-    // so the back stack matches the screen (see `unwindMobileSpoke`). This is
-    // the other out-of-band clear path: a terminal whose PTY exited is dropped
-    // from the ViewModel while the user may be sitting in its spoke.
-    selectSession(null)
+    // The other out-of-band path: a terminal whose PTY exited is dropped from
+    // the ViewModel while the user may be looking at it. A terminal is not an
+    // agent and has no "next terminal" worth guessing at, so the destination is
+    // whatever sits one level UP: the owning agent for a companion terminal
+    // (which is alive and is a real position), home for a project terminal
+    // (which has nothing above it). This matches what the deep-link path
+    // already does, and both rewrite the current entry rather than stepping
+    // history. Ejecting a companion terminal all the way to home threw away a
+    // position that still existed.
+    const fallback =
+      owner.kind === "session" &&
+      spine.sessions.some((s) => s.id === owner.sessionId)
+        ? owner.sessionId
+        : null
+    selectSessionRoute(fallback, "replace")
   }
+}
+
+// The destination when the focused agent vanishes under the user: the next
+// ACTIVE agent in the order the list is already showing (see
+// `nextActiveSessionId`), or home when every remaining agent is dormant. The
+// URL is REWRITTEN rather than pushed, so the entry pushed on the way in is
+// gone: one Back can then land on the screen the user is already on and look
+// inert. That is accepted, and it only happens when the world changed under
+// them, which beats being thrown out of the app entirely.
+function navigateAfterVanish(
+  spine: Spine,
+  previous: SessionView[],
+  goneSessionId: string,
+): void {
+  // The overlay first, exactly as `FlatAgentList` does before it partitions and
+  // sorts: while a drag is applied but not yet confirmed by the server, the
+  // order on screen is the overlay's, so a destination computed from the raw
+  // spine would name a row that is not the one below the agent that vanished.
+  const pending = state.pendingAgentOrder
+  const next = nextActiveSessionId(
+    pending ? reorderById(previous, pending) : previous,
+    pending ? reorderById(spine.sessions, pending) : spine.sessions,
+    goneSessionId,
+    agentSortValue(state),
+  )
+  selectSessionRoute(next, "replace")
 }
 
 // Snapshot the session ids that exist right now and arm auto-focus for an agent
@@ -1402,60 +1509,46 @@ function boot(): void {
 }
 boot()
 
-// Hardware/browser Back for the mobile shell. Registered ONCE at module scope
-// (never in a React effect) so it survives re-renders and shell switches. The
-// browser has already popped its own entry by the time this fires, so we only
-// mirror that into our screen state. The target is derived from our own state
-// machine — changes unwinds to the terminal when a target is still focused
-// (else home), terminal unwinds to home — not from event.state contents, which
-// keeps it resilient to history entries we didn't author. When mobileScreen is
-// already "home" there is no spoke to unwind, so we no-op; this is also why
-// desktop (which never advances past "home") is unaffected.
+// Browser/hardware Back and Forward. Registered ONCE at module scope (never in a
+// React effect) so it survives re-renders and shell switches. The browser has
+// already moved its own cursor by the time this fires, so the only job here is
+// to read the URL it landed on and make the app match it. Nothing is derived
+// from `event.state`, and nothing is counted: the hash alone says where we are.
 window.addEventListener("popstate", () => {
-  const current = state.mobileScreen
-  if (current === "home") return
-  if (current === "changes") {
-    setState({ mobileScreen: state.selectedTarget ? "terminal" : "home" })
-  } else {
-    setState({ mobileScreen: "home" })
-  }
+  applyUrlRoute()
 })
-
-// INVARIANT: the number of history entries we've pushed equals the spoke depth
-// implied by `mobileScreen` (home = 0, terminal = 1, changes = 2). `mobileNavigate`
-// pushes on the way in; the popstate listener above pops on the way out. When the
-// focused target is cleared OUT-OF-BAND (an agent exits, or a terminal is pruned
-// from the ViewModel) the screen would otherwise fall back to home content while
-// our pushed entries linger, leaving Back as a stale no-op (terminal) or a
-// double-back (changes). This collapses the whole spoke back to home in one
-// `history.go`, which fires a SINGLE popstate at the destination; the listener
-// above then derives `mobileScreen: "home"` (selectedTarget is null by the time
-// it runs because callers clear it first), restoring the invariant.
-function unwindMobileSpoke(): void {
-  if (state.mobileScreen === "terminal") {
-    history.go(-1)
-  } else if (state.mobileScreen === "changes") {
-    history.go(-2)
-  }
-  // "home": no spoke entries to unwind. Desktop never advances past "home", so
-  // it never reaches this branch with entries to pop — desktop is untouched.
-}
 
 export function useDux(): DuxState {
   return useSyncExternalStore(subscribe, getSnapshot)
 }
 
-// --- Deep-linking (a tiny hash router) ------------------------------------
+// --- Routing (a tiny hash router) -----------------------------------------
 //
-// The selected target is mirrored into `location.hash` so a tab can be bookmarked
-// /shared/reloaded back to the same agent (and, when one is focused, terminal):
+// The URL is the SOURCE OF TRUTH for where the app is, including which screen
+// the mobile shell shows. The selected target is mirrored into `location.hash`
+// so a tab can be bookmarked/shared/reloaded back to the same place:
 //   #/agent/<sessionId>
 //   #/agent/<sessionId>/terminal/<terminalId>
+//   #/agent/<sessionId>/changes
 // Session ids are stable (a reload restores the agent); terminal ids are
 // ephemeral (a reload that finds the session but not the terminal falls back to
-// the agent; one that finds neither ignores the link). The hash is written with
-// `history.replaceState` so it never adds a back-stack entry (that would fight
-// the mobile spoke/back-button model, which uses `pushState`/`go`).
+// the agent). A hash naming a session the workspace does not have resolves to
+// the not-found screen (`routeNotFound`) rather than silently landing home.
+//
+// Moving to a DIFFERENT screen pushes a history entry, in BOTH directions:
+// going into an agent pushes, and the Up control that comes back out pushes too,
+// because both are ordinary navigation between two real positions and the
+// browser is supposed to accumulate those. Changing which agent or tab is
+// focused within the same screen replaces the current entry, so switching around
+// never piles up. Back and Forward are only ever the browser's own, and the app
+// never steps history relatively: `history.go` appears nowhere. The screen is
+// read from the URL, so there is no separate depth to keep in agreement with it.
+//
+// Only two things replace on a screen CHANGE, and both name a position the
+// browser is already parked on rather than a new one: a RESTORE (the boot
+// deep-link, the reconnect re-restore, the destination chosen when what the user
+// was looking at vanished under them) and a CORRECTION (leaving the not-found
+// screen, which is retiring a bad address, not visiting a place worth keeping).
 
 // Parse a deep-link hash into a target, or null when it is absent/malformed.
 function parseSelectionHash(hash: string): SelectedTarget | null {
@@ -1531,41 +1624,274 @@ function selectionHash(target: SelectedTarget | null): string {
     : `${base}/tab/${encodeURIComponent(target.tabId)}`
 }
 
-// Mirror the current selection into the URL hash without growing the back stack.
-// Defensive: in non-browser test environments `history.replaceState` / a real
-// `location` may be absent, so this no-ops there.
-function writeSelectionHash(): void {
+// A position in the app: what is focused, plus whether the changes screen is
+// open on top of it. This is everything the URL encodes and everything the
+// screen is derived from.
+interface Route {
+  target: SelectedTarget | null
+  changes: boolean
+}
+
+// The changes screen rides as a suffix on the focused target's hash, so it
+// bookmarks and shares like any other position.
+const CHANGES_SUFFIX = "/changes"
+
+// Parse a hash into a route. A hash that names no valid target is home.
+function parseRoute(hash: string): Route {
+  const direct = parseSelectionHash(hash)
+  if (direct) return { target: direct, changes: false }
+  // The two branches are mutually exclusive rather than ranked: every regex in
+  // `parseSelectionHash` is anchored, so no hash can parse both as a target and
+  // as a target-plus-suffix. `#/agent/s1/tab/changes` parses directly and never
+  // reaches here; `#/agent/s1/changes` does not parse directly and only the
+  // strip finds it. Trying the direct parse first is just the common case
+  // first, it decides nothing, and inverting the order would produce the same
+  // answers.
+  if (hash.endsWith(CHANGES_SUFFIX)) {
+    const target = parseSelectionHash(hash.slice(0, -CHANGES_SUFFIX.length))
+    if (target) return { target, changes: true }
+  }
+  return { target: null, changes: false }
+}
+
+// The hash for a route. Home is the empty hash; the changes suffix only applies
+// on top of a focused target, since there is nothing to show changes for
+// otherwise.
+function routeHash(route: Route): string {
+  const base = selectionHash(route.target)
+  if (base === "" || !route.changes) return base
+  return base + CHANGES_SUFFIX
+}
+
+// The screen a route puts the mobile shell on. This is the whole derivation:
+// screen state is never tracked independently of the route.
+function routeScreen(route: Route): MobileScreen {
+  if (!route.target) return "home"
+  return route.changes ? "changes" : "terminal"
+}
+
+// The route the app currently holds in state.
+function currentRoute(): Route {
+  return {
+    target: state.selectedTarget,
+    changes: state.mobileScreen === "changes",
+  }
+}
+
+// Bring the URL in line with the app's current position. Pushes when the
+// destination is a DIFFERENT screen from the one the URL names (the user moved
+// between two positions, in either direction) and replaces when it is the same
+// screen (switching agents or tabs in place), so switching around never piles up
+// while every screen change stays reachable by Back. `mode: "replace"` forces a
+// replace for a move the user did not ask for: the boot deep-link restore, the
+// reconnect re-restore, the destination picked when what they were looking at
+// vanished under them, and the way out of the not-found screen. Those last two
+// deliberately discard the entry pushed on the way in, so one Back can land on
+// the screen you are already on; that is accepted, and far better than either
+// stepping out of the app or bouncing back onto a dead link.
+//
+// Defensive: in non-browser test environments `history.replaceState` /
+// `history.pushState` / a real `location` may be absent, so this degrades
+// rather than throwing.
+//
+// The write itself is BEST-EFFORT and never throws at its caller. A browser can
+// refuse a history call (Safari rate-limits them), and every call site here is
+// reached from a click handler AFTER the screen has already moved, so letting
+// the refusal propagate would abort the handler mid-navigation and leave the
+// screen and the URL disagreeing with no one to put them back. Swallow it, warn
+// so a persistently-refusing browser is visible, and let the next successful
+// write bring the address bar back in line. This is the ONE place a history call
+// is made, which is what makes the one guard enough.
+function syncUrl(mode?: "replace"): void {
   if (typeof history === "undefined" || typeof history.replaceState !== "function") {
     return
   }
-  const next = selectionHash(state.selectedTarget)
-  const current = typeof location !== "undefined" ? location.hash ?? "" : ""
+  const next = routeHash(currentRoute())
+  const current = typeof location !== "undefined" ? (location.hash ?? "") : ""
+  // Belt and braces: when the address is already what we would write, the
+  // branch below would take the replace arm anyway (an unchanged hash is an
+  // unchanged screen) and rewrite the identical URL. Skipping the write is
+  // cheaper and keeps `history.state` untouched, but nothing depends on it.
   if (current === next) return
   // An empty target hash collapses to the bare path so the URL doesn't keep a
-  // dangling "#"; otherwise replace just the hash, preserving path + query.
+  // dangling "#"; otherwise write just the hash, preserving path + query.
   const base =
     typeof location !== "undefined"
       ? (location.pathname ?? "") + (location.search ?? "")
       : ""
-  history.replaceState(history.state, "", next === "" ? base : next)
+  const url = next === "" ? base : next
+  const movedScreen =
+    routeScreen(parseRoute(next)) !== routeScreen(parseRoute(current))
+  try {
+    if (mode !== "replace" && movedScreen && typeof history.pushState === "function") {
+      history.pushState({ duxRoute: next }, "", url)
+      return
+    }
+    history.replaceState(history.state, "", url)
+  } catch (err) {
+    console.warn("[dux] history write refused", err)
+  }
 }
 
-// The deep-link parsed from the URL at module load, restored once the first spine
+// Adopt the route the URL currently names. Called from popstate, where the
+// browser has already moved its cursor, so this only mirrors the destination
+// into state and must never write the URL back.
+function applyUrlRoute(): void {
+  const hash = typeof location !== "undefined" ? (location.hash ?? "") : ""
+  const route = parseRoute(hash)
+  const spine = state.spine
+  if (!spine) {
+    // A popstate before the first spine landed: a slow spine fetch, or a
+    // session/bfcache restore that comes back with a back stack already. This
+    // used to return and drop the route on the floor, on the claim that the
+    // boot deep-link restore would resolve the hash later. It does not: that
+    // restore resolves the BOOT hash, and the browser has since moved to a
+    // different one. Both outcomes were measured. Booting on home and stepping
+    // to an agent left the address bar naming an agent the app never selected,
+    // permanently, since nothing retries. Booting on an agent and stepping back
+    // to home had the boot restore silently undo the Back and overwrite the
+    // entry the user had landed on.
+    //
+    // So the pending boot link is REPLACED by where the browser actually is,
+    // and `restoreDeepLink` resolves that against the first spine. A route
+    // naming home replaces it with null, which is exactly the cancellation the
+    // second case needs. Nothing else can be done here: resolving a target
+    // needs a session list, and there is none yet.
+    pendingDeepLink = route.target
+    pendingDeepLinkChanges = route.changes
+    return
+  }
+  if (!route.target) {
+    // Through `selectSessionRoute`, not `clearSelection`, because pressing Back
+    // to home is the user taking control: it must disarm the reconnect
+    // deep-link intent, or a reconnect could yank them back to the agent they
+    // just left.
+    selectSessionRoute(null)
+    return
+  }
+  resolveRouteTarget(spine, route.target, route.changes)
+}
+
+// Resolve a route's target against a spine and commit it, or record not-found
+// when the agent it names is gone. The URL is not rewritten on the not-found
+// path: the address the user is looking at stays truthful, and Forward still
+// works.
+function resolveRouteTarget(
+  spine: Spine,
+  target: SelectedTarget,
+  changes: boolean,
+): void {
+  let sessionId: string
+  if (target.kind === "terminal") {
+    const owner = target.owner
+    if (owner.kind === "project") {
+      // A project terminal belongs to no session, so it resolves against the
+      // project list on its own.
+      applyProjectTerminalDeepLink(
+        spine,
+        target.terminalId,
+        owner.projectId,
+        "replace",
+        changes,
+      )
+      return
+    }
+    sessionId = owner.sessionId
+  } else {
+    sessionId = target.sessionId
+  }
+  const session = spine.sessions.find((s) => s.id === sessionId)
+  if (!session) {
+    setRouteNotFound(sessionId)
+    return
+  }
+  // `changes` travels WITH the target rather than being applied after it. The
+  // URL names the screen as well as the focus, and `syncUrl` reads the screen
+  // off state, so committing the target first and the screen second would write
+  // the address from a half-applied route and strip the `/changes` segment off
+  // the very URL being resolved.
+  //
+  // The `"replace"` here is BELT AND BRACES. Every caller has the browser
+  // already parked on this hash, and the only rewrites this path can produce
+  // (a gone tab or a gone terminal falling back to its session) stay on the
+  // same SCREEN, so `syncUrl` would replace on its own. It is passed because
+  // the intent, "this is a restore, never a new position", should be stated at
+  // the call site rather than inferred from what the fallbacks happen to do.
+  applyDeepLinkSelection(session, target, "replace", changes)
+}
+
+// The session a route target belongs to, or null for a project terminal (which
+// belongs to a project instead).
+function targetSessionId(target: SelectedTarget): string | null {
+  if (target.kind === "agent") return target.sessionId
+  return target.owner.kind === "session" ? target.owner.sessionId : null
+}
+
+// Retire the not-found screen once a spine carries the agent its URL names. The
+// flag is set from the route, so only the route can clear it, and nothing else
+// on the spine path touches it: the prune returns early (there is no selection
+// to prune) and no state patch mentions the missing target. Without this the
+// screen sticks after the agent comes back, and on a phone it replaces the whole
+// shell, so its single button is the only way out.
+//
+// The check that the URL still names the agent we flagged is BELT AND BRACES,
+// not a live guard: any move the user makes carries a target, and a patch
+// carrying a target clears the flag (see `setState`), so by the time the hash
+// disagrees there is no flag left to act on. It is kept because it is the one
+// line that makes "never re-read a stale hash" true by inspection rather than
+// by tracing every writer of `routeNotFound`.
+function retryRouteNotFound(spine: Spine): void {
+  const missing = state.routeNotFound
+  if (!missing) return
+  const route = parseRoute(typeof location !== "undefined" ? (location.hash ?? "") : "")
+  if (!route.target) return
+  if (targetSessionId(route.target) !== missing.sessionId) return
+  if (!spine.sessions.some((s) => s.id === missing.sessionId)) return
+  resolveRouteTarget(spine, route.target, route.changes)
+}
+
+// The URL names an agent this workspace does not have. Clear the selection and
+// hand the surfaces something truthful to render (see `AgentNotFound`); pressing
+// Back onto a deleted agent is a normal thing to do.
+function setRouteNotFound(sessionId: string): void {
+  const prev = state.selectedSessionId
+  setState({
+    selectedTarget: null,
+    selectedSessionId: null,
+    changes: emptyChanges(),
+    mobileScreen: "home",
+    routeNotFound: { kind: "agent", sessionId },
+  })
+  switchChangesSubscription(prev, null)
+}
+
+// The route parsed from the URL at module load, restored once the first spine
 // lands (a target can't be resolved until the session list exists). One-shot:
 // consumed (and cleared) on the first `applySpine` so later spine refetches don't
 // re-yank a user who has since navigated away.
-let pendingDeepLink: SelectedTarget | null =
+const bootRoute: Route =
   typeof location !== "undefined"
-    ? parseSelectionHash(location.hash ?? "")
-    : null
+    ? parseRoute(location.hash ?? "")
+    : { target: null, changes: false }
+// Both halves are mutable: a popstate that beats the first spine overwrites
+// them with the address the browser actually moved to (see `applyUrlRoute`), so
+// the restore resolves that rather than a boot hash the user has already left.
+let pendingDeepLink: SelectedTarget | null = bootRoute.target
+let pendingDeepLinkChanges = bootRoute.changes
 
-// Route a normalized deep-link target onto an already-resolved session: restore
-// a still-present terminal or extra tab, else fall back to the session-slot tab.
-// Shared by the boot deep-link restore and the reconnect re-restore so both
-// honor tabs/terminals identically.
+// Route a normalized route target onto an already-resolved session: restore a
+// still-present terminal or extra tab, else fall back to the session-slot tab.
+// Shared by the boot restore, the reconnect re-restore, and Back/Forward so all
+// three honor tabs/terminals identically. `urlMode` is passed through to
+// `syncUrl`: these are all restores of a position the URL already names (or a
+// correction to one), never a fresh move in, so they replace. `changes` is the
+// screen half of the route and is committed in the SAME state patch as the
+// target, never after it, so the URL is only ever written from a whole route.
 function applyDeepLinkSelection(
   session: Spine["sessions"][number],
   target: SelectedTarget,
+  urlMode?: "replace",
+  changes?: boolean,
 ): void {
   if (target.kind === "terminal") {
     // Only session-owned terminals resolve through a session; project-terminal
@@ -1573,11 +1899,13 @@ function applyDeepLinkSelection(
     if (target.owner.kind !== "session") return
     const owner = target.owner
     if (session.terminals.some((t) => t.id === target.terminalId)) {
-      selectTerminal(target.terminalId, owner)
+      selectTerminal(target.terminalId, owner, { urlMode, changes })
       return
     }
-    // Terminal id gone — fall back to the owning agent.
-    selectSession(owner.sessionId)
+    // Terminal id gone, so fall back to the owning agent, keeping the changes
+    // screen: changed files are SESSION-scoped, so they survive any fallback
+    // that stays inside the same session.
+    selectSessionRoute(owner.sessionId, urlMode, changes)
     return
   }
   if (
@@ -1588,60 +1916,46 @@ function applyDeepLinkSelection(
     // through to the session-slot tab. `persist: false` because merely FOLLOWING
     // a shared link must not rewrite the workspace-shared remembered tab for
     // everyone that opens it.
-    selectTab(target.sessionId, target.tabId, { persist: false })
+    selectTab(target.sessionId, target.tabId, { persist: false, urlMode, changes })
     return
   }
-  selectSession(target.sessionId)
+  selectSessionRoute(target.sessionId, urlMode, changes)
 }
 
-// Restore the boot-time deep-link against the first spine. Resolve the session in
-// the spine; restore the terminal when it still exists, else fall back to the
-// session; ignore the link entirely when the session is gone.
+// Restore the boot URL against the first spine. Resolve the session in the
+// spine; restore the terminal when it still exists, else fall back to the
+// session; render the not-found screen when the session is gone. The mobile
+// shell lands on the screen the URL names (`resolveRouteTarget` commits the
+// target, and the screen follows from it), which is what makes an agent link
+// open its terminal rather than leaving the hub on top of it. Nothing is pushed:
+// the browser is already parked on this entry.
 function restoreDeepLink(spine: Spine): void {
   const link = pendingDeepLink
   if (!link) return
   pendingDeepLink = null // one-shot, whatever the outcome
-  if (link.kind === "terminal") {
-    const owner = link.owner
-    if (owner.kind === "project") {
-      // A project-terminal link: restore it when it still exists; a vanished
-      // terminal falls back to nothing selected (there is no agent to land on).
-      applyProjectTerminalDeepLink(spine, link.terminalId, owner.projectId)
-    } else {
-      const session = spine.sessions.find((s) => s.id === owner.sessionId)
-      // session id gone — ignore the link
-      if (session) applyDeepLinkSelection(session, link)
-    }
-  } else {
-    const session = spine.sessions.find((s) => s.id === link.sessionId)
-    // session id gone — ignore the link
-    if (session) applyDeepLinkSelection(session, link)
-  }
-  // If the boot deep-link resolved to a selection, advance the mobile shell to
-  // the terminal spoke. Otherwise `mobileScreen` stays "home" and the hub covers
-  // the deep-linked agent — and, because the terminal pane only mounts on the
-  // terminal screen, the PTY never even subscribes/launches. Desktop has no such
-  // screen state and renders the center pane straight from `selectedTarget`, so
-  // it "just works" there. This mirrors a tap's `mobileNavigate("terminal")` and
-  // the popstate derive; `setState` (not `mobileNavigate`) avoids pushing a
-  // spurious history entry at boot.
-  if (state.selectedTarget) {
-    setState({ mobileScreen: "terminal" })
-  }
+  resolveRouteTarget(spine, link, pendingDeepLinkChanges)
 }
 
-// Restore a project-terminal deep link against a spine: select the terminal
-// when its project still carries it, otherwise leave nothing selected.
+// Restore a project-terminal route against a spine: select the terminal when its
+// project still carries it, and land home when either the project or the terminal
+// is gone. Landing home is a real navigation, URL included: returning silently
+// used to leave the address bar naming a terminal the app was not showing, which
+// is the exact URL-versus-state disagreement this router exists to remove. There
+// is no not-found screen for a terminal, deliberately, since terminal ids are
+// ephemeral and a closed terminal is ordinary rather than a broken link.
 function applyProjectTerminalDeepLink(
   spine: Spine,
   terminalId: string,
   projectId: string,
+  urlMode?: "replace",
+  changes?: boolean,
 ): void {
   const project = spine.projects.find((p) => p.id === projectId)
-  if (!project) return
-  if (project.terminals.some((t) => t.id === terminalId)) {
-    selectTerminal(terminalId, { kind: "project", projectId })
+  if (project?.terminals.some((t) => t.id === terminalId)) {
+    selectTerminal(terminalId, { kind: "project", projectId }, { urlMode, changes })
+    return
   }
+  selectSessionRoute(null, urlMode)
 }
 
 // Deep-link intent re-armed on an events-socket RECONNECT — distinct from the
@@ -1656,7 +1970,16 @@ function applyProjectTerminalDeepLink(
 // — and re-restore it once the agent is present AND back to `active` (its resume
 // has completed). Restoring earlier, while still `detached`, would ping-pong
 // with the center pane's eject.
-let reconnectDeepLink: { target: SelectedTarget; armedAt: number } | null = null
+// The `changes` half of the route rides along with the target: the intent is a
+// whole POSITION, not just a focus. Arming from a target alone used to strand a
+// user reading changed files twice over, first because the anchored
+// `parseSelectionHash` read `#/agent/<sid>/changes` as no link at all, and then
+// because the restore would have dropped them onto the terminal screen.
+let reconnectDeepLink: {
+  target: SelectedTarget
+  changes: boolean
+  armedAt: number
+} | null = null
 
 // Bound how long the re-armed intent stays live, measured from the LATEST
 // events-socket reopen (armReconnectDeepLink refreshes `armedAt` on every
@@ -1686,9 +2009,16 @@ function armReconnectDeepLink(): void {
     reconnectDeepLink = null
     return
   }
-  const target = parseSelectionHash(location.hash ?? "")
-  if (target) {
-    reconnectDeepLink = { target, armedAt: Date.now() }
+  // Through `parseRoute`, never `parseSelectionHash`: the latter's regexes are
+  // anchored, so a hash carrying the `/changes` suffix parses as null and the
+  // whole reconnect would arm nothing.
+  const route = parseRoute(location.hash ?? "")
+  if (route.target) {
+    reconnectDeepLink = {
+      target: route.target,
+      changes: route.changes,
+      armedAt: Date.now(),
+    }
     return
   }
   // The hash reads as home. This is either a genuine "nothing was deep-linked"
@@ -1754,7 +2084,14 @@ function restoreReconnectDeepLink(spine: Spine): void {
         .find((p) => p.id === owner.projectId)
         ?.terminals.some((t) => t.id === target.terminalId) ?? false
     if (!exists) return // keep waiting within the TTL (the spine may lag)
-    selectTerminal(target.terminalId, owner)
+    // A replace: this restores the position the browser is ALREADY parked on
+    // (the hash still names it, or our own eject rewrote it). Pushing would add
+    // an entry per reconnect, so a flaky link would put an unbounded pile of
+    // duplicates between the user and home.
+    selectTerminal(target.terminalId, owner, {
+      urlMode: "replace",
+      changes: armed.changes,
+    })
     reconnectDeepLink = null
     return
   }
@@ -1801,8 +2138,10 @@ function restoreReconnectDeepLink(spine: Spine): void {
   // The agent is present and running again. If the eject already cleared the
   // selection, re-restore the captured route; if it never cleared, this is a
   // no-op. Either way, disarm.
+  // A replace, for the same reason as the project-terminal branch above: this is
+  // a restore of the position the URL already named, not a move the user made.
   if (sel !== armedSessionId) {
-    applyDeepLinkSelection(session, armed.target)
+    applyDeepLinkSelection(session, armed.target, "replace", armed.changes)
   }
   reconnectDeepLink = null
 }
@@ -1818,25 +2157,32 @@ function restoreReconnectDeepLink(spine: Spine): void {
 // not a write — no persistence call happens here; `selectTab` below owns
 // persisting an actual tab switch.
 export function selectSession(id: string | null): void {
+  selectSessionRoute(id, undefined)
+}
+
+// The screen half of a route commit. A selection carries it so the target and
+// the screen land in ONE state patch, which is what lets `syncUrl` write a whole
+// route; `undefined` means "the ordinary derivation" (a target is the terminal
+// screen), and only a route that explicitly names `/changes` passes `true`.
+function screenPatch(changes?: boolean): { mobileScreen: MobileScreen } | object {
+  return changes ? { mobileScreen: "changes" as const } : {}
+}
+
+// `selectSession` with control over how the URL is written. `urlMode:
+// "replace"` is for a move the user did not make: a restore, or the destination
+// chosen when what they were looking at vanished. `changes` restores the changes
+// screen for a route that names it.
+function selectSessionRoute(
+  id: string | null,
+  urlMode?: "replace",
+  changes?: boolean,
+): void {
   // Any deliberate selection (to an agent OR to null/home) means the user took
   // control. See `ejectSelectionForReconnect` below for the one carve-out.
   lastClearWasReconnectEject = false
   const prev = state.selectedSessionId
   if (id === null) {
-    // Clear the target FIRST so any synchronous re-render shows the fallback,
-    // THEN collapse the mobile spoke so the back stack matches the screen. This
-    // is the out-of-band clear path (e.g. an agent exit) — see
-    // `unwindMobileSpoke`. Desktop stays on "home", so the unwind no-ops there.
-    setState({
-      selectedTarget: null,
-      selectedSessionId: null,
-      changes: emptyChanges(),
-    })
-    // Drop the previous session's changed-files subscription; there is no global
-    // watch to clear, so the cross-client clobber is gone by construction.
-    switchChangesSubscription(prev, null)
-    writeSelectionHash()
-    unwindMobileSpoke()
+    clearSelection(urlMode)
     return
   }
   const session = state.spine?.sessions.find((s) => s.id === id)
@@ -1845,7 +2191,7 @@ export function selectSession(id: string | null): void {
     // A remembered extra tab is still live: select it directly so the
     // hash/changes wiring and the persistence write match an explicit tab
     // click exactly.
-    selectTab(id, focusedTab)
+    selectTab(id, focusedTab, { urlMode, changes })
     return
   }
   setState({
@@ -1856,12 +2202,29 @@ export function selectSession(id: string | null): void {
     // the loading window so the pane shows a spinner, not the previous session's
     // files.
     changes: prev === id ? state.changes : loadingChanges(id),
+    ...screenPatch(changes),
   })
   // Move the per-session changed-files subscription, THEN fetch — subscribing
   // before the GET means an invalidation that races the fetch is never missed.
   switchChangesSubscription(prev, id)
-  writeSelectionHash()
+  syncUrl(urlMode)
   if (prev !== id) loadChanges(id)
+}
+
+// Drop the focused target and land on home. The target is cleared FIRST so any
+// synchronous re-render shows the fallback; the URL is written after, and the
+// screen follows the empty target (see `setState`).
+function clearSelection(urlMode?: "replace"): void {
+  const prev = state.selectedSessionId
+  setState({
+    selectedTarget: null,
+    selectedSessionId: null,
+    changes: emptyChanges(),
+  })
+  // Drop the previous session's changed-files subscription; there is no global
+  // watch to clear, so the cross-client clobber is gone by construction.
+  switchChangesSubscription(prev, null)
+  syncUrl(urlMode)
 }
 
 // The ONE carve-out to `selectSession`'s "any clear disarms the reconnect
@@ -1873,7 +2236,10 @@ export function selectSession(id: string | null): void {
 // agent was still resuming, only the former should be undone once the agent
 // comes back to `active`.
 export function ejectSelectionForReconnect(): void {
-  selectSession(null)
+  // A replace, not a push: the eject is transient (the reconnect re-restore
+  // undoes it), so it must not leave a home entry between the user and the
+  // agent they were on.
+  selectSessionRoute(null, "replace")
   lastClearWasReconnectEject = true
 }
 
@@ -1890,16 +2256,17 @@ export function ejectSelectionForReconnect(): void {
 export function selectTab(
   sessionId: string,
   tabId: string,
-  opts?: { persist?: boolean },
+  opts?: { persist?: boolean; urlMode?: "replace"; changes?: boolean },
 ): void {
   const prev = state.selectedSessionId
   setState({
     selectedTarget: { kind: "agent", sessionId, tabId },
     selectedSessionId: sessionId,
     changes: prev === sessionId ? state.changes : loadingChanges(sessionId),
+    ...screenPatch(opts?.changes),
   })
   switchChangesSubscription(prev, sessionId)
-  writeSelectionHash()
+  syncUrl(opts?.urlMode)
   if (prev !== sessionId) loadChanges(sessionId)
   if (opts?.persist === false) return
   persistFocusedTab(sessionId, tabId === sessionId ? null : tabId)
@@ -1943,7 +2310,11 @@ function fireFocusedTabPut(
 // terminal has NO session context (`selectedSessionId` stays null and the
 // changes pane shows its empty state, since changed files belong to a session's
 // worktree, and the project's source checkout has no diff pipeline).
-export function selectTerminal(terminalId: string, owner: TerminalOwnerRef): void {
+export function selectTerminal(
+  terminalId: string,
+  owner: TerminalOwnerRef,
+  opts?: { urlMode?: "replace"; changes?: boolean },
+): void {
   const prev = state.selectedSessionId
   const sessionId = owner.kind === "session" ? owner.sessionId : null
   setState({
@@ -1958,12 +2329,13 @@ export function selectTerminal(terminalId: string, owner: TerminalOwnerRef): voi
         : prev === sessionId
           ? state.changes
           : loadingChanges(sessionId),
+    ...screenPatch(opts?.changes),
   })
   // The changed files belong to the SESSION, so subscribe/fetch the parent
   // session even when a companion terminal is the streamed target; a project
   // terminal drops the subscription entirely.
   switchChangesSubscription(prev, sessionId)
-  writeSelectionHash()
+  syncUrl(opts?.urlMode)
   if (sessionId !== null && prev !== sessionId) loadChanges(sessionId)
 }
 
@@ -2520,6 +2892,10 @@ export function reconnectSession(sessionId: string, force: boolean): void {
     selectedSessionId: sessionId,
     terminalEpoch: state.terminalEpoch + 1,
   })
+  // This focuses an agent like any other selection, so the URL has to say so
+  // too: a position the address bar does not name is a position Back cannot
+  // return to.
+  syncUrl()
 }
 
 export function openGlobalEnv(): void {
@@ -3494,25 +3870,47 @@ export function saveMacros(macros: MacroView[]): void {
   closeMacrosDialog()
 }
 
-// Mobile hub-&-spoke navigation. Moving INTO a spoke ("terminal" or "changes")
-// pushes a history entry so the hardware/browser Back button unwinds the stack
-// one screen at a time (see the popstate listener above). Navigating to "home"
-// is a programmatic return: rather than just flipping state (which would leave
-// the pushed spoke entries dangling), it routes through `unwindMobileSpoke` so
-// the history depth collapses to match — keeping the back stack honest for any
-// future caller. Re-navigating to the screen we're already on is a no-op so we
-// never stack duplicate history entries (e.g. switching sessions while already
-// on the terminal screen must not deepen the back stack). The comparison reads
-// the LATEST `state.mobileScreen`, so a tap that races a pending popstate still
-// sees the up-to-date screen and won't double-push.
-export function mobileNavigate(screen: MobileScreen): void {
-  if (screen === state.mobileScreen) return
-  if (screen === "home") {
-    unwindMobileSpoke()
+// Open the mobile changes screen over the focused agent. It is a position of its
+// own in the URL (`#/agent/<sid>/changes`), so entering it pushes an entry and
+// the browser's Back leaves it. There is no matching "go to the terminal screen"
+// or "go home" call: focusing a target IS the terminal screen and clearing the
+// target IS home, both through the ordinary selection functions.
+export function openChangesScreen(): void {
+  if (!state.selectedTarget || state.mobileScreen === "changes") return
+  setState({ mobileScreen: "changes" })
+  syncUrl()
+}
+
+// The destination one level UP from where the app is: the changes screen sits on
+// top of the agent it belongs to, everything else sits on top of home. This is
+// what the mobile shell's chevrons and the not-found screen's way out call, and
+// it is emphatically NOT the browser's Back.
+//
+// Up must name a destination, because a relative step has no floor. A deep-link
+// boot pushes nothing, so on that first screen dux's own entry IS the bottom of
+// the stack and stepping back walks out of the application onto whatever page
+// preceded it, which is the bug this whole model exists to remove.
+//
+// Up from a REAL screen PUSHES, because it is ordinary navigation to a different
+// position and the browser is supposed to accumulate those: Back then alternates
+// meaningfully between where you were and where you went. It used to replace,
+// and that quietly grew the stack by one entry per trip, since going in pushed
+// and coming out overwrote the top: ten trips in and out left ten identical home
+// entries, so Back did nothing visible ten times before it did anything at all.
+//
+// Leaving the NOT-FOUND screen is the one exception, and it replaces. That is
+// not navigation between two positions, it is a CORRECTION of a bad URL, and a
+// corrected URL is not a position worth keeping: pushing there would put the
+// dead end exactly one Back away, so the user's way out would bounce them
+// straight back onto it.
+export function navigateUp(): void {
+  const urlMode = state.routeNotFound ? ("replace" as const) : undefined
+  if (state.mobileScreen === "changes" && state.selectedTarget) {
+    setState({ mobileScreen: "terminal" })
+    syncUrl(urlMode)
     return
   }
-  setState({ mobileScreen: screen })
-  history.pushState({ duxMobile: screen }, "")
+  selectSessionRoute(null, urlMode)
 }
 
 export function reconnect(): void {

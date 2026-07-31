@@ -2,12 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import type { Spine } from "./spineApi"
 
-// Phase 6 deep-linking: a tiny hash router mirrors the selected target into
+// Deep-linking: a tiny hash router mirrors the selected target into
 // `location.hash` (#/agent/<id> | #/agent/<id>/terminal/<tid>). On load the hash
 // is parsed and, once the first spine lands, the selection is restored (falling
-// back to the agent when the terminal id is gone; ignoring the link when the
-// session id is gone). On selection change the hash is rewritten with
-// `history.replaceState` (never `pushState`, so the mobile back-stack is intact).
+// back to the agent when the terminal id is gone; rendering the not-found screen
+// when the session id is gone). On selection change the hash is rewritten:
+// pushed when the destination is a different screen, replaced when it is not.
+// See `storeRouting.test.ts` for the history-stack behavior that rests on it.
 
 function makeSpine(
   sessions: {
@@ -38,6 +39,14 @@ function makeSpine(
 
 let spineBody: Spine = makeSpine([])
 let replaceStateMock: ReturnType<typeof vi.fn>
+let pushStateMock: ReturnType<typeof vi.fn>
+let loc: {
+  protocol: string
+  host: string
+  hash: string
+  pathname: string
+  search: string
+}
 
 const fetchMock = vi.fn(async (url: string) => {
   const u = String(url)
@@ -82,7 +91,15 @@ class FakeWebSocket {
 
 beforeEach(() => {
   spineBody = makeSpine([])
-  replaceStateMock = vi.fn()
+  // Both writers mirror the new URL back into the fake `location`, the way a
+  // browser does, so the router's next push-or-replace decision reads the hash
+  // it actually just wrote rather than a frozen boot value.
+  replaceStateMock = vi.fn((_s: unknown, _t: string, url: string) => {
+    loc.hash = url.startsWith("#") ? url : ""
+  })
+  pushStateMock = vi.fn((_s: unknown, _t: string, url: string) => {
+    loc.hash = url.startsWith("#") ? url : ""
+  })
   vi.stubGlobal("localStorage", {
     getItem: () => null,
     setItem: () => {},
@@ -90,7 +107,7 @@ beforeEach(() => {
   })
   vi.stubGlobal("window", { addEventListener: () => {} })
   vi.stubGlobal("history", {
-    go: () => {},
+    pushState: pushStateMock,
     replaceState: replaceStateMock,
     state: null,
   })
@@ -111,13 +128,14 @@ async function loadStore(
   sessions: { id: string; project_id: string; terminals?: string[] }[],
   projects: { id: string; terminals?: string[] }[] = [],
 ) {
-  vi.stubGlobal("location", {
+  loc = {
     protocol: "http:",
     host: "localhost:0",
     hash,
     pathname: "/",
     search: "",
-  })
+  }
+  vi.stubGlobal("location", loc)
   spineBody = makeSpine(sessions, projects)
   const mod = await import("./store")
   await vi.waitFor(() => {
@@ -143,10 +161,13 @@ describe("deep-link restore on load", () => {
     expect(mod.getSnapshot().mobileScreen).toBe("terminal")
   })
 
-  it("leaves the mobile shell on home when the deep-link session is gone", async () => {
+  it("reports not-found when the deep-link session is gone", async () => {
     const mod = await loadStore("#/agent/missing", [{ id: "s1", project_id: "p1" }])
     expect(mod.getSnapshot().selectedTarget).toBeNull()
-    expect(mod.getSnapshot().mobileScreen).toBe("home")
+    expect(mod.getSnapshot().routeNotFound).toEqual({
+      kind: "agent",
+      sessionId: "missing",
+    })
   })
 
   it("restores an extra-tab selection from #/agent/<id>/tab/<tabId>", async () => {
@@ -239,11 +260,31 @@ describe("deep-link restore on load", () => {
     })
   })
 
-  it("ignores the link when the session id is gone", async () => {
+  it("selects nothing when the session id is gone", async () => {
     const mod = await loadStore("#/agent/missing", [
       { id: "s1", project_id: "p1" },
     ])
     expect(mod.getSnapshot().selectedTarget).toBeNull()
+  })
+
+  it("restores the changes screen from #/agent/<id>/changes", async () => {
+    const mod = await loadStore("#/agent/s1/changes", [
+      { id: "s1", project_id: "p1" },
+    ])
+    expect(mod.getSnapshot().selectedSessionId).toBe("s1")
+    expect(mod.getSnapshot().mobileScreen).toBe("changes")
+  })
+
+  it("does not mistake a tab named 'changes' for the changes screen", async () => {
+    const mod = await loadStore("#/agent/s1/tab/changes", [
+      { id: "s1", project_id: "p1", tabs: ["changes"] },
+    ])
+    expect(mod.getSnapshot().selectedTarget).toEqual({
+      kind: "agent",
+      sessionId: "s1",
+      tabId: "changes",
+    })
+    expect(mod.getSnapshot().mobileScreen).toBe("terminal")
   })
 
   it("a malformed percent-encoded hash does not crash the app at load", async () => {
@@ -269,35 +310,61 @@ describe("deep-link restore on load", () => {
   })
 })
 
+// The URL is written on every selection change. Moving between SCREENS (home to
+// an agent, an agent back to home) pushes an entry so the browser's Back
+// unwinds it; changing which agent or tab is focused within the terminal screen
+// replaces the current entry, so switching around never piles up history.
 describe("selection writes the hash", () => {
-  it("selecting an agent replaces the hash with #/agent/<id>", async () => {
+  it("selecting an agent from home pushes #/agent/<id>", async () => {
     const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
-    replaceStateMock.mockClear()
+    pushStateMock.mockClear()
     mod.selectSession("s1")
-    expect(replaceStateMock).toHaveBeenCalledWith(null, "", "#/agent/s1")
+    expect(pushStateMock).toHaveBeenCalledWith(
+      { duxRoute: "#/agent/s1" },
+      "",
+      "#/agent/s1",
+    )
+  })
+
+  it("switching agents replaces rather than pushes", async () => {
+    const mod = await loadStore("", [
+      { id: "s1", project_id: "p1" },
+      { id: "s2", project_id: "p1" },
+    ])
+    mod.selectSession("s1")
+    pushStateMock.mockClear()
+    replaceStateMock.mockClear()
+    mod.selectSession("s2")
+    expect(pushStateMock).not.toHaveBeenCalled()
+    expect(replaceStateMock).toHaveBeenCalledWith(null, "", "#/agent/s2")
   })
 
   it("selecting an extra tab writes the /tab/ form; the session-slot tab stays bare", async () => {
     const mod = await loadStore("", [
       { id: "s1", project_id: "p1", tabs: ["t2"] },
     ])
-    replaceStateMock.mockClear()
+    pushStateMock.mockClear()
     mod.selectTab("s1", "t2")
-    expect(replaceStateMock).toHaveBeenCalledWith(null, "", "#/agent/s1/tab/t2")
+    expect(pushStateMock).toHaveBeenCalledWith(
+      { duxRoute: "#/agent/s1/tab/t2" },
+      "",
+      "#/agent/s1/tab/t2",
+    )
     replaceStateMock.mockClear()
-    // Focusing the session-slot tab (tabId === sessionId) collapses back to the bare form.
+    // Focusing the session-slot tab (tabId === sessionId) collapses back to the
+    // bare form, and stays on the same screen, so it replaces.
     mod.selectTab("s1", "s1")
     expect(replaceStateMock).toHaveBeenCalledWith(null, "", "#/agent/s1")
   })
 
-  it("selecting a terminal replaces the hash with the terminal form", async () => {
+  it("selecting a terminal writes the terminal form", async () => {
     const mod = await loadStore("", [
       { id: "s1", project_id: "p1", terminals: ["t1"] },
     ])
-    replaceStateMock.mockClear()
+    pushStateMock.mockClear()
     mod.selectTerminal("t1", { kind: "session", sessionId: "s1" })
-    expect(replaceStateMock).toHaveBeenCalledWith(
-      null,
+    expect(pushStateMock).toHaveBeenCalledWith(
+      { duxRoute: "#/agent/s1/terminal/t1" },
       "",
       "#/agent/s1/terminal/t1",
     )
@@ -305,10 +372,10 @@ describe("selection writes the hash", () => {
 
   it("selecting a project terminal writes the project hash form", async () => {
     const mod = await loadStore("", [], [{ id: "p1", terminals: ["pt1"] }])
-    replaceStateMock.mockClear()
+    pushStateMock.mockClear()
     mod.selectTerminal("pt1", { kind: "project", projectId: "p1" })
-    expect(replaceStateMock).toHaveBeenCalledWith(
-      null,
+    expect(pushStateMock).toHaveBeenCalledWith(
+      { duxRoute: "#/project/p1/terminal/pt1" },
       "",
       "#/project/p1/terminal/pt1",
     )
@@ -316,8 +383,8 @@ describe("selection writes the hash", () => {
 
   it("clearing the selection collapses the hash to the bare path", async () => {
     const mod = await loadStore("#/agent/s1", [{ id: "s1", project_id: "p1" }])
-    replaceStateMock.mockClear()
+    pushStateMock.mockClear()
     mod.selectSession(null)
-    expect(replaceStateMock).toHaveBeenCalledWith(null, "", "/")
+    expect(pushStateMock).toHaveBeenCalledWith({ duxRoute: "" }, "", "/")
   })
 })
