@@ -27,6 +27,7 @@ use compact_str::CompactString;
 use portable_pty::{Child, CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySystem};
 
 use crate::logger;
+use crate::scroll_margins::{ScrollRegion, ScrollRegionTracker};
 
 /// Mirrors the variant set of `ratatui::style::Color` so the PTY snapshot can
 /// describe any cell color without depending on a UI toolkit. The TUI converts
@@ -137,11 +138,28 @@ impl TerminalSnapshot {
 /// client's terminal. If `alt_screen` is set, switch the client into the
 /// alternate-screen buffer first so full-screen apps (vim, claude) render
 /// correctly. Reflects the visible screen only (no scrollback replay).
-pub fn synthesize_repaint(snapshot: &TerminalSnapshot, alt_screen: bool) -> Vec<u8> {
+///
+/// `scroll_region` is the child's scrolling region, restored at the end. The
+/// ordering is load bearing and pinned by its own test: the painting addresses
+/// cells absolutely, so it has to run with the whole screen scrolling or every
+/// cell lands somewhere else, and setting a region homes the cursor, so the
+/// cursor can only be placed once the region is already in place. Hence the whole
+/// screen up front, cells, region, cursor.
+pub fn synthesize_repaint(
+    snapshot: &TerminalSnapshot,
+    alt_screen: bool,
+    scroll_region: ScrollRegion,
+) -> Vec<u8> {
     let mut out = String::new();
     if alt_screen {
         out.push_str("\x1b[?1049h");
     }
+    // Widen to the whole screen and turn origin mode off before painting. A
+    // reconnecting client has reset and already has both, but a client arriving
+    // from another PTY carries whatever that one had, and either a leftover region
+    // or a leftover origin mode would misplace every cell this paints.
+    out.push_str("\x1b[?6l");
+    out.push_str("\x1b[r");
     out.push_str("\x1b[2J\x1b[H");
 
     let mut cells: Vec<&SnapshotCell> = snapshot.cells.iter().collect();
@@ -164,6 +182,7 @@ pub fn synthesize_repaint(snapshot: &TerminalSnapshot, alt_screen: bool) -> Vec<
     }
 
     out.push_str("\x1b[0m");
+    out.push_str(&scroll_region.decstbm_sequence());
     if let Some(cursor) = &snapshot.cursor {
         out.push_str(&format!("\x1b[{};{}H", cursor.row + 1, cursor.col + 1));
     }
@@ -187,11 +206,22 @@ pub fn synthesize_repaint(snapshot: &TerminalSnapshot, alt_screen: bool) -> Vec<
 /// PTYs, say) at a cost of well under 100 bytes on a frame that can carry a
 /// hundred thousand replayed lines.
 ///
-/// Deliberately absent: origin mode (`?6`) and insert mode (`?4`). The repaint
-/// paints with absolute cursor addressing and never re-asserts a scroll region,
-/// so restoring origin mode without its margins would misplace every subsequent
-/// write. They stay at the client's defaults, which is what the repaint itself
-/// assumed while painting.
+/// Deliberately absent: origin mode (`?6`) and insert mode (`?4`). Origin mode
+/// makes every coordinate relative to the scrolling region's top margin, so it is
+/// not a flag the repaint can simply assert alongside the others: the repaint
+/// paints with absolute addressing, and the one coordinate that outlives the
+/// painting, the final cursor position, would have to be translated into
+/// region-relative space to survive it. The repaint does no such translation, so
+/// it does not restore origin mode. It does CLEAR it, up front, in the same place
+/// it widens the scrolling region, which is a different thing and a necessary
+/// one: the repaint now sets a region before it places the cursor, so a client
+/// that arrived with the flag already on would take that final position relative
+/// to the top margin and land the cursor a whole margin too low. Clearing it
+/// costs one sequence and makes the frame's own absolute positioning true
+/// regardless of what the client was carrying. The margins themselves ARE
+/// restored (see [`ScrollRegion::decstbm_sequence`]), so a program that scrolls a
+/// pinned region keeps its region across a reconnect even though it does not keep
+/// this flag.
 fn mode_restore_sequence(mode: TermMode) -> String {
     let mut out = String::with_capacity(96);
     let mut set = |code: u16, on: bool| {
@@ -1674,6 +1704,12 @@ struct TerminalState {
     /// bytes (OSC status sequences like OSC 9;4 progress, color queries) never
     /// read as activity. `None` until the first check.
     last_content_hash: Option<u64>,
+    /// The child's scrolling region, tracked by a second parser over the same
+    /// bytes. `Term` keeps its own copy in a private field with no accessor, so
+    /// this is the only way to read the region back out for a reconnect repaint.
+    /// See [`crate::scroll_margins`] for why it is a mirror of the engine's
+    /// behaviour rather than an independent reading of the specification.
+    scroll_region: ScrollRegionTracker,
 }
 
 impl TerminalState {
@@ -1695,6 +1731,7 @@ impl TerminalState {
             rows,
             cols,
             last_content_hash: None,
+            scroll_region: ScrollRegionTracker::new(rows, cols),
         }
     }
 
@@ -1722,6 +1759,17 @@ impl TerminalState {
 
     fn process(&mut self, data: &[u8]) -> Vec<u8> {
         self.parser.advance(&mut self.term, data);
+        // The same bytes, through a second parser that watches only the scrolling
+        // region. The two cannot disagree about a synchronized update, even
+        // though each keeps its own buffer and its own 150ms timer. The timer is
+        // never what releases a batch here: the parser only consults
+        // `pending_timeout`, which reports whether a timeout was ever ARMED and
+        // not whether it has expired, and the one entry point that acts on expiry
+        // (`Processor::stop_sync`) is never called from dux. So a batch is
+        // released by exactly two things, the ESU sequence in the stream and the
+        // sync buffer filling, and both are pure functions of the bytes. Feed
+        // both parsers the same bytes and they buffer and release in lockstep.
+        self.scroll_region.advance(data);
         let pending = self.event_proxy.take_pending();
         let mut replies = pending.bytes;
 
@@ -1911,7 +1959,7 @@ impl TerminalState {
     /// repaints overwrite the viewport without ever scrolling.
     fn reconnect_repaint(&self) -> Vec<u8> {
         if self.is_alt_screen() {
-            let mut out = synthesize_repaint(&self.snapshot(), true);
+            let mut out = synthesize_repaint(&self.snapshot(), true, self.scroll_region.region());
             // Cells alone are not the terminal's state: re-assert the child's
             // private modes so a client that reset before applying the replay
             // (every web reconnect does) comes back with mouse tracking,
@@ -1955,11 +2003,27 @@ impl TerminalState {
         let est_rows = (bottom - top + 1).max(0) as usize;
         let mut out = String::with_capacity(est_rows * (cols + 2) + 32);
         // Ensure the primary buffer and autowrap-on (so soft-wrapped rows can be
-        // rebuilt by the client), then clear the screen, clear the client's saved
-        // scrollback (3J), and home the cursor. Clearing scrollback makes a
-        // reconnect idempotent: we rebuild from the authoritative grid rather than
-        // appending a second copy of the history.
-        out.push_str("\x1b[?1049l\x1b[?7h\x1b[2J\x1b[3J\x1b[H");
+        // rebuilt by the client), widen the scrolling region back to the whole
+        // screen, then clear the screen, clear the client's saved scrollback (3J),
+        // and home the cursor. Clearing scrollback makes a reconnect idempotent:
+        // we rebuild from the authoritative grid rather than appending a second
+        // copy of the history. The widening is load bearing rather than defensive:
+        // this replay rebuilds the buffer by printing lines and letting them
+        // scroll off the top, and a line only reaches the client's scrollback when
+        // the scrolling region starts at the FIRST row. A bottom margin alone is
+        // fine (a program pinning a status bar keeps its scrollback, which
+        // `scroll_region_with_bottom_margin_still_captures_scrollback` asserts on
+        // our own engine); a top margin is what would send every replayed line
+        // into a pinned band instead of the history. Widening covers both without
+        // having to ask which one the client has.
+        //
+        // Origin mode goes off in the same breath. The replay addresses the cursor
+        // absolutely, and origin mode would make those coordinates relative to the
+        // top margin the replay is about to set, landing the cursor one whole
+        // margin too low on a client that arrived with the flag already on.
+        // Clearing it is not the same as restoring it, which stays out of scope;
+        // it just guarantees the frame's own positioning means what it says.
+        out.push_str("\x1b[?1049l\x1b[?7h\x1b[?6l\x1b[r\x1b[2J\x1b[3J\x1b[H");
 
         let mut last_style: Option<(CellColor, CellColor, CellModifier)> = None;
         // A soft-wrapped row carries `WRAPLINE` on its last cell. We replay such a
@@ -2038,6 +2102,9 @@ impl TerminalState {
         }
 
         out.push_str("\x1b[0m");
+        // The region goes back after the printing that needed the whole screen and
+        // before the cursor, because setting a region homes the cursor.
+        out.push_str(&self.scroll_region.region().decstbm_sequence());
         if let Some(point) = cursor {
             out.push_str(&format!("\x1b[{};{}H", point.line + 1, point.column.0 + 1));
         }
@@ -2069,6 +2136,11 @@ impl TerminalState {
         self.cols = cols;
         self.event_proxy.set_size(rows, cols);
         self.term.resize(TerminalDimensions::new(rows, cols));
+        // A resize widens the engine's region back to the whole screen at the new
+        // height. Follow it, or the tracker keeps reporting margins the child no
+        // longer has. Both dimensions go across because the engine skips its own
+        // region reset when neither changed, and the tracker mirrors that skip.
+        self.scroll_region.resize(rows, cols);
     }
 }
 
@@ -2809,12 +2881,467 @@ mod tests {
 
         // The viewport-only repaint (the previous behavior) omits scrolled-off
         // history — this is exactly the gap this method closes.
-        let viewport_only =
-            String::from_utf8(synthesize_repaint(&terminal.snapshot(), false)).unwrap();
+        let viewport_only = String::from_utf8(synthesize_repaint(
+            &terminal.snapshot(),
+            false,
+            ScrollRegion::full(4),
+        ))
+        .unwrap();
         assert!(
             !viewport_only.contains("line0"),
             "sanity: viewport-only repaint omits scrolled-off history"
         );
+    }
+
+    /// Read the scrolling region a live terminal is ACTUALLY using, without an
+    /// accessor for it.
+    ///
+    /// Origin mode is the lever: while it is on, the engine resolves a row
+    /// coordinate against the region instead of the screen, clamping it into
+    /// `start ..= end - 1`. So homing the cursor lands it on the region's first
+    /// row, and asking for a row far past the bottom lands it on the region's
+    /// last. Reading the cursor back after each gives both margins exactly, with
+    /// no scrolling and without disturbing a single cell. Origin mode is turned
+    /// back off afterwards so the probe leaves no state behind.
+    ///
+    /// This is deliberately a behavioural reading rather than a second copy of the
+    /// tracker's arithmetic: if it were the same arithmetic it could agree with
+    /// the tracker while both disagreed with the terminal, which is the failure
+    /// the test exists to catch.
+    ///
+    /// It resolves every region a program can actually end up with, but not an
+    /// EMPTY one. The engine clamps a top margin to the screen height rather than
+    /// to the last row, so a region asked for entirely below the screen collapses
+    /// to `start == end`; the same clamp then pins any probe row to `end - 1`, so
+    /// an empty region reads back exactly like the one-row region above it. That
+    /// is a property of the engine and not of this probe, and it is covered
+    /// separately by `an_empty_region_is_reported_and_written_as_the_whole_screen`.
+    fn probe_live_scroll_region(terminal: &mut TerminalState) -> (i32, i32) {
+        let cursor_line = |terminal: &TerminalState| terminal.term.grid().cursor.point.line.0;
+
+        // `?6h` homes the cursor as it engages, which under origin mode is the top
+        // margin.
+        terminal.process(b"\x1b[?6h");
+        let start = cursor_line(terminal);
+        // Far past any plausible screen height, so it clamps to the bottom margin.
+        terminal.process(b"\x1b[9999;1H");
+        let last = cursor_line(terminal);
+        terminal.process(b"\x1b[?6l");
+
+        (start, last + 1)
+    }
+
+    /// Drive one byte sequence through a real terminal and through the tracker,
+    /// and assert they end up with the same scrolling region.
+    fn assert_region_agrees(label: &str, rows: u16, steps: &[&[u8]]) {
+        let mut terminal = TerminalState::with_scrollback(rows, 20, 100);
+        for step in steps {
+            terminal.process(step);
+        }
+
+        let tracked = terminal.scroll_region.region();
+        let (live_start, live_end) = probe_live_scroll_region(&mut terminal);
+
+        assert_eq!(
+            (tracked.start, tracked.end),
+            (live_start, live_end),
+            "{label}: the tracked scrolling region must match the one the terminal is really using"
+        );
+        assert_eq!(
+            tracked.screen_lines,
+            i32::from(rows),
+            "{label}: the tracked region must be measured against the current screen height"
+        );
+    }
+
+    #[test]
+    fn tracked_scroll_region_agrees_with_the_terminal() {
+        // Nothing written at all: both sides start at the whole screen.
+        assert_region_agrees("construction", 24, &[]);
+        // Ordinary output moves nothing.
+        assert_region_agrees("plain output", 24, &[b"hello\r\nworld\r\n"]);
+        // A program pinning a header and a footer.
+        assert_region_agrees("explicit set", 24, &[b"\x1b[3;20r"]);
+        // The bottom margin omitted means the last row.
+        assert_region_agrees("open bottom margin", 24, &[b"\x1b[5r"]);
+        // A region set, then narrowed again.
+        assert_region_agrees("set twice", 24, &[b"\x1b[3;20r", b"\x1b[8;12r"]);
+        // A bottom margin past the last row is clamped to the screen height.
+        assert_region_agrees("bottom margin past the screen", 24, &[b"\x1b[3;40r"]);
+        // An inverted pair is refused outright and leaves the region alone.
+        assert_region_agrees(
+            "inverted pair ignored",
+            24,
+            &[b"\x1b[10;12r", b"\x1b[20;5r"],
+        );
+        // The whole screen written out explicitly.
+        assert_region_agrees("explicit whole screen", 24, &[b"\x1b[1;24r"]);
+        // A full reset (RIS) widens the region back to the whole screen. An
+        // observer watching only the explicit set reports the stale margins here.
+        assert_region_agrees("full reset after a set", 24, &[b"\x1b[3;20r", b"\x1bc"]);
+        // Split across chunk boundaries, mid-escape, which is the shape real PTY
+        // reads arrive in.
+        assert_region_agrees("split across reads", 24, &[b"\x1b[3", b";2", b"0r"]);
+        // Bracketed by a synchronized update, so the bytes travel through both
+        // parsers' sync buffering.
+        assert_region_agrees(
+            "inside a synchronized update",
+            24,
+            &[b"\x1b[?2026h\x1b[4;18rtext\x1b[?2026l"],
+        );
+        // Column mode (DECCOLM). The engine widens the region back to the whole
+        // screen as one of the sequence's side effects, and it does so by calling
+        // its own handler method directly rather than through the parser, so no
+        // callback carries it. Both polarities run the same side effects.
+        assert_region_agrees(
+            "column mode set after a set",
+            24,
+            &[b"\x1b[3;20r", b"\x1b[?3h"],
+        );
+        assert_region_agrees(
+            "column mode unset after a set",
+            24,
+            &[b"\x1b[3;20r", b"\x1b[?3l"],
+        );
+    }
+
+    #[test]
+    fn an_empty_region_is_reported_and_written_as_the_whole_screen() {
+        // Both margins below the last row. The engine clamps each to the screen
+        // height (not to the last row), so the region collapses to `24..24` and
+        // scrolls nothing at all. The tracker reproduces that exactly, and the
+        // repaint writes it as the whole-screen reset, because there is no DECSTBM
+        // spelling for an empty region and the inverted pair that would describe
+        // it is one a client throws away.
+        let mut terminal = TerminalState::with_scrollback(24, 20, 100);
+        terminal.process(b"\x1b[30;40r");
+
+        let tracked = terminal.scroll_region.region();
+        assert_eq!((tracked.start, tracked.end), (24, 24));
+        assert!(!tracked.is_full_screen());
+        assert_eq!(tracked.decstbm_sequence(), "\x1b[r");
+    }
+
+    #[test]
+    fn tracked_scroll_region_agrees_with_the_terminal_across_a_resize() {
+        // A resize widens the engine's region back to the whole screen at the new
+        // height, and nothing in the byte stream says so. An observer that watches
+        // only the bytes reports the pre-resize margins forever after.
+        let mut terminal = TerminalState::with_scrollback(24, 20, 100);
+        terminal.process(b"\x1b[3;20r");
+        terminal.resize(10, 20);
+
+        let tracked = terminal.scroll_region.region();
+        let (live_start, live_end) = probe_live_scroll_region(&mut terminal);
+
+        assert_eq!(
+            (tracked.start, tracked.end),
+            (live_start, live_end),
+            "a resize must move the tracked region exactly as it moves the terminal's"
+        );
+        assert!(
+            tracked.is_full_screen(),
+            "a resize widens the region back to the whole screen, got {tracked:?}"
+        );
+
+        // And a region set after the resize is measured against the new height.
+        terminal.process(b"\x1b[2;9r");
+        let tracked = terminal.scroll_region.region();
+        let (live_start, live_end) = probe_live_scroll_region(&mut terminal);
+        assert_eq!((tracked.start, tracked.end), (live_start, live_end));
+    }
+
+    #[test]
+    fn a_resize_to_the_size_already_in_effect_leaves_the_region_alone() {
+        // The engine returns from a resize before touching its region when both
+        // dimensions already match, so a same-size resize moves nothing there and
+        // must move nothing here either. This is not a corner case: a browser
+        // client sends its size on every reconnect, every tab focus, every
+        // visibility change and every input claim, and almost all of those are
+        // the size already in effect. A tracker that widened on each of them
+        // would report the whole screen while the child still had its margins,
+        // and the next reconnect would then clobber a region the program still
+        // has, which is worse than not restoring one at all.
+        let mut terminal = TerminalState::with_scrollback(24, 20, 100);
+        terminal.process(b"\x1b[3;20r");
+        terminal.resize(24, 20);
+
+        let tracked = terminal.scroll_region.region();
+        let (live_start, live_end) = probe_live_scroll_region(&mut terminal);
+        assert_eq!(
+            (tracked.start, tracked.end),
+            (live_start, live_end),
+            "a same-size resize must leave the tracked region where the terminal still has it"
+        );
+        assert_eq!(
+            (tracked.start, tracked.end),
+            (2, 20),
+            "the region the program set must survive a same-size resize, got {tracked:?}"
+        );
+
+        // A change in COLUMNS alone still resets the engine's region, so a
+        // rows-only comparison is not enough to decide this.
+        terminal.resize(24, 40);
+        let tracked = terminal.scroll_region.region();
+        let (live_start, live_end) = probe_live_scroll_region(&mut terminal);
+        assert_eq!(
+            (tracked.start, tracked.end),
+            (live_start, live_end),
+            "a columns-only resize must widen the tracked region exactly as it widens the terminal's"
+        );
+        assert!(
+            tracked.is_full_screen(),
+            "a columns-only resize widens the region back to the whole screen, got {tracked:?}"
+        );
+    }
+
+    /// What the engine does to its scrolling region at one of its region-moving
+    /// sites.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum RegionMove {
+        /// Widens back to every row of the current screen.
+        WidensToWholeScreen,
+        /// Narrows to this half-open row range.
+        NarrowsTo(i32, i32),
+        /// Leaves the region exactly where it already was.
+        LeavesItAlone,
+    }
+
+    /// Every place the terminal engine moves its scrolling region, with the
+    /// trigger that reaches it and what it does when it gets there.
+    ///
+    /// This list, not the byte sequences in
+    /// `tracked_scroll_region_agrees_with_the_terminal`, is what gives the mirror
+    /// its coverage. Those cases all drive sequences the observer already
+    /// implements a callback for, so they can only ever confirm that a door the
+    /// observer is watching is still watched. The failure this design is actually
+    /// exposed to is the opposite one: the engine moving its region through a
+    /// door the observer is NOT watching, which is exactly how the column-mode
+    /// site was missed. Enumerating the sites is what opens those doors.
+    ///
+    /// The sites were read out of the dependency by finding every assignment to
+    /// the engine's private region field and every caller that reaches one:
+    /// construction, resize, full reset (RIS), the explicit DECSTBM set, and
+    /// column mode (DECCOLM), which reaches the explicit set by an internal call
+    /// that bypasses the parser. Be honest about what this test can do: it cannot
+    /// discover a SIXTH site on its own, because a site nobody has named has no
+    /// trigger to drive. What it does is make the set explicit and checkable, so
+    /// a dependency bump is a matter of re-reading the field's assignments
+    /// against this list rather than guessing.
+    fn engine_region_moving_sites() -> Vec<(&'static str, &'static [u8], RegionMove)> {
+        vec![
+            // The explicit DECSTBM set, the one site a program drives on purpose.
+            (
+                "explicit set (DECSTBM)",
+                b"\x1b[8;12r",
+                RegionMove::NarrowsTo(7, 12),
+            ),
+            // A full reset. Widens, and says nothing else about it.
+            (
+                "full reset (RIS)",
+                b"\x1bc",
+                RegionMove::WidensToWholeScreen,
+            ),
+            // Column mode, both polarities. Widens as a side effect, through an
+            // internal call the parser never sees.
+            (
+                "column mode set (DECCOLM)",
+                b"\x1b[?3h",
+                RegionMove::WidensToWholeScreen,
+            ),
+            (
+                "column mode unset (DECCOLM)",
+                b"\x1b[?3l",
+                RegionMove::WidensToWholeScreen,
+            ),
+            // A sequence that moves no region at all, so a case that passed by
+            // doing nothing would be caught by the assertion that the engine
+            // really moved.
+            ("ordinary output", b"hello\r\n", RegionMove::LeavesItAlone),
+        ]
+    }
+
+    #[test]
+    fn the_tracker_follows_the_engine_at_every_site_that_moves_the_region() {
+        // Construction, the one site with no trigger to drive: a terminal that has
+        // been written to not at all starts at the whole screen on both sides.
+        let mut terminal = TerminalState::with_scrollback(24, 20, 100);
+        let tracked = terminal.scroll_region.region();
+        assert_eq!(tracked, ScrollRegion::full(24));
+        assert_eq!(
+            (tracked.start, tracked.end),
+            probe_live_scroll_region(&mut terminal),
+            "construction: the tracker and the terminal must start on the same region"
+        );
+
+        // Resize, the other site with no byte sequence behind it, in both of its
+        // outcomes. Covered in full by its own two tests, named here so this list
+        // is not read as the complete set.
+        //
+        // - `tracked_scroll_region_agrees_with_the_terminal_across_a_resize`
+        // - `a_resize_to_the_size_already_in_effect_leaves_the_region_alone`
+
+        for (label, trigger, expected) in engine_region_moving_sites() {
+            let mut terminal = TerminalState::with_scrollback(24, 20, 100);
+            // Narrow first, so a site that widens has something to widen from and
+            // a site that changes nothing has something to preserve.
+            terminal.process(b"\x1b[3;20r");
+            assert_eq!(
+                probe_live_scroll_region(&mut terminal),
+                (2, 20),
+                "{label}: sanity, the setup must actually narrow the terminal's region"
+            );
+
+            terminal.process(trigger);
+
+            let live = probe_live_scroll_region(&mut terminal);
+            let expected_live = match expected {
+                RegionMove::WidensToWholeScreen => (0, 24),
+                RegionMove::NarrowsTo(start, end) => (start, end),
+                RegionMove::LeavesItAlone => (2, 20),
+            };
+            // Assert what the ENGINE did first. If a dependency bump changes a
+            // site's behaviour, this is what says so, rather than the two sides
+            // quietly agreeing on something new.
+            assert_eq!(
+                live, expected_live,
+                "{label}: the terminal did not move its region the way this site says it does"
+            );
+
+            let tracked = terminal.scroll_region.region();
+            assert_eq!(
+                (tracked.start, tracked.end),
+                live,
+                "{label}: the tracker must follow the engine through this site"
+            );
+        }
+    }
+
+    #[test]
+    fn reconnect_repaint_restores_the_scroll_region_on_the_alt_screen() {
+        let mut terminal = TerminalState::with_scrollback(6, 20, 100);
+        terminal.process(b"\x1b[?1049h");
+        terminal.process(b"\x1b[2;5r");
+        terminal.process(b"\x1b[1;1Hheader");
+        // A cursor position no painting step would emit on its own, so the
+        // ordering assertions below cannot latch onto the wrong sequence.
+        terminal.process(b"\x1b[4;3H");
+
+        let replay = String::from_utf8(terminal.reconnect_repaint()).unwrap();
+        let region_at = replay.find("\x1b[2;5r").unwrap_or_else(|| {
+            panic!("the replay must re-assert the scroll region, got:\n{replay:?}")
+        });
+        let cells_at = replay
+            .find("header")
+            .expect("the replay must paint the cells");
+        let cursor_at = replay
+            .find("\x1b[4;3H")
+            .expect("the replay must place the cursor");
+
+        assert!(
+            cells_at < region_at,
+            "the cells are painted with absolute addressing, so the region must come after them: {replay:?}"
+        );
+        assert!(
+            region_at < cursor_at,
+            "setting the region homes the cursor, so the cursor must come after it: {replay:?}"
+        );
+        assert!(
+            replay[..cells_at].contains("\x1b[r"),
+            "the replay must widen to the whole screen before painting: {replay:?}"
+        );
+    }
+
+    #[test]
+    fn reconnect_repaint_restores_the_scroll_region_on_the_main_screen() {
+        let mut terminal = TerminalState::with_scrollback(6, 20, 100);
+        terminal.process(b"one\r\ntwo\r\n");
+        terminal.process(b"\x1b[2;5r");
+        terminal.process(b"\x1b[4;3H");
+
+        let replay = String::from_utf8(terminal.reconnect_repaint()).unwrap();
+        let region_at = replay.find("\x1b[2;5r").unwrap_or_else(|| {
+            panic!("the replay must re-assert the scroll region, got:\n{replay:?}")
+        });
+        let text_at = replay
+            .find("two")
+            .expect("the replay must print the history");
+        let cursor_at = replay
+            .find("\x1b[4;3H")
+            .expect("the replay must place the cursor");
+
+        assert!(
+            text_at < region_at,
+            "the history is printed and allowed to scroll, so the region must come after it: {replay:?}"
+        );
+        assert!(
+            region_at < cursor_at,
+            "setting the region homes the cursor, so the cursor must come after it: {replay:?}"
+        );
+        assert!(
+            replay[..text_at].contains("\x1b[r"),
+            "the replay must widen to the whole screen before printing: {replay:?}"
+        );
+    }
+
+    #[test]
+    fn reconnect_repaint_widens_to_the_whole_screen_when_the_child_has_no_region() {
+        let mut terminal = TerminalState::with_scrollback(6, 20, 100);
+        terminal.process(b"\x1b[?1049h");
+        terminal.process(b"plain");
+
+        let replay = String::from_utf8(terminal.reconnect_repaint()).unwrap();
+        // Exactly two: the widening before the painting and the restore after it,
+        // both of which are the whole screen because that is what the child has.
+        // A client arriving from another PTY with a narrow region gets widened
+        // rather than left with someone else's margins.
+        assert_eq!(
+            replay.matches("\x1b[r").count(),
+            2,
+            "the whole screen must be asserted before and after the painting: {replay:?}"
+        );
+    }
+
+    #[test]
+    fn reconnect_repaint_clears_origin_mode_before_it_positions_anything() {
+        // The repaint sets a scrolling region and then places the cursor
+        // absolutely. Under origin mode that final row would be read relative to
+        // the region's top margin, so a client that arrives with the flag already
+        // on (one switching over from another PTY that had it) would put the
+        // cursor a whole margin too low. Clearing the flag up front makes the
+        // frame's own coordinates mean what they say. It is not a restore: the
+        // child's own origin mode is still not carried across, which the
+        // `mode_restore_sequence` docs spell out.
+        for alt_screen in [false, true] {
+            let mut terminal = TerminalState::with_scrollback(6, 20, 100);
+            if alt_screen {
+                terminal.process(b"\x1b[?1049h");
+            }
+            terminal.process(b"one\r\ntwo\r\n");
+            terminal.process(b"\x1b[2;5r");
+            terminal.process(b"\x1b[4;3H");
+
+            let replay = String::from_utf8(terminal.reconnect_repaint()).unwrap();
+            let origin_off_at = replay.find("\x1b[?6l").unwrap_or_else(|| {
+                panic!(
+                    "the replay must clear origin mode, got (alt_screen={alt_screen}):\n{replay:?}"
+                )
+            });
+            let region_at = replay
+                .find("\x1b[2;5r")
+                .expect("the replay must re-assert the scroll region");
+            let cursor_at = replay
+                .find("\x1b[4;3H")
+                .expect("the replay must place the cursor");
+            assert!(
+                origin_off_at < region_at && origin_off_at < cursor_at,
+                "origin mode must be cleared before any region or cursor is set (alt_screen={alt_screen}): {replay:?}"
+            );
+            assert!(
+                !replay.contains("\x1b[?6h"),
+                "the replay must never turn origin mode ON (alt_screen={alt_screen}): {replay:?}"
+            );
+        }
     }
 
     #[test]
@@ -2905,7 +3432,8 @@ mod tests {
         // repaint is the viewport-only repaint plus the private-mode restore a
         // reconnecting client needs (`synthesize_repaint` takes a snapshot, which
         // carries cells and no modes, so it cannot emit that block itself).
-        let mut expected = synthesize_repaint(&terminal.snapshot(), true);
+        let mut expected =
+            synthesize_repaint(&terminal.snapshot(), true, terminal.scroll_region.region());
         expected.extend_from_slice(mode_restore_sequence(*terminal.term.mode()).as_bytes());
         assert_eq!(terminal.reconnect_repaint(), expected);
     }
@@ -4821,7 +5349,7 @@ mod tests {
             ],
             links: Vec::new(),
         };
-        let bytes = synthesize_repaint(&snapshot, true);
+        let bytes = synthesize_repaint(&snapshot, true, ScrollRegion::full(1));
         let text = String::from_utf8(bytes).expect("utf8");
 
         assert!(
@@ -4849,7 +5377,7 @@ mod tests {
             cells: vec![repaint_cell(0, 0, "x", CellColor::Reset)],
             links: Vec::new(),
         };
-        let bytes = synthesize_repaint(&snapshot, false);
+        let bytes = synthesize_repaint(&snapshot, false, ScrollRegion::full(1));
         let text = String::from_utf8(bytes).expect("utf8");
         assert!(
             !text.contains("\x1b[?1049h"),
