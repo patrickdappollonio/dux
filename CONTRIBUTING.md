@@ -25,8 +25,12 @@ cargo build
 ```
 
 That is all. `crates/dux-web/build.rs` runs `npm ci` (when the lockfile is newer
-than `node_modules`) and then `npm run build` in `crates/dux-web/web`, gzips the
-result in place, and `rust_embed` bakes it into the binary.
+than `node_modules`) and then `npm run build` in `crates/dux-web/web`. The raw
+Vite output is left in `web/dist` untouched; what `rust_embed` bakes into the
+binary is a **gzipped mirror the build script stages under `$OUT_DIR/ui`**. That
+distinction matters the moment you go looking for why the binary is serving
+something you did not expect, so it has a section of its own:
+[Where the embedded assets actually live](#where-the-embedded-assets-actually-live).
 
 **A failed frontend build fails the Rust build.** It used to print a
 `cargo:warning`, embed a placeholder page and succeed, which meant a release could
@@ -66,7 +70,8 @@ toolchain. What it does and does not do:
     must not print to stdout).
 - **An existing `dist` is left alone, and the binary says so.** If you already
   have a real build in `crates/dux-web/web/dist`, setting the hatch does not
-  delete it; the build script embeds it exactly as it is. Because that binary
+  delete it; the build script stages it, contents unchanged, into the directory it
+  embeds from (see the note on `$OUT_DIR/ui` below). Because that binary
   serves a real single-page app with real hashed assets, **nothing about using it
   reveals that the UI could be arbitrarily old**, so it is marked too: the startup
   banner and `dux.log` both carry a warning saying the web UI was not built from
@@ -100,6 +105,47 @@ toolchain. What it does and does not do:
 
 Skipping the frontend build deliberately is supported. Letting a *failed* frontend
 build through quietly is not, and that distinction is the whole point of the flag.
+
+### Where the embedded assets actually live
+
+`crates/dux-web/web/dist` is raw Vite output, and everything above still describes
+it correctly: the build script READS it to decide between the notice page and the
+reuse path. What it no longer does is embed it. rust-embed reads
+`$OUT_DIR/ui`, a gzipped mirror the build script stages from `dist` on every path
+it can take.
+
+The reason is written out in full in the long comment in `crates/dux-web/build.rs`,
+including the two things the change does not fix. The short version: `dist` is a
+directory the build script generates, cargo cannot watch a generated directory
+without re-running the script forever, and so emptying `dist` used to leave the
+script un-run and bake zero assets into the binary with nothing said anywhere.
+
+Two practical consequences:
+
+- **A hand-run `npm run build` no longer reaches the binary on its own.** It used
+  to, because rust-embed's file dependencies forced a recompile. Now the staged
+  copy is what gets embedded and nothing notices that `dist` moved on. Run
+  `touch crates/dux-web/web/index.html` and rebuild.
+- **Fault injection moved too.** The `dist.real/`, `dist.bak/` and `dist.orig/`
+  entries in `.gitignore` exist so you can park a real build aside and see what
+  the binary does without one:
+
+  ```bash
+  mv crates/dux-web/web/dist crates/dux-web/web/dist.orig
+  mkdir crates/dux-web/web/dist
+  ```
+
+  That alone no longer changes what is embedded, which is the whole point of the
+  change: the binary keeps serving the staged copy. To make a binary with no web
+  UI, set `DUX_DISABLE_UI_BUILD=1` on top of it, which stages the notice page.
+
+  Deleting the staged copy by hand (`rm -rf target/debug/build/dux-web-*/out/ui`)
+  does not produce an empty embed either. Measured: it is a **compile error**,
+  `#[derive(RustEmbed)] folder '.../out/ui' does not exist`, because the build
+  script does not re-run to recreate it. Recover with
+  `touch crates/dux-web/web/index.html` (which re-runs the build script) or
+  `cargo clean -p dux-web`, which drops the staged copy and the build-script
+  fingerprint together, so a clean build always brings the assets back.
 
 ## Checks
 

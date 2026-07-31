@@ -31,6 +31,16 @@
 //! `.github/scripts/smoke_archive.sh` performs the same walk on the artifact that
 //! actually ships.
 //!
+//! ## Reaching past the router
+//!
+//! Every check described above is INDIRECT: it drives the router, and it happens
+//! to fail when nothing is embedded, reporting a 404 that says nothing about why.
+//! `the_embedded_asset_set_is_a_whole_frontend_build` asserts on `WebAssets`
+//! itself instead, so it holds regardless of where rust-embed's `folder` points
+//! and it names the cause. `the_embed_folder_resolves_to_something` is the cheap
+//! unconditional twin of it, pinning the `interpolate-folder-path` feature that
+//! makes `folder = "$OUT_DIR/ui"` resolve at all.
+//!
 //! ## The skip
 //!
 //! With `DUX_DISABLE_UI_BUILD` set, no frontend build happened for this binary, so
@@ -723,6 +733,105 @@ async fn index_references_a_real_hashed_asset_that_is_actually_served() {
          under the {MIN_BUNDLE_TOTAL_BYTES}-byte floor. That is stub territory, not \
          a real build of this app.",
         seen.len()
+    );
+}
+
+/// The smallest number of content-hashed `assets/*.{js,css}` files a real build
+/// can plausibly EMBED.
+///
+/// Measured on a real build of this app (2026-07): `web/dist/assets` holds 92
+/// hashed `.js`/`.css` files. 40 leaves more than a factor of two of headroom for
+/// the app shedding code-split chunks, and matches the floor
+/// [`MIN_FOLLOWED_CHUNKS`] uses for the reference walk, while sitting far above
+/// anything an empty or stubbed embed could reach.
+const MIN_HASHED_EMBEDDED_ASSETS: usize = 40;
+
+#[test]
+fn the_embedded_asset_set_is_a_whole_frontend_build() {
+    // The check every other gate in this file makes only INDIRECTLY. The rest
+    // fetch a page through the router and happen to fail when the embed is empty,
+    // which reports a 404 and says nothing about why. This one asserts on
+    // `WebAssets` itself, so it holds regardless of where rust-embed's `folder`
+    // points and it names the cause.
+    //
+    // It is the in-process twin of the static grep in
+    // `.github/scripts/smoke_archive.sh`, and it is what would have caught the
+    // defect this file's `folder` change repairs: emptying `web/dist` re-ran the
+    // build script ZERO times, rust-embed baked in nothing, and the server
+    // answered 404 at the root with no warning anywhere.
+    //
+    // The byte floor is compared against the EMBEDDED bytes, which are gzipped for
+    // the text assets, so it is measuring less than the raw dist does. A real
+    // build embeds about 2.3 MB that way, four times the floor.
+    require_real_ui_build!("the_embedded_asset_set_is_a_whole_frontend_build");
+
+    let mut hashed = Vec::new();
+    let mut total = 0usize;
+    let mut files = 0usize;
+    for name in dux_web::web_assets::WebAssets::iter() {
+        let Some(file) = dux_web::web_assets::WebAssets::get(&name) else {
+            panic!("{name} is listed in the embed but cannot be fetched from it");
+        };
+        files += 1;
+        total += file.data.len();
+        let Some(rest) = name.strip_prefix("assets/") else {
+            continue;
+        };
+        let Some((stem, ext)) = rest.rsplit_once('.') else {
+            continue;
+        };
+        if (ext == "js" || ext == "css") && looks_hashed(stem) {
+            hashed.push(name.to_string());
+        }
+    }
+
+    assert!(
+        hashed.len() >= MIN_HASHED_EMBEDDED_ASSETS,
+        "only {} content-hashed assets/*.js|css files are embedded in this binary, \
+         under the floor of {MIN_HASHED_EMBEDDED_ASSETS} ({files} embedded files in \
+         total). The web UI is not baked into this binary, so server mode will 404 \
+         at the root. Run `touch crates/dux-web/web/index.html` and rebuild to force \
+         the frontend build script to run.",
+        hashed.len()
+    );
+    assert!(
+        total >= MIN_BUNDLE_TOTAL_BYTES,
+        "the embedded asset set is only {total} bytes across {files} files, under the \
+         {MIN_BUNDLE_TOTAL_BYTES}-byte floor. That is stub territory, not a real \
+         build of this app."
+    );
+}
+
+#[test]
+fn the_embed_folder_resolves_to_something() {
+    // Deliberately NO skip guard: this is the unconditional canary that the
+    // staged tree build.rs writes is NON-EMPTY, and it holds on every path that
+    // script can take. On a real build the staged copy is the whole frontend; on
+    // the notice-page route build.rs writes its page into `dist` and stages that;
+    // on the REUSE route nothing is written at all, but that route is only chosen
+    // when `dist/index.html` already exists, so there is something to stage
+    // either way. An empty embed is a 404 at the root with nothing said anywhere,
+    // which is the defect this layout was changed to avoid, so it gets a cheap
+    // assertion that runs in every configuration.
+    //
+    // What this does NOT do, despite an earlier version of this comment saying
+    // so, is pin the rust-embed `interpolate-folder-path` feature. That feature
+    // is enforced by rust-embed itself, at COMPILE time, so no runtime assertion
+    // could reach it: read against the pinned 8.11.0, the `$OUT_DIR` expansion in
+    // `rust-embed-impl` is `#[cfg(feature = "interpolate-folder-path")]`, and
+    // without it the literal string `$OUT_DIR/ui` is RELATIVE, so it is joined
+    // onto `CARGO_MANIFEST_DIR` and yields a path containing the placeholder
+    // text. That path does not exist, and the derive returns an error naming it
+    // (plus a hint about the feature). There is no "resolves somewhere that
+    // exists and is empty" branch to guard against; dropping the feature simply
+    // fails to build.
+    assert!(
+        dux_web::web_assets::WebAssets::iter().next().is_some(),
+        "the binary embeds ZERO files, so server mode will 404 at the root. \
+         $OUT_DIR/ui exists (a missing folder is a compile error, so this binary \
+         would not have built) but is empty, which means build.rs staged nothing \
+         into it. Run `touch crates/dux-web/web/index.html` and rebuild, or \
+         `cargo clean -p dux-web` and rebuild, to make the staging step run again."
     );
 }
 

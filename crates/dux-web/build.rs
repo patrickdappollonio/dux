@@ -1,5 +1,13 @@
-//! Builds the React frontend in `web/` and leaves the result in `web/dist` for
-//! `rust_embed` to bake into the binary.
+//! Builds the React frontend in `web/`, leaves the raw Vite output in `web/dist`,
+//! and stages a gzipped mirror of it under `$OUT_DIR/ui` for `rust_embed` to bake
+//! into the binary.
+//!
+//! The staging is not tidiness. `web/dist` is a directory this script GENERATES,
+//! and a generated directory cannot be watched with `cargo:rerun-if-changed`
+//! (see the KNOWN GAP comment in `main`), so as long as rust-embed read from it
+//! the embedded bytes depended on the state of a directory nothing was allowed to
+//! notice. Reading from a copy this script writes on every path it takes moves
+//! that dependency onto `$OUT_DIR`, which nothing edits by hand.
 //!
 //! ## Failure policy
 //!
@@ -180,31 +188,58 @@ fn main() {
     println!("cargo:rerun-if-changed=web/tsconfig.app.json");
     println!("cargo:rerun-if-changed=web/tsconfig.node.json");
     println!("cargo:rerun-if-changed=web/eslint.config.js");
-    // KNOWN GAP, deliberately not "fixed": emptying web/dist WITHOUT touching a
-    // source file leaves this script un-run, rust-embed then bakes in zero files,
-    // and the server answers 404 at the root with no warning anywhere. Measured,
-    // not theorised: `rm -rf web/dist/*` followed by `cargo build -p dux-web`
-    // re-runs this script ZERO times and leaves dist empty.
+    println!("cargo:rerun-if-changed=web/scripts");
+    // WHY THE EMBED READS $OUT_DIR/ui AND NOT web/dist, and what that does and
+    // does not buy.
+    //
+    // The original defect: emptying web/dist WITHOUT touching a source file left
+    // this script un-run, rust-embed baked in zero files, and the server answered
+    // 404 at the root with no warning anywhere. Measured, not theorised:
+    // `rm -rf web/dist/*` followed by `cargo build -p dux-web` re-runs this script
+    // ZERO times and leaves dist empty.
     //
     // The obvious repair, `cargo:rerun-if-changed=web/dist`, is WORSE, and that
-    // was measured too: it re-runs this script on EVERY build, forever. Cargo
-    // creates its `invoked.timestamp` BEFORE running a build script, so any file
-    // the script itself writes under a watched path is newer than the reference
-    // the next build compares against, and the path is permanently dirty. Both
-    // Vite and the gzip step below write all over web/dist, so watching it means
-    // running `npm run build` on every single cargo invocation. Preserving mtimes
-    // across the gzip does not save it either, because the Vite run inside the
-    // same script rewrites the files regardless.
+    // was measured too (three consecutive no-op builds, three script runs): it
+    // re-runs this script on EVERY build, forever. Cargo creates its
+    // `invoked.timestamp` BEFORE running a build script, so any file the script
+    // itself writes under a watched path is newer than the reference the next
+    // build compares against, and the path is permanently dirty. Watching a
+    // directory this script generates is simply not what rerun-if-changed is for.
     //
-    // Watching a generated directory is simply not what rerun-if-changed is for.
-    // The real fix is to stop generating into the watched tree at all: stage the
-    // gzipped output under OUT_DIR and point rust-embed's `folder` there, leaving
-    // web/dist as pure Vite output. That is a layout change spanning this file and
-    // web_assets.rs, so it is written down here rather than smuggled in.
+    // So the generated tree stopped being the one rust-embed reads: `stage_dist`
+    // mirrors web/dist into $OUT_DIR/ui on EVERY path through this script, and
+    // web_assets.rs embeds that. The embedded bytes no longer depend on the state
+    // of web/dist at compile time.
     //
-    // Until then: if the root 404s, run `touch crates/dux-web/web/index.html` (or
-    // any web source) and rebuild.
-    println!("cargo:rerun-if-changed=web/scripts");
+    // Be honest about the limit: this MOVES the hole somewhere unreachable in
+    // practice, it does not close it. Emptying $OUT_DIR/ui (leaving the directory
+    // there) and rebuilding runs this script zero additional times and embeds
+    // nothing, exactly as before. Measured, and the startup guard in web_assets.rs
+    // fired on it. What is different is that nobody selectively empties $OUT_DIR;
+    // DELETING the directory is a compile error naming the missing folder rather
+    // than a silent empty embed (measured too); and `cargo clean -p dux-web` drops
+    // the build-script fingerprint along with the staged copy, so the assets come
+    // back.
+    //
+    // And it introduces a NEW staleness path, which is the dual of the bug it
+    // fixes. Before, a developer who ran `npm run build` by hand got those bytes
+    // into the next `cargo build` for free, because rust-embed's file
+    // dependencies forced a recompile. Now the staged copy is stale, nothing
+    // notices, and the binary is still marked as a real build. The trade is
+    // deliberate and much the lesser evil, but it is a trade. Either way the lever
+    // is the same: `touch crates/dux-web/web/index.html` (or any web source) and
+    // rebuild.
+    //
+    // One interaction is UNVERIFIED and is a gate rather than a claim: how CI's
+    // `Swatinem/rust-cache` save/restore behaves against a cached $OUT_DIR. A
+    // fresh checkout stamps sources with current mtimes newer than any cached
+    // reference, so the script should re-run, but that was reasoned rather than
+    // measured. Before, a cached target directory that skipped this script would
+    // have met an empty (gitignored) web/dist and failed the suite loudly; now a
+    // cached staged copy would satisfy the page-level gates silently. The
+    // mitigations are `the_embedded_asset_set_is_a_whole_frontend_build` in
+    // tests/static_serving.rs and the startup guard in web_assets.rs, neither of
+    // which cares where the bytes came from.
     // Without this, cargo caches the build-script result and toggling the hatch
     // appears to do nothing: the previous `DUX_UI_BUILD_STATE` sticks across
     // builds. Verified by probe, not assumed.
@@ -212,10 +247,11 @@ fn main() {
 
     let dist = web.join("dist");
     let dist_index = dist.join("index.html");
+    let staged = staged_dir();
 
     if hatch_set() {
         skip_frontend_build(&dist, &dist_index);
-        gzip_dist(&dist);
+        stage_dist(&dist, &staged);
         return;
     }
 
@@ -251,11 +287,19 @@ fn main() {
     // skipping on a genuine build. See the module docs.
     mark_state("built");
 
-    // Gzip the text assets IN PLACE so rust-embed bakes the compressed bytes into
-    // the binary (and `web_assets` serves them with `Content-Encoding: gzip`).
-    // Runs after the Vite build (which writes raw files); idempotent via the gzip
-    // magic-byte check, so an already-compressed dist isn't double-compressed.
-    gzip_dist(&dist);
+    // Stage the gzipped mirror rust-embed actually reads. Runs after the Vite
+    // build, which writes the raw files.
+    stage_dist(&dist, &staged);
+}
+
+/// Where the embedded copy is staged: `$OUT_DIR/ui`, matching the `folder`
+/// attribute in `web_assets.rs`. The two must agree, and `ui` rather than the
+/// bare `$OUT_DIR` because rust-embed walks the whole directory and `$OUT_DIR`
+/// also holds whatever else cargo and other build steps put there.
+fn staged_dir() -> std::path::PathBuf {
+    let out_dir = std::env::var_os("OUT_DIR")
+        .unwrap_or_else(|| panic!("dux-web: cargo did not set OUT_DIR for the build script"));
+    Path::new(&out_dir).join("ui")
 }
 
 /// Whether the escape hatch is engaged. ANY non-empty value counts as set, so
@@ -340,8 +384,17 @@ fn deps_stale(web: &Path) -> bool {
 }
 
 /// Whether `index.html` is a notice page this script wrote earlier, rather than a
-/// real build. `gzip_dist` compresses `index.html` in place, so the sentinel has
-/// to be looked for in the inflated bytes as well as the raw ones.
+/// real build.
+///
+/// The sentinel is looked for in the INFLATED bytes as well as the raw ones, and
+/// that branch is not dead code even though this script no longer compresses
+/// anything inside `web/dist`. A checkout built by the PREVIOUS version of this
+/// file has a `dist/index.html` that was gzipped in place, and the escape hatch
+/// must still recognise its own notice page there. Deleting the branch
+/// reintroduces exactly the bug the sentinel comment above documents: the second
+/// consecutive hatch build mistakes the notice page for a real dist, stops
+/// marking the binary, and the tests assert against the notice instead of
+/// skipping.
 fn is_not_built_notice(dist_index: &Path) -> bool {
     let Ok(bytes) = std::fs::read(dist_index) else {
         return false;
@@ -362,37 +415,98 @@ fn is_not_built_notice(dist_index: &Path) -> bool {
     String::from_utf8_lossy(&bytes).contains(NOT_BUILT_SENTINEL)
 }
 
-fn gzip_dist(dir: &Path) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
+/// Mirror `dist` into the staging directory rust-embed reads, gzipping the text
+/// assets DURING the copy so the binary carries the compressed bytes (and
+/// `web_assets` serves them with `Content-Encoding: gzip`).
+///
+/// Must run on EVERY path through this script. If one skipped it, `$OUT_DIR/ui`
+/// would not exist and the crate would fail to compile. That is loud rather than
+/// silent, so it would be survivable, but it is not a state to ship.
+///
+/// The staging directory is REMOVED first rather than written over. rust-embed
+/// bakes in everything it finds, so a chunk Vite stopped emitting would otherwise
+/// linger in the binary for as long as `$OUT_DIR` survived, and the hashed
+/// filenames mean that accumulates one dead copy per content change. A full
+/// remove costs nothing measurable next to the copy itself.
+fn stage_dist(dist: &Path, staged: &Path) {
+    if let Err(err) = std::fs::remove_dir_all(staged)
+        && err.kind() != std::io::ErrorKind::NotFound
+    {
+        panic!("dux-web: could not clear the staging directory {staged:?}: {err}");
+    }
+    copy_tree(dist, staged);
+}
+
+/// Recursive half of [`stage_dist`].
+///
+/// Failures PANIC rather than being skipped, unlike the in-place gzip this
+/// replaced, which ignored every error it could hit. A file that silently fails
+/// to copy is a chunk missing from the binary, which is a blank screen the moment
+/// the feature behind it is opened, and this whole change exists because a
+/// silently incomplete embed is hard to notice.
+///
+/// The ONE exception is a dangling symlink, and it is here because the loud
+/// policy above overshot on a state people really do create. Measured, by
+/// replicating this function in a standalone program against a hand-built `dist`:
+/// a symlink whose target is gone is not a directory, `read` fails with
+/// `No such file or directory`, and the panic takes the whole `cargo build` down.
+/// Everything else in that probe copied correctly (nested directories, dotfiles,
+/// zero-byte files, empty directories, symlinks to real files, and names that are
+/// not valid UTF-8), and a staging path already occupied by a regular file still
+/// panics with a clear message, which is right. Vite does not emit dangling
+/// symlinks, so a healthy tree never reaches this branch; `web/dist` is
+/// gitignored and hand-manipulated, and CONTRIBUTING.md documents moving it
+/// aside, so a half-populated tree is a state a contributor can produce. Skipping
+/// one is also honest about what is there: a link pointing at nothing has no
+/// bytes to embed. Do NOT widen this back into a blanket ignore-the-error; the
+/// loud failure is the point.
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to)
+        .unwrap_or_else(|err| panic!("dux-web: could not create {to:?}: {err}"));
+    let entries = std::fs::read_dir(from)
+        .unwrap_or_else(|err| panic!("dux-web: could not read {from:?}: {err}"));
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|err| panic!("dux-web: could not read {from:?}: {err}"));
         let path = entry.path();
+        let dest = to.join(entry.file_name());
         if path.is_dir() {
-            gzip_dist(&path);
+            copy_tree(&path, &dest);
             continue;
         }
-        let is_compressible = path
+        // `is_dir` and `exists` both FOLLOW the link, so a symlink to a real file
+        // or directory has already been handled as that file or directory. What
+        // is left here is a link whose target does not resolve, the one skip this
+        // function allows (see the doc comment).
+        if std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_symlink()) && !path.exists() {
+            println!(
+                "cargo:warning=dux-web: skipping the dangling symlink {path:?} while staging \
+                 web/dist; it points at nothing, so there are no bytes to embed."
+            );
+            continue;
+        }
+        let bytes = std::fs::read(&path)
+            .unwrap_or_else(|err| panic!("dux-web: could not read {path:?}: {err}"));
+        let compressible = path
             .extension()
             .and_then(|e| e.to_str())
             .map(|e| COMPRESSIBLE.contains(&e))
             .unwrap_or(false);
-        if !is_compressible {
-            continue;
-        }
-        let Ok(bytes) = std::fs::read(&path) else {
-            continue;
+        // The magic-byte check is still needed: a checkout whose dist was gzipped
+        // IN PLACE by the previous version of this script hands us compressed
+        // bytes already, and compressing them twice would serve garbage to a
+        // browser that inflates once.
+        let already_gzipped = bytes.starts_with(&[0x1f, 0x8b]);
+        let out = if compressible && !already_gzipped {
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
+            encoder
+                .write_all(&bytes)
+                .and_then(|()| encoder.finish())
+                .unwrap_or_else(|err| panic!("dux-web: could not gzip {path:?}: {err}"))
+        } else {
+            bytes
         };
-        // Already gzipped (e.g. a dist kept from a prior failed build) → skip.
-        if bytes.starts_with(&[0x1f, 0x8b]) {
-            continue;
-        }
-        let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
-        if encoder.write_all(&bytes).is_ok()
-            && let Ok(compressed) = encoder.finish()
-        {
-            let _ = std::fs::write(&path, compressed);
-        }
+        std::fs::write(&dest, out)
+            .unwrap_or_else(|err| panic!("dux-web: could not write {dest:?}: {err}"));
     }
 }
 

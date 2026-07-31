@@ -97,8 +97,13 @@ pub fn run_server(paths: DuxPaths, plan: ServerPlan, version: String) -> Result<
 ///   no banner to carry the row.
 ///
 /// Called by both serve entry points so neither can forget it.
+///
+/// A binary that reports a real build but embeds almost nothing is warned about
+/// here too, through the same row: the build state alone cannot see what
+/// rust-embed baked in, and a 404 at the root with nothing said anywhere is the
+/// symptom that motivated the check (see `web_assets::UI_EMPTY_EMBED_WARNING`).
 fn warn_if_ui_not_built() {
-    if let Some(warning) = web_assets::ui_build_warning(web_assets::ui_build_state()) {
+    if let Some(warning) = web_assets::ui_startup_warning() {
         dux_core::logger::warn(&format!("[server] {warning}"));
     }
 }
@@ -234,11 +239,12 @@ async fn bind_plan_addrs(addrs: &[PlanAddr]) -> Result<(Vec<BoundListener>, Vec<
 /// a browser. It is listed FIRST because "the web UI in here is not what you
 /// think" outranks any per-address degradation.
 ///
-/// The parameter is the MESSAGE rather than a bool because there are two of them
-/// (see `web_assets::ui_build_warning`): the notice-page binary has no web UI at
-/// all, while a binary that reused an existing `web/dist` serves a real one of
-/// unknown age. A bool could only pick one of those and would be wrong the other
-/// half of the time. Pure (over `(SocketAddr, bool)` pairs and an `Option<&str>`,
+/// The parameter is the MESSAGE rather than a bool because there is more than one
+/// of them (see `web_assets::ui_startup_warning`): the notice-page binary has no
+/// web UI at all, a binary that reused an existing `web/dist` serves a real one of
+/// unknown age, and a binary whose embed came out empty despite a real build
+/// serves nothing while claiming otherwise. A bool could only pick one of those
+/// and would be wrong the rest of the time. Pure (over `(SocketAddr, bool)` pairs and an `Option<&str>`,
 /// not the live listeners or the compiled-in markers) so it is unit-testable
 /// without binding sockets or rebuilding.
 fn plain_http_banner(
@@ -401,7 +407,7 @@ fn run_plain_http(paths: DuxPaths, addrs: Vec<PlanAddr>, version: String) -> Res
             &banner_legs,
             &bind_warnings,
             note,
-            web_assets::ui_build_warning(web_assets::ui_build_state()),
+            web_assets::ui_startup_warning(),
         ));
 
         // Spawn the engine on its own std thread (it runs the synchronous engine

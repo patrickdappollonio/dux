@@ -1,18 +1,42 @@
-//! The built web UI (`web/dist`) embedded into the binary by rust-embed and
-//! served with SPA fallback. Built by build.rs.
+//! The built web UI embedded into the binary by rust-embed and served with SPA
+//! fallback. Built by build.rs.
 //!
-//! build.rs gzips the text assets IN PLACE, so the bytes rust-embed bakes in are
-//! already compressed (shrinking the binary). The handler detects the gzip magic
-//! bytes and serves them with `Content-Encoding: gzip` for clients that accept it
-//! (every browser), inflating on the fly for the rare client that doesn't.
+//! The embedded tree is `$OUT_DIR/ui`, a gzipped mirror build.rs stages from
+//! `web/dist` on every path it can take, NOT `web/dist` itself. Reading the
+//! generated directory directly meant the embedded bytes depended on the state of
+//! a directory cargo was not allowed to watch (watching it re-runs the frontend
+//! build forever); emptying it baked in zero files and the server answered 404 at
+//! the root with nothing said anywhere. The KNOWN GAP comment in build.rs has the
+//! measurements, and the honest limits of the repair.
+//!
+//! Interpolating `$OUT_DIR` in the `folder` attribute needs rust-embed's
+//! `interpolate-folder-path` feature, which Cargo.toml enables. Nothing here has
+//! to pin it, and no test could: rust-embed enforces it at COMPILE time. Read
+//! against the pinned 8.11.0, the expansion is `#[cfg]`-gated on that feature,
+//! and without it the literal `$OUT_DIR/ui` is a RELATIVE path joined onto the
+//! crate's manifest directory, so it names a directory that does not exist and
+//! the derive fails with an error quoting it. What
+//! `the_embed_folder_resolves_to_something` covers is the state that DOES
+//! compile: a staging directory that exists and is empty.
+//!
+//! The text assets are gzipped during that staging, so the bytes rust-embed bakes
+//! in are already compressed (shrinking the binary). The handler detects the gzip
+//! magic bytes and serves them with `Content-Encoding: gzip` for clients that
+//! accept it (every browser), inflating on the fly for the rare client that
+//! doesn't.
 
 use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use rust_embed::RustEmbed;
 
+/// Public so the integration tests can assert on the embedded set DIRECTLY
+/// (`WebAssets::iter()` / `WebAssets::get()`) instead of only through the router.
+/// Every other gate in this crate is indirect: it fetches a page and happens to
+/// fail when the embed is empty. A direct assertion holds no matter where
+/// `folder` points and reports the cause instead of a 404.
 #[derive(RustEmbed)]
-#[folder = "web/dist"]
-struct WebAssets;
+#[folder = "$OUT_DIR/ui"]
+pub struct WebAssets;
 
 /// What the page served at `/` actually is, decided at compile time by `build.rs`.
 ///
@@ -95,6 +119,76 @@ pub const fn ui_build_warning(state: UiBuildState) -> Option<&'static str> {
         UiBuildState::NotBuilt => Some(UI_NOT_BUILT_WARNING),
         UiBuildState::StaleReuse => Some(UI_STALE_WARNING),
     }
+}
+
+/// Operator-facing warning for a binary that CLAIMS a real frontend build but
+/// carries next to nothing.
+///
+/// The build state is stamped by build.rs and says only "a frontend build ran
+/// during this compilation". It cannot say anything about what rust-embed then
+/// baked in, because those are two different steps reading two different things.
+/// When they disagree the user's symptom is a 404 at the root with no explanation
+/// anywhere, which is the reported bug this guard exists to convert into an
+/// explicit failure. It is also the only mitigation that reaches somebody who ran
+/// `cargo build` and never ran the test suite.
+///
+/// What it does NOT have to cover is a MISSING staging directory: rust-embed
+/// fails to compile on that, loudly, naming the folder (measured). The case left
+/// is a staging directory that exists and is empty or nearly so, which compiles
+/// happily and embeds nothing. That was measured as well, by emptying
+/// `$OUT_DIR/ui` and rebuilding, and this warning is what fired.
+/// The wording carries a second audience on purpose. The two repair steps below
+/// are things only somebody with the source tree can do, and the artifact check
+/// that would otherwise catch this (`.github/scripts/smoke_archive.sh`) runs in
+/// the RELEASE workflow only, so an empty embed merged through a pull request
+/// reaches a build nobody grepped. Whoever installed that from a release archive
+/// has no checkout to touch and no cargo to clean, and needs to be told this is a
+/// packaging bug rather than left running commands that cannot apply. The notice
+/// page in build.rs says the same thing for the same reason.
+pub const UI_EMPTY_EMBED_WARNING: &str = "This binary reports a real frontend build, but almost no web assets are embedded \
+     in it, so server mode will answer 404 for the web UI. The build script and \
+     rust-embed disagreed about what to bake in. Building from source? Run `touch \
+     crates/dux-web/web/index.html` and rebuild, or `cargo clean -p dux-web` and \
+     rebuild, to force the frontend build and the staging step to run again. \
+     Installed dux from a release archive, npm, or the install script? That is a \
+     packaging bug, not something you can fix locally. Please report it.";
+
+/// The smallest number of embedded files a real build can plausibly have.
+///
+/// The failure this guards is total: a broken embed carries ZERO files, so any
+/// floor at all would catch it. 8 is a little headroom above that without
+/// approaching a real build, which is 108 files (measured, 2026-07: `web/dist`
+/// holds 108 files, 92 of them hashed bundles under `assets/`). Even an app that
+/// abandoned code splitting entirely would still ship an `index.html`, an entry
+/// chunk, a stylesheet, the service worker, the manifest, the offline page and
+/// its icons. Kept deliberately low because this fires a WARNING at every server
+/// start: a floor that could cry wolf on a legitimate build is worse than one
+/// that only ever catches the empty case.
+const MIN_PLAUSIBLE_EMBEDDED_FILES: usize = 8;
+
+/// The single warning row `dux server` shows, or `None` when there is nothing to
+/// say. Pure over its inputs so it can be tested; [`ui_startup_warning`] supplies
+/// the real ones.
+///
+/// A skip state outranks the embed check because it EXPLAINS it: a notice-page
+/// binary legitimately embeds one file, and telling that operator their embed is
+/// implausibly small would send them hunting for the wrong problem.
+fn startup_warning(state: UiBuildState, embedded_files: usize) -> Option<&'static str> {
+    match ui_build_warning(state) {
+        Some(warning) => Some(warning),
+        None if embedded_files < MIN_PLAUSIBLE_EMBEDDED_FILES => Some(UI_EMPTY_EMBED_WARNING),
+        None => None,
+    }
+}
+
+/// This binary's startup warning row: the build-state warning when the frontend
+/// build was skipped, otherwise the empty-embed warning when the build state and
+/// the embedded set disagree, otherwise nothing.
+///
+/// Counting is bounded: it stops at the floor rather than walking all 108 entries.
+pub fn ui_startup_warning() -> Option<&'static str> {
+    let embedded = WebAssets::iter().take(MIN_PLAUSIBLE_EMBEDDED_FILES).count();
+    startup_warning(ui_build_state(), embedded)
 }
 
 /// Cache policy per request path. Vite fingerprints everything under `assets/`
@@ -332,6 +426,64 @@ mod tests {
                 warning.contains("DUX_DISABLE_UI_BUILD"),
                 "each warning must name the variable that caused it: {warning}"
             );
+        }
+    }
+
+    #[test]
+    fn a_real_build_that_embedded_nothing_is_warned_about() {
+        // The build state says only "a frontend build ran", which is a different
+        // question from "did those files reach the binary". When they disagree the
+        // user sees a 404 at the root and nothing anywhere says why, so the server
+        // says it at startup instead.
+        assert_eq!(
+            startup_warning(UiBuildState::Built, 0),
+            Some(UI_EMPTY_EMBED_WARNING)
+        );
+        assert_eq!(
+            startup_warning(UiBuildState::Built, MIN_PLAUSIBLE_EMBEDDED_FILES - 1),
+            Some(UI_EMPTY_EMBED_WARNING)
+        );
+        // A real build (108 files, measured) is silent, and so is anything at the
+        // floor: this row appears at every server start, so it must not cry wolf.
+        assert_eq!(
+            startup_warning(UiBuildState::Built, MIN_PLAUSIBLE_EMBEDDED_FILES),
+            None
+        );
+        assert_eq!(startup_warning(UiBuildState::Built, 108), None);
+    }
+
+    #[test]
+    fn a_skip_state_outranks_the_empty_embed_check() {
+        // A notice-page binary legitimately embeds ONE file, so the empty-embed
+        // wording would be technically true and completely misleading: it tells
+        // the operator the build script and rust-embed disagreed, when what
+        // actually happened is that they asked for no web UI. The state warning
+        // explains the small embed, so it wins.
+        assert_eq!(
+            startup_warning(UiBuildState::NotBuilt, 1),
+            Some(UI_NOT_BUILT_WARNING)
+        );
+        assert_eq!(
+            startup_warning(UiBuildState::StaleReuse, 108),
+            Some(UI_STALE_WARNING)
+        );
+    }
+
+    #[test]
+    fn this_binarys_startup_warning_reflects_this_binarys_embed() {
+        // The end-to-end shape of the guard, against whatever this binary actually
+        // carries. In a normal build both halves are quiet; under the escape hatch
+        // the row is the state's, never the empty-embed one, because a skip state
+        // outranks it.
+        let warning = ui_startup_warning();
+        match ui_build_state() {
+            UiBuildState::Built => assert_eq!(
+                warning, None,
+                "a normal build must produce no startup warning; getting {warning:?} \
+                 means this binary embedded fewer than {MIN_PLAUSIBLE_EMBEDDED_FILES} \
+                 files and would 404 at the root"
+            ),
+            state => assert_eq!(warning, ui_build_warning(state)),
         }
     }
 
