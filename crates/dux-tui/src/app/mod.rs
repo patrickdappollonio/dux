@@ -179,7 +179,46 @@ pub struct App {
     pub(crate) agent_tab_regions: Vec<(String, Rect)>,
     pub(crate) terminal_return_to_list: bool,
     pub(crate) last_pty_size: (u16, u16),
-    pub(crate) prev_scrollback_offset: usize,
+    /// How many times the selected surface's grid has been REBUILT (see
+    /// `refresh_snapshot_buf`). Not a clock and not a line count: it only
+    /// answers "has the grid moved since I looked?", which is the one question
+    /// `drop_drifted_selection` needs and the one the scroll numbers cannot
+    /// answer once the history ring is full.
+    pub(crate) grid_generation: u64,
+    /// Which terminal surfaces (focused tab ids, companion terminal ids) the
+    /// user has put into SCROLL MODE. Empty means nobody is scrolled back.
+    ///
+    /// A SET, not one slot, because the offset this mirrors is per-surface:
+    /// it lives in each PTY client, so "agent A and terminal B are both parked
+    /// in their scrollback" is an ordinary state that one slot cannot
+    /// represent. It shipped as one slot, and the consequence was that any
+    /// surface snapping to its live edge cleared the mode for a DIFFERENT
+    /// surface, leaving that pane frozen at its old offset with no cue, no
+    /// status, and the next keystroke going through to its child. Every write
+    /// here is scoped to the one surface it concerns.
+    ///
+    /// This is an explicit mode, entered and left by the user, exactly as
+    /// tmux's copy mode is a property of the pane rather than a function of
+    /// where the grid happens to be sitting. Nothing ever ENTERS the mode from
+    /// a sample of the grid, and nothing that gates behaviour on it (keystroke
+    /// suppression, the cue, the badge) samples the grid either: those read
+    /// this state. The offset is read in exactly two places, and both are
+    /// transitions rather than gates. `note_user_scroll` reads it in the same
+    /// breath as a scroll the USER performed, to decide whether that gesture
+    /// entered or left the mode. `reconcile_scroll_mode` reads it once per
+    /// input batch to notice the CHILD yanking the view back and to end the
+    /// mode out loud.
+    ///
+    /// That second read is why the mode cannot simply BE "offset > 0":
+    /// measured against the terminal library we pin, starting from a
+    /// scrolled-back grid, `ESC [ ? 1049 h` (enter the alternate screen),
+    /// `ESC [ 3 J` (erase scrollback) and `ESC c` (full reset) each drop
+    /// `scrollback_offset()` to 0. Deriving the mode from the offset let any
+    /// pager, editor or full-screen agent silently hand the user's keystrokes
+    /// back to the child while the user believed they were still reading
+    /// history. Keeping the mode as state means that transition is announced
+    /// instead of being invisible.
+    pub(crate) scroll_mode: std::collections::HashSet<String>,
     pub(crate) show_diff_line_numbers: bool,
     pub(crate) last_diff_height: u16,
     pub(crate) last_diff_visual_lines: u16,
@@ -1809,6 +1848,33 @@ pub(crate) struct TermGridPos {
     pub col: u16,
 }
 
+/// The scroll state of a PTY grid at one instant, as reported by
+/// [`dux_core::pty::TerminalSnapshot`]. Stamped onto a [`TerminalSelection`] at
+/// drag start so viewport rows recorded then can be re-found later; see
+/// [`TerminalSelection::to_origin_row`] for the arithmetic and its limits.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SelectionOrigin {
+    /// `TerminalSnapshot::scrollback_offset` (alacritty's `display_offset`):
+    /// how many lines above the live edge the viewport top sits.
+    pub scrollback_offset: usize,
+    /// `TerminalSnapshot::scrollback_total` (alacritty's `history_size`): how
+    /// many lines of scrollback exist behind the viewport.
+    pub scrollback_total: usize,
+    /// Whether the scrollback ring was already FULL in this frame, i.e.
+    /// `scrollback_total` had reached the configured capacity and can no longer
+    /// grow. [`TerminalSelection::to_origin_row`] leans on history growth to
+    /// stand in for the grid's advancing bottom, so a selection stamped here
+    /// cannot be corrected once anything else moves the grid; `App::
+    /// drop_drifted_selection` retires it instead of letting it point at other
+    /// text. Read from `ui.agent_scrollback_lines`, which is the value every
+    /// agent PTY and companion terminal is spawned with.
+    pub history_saturated: bool,
+    /// The value of `App::grid_generation` in this frame: how many times the
+    /// grid had been rebuilt when the origin was stamped. Only meaningful
+    /// alongside `history_saturated`; see `App::drop_drifted_selection`.
+    pub grid_generation: u64,
+}
+
 /// Active text selection in the terminal viewport.
 #[derive(Clone, Debug)]
 pub(crate) struct TerminalSelection {
@@ -1818,6 +1884,12 @@ pub(crate) struct TerminalSelection {
     pub end: TermGridPos,
     /// True while the mouse button is held (still dragging).
     pub dragging: bool,
+    /// Grid scroll state when the drag started. `anchor`/`end` are viewport
+    /// rows, which only name a fixed piece of text while this stays true, so
+    /// the PTY paths translate live rows back into this frame before testing
+    /// them. Unused by the startup-log viewer, which shares this type but
+    /// stores absolute log line numbers (see `screen_to_startup_log_grid`).
+    pub origin: SelectionOrigin,
 }
 
 impl TerminalSelection {
@@ -1849,6 +1921,88 @@ impl TerminalSelection {
             return col <= end.col;
         }
         true // middle rows are fully selected
+    }
+
+    /// Translate a row of the LIVE viewport back into the frame this selection
+    /// was recorded in, or `None` when that row holds text the selection could
+    /// never have covered.
+    ///
+    /// A viewport row does not name a fixed piece of text. Writing `bottom` for
+    /// the absolute index of the newest grid line and `rows` for the viewport
+    /// height, row `r` shows absolute line `bottom - offset - (rows - 1) + r`,
+    /// so for one fixed line the row moves by
+    /// `(offset_now - offset_then) - (bottom_now - bottom_then)`.
+    ///
+    /// `bottom` is not exposed, but `scrollback_total` is alacritty's
+    /// `history_size`, and in the ordinary case the event that grows history is
+    /// the event that advances `bottom`: `Grid::scroll_up` pushes the top line
+    /// into history and moves everything up by one. So `scrollback_total`
+    /// stands in for `bottom`.
+    ///
+    /// The two deltas are NOT equal in general, and this comment used to claim
+    /// they were. See KNOWN LIMITS below for the two measured cases where they
+    /// part company.
+    ///
+    /// That covers both ways the numbers move. A user scroll changes `offset`
+    /// while history holds still, so the text moves down the screen by the
+    /// scroll distance. New output grows history; alacritty already bumps
+    /// `display_offset` in step while the user is scrolled back
+    /// (`Grid::scroll_up`, `if self.display_offset != 0 { … }` in
+    /// alacritty_terminal 0.26.0), so the two deltas cancel and the text stays
+    /// put, while at the live edge `offset` stays 0 and the text scrolls up.
+    ///
+    /// KNOWN LIMIT 1, saturation, and it is HANDLED rather than tolerated.
+    /// Once history saturates at the configured scrollback size,
+    /// `scrollback_total` stops growing while `bottom` keeps moving, so the
+    /// correction under-counts by exactly the number of lines produced.
+    /// Measured on a 5-line ring: select `L30`, feed three lines, and the copy
+    /// yields `L33`. With the default 10,000-line scrollback saturation is the
+    /// steady state of any long session, so this would be the NORMAL behaviour
+    /// rather than a corner. Following text past that point needs absolute grid
+    /// coordinates, which this deliberately does not introduce; instead
+    /// `SelectionOrigin::history_saturated` records the regime and
+    /// `App::drop_drifted_selection` retires the selection the moment the grid
+    /// moves under it. A selection that vanishes is honest; one that quietly
+    /// names other text is not.
+    ///
+    /// KNOWN LIMIT 2, top-margin scrolling regions, and it is NOT handled.
+    /// `Grid::scroll_up` bumps the display offset for every scroll while the
+    /// offset is non-zero, but pushes the scrolled-out line into history only
+    /// when the scrolling region starts at row zero (the same asymmetry
+    /// `dux_core::pty::TerminalState::clamp_display_offset_to_history` documents
+    /// and works around for a different symptom). So a child that sets a
+    /// scrolling region with a TOP margin and scrolls it advances the offset
+    /// while history stands still, and this correction drifts the same way it
+    /// does at saturation. The saturation guard does not cover it: that case is
+    /// gated on the ring being full, and this one happens at any history depth.
+    /// Detecting it would mean knowing the child's current scrolling region,
+    /// which is not exposed. A selection held across a top-margin scroll can
+    /// therefore still drift, and that is a recorded gap rather than a claim
+    /// that it cannot happen.
+    ///
+    /// A live row that predates the recorded viewport translates to a negative
+    /// row and comes back as `None` rather than wrapping. The other direction
+    /// needs no guard: selected text that has scrolled off the screen simply
+    /// stops appearing among the snapshot's cells, so it drops out of the
+    /// highlight and out of the copy on its own. Copying a selection that has
+    /// scrolled out of the viewport is OUT OF SCOPE here; it would mean reading
+    /// scrollback the snapshot does not carry.
+    pub fn to_origin_row(&self, live_row: u16, now: SelectionOrigin) -> Option<u16> {
+        let offset_delta = now.scrollback_offset as i64 - self.origin.scrollback_offset as i64;
+        let total_delta = now.scrollback_total as i64 - self.origin.scrollback_total as i64;
+        let origin_row = live_row as i64 - offset_delta + total_delta;
+        u16::try_from(origin_row).ok()
+    }
+
+    /// [`Self::contains`] for a cell read from the LIVE grid: translates the
+    /// cell's row into the selection's own frame first. Every PTY-grid caller
+    /// must use this rather than `contains`, or the highlight and the copied
+    /// text stay pinned to screen coordinates while the text underneath moves.
+    pub fn contains_live(&self, live_row: u16, col: u16, now: SelectionOrigin) -> bool {
+        match self.to_origin_row(live_row, now) {
+            Some(row) => self.contains(row, col),
+            None => false,
+        }
     }
 }
 
@@ -2590,7 +2744,8 @@ impl App {
             agent_tab_regions: Vec::new(),
             terminal_return_to_list: false,
             last_pty_size: (0, 0),
-            prev_scrollback_offset: 0,
+            grid_generation: 0,
+            scroll_mode: std::collections::HashSet::new(),
             last_diff_height: 0,
             last_diff_visual_lines: 0,
             theme,
@@ -2758,6 +2913,12 @@ impl App {
                 self.note_focused_agent_viewed();
                 self.engine.poll_agent_signals();
                 self.tick_count = self.tick_count.wrapping_add(1);
+                // Scroll mode is the user's, but the child can pull the grid
+                // back to the live edge underneath them. Check every tick, not
+                // only on a keystroke, so the "your keys are going nowhere" cue
+                // and the status message that retires it land in the same frame
+                // the view unfroze rather than on the user's next key.
+                self.reconcile_scroll_mode();
                 // Expire a transient status (e.g. a success confirmation) after
                 // its configured lifetime. Busy entries older than BUSY_TIMEOUT
                 // are upgraded to Warning. Wall-clock, not tick count.
@@ -3084,8 +3245,10 @@ impl App {
         if matches!(self.fullscreen_overlay, FullscreenOverlay::Terminal) {
             let return_to_list = self.terminal_return_to_list;
             // Snap to the live edge while the surface still resolves the
-            // terminal client — a scrolled-back PTY pauses ingestion, and the
-            // pane behind the dismissed overlay must come back live.
+            // terminal client. Scrolling back moves the display offset and
+            // nothing else, and the terminal library holds that view still as
+            // new lines arrive, so an offset left behind would bring the pane
+            // back parked in history while the child prints below it.
             self.reset_pty_scrollback();
             self.fullscreen_overlay = FullscreenOverlay::None;
             self.session_surface = SessionSurface::Agent;
@@ -3129,7 +3292,8 @@ impl App {
         // through the raw-input passthrough, which has its own exit handling.
         if matches!(self.fullscreen_overlay, FullscreenOverlay::Agent) {
             // Same live-edge snap as `exit_interactive_mode`: the minimized
-            // pane must never come back frozen on a paused, scrolled-back PTY.
+            // pane must never come back parked in history, showing content the
+            // child has already printed past.
             self.reset_pty_scrollback();
             self.fullscreen_overlay = FullscreenOverlay::None;
             self.input_target = InputTarget::None;
@@ -4589,6 +4753,32 @@ impl App {
         }
     }
 
+    /// The id that names the currently selected terminal surface: the focused
+    /// tab id for an agent, the terminal id for a companion terminal. `None`
+    /// when that surface has no live PTY, so it always agrees with
+    /// [`Self::selected_terminal_surface_client`] about whether there is a
+    /// surface at all. Scroll mode is keyed by this id so scrolling back in one
+    /// agent never suppresses typing in another.
+    pub(crate) fn selected_terminal_surface_id(&self) -> Option<String> {
+        match self.session_surface {
+            SessionSurface::Agent => {
+                let session_id = self.selected_session()?.id.clone();
+                let tab_id = self.focused_tab_id(&session_id);
+                self.engine
+                    .providers
+                    .contains_key(&tab_id)
+                    .then_some(tab_id)
+            }
+            SessionSurface::Terminal => {
+                let id = self.active_terminal_id.as_ref()?;
+                self.engine
+                    .companion_terminals
+                    .contains_key(id)
+                    .then(|| id.clone())
+            }
+        }
+    }
+
     pub(crate) fn selected_terminal_surface_client(&self) -> Option<&PtyClient> {
         match self.session_surface {
             SessionSurface::Agent => {
@@ -4745,6 +4935,26 @@ impl App {
         }
     }
 
+    /// The scroll state of the snapshot currently in `snapshot_buf`, as a
+    /// [`SelectionOrigin`]. Callers stamp it onto a new selection and pass it
+    /// back in as the "now" frame when testing live cells.
+    pub(crate) fn snapshot_selection_origin(&self) -> SelectionOrigin {
+        // The capacity every terminal surface is spawned with: agents through
+        // `dux_core::agent_job` and companion terminals through
+        // `dux_core::engine::companion` both pass `ui.agent_scrollback_lines`
+        // to `PtyClient::spawn`. The PTY does not expose its own limit, so this
+        // is where the number has to come from; a zero capacity is treated as
+        // "never saturated" rather than "always", so an unconfigured surface
+        // keeps the ordinary behaviour instead of dropping every selection.
+        let capacity = self.engine.config.ui.agent_scrollback_lines;
+        SelectionOrigin {
+            history_saturated: capacity > 0 && self.snapshot_buf.scrollback_total >= capacity,
+            grid_generation: self.grid_generation,
+            scrollback_offset: self.snapshot_buf.scrollback_offset,
+            scrollback_total: self.snapshot_buf.scrollback_total,
+        }
+    }
+
     /// Refresh `self.snapshot_buf` from the currently selected terminal
     /// surface, reusing the existing cell allocation. Returns `true` if a
     /// provider was found and the snapshot was updated.
@@ -4775,7 +4985,13 @@ impl App {
                 self.terminal_selection = None;
             }
             let collect_links = self.engine.config.capabilities.hyperlinks;
-            provider.snapshot_into(&mut self.snapshot_buf, collect_links);
+            // A rebuild means the grid MOVED (output, a scroll, a resize). The
+            // counter is what lets `drop_drifted_selection` tell "nothing has
+            // happened since this selection was stamped" from "the grid has
+            // moved and, at saturation, I can no longer say by how much".
+            if provider.snapshot_into(&mut self.snapshot_buf, collect_links) {
+                self.grid_generation = self.grid_generation.wrapping_add(1);
+            }
             true
         } else {
             false
@@ -6065,6 +6281,7 @@ leading_branch = "main"
             anchor: TermGridPos { row: 2, col: 5 },
             end: TermGridPos { row: 4, col: 10 },
             dragging: false,
+            origin: SelectionOrigin::default(),
         };
         let (start, end) = sel.ordered();
         assert_eq!(start, TermGridPos { row: 2, col: 5 });
@@ -6077,6 +6294,7 @@ leading_branch = "main"
             anchor: TermGridPos { row: 4, col: 10 },
             end: TermGridPos { row: 2, col: 5 },
             dragging: false,
+            origin: SelectionOrigin::default(),
         };
         let (start, end) = sel.ordered();
         assert_eq!(start, TermGridPos { row: 2, col: 5 });
@@ -6089,6 +6307,7 @@ leading_branch = "main"
             anchor: TermGridPos { row: 3, col: 15 },
             end: TermGridPos { row: 3, col: 5 },
             dragging: false,
+            origin: SelectionOrigin::default(),
         };
         let (start, end) = sel.ordered();
         assert_eq!(start, TermGridPos { row: 3, col: 5 });
@@ -6101,6 +6320,7 @@ leading_branch = "main"
             anchor: TermGridPos { row: 3, col: 5 },
             end: TermGridPos { row: 3, col: 10 },
             dragging: false,
+            origin: SelectionOrigin::default(),
         };
         assert!(sel.contains(3, 5));
         assert!(sel.contains(3, 7));
@@ -6117,6 +6337,7 @@ leading_branch = "main"
             anchor: TermGridPos { row: 2, col: 10 },
             end: TermGridPos { row: 4, col: 5 },
             dragging: false,
+            origin: SelectionOrigin::default(),
         };
         // First row: from anchor col to end of line.
         assert!(sel.contains(2, 10));
@@ -6141,12 +6362,121 @@ leading_branch = "main"
             anchor: TermGridPos { row: 4, col: 5 },
             end: TermGridPos { row: 2, col: 10 },
             dragging: false,
+            origin: SelectionOrigin::default(),
         };
         assert!(sel.contains(2, 10));
         assert!(sel.contains(3, 0));
         assert!(sel.contains(4, 5));
         assert!(!sel.contains(2, 9));
         assert!(!sel.contains(4, 6));
+    }
+
+    /// A selection recorded at scrollback offset 4 with 100 lines of history.
+    /// Every translation case below starts from this one frame.
+    fn anchored_selection() -> TerminalSelection {
+        TerminalSelection {
+            anchor: TermGridPos { row: 10, col: 0 },
+            end: TermGridPos { row: 10, col: 3 },
+            dragging: false,
+            origin: SelectionOrigin {
+                scrollback_offset: 4,
+                scrollback_total: 100,
+                ..Default::default()
+            },
+        }
+    }
+
+    /// Scrolling UP by 5 leaves history alone and pushes the text 5 rows DOWN
+    /// the screen, so the cell now at row 15 is the one recorded at row 10.
+    #[test]
+    fn to_origin_row_follows_a_user_scroll_up() {
+        let sel = anchored_selection();
+        let now = SelectionOrigin {
+            scrollback_offset: 9,
+            scrollback_total: 100,
+            ..Default::default()
+        };
+        assert_eq!(sel.to_origin_row(15, now), Some(10));
+        assert!(sel.contains_live(15, 1, now));
+        // The old screen row now holds different text and must not highlight.
+        assert!(!sel.contains_live(10, 1, now));
+    }
+
+    /// At the live edge the offset stays 0 while history grows, so 3 new lines
+    /// carry the text 3 rows UP: row 10 then is row 7 now.
+    #[test]
+    fn to_origin_row_follows_output_at_the_live_edge() {
+        let sel = TerminalSelection {
+            origin: SelectionOrigin {
+                scrollback_offset: 0,
+                scrollback_total: 100,
+                ..Default::default()
+            },
+            ..anchored_selection()
+        };
+        let now = SelectionOrigin {
+            scrollback_offset: 0,
+            scrollback_total: 103,
+            ..Default::default()
+        };
+        assert_eq!(sel.to_origin_row(7, now), Some(10));
+        assert!(sel.contains_live(7, 1, now));
+        assert!(!sel.contains_live(10, 1, now));
+    }
+
+    /// While the user is scrolled back, alacritty bumps `display_offset` in
+    /// step with the history it grows, so the two deltas cancel and the text
+    /// does not move. The selection must not move either.
+    #[test]
+    fn to_origin_row_holds_still_for_output_while_scrolled_back() {
+        let sel = anchored_selection();
+        let now = SelectionOrigin {
+            scrollback_offset: 7,
+            scrollback_total: 103,
+            ..Default::default()
+        };
+        assert_eq!(sel.to_origin_row(10, now), Some(10));
+        assert!(sel.contains_live(10, 1, now));
+    }
+
+    /// Scrolling back far enough brings text from ABOVE the recorded viewport
+    /// onto the screen. Those rows translate to negative numbers, and the
+    /// translation must say so rather than wrap into a bogus `u16` row that
+    /// would highlight and copy the wrong line.
+    #[test]
+    fn to_origin_row_refuses_rows_from_above_the_recorded_viewport() {
+        let sel = anchored_selection();
+        let now = SelectionOrigin {
+            scrollback_offset: 9,
+            scrollback_total: 100,
+            ..Default::default()
+        };
+        // The user scrolled back 5, so live row 2 was row -3 when recorded.
+        assert_eq!(sel.to_origin_row(2, now), None);
+        assert!(!sel.contains_live(2, 1, now));
+    }
+
+    /// The opposite direction is NOT a refusal. After 20 lines of output at the
+    /// live edge, live row 0 holds what was row 20, which is a real recorded
+    /// row and translates cleanly. What went off the top of the screen simply
+    /// stops appearing among live cells, so it is dropped from the copy without
+    /// the translation ever being asked about it.
+    #[test]
+    fn to_origin_row_still_answers_after_the_text_slid_up() {
+        let sel = TerminalSelection {
+            origin: SelectionOrigin {
+                scrollback_offset: 0,
+                scrollback_total: 100,
+                ..Default::default()
+            },
+            ..anchored_selection()
+        };
+        let now = SelectionOrigin {
+            scrollback_offset: 0,
+            scrollback_total: 120,
+            ..Default::default()
+        };
+        assert_eq!(sel.to_origin_row(0, now), Some(20));
     }
 
     /// A reentrant config reload (one already in flight) returns an Info status

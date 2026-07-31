@@ -1089,17 +1089,202 @@ impl App {
         };
         let up = matches!(direction, ScrollDirection::Up);
         provider.scroll(up, amount);
+        self.note_user_scroll();
     }
 
-    pub(crate) fn reset_pty_scrollback(&self) {
+    pub(crate) fn reset_pty_scrollback(&mut self) {
         if let Some(provider) = self.selected_terminal_surface_client() {
             provider.set_scrollback(0);
         }
+        // A snap to the live edge is a user action, so scroll mode ends here
+        // rather than in `reconcile_scroll_mode`: landing at the bottom because
+        // you asked to is not a surprise and does not deserve a status message.
+        //
+        // Scoped to the surface whose offset was just zeroed. Clearing the mode
+        // wholesale zeroed one surface's offset while retiring every surface's
+        // mode, so an agent left parked in its scrollback kept the frozen view
+        // and lost the cue that its keystrokes were being held.
+        if let Some(id) = self.selected_terminal_surface_id() {
+            self.scroll_mode.remove(&id);
+        }
+        self.note_selection_survives_own_scroll();
     }
 
-    fn set_pty_scrollback_max(&self) {
+    fn set_pty_scrollback_max(&mut self) {
         if let Some(provider) = self.selected_terminal_surface_client() {
             provider.set_scrollback(usize::MAX);
+        }
+        self.note_user_scroll();
+    }
+
+    /// Record where a USER scroll gesture (key or wheel) left the grid: above
+    /// the live edge enters scroll mode on the selected surface, at the live
+    /// edge leaves it silently.
+    ///
+    /// This is the only place the mode is ENTERED, and it is the only offset
+    /// read that can turn it on. It runs strictly in the same breath as a
+    /// scroll the user just performed, so the sample describes their own
+    /// gesture rather than whatever the child has been doing. (The one other
+    /// offset read, in `reconcile_scroll_mode`, can only turn the mode OFF; see
+    /// the field docs on `App::scroll_mode` for why that split matters.)
+    ///
+    /// Every production entry into scroll mode goes through here:
+    /// `scroll_pty`, `set_pty_scrollback_max` and the wheel handler. Each of
+    /// those three call sites is pinned by its own test that drives a real key
+    /// or a real wheel event, because a helper that re-implemented this
+    /// sequence by hand left the whole feature deletable with the suite green.
+    pub(crate) fn note_user_scroll(&mut self) {
+        let Some(id) = self.selected_terminal_surface_id() else {
+            return;
+        };
+        let scrolled = self
+            .selected_terminal_surface_client()
+            .is_some_and(|p| p.scrollback_offset() > 0);
+        if scrolled {
+            self.scroll_mode.insert(id);
+        } else {
+            self.scroll_mode.remove(&id);
+        }
+        self.note_selection_survives_own_scroll();
+    }
+
+    /// Whether the selected terminal surface is in scroll mode, which is what
+    /// gates keystroke forwarding, the hint-bar cue and the badge.
+    pub(crate) fn scroll_mode_active(&self) -> bool {
+        self.selected_terminal_surface_id()
+            .is_some_and(|current| self.scroll_mode.contains(&current))
+    }
+
+    /// End scroll mode OUT LOUD when the child pulled the grid back to the live
+    /// edge underneath the user.
+    ///
+    /// Measured against the pinned terminal library, starting from a
+    /// scrolled-back grid, each of `ESC [ ? 1049 h` (alternate screen),
+    /// `ESC [ 3 J` (erase scrollback) and `ESC c` (full reset) leaves
+    /// `scrollback_offset()` at 0. Any of them therefore hands typing back to
+    /// the child, and doing that silently is the whole hazard: the pane looks
+    /// alive, the cue is gone, and the next keystroke reaches the agent. So the
+    /// mode is retired with a status message that says what happened and how to
+    /// get back.
+    ///
+    /// Only reconciles the surface the user is actually looking at. A
+    /// background agent whose grid moved is not worth interrupting for, and it
+    /// gets reconciled the moment the user returns to it.
+    ///
+    /// The wording is deliberately about the EFFECT and not about a cause. The
+    /// child is the interesting case but it is not the only one: dux resizes
+    /// the PTY from the render path whenever the pane geometry changes, and
+    /// growing the viewport pulls the offset down, so merely resizing the dux
+    /// window while reading scrollback lands here. A message naming "the
+    /// program in this pane" was accusing an agent that had done nothing.
+    /// Likewise the promise that keystrokes now reach the program is only made
+    /// when the input target actually IS the PTY: in non-interactive mode the
+    /// keys are dux's own commands and never reached the child at all.
+    pub(crate) fn reconcile_scroll_mode(&mut self) {
+        if self.scroll_mode.is_empty() {
+            return;
+        }
+        // Surfaces the user scrolled that are now gone (detached, exited,
+        // deleted). There is nothing left to scroll or to type into, so drop
+        // the mode quietly. Doing it here rather than waiting for the surface
+        // to be selected again also keeps a relaunch under the same id from
+        // inheriting a stale mode and announcing an exit the user never
+        // entered.
+        let stale: Vec<String> = self
+            .scroll_mode
+            .iter()
+            .filter(|id| {
+                !self.engine.providers.contains_key(*id)
+                    && !self.engine.companion_terminals.contains_key(*id)
+            })
+            .cloned()
+            .collect();
+        for id in stale {
+            self.scroll_mode.remove(&id);
+        }
+
+        let Some(current) = self.selected_terminal_surface_id() else {
+            return;
+        };
+        if !self.scroll_mode.contains(&current) {
+            return;
+        }
+        match self
+            .selected_terminal_surface_client()
+            .map(|p| p.scrollback_offset())
+        {
+            // No client behind the selected surface: nothing to be in scroll
+            // mode over.
+            None => {
+                self.scroll_mode.remove(&current);
+                return;
+            }
+            Some(offset) if offset > 0 => return,
+            Some(_) => {}
+        }
+        self.scroll_mode.remove(&current);
+        let up = self.bindings.label_for(Action::ScrollPageUp);
+        let typing = if matches!(
+            self.input_target,
+            InputTarget::Agent | InputTarget::Terminal
+        ) {
+            " Your keystrokes reach it again."
+        } else {
+            ""
+        };
+        self.set_warning(format!(
+            "Scroll mode ended: this pane jumped back to its latest output (a \
+             full-screen app, an erased history, a terminal reset, or a resize \
+             of this window can all do it).{typing} Press \"{up}\" to scroll \
+             back."
+        ));
+    }
+
+    /// Retire a terminal selection whose text this can no longer FIND.
+    ///
+    /// `TerminalSelection::to_origin_row` corrects viewport rows by reading
+    /// history growth as the grid's advancing bottom, and that reading holds
+    /// only while history can still grow. Once the ring is at capacity the two
+    /// come apart (see the KNOWN LIMITS on `to_origin_row`), and the correction
+    /// under-counts by however many lines have been produced: measured on a
+    /// 5-line ring, a selection on `L30` copies `L33` after three lines arrive.
+    /// With the default 10,000-line scrollback that regime is where any long
+    /// session spends its time, so the failure is the normal case rather than
+    /// a corner, and it is silent: the highlight still looks deliberate.
+    ///
+    /// So a selection stamped at capacity survives only while the grid has not
+    /// moved at all. It is gated on saturation and not on "output arrived",
+    /// because BELOW capacity the correction is exact and following the text
+    /// through output is the behaviour the translation exists for.
+    ///
+    /// A scroll dux performed itself is not drift: its arithmetic is exact at
+    /// any history depth, so the scroll paths re-stamp the selection through
+    /// [`Self::note_selection_survives_own_scroll`] rather than losing it. The
+    /// residual race is that the grid's dirty flag is one bit, so output that
+    /// lands between dux's scroll and its re-read is folded into the same
+    /// rebuild and re-stamped along with it. That window is a frame wide and
+    /// fails toward the old behaviour, which is the safer of the two.
+    pub(crate) fn drop_drifted_selection(&mut self) {
+        let drifted = self.terminal_selection.as_ref().is_some_and(|sel| {
+            sel.origin.history_saturated && sel.origin.grid_generation != self.grid_generation
+        });
+        if drifted {
+            self.terminal_selection = None;
+        }
+    }
+
+    /// Re-stamp the live selection against the grid dux's OWN scroll just
+    /// produced, so that scroll does not read as drift. See
+    /// [`Self::drop_drifted_selection`].
+    fn note_selection_survives_own_scroll(&mut self) {
+        if self.terminal_selection.is_none() {
+            return;
+        }
+        // Consume the rebuild this scroll caused, then adopt its generation.
+        self.refresh_snapshot_buf();
+        let generation = self.grid_generation;
+        if let Some(sel) = &mut self.terminal_selection {
+            sel.origin.grid_generation = generation;
         }
     }
 
@@ -1889,11 +2074,18 @@ impl App {
             }
         }
 
-        // Check once whether the user is scrolled back so we can suppress
+        // Check once whether the user is in scroll mode so we can suppress
         // non-scroll input for the entire batch.
-        let is_scrolled_back = self
-            .selected_terminal_surface_client()
-            .is_some_and(|p| p.scrollback_offset() > 0);
+        //
+        // Read the MODE, never the grid: the child can zero `scrollback_offset`
+        // (see `reconcile_scroll_mode`), and sampling the grid here is what let
+        // it re-enable forwarding behind the user's back. The sample is taken
+        // BEFORE reconciling so a batch that arrives in the same instant the
+        // mode dies is still suppressed: the user cannot have read the status
+        // message yet, and their keystroke was aimed at a pane they believed
+        // was frozen.
+        let is_scrolled_back = self.scroll_mode_active();
+        self.reconcile_scroll_mode();
 
         // Process collected actions, batching consecutive forward sequences
         // into a single PTY write to avoid per-character lock/write/flush
@@ -2104,7 +2296,6 @@ impl App {
                             | MouseEventKind::ScrollRight
                     );
                     if is_scroll {
-                        self.terminal_selection = None;
                         // Tri-state forward decision from the selected surface's
                         // `forward_scroll` policy plus the child's live alt-screen
                         // and mouse-reporting state. Applies to both agents and
@@ -2116,6 +2307,14 @@ impl App {
                             .unwrap_or((false, false));
                         let forward = should_forward_wheel(fs, alt, mouse);
                         if forward {
+                            // The wheel goes to the CHILD, which will repaint
+                            // the grid however it likes. Nothing in the
+                            // snapshot's scroll numbers describes that, so the
+                            // selection has no text left to track and is
+                            // dropped. A LOCAL scroll is the opposite case: the
+                            // text is stable and `to_origin_row` follows it, so
+                            // that branch deliberately keeps the selection.
+                            self.terminal_selection = None;
                             if let Some(provider) = self.selected_terminal_surface_client() {
                                 let _ = provider.write_bytes(&raw);
                                 forwarded_to_pty = true;
@@ -7229,6 +7428,9 @@ impl App {
             matches!(mouse.kind, MouseEventKind::ScrollUp),
             MOUSE_WHEEL_LINES,
         );
+        // A wheel scroll enters and leaves scroll mode exactly as the keyboard
+        // scroll keys do.
+        self.note_user_scroll();
     }
 
     /// Handle a left-click on the agent tab strip. Returns true if the click
@@ -7646,16 +7848,33 @@ impl App {
                         anchor: pos,
                         end: pos,
                         dragging: true,
+                        // Stamp the scroll state the user was LOOKING at, which
+                        // is the one the last frame rendered from, not a fresh
+                        // read of the live grid: the click selects the cells on
+                        // screen, and output may already have arrived since.
+                        origin: self.snapshot_selection_origin(),
                     });
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) => {
                 let pos = self.screen_to_grid_clamped(mouse_ev.column, mouse_ev.row);
+                // Read the live frame BEFORE taking the mutable borrow of the
+                // selection (the borrow split this needs is the whole reason
+                // the translation is easy to leave out here).
+                let now = self.snapshot_selection_origin();
                 if let Some(sel) = &mut self.terminal_selection
                     && sel.dragging
                     && let Some(pos) = pos
+                    // `screen_to_grid_clamped` hands back a LIVE viewport row,
+                    // while `anchor` and `origin` are in the frame the button
+                    // went down in. Storing the live row untranslated makes the
+                    // selection's extent wrong by however far output moved the
+                    // grid during the drag. `None` means the pointer is over
+                    // text that predates the recorded frame, i.e. nothing the
+                    // drag could have covered, so the endpoint simply stays put.
+                    && let Some(row) = sel.to_origin_row(pos.row, now)
                 {
-                    sel.end = pos;
+                    sel.end = TermGridPos { row, col: pos.col };
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => {
@@ -7682,32 +7901,62 @@ impl App {
             self.copy_startup_log_selection();
             return;
         }
+        let text = self.terminal_selection_text();
+        if !text.is_empty() {
+            let _ = self.clipboard.copy_text(
+                &text,
+                "Terminal text copied to clipboard.",
+                &self.engine.worker_tx,
+            );
+        }
+    }
+
+    /// Build the text of the active terminal selection from the CURRENT grid.
+    ///
+    /// Split out of [`Self::copy_terminal_selection`] so the extraction can be
+    /// asserted directly, without a clipboard worker thread in the loop.
+    pub(crate) fn terminal_selection_text(&mut self) -> String {
+        // Refresh snapshot to get current content, then retire the selection if
+        // the grid has moved somewhere this can no longer follow it. Both come
+        // BEFORE the clone, or the copy would run off a selection that has just
+        // been judged unfollowable.
+        self.refresh_snapshot_buf();
+        self.drop_drifted_selection();
         let sel = match self.terminal_selection.clone() {
             Some(s) => s,
-            None => return,
+            None => return String::new(),
         };
         let (start, end) = sel.ordered();
 
-        // Refresh snapshot to get current content.
-        self.refresh_snapshot_buf();
+        // Read the grid's scroll state from the SAME snapshot the cells below
+        // come from, so the translation cannot be a frame out of step with the
+        // rows it is correcting.
+        let now = self.snapshot_selection_origin();
 
         let mut lines: Vec<String> = Vec::new();
         let mut current_row = start.row;
         let mut current_line = String::new();
 
         for cell in &self.snapshot_buf.cells {
-            if !sel.contains(cell.row, cell.col) {
+            // Rows are recorded in the frame the drag started in, so translate
+            // each live cell back into that frame before testing it. Without
+            // this the copy takes whatever text has since scrolled into those
+            // screen rows instead of the text the user highlighted.
+            let Some(cell_row) = sel.to_origin_row(cell.row, now) else {
+                continue;
+            };
+            if !sel.contains(cell_row, cell.col) {
                 continue;
             }
-            if cell.row != current_row {
+            if cell_row != current_row {
                 // Flush the previous line (trim trailing whitespace).
                 lines.push(current_line.trim_end().to_string());
                 // Insert empty lines for any gap rows.
-                for _ in (current_row + 1)..cell.row {
+                for _ in (current_row + 1)..cell_row {
                     lines.push(String::new());
                 }
                 current_line = String::new();
-                current_row = cell.row;
+                current_row = cell_row;
             }
             // Pad with spaces if columns are not contiguous (sparse cells).
             let expected_col = if current_line.is_empty() {
@@ -7715,7 +7964,7 @@ impl App {
             } else {
                 // Approximate: one char per column.
                 let line_cols = current_line.chars().count() as u16;
-                if cell.row == start.row {
+                if cell_row == start.row {
                     start.col + line_cols
                 } else {
                     line_cols
@@ -7737,14 +7986,7 @@ impl App {
             }
         }
 
-        let text = lines.join("\n");
-        if !text.is_empty() {
-            let _ = self.clipboard.copy_text(
-                &text,
-                "Terminal text copied to clipboard.",
-                &self.engine.worker_tx,
-            );
-        }
+        lines.join("\n")
     }
 
     fn screen_to_startup_log_grid(&self, screen_col: u16, screen_row: u16) -> Option<TermGridPos> {
@@ -7789,6 +8031,11 @@ impl App {
                         anchor: pos,
                         end: pos,
                         dragging: true,
+                        // The log viewer's rows are absolute log lines, not
+                        // viewport rows (`screen_to_startup_log_grid` folds in
+                        // its scroll offset), so it needs no frame to translate
+                        // against and never calls `contains_live`.
+                        origin: SelectionOrigin::default(),
                     });
                     return true;
                 }
@@ -7891,12 +8138,13 @@ impl App {
             matches!(self.input_target, InputTarget::Terminal) && self.terminal_return_to_list;
         let return_to_projects = matches!(self.input_target, InputTarget::Agent);
         // Snap the PTY to the live edge BEFORE the surface fields reset (the
-        // client resolves through the current surface). Scrolling back pauses
-        // ingestion so the view holds still; leaving that pause behind froze
-        // the minimized pane on stale content until a later scroll crossed
-        // back to the bottom. Entering interactive mode already snaps to the
-        // live edge — exiting mirrors it, and the snap's 0-crossing resumes
-        // ingestion and drains anything buffered while scrolled back.
+        // client resolves through the current surface). Scrolling back moves
+        // the display offset, and the terminal library holds that view still
+        // as new lines arrive, so an offset left behind froze the minimized
+        // pane on stale content until a later scroll walked it back to the
+        // bottom. The child's output kept landing in the grid the whole time;
+        // the user simply could not see any of it. Entering interactive mode
+        // already snaps to the live edge, so exiting mirrors it.
         self.reset_pty_scrollback();
         self.input_target = InputTarget::None;
         self.fullscreen_overlay = FullscreenOverlay::None;
@@ -8067,6 +8315,7 @@ mod tests {
         SearchableList, StartupCommandLogFocus, StartupCommandLogPrompt, TextInput, WorkerEvent,
     };
     use crate::app::{StartupLogViewer, pick_project_matches};
+    use crate::app::{TermGridPos, TerminalSelection};
     use crate::clipboard::Clipboard;
     use crate::config::{Config, ProjectConfig};
     use crate::editor::{DetectedEditor, EditorKind};
@@ -8076,6 +8325,7 @@ mod tests {
         ProjectBranchStatus, ProviderKind, SessionStatus, SessionSurface,
     };
     use crate::pty::PtyClient;
+    use crate::theme::Theme;
     use chrono::Utc;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
@@ -12849,19 +13099,21 @@ not_a_real_action = ["x"]
     }
 
     /// Spawn a real child that prints enough lines to build alacritty history,
-    /// wait until ingestion is QUIESCENT, and only then seed the scrollback
-    /// offset to `lines`.
+    /// wait until the child has printed EVERYTHING, and only then seed the
+    /// scrollback offset to `lines`.
     ///
-    /// Quiescence is the whole point. `seq` is line buffered on a terminal, so
-    /// its 200 lines arrive as many small writes, and the previous version of
-    /// this helper polled mid-stream: it seeded as soon as
+    /// Waiting is the whole point. `seq` is line buffered on a terminal, so its
+    /// 200 lines arrive as many small writes, and the previous version of this
+    /// helper polled mid-stream: it seeded as soon as
     /// `scrollback_offset() >= lines` succeeded, which it can while history is
     /// still only 10, 11 or 12 rows deep. Both `set_scrollback` and `scroll`
-    /// CLAMP to the available history, and seeding a positive offset PAUSES
-    /// ingestion, so history froze wherever the poll happened to land: the seed
-    /// then succeeded at 10 while a 3-line wheel step could only reach 12, and
-    /// the caller's `assert_eq!(offset, 13)` failed. Measured at roughly 1 run
-    /// in 40.
+    /// CLAMP to the history that exists at the instant they run, so a seed
+    /// taken mid-stream and the wheel step the caller makes right after it both
+    /// clamp against a history far shallower than the finished 200 rows: the
+    /// seed succeeded at 10 while a 3-line step could only reach 12, and the
+    /// caller's `assert_eq!(offset, 13)` failed. Measured at roughly 1 run in
+    /// 40. Seeding after the stream is over removes the race, because the
+    /// history both calls clamp against is then the same and it is final.
     ///
     /// The child therefore prints a sentinel with NO trailing newline after the
     /// numbers, so its cursor parks at a position no earlier write can produce
@@ -12899,6 +13151,500 @@ not_a_real_action = ["x"]
              history to scroll back into, so any assertion about the wheel \
              step past this point would be measuring the clamp instead"
         );
+    }
+
+    // -- A selection must follow its TEXT, not its screen row --
+
+    /// Spawn a child that prints exactly what the test feeds it and nothing
+    /// else, so output arrives ON DEMAND instead of on the child's own
+    /// schedule. `stty -echo` is what makes it exact: with echo left on, the
+    /// line driver prints each fed line once and `cat` prints it again, and the
+    /// row arithmetic these tests assert measures the double. That is not
+    /// hypothetical: feeding 40 lines without waiting for the `stty` produced
+    /// 57 lines of history instead of 16, because the write beat the shell to
+    /// it. The `READY` sentinel is printed AFTER the `stty`, so blocking on it
+    /// proves echo is off before anything is fed.
+    fn install_feedable_pty(app: &mut App) {
+        install_feedable_pty_with_scrollback(app, 1000);
+    }
+
+    /// The same fixture with an explicit scrollback capacity, so a test can
+    /// SATURATE the history ring without feeding ten thousand lines. The
+    /// capacity is also written into config, because that is where the App
+    /// reads it from (see `App::snapshot_selection_origin`); leaving the two
+    /// out of step would make the fixture lie about which regime it is in.
+    fn install_feedable_pty_with_scrollback(app: &mut App, scrollback: usize) {
+        app.engine.config.ui.agent_scrollback_lines = scrollback;
+        let session_id = app.engine.sessions[0].id.clone();
+        let args = vec![
+            "-c".to_string(),
+            "stty -echo; printf 'READY\\n'; cat".to_string(),
+        ];
+        let client = PtyClient::spawn(
+            "/bin/sh",
+            &args,
+            std::path::Path::new("."),
+            24,
+            80,
+            scrollback,
+        )
+        .expect("spawn pty");
+        app.engine.providers.insert(session_id, client);
+        app.session_surface = SessionSurface::Agent;
+        for _ in 0..200 {
+            app.refresh_snapshot_buf();
+            if app
+                .snapshot_buf
+                .cells
+                .iter()
+                .any(|c| c.row == 0 && c.col == 0 && c.symbol == "R")
+            {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("PTY child never reached its READY sentinel within 2s");
+    }
+
+    /// Feed `text` to the child and block until the grid has exactly `total`
+    /// lines of scrollback. Waiting on the history depth rather than on a sleep
+    /// means the test waits for the fact it depends on: history only grows when
+    /// alacritty actually scrolls a line off the top, which is precisely the
+    /// event these tests are about.
+    fn feed_until_history(app: &mut App, text: &str, total: usize) {
+        if let Some(provider) = app.selected_terminal_surface_client() {
+            let _ = provider.write_bytes(text.as_bytes());
+        }
+        for _ in 0..200 {
+            app.refresh_snapshot_buf();
+            if app.snapshot_buf.scrollback_total == total {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!(
+            "PTY reached {} lines of scrollback, expected {total}",
+            app.snapshot_buf.scrollback_total
+        );
+    }
+
+    /// The viewport row whose text starts with `needle`, read from the live
+    /// snapshot. Scanned rather than hardcoded so the tests assert the
+    /// translation, not a hand-computed grid layout.
+    fn snapshot_row_of(app: &mut App, needle: &str) -> u16 {
+        app.refresh_snapshot_buf();
+        let mut rows: std::collections::BTreeMap<u16, String> = std::collections::BTreeMap::new();
+        for cell in &app.snapshot_buf.cells {
+            rows.entry(cell.row).or_default().push_str(&cell.symbol);
+        }
+        rows.into_iter()
+            .find(|(_, line)| line.trim().starts_with(needle))
+            .map(|(row, _)| row)
+            .unwrap_or_else(|| panic!("no viewport row holds {needle}"))
+    }
+
+    /// Select one row's text and stamp the frame it was read in, exactly as a
+    /// mouse drag does.
+    fn select_row(app: &mut App, row: u16, last_col: u16) {
+        app.terminal_selection = Some(TerminalSelection {
+            anchor: TermGridPos { row, col: 0 },
+            end: TermGridPos { row, col: last_col },
+            dragging: false,
+            origin: app.snapshot_selection_origin(),
+        });
+    }
+
+    /// Fill the grid and park 16 lines in history, then hand back the viewport
+    /// row holding `L30`.
+    fn fill_and_select_l30(app: &mut App) -> u16 {
+        install_feedable_pty(app);
+        let mut fill = String::new();
+        for n in 0..40 {
+            fill.push_str(&format!("L{n:02}\n"));
+        }
+        // 41 lines (40 fed plus the READY sentinel) through a 24-row grid,
+        // with the trailing newline pushing the cursor onto a 42nd row, leaves
+        // 18 lines in history. MEASURED, not derived: the first version of this
+        // said 17 and the helper reported 18.
+        feed_until_history(app, &fill, 18);
+        let row = snapshot_row_of(app, "L30");
+        select_row(app, row, 2);
+        assert_eq!(
+            app.terminal_selection_text(),
+            "L30",
+            "the fixture must start by selecting the text it names"
+        );
+        row
+    }
+
+    /// Output arriving after the drag must not change what the copy yields.
+    /// This is the live-edge race: the rows slide up under the recorded
+    /// coordinates, so without translating them the copy takes whatever text
+    /// landed on those screen rows instead.
+    #[test]
+    fn copy_follows_its_text_when_output_arrives() {
+        let mut app = test_app(default_bindings());
+        fill_and_select_l30(&mut app);
+
+        feed_until_history(&mut app, "M00\nM01\nM02\n", 21);
+
+        assert_eq!(
+            app.terminal_selection_text(),
+            "L30",
+            "the copy must yield the highlighted text, not the text that \
+             scrolled into its screen rows"
+        );
+    }
+
+    /// Scrolling back must move the highlight WITH its text. The selection is
+    /// no longer cleared on a local scroll, so the render predicate has to
+    /// answer for the row the text moved to and stop answering for the row it
+    /// left.
+    #[test]
+    fn highlight_follows_its_text_when_the_view_scrolls() {
+        let mut app = test_app(default_bindings());
+        let row = fill_and_select_l30(&mut app);
+
+        app.selected_terminal_surface_client()
+            .expect("provider")
+            .scroll(true, 5);
+        app.refresh_snapshot_buf();
+        let now = app.snapshot_selection_origin();
+        let sel = app.terminal_selection.clone().expect("selection survives");
+
+        assert_eq!(
+            snapshot_row_of(&mut app, "L30"),
+            row + 5,
+            "scrolling back 5 lines must carry the text 5 rows down the screen"
+        );
+        assert!(
+            sel.contains_live(row + 5, 0, now),
+            "the highlight must cover the row the text moved to"
+        );
+        assert!(
+            !sel.contains_live(row, 0, now),
+            "the highlight must leave the row the text vacated"
+        );
+        assert_eq!(
+            app.terminal_selection_text(),
+            "L30",
+            "and the copy must still yield that text"
+        );
+    }
+
+    /// Feed `text` and block until `needle` has appeared in the viewport. The
+    /// sibling `feed_until_history` cannot be used once the ring is SATURATED:
+    /// history stops moving there, so a wait on its depth returns before the
+    /// child has finished writing.
+    fn feed_until_row_present(app: &mut App, text: &str, needle: &str) {
+        if let Some(provider) = app.selected_terminal_surface_client() {
+            let _ = provider.write_bytes(text.as_bytes());
+        }
+        for _ in 0..200 {
+            app.refresh_snapshot_buf();
+            let mut rows: std::collections::BTreeMap<u16, String> =
+                std::collections::BTreeMap::new();
+            for cell in &app.snapshot_buf.cells {
+                rows.entry(cell.row).or_default().push_str(&cell.symbol);
+            }
+            if rows.values().any(|line| line.trim().starts_with(needle)) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("PTY never showed {needle} within 2s");
+    }
+
+    /// A grid whose scrollback ring is FULL, holding L00..L39 with L30 selected.
+    fn app_with_saturated_scrollback() -> App {
+        let mut app = test_app(default_bindings());
+        install_feedable_pty_with_scrollback(&mut app, 5);
+        let mut fill = String::new();
+        for n in 0..40 {
+            fill.push_str(&format!("L{n:02}\n"));
+        }
+        feed_until_row_present(&mut app, &fill, "L39");
+        app.refresh_snapshot_buf();
+        assert_eq!(
+            app.snapshot_buf.scrollback_total, 5,
+            "test premise: the ring must be at capacity, not merely deep"
+        );
+        let row = snapshot_row_of(&mut app, "L30");
+        select_row(&mut app, row, 2);
+        assert_eq!(
+            app.terminal_selection_text(),
+            "L30",
+            "the fixture must start by selecting the text it names"
+        );
+        app
+    }
+
+    /// Once the scrollback ring is FULL, `to_origin_row`'s correction stops
+    /// working. It uses history GROWTH to stand in for the grid's advancing
+    /// bottom, and that equivalence holds only while history is growing: at
+    /// capacity the ring stops growing while the bottom keeps moving, so the
+    /// correction under-counts by exactly the number of lines produced.
+    ///
+    /// This is not an edge case. With the default 10,000-line scrollback,
+    /// saturation is the STEADY STATE of any long session, so silently pointing
+    /// the highlight and the copy at different text would be the normal
+    /// behaviour rather than a corner. Measured on this 5-line ring before the
+    /// fix: select L30, feed three lines, and the copy yields "L33". A
+    /// selection that vanishes is honest; one that quietly names other text is
+    /// not, so the selection is dropped instead.
+    #[test]
+    fn a_saturated_scrollback_drops_the_selection_rather_than_naming_other_text() {
+        let mut app = app_with_saturated_scrollback();
+
+        feed_until_row_present(&mut app, "M00\nM01\nM02\n", "M02");
+        app.refresh_snapshot_buf();
+        app.drop_drifted_selection();
+
+        assert!(
+            app.terminal_selection.is_none(),
+            "the selection must be dropped, not silently re-pointed; it still \
+             named {:?}",
+            app.terminal_selection_text()
+        );
+    }
+
+    /// The guard is keyed on SATURATION, not on "output arrived". Below
+    /// capacity the correction is exact, and a selection that follows its text
+    /// through arriving output is the behaviour the translation exists for.
+    #[test]
+    fn an_unsaturated_scrollback_still_follows_its_text_through_output() {
+        let mut app = test_app(default_bindings());
+        fill_and_select_l30(&mut app);
+
+        feed_until_history(&mut app, "M00\nM01\nM02\n", 21);
+        app.refresh_snapshot_buf();
+        app.drop_drifted_selection();
+
+        assert_eq!(
+            app.terminal_selection_text(),
+            "L30",
+            "a selection below capacity must survive and keep naming its text"
+        );
+    }
+
+    /// A user scroll is not drift, even at capacity: its arithmetic is exact
+    /// (the offset moves, the text moves with it). Only the grid moving under
+    /// dux counts, so dux re-stamps the selection against the frame produced by
+    /// its OWN scrolls. Without that, "scroll back, select, scroll a bit more"
+    /// would lose the selection on every long-running agent.
+    #[test]
+    fn a_users_own_scroll_does_not_count_as_drift_at_capacity() {
+        let mut app = app_with_saturated_scrollback();
+
+        app.scroll_pty(crate::app::ScrollDirection::Up, 2);
+        app.refresh_snapshot_buf();
+        app.drop_drifted_selection();
+
+        assert_eq!(
+            app.terminal_selection_text(),
+            "L30",
+            "the user's own scroll must keep the selection on its text"
+        );
+    }
+
+    /// The drag endpoint is written while the button is still DOWN, so output
+    /// that arrives mid-drag slides the grid under it. `anchor` and `origin`
+    /// are stamped in the frame the mouse went down in, and the endpoint has to
+    /// be recorded in that same frame or the selection's EXTENT is wrong by the
+    /// drift, in the highlight and in the copy alike.
+    ///
+    /// Translation was implemented at both READ sites and omitted at the one
+    /// WRITE site. Nothing caught it because every other selection fixture in
+    /// this file builds its selection with the drag already finished, so the
+    /// endpoint is never written against a frame that has since moved.
+    #[test]
+    fn a_drag_that_races_output_selects_the_rows_the_user_dragged_over() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+        let term = app.mouse_layout.agent_term.expect("agent term rect");
+        fill_and_select_l30(&mut app);
+        // Start from no selection: this test builds one with the mouse.
+        app.terminal_selection = None;
+
+        // Button down on L30, in the frame the user is looking at.
+        let anchor_row = snapshot_row_of(&mut app, "L30");
+        app.handle_terminal_selection_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            term.x,
+            term.y + anchor_row,
+        ));
+
+        // Three lines arrive while the button is still held. The grid slides up
+        // by three; the user's finger has not moved.
+        feed_until_history(&mut app, "M00\nM01\nM02\n", 21);
+
+        // Now they drag down to L32, wherever it has ended up on screen.
+        let end_row = snapshot_row_of(&mut app, "L32");
+        assert_eq!(
+            end_row,
+            anchor_row - 1,
+            "test premise: the output moved the text under the drag (L32 is now \
+             ABOVE where L30 was), so an untranslated endpoint cannot be right \
+             by accident"
+        );
+        app.handle_terminal_selection_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            term.x + 2,
+            term.y + end_row,
+        ));
+
+        assert_eq!(
+            app.terminal_selection_text(),
+            "L30\nL31\nL32",
+            "the selection must cover the text the user dragged over"
+        );
+    }
+
+    /// Point the selected agent's provider at a fixed `forward_scroll`, so a
+    /// wheel test picks its branch instead of depending on whether the child
+    /// happens to have raised the alt screen.
+    fn set_forward_scroll(app: &mut App, forward: bool) {
+        let provider = app.engine.sessions[0].provider.as_str().to_string();
+        let entry = app
+            .engine
+            .config
+            .providers
+            .commands
+            .entry(provider.clone())
+            .or_insert_with(|| dux_core::config::ProviderCommandConfig {
+                command: provider,
+                ..Default::default()
+            });
+        entry.forward_scroll = Some(forward);
+    }
+
+    /// Wheel-up over the PTY pane in interactive mode, as the host sends it
+    /// (SGR button 64), landing inside the installed `agent_term` rect.
+    const WHEEL_UP_IN_PANE: &[u8] = b"\x1b[<64;30;5M";
+
+    /// A wheel that scrolls dux's OWN scrollback keeps the selection: the text
+    /// is still on screen and `to_origin_row` follows it there. This is the
+    /// behaviour the old unconditional clear made impossible, which is what
+    /// made "scroll back, then select" the only reliable way to copy.
+    #[test]
+    fn local_wheel_scroll_keeps_the_selection() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+        fill_and_select_l30(&mut app);
+        set_forward_scroll(&mut app, false);
+        app.input_target = InputTarget::Agent;
+
+        app.process_raw_input_bytes(WHEEL_UP_IN_PANE)
+            .expect("raw input");
+
+        assert!(
+            app.terminal_selection.is_some(),
+            "a local scroll must not drop the selection"
+        );
+        assert_eq!(
+            app.terminal_selection_text(),
+            "L30",
+            "and it must still name the same text"
+        );
+    }
+
+    /// A wheel that is FORWARDED to the child does drop it. The child repaints
+    /// the grid however it likes, and nothing in the snapshot's scroll numbers
+    /// describes that, so there is no text left to follow.
+    #[test]
+    fn forwarded_wheel_scroll_drops_the_selection() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+        fill_and_select_l30(&mut app);
+        set_forward_scroll(&mut app, true);
+        app.input_target = InputTarget::Agent;
+
+        app.process_raw_input_bytes(WHEEL_UP_IN_PANE)
+            .expect("raw input");
+
+        assert!(
+            app.terminal_selection.is_none(),
+            "a forwarded scroll must drop the selection"
+        );
+    }
+
+    /// The RENDERER half of the same guarantee. The test above pins the
+    /// predicate; this one draws a real frame and reads the styles back, so the
+    /// agent pane cannot quietly go back to testing raw screen rows.
+    #[test]
+    fn rendered_highlight_follows_its_text_when_the_view_scrolls() {
+        let mut app = test_app(default_bindings());
+        app.center_mode = CenterMode::Agent;
+        let row = fill_and_select_l30(&mut app);
+
+        let mut terminal = test_terminal();
+        draw_frame(&mut app, &mut terminal);
+        let before = highlighted_rows(&terminal);
+        assert_eq!(
+            before.len(),
+            1,
+            "the fixture must draw exactly one highlighted row or this test \
+             proves nothing"
+        );
+        // Naming the TEXT, not just the row. The frame resizes the PTY from the
+        // 24 rows it was spawned with to the 23 the pane offers, which pushes
+        // one line into history, and the highlight lands on L30 anyway because
+        // `to_origin_row` reads that as the one-row shift it is.
+        assert_eq!(
+            highlighted_text(&terminal, before[0]),
+            "L30",
+            "the highlight must sit on the text that was selected"
+        );
+
+        app.selected_terminal_surface_client()
+            .expect("provider")
+            .scroll(true, 5);
+        draw_frame(&mut app, &mut terminal);
+        let after = highlighted_rows(&terminal);
+
+        assert_eq!(
+            highlighted_text(&terminal, after.first().copied().unwrap_or(0)),
+            "L30",
+            "and must still sit on it after the scroll"
+        );
+        assert_eq!(
+            after,
+            before.iter().map(|r| r + 5).collect::<Vec<_>>(),
+            "scrolling back 5 lines must carry the painted highlight 5 screen \
+             rows down with its text, not leave it where it was (selection \
+             recorded at PTY row {row})"
+        );
+    }
+
+    /// The drawn text of the highlighted cells on one screen row.
+    fn highlighted_text(terminal: &ratatui::Terminal<TestBackend>, y: u16) -> String {
+        let buffer = terminal.backend().buffer();
+        let bg = Theme::default_dark().selection_bg;
+        (buffer.area.left()..buffer.area.right())
+            .filter(|x| buffer[(*x, y)].style().bg == Some(bg))
+            .map(|x| buffer[(x, y)].symbol().to_string())
+            .collect()
+    }
+
+    /// Screen rows carrying at least one cell painted with the theme's
+    /// selection background. Read from the drawn buffer, so it answers what the
+    /// user sees. Matching on the BACKGROUND rather than on the whole style is
+    /// deliberate: `Cell::set_style` PATCHES, so a highlighted PTY cell keeps
+    /// whatever the snapshot gave it and never compares equal to
+    /// `selection_style()` outright.
+    fn highlighted_rows(terminal: &ratatui::Terminal<TestBackend>) -> Vec<u16> {
+        let buffer = terminal.backend().buffer();
+        let bg = Theme::default_dark().selection_bg;
+        let mut rows: Vec<u16> = Vec::new();
+        for y in buffer.area.top()..buffer.area.bottom() {
+            for x in buffer.area.left()..buffer.area.right() {
+                if buffer[(x, y)].style().bg == Some(bg) {
+                    rows.push(y);
+                    break;
+                }
+            }
+        }
+        rows
     }
 
     /// One wheel tick over the inline PTY pane scrolls the LOCAL scrollback by
@@ -15925,10 +16671,12 @@ cyan = "#00ffff"
     }
 
     /// Minimizing (Ctrl-g) while scrolled back must snap the PTY to the live
-    /// edge. Scrolling back pauses ingestion so the view holds still; leaving
-    /// that pause behind on exit froze the minimized pane on stale content
-    /// (no updates until a later scroll crossed back to the bottom). Entering
-    /// interactive mode already snaps to the live edge — exiting must too.
+    /// edge. Scrolling back moves the display offset, and the terminal library
+    /// holds that view still as new lines arrive, so an offset left behind on
+    /// exit froze the minimized pane on stale content (the grid kept updating,
+    /// but nothing new was VISIBLE until a later scroll walked the offset back
+    /// to the bottom). Entering interactive mode already snaps to the live
+    /// edge, so exiting must too.
     #[test]
     fn exit_interactive_while_scrolled_back_snaps_to_the_live_edge() {
         let mut app = test_app(default_bindings());
@@ -15958,7 +16706,8 @@ cyan = "#00ffff"
         app.input_target = InputTarget::Agent;
         app.fullscreen_overlay = FullscreenOverlay::Agent;
 
-        // The user wheel-scrolled up to read history: ingestion pauses.
+        // The user wheel-scrolled up to read history: the view stops tracking
+        // the live edge.
         let provider = app.engine.providers.get("session-1").expect("provider");
         provider.set_scrollback(20);
         assert_eq!(provider.scrollback_offset(), 20, "scrolled back");
@@ -15971,7 +16720,9 @@ cyan = "#00ffff"
             0,
             "exiting interactive mode must snap the PTY to the live edge"
         );
-        // And ingestion must be live again: new output reaches the grid.
+        // And the view must be tracking the live edge again, which is what
+        // `viewport_contains` measures: it reads the offset-relative snapshot,
+        // so it only sees the marker if the pane is showing the bottom.
         provider
             .write_bytes(b"marker-after-exit\n")
             .expect("write marker");
@@ -15982,8 +16733,8 @@ cyan = "#00ffff"
         ) {
             assert!(
                 std::time::Instant::now() < deadline,
-                "the minimized pane never received new PTY output: ingestion \
-                 stayed paused after exiting interactive mode"
+                "new PTY output never became visible in the minimized pane: \
+                 the scrollback offset was left behind on exit"
             );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
@@ -18275,18 +19026,158 @@ cyan = "#00ffff"
         app.fullscreen_overlay = FullscreenOverlay::Agent;
         app.last_pty_size = (5, 40);
 
-        // Wait for the child to produce output so the PTY has content.
-        std::thread::sleep(std::time::Duration::from_millis(200));
-
-        // Scroll back so scrollback_offset > 0.
-        let provider = app.selected_terminal_surface_client().unwrap();
-        provider.set_scrollback(3);
+        // Scroll back the way a user does. Poking `set_scrollback` directly
+        // would move the VIEW without entering scroll mode, and scroll mode is
+        // what gates typing now (a grid offset is not a mode: the child can
+        // zero it, see `reconcile_scroll_mode`).
+        enter_scroll_mode(&mut app, 3);
         assert!(
-            provider.scrollback_offset() > 0,
+            app.selected_terminal_surface_client()
+                .unwrap()
+                .scrollback_offset()
+                > 0,
             "test setup: should be scrolled back"
         );
 
         app
+    }
+
+    /// Helper: the same live PTY with real scrollback history, left AT THE LIVE
+    /// EDGE so a test can drive a production scroll path and watch the mode turn
+    /// on. `app_with_scrolled_back_pty` cannot be used for that, because it has
+    /// already entered the mode by the time it returns.
+    fn app_with_history_at_the_live_edge() -> App {
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        let args = vec![
+            "-c".to_string(),
+            "printf 'L%s\\n' 1 2 3 4 5 6 7 8 9 10 11 12; sleep 30".to_string(),
+        ];
+        let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 5, 40, 100)
+            .expect("spawn pty");
+        app.engine.providers.insert(session_id, client);
+        app.input_target = InputTarget::Agent;
+        app.session_surface = SessionSurface::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+        app.last_pty_size = (5, 40);
+        install_mouse_layout(&mut app);
+        // Pin the local branch of every scroll path: with `forward_scroll`
+        // unset these tests would depend on whether the child happened to raise
+        // the alt screen, and a forwarded scroll never enters scroll mode.
+        set_forward_scroll(&mut app, false);
+
+        // Wait on the fact the test depends on (real history), not on a sleep.
+        for _ in 0..200 {
+            app.refresh_snapshot_buf();
+            if app.snapshot_buf.scrollback_total > 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            app.snapshot_buf.scrollback_total > 0,
+            "PTY produced no scrollback within 2s"
+        );
+        assert!(
+            !app.scroll_mode_active(),
+            "test setup: the fixture must start at the live edge"
+        );
+        app
+    }
+
+    // The three tests below are the only ones that reach scroll mode through a
+    // REAL input path. Every other scroll-mode test enters it through
+    // `test_support::enter_scroll_mode`, which scrolls the provider and then
+    // calls `note_user_scroll` BY HAND. That helper re-implements the
+    // production sequence instead of invoking it, so the whole group was blind
+    // to the sequence going missing: deleting all three `note_user_scroll` call
+    // sites (in `scroll_pty`, `set_pty_scrollback_max` and the wheel handler)
+    // left the entire suite green. That deletion ships a mode that no key and
+    // no wheel can turn on, i.e. permanently off, and the user types invisibly
+    // into a pane that is not moving. Each test below drives ONE call site, so
+    // removing any one of them turns exactly one of these red.
+
+    /// The keyboard half: a real page-up keystroke, decoded from the host bytes
+    /// by the interactive matcher, must leave the pane in scroll mode.
+    #[test]
+    fn a_real_page_up_key_enters_scroll_mode() {
+        let mut app = app_with_history_at_the_live_edge();
+
+        // The bytes the host sends for the bound scroll key, taken from the
+        // bindings rather than typed in, so a rebind moves the test with the
+        // app. This is the same table `interactive_patterns` matches against,
+        // so these bytes take the production interactive route.
+        let combo = app
+            .bindings
+            .first_key_reaching(Action::ScrollPageUp, |_| true)
+            .expect("ScrollPageUp has a binding");
+        let bytes = crate::keybindings::key_combination_to_bytes(&combo)
+            .expect("the bound scroll key has a byte encoding");
+        app.process_raw_input_bytes(&bytes).expect("raw input");
+
+        assert!(
+            app.selected_terminal_surface_client()
+                .unwrap()
+                .scrollback_offset()
+                > 0,
+            "the key must have moved the view (otherwise this proves nothing)"
+        );
+        assert!(
+            app.scroll_mode_active(),
+            "a scroll key must ENTER scroll mode, or keystrokes keep reaching \
+             the child while the pane sits frozen"
+        );
+    }
+
+    /// The wheel half: the same guarantee for the mouse, through the SGR bytes
+    /// crossterm's mouse capture actually delivers.
+    #[test]
+    fn a_real_wheel_scroll_enters_scroll_mode() {
+        let mut app = app_with_history_at_the_live_edge();
+
+        app.process_raw_input_bytes(WHEEL_UP_IN_PANE)
+            .expect("raw input");
+
+        assert!(
+            app.selected_terminal_surface_client()
+                .unwrap()
+                .scrollback_offset()
+                > 0,
+            "the wheel must have moved the view (otherwise this proves nothing)"
+        );
+        assert!(
+            app.scroll_mode_active(),
+            "a wheel scroll must ENTER scroll mode, exactly as the keys do"
+        );
+    }
+
+    /// The jump-to-top half. `set_pty_scrollback_max` is a third, separate call
+    /// site, and it is the one a user reaches for to read the start of a long
+    /// build log.
+    #[test]
+    fn a_real_jump_to_top_key_enters_scroll_mode() {
+        let mut app = app_with_history_at_the_live_edge();
+        app.input_target = InputTarget::None;
+        app.focus = FocusPane::Center;
+        app.center_mode = CenterMode::Agent;
+
+        let combo = app
+            .bindings
+            .first_key_reaching(Action::ScrollToTop, |_| true)
+            .expect("ScrollToTop has a binding");
+        app.handle_center_key(press(combo)).expect("center key");
+
+        assert!(
+            app.selected_terminal_surface_client()
+                .unwrap()
+                .scrollback_offset()
+                > 0,
+            "the key must have moved the view (otherwise this proves nothing)"
+        );
+        assert!(
+            app.scroll_mode_active(),
+            "jumping to the top of the scrollback must ENTER scroll mode"
+        );
     }
 
     #[test]
@@ -18321,6 +19212,455 @@ cyan = "#00ffff"
             "ExitInteractive must work even when scrolled back"
         );
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
+    }
+
+    /// Flatten a rendered line back to plain text so a test can assert on what
+    /// the user reads rather than on how it was split into spans.
+    fn line_text(line: &ratatui::text::Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    /// Scroll mode keeps swallowing keystrokes (that is the decided behaviour,
+    /// as in tmux copy mode), but it must no longer do it silently. The drop and
+    /// the cue are asserted together on purpose: a cue that appears while input
+    /// is quietly getting through, or a drop with no cue, are both the bug.
+    ///
+    /// "Reached the PTY" is read off `engine.pty_input`, which the forward path
+    /// stamps only after bytes were actually written (see the tail of
+    /// `process_raw_input_bytes`), so this is a real observation rather than an
+    /// absence of a crash.
+    #[test]
+    fn scroll_mode_drops_the_keystroke_and_says_so() {
+        let mut app = app_with_scrolled_back_pty();
+        let session_id = app.engine.sessions[0].id.clone();
+
+        assert!(app.process_raw_input_bytes(b"x").is_ok());
+        assert!(
+            !app.engine.pty_input.contains_key(&session_id),
+            "a keystroke in scroll mode must not reach the PTY"
+        );
+
+        let cue = line_text(&app.scroll_mode_cue_line());
+        assert!(
+            cue.contains("keys are not reaching the agent"),
+            "the cue must say the keys are going nowhere; got {cue:?}"
+        );
+        let live_edge = app.bindings.labels_for(Action::ScrollToBottom);
+        assert!(
+            cue.contains(&live_edge),
+            "the cue must name the live-edge key {live_edge:?}; got {cue:?}"
+        );
+    }
+
+    /// Every binding is user-configurable, so the cue has to resolve its label
+    /// through `RuntimeBindings` rather than spelling a key out. Rebinding the
+    /// live-edge key must change what the cue says.
+    #[test]
+    fn the_scroll_mode_cue_names_the_rebound_live_edge_key() {
+        let app = test_app(bindings_with_overrides(&[(
+            Action::ScrollToBottom,
+            &["ctrl-alt-b"],
+        )]));
+
+        let cue = line_text(&app.scroll_mode_cue_line());
+        let rebound = app.bindings.labels_for(Action::ScrollToBottom);
+        assert_eq!(
+            rebound, "Ctrl-Alt-b",
+            "test setup: the rebind should produce a proper-cased label"
+        );
+        assert!(
+            cue.contains(&rebound),
+            "the cue must follow the rebind; got {cue:?}"
+        );
+        assert!(
+            !cue.contains(" q "),
+            "the default key must not be hardcoded into the cue; got {cue:?}"
+        );
+    }
+
+    /// The cue REPLACES the whole hint line, so anything the hint line was the
+    /// only place to say goes missing while the mode is on. That included the
+    /// exit-interactive key: a user who scrolled back lost the sole on-screen
+    /// reminder of how to leave interactive mode, in the one state where every
+    /// other key is being swallowed.
+    #[test]
+    fn the_scroll_mode_cue_still_names_the_way_out_of_interactive_mode() {
+        let app = test_app(default_bindings());
+
+        let cue = line_text(&app.scroll_mode_cue_line());
+        let exit = app.bindings.label_for(Action::ExitInteractive);
+        assert!(
+            cue.contains(&exit),
+            "the cue must keep naming the exit key {exit:?}; got {cue:?}"
+        );
+    }
+
+    /// The hazard step 2 exists for: the CHILD can pull the grid back to the
+    /// live edge (measured: entering the alternate screen, erasing scrollback,
+    /// or a full reset each leave `scrollback_offset()` at 0). The mode must end
+    /// on that, and it must end LOUDLY, because the user is still looking at a
+    /// cue that says their keys are being dropped.
+    #[test]
+    fn a_child_zeroing_the_offset_ends_scroll_mode_out_loud() {
+        let mut app = app_with_scrolled_back_pty();
+        assert!(app.scroll_mode_active(), "test setup: in scroll mode");
+
+        // Stand in for the child's escape sequence by landing the grid where
+        // those sequences measurably land it. The sequences themselves are
+        // exercised end-to-end in
+        // `no_child_escape_sequence_silently_resumes_forwarding`.
+        app.selected_terminal_surface_client()
+            .unwrap()
+            .set_scrollback(0);
+
+        app.reconcile_scroll_mode();
+
+        assert!(
+            !app.scroll_mode_active(),
+            "the mode must not outlive the view it described"
+        );
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Warning);
+        let message = app.status.message();
+        assert!(
+            message.contains("Scroll mode ended"),
+            "the exit must be announced; got {message:?}"
+        );
+        assert!(
+            message.contains(&app.bindings.labels_for(Action::ScrollPageUp)),
+            "the announcement must say how to get back; got {message:?}"
+        );
+    }
+
+    /// A user snapping to the live edge is not a surprise, so that exit stays
+    /// quiet. Without this the status line would nag on every ordinary return
+    /// from scrollback and the real announcement would stop meaning anything.
+    #[test]
+    fn a_user_snap_to_the_live_edge_leaves_scroll_mode_quietly() {
+        let mut app = app_with_scrolled_back_pty();
+        app.reset_pty_scrollback();
+        app.reconcile_scroll_mode();
+        assert!(!app.scroll_mode_active());
+        assert!(
+            !app.status.message().contains("Scroll mode ended"),
+            "a user-driven return to the live edge must not announce itself; got {:?}",
+            app.status.message()
+        );
+    }
+
+    /// The batch in which the mode dies is still suppressed. The keystroke in it
+    /// was aimed at a pane the user believed was frozen, and they cannot have
+    /// read the status message that had not been drawn yet.
+    #[test]
+    fn the_batch_that_ends_scroll_mode_still_drops_its_keystroke() {
+        let mut app = app_with_scrolled_back_pty();
+        let session_id = app.engine.sessions[0].id.clone();
+        app.selected_terminal_surface_client()
+            .unwrap()
+            .set_scrollback(0);
+
+        assert!(app.process_raw_input_bytes(b"x").is_ok());
+        assert!(
+            !app.engine.pty_input.contains_key(&session_id),
+            "the keystroke that raced the mode's death must not reach the PTY"
+        );
+        assert!(!app.scroll_mode_active(), "the mode ended in that batch");
+        assert!(app.status.message().contains("Scroll mode ended"));
+
+        // The NEXT keystroke is forwarded normally: the user has been told.
+        assert!(app.process_raw_input_bytes(b"y").is_ok());
+        assert!(
+            app.engine.pty_input.contains_key(&session_id),
+            "typing must work again once the mode is over"
+        );
+    }
+
+    /// End-to-end over the three sequences that were measured to zero the
+    /// offset. The child emits its escape while the user is scrolled back, the
+    /// reader parses it like any other bytes (there is no branch that holds a
+    /// scrolled-back surface's output out of the parser), the offset drops to 0
+    /// under the user, and `reconcile_scroll_mode` must end the mode OUT LOUD.
+    /// Measured here: all three sequences reach that outcome, well inside the
+    /// loop's one-second budget.
+    ///
+    /// The PREMISE and the INVARIANT are asserted separately, and that split is
+    /// the point. The premise is the measured claim in the paragraph above,
+    /// that each of these three sequences zeroes the offset; the invariant is
+    /// that the mode never ends, and forwarding never resumes, in silence. An
+    /// earlier version asserted only the invariant, inside an `if ended` with a
+    /// timing-tolerant `else`. That arm was written as a slow-machine
+    /// allowance, but it doubled as a hiding place: the day one of these
+    /// sequences stopped zeroing the offset, the run would have taken the
+    /// `else` branch, proved only that a still-scrolled-back pane suppresses
+    /// typing (which is trivially true), and passed. So the premise is now
+    /// polled and asserted on its own, and once it holds the reconcile is
+    /// synchronous, which is why the invariant below needs no tolerance at all.
+    #[test]
+    fn no_child_escape_sequence_silently_resumes_forwarding() {
+        for (name, escape) in [
+            ("alternate screen", "\\033[?1049h"),
+            ("erase scrollback", "\\033[3J"),
+            ("full reset", "\\033c"),
+        ] {
+            let mut app = test_app(default_bindings());
+            let session_id = app.engine.sessions[0].id.clone();
+            // Print history, then block on `read` so the escape is emitted only
+            // once the test says so, i.e. strictly after the user has scrolled
+            // back. `sleep` afterwards keeps the child (and its grid) alive.
+            let args = vec![
+                "-c".to_string(),
+                format!(
+                    "printf 'L%s\\n' 1 2 3 4 5 6 7 8 9 10 11 12; read _ignored; \
+                     printf '{escape}'; sleep 30"
+                ),
+            ];
+            let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 5, 40, 100)
+                .expect("spawn pty");
+            app.engine.providers.insert(session_id.clone(), client);
+            app.input_target = InputTarget::Agent;
+            app.session_surface = SessionSurface::Agent;
+            app.fullscreen_overlay = FullscreenOverlay::Agent;
+            app.last_pty_size = (5, 40);
+
+            enter_scroll_mode(&mut app, 3);
+
+            // Unblock the child's `read` by writing to the PTY directly. This
+            // deliberately bypasses the key path, which is suppressed here: the
+            // point is that the CHILD acts on its own while the user reads.
+            app.selected_terminal_surface_client()
+                .unwrap()
+                .write_bytes(b"\n")
+                .expect("unblock the child");
+
+            // PREMISE. Give the child time to emit the escape and dux's reader
+            // thread time to parse it, then assert the offset ITSELF, not the
+            // mode. This is the claim the doc above makes and it is measured
+            // here rather than assumed: waiting on the offset is waiting on the
+            // fact the rest of the test depends on.
+            let mut zeroed = false;
+            for _ in 0..200 {
+                if app
+                    .selected_terminal_surface_client()
+                    .is_some_and(|p| p.scrollback_offset() == 0)
+                {
+                    zeroed = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert!(
+                zeroed,
+                "{name}: this sequence no longer pulls the grid to the live \
+                 edge, so it no longer hands typing back to the child and the \
+                 invariant below would be testing nothing"
+            );
+
+            // INVARIANT. With the grid already back at the live edge the
+            // reconcile is synchronous, so there is no timing to tolerate: the
+            // mode must end, and it must end out loud.
+            app.reconcile_scroll_mode();
+            assert!(
+                !app.scroll_mode_active(),
+                "{name}: the mode outlived the view it described, so the cue \
+                 now lies about where the keystrokes are going"
+            );
+            assert!(
+                app.status.message().contains("Scroll mode ended"),
+                "{name}: the mode ended with nothing said; status was {:?}",
+                app.status.message()
+            );
+            // And typing really is back, which is what made the silence
+            // dangerous in the first place.
+            assert!(app.process_raw_input_bytes(b"z").is_ok());
+            assert!(
+                app.engine.pty_input.contains_key(&session_id),
+                "{name}: the child took the view back, so typing must reach it"
+            );
+        }
+    }
+
+    /// A surface that dies while scrolled back takes its mode with it, in
+    /// silence. The loud exit is reserved for a LIVE pane that yanked itself to
+    /// the bottom; a torn-down PTY has no keystroke routing left to be
+    /// surprised by, and warning about it would also mean warning again if the
+    /// agent relaunches under the same id.
+    #[test]
+    fn a_torn_down_surface_drops_its_scroll_mode_in_silence() {
+        let mut app = app_with_scrolled_back_pty();
+        let session_id = app.engine.sessions[0].id.clone();
+        app.engine.providers.remove(&session_id);
+
+        app.reconcile_scroll_mode();
+
+        assert!(app.scroll_mode.is_empty(), "the stale mode must not linger");
+        assert!(
+            !app.status.message().contains("Scroll mode ended"),
+            "a dead surface must not announce anything; got {:?}",
+            app.status.message()
+        );
+    }
+
+    /// Scroll mode belongs to the surface the user scrolled, not to the app.
+    /// Without the key, scrolling back in one agent would swallow typing in the
+    /// next agent the user switched to.
+    #[test]
+    fn scroll_mode_does_not_follow_the_user_to_another_surface() {
+        let mut app = app_with_scrolled_back_pty();
+        assert!(app.scroll_mode_active());
+
+        let other = "another-session".to_string();
+        let args = vec!["-c".to_string(), "sleep 30".to_string()];
+        let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 5, 40, 100)
+            .expect("spawn pty");
+        app.engine.providers.insert(other.clone(), client);
+        app.engine.sessions[0].id = other;
+
+        assert!(
+            !app.scroll_mode_active(),
+            "a different surface is at its own live edge"
+        );
+    }
+
+    /// A resize is the OTHER way the view snaps back under the user, and it is
+    /// DUX's own doing: the render path resizes the PTY whenever the pane
+    /// geometry changes, and growing the viewport pulls the offset down. So
+    /// merely widening the dux window while reading scrollback used to produce
+    /// a warning accusing "the program in this pane" of something it had not
+    /// done. The message must name the effect and offer causes, not assert one.
+    #[test]
+    fn a_window_resize_ends_scroll_mode_without_blaming_the_program() {
+        let mut app = app_with_scrolled_back_pty();
+        assert!(app.scroll_mode_active(), "test setup: in scroll mode");
+
+        // Grow the pane from the 5 rows the fixture spawned to 24, exactly as
+        // the render path does when the dux window gets taller.
+        app.selected_terminal_surface_client()
+            .unwrap()
+            .resize(24, 40)
+            .expect("resize");
+        assert_eq!(
+            app.selected_terminal_surface_client()
+                .unwrap()
+                .scrollback_offset(),
+            0,
+            "test premise: growing the viewport pulls the view to the live edge"
+        );
+
+        app.reconcile_scroll_mode();
+
+        assert!(!app.scroll_mode_active(), "the mode must end");
+        let msg = app.status.message().to_string();
+        assert!(
+            msg.contains("Scroll mode ended"),
+            "the end of the mode must be announced; got {msg:?}"
+        );
+        assert!(
+            msg.contains("resize"),
+            "the message must offer the cause that actually applies here, \
+             rather than blaming the agent; got {msg:?}"
+        );
+        assert!(
+            !msg.contains("the program in this pane pulled"),
+            "the message must not assert a cause it cannot know; got {msg:?}"
+        );
+    }
+
+    /// The same message promises that keystrokes reach the program again. That
+    /// is only true when the input target IS the PTY. In non-interactive mode
+    /// the keys are dux's own commands and never reached the child, so the
+    /// sentence would be describing something that was not happening.
+    #[test]
+    fn the_end_of_scroll_mode_only_promises_keystrokes_when_they_go_to_the_pty() {
+        let mut interactive = app_with_scrolled_back_pty();
+        assert_eq!(interactive.input_target, InputTarget::Agent);
+        interactive
+            .selected_terminal_surface_client()
+            .unwrap()
+            .set_scrollback(0);
+        interactive.reconcile_scroll_mode();
+        let msg = interactive.status.message().to_string();
+        assert!(
+            msg.contains("keystrokes reach it again"),
+            "in interactive mode the promise is true and worth making; got {msg:?}"
+        );
+
+        let mut non_interactive = app_with_scrolled_back_pty();
+        non_interactive.input_target = InputTarget::None;
+        non_interactive
+            .selected_terminal_surface_client()
+            .unwrap()
+            .set_scrollback(0);
+        non_interactive.reconcile_scroll_mode();
+        let msg = non_interactive.status.message().to_string();
+        assert!(
+            msg.contains("Scroll mode ended"),
+            "the mode still ends out loud; got {msg:?}"
+        );
+        assert!(
+            !msg.contains("keystrokes"),
+            "the keys were dux's own commands, so nothing was being held back \
+             from the child; got {msg:?}"
+        );
+    }
+
+    /// The other direction of the same tenet, and the one that shipped broken.
+    ///
+    /// Scroll mode used to be a single slot while the offset it mirrors is
+    /// per-surface, living in each PTY client. So snapping ANY surface to its
+    /// live edge cleared the one slot, and the agent the user had left parked in
+    /// scrollback kept its frozen view and its offset while losing its mode: no
+    /// cue, no status, and the next keystroke straight through to its child.
+    /// Two surfaces scrolled back at once is an ordinary state, and one slot
+    /// cannot represent it.
+    #[test]
+    fn snapping_another_surface_to_its_live_edge_leaves_this_ones_scroll_mode_alone() {
+        let mut app = app_with_scrolled_back_pty();
+        let first = app.engine.sessions[0].id.clone();
+        let parked_at = app
+            .selected_terminal_surface_client()
+            .unwrap()
+            .scrollback_offset();
+        assert!(
+            parked_at > 0,
+            "test setup: the first surface is scrolled back"
+        );
+
+        // Move to a second live surface (the id swap is this file's established
+        // way to move the selection between agents).
+        let other = "another-session".to_string();
+        let args = vec!["-c".to_string(), "sleep 30".to_string()];
+        let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 5, 40, 100)
+            .expect("spawn pty");
+        app.engine.providers.insert(other.clone(), client);
+        app.engine.sessions[0].id = other;
+
+        // Snap THAT surface to its live edge. It is already there; the point is
+        // that the action names one surface and must touch only that one.
+        app.reset_pty_scrollback();
+
+        // Back to the first surface, exactly where the user left it.
+        app.engine.sessions[0].id = first.clone();
+
+        assert_eq!(
+            app.selected_terminal_surface_client()
+                .unwrap()
+                .scrollback_offset(),
+            parked_at,
+            "the first surface's view never moved"
+        );
+        assert!(
+            app.scroll_mode_active(),
+            "a surface still parked above its live edge is still in scroll mode"
+        );
+
+        // And the harm the mode exists to prevent must still be prevented.
+        assert!(app.process_raw_input_bytes(b"x").is_ok());
+        assert!(
+            !app.engine.pty_input.contains_key(&first),
+            "a keystroke must not reach a pane whose view is frozen"
+        );
     }
 
     /// Helper: an App focused on a live agent PTY in interactive mode, not

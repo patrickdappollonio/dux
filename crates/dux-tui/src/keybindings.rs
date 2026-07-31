@@ -1913,7 +1913,7 @@ impl RuntimeBindings {
 /// Convert a `KeyCombination` to the raw byte sequence a terminal would send.
 /// Returns `None` for key types that can't be represented as bytes (e.g. mouse
 /// buttons or function keys beyond F4 in SS3 mode).
-fn key_combination_to_bytes(kc: &KeyCombination) -> Option<Vec<u8>> {
+pub(crate) fn key_combination_to_bytes(kc: &KeyCombination) -> Option<Vec<u8>> {
     let norm = kc.normalized();
     let has_ctrl = norm.modifiers.contains(KeyModifiers::CONTROL);
     let has_alt = norm.modifiers.contains(KeyModifiers::ALT);

@@ -3,12 +3,14 @@
 //!
 //! dux runs each agent inside an embedded terminal emulator. That emulator would
 //! ordinarily hand us a ready-made [`alacritty_terminal::event::Event::Bell`] for
-//! the classic terminal ding, but it silently drops the richer OSC notification
-//! codes (`OSC 9`, `OSC 777`) and the `OSC 9;4` progress report, and the emulator
-//! path is skipped entirely while a tab is scroll-paused. To catch every signal
-//! (bell included) even while ingestion is paused, we scan the raw byte stream
-//! ourselves, just before feeding it to the emulator, and this scanner is the
-//! single detection path for all of them.
+//! the classic terminal ding, but it has no event at all for the richer OSC
+//! notification codes (`OSC 9`, `OSC 777`) or the `OSC 9;4` progress report:
+//! alacritty's `Event` carries a bell, a title/icon change, a clipboard store, a
+//! colour request and a PTY write, and nothing else, so those sequences reaching
+//! its parser are simply consumed. Scanning the raw byte stream ourselves, just
+//! before feeding it to the emulator, is therefore the ONLY detection path for
+//! them. The bell is scanned here too rather than taken from `Event::Bell`, so
+//! that one signal set comes from one mechanism and cannot double-fire.
 //!
 //! This module is deliberately free of any PTY, terminal, or engine dependency so
 //! it can be exhaustively unit-tested at the byte level. It is a small streaming
@@ -63,8 +65,9 @@ const MAX_CARRY: usize = 4096;
 pub enum AttentionEvent {
     /// A bare terminal bell (`0x07`) outside any escape sequence: the classic
     /// ding, config-gated by `attention_on_bell`. This is the ONLY bell path
-    /// (the emulator's own `Event::Bell` is not used) so pause/unpause can never
-    /// make the bell double-fire or go missing.
+    /// (the emulator's own `Event::Bell` is deliberately not handled, see
+    /// `EventProxy::send_event`), so the bell cannot be armed twice for one ding
+    /// and one signal set stays on one mechanism.
     Bell,
     /// An `OSC 9` / `OSC 777` desktop-notification style sequence: the agent is
     /// asking for the user's attention (permission prompt, finished turn, ...).

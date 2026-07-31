@@ -833,9 +833,12 @@ impl Engine {
     /// PTY OUTPUT wins over everything, then the agent's own OSC 9;4 progress
     /// report, then idle.
     ///
-    /// - Visible output within [`AGENT_STREAMING_WINDOW`] → working. `pty_activity`
-    ///   is stamped only on VISIBLE grid changes (see `TerminalState::
-    ///   take_visible_change`), so this is genuine agent output, not an OSC status
+    /// - Rendered output within [`AGENT_STREAMING_WINDOW`] → working. `pty_activity`
+    ///   is stamped only on real content changes in the terminal's ACTIVE AREA
+    ///   (see `TerminalState::take_content_change`, which hashes the active area
+    ///   rather than the displayed viewport precisely so a scrolled-back operator
+    ///   still sees a producing agent as working), so this is genuine agent
+    ///   output, not an OSC status
     ///   sequence. It overrides the OSC report everywhere: an agent that misreports
     ///   "idle" (or stopped reporting) while still printing must still read as
     ///   working. The one exception is output that is the terminal echoing the

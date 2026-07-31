@@ -2317,6 +2317,56 @@ impl App {
         term_area
     }
 
+    /// The hint-bar line shown while the focused surface is in scroll mode and
+    /// interactive: it says that keystrokes are being dropped and names the key
+    /// that returns to the live edge.
+    ///
+    /// The drop itself is deliberate (scroll mode routes keys to the mode, as
+    /// tmux's copy mode does), what is not acceptable is doing it silently. The
+    /// wording never hardcodes a key: every binding is user-configurable, so the
+    /// labels come from `RuntimeBindings` and stay right after a rebind. The
+    /// colors come from `Theme`: `nudge_border` is the existing semantic
+    /// "something needs your attention in this pane" field, already used for the
+    /// nudge border and the read-only warning on this very hint bar, so no new
+    /// theme token is needed.
+    pub(crate) fn scroll_mode_cue_line(&self) -> Line<'static> {
+        let warn_style = Style::default().fg(self.theme.nudge_border);
+        let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
+        let target = match self.session_surface {
+            SessionSurface::Agent => "agent",
+            SessionSurface::Terminal => "terminal",
+        };
+        let live_edge = self.bindings.labels_for(Action::ScrollToBottom);
+        let scroll_up = self.bindings.labels_for(Action::ScrollPageUp);
+        let scroll_down = self.bindings.labels_for(Action::ScrollPageDown);
+        let exit_key = self.bindings.label_for(Action::ExitInteractive);
+
+        let mut spans: Vec<Span> = vec![Span::styled(
+            format!("Scroll mode: keys are not reaching the {target}. "),
+            warn_style,
+        )];
+        spans.extend(self.theme.dim_key_badge_default(&live_edge));
+        spans.push(Span::styled(" resume at the live edge  ", desc_style));
+        spans.extend(self.theme.dim_key_badge_default(&scroll_up));
+        spans.push(Span::styled(" up  ", desc_style));
+        spans.extend(self.theme.dim_key_badge_default(&scroll_down));
+        spans.push(Span::styled(" down  ", desc_style));
+        // This line REPLACES the whole hint bar, so the exit key has to come
+        // along: while the mode is on, every other key is being swallowed and
+        // this is the only place left on screen that says how to get out of
+        // interactive mode.
+        spans.extend(self.theme.dim_key_badge_default(&exit_key));
+        spans.push(Span::styled(" return", desc_style));
+        // The key badges borrow the label strings, which are locals here, so
+        // hand back owned spans (same pattern as `hint_bar::modal_hint_line`).
+        Line::from(
+            spans
+                .into_iter()
+                .map(|span| Span::styled(span.content.into_owned(), span.style))
+                .collect::<Vec<_>>(),
+        )
+    }
+
     fn render_agent_terminal(&mut self, frame: &mut Frame, area: Rect, title: &str, focused: bool) {
         let nudge_active = self.is_nudge_active();
         let outer_block = if nudge_active {
@@ -2472,15 +2522,51 @@ impl App {
                 // buffer, reusing the pre-allocated snapshot buffer to
                 // avoid per-frame heap allocation.
                 self.refresh_snapshot_buf();
+                // A selection stamped against a full history ring cannot be
+                // translated once the grid moves, so retire it here rather than
+                // painting the highlight over whatever text has taken its rows.
+                self.drop_drifted_selection();
                 scrollback_offset = self.snapshot_buf.scrollback_offset;
 
-                // When returning from scrollback to the live bottom,
-                // clear the PTY area so stale cells don't linger in
-                // ratatui's diff buffer.
-                if scrollback_offset != self.prev_scrollback_offset {
-                    Clear.render(term_area, frame.buffer_mut());
-                }
-                self.prev_scrollback_offset = scrollback_offset;
+                // Deliberately NO `Clear.render(term_area, ..)` here. This used
+                // to clear the pane whenever the offset differed from the
+                // previous frame's, to stop stale cells lingering in ratatui's
+                // diff buffer. Measured against ratatui 0.30: it cannot linger
+                // and the clear cannot help.
+                //
+                // `Terminal::swap_buffers` calls `reset()` on the buffer the
+                // next frame draws into, and `Clear` is exactly `Cell::reset()`
+                // per cell, so the clear only redid work the frame start had
+                // already done. What it did NOT redo is the frame-wide `app_bg`
+                // fill, which runs before this: a reset cell's background is
+                // `Color::Reset` (the host terminal's default). In the
+                // non-interactive pane `pty_cell_colors` returns no background
+                // for a default-background cell, on purpose, so the app surface
+                // shows through, and the loop below applies each cell as a
+                // style PATCH that leaves an unset background alone. The clear
+                // therefore stripped the theme colour off every cell the child
+                // had not painted a background on.
+                //
+                // It used to fire on a single frame per user scroll, which
+                // nobody could see. Now output always flows and the terminal
+                // library holds a scrolled-back view still by incrementing the
+                // offset per arriving line, so it fired on nearly every frame
+                // and the pane background visibly flipped while the agent
+                // talked. Measured at 1800 of 1815 pane cells falling to the
+                // terminal default, pinned by
+                // `agent_pane_background_survives_a_scrollback_offset_change`.
+                //
+                // Wide-character spacers do not need it either: the snapshot
+                // skips `WIDE_CHAR_SPACER` cells, but a skipped cell is already
+                // blank from the frame reset, and `Buffer::diff` widens its
+                // invalidation window by `max(current, previous)` symbol width,
+                // so a wide glyph replaced by a narrow one still repaints its
+                // trailing cell.
+
+                // Read once, from the same snapshot the cells below come from,
+                // so every cell in this frame is translated against one scroll
+                // state rather than a re-read that could move mid-loop.
+                let selection_now = self.snapshot_selection_origin();
 
                 let buf = frame.buffer_mut();
                 for cell in &self.snapshot_buf.cells {
@@ -2542,9 +2628,14 @@ impl App {
                     ratatui_cell.set_style(style);
 
                     // Overlay selection highlight if this cell is selected.
+                    // `contains_live`, not `contains`: the selection's rows are
+                    // viewport rows from the frame the drag started in, and the
+                    // grid has moved since if the user scrolled or the child
+                    // wrote. Testing the raw row would leave the highlight
+                    // pinned to screen coordinates while its text slid away.
                     if let Some(sel) = &self.terminal_selection
                         && sel.anchor != sel.end
-                        && sel.contains(cell.row, cell.col)
+                        && sel.contains_live(cell.row, cell.col, selection_now)
                     {
                         ratatui_cell.set_style(self.theme.selection_style());
                     }
@@ -2594,10 +2685,8 @@ impl App {
                 // the alternate screen buffer — the alt grid has no history,
                 // so the label would be misleading even if it somehow rendered.
                 if !is_alt_screen
-                    && let Some(label) = scrollback_indicator_label(
-                        self.snapshot_buf.scrollback_offset,
-                        self.snapshot_buf.scrollback_total,
-                    )
+                    && let Some(label) =
+                        scrollback_indicator_label(self.snapshot_buf.scrollback_offset)
                 {
                     let badge_width = label.len() as u16;
                     if term_area.height > 0 && badge_width <= term_area.width {
@@ -2666,7 +2755,14 @@ impl App {
             let reconnect = self.bindings.labels_for(Action::ReconnectAgent);
 
             let macro_key = self.bindings.label_for(Action::OpenMacroBar);
-            let hint_line = if is_input {
+            let hint_line = if is_input && self.scroll_mode_active() {
+                // Scroll mode swallows every non-scroll key (see
+                // `process_raw_input_bytes`), so while it is on, this line says
+                // so instead of listing the usual keys. Without it the only
+                // signal is a pane that happens not to be moving, which stops
+                // being a signal the moment the pane is live again.
+                self.scroll_mode_cue_line()
+            } else if is_input {
                 let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
                 let mut spans: Vec<Span> = Vec::new();
                 spans.extend(self.theme.dim_key_badge_default(&exit_key));
@@ -9512,14 +9608,31 @@ fn runtime_context_spans(
     spans
 }
 
-fn scrollback_indicator_label(scrolled: usize, total: usize) -> Option<String> {
+/// The scrollback badge painted at the top-right of the PTY view.
+///
+/// The badge names the DISTANCE FROM THE LIVE EDGE, and says so in words. That
+/// is a deliberate decision, not the incidental shape of the old label, so here
+/// is the reasoning. The number is a distance to a moving end, not a position in
+/// a fixed document: while the user holds perfectly still, the child keeps
+/// printing and the live edge keeps receding, so the number climbs on its own.
+/// That is something the user really sees, not a theoretical case: scrolling
+/// back holds the VIEW still and nothing else, the reader parses every chunk
+/// regardless, so reading history during a busy build means watching this
+/// number rise without touching anything. The old
+/// `41/800 lines` form reads as a progress ratio through a document of 800
+/// lines, and against that reading a numerator that climbs by itself looks like
+/// the view scrolling under the user. `41 lines below` reads as "the live edge
+/// is 41 lines below you", and a number that climbs is then exactly what the
+/// user expects: more output arrived beneath them. The total is dropped for the
+/// same reason: it is a moving denominator, and printing it only invites the
+/// ratio reading it cannot honestly support.
+fn scrollback_indicator_label(scrolled: usize) -> Option<String> {
     if scrolled == 0 {
         return None;
     }
 
-    let total = total.max(scrolled);
-    let noun = if total == 1 { "line" } else { "lines" };
-    Some(format!(" {scrolled}/{total} {noun} "))
+    let noun = if scrolled == 1 { "line" } else { "lines" };
+    Some(format!(" {scrolled} {noun} below "))
 }
 
 fn path_completion_display_label(completion: &str) -> String {
@@ -9757,7 +9870,7 @@ mod tests {
     use super::*;
 
     use crate::app::test_support::{
-        agent_provider_prompt, default_bindings, default_provider_prompt,
+        agent_provider_prompt, default_bindings, default_provider_prompt, enter_scroll_mode,
         project_default_provider_prompt, test_app, wait_for_agent_cursor,
     };
     use crate::model::{CompanionTerminal, SessionSurface};
@@ -11018,6 +11131,299 @@ mod tests {
         terminal.backend_mut().assert_cursor_position(expected);
     }
 
+    /// The cue has to be ON SCREEN, not merely constructible: the hint bar is
+    /// the only surface that can say "your typing is going nowhere" while the
+    /// pane itself looks perfectly alive. Renders a real frame over a real,
+    /// scrolled-back PTY and reads the cue back out of the buffer, so a hint
+    /// branch that never runs cannot pass.
+    #[test]
+    fn the_scroll_mode_cue_reaches_the_hint_bar() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        // Print more lines than the 6-row grid holds so there is real history
+        // to scroll into, then stay alive.
+        let args = vec![
+            "-c".to_string(),
+            "printf 'L%s\\n' 1 2 3 4 5 6 7 8 9 10 11 12; sleep 30".to_string(),
+        ];
+        let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 6, 80, 100)
+            .expect("spawn pty");
+        app.engine.providers.insert(session_id, client);
+
+        app.input_target = InputTarget::Agent;
+        app.session_surface = SessionSurface::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+        enter_scroll_mode(&mut app, 3);
+
+        let backend = TestBackend::new(100, 40);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+
+        let rows = buffer_rows(terminal.backend().buffer());
+        let cue = rows
+            .iter()
+            .find(|row| row.contains("keys are not reaching the agent"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "scroll mode must say so on screen; frame was:\n{}",
+                    rows.join("\n")
+                )
+            });
+        let live_edge = app.bindings.labels_for(Action::ScrollToBottom);
+        assert!(
+            cue.contains(&live_edge),
+            "the cue must name the live-edge key {live_edge:?}; row was {cue:?}"
+        );
+    }
+
+    /// The scrollback badge paints its OWN themed background over the pane's
+    /// top-right corner and its width tracks the offset's digit count, so it is
+    /// not part of the pane surface these tests measure. Mirrors the render
+    /// site's geometry rather than guessing it.
+    fn scrollback_badge_rect(app: &App, term_area: Rect) -> Option<Rect> {
+        let label = scrollback_indicator_label(app.snapshot_buf.scrollback_offset)?;
+        let width = label.len() as u16;
+        (term_area.height > 0 && width <= term_area.width)
+            .then(|| Rect::new(term_area.x + term_area.width - width, term_area.y, width, 1))
+    }
+
+    /// Every background colour inside `area`, with a tally, so a failure can
+    /// say WHAT the pane was painted rather than just that it was wrong.
+    fn pane_bg_tally(
+        buffer: &ratatui::buffer::Buffer,
+        area: Rect,
+        skip: Option<Rect>,
+    ) -> std::collections::BTreeMap<String, usize> {
+        let mut tally = std::collections::BTreeMap::new();
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                if skip.is_some_and(|rect| rect.contains(ratatui::layout::Position::new(x, y))) {
+                    continue;
+                }
+                *tally.entry(format!("{:?}", buffer[(x, y)].bg)).or_insert(0) += 1;
+            }
+        }
+        tally
+    }
+
+    /// The agent pane's themed background must be the SAME whether or not the
+    /// scrollback offset moved since the previous frame.
+    ///
+    /// This is a regression test for a real, measured defect. The pane used to
+    /// `Clear.render(term_area, ..)` whenever the offset differed from the
+    /// previous frame's. `Clear` is `Cell::reset()` per cell, which drops the
+    /// background to `Color::Reset` (the host terminal's default), and it ran
+    /// AFTER the frame-wide `app_bg` fill, so every cell the snapshot loop
+    /// leaves alone lost its theme colour. That branch used to be unreachable
+    /// while a user read history, because output parsing stopped on scroll; now
+    /// output always flows and the terminal library holds the view still by
+    /// incrementing the offset per arriving line, so the branch fired on
+    /// essentially every frame and the pane background visibly flipped between
+    /// themed and terminal-default while the agent talked.
+    ///
+    /// Non-interactive on purpose: in interactive mode a default-background PTY
+    /// cell deliberately resolves to `Some(Color::Reset)` (see
+    /// `pty_cell_colors_preserves_default_bg_in_interactive_mode`) so the CLI's
+    /// own surface shows through, and the pane's own background is not what the
+    /// user is looking at. Non-interactive is where `app_bg` is the surface.
+    #[test]
+    fn agent_pane_background_survives_a_scrollback_offset_change() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        // More lines than the 6-row grid holds, so there is real history to
+        // scroll into, then stay alive.
+        let args = vec![
+            "-c".to_string(),
+            "i=1; while [ $i -le 200 ]; do echo L$i; i=$((i+1)); done; sleep 30".to_string(),
+        ];
+        let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 6, 80, 2000)
+            .expect("spawn pty");
+        app.engine.providers.insert(session_id, client);
+
+        app.input_target = InputTarget::None;
+        app.session_surface = SessionSurface::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::None;
+
+        let backend = TestBackend::new(100, 40);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+
+        // A first frame settles the PTY resize to the pane's real size. It has
+        // to come before the scroll: the resize reflows the grid and returns
+        // the view to the live edge, so a scroll staged earlier is undone.
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render sizing frame");
+        enter_scroll_mode(&mut app, 3);
+        // Then one frame to carry the 0 -> N offset change, so the next frame
+        // is genuinely the "offset unchanged" case.
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render settling frame");
+
+        let term_area = app
+            .mouse_layout
+            .agent_term
+            .expect("agent terminal area should be recorded after render");
+        assert!(
+            app.snapshot_buf.scrollback_offset > 0,
+            "test setup: the pane must be parked in scrollback"
+        );
+
+        // The reference the user sees while the agent is quiet.
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render quiet frame");
+        let quiet_offset = app.snapshot_buf.scrollback_offset;
+        let quiet_badge = scrollback_badge_rect(&app, term_area);
+        let quiet = pane_bg_tally(terminal.backend().buffer(), term_area, quiet_badge);
+
+        // The "offset moved" case, which is what an arriving line does to a
+        // view the terminal library is holding still.
+        app.selected_terminal_surface_client()
+            .expect("provider")
+            .scroll(true, 1);
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render moved frame");
+        assert_ne!(
+            app.snapshot_buf.scrollback_offset, quiet_offset,
+            "test setup: the second frame must carry a CHANGED scrollback offset"
+        );
+        let moved_badge = scrollback_badge_rect(&app, term_area);
+        let moved = pane_bg_tally(terminal.backend().buffer(), term_area, moved_badge);
+
+        let app_bg = format!("{:?}", app.theme.app_bg);
+        for (label, tally) in [("offset unchanged", &quiet), ("offset moved", &moved)] {
+            assert_eq!(
+                tally.get("Reset").copied().unwrap_or(0),
+                0,
+                "the {label} frame dropped agent-pane cells to the terminal default \
+                 background; backgrounds were {tally:?}"
+            );
+            assert!(
+                tally.get(&app_bg).copied().unwrap_or(0) > 0,
+                "the {label} frame painted no themed {app_bg} background in the agent \
+                 pane; backgrounds were {tally:?}"
+            );
+        }
+        assert_eq!(
+            quiet, moved,
+            "the agent pane background must not depend on whether the scrollback \
+             offset moved this frame"
+        );
+    }
+
+    /// The other half of removing that clear: prove it was protecting nothing.
+    ///
+    /// Its comment claimed it stopped stale cells lingering in ratatui's diff
+    /// buffer across a scroll, and a review suggested it was also scrubbing the
+    /// spacer cells wide characters leave behind (the snapshot skips
+    /// `WIDE_CHAR_SPACER`, so the painting loop never touches them). This walks
+    /// the pane cell by cell after scrolling a grid that holds wide CJK glyphs
+    /// and asserts the buffer says exactly what the current snapshot says:
+    /// every snapshot cell present, every uncovered position blank. A leftover
+    /// glyph from the previous frame, in a spacer or anywhere else, fails here.
+    #[test]
+    fn scrolling_the_agent_pane_leaves_no_stale_cells_without_a_clear() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        // Wide CJK lines first, then narrow ASCII ones, so scrolling replaces
+        // double-width glyphs (and their spacers) with single-width text.
+        let args = vec![
+            "-c".to_string(),
+            "i=1; while [ $i -le 120 ]; do echo 日本語日本語$i; i=$((i+1)); done; \
+             i=1; while [ $i -le 120 ]; do echo n$i; i=$((i+1)); done; sleep 30"
+                .to_string(),
+        ];
+        let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 6, 80, 2000)
+            .expect("spawn pty");
+        app.engine.providers.insert(session_id, client);
+
+        app.input_target = InputTarget::None;
+        app.session_surface = SessionSurface::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::None;
+
+        let backend = TestBackend::new(100, 40);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render sizing frame");
+        // Deep enough to land in the wide-glyph half of the history.
+        enter_scroll_mode(&mut app, 150);
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render wide frame");
+        let term_area = app
+            .mouse_layout
+            .agent_term
+            .expect("agent terminal area should be recorded after render");
+        assert!(
+            app.snapshot_buf
+                .cells
+                .iter()
+                .any(|cell| cell.symbol.as_str() == "日"),
+            "test setup: the scrolled-back view must contain wide glyphs"
+        );
+
+        // Scroll forward into the narrow half. Any cell the previous frame
+        // painted and this one does not must be gone.
+        app.selected_terminal_surface_client()
+            .expect("provider")
+            .scroll(false, 130);
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render narrow frame");
+
+        // The scrollback badge overpaints the top-right corner after the cell
+        // loop, so those cells legitimately disagree with the snapshot.
+        let badge = scrollback_badge_rect(&app, term_area);
+        let overpainted = |x: u16, y: u16| {
+            badge.is_some_and(|rect| rect.contains(ratatui::layout::Position::new(x, y)))
+        };
+
+        let buffer = terminal.backend().buffer();
+        let mut covered = std::collections::HashSet::new();
+        for cell in &app.snapshot_buf.cells {
+            if cell.row >= term_area.height || cell.col >= term_area.width {
+                continue;
+            }
+            let pos = (term_area.x + cell.col, term_area.y + cell.row);
+            covered.insert(pos);
+            if overpainted(pos.0, pos.1) {
+                continue;
+            }
+            assert_eq!(
+                buffer[pos].symbol(),
+                cell.symbol.as_str(),
+                "pane cell at {pos:?} does not match the snapshot"
+            );
+        }
+        for y in term_area.y..term_area.y + term_area.height {
+            for x in term_area.x..term_area.x + term_area.width {
+                if covered.contains(&(x, y)) || overpainted(x, y) {
+                    continue;
+                }
+                assert_eq!(
+                    buffer[(x, y)].symbol(),
+                    " ",
+                    "an uncovered pane cell at {:?} kept stale content",
+                    (x, y)
+                );
+            }
+        }
+    }
+
     /// Regression test for the invisible-caret-in-Alacritty bug.
     ///
     /// The renderer used to pre-paint the cursor cell into a block
@@ -11111,25 +11517,29 @@ mod tests {
         terminal.backend_mut().assert_cursor_position((cx, cy));
     }
 
+    /// The badge names a distance to the live edge, not a position in a
+    /// document: no denominator, and the word "below" so a number that climbs
+    /// while the user sits still reads as output arriving beneath them. See the
+    /// function's own comment for why that reading matters.
     #[test]
-    fn scrollback_indicator_uses_fractional_label() {
+    fn scrollback_indicator_names_the_distance_below() {
         assert_eq!(
-            scrollback_indicator_label(41, 800),
-            Some(" 41/800 lines ".to_string())
+            scrollback_indicator_label(41),
+            Some(" 41 lines below ".to_string())
         );
     }
 
     #[test]
-    fn scrollback_indicator_handles_singular_total() {
+    fn scrollback_indicator_handles_a_single_line() {
         assert_eq!(
-            scrollback_indicator_label(1, 1),
-            Some(" 1/1 line ".to_string())
+            scrollback_indicator_label(1),
+            Some(" 1 line below ".to_string())
         );
     }
 
     #[test]
     fn scrollback_indicator_hides_at_live_bottom() {
-        assert_eq!(scrollback_indicator_label(0, 800), None);
+        assert_eq!(scrollback_indicator_label(0), None);
     }
 
     #[test]

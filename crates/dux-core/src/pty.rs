@@ -10,7 +10,7 @@ use std::ffi::OsStr;
 use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Instant;
 
@@ -373,12 +373,6 @@ fn bg_sgr(color: CellColor) -> String {
     }
 }
 
-/// Maximum number of bytes buffered while PTY ingestion is paused (4 MiB).
-/// The oldest data is dropped on overflow — on resume the child will typically
-/// redraw anyway because pause is only active during scrollback sessions with
-/// TUI-style providers.
-const PAUSE_BUFFER_CAP: usize = 4 * 1024 * 1024;
-
 /// Safety ceiling on how many grid rows a single reconnect repaint replays.
 /// `agent_scrollback_lines` is an unbounded user value; this bounds the one-time
 /// buffer a connect builds (under the terminal lock) so a pathological config
@@ -594,6 +588,13 @@ pub struct PtyClient {
     /// read side is still being held open by something else".
     reaped: Option<(portable_pty::ExitStatus, Instant)>,
     exited: Arc<AtomicBool>,
+    /// When the reader thread reached end of input, written once immediately
+    /// BEFORE it sets `exited`, so anyone who observes `exited` (an `Acquire`
+    /// load paired with the `Release` store below) also sees this instant. It is
+    /// what bounds a wait that is keyed on EOF: `reaped` cannot bound one,
+    /// because a child that closes its descriptors and keeps running reaches EOF
+    /// and is never reaped at all.
+    exited_at: Arc<OnceLock<Instant>>,
     has_output: Arc<AtomicBool>,
     /// Set by the reader thread or scroll/resize methods when the terminal
     /// state changes. Cleared by `snapshot_into` after rebuilding the buffer.
@@ -605,17 +606,8 @@ pub struct PtyClient {
     /// Records the last resize so `take_received_data` can suppress the
     /// redraw burst that follows a `SIGWINCH`.
     last_resize_at: Mutex<Option<Instant>>,
-    /// When true, the reader thread buffers incoming bytes into `pending_bytes`
-    /// instead of feeding them to the terminal parser. Toggled by the app
-    /// when the user enters/leaves scrollback so the grid stays stable while
-    /// the user reads history (tmux copy-mode style).
-    scroll_paused: Arc<AtomicBool>,
-    /// Bytes received from the PTY while ingestion is paused. Drained into
-    /// the terminal parser on resume. Bounded by `PAUSE_BUFFER_CAP`; oldest
-    /// bytes are dropped on overflow.
-    pending_bytes: Arc<Mutex<PendingIngest>>,
     /// Live raw-byte subscribers (web clients). Each receives a clone of every
-    /// chunk read from the PTY, independent of TUI scrollback pause. Each entry
+    /// chunk read from the PTY. Each entry
     /// is tagged with a stable id so the RAII [`PtyViewerGuard`] can remove its
     /// own slot on drop without waiting for the next PTY output. The reader loop
     /// also prunes hung-up senders reactively as a backstop.
@@ -654,12 +646,6 @@ const PASSTHROUGH_RING_CAP: usize = 64;
 /// Maximum size of a single captured passthrough sequence. A larger one (a huge
 /// OSC 52 clipboard payload, say) is dropped rather than buffered.
 const PASSTHROUGH_SEQ_MAX: usize = 8 * 1024;
-
-#[derive(Default)]
-struct PendingIngest {
-    buf: Vec<u8>,
-    dropped: bool,
-}
 
 /// The most recent `OSC 9;4` progress report an agent emitted, with the moment
 /// it arrived. The engine reads this to drive a truer "working" indicator: while
@@ -808,11 +794,10 @@ impl PtyClient {
         let writer = PtyWriter::spawn(pty_writer);
         let writer_tx = writer.sender();
         let exited = Arc::new(AtomicBool::new(false));
+        let exited_at: Arc<OnceLock<Instant>> = Arc::new(OnceLock::new());
         let has_output = Arc::new(AtomicBool::new(false));
         let dirty = Arc::new(AtomicBool::new(true));
         let received_data = Arc::new(AtomicBool::new(false));
-        let scroll_paused = Arc::new(AtomicBool::new(false));
-        let pending_bytes = Arc::new(Mutex::new(PendingIngest::default()));
         let subscribers: SubscriberList = Arc::new(Mutex::new(Vec::new()));
         let attention_notify = Arc::new(AtomicBool::new(false));
         let progress: Arc<Mutex<Option<ProgressReport>>> = Arc::new(Mutex::new(None));
@@ -821,11 +806,10 @@ impl PtyClient {
 
         let terminal_ref = Arc::clone(&terminal);
         let exited_ref = Arc::clone(&exited);
+        let exited_at_ref = Arc::clone(&exited_at);
         let has_output_ref = Arc::clone(&has_output);
         let dirty_ref = Arc::clone(&dirty);
         let received_data_ref = Arc::clone(&received_data);
-        let scroll_paused_ref = Arc::clone(&scroll_paused);
-        let pending_bytes_ref = Arc::clone(&pending_bytes);
         let subscribers_ref = Arc::clone(&subscribers);
         let attention_bell_ref = Arc::clone(&attention_bell);
         let attention_notify_ref = Arc::clone(&attention_notify);
@@ -837,11 +821,10 @@ impl PtyClient {
                 terminal_ref,
                 writer_tx,
                 exited_ref,
+                exited_at_ref,
                 has_output_ref,
                 dirty_ref,
                 received_data_ref,
-                scroll_paused_ref,
-                pending_bytes_ref,
                 subscribers_ref,
                 attention_bell_ref,
                 attention_notify_ref,
@@ -858,12 +841,11 @@ impl PtyClient {
             child,
             reaped: None,
             exited,
+            exited_at,
             has_output,
             dirty,
             received_data,
             last_resize_at: Mutex::new(None),
-            scroll_paused,
-            pending_bytes,
             subscribers,
             next_sub_id: AtomicU64::new(0),
             reader_thread: Some(reader_thread),
@@ -880,11 +862,10 @@ impl PtyClient {
         terminal: Arc<Mutex<TerminalState>>,
         writer_tx: std::sync::mpsc::SyncSender<PtyWriteMsg>,
         exited: Arc<AtomicBool>,
+        exited_at: Arc<OnceLock<Instant>>,
         has_output: Arc<AtomicBool>,
         dirty: Arc<AtomicBool>,
         received_data: Arc<AtomicBool>,
-        scroll_paused: Arc<AtomicBool>,
-        pending_bytes: Arc<Mutex<PendingIngest>>,
         subscribers: SubscriberList,
         attention_bell: Arc<AtomicBool>,
         attention_notify: Arc<AtomicBool>,
@@ -895,24 +876,36 @@ impl PtyClient {
         let mut buf = [0u8; 4096];
         // Raw-byte scanner for bell / OSC notifications and progress reports. Lives
         // on the reader thread's stack so its cross-chunk carry persists between
-        // reads. It is the SINGLE detection path for all three signals (the
-        // emulator's own `Event::Bell` is intentionally not used), and it runs on
-        // every chunk before the scroll-pause branch, so no signal is lost while
-        // the user browses scrollback. Only agent tabs track signals; companion
-        // terminals leave the scanner unused.
+        // reads. It is the ONLY detection path for the notification and progress
+        // sequences, because the emulator does not report them: alacritty's
+        // `Event` carries a bell, a title/icon change, a clipboard store, a colour
+        // request and a PTY write, and nothing else, so an `OSC 9` notification or
+        // an `OSC 9;4` progress report reaching `process` is simply consumed. The
+        // bell is scanned here too rather than taken from `Event::Bell`, so that
+        // all three signals come from one place and cannot double-fire. Only agent
+        // tabs track signals; companion terminals leave the scanner unused.
         let mut scanner = crate::attention::AttentionScanner::new();
         let mut overflow_seen = 0u64;
+        // End of input, from either arm below. The instant is stamped BEFORE the
+        // flag is published so an observer that sees `is_exited()` (an `Acquire`
+        // load) is guaranteed to see the instant too, never `is_exited() == true`
+        // with `exited_at() == None`. Prune's readiness rule reads them as a pair.
+        let mark_eof = || {
+            let _ = exited_at.set(Instant::now());
+            exited.store(true, Ordering::Release);
+        };
         loop {
             match crate::io_retry::retry_on_interrupt(|| reader.read(&mut buf)) {
                 Ok(0) => {
-                    exited.store(true, Ordering::Release);
+                    mark_eof();
                     break;
                 }
                 Ok(n) => {
                     let data = &buf[..n];
 
-                    // Scan for attention/progress signals before any pause branch
-                    // so all are detected even while ingestion is paused. The same
+                    // Scan for attention/progress signals on the raw bytes, before
+                    // the parser gets them and swallows the two it has no event
+                    // for (see the scanner's declaration). The same
                     // pass captures whitelisted passthrough sequences into the ring
                     // (unconditionally: the host decides whether to forward them at
                     // drain time, so a live config toggle applies immediately and a
@@ -976,10 +969,10 @@ impl PtyClient {
 
                     // Take the terminal lock BEFORE the subscriber fan-out and
                     // hold it across both, so "this chunk reached the
-                    // subscribers" and "this chunk reached the grid (or the
-                    // pause buffer)" are ONE atomic step as far as
-                    // `subscribe_with_repaint` can tell. That is what makes a
-                    // fresh connection see every byte exactly once.
+                    // subscribers" and "this chunk reached the grid" are ONE
+                    // atomic step as far as `subscribe_with_repaint` can tell.
+                    // That is what makes a fresh connection see every byte
+                    // exactly once.
                     //
                     // The fan-out used to run outside this lock, and the gap was
                     // not the "few bytes" the old comment claimed: `Mutex` is not
@@ -995,36 +988,25 @@ impl PtyClient {
                     // repaints over itself; line-oriented output appends, so it is
                     // corruption. Keep the two under one lock.
                     //
-                    // What it costs, honestly. On the ordinary path, nothing: the
-                    // ingest below took this same lock anyway, so the reader waits
-                    // exactly where it always waited. On the SCROLL-PAUSED path it
-                    // is a real regression, and the earlier claim that the worst
-                    // case was unchanged was only ever true of the ordinary path.
-                    // A paused reader used to skip this lock entirely and buffer
-                    // under `pending_bytes` alone, so it kept draining the PTY at
-                    // full speed while a connecting client built its snapshot; now
-                    // it waits for that snapshot like any other chunk, and the wait
-                    // scales with how many rows the replay has to render, up to
-                    // `MAX_RECONNECT_REPLAY_LINES` (measured on one machine: about
-                    // 10ms to build a replay at the default 10_000-line scrollback
-                    // and about 100ms at the 100_000-line cap, so tens to hundreds
-                    // of milliseconds, not microseconds). Treat those two figures as
-                    // a floor rather than the number: the build loop is
+                    // What it costs is nothing the reader did not already pay: the
+                    // ingest below takes this same lock, on every chunk, so the
+                    // reader waits exactly where it always waited. It does mean a
+                    // browser building a reconnect replay stalls the reader for as
+                    // long as the build takes, and everything downstream of the
+                    // read waits with it, including the attention scan above (bell
+                    // and notification detection for THIS one terminal lands late,
+                    // and is not lost). Measured on one machine: about 10ms to
+                    // build a replay at the default 10_000-line scrollback and
+                    // about 100ms at the `MAX_RECONNECT_REPLAY_LINES` cap. Treat
+                    // those as a floor rather than the number: the build loop is
                     // rows-times-COLUMNS unconditionally, because every row is
                     // scanned from its right edge to right-trim trailing empty
                     // cells even when the row is blank, so a wide terminal costs
-                    // several times a narrow one at the same row count. So a
-                    // browser attaching while a TUI operator is reading scrollback
-                    // can stall the reader where it previously could not, and
-                    // everything downstream of the read waits with it: the
-                    // attention scan runs on the reader thread, so bell and
-                    // notification detection for THIS one terminal is delayed by
-                    // the same window (already-scanned signals are not lost, they
-                    // just land late). The trade is deliberate and it is
-                    // the cheap side: a reader running ahead of the grid is exactly
-                    // the state in which a connecting client loses bytes outright,
-                    // and the only consequence of making it wait is that the child
-                    // blocks on a full PTY buffer, which loses nothing.
+                    // several times a narrow one at the same row count. The trade
+                    // is the cheap side: a reader running ahead of the grid is
+                    // exactly the state in which a connecting client loses bytes
+                    // outright, and the only consequence of making it wait is that
+                    // the child blocks on a full PTY buffer, which loses nothing.
                     //
                     // A poisoned terminal mutex means some other thread panicked
                     // while holding it. Nothing here can fix that, but the fan-out
@@ -1036,35 +1018,31 @@ impl PtyClient {
                     };
                     fan_out_to_subscribers(&subscribers, data);
 
-                    // If the TUI is scrolled back, buffer instead of parsing. The
-                    // definitive check happens inside the pending_bytes lock to
-                    // synchronize with `resume_ingestion`.
-                    if scroll_paused.load(Ordering::Acquire)
-                        && let Ok(mut pending) = pending_bytes.lock()
-                    {
-                        // Re-check under the lock: `resume_ingestion` flips the flag
-                        // while holding both this lock and the terminal lock we are
-                        // holding, so if we observe paused=true here it will stay
-                        // true until we release.
-                        if scroll_paused.load(Ordering::Acquire) {
-                            append_with_cap(&mut pending, data, PAUSE_BUFFER_CAP);
-                            received_data.store(true, Ordering::Release);
-                            continue;
-                        }
-                        // Fell through: pause was just lifted, so feed this chunk
-                        // through the normal path below.
-                    }
-
+                    // Every chunk is parsed, unconditionally. There is deliberately
+                    // no "the operator is reading scrollback, hold this back" branch
+                    // here: dux used to have one, buffering unparsed bytes in a
+                    // 4 MiB side buffer and DROPPING THE OLDEST on overflow, so a
+                    // scrollback session across a busy build lost the middle of it
+                    // for good. Reading history is a view operation and must not
+                    // change what the terminal records, which is how real terminals
+                    // behave (tmux parses pty data regardless of copy mode; copy
+                    // mode routes the user's KEYS, not the child's bytes). The
+                    // stable-view part of that behaviour is the display offset's
+                    // job, in `TerminalState`, not the reader's.
                     let replies = terminal.process(data);
                     dirty.store(true, Ordering::Release);
-                    // Streaming/"working" signal: only a VISIBLE content change
-                    // counts as the agent producing output. OSC status sequences
-                    // (OSC 9;4 progress) and other non-rendering bytes advance the
-                    // parser without changing the grid, so they must not read as
-                    // activity — `is_agent_streaming` consults them only as a
-                    // fallback. The raw `dirty` flag above still fires for
-                    // rendering regardless.
-                    if terminal.take_visible_change() {
+                    // Streaming/"working" signal: only a real content change in the
+                    // ACTIVE AREA counts as the agent producing output. OSC status
+                    // sequences (OSC 9;4 progress) and other non-rendering bytes
+                    // advance the parser without changing the grid, so they must
+                    // not read as activity; `is_agent_streaming` consults them only
+                    // as a fallback. The active area, not the DISPLAYED viewport:
+                    // while the operator is scrolled back the viewport is immutable
+                    // history and its fingerprint can never change, so hashing it
+                    // would make a still-producing agent read as idle (see
+                    // `take_content_change`). The raw `dirty` flag above still fires
+                    // for rendering regardless.
+                    if terminal.take_content_change() {
                         received_data.store(true, Ordering::Release);
                     }
                     // Capture the visibility transition while we still hold the
@@ -1090,7 +1068,7 @@ impl PtyClient {
                 }
                 Err(err) => {
                     logger::debug(&format!("PTY reader error: {err}"));
-                    exited.store(true, Ordering::Release);
+                    mark_eof();
                     break;
                 }
             }
@@ -1186,19 +1164,10 @@ impl PtyClient {
     /// repaint). The client therefore sees each byte exactly once, in order, with
     /// nothing lost.
     ///
-    /// The repaint carries the grid PLUS any bytes still sitting in the pause
-    /// buffer. While the TUI is scrolled back the reader fans chunks out and
-    /// buffers them unparsed, so they are already past the fan-out point but not
-    /// yet in the grid: a subscriber that registers now will never be sent them,
-    /// and they are the exact continuation of the grid, so they belong on the end
-    /// of the repaint. (If that buffer previously overflowed its cap, the oldest
-    /// bytes it dropped are gone for the TUI too; nothing here can recover them.
-    /// What it does do is tidy the cut, so what survives usually starts on a
-    /// boundary rather than partway through an escape sequence. That is a
-    /// COSMETIC improvement and nothing more: a browser receiving these bytes is
-    /// at ground state, so a leading fragment renders as a few stray characters
-    /// and the live output behind it is never swallowed. See [`append_with_cap`]
-    /// and [`resync_offset`].)
+    /// The repaint is the grid and only the grid, which is exact because the
+    /// reader parses every chunk as it arrives. There is no third place a byte
+    /// can be sitting: it is either already in the grid (so the repaint has it)
+    /// or it has not been read yet (so the channel will get it).
     ///
     /// Returns `(guard, repaint_bytes, receiver)`. Hold the guard for the
     /// connection's lifetime; dropping it removes the subscriber immediately.
@@ -1210,13 +1179,7 @@ impl PtyClient {
         // while we hold it), so keep registering first: the receiver exists before
         // anything is read off the grid.
         let (guard, rx) = self.subscribe();
-        let mut repaint = terminal.reconnect_repaint();
-        // Lock order is terminal -> pending_bytes, matching the reader and
-        // `resume_ingestion`, so a drain cannot interleave and hand these bytes to
-        // the grid between the two reads (which would duplicate them).
-        if let Ok(pending) = self.pending_bytes.lock() {
-            repaint.extend_from_slice(&pending.buf);
-        }
+        let repaint = terminal.reconnect_repaint();
         drop(terminal);
         (guard, repaint, rx)
     }
@@ -1244,97 +1207,29 @@ impl PtyClient {
         terminal.scrollback_offset()
     }
 
-    /// Atomically adjust the scrollback offset by the given amount in the
-    /// given direction. If the scroll crosses the 0 boundary, PTY ingestion
-    /// is paused (entering scrollback) or resumed (returning to the live
-    /// bottom).
+    /// Adjust the scrollback offset by the given amount in the given direction.
+    /// Scrolling only moves the VIEW: the reader keeps parsing the child's
+    /// output into the grid the whole time.
     pub fn scroll(&self, up: bool, amount: usize) {
-        let Some((prev, next)) = self.mutate_scroll(|t| t.scroll(up, amount)) else {
-            return;
-        };
-        self.sync_pause_state(prev, next);
+        self.mutate_scroll(|t| t.scroll(up, amount));
     }
 
     /// Set the scrollback offset (0 = normal view, positive = scrolled back).
     pub fn set_scrollback(&self, rows: usize) {
-        let Some((prev, next)) = self.mutate_scroll(|t| t.set_scrollback(rows)) else {
-            return;
-        };
-        self.sync_pause_state(prev, next);
+        self.mutate_scroll(|t| t.set_scrollback(rows));
     }
 
-    /// Run a closure under the terminal lock, capturing the scrollback offset
-    /// before and after so the caller can detect transitions. Marks dirty on
-    /// success. Returns `None` if the terminal mutex was poisoned.
-    fn mutate_scroll<F>(&self, mutate: F) -> Option<(usize, usize)>
+    /// Run a closure under the terminal lock and mark the grid dirty so the next
+    /// snapshot rebuilds.
+    fn mutate_scroll<F>(&self, mutate: F)
     where
         F: FnOnce(&mut TerminalState),
     {
-        let mut terminal = self.terminal.lock().ok()?;
-        let prev = terminal.scrollback_offset();
-        mutate(&mut terminal);
-        let next = terminal.scrollback_offset();
-        self.dirty.store(true, Ordering::Release);
-        drop(terminal);
-        Some((prev, next))
-    }
-
-    /// Toggle PTY ingestion based on whether the scrollback offset just
-    /// crossed the live-bottom boundary (0 ↔ >0). Called from `scroll` and
-    /// `set_scrollback` after the grid has been updated and the terminal
-    /// lock released.
-    fn sync_pause_state(&self, prev: usize, next: usize) {
-        match (prev, next) {
-            (0, n) if n > 0 => self.pause_ingestion(),
-            (p, 0) if p > 0 => self.resume_ingestion(),
-            _ => {}
-        }
-    }
-
-    /// Pause PTY ingestion: the reader thread will buffer incoming bytes
-    /// into `pending_bytes` instead of feeding them to the terminal parser.
-    /// Idempotent.
-    fn pause_ingestion(&self) {
-        self.scroll_paused.store(true, Ordering::Release);
-    }
-
-    /// Resume PTY ingestion and drain any bytes that arrived while paused
-    /// into the terminal parser. Idempotent — a no-op if not paused.
-    fn resume_ingestion(&self) {
-        // Lock terminal first, then pending_bytes. Flip the flag while
-        // holding pending_bytes so readers blocked on that lock re-check
-        // `scroll_paused` and fall through to the normal path.
         let Ok(mut terminal) = self.terminal.lock() else {
             return;
         };
-        let Ok(mut pending) = self.pending_bytes.lock() else {
-            return;
-        };
-        self.scroll_paused.store(false, Ordering::Release);
-
-        if pending.dropped {
-            logger::debug(
-                "PTY pause buffer overflowed during scrollback session; oldest bytes dropped",
-            );
-            pending.dropped = false;
-        }
-
-        if pending.buf.is_empty() {
-            return;
-        }
-        let bytes = std::mem::take(&mut pending.buf);
-        drop(pending);
-
-        let replies = terminal.process(&bytes);
+        mutate(&mut terminal);
         self.dirty.store(true, Ordering::Release);
-        if !self.has_output.load(Ordering::Acquire) && terminal.has_visible_output() {
-            self.has_output.store(true, Ordering::Release);
-        }
-        drop(terminal);
-
-        if !replies.is_empty() {
-            self.writer.send(replies);
-        }
     }
 
     /// Whether the child process has switched to the alternate screen buffer
@@ -1355,25 +1250,13 @@ impl PtyClient {
                 pixel_height: 0,
             })
             .context("failed to resize PTY")?;
-        // A resize can move the scrollback offset across the live-bottom
-        // boundary (growing the viewport pulls history into the grid and
-        // resets the display offset to 0), so it must sync the ingestion
-        // pause exactly like `scroll`/`set_scrollback`. Skipping this
-        // stranded `scroll_paused` on at offset 0: the reader buffered all
-        // child output unparsed and the pane froze with no scrollback
-        // indicator. Capture the transition under the lock, sync after
-        // releasing it (`resume_ingestion` re-locks the terminal).
-        let transition = if let Ok(mut terminal) = self.terminal.lock() {
-            let prev = terminal.scrollback_offset();
+        // A resize can move the scrollback offset (growing the viewport pulls
+        // history into the grid and resets the display offset to 0). That is
+        // purely a view change now, so there is nothing to synchronize beyond
+        // marking the grid dirty.
+        if let Ok(mut terminal) = self.terminal.lock() {
             terminal.resize(rows, cols);
-            let next = terminal.scrollback_offset();
             self.dirty.store(true, Ordering::Release);
-            Some((prev, next))
-        } else {
-            None
-        };
-        if let Some((prev, next)) = transition {
-            self.sync_pause_state(prev, next);
         }
         if let Ok(mut ts) = self.last_resize_at.lock() {
             *ts = Some(Instant::now());
@@ -1506,6 +1389,18 @@ impl PtyClient {
     /// ingested must wait for `is_exited`, and use this only to bound that wait.
     pub fn reaped_at(&self) -> Option<Instant> {
         self.reaped.as_ref().map(|(_, at)| *at)
+    }
+
+    /// When the reader thread reached end of input, or `None` while the PTY read
+    /// side is still open. `Some` exactly when [`PtyClient::is_exited`] is true.
+    ///
+    /// This is the counterpart clock to [`PtyClient::reaped_at`], and the two
+    /// bound different waits. A caller that waits for the exit STATUS after EOF
+    /// cannot bound that wait on the reap, because the wait exists precisely for
+    /// the case where no reap has happened: a child that closes its descriptors
+    /// and keeps running reaches EOF and is never reapable at all.
+    pub fn exited_at(&self) -> Option<Instant> {
+        self.exited_at.get().copied()
     }
 
     /// Returns the PID of the shell process spawned in this PTY.
@@ -1763,11 +1658,17 @@ struct TerminalState {
     event_proxy: EventProxy,
     rows: u16,
     cols: u16,
-    /// Fingerprint of the visible grid content at the last `take_visible_change`
-    /// call. Drives the streaming/"working" signal: only a change in what is
-    /// actually rendered counts as the agent producing output, so non-rendering
-    /// bytes (OSC status sequences like OSC 9;4 progress, color queries) never
-    /// read as activity. `None` until the first check.
+    /// Fingerprint of the ACTIVE AREA's content at the last
+    /// `take_content_change` call. Drives the streaming/"working" signal: only a
+    /// change in what the child actually rendered counts as it producing output,
+    /// so non-rendering bytes (OSC status sequences like OSC 9;4 progress, color
+    /// queries) never read as activity. `None` until the first check.
+    ///
+    /// The active area, deliberately, and not the displayed viewport: "did the
+    /// child produce output" is a property of the terminal, not of where the
+    /// human is looking. A user scrolled back further than one screen height
+    /// sees only immutable history, so a viewport fingerprint would never change
+    /// and the agent would read as idle while it was still working.
     last_content_hash: Option<u64>,
     /// The child's scrolling region, tracked by a second parser over the same
     /// bytes. `Term` keeps its own copy in a private field with no accessor, so
@@ -1800,21 +1701,33 @@ impl TerminalState {
         }
     }
 
-    /// Whether the VISIBLE grid content changed since the last call (real output),
-    /// as opposed to only non-rendering bytes advancing the parser (OSC status
-    /// sequences, color queries, cursor-only moves). Fingerprints the rendered
-    /// characters — deliberately cursor-independent, so a bare cursor blink/move
-    /// or an OSC 9;4 progress report never reads as activity. Drives the
-    /// streaming/"working" signal; the raw snapshot dirty flag is separate.
-    fn take_visible_change(&mut self) -> bool {
+    /// Whether the ACTIVE AREA's content changed since the last call (real
+    /// output), as opposed to only non-rendering bytes advancing the parser (OSC
+    /// status sequences, color queries, cursor-only moves). Fingerprints the
+    /// rendered characters, deliberately cursor-independent, so a bare cursor
+    /// blink/move or an OSC 9;4 progress report never reads as activity. Drives
+    /// the streaming/"working" signal; the raw snapshot dirty flag is separate.
+    ///
+    /// It hashes the active area rather than the DISPLAYED viewport on purpose.
+    /// The two are the same thing only while the display offset is zero. Scroll
+    /// back past one screen height and the viewport is nothing but immutable
+    /// history: its fingerprint can never change, so the agent would read as
+    /// idle, the spinner and shimmer would stop, the poll rate would drop, and
+    /// every browser watching that agent would turn its working badge off, all
+    /// while the child was still producing output.
+    fn take_content_change(&mut self) -> bool {
         use std::hash::{Hash, Hasher};
-        // The display iterator walks the viewport in a fixed order, so hashing each
+        // Walking the active area's lines in a fixed order and hashing each
         // cell's character captures both the content AND its layout: a spinner
-        // cycling a glyph, a new line of text, or a scroll all change the sequence,
-        // while a cursor-only move or an OSC status write leave it identical.
+        // cycling a glyph, a new line of text, or a scroll all change the
+        // sequence, while a cursor-only move or an OSC status write leave it
+        // identical.
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        for indexed in self.term.renderable_content().display_iter {
-            indexed.cell.c.hash(&mut hasher);
+        let screen_lines = self.term.screen_lines() as i32;
+        for line in 0..screen_lines {
+            for cell in &self.term.grid()[Line(line)] {
+                cell.c.hash(&mut hasher);
+            }
         }
         let hash = hasher.finish();
         let changed = self.last_content_hash != Some(hash);
@@ -1824,6 +1737,7 @@ impl TerminalState {
 
     fn process(&mut self, data: &[u8]) -> Vec<u8> {
         self.parser.advance(&mut self.term, data);
+        self.clamp_display_offset_to_history();
         // The same bytes, through a second parser that watches only the scrolling
         // region. The two cannot disagree about a synchronized update, even
         // though each keeps its own buffer and its own 150ms timer. The timer is
@@ -1844,6 +1758,51 @@ impl TerminalState {
         }
 
         replies
+    }
+
+    /// Workaround for a bug in `alacritty_terminal` 0.26.0, not for one of ours.
+    ///
+    /// `Grid::scroll_up` (grid/mod.rs) bumps the display offset for every scroll
+    /// while the offset is non-zero, so that a scrolled-back view stays parked
+    /// on the same content. But it only pushes the scrolled-out line into
+    /// history when the scrolling region starts at row zero, and it clamps the
+    /// bumped offset to `max_scroll_limit` (the configured scrollback capacity)
+    /// rather than to the current history size. Every other clamp in that crate
+    /// uses the history size; that one line is the odd one out. So a child that
+    /// sets a scrolling region with a TOP margin and scrolls it, while the user
+    /// is scrolled back and the history ring is not yet full, walks the offset
+    /// past the history size.
+    ///
+    /// Measured on the pinned 0.26.0: a 5-row terminal with 3 lines of history,
+    /// scrolled to the top, given `CSI 2;5r` and eight line feeds, ends with a
+    /// display offset of 11 against a history size of 3, and the next render
+    /// panics inside the library:
+    ///
+    /// ```text
+    /// panicked at alacritty_terminal-0.26.0/src/grid/storage.rs:225:9:
+    /// assertion failed: positive < self.len
+    /// ```
+    ///
+    /// Debug builds panic, so this is reachable from `cargo test` and
+    /// `cargo run`; release builds did not panic in the range tested but render
+    /// wrapped ring rows, which is wrong content rather than a crash.
+    ///
+    /// The fix has to be on the WRITE side. The panic happens inside the library
+    /// while it builds its display iterator from its own private offset field,
+    /// and dux never indexes the grid by offset itself (every read goes through
+    /// `renderable_content`), so clamping a number dux reads back out would
+    /// change nothing. `Scroll::Delta(0)` re-clamps the offset to the history
+    /// size and is measured to fix it. This also keeps the scrollback badge
+    /// honest: the snapshot reads offset and total together, and an unclamped
+    /// grid yielded nonsense pairs like "57/16".
+    ///
+    /// The guard is what keeps the common path cheap: one comparison, and no
+    /// touching of damage tracking or the event proxy (both of which
+    /// `Term::scroll_display` does unconditionally) on every chunk.
+    fn clamp_display_offset_to_history(&mut self) {
+        if self.term.grid().display_offset() > self.term.grid().history_size() {
+            self.term.scroll_display(Scroll::Delta(0));
+        }
     }
 
     fn has_visible_output(&self) -> bool {
@@ -2276,9 +2235,10 @@ impl EventListener for EventProxy {
             Event::PtyWrite(text) => self.push_bytes(text.as_bytes()),
             // The terminal ding (`Event::Bell`) is deliberately NOT handled here.
             // The raw-byte `AttentionScanner` in the reader loop is the single
-            // bell-detection path (it sees a bare `0x07` even while ingestion is
-            // scroll-paused); handling it here as well would double-fire when
-            // `resume_ingestion` replays paused bytes through `process`.
+            // bell-detection path, because it is already the ONLY path for the
+            // notification and progress sequences this enum has no variant for.
+            // Taking the bell from both places would arm the flag twice for one
+            // ding and split one signal set across two mechanisms.
             Event::ColorRequest(index, formatter) => self.push_color_request(index, formatter),
             Event::TextAreaSizeRequest(formatter) => {
                 let (rows, cols) = self.size.lock().map(|size| *size).unwrap_or((24, 80));
@@ -2587,111 +2547,6 @@ const fn rgb(r: u8, g: u8, b: u8) -> Rgb {
     Rgb { r, g, b }
 }
 
-/// How far past an overflow cut [`append_with_cap`] looks for a boundary a
-/// client can safely start parsing on. Terminal output breaks lines constantly,
-/// so that boundary is normally a handful of bytes away; the ceiling only bounds
-/// the pathological case of a very long run carrying neither a line break nor a
-/// bell.
-const RESYNC_SCAN_LIMIT: usize = 64 * 1024;
-
-/// The first index at or after `from` that a byte stream can safely be restarted
-/// on.
-///
-/// Cutting a byte stream at an arbitrary offset leaves the survivor beginning
-/// wherever the cut fell, which may be inside an escape sequence or inside a
-/// multi-byte UTF-8 character. That used to be private to the TUI, whose resume
-/// path feeds the buffer back to an emulator that absorbs the junk in one row of
-/// one screen. [`PtyClient::subscribe_with_repaint`] now appends the same buffer
-/// to what a browser is handed.
-///
-/// Be precise about what that buys, because it is less than it looks. A client
-/// receiving the pause buffer is at ground state, and cutting bytes off the FRONT
-/// can only delete sequence OPENERS, never create one, so the leading fragment is
-/// parsed as ordinary printable text and the live output behind it arrives
-/// intact. Measured against the xterm.js the web UI actually ships (6.0.0): the
-/// mid-OSC fragment `"tle-with-newline\x07live output\r\n"` renders
-/// "tle-with-newlinelive output", the mid-CSI fragment `"5;3Hlive output\r\n"`
-/// renders "5;3Hlive output", and the mid-DCS fragment
-/// `"payload\x1b\\live output\r\n"` renders "payloadlive output". So the benefit
-/// here is COSMETIC: without it, one overflow puts a few stray characters on one
-/// line, once. That is cheap enough to be worth doing, and it is not a candidate
-/// mechanism for any report of output going missing.
-///
-/// The boundary this looks for is a line feed or a BEL, on the HEURISTIC that the
-/// byte after either is at the parser's ground state. That is almost always true
-/// in practice and it is NOT a rule of the grammar. xterm.js's
-/// `EscapeSequenceParser` executes the C0 range 0x00-0x17, which contains both of
-/// those bytes, without leaving the OSC, CSI or DCS state it is in; only a short
-/// specific list ends an OSC string. Measured: `"A\x1b]0;ti\ntle-rest\x07B"`
-/// renders "AB", the OSC having run straight through the line feed;
-/// `"A\x1b[1\n2mB"` executes the line feed and keeps parsing the CSI; and a BEL
-/// inside an APC or a DCS does not end either. So the anchor can land inside a
-/// control string: a tmux passthrough, a graphics sequence, a window title
-/// carrying a newline. Given the paragraph above, all that costs is the same
-/// bounded handful of stray characters the resync exists to tidy, so the
-/// heuristic is allowed to be wrong.
-///
-/// Failing to find an anchor at all (nothing within [`RESYNC_SCAN_LIMIT`]) it
-/// falls back to the one repair that is always available and steps over UTF-8
-/// continuation bytes, so the survivor at least does not open with a replacement
-/// character.
-fn resync_offset(buf: &[u8], from: usize) -> usize {
-    if from >= buf.len() {
-        return buf.len();
-    }
-    // The cut is already a boundary: either nothing was dropped, or the byte
-    // just before the survivor is one of the anchors below. Scanning anyway
-    // would discard the whole next line on every ordinary overflow, which is
-    // the common case for line-oriented output.
-    if from == 0 || buf[from - 1] == b'\n' || buf[from - 1] == 0x07 {
-        return from;
-    }
-    let limit = buf.len().min(from.saturating_add(RESYNC_SCAN_LIMIT));
-    if let Some(rel) = buf[from..limit]
-        .iter()
-        .position(|&b| b == b'\n' || b == 0x07)
-    {
-        return from + rel + 1;
-    }
-    let mut i = from;
-    while i < buf.len() && (0x80..=0xbf).contains(&buf[i]) {
-        i += 1;
-    }
-    i
-}
-
-/// Append `data` to `pending.buf`, respecting `cap`. On overflow, drop the
-/// oldest bytes from the front and mark `pending.dropped` so the next resume
-/// can log a warning. If `data` alone exceeds `cap`, keep only its trailing
-/// `cap` bytes.
-///
-/// Either kind of drop moves the cut forward to the next boundary a client can
-/// start parsing on (see [`resync_offset`]), so the survivor never begins inside
-/// an escape sequence or a UTF-8 character. `cap` is a ceiling, so keeping less
-/// than it is always allowed.
-fn append_with_cap(pending: &mut PendingIngest, data: &[u8], cap: usize) {
-    if cap == 0 {
-        pending.buf.clear();
-        pending.dropped = !data.is_empty();
-        return;
-    }
-    if data.len() >= cap {
-        pending.buf.clear();
-        let start = resync_offset(data, data.len() - cap);
-        pending.buf.extend_from_slice(&data[start..]);
-        pending.dropped = true;
-        return;
-    }
-    let new_len = pending.buf.len().saturating_add(data.len());
-    if new_len > cap {
-        let overflow = new_len - cap;
-        let cut = resync_offset(&pending.buf, overflow);
-        pending.buf.drain(..cut);
-        pending.dropped = true;
-    }
-    pending.buf.extend_from_slice(data);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2959,13 +2814,13 @@ mod tests {
     }
 
     #[test]
-    fn take_visible_change_fires_on_text_not_on_osc_or_cursor() {
+    fn take_content_change_fires_on_text_not_on_osc_or_cursor() {
         let mut terminal = TerminalState::with_scrollback(4, 20, 100);
 
         // Real printed text is a visible change.
         terminal.process(b"hello");
         assert!(
-            terminal.take_visible_change(),
+            terminal.take_content_change(),
             "printing text must register a visible change"
         );
 
@@ -2973,21 +2828,21 @@ mod tests {
         // an OSC 9;4 progress report (the agent's own status signal)...
         terminal.process(b"\x1b]9;4;1;50\x1b\\");
         assert!(
-            !terminal.take_visible_change(),
+            !terminal.take_content_change(),
             "an OSC 9;4 progress report changes no visible content"
         );
 
         // ...and a bare cursor move (no cell content written).
         terminal.process(b"\x1b[2;3H");
         assert!(
-            !terminal.take_visible_change(),
+            !terminal.take_content_change(),
             "a cursor move writes no visible content"
         );
 
         // Printing more text is a change again.
         terminal.process(b" world");
         assert!(
-            terminal.take_visible_change(),
+            terminal.take_content_change(),
             "printing more text must register a visible change"
         );
     }
@@ -3023,6 +2878,76 @@ mod tests {
             terminal.term.grid().history_size()
         );
         assert!(terminal.term.grid().history_size() >= 5);
+    }
+
+    #[test]
+    fn visible_change_fires_while_scrolled_past_the_viewport() {
+        // The question `take_content_change` answers is "did the child produce
+        // visible output", which is a property of the terminal and not of where
+        // the human is looking. This is exactly the state the live path is in
+        // whenever the operator reads history while the child keeps talking,
+        // which the reader no longer stops parsing for; driving `TerminalState`
+        // directly just pins the property without spawning a PTY.
+        let mut terminal = TerminalState::with_scrollback(3, 16, 100);
+        terminal.process(b"one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix\r\nseven\r\n");
+
+        // Scroll back FURTHER than one screen height, so the displayed viewport
+        // is entirely immutable history.
+        let history = terminal.term.grid().history_size();
+        assert!(
+            history > terminal.term.screen_lines(),
+            "precondition: more history than one screen ({history} vs {})",
+            terminal.term.screen_lines()
+        );
+        terminal.set_scrollback(history);
+        // Prime the fingerprint so the assertion below is about the new output.
+        terminal.take_content_change();
+
+        terminal.process(b"eight\r\n");
+
+        assert!(
+            terminal.take_content_change(),
+            "output printed while the user reads history is still the agent working"
+        );
+    }
+
+    #[test]
+    fn region_scroll_while_scrolled_back_keeps_offset_renderable() {
+        // Regression for a panic inside alacritty_terminal 0.26.0: its
+        // `Grid::scroll_up` bumps the display offset for every scroll while the
+        // offset is non-zero, but only pushes to history when the region starts
+        // at row zero, and it clamps to `max_scroll_limit` rather than to the
+        // current history size. A top-margin region scrolled while the user is
+        // scrolled back and the history ring is unsaturated therefore drives the
+        // offset past the history size, and the next render panics in
+        // `grid/storage.rs`.
+        let mut terminal = TerminalState::with_scrollback(5, 16, 1000);
+        terminal.process(b"one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix\r\nseven\r\n");
+        let history = terminal.term.grid().history_size();
+        assert!(history > 0, "precondition: some history exists");
+        assert!(
+            history < 1000,
+            "precondition: the history ring is unsaturated ({history})"
+        );
+        terminal.set_scrollback(history);
+
+        // A scrolling region with a TOP margin (rows 2..5), then scroll it.
+        terminal.process(b"\x1b[2;5r");
+        terminal.process(b"\x1b[5;1H");
+        for _ in 0..8 {
+            terminal.process(b"\n");
+        }
+
+        let history = terminal.term.grid().history_size();
+        let offset = terminal.term.grid().display_offset();
+        assert!(
+            offset <= history,
+            "display offset {offset} must stay within history size {history}"
+        );
+        // The panic lives in the render path, not in the number, so prove the
+        // render completes too.
+        let snapshot = terminal.snapshot();
+        assert!(snapshot.scrollback_offset <= snapshot.scrollback_total);
     }
 
     #[test]
@@ -4585,6 +4510,53 @@ mod tests {
         PtyClient::spawn("/bin/sh", &args, Path::new("."), 6, 40, scrollback).expect("spawn pty")
     }
 
+    /// [`LINE_ECHOER`] with each line padded out to about 4 KiB by a long run of
+    /// no-op SGR resets. The padding is what lets a test push megabytes of child
+    /// output through the reader without paying for megabytes of grid: `ESC[0m`
+    /// advances the parser and occupies the byte stream but writes no cell, so
+    /// 1500 echoed lines are 6 MB on the wire and still only 1500 rows of
+    /// history. Measured with `/bin/sh`: 4107 bytes per echoed line.
+    const PADDED_LINE_ECHOER: &str = "stty -echo; pad=$(printf '\\033[0m'); i=0; \
+         while [ $i -lt 10 ]; do pad=\"$pad$pad\"; i=$((i+1)); done; \
+         while IFS= read -r n; do printf 'L%08d%s\\r\\n' \"$n\" \"$pad\"; done";
+
+    fn spawn_padded_line_echoer(scrollback: usize) -> PtyClient {
+        let args = vec!["-c".to_string(), PADDED_LINE_ECHOER.to_string()];
+        PtyClient::spawn("/bin/sh", &args, Path::new("."), 6, 40, scrollback).expect("spawn pty")
+    }
+
+    /// Every row the grid holds, scrollback history first and then the viewport,
+    /// right-trimmed. The snapshot only ever exposes the visible rows, so a test
+    /// that needs to prove nothing fell out of history has to read the grid.
+    fn all_grid_lines(client: &PtyClient) -> Vec<String> {
+        let terminal = client.terminal.lock().expect("terminal mutex poisoned");
+        let history = terminal.term.grid().history_size() as i32;
+        let rows = i32::from(terminal.rows);
+        let cols = usize::from(terminal.cols);
+        let mut out = Vec::with_capacity((history + rows) as usize);
+        for line in -history..rows {
+            let row = &terminal.term.grid()[Line(line)];
+            let mut text = String::with_capacity(cols);
+            for c in 0..cols {
+                text.push(row[Column(c)].c);
+            }
+            out.push(text.trim_end().to_string());
+        }
+        out
+    }
+
+    /// The `L<n>` ids carried by `lines`, in order.
+    fn grid_line_ids(lines: &[String]) -> Vec<u64> {
+        lines
+            .iter()
+            .filter_map(|line| {
+                let rest = line.strip_prefix('L')?;
+                let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+                (digits.len() == LINE_ID_DIGITS).then(|| digits.parse().ok())?
+            })
+            .collect()
+    }
+
     /// Drop ANSI escape sequences so the remaining bytes are the text a client
     /// would end up displaying.
     fn strip_ansi(bytes: &[u8]) -> Vec<u8> {
@@ -4933,48 +4905,48 @@ mod tests {
     }
 
     #[test]
-    fn a_repaint_carries_the_bytes_still_sitting_in_the_pause_buffer() {
-        // The loss direction of the same missing atomicity. While the TUI is
-        // scrolled back the reader fans chunks out and buffers them UNPARSED, so
-        // they are already past the fan-out point but not yet in the grid: a
-        // client that connects now will never be sent them, and a repaint built
-        // from the grid alone does not contain them either, so they vanish. The
-        // repaint has to carry the pause buffer as its tail.
+    fn a_client_connecting_while_the_operator_reads_history_still_gets_every_line() {
+        // A browser attaching is rebuilt from the GRID. While the reader held
+        // bytes back, the grid a scrolled-back operator was looking at was stale
+        // by however much the child had produced since, so a reconnect landing in
+        // that window rebuilt from old content and the missing bytes had to be
+        // stapled onto the repaint as a raw tail. Parsing unconditionally means
+        // the grid is always current, so the repaint alone is exact and the
+        // stapling is gone. Prove the property that mattered: connect mid
+        // scrollback and lose nothing.
         let client = spawn_line_echoer(500);
-        client.write_bytes(b"1\r").expect("write");
-        wait_for_viewport(&client, "L00000001");
 
-        client.pause_ingestion();
-        for n in 2..=4 {
+        for n in 1..=8 {
+            client
+                .write_bytes(format!("{n}\r").as_bytes())
+                .expect("write");
+        }
+        wait_for_viewport(&client, "L00000008");
+
+        client.set_scrollback(3);
+        assert_eq!(
+            client.scrollback_offset(),
+            3,
+            "the operator is reading back"
+        );
+
+        for n in 9..=12 {
             client
                 .write_bytes(format!("{n}\r").as_bytes())
                 .expect("write");
         }
         assert!(
             wait_until(std::time::Duration::from_secs(5), || {
-                client
-                    .pending_bytes
-                    .lock()
-                    .expect("pending mutex poisoned")
-                    .buf
-                    .windows(10)
-                    .any(|w| w == b"L00000004\r")
+                grid_line_ids(&all_grid_lines(&client)).last() == Some(&12)
             }),
-            "the reader never buffered the paused lines"
+            "output produced while scrolled back must still reach the grid"
         );
 
         let (_guard, repaint, rx) = client.subscribe_with_repaint();
-
-        // Resuming parses the buffered bytes into the grid; it deliberately does
-        // NOT re-send them to subscribers, so a repaint that skipped them has lost
-        // them for good.
-        client.resume_ingestion();
-        client.write_bytes(b"5\r").expect("write");
+        client.write_bytes(b"13\r").expect("write");
         assert!(
             wait_until(std::time::Duration::from_secs(5), || {
-                viewport_lines(&client.snapshot())
-                    .iter()
-                    .any(|line| line.contains("L00000005"))
+                grid_line_ids(&all_grid_lines(&client)).last() == Some(&13)
             }),
             "the child never echoed the last line"
         );
@@ -4983,11 +4955,113 @@ mod tests {
         combined.extend_from_slice(&drain(&rx, std::time::Duration::from_millis(200)));
         assert_eq!(
             line_ids(&combined),
-            vec![1, 2, 3, 4, 5],
-            "lines buffered by the scrollback pause must reach a client that \
-             connects while they are buffered (got {:?})",
+            (1..=13).collect::<Vec<u64>>(),
+            "a client connecting while the operator reads history must be handed \
+             every line exactly once (its whole byte stream reads {:?})",
             String::from_utf8_lossy(&combined),
         );
+    }
+
+    #[test]
+    fn scrolling_back_never_drops_the_output_that_arrives_while_you_read() {
+        // The whole point of parsing unconditionally. Reading history is a VIEW
+        // operation: it must not change what the terminal records. dux used to
+        // stop feeding the parser while the operator was scrolled back and hold
+        // the child's bytes in a side buffer capped at 4 MiB, dropping the OLDEST
+        // bytes on overflow, so a scrollback session across a busy build simply
+        // lost the middle of it, permanently and silently. No real terminal does
+        // this: tmux's pane reader parses regardless of copy mode, and alacritty
+        // compensates the view rather than the stream.
+        //
+        // So: scroll back, produce well past that old cap, come back to the
+        // bottom, and require every line to be in history, in order, with no gap.
+        const LINES: u64 = 1500; // about 6.2 MB of child output, comfortably past 4 MiB.
+        let client = spawn_padded_line_echoer(5000);
+
+        // A subscriber sees the raw byte stream regardless of what the grid is
+        // doing, which is how this test knows the child has finished echoing
+        // without asking the grid a question the grid used to refuse to answer.
+        let (_guard, rx) = client.subscribe();
+
+        client.write_bytes(b"1\r").expect("write the first line");
+        wait_for_viewport(&client, "L00000001");
+
+        // Build a little history, then scroll into it.
+        for n in 2..=10 {
+            client
+                .write_bytes(format!("{n}\r").as_bytes())
+                .expect("write");
+        }
+        wait_for_viewport(&client, "L00000010");
+        client.set_scrollback(4);
+        assert_eq!(
+            client.scrollback_offset(),
+            4,
+            "the test has to actually be scrolled back to mean anything"
+        );
+
+        let mut input = String::new();
+        for n in 11..=LINES {
+            input.push_str(&format!("{n}\r"));
+        }
+        client
+            .write_bytes(input.as_bytes())
+            .expect("write the bulk lines");
+
+        // Wait for the last line on the wire, carrying a few bytes between chunks
+        // so a marker split across a chunk boundary is still found.
+        let marker = format!("L{LINES:08}");
+        let deadline = Instant::now() + std::time::Duration::from_secs(120);
+        let mut carry = String::new();
+        loop {
+            match rx.recv_timeout(std::time::Duration::from_millis(200)) {
+                Ok(chunk) => {
+                    carry.push_str(&String::from_utf8_lossy(&chunk));
+                    if carry.contains(&marker) {
+                        break;
+                    }
+                    let keep = carry.len().saturating_sub(marker.len());
+                    carry.drain(..keep);
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    panic!("the echoer died before it echoed {marker}")
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the echoer never reached {marker} on the wire"
+            );
+        }
+
+        // Back to the live bottom, and give the grid a moment to hold every line.
+        client.set_scrollback(0);
+        assert!(
+            wait_until(std::time::Duration::from_secs(30), || {
+                grid_line_ids(&all_grid_lines(&client)).last() == Some(&LINES)
+            }),
+            "the last echoed line never reached the grid"
+        );
+
+        let ids = grid_line_ids(&all_grid_lines(&client));
+        let expected: Vec<u64> = (1..=LINES).collect();
+        if ids != expected {
+            let missing: Vec<u64> = expected
+                .iter()
+                .copied()
+                .filter(|n| !ids.contains(n))
+                .collect();
+            panic!(
+                "scrolling back lost child output: the grid holds {} of {LINES} lines, \
+                 first {:?}, last {:?}, {} missing (first few: {:?}). Reading history \
+                 must never change what the terminal records.",
+                ids.len(),
+                ids.first(),
+                ids.last(),
+                missing.len(),
+                missing.iter().take(5).collect::<Vec<_>>(),
+            );
+        }
     }
 
     #[test]
@@ -5001,8 +5075,9 @@ mod tests {
         //
         // This is the SYSTEM-level check and it is inherently sampled, so the two
         // halves of the fix each also carry a constructed, deterministic test of
-        // their own (`a_chunk_ingested_between_registering_and_snapshotting_is_not_replayed_twice`
-        // for the subscribe side and
+        // their own (`a_client_does_not_join_the_fan_out_list_before_it_can_reach_its_snapshot`
+        // for the subscribe side, which pins that registration happens behind the
+        // terminal lock rather than the no-duplicate outcome itself, and
         // `a_chunk_the_reader_already_holds_still_reaches_a_client_that_registers_first`
         // for the reader side). Do not rely on this one to catch a revert.
         //
@@ -5671,255 +5746,6 @@ mod tests {
             !terminal.is_alt_screen(),
             "alt-screen should be inactive after DECRST 1049"
         );
-    }
-
-    #[test]
-    fn append_with_cap_grows_buffer_below_cap() {
-        let mut pending = PendingIngest::default();
-        append_with_cap(&mut pending, b"hello ", 64);
-        append_with_cap(&mut pending, b"world", 64);
-        assert_eq!(pending.buf, b"hello world");
-        assert!(!pending.dropped);
-    }
-
-    #[test]
-    fn append_with_cap_drops_oldest_on_overflow() {
-        let mut pending = PendingIngest::default();
-        pending.buf.extend_from_slice(b"AAAAAAAA"); // 8 bytes already buffered
-        append_with_cap(&mut pending, b"BBBB", 10);
-        // Cap=10, new_len would be 12 → drop 2 from the front.
-        assert_eq!(pending.buf, b"AAAAAABBBB");
-        assert!(pending.dropped);
-    }
-
-    #[test]
-    fn append_with_cap_truncates_oversized_single_chunk() {
-        let mut pending = PendingIngest::default();
-        pending.buf.extend_from_slice(b"prev");
-        let huge = vec![b'X'; 32];
-        append_with_cap(&mut pending, &huge, 10);
-        // Existing content is dropped; only the last 10 bytes of `huge` are kept.
-        assert_eq!(pending.buf.len(), 10);
-        assert!(pending.buf.iter().all(|b| *b == b'X'));
-        assert!(pending.dropped);
-    }
-
-    // The pause buffer is no longer private to the TUI: `subscribe_with_repaint`
-    // appends it verbatim to the bytes a browser is handed. An overflow drop that
-    // lands in the middle of a sequence therefore reaches a browser's parser as a
-    // fragment. Measured against the shipped xterm.js, that fragment renders as
-    // stray printable characters and does NOT swallow the live output behind it,
-    // so what this pins is a cosmetic tidy-up rather than a correctness property.
-    // See `resync_offset` for the measurements.
-    #[test]
-    fn append_with_cap_resynchronises_an_oversized_chunk_past_the_sequence_it_cut() {
-        let mut pending = PendingIngest::default();
-        let mut data = Vec::new();
-        data.extend_from_slice(b"first-line\n");
-        data.extend_from_slice(b"\x1b]0;a-window-title\x07");
-        data.extend_from_slice(b"second\n");
-        // Keeping the trailing 24 bytes cuts squarely inside the OSC.
-        append_with_cap(&mut pending, &data, 24);
-
-        assert!(pending.dropped);
-        assert_eq!(
-            pending.buf,
-            b"second\n",
-            "a drop that lands inside an OSC must move forward to the next byte a \
-             client can start parsing on, not hand it the tail of the sequence \
-             (got {:?})",
-            String::from_utf8_lossy(&pending.buf),
-        );
-    }
-
-    #[test]
-    fn append_with_cap_resynchronises_when_it_drains_the_front() {
-        let mut pending = PendingIngest::default();
-        let mut first = Vec::new();
-        first.extend_from_slice(b"aaaa\n");
-        first.extend_from_slice(b"\x1b]0;an-old-window-title\x07");
-        first.extend_from_slice(b"bbbb\n");
-        append_with_cap(&mut pending, &first, 35);
-        assert!(!pending.dropped);
-
-        // Overflows by eight bytes, which lands inside the OSC.
-        append_with_cap(&mut pending, b"cccccccc\n", 35);
-
-        assert!(pending.dropped);
-        assert_eq!(
-            pending.buf,
-            b"bbbb\ncccccccc\n",
-            "draining the front must leave the buffer starting at a boundary, not \
-             partway through the escape sequence it cut (got {:?})",
-            String::from_utf8_lossy(&pending.buf),
-        );
-    }
-
-    #[test]
-    fn resync_offset_keeps_a_cut_that_already_lands_on_a_line_start() {
-        // The cut is the FIRST byte kept, so a cut sitting immediately after a
-        // line feed is already a boundary and there is nothing to repair.
-        // Scanning forward unconditionally would throw away the whole line the
-        // survivor was supposed to open with, on every overflow, which is the
-        // ordinary case for line-oriented output.
-        let buf = b"AAAA\nBBBB\nCCCC\n";
-        assert_eq!(resync_offset(buf, 0), 0, "nothing was dropped at all");
-        assert_eq!(
-            &buf[resync_offset(buf, 5)..],
-            b"BBBB\nCCCC\n",
-            "a cut on a line start must keep that line",
-        );
-        assert_eq!(
-            &buf[resync_offset(buf, 10)..],
-            b"CCCC\n",
-            "a cut on a line start must keep that line",
-        );
-
-        // A BEL is the other boundary the scan accepts, so landing just after one
-        // is equally safe.
-        let belled = b"\x1b]0;title\x07rest\n";
-        assert_eq!(&belled[resync_offset(belled, 10)..], b"rest\n");
-
-        // And a cut that really does land mid-sequence still moves forward.
-        assert_eq!(&buf[resync_offset(buf, 2)..], b"BBBB\nCCCC\n");
-    }
-
-    #[test]
-    fn append_with_cap_never_leaves_the_buffer_starting_mid_utf8() {
-        // No line break and no bell to resynchronise on, so this exercises the
-        // fallback: step over the continuation bytes of the character the cut
-        // fell inside.
-        let mut pending = PendingIngest::default();
-        let data = "日本語です".as_bytes().to_vec();
-        append_with_cap(&mut pending, &data, 10);
-
-        assert!(pending.dropped);
-        assert!(
-            std::str::from_utf8(&pending.buf).is_ok(),
-            "a client is handed these bytes verbatim, so the buffer must not start \
-             inside a character (got {:?})",
-            pending.buf,
-        );
-        assert_eq!(
-            String::from_utf8_lossy(&pending.buf),
-            "語です",
-            "the fallback drops the character the cut fell inside and no more",
-        );
-    }
-
-    #[test]
-    fn append_with_cap_zero_cap_is_noop_with_flag() {
-        let mut pending = PendingIngest::default();
-        append_with_cap(&mut pending, b"ignored", 0);
-        assert!(pending.buf.is_empty());
-        assert!(pending.dropped);
-
-        // With empty data and cap=0, dropped stays false on a fresh buffer.
-        let mut fresh = PendingIngest::default();
-        append_with_cap(&mut fresh, b"", 0);
-        assert!(fresh.buf.is_empty());
-        assert!(!fresh.dropped);
-    }
-
-    /// The resume path drains `pending_bytes` into `terminal.process`. Verify
-    /// that a paused-then-drained stream produces an identical terminal state
-    /// to feeding the same bytes inline, so users returning from scrollback
-    /// see exactly the output they would have seen without pausing.
-    #[test]
-    fn paused_then_resumed_matches_unpaused_baseline() {
-        let mut baseline = TerminalState::with_scrollback(5, 20, 100);
-        baseline.process(b"one\r\ntwo\r\nthree\r\nfour\r\nfive\r\n");
-
-        // Simulate: first chunk arrives live, remainder while paused.
-        let mut paused = TerminalState::with_scrollback(5, 20, 100);
-        paused.process(b"one\r\n");
-
-        let mut pending = PendingIngest::default();
-        append_with_cap(&mut pending, b"two\r\nthree\r\n", PAUSE_BUFFER_CAP);
-        append_with_cap(&mut pending, b"four\r\nfive\r\n", PAUSE_BUFFER_CAP);
-        assert!(!pending.dropped);
-
-        // Resume: drain accumulated bytes into the terminal parser.
-        let drained = std::mem::take(&mut pending.buf);
-        paused.process(&drained);
-
-        assert_eq!(
-            viewport_lines(&baseline.snapshot()),
-            viewport_lines(&paused.snapshot()),
-            "paused+drained stream should match the unpaused baseline"
-        );
-        assert_eq!(
-            baseline.term.grid().history_size(),
-            paused.term.grid().history_size(),
-            "scrollback history size should match"
-        );
-    }
-
-    /// Chunks that overflow the pause buffer must still drop oldest rather
-    /// than panic, and `dropped` must be sticky so resume can log once.
-    #[test]
-    fn overflow_during_pause_keeps_tail_and_flags_drop() {
-        let mut pending = PendingIngest::default();
-        // Small cap for deterministic overflow.
-        let cap = 8;
-        append_with_cap(&mut pending, b"1234", cap);
-        append_with_cap(&mut pending, b"5678", cap);
-        assert_eq!(pending.buf, b"12345678");
-        assert!(!pending.dropped);
-
-        // Next chunk forces an overflow — oldest bytes are dropped.
-        append_with_cap(&mut pending, b"abcd", cap);
-        assert_eq!(pending.buf, b"5678abcd");
-        assert!(pending.dropped);
-
-        // Flag stays set across subsequent non-overflowing appends so that a
-        // single log line on resume can summarize the session.
-        append_with_cap(&mut pending, b"", cap);
-        assert!(pending.dropped);
-    }
-
-    /// Regression: a resize can move the scrollback offset back to the live
-    /// bottom (alacritty resets the display offset when the viewport grows,
-    /// pulling history into the visible grid), and `resize` used to skip the
-    /// pause-state sync that `scroll` and `set_scrollback` perform. That
-    /// stranded `scroll_paused` on with the offset at 0: the reader thread
-    /// buffered all child output without parsing it, so the pane froze with
-    /// no scrollback indicator until a later scroll happened to cross the
-    /// back-to-bottom transition. A resize that lands on the live bottom must
-    /// resume ingestion exactly like any other return to offset 0.
-    #[test]
-    fn resize_back_to_live_bottom_resumes_ingestion() {
-        let args = vec!["-c".to_string(), "cat".to_string()];
-        let client =
-            PtyClient::spawn("/bin/sh", &args, Path::new("."), 10, 40, 1000).expect("spawn pty");
-
-        // Fill enough history that scrolling back 20 rows is possible.
-        let mut fill = String::new();
-        for i in 0..60 {
-            fill.push_str(&format!("line {i}\n"));
-        }
-        client.write_bytes(fill.as_bytes()).expect("write fill");
-        wait_for_viewport(&client, "line 59");
-
-        // Scroll back: crossing 0 -> 20 pauses PTY ingestion.
-        client.set_scrollback(20);
-        assert_eq!(client.scrollback_offset(), 20, "scrolled back 20 rows");
-
-        // Growing the viewport resets the offset to the live bottom
-        // (measured against alacritty_terminal 0.26).
-        client.resize(30, 40).expect("resize");
-        assert_eq!(
-            client.scrollback_offset(),
-            0,
-            "a grow consumes history and lands on the live bottom"
-        );
-
-        // Ingestion must be live again: new child output has to reach the
-        // grid. Before the fix the reader stayed paused and this timed out.
-        client
-            .write_bytes(b"marker-after-resize\n")
-            .expect("write marker");
-        wait_for_viewport(&client, "marker-after-resize");
     }
 
     fn repaint_cell(row: u16, col: u16, symbol: &str, fg: CellColor) -> SnapshotCell {

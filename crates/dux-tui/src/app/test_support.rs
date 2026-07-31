@@ -240,7 +240,8 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         agent_tab_regions: Vec::new(),
         terminal_return_to_list: false,
         last_pty_size: (0, 0),
-        prev_scrollback_offset: 0,
+        grid_generation: 0,
+        scroll_mode: std::collections::HashSet::new(),
         last_diff_height: 0,
         last_diff_visual_lines: 0,
         theme: Theme::default_dark(),
@@ -300,6 +301,30 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
     app
 }
 
+/// Put the selected terminal surface into SCROLL MODE the way a user does:
+/// wait until the child has actually produced scrollback history, scroll up by
+/// `lines`, and record the gesture through the same entry point the scroll keys
+/// and the wheel use. Polls instead of sleeping a fixed amount, so the test is
+/// waiting on the fact it depends on (real history) rather than on a guess.
+/// Panics if no history appears within ~2s.
+pub(crate) fn enter_scroll_mode(app: &mut App, lines: usize) {
+    for _ in 0..200 {
+        if let Some(provider) = app.selected_terminal_surface_client() {
+            provider.scroll(true, lines);
+            if provider.scrollback_offset() > 0 {
+                app.note_user_scroll();
+                assert!(
+                    app.scroll_mode_active(),
+                    "a user scroll above the live edge must enter scroll mode"
+                );
+                return;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!("PTY produced no scrollback to scroll into within 2s");
+}
+
 /// Deterministically wait until the PTY child for the active terminal surface
 /// has parked its cursor at the given (row, col), polling the live snapshot
 /// instead of guessing a fixed sleep. The caller must have set up the surface
@@ -322,33 +347,43 @@ pub(crate) fn wait_for_agent_cursor(app: &mut App, row: u16, col: u16) {
     );
 }
 
-/// Block until the PTY client keyed by `key` has reached END OF INPUT, which is
-/// the precondition the exit-prune tests actually depend on, then return so the
+/// Block until the PTY client keyed by `key` is in the exact state the exit
+/// prune requires, END OF INPUT plus a REAPED EXIT STATUS, then return so the
 /// caller can `drain_events()` exactly ONCE and assert the prune happened.
 ///
-/// Waiting on `is_exited()` alone is deliberate, and `try_wait()` must NOT be
-/// added back as a second break arm. They are different facts: `is_exited` is
-/// set by the reader thread when the read side EOFs, while `try_wait` merely
-/// reaps the child and stamps the reap instant. The prune policy is
-/// `dux_core::engine::agent_pty_ready_to_prune(reader_at_eof, since_reap)`,
-/// which REFUSES to prune a reaped-but-not-yet-EOF PTY until the reap is older
-/// than `REAPED_DRAIN_GRACE` (250ms), so a crash excerpt is captured off a
-/// fully drained buffer. Breaking out on the reap arm therefore lands the test
-/// inside that 250ms window, one drain sees nothing, and the prune assertion
-/// fires: measured at roughly 1 run in 40. `PtyClient::reaped_at`'s own doc
-/// states the same rule ("callers that need the child's output fully ingested
-/// must wait for `is_exited`").
+/// Both arms are load-bearing, and waiting on either alone has raced in the
+/// past. They are different facts arriving from different places: `is_exited` is
+/// set by the reader thread when the read side EOFs, while `try_wait` reaps the
+/// child and stamps the reap instant. The prune policy is
+/// `dux_core::engine::agent_pty_ready_to_prune(exit_status_known, since_eof,
+/// since_reap)`, which REFUSES to prune until it holds both, until
+/// `REAPED_DRAIN_GRACE` (250ms) expires on either clock. Each fact is read
+/// exactly once and cannot be recovered afterwards, so pruning early loses one:
+/// without the drain the crash excerpt comes off a half-filled buffer, and
+/// without the status `exit_success` is `None`, which stops a clean exit from
+/// closing its tab row. Break on `is_exited` alone and the test lands inside the
+/// window where the reader has EOFed but the child is not yet waitable (the
+/// kernel closes a dying task's descriptors before it makes the task waitable),
+/// one drain sees nothing, and the prune assertion fires: that is the roughly
+/// 1-in-40 flake this helper exists to remove.
 ///
-/// A single drain, rather than a retry loop, is also deliberate:
-/// `agent_pty_ready_to_prune(true, _)` is unconditionally true, so a drain
-/// after EOF MUST prune. That is a product guarantee, and a loop would stop
-/// pinning it.
-pub(crate) fn wait_for_pty_eof(app: &App, key: &str) {
+/// `try_wait` is memoized on `PtyClient`, so polling it here does not steal the
+/// status from the prune that follows.
+///
+/// A single drain, rather than a retry loop, is also deliberate: with both facts
+/// in hand the prune MUST fire. That is a product guarantee, and a loop would
+/// stop pinning it.
+pub(crate) fn wait_for_pty_eof(app: &mut App, key: &str) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
-    while !app.engine.providers.get(key).is_some_and(|c| c.is_exited()) {
+    while !app
+        .engine
+        .providers
+        .get_mut(key)
+        .is_some_and(|c| c.is_exited() && c.try_wait().is_some())
+    {
         assert!(
             std::time::Instant::now() < deadline,
-            "PTY {key} never reached end of input"
+            "PTY {key} never reached end of input with a reaped exit status"
         );
         std::thread::sleep(std::time::Duration::from_millis(5));
     }

@@ -1565,11 +1565,13 @@ mod tests {
         app.input_target = InputTarget::Agent;
         app.fullscreen_overlay = FullscreenOverlay::Agent;
 
-        // Wait for END OF INPUT, not merely for the child to be reapable, then
-        // let a single drain_events observe it. See `wait_for_pty_eof`: a reaped
-        // but not-yet-EOF PTY is deliberately held back by REAPED_DRAIN_GRACE,
-        // so breaking out on `try_wait` makes this assertion flake.
-        crate::app::test_support::wait_for_pty_eof(&app, "tab-x");
+        // Wait for END OF INPUT *and* a reaped exit status, then let a single
+        // drain_events observe it. See `wait_for_pty_eof`: a PTY missing either
+        // fact is deliberately held back by REAPED_DRAIN_GRACE, so breaking out
+        // on one of them alone makes this assertion flake. The status arm
+        // matters most here: without it the clean exit below is pruned as
+        // `exit_success: None` and the tab row survives.
+        crate::app::test_support::wait_for_pty_eof(&mut app, "tab-x");
         app.drain_events();
         assert!(
             !app.engine.providers.contains_key("tab-x"),
@@ -1617,10 +1619,10 @@ mod tests {
             .agent_viewed
             .insert(session_id.clone(), std::time::Instant::now());
 
-        // END OF INPUT, not `try_wait`: inside REAPED_DRAIN_GRACE the prune is
-        // deliberately deferred and one drain would see nothing. See
-        // `wait_for_pty_eof`.
-        crate::app::test_support::wait_for_pty_eof(&app, &session_id);
+        // END OF INPUT *and* a reaped status: with either one missing the prune
+        // is deliberately deferred inside REAPED_DRAIN_GRACE and one drain would
+        // see nothing. See `wait_for_pty_eof`.
+        crate::app::test_support::wait_for_pty_eof(&mut app, &session_id);
         app.drain_events();
 
         assert!(!app.engine.providers.contains_key(&session_id), "pruned");
