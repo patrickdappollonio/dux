@@ -206,7 +206,16 @@ pub fn synthesize_repaint(
 /// PTYs, say) at a cost of well under 100 bytes on a frame that can carry a
 /// hundred thousand replayed lines.
 ///
-/// Deliberately absent: origin mode (`?6`) and insert mode (`?4`). Origin mode
+/// Both the private (DEC) modes and the two ANSI modes the engine tracks are
+/// covered. The ANSI pair is spelled WITHOUT the `?`: insert mode is IRM,
+/// `CSI 4 h`, and line-feed/new-line mode is LNM, `CSI 20 h`. The private `?4` is
+/// a different setting entirely (DECSCLM, smooth scrolling) that the engine does
+/// not track at all, so do not reach for it here. Insert mode is the one whose
+/// loss is immediately visible: a program sitting in it comes back with the
+/// client OVERWRITING at the cursor where the program expects each character to
+/// push the rest of the line right.
+///
+/// Deliberately absent: origin mode (`?6`). Origin mode
 /// makes every coordinate relative to the scrolling region's top margin, so it is
 /// not a flag the repaint can simply assert alongside the others: the repaint
 /// paints with absolute addressing, and the one coordinate that outlives the
@@ -238,9 +247,17 @@ fn mode_restore_sequence(mode: TermMode) -> String {
     // disables after the enable would silently undo the enable (measured: a
     // `1000l 1002h 1003l` block leaves `mouseTrackingMode === "none"`). Emit
     // every unset one first and the set one(s) last, ascending, so the most
-    // capable tracking mode is what lands. When the child has none set, all three
-    // disables go out: alacritty_terminal DOES treat them as independent bits, so
-    // a single 1000l would leave a stale 1002 alive on a re-used client.
+    // capable tracking mode is what lands.
+    //
+    // On OUR side at most one of the three is ever set. alacritty_terminal makes
+    // the protocols mutually exclusive the same way xterm.js does: setting any of
+    // 1000/1002/1003 clears `MOUSE_MODE` (all three bits) before inserting the one
+    // asked for, so `mode` can never carry two at once. The second loop therefore
+    // emits at most one enable in practice; it is written to handle several
+    // because that costs nothing and keeps the ordering rule true whatever the
+    // flags come from. When the child has none set, all three disables go out,
+    // which is the full assignment a client re-used from another PTY needs,
+    // whichever one of them it happens to be carrying.
     let tracking = [
         (1000u16, TermMode::MOUSE_REPORT_CLICK),
         (1002, TermMode::MOUSE_DRAG),
@@ -263,6 +280,17 @@ fn mode_restore_sequence(mode: TermMode) -> String {
     set(1006, mode.contains(TermMode::SGR_MOUSE));
     set(1007, mode.contains(TermMode::ALTERNATE_SCROLL));
     set(2004, mode.contains(TermMode::BRACKETED_PASTE));
+    // The two ANSI (non-private) modes, so no `?`. These go out AFTER the block
+    // above and, at both call sites, after the repaint has finished painting:
+    // asserting insert mode before the cells would make the client push the
+    // replay's own output sideways as it lands.
+    let mut ansi_set = |code: u16, on: bool| {
+        out.push_str("\x1b[");
+        out.push_str(&code.to_string());
+        out.push(if on { 'h' } else { 'l' });
+    };
+    ansi_set(4, mode.contains(TermMode::INSERT));
+    ansi_set(20, mode.contains(TermMode::LINE_FEED_NEW_LINE));
     // Application keypad has no DECSET form; it is the two-byte DECKPAM/DECKPNM.
     out.push_str(if mode.contains(TermMode::APP_KEYPAD) {
         "\x1b="
@@ -967,6 +995,37 @@ impl PtyClient {
                     // repaints over itself; line-oriented output appends, so it is
                     // corruption. Keep the two under one lock.
                     //
+                    // What it costs, honestly. On the ordinary path, nothing: the
+                    // ingest below took this same lock anyway, so the reader waits
+                    // exactly where it always waited. On the SCROLL-PAUSED path it
+                    // is a real regression, and the earlier claim that the worst
+                    // case was unchanged was only ever true of the ordinary path.
+                    // A paused reader used to skip this lock entirely and buffer
+                    // under `pending_bytes` alone, so it kept draining the PTY at
+                    // full speed while a connecting client built its snapshot; now
+                    // it waits for that snapshot like any other chunk, and the wait
+                    // scales with how many rows the replay has to render, up to
+                    // `MAX_RECONNECT_REPLAY_LINES` (measured on one machine: about
+                    // 10ms to build a replay at the default 10_000-line scrollback
+                    // and about 100ms at the 100_000-line cap, so tens to hundreds
+                    // of milliseconds, not microseconds). Treat those two figures as
+                    // a floor rather than the number: the build loop is
+                    // rows-times-COLUMNS unconditionally, because every row is
+                    // scanned from its right edge to right-trim trailing empty
+                    // cells even when the row is blank, so a wide terminal costs
+                    // several times a narrow one at the same row count. So a
+                    // browser attaching while a TUI operator is reading scrollback
+                    // can stall the reader where it previously could not, and
+                    // everything downstream of the read waits with it: the
+                    // attention scan runs on the reader thread, so bell and
+                    // notification detection for THIS one terminal is delayed by
+                    // the same window (already-scanned signals are not lost, they
+                    // just land late). The trade is deliberate and it is
+                    // the cheap side: a reader running ahead of the grid is exactly
+                    // the state in which a connecting client loses bytes outright,
+                    // and the only consequence of making it wait is that the child
+                    // blocks on a full PTY buffer, which loses nothing.
+                    //
                     // A poisoned terminal mutex means some other thread panicked
                     // while holding it. Nothing here can fix that, but the fan-out
                     // is independent of the grid, so keep streaming to web clients
@@ -1133,7 +1192,13 @@ impl PtyClient {
     /// yet in the grid: a subscriber that registers now will never be sent them,
     /// and they are the exact continuation of the grid, so they belong on the end
     /// of the repaint. (If that buffer previously overflowed its cap, the oldest
-    /// bytes it dropped are gone for the TUI too; nothing here can recover them.)
+    /// bytes it dropped are gone for the TUI too; nothing here can recover them.
+    /// What it does do is tidy the cut, so what survives usually starts on a
+    /// boundary rather than partway through an escape sequence. That is a
+    /// COSMETIC improvement and nothing more: a browser receiving these bytes is
+    /// at ground state, so a leading fragment renders as a few stray characters
+    /// and the live output behind it is never swallowed. See [`append_with_cap`]
+    /// and [`resync_offset`].)
     ///
     /// Returns `(guard, repaint_bytes, receiver)`. Hold the guard for the
     /// connection's lifetime; dropping it removes the subscriber immediately.
@@ -1959,7 +2024,24 @@ impl TerminalState {
     /// repaints overwrite the viewport without ever scrolling.
     fn reconnect_repaint(&self) -> Vec<u8> {
         if self.is_alt_screen() {
-            let mut out = synthesize_repaint(&self.snapshot(), true, self.scroll_region.region());
+            let snapshot = self.snapshot();
+            let mut out = synthesize_repaint(&snapshot, true, self.scroll_region.region());
+            // A HIDDEN cursor is absent from the snapshot, because a snapshot
+            // describes what is drawn and a hidden cursor draws nothing. So
+            // `synthesize_repaint` emitted no positioning for it, and the region
+            // restore it emitted just before that HOMED the cursor. Place it
+            // explicitly: a hidden cursor still has a position, and a program that
+            // moves or prints relative to it resumes from the wrong cell.
+            if snapshot.cursor.is_none() {
+                let renderable = self.term.renderable_content();
+                if let Some(point) =
+                    term::point_to_viewport(renderable.display_offset, renderable.cursor.point)
+                {
+                    out.extend_from_slice(
+                        format!("\x1b[{};{}H", point.line + 1, point.column.0 + 1).as_bytes(),
+                    );
+                }
+            }
             // Cells alone are not the terminal's state: re-assert the child's
             // private modes so a client that reset before applying the replay
             // (every web reconnect does) comes back with mouse tracking,
@@ -1975,11 +2057,13 @@ impl TerminalState {
         // offset 0). Using the live `display_offset` here would add the scrollback
         // distance and emit an out-of-range cursor position whenever a TUI
         // operator is reading history at the moment a web client connects.
-        let cursor = if renderable.cursor.shape == CursorShape::Hidden {
-            None
-        } else {
-            term::point_to_viewport(0, renderable.cursor.point)
-        };
+        //
+        // Visibility is NOT a reason to skip this. A hidden cursor still has a
+        // position, and the region restore emitted just before the positioning
+        // homes the cursor, so leaving it out resumes the client at the origin
+        // rather than where the program's cursor is. Whether it is DRAWN is
+        // `?25`, which `mode_restore_sequence` restores separately.
+        let cursor = term::point_to_viewport(0, renderable.cursor.point);
 
         let grid = self.term.grid();
         let cols = grid.columns();
@@ -2503,10 +2587,88 @@ const fn rgb(r: u8, g: u8, b: u8) -> Rgb {
     Rgb { r, g, b }
 }
 
+/// How far past an overflow cut [`append_with_cap`] looks for a boundary a
+/// client can safely start parsing on. Terminal output breaks lines constantly,
+/// so that boundary is normally a handful of bytes away; the ceiling only bounds
+/// the pathological case of a very long run carrying neither a line break nor a
+/// bell.
+const RESYNC_SCAN_LIMIT: usize = 64 * 1024;
+
+/// The first index at or after `from` that a byte stream can safely be restarted
+/// on.
+///
+/// Cutting a byte stream at an arbitrary offset leaves the survivor beginning
+/// wherever the cut fell, which may be inside an escape sequence or inside a
+/// multi-byte UTF-8 character. That used to be private to the TUI, whose resume
+/// path feeds the buffer back to an emulator that absorbs the junk in one row of
+/// one screen. [`PtyClient::subscribe_with_repaint`] now appends the same buffer
+/// to what a browser is handed.
+///
+/// Be precise about what that buys, because it is less than it looks. A client
+/// receiving the pause buffer is at ground state, and cutting bytes off the FRONT
+/// can only delete sequence OPENERS, never create one, so the leading fragment is
+/// parsed as ordinary printable text and the live output behind it arrives
+/// intact. Measured against the xterm.js the web UI actually ships (6.0.0): the
+/// mid-OSC fragment `"tle-with-newline\x07live output\r\n"` renders
+/// "tle-with-newlinelive output", the mid-CSI fragment `"5;3Hlive output\r\n"`
+/// renders "5;3Hlive output", and the mid-DCS fragment
+/// `"payload\x1b\\live output\r\n"` renders "payloadlive output". So the benefit
+/// here is COSMETIC: without it, one overflow puts a few stray characters on one
+/// line, once. That is cheap enough to be worth doing, and it is not a candidate
+/// mechanism for any report of output going missing.
+///
+/// The boundary this looks for is a line feed or a BEL, on the HEURISTIC that the
+/// byte after either is at the parser's ground state. That is almost always true
+/// in practice and it is NOT a rule of the grammar. xterm.js's
+/// `EscapeSequenceParser` executes the C0 range 0x00-0x17, which contains both of
+/// those bytes, without leaving the OSC, CSI or DCS state it is in; only a short
+/// specific list ends an OSC string. Measured: `"A\x1b]0;ti\ntle-rest\x07B"`
+/// renders "AB", the OSC having run straight through the line feed;
+/// `"A\x1b[1\n2mB"` executes the line feed and keeps parsing the CSI; and a BEL
+/// inside an APC or a DCS does not end either. So the anchor can land inside a
+/// control string: a tmux passthrough, a graphics sequence, a window title
+/// carrying a newline. Given the paragraph above, all that costs is the same
+/// bounded handful of stray characters the resync exists to tidy, so the
+/// heuristic is allowed to be wrong.
+///
+/// Failing to find an anchor at all (nothing within [`RESYNC_SCAN_LIMIT`]) it
+/// falls back to the one repair that is always available and steps over UTF-8
+/// continuation bytes, so the survivor at least does not open with a replacement
+/// character.
+fn resync_offset(buf: &[u8], from: usize) -> usize {
+    if from >= buf.len() {
+        return buf.len();
+    }
+    // The cut is already a boundary: either nothing was dropped, or the byte
+    // just before the survivor is one of the anchors below. Scanning anyway
+    // would discard the whole next line on every ordinary overflow, which is
+    // the common case for line-oriented output.
+    if from == 0 || buf[from - 1] == b'\n' || buf[from - 1] == 0x07 {
+        return from;
+    }
+    let limit = buf.len().min(from.saturating_add(RESYNC_SCAN_LIMIT));
+    if let Some(rel) = buf[from..limit]
+        .iter()
+        .position(|&b| b == b'\n' || b == 0x07)
+    {
+        return from + rel + 1;
+    }
+    let mut i = from;
+    while i < buf.len() && (0x80..=0xbf).contains(&buf[i]) {
+        i += 1;
+    }
+    i
+}
+
 /// Append `data` to `pending.buf`, respecting `cap`. On overflow, drop the
 /// oldest bytes from the front and mark `pending.dropped` so the next resume
 /// can log a warning. If `data` alone exceeds `cap`, keep only its trailing
 /// `cap` bytes.
+///
+/// Either kind of drop moves the cut forward to the next boundary a client can
+/// start parsing on (see [`resync_offset`]), so the survivor never begins inside
+/// an escape sequence or a UTF-8 character. `cap` is a ceiling, so keeping less
+/// than it is always allowed.
 fn append_with_cap(pending: &mut PendingIngest, data: &[u8], cap: usize) {
     if cap == 0 {
         pending.buf.clear();
@@ -2515,14 +2677,16 @@ fn append_with_cap(pending: &mut PendingIngest, data: &[u8], cap: usize) {
     }
     if data.len() >= cap {
         pending.buf.clear();
-        pending.buf.extend_from_slice(&data[data.len() - cap..]);
+        let start = resync_offset(data, data.len() - cap);
+        pending.buf.extend_from_slice(&data[start..]);
         pending.dropped = true;
         return;
     }
     let new_len = pending.buf.len().saturating_add(data.len());
     if new_len > cap {
         let overflow = new_len - cap;
-        pending.buf.drain(..overflow);
+        let cut = resync_offset(&pending.buf, overflow);
+        pending.buf.drain(..cut);
         pending.dropped = true;
     }
     pending.buf.extend_from_slice(data);
@@ -3438,6 +3602,98 @@ mod tests {
         assert_eq!(terminal.reconnect_repaint(), expected);
     }
 
+    // The two ANSI (non-private) modes the engine tracks. Insert mode is the one
+    // that visibly corrupts a reconnect: a program sitting in it comes back with
+    // the client OVERWRITING at the cursor where the program expects each
+    // character to push the rest of the line right.
+    #[test]
+    fn reconnect_repaint_restores_the_ansi_modes() {
+        for alt in [false, true] {
+            let mut src = TerminalState::with_scrollback(6, 20, 100);
+            if alt {
+                src.process(b"\x1b[?1049h");
+            }
+            // IRM (`CSI 4 h`) and LNM (`CSI 20 h`). Neither is a private mode:
+            // the private `?4` is DECSCLM smooth scrolling, which the engine does
+            // not track at all.
+            src.process(b"\x1b[4h\x1b[20h");
+            src.process(b"content");
+            assert!(src.term.mode().contains(TermMode::INSERT));
+            assert!(src.term.mode().contains(TermMode::LINE_FEED_NEW_LINE));
+
+            let mut dst = TerminalState::with_scrollback(6, 20, 100);
+            dst.process(&src.reconnect_repaint());
+
+            assert!(
+                dst.term.mode().contains(TermMode::INSERT),
+                "replay must re-assert insert mode (alt screen: {alt})",
+            );
+            assert!(
+                dst.term.mode().contains(TermMode::LINE_FEED_NEW_LINE),
+                "replay must re-assert line-feed/new-line mode (alt screen: {alt})",
+            );
+        }
+    }
+
+    #[test]
+    fn reconnect_repaint_clears_stale_ansi_modes() {
+        let mut src = TerminalState::with_scrollback(6, 20, 100);
+        src.process(b"plain output\r\n");
+
+        // A client left over from a different app carries both; the child has
+        // neither, so a full assignment has to put them back off.
+        let mut dst = TerminalState::with_scrollback(6, 20, 100);
+        dst.process(b"\x1b[4h\x1b[20h");
+        dst.process(&src.reconnect_repaint());
+
+        assert!(
+            !dst.term.mode().contains(TermMode::INSERT),
+            "replay must clear stale insert mode",
+        );
+        assert!(
+            !dst.term.mode().contains(TermMode::LINE_FEED_NEW_LINE),
+            "replay must clear stale line-feed/new-line mode",
+        );
+    }
+
+    // A hidden cursor still HAS a position, and the replay sets a scrolling
+    // region, which homes the cursor. Emitting no positioning for a hidden cursor
+    // therefore leaves the client's cursor at the origin instead of where the
+    // program's is: harmless while the program addresses absolutely, wrong the
+    // moment it moves relatively or prints.
+    #[test]
+    fn reconnect_repaint_places_a_hidden_cursor_where_the_program_left_it() {
+        for alt in [false, true] {
+            let mut src = TerminalState::with_scrollback(6, 20, 100);
+            if alt {
+                src.process(b"\x1b[?1049h");
+            }
+            src.process(b"\x1b[2;5Habc\x1b[?25l");
+            let want = {
+                let renderable = src.term.renderable_content();
+                term::point_to_viewport(renderable.display_offset, renderable.cursor.point)
+            };
+            assert!(want.is_some());
+
+            let mut dst = TerminalState::with_scrollback(6, 20, 100);
+            dst.process(&src.reconnect_repaint());
+
+            let got = {
+                let renderable = dst.term.renderable_content();
+                term::point_to_viewport(renderable.display_offset, renderable.cursor.point)
+            };
+            assert_eq!(
+                got, want,
+                "a hidden cursor must come back where the program left it, not \
+                 homed by the scrolling-region restore (alt screen: {alt})",
+            );
+            assert!(
+                !dst.term.mode().contains(TermMode::SHOW_CURSOR),
+                "and it must still be hidden (alt screen: {alt})",
+            );
+        }
+    }
+
     // A reconnecting web client resets its terminal before applying the replay,
     // so every private MODE the child enabled at its own startup is gone by the
     // time the replay lands. Modes are terminal state, not cell content, so a
@@ -4247,12 +4503,34 @@ mod tests {
     // NEITHER, the agent's output is silently lost, which is worse.
     // ---------------------------------------------------------------------
 
+    /// Width of the numeric part of the `L<n>` marker lines these tests stream.
+    ///
+    /// It is FIXED, and that is load bearing. A PTY read can cut a line anywhere,
+    /// so the grid routinely ends mid-number and the next chunk carries the rest;
+    /// the checks below therefore join the repaint and the live stream before
+    /// parsing, and the join is what puts such a number back together. With
+    /// variable-width ids a join of two halves that do NOT belong together also
+    /// yields a well-formed number, so a stream that had genuinely lost bytes was
+    /// reported with a FABRICATED id (measured: a repaint ending `L5` and a chunk
+    /// opening `4465` were reported as one line `L54465`, which describes no line
+    /// either side ever produced). With a fixed width the arithmetic gives it
+    /// away: the repaint keeps the first `k` digits of the line it was cut in and
+    /// the chunk carries the last `width - m` digits of the line IT was cut in, so
+    /// the join is `width` digits long only when `k == m`, which is exactly the
+    /// case where the two halves are the same line. Every other join comes out the
+    /// wrong length and [`scan_line_ids`] names it as itself instead of printing a
+    /// number nobody can act on. (A loss that happens to cut both lines at the
+    /// same digit still yields a well-formed id, but it is then a real id from the
+    /// halves that were joined, and it is off by more than one, so the ordinary
+    /// contiguity check still reports it.)
+    const LINE_ID_DIGITS: usize = 8;
+
     /// A shell that emits one `L<n>` line per line we write to it, so a test
     /// decides exactly when output is produced and never sleeps on a guess.
     /// `stty -echo` keeps the line discipline from echoing our own writes back,
     /// so the child's output is only the lines it prints.
     const LINE_ECHOER: &str =
-        "stty -echo; while IFS= read -r n; do printf 'L%s\\r\\n' \"$n\"; done";
+        "stty -echo; while IFS= read -r n; do printf 'L%08d\\r\\n' \"$n\"; done";
 
     fn spawn_line_echoer(scrollback: usize) -> PtyClient {
         let args = vec!["-c".to_string(), LINE_ECHOER.to_string()];
@@ -4297,14 +4575,32 @@ mod tests {
         out
     }
 
-    /// Every `L<n>` id in `bytes`, in the order it appears. Callers pass the
-    /// repaint and the live stream CONCATENATED, so a line split across the
-    /// junction (the grid ends mid-number and the stream carries the rest) reads
-    /// back as the one id it really is.
-    fn line_ids(bytes: &[u8]) -> Vec<u64> {
+    /// What a scan of a byte stream for `L<n>` markers found.
+    struct LineIdScan {
+        /// Every complete id, in the order it appears.
+        ids: Vec<u64>,
+        /// Digit runs whose length was not [`LINE_ID_DIGITS`], as
+        /// `(byte offset, the run)`. A run that is too SHORT at the very END of
+        /// the stream is simply a chunk cut in half and is not recorded. Every
+        /// other wrong-length run is, including one that is too LONG at the end
+        /// (a run cut short cannot have grown past the width) and a bare marker
+        /// letter with no digits behind it at a junction: those mean the two
+        /// halves that were joined did not belong together, which is bytes lost
+        /// or bytes replayed.
+        malformed: Vec<(usize, String)>,
+    }
+
+    /// Scan `bytes` for `L<n>` markers. Callers pass the repaint and the live
+    /// stream CONCATENATED, so a line split across the junction (the grid ends
+    /// mid-number and the stream carries the rest) reads back as the one id it
+    /// really is.
+    fn scan_line_ids(bytes: &[u8]) -> LineIdScan {
         let text = String::from_utf8_lossy(&strip_ansi(bytes)).to_string();
         let raw = text.as_bytes();
-        let mut ids = Vec::new();
+        let mut scan = LineIdScan {
+            ids: Vec::new(),
+            malformed: Vec::new(),
+        };
         let mut i = 0usize;
         while i < raw.len() {
             if raw[i] == b'L' {
@@ -4312,15 +4608,33 @@ mod tests {
                 while j < raw.len() && raw[j].is_ascii_digit() {
                     j += 1;
                 }
+                let run = &text[i + 1..j];
+                // A run is only excusable as a chunk boundary when it could
+                // still have been GROWING when the stream stopped: too few
+                // digits, and nothing after it. A run that is already too LONG
+                // cannot have been cut short, and a marker with no digits at all
+                // is not a partial number as long as some other byte follows it,
+                // so both are faults wherever they sit.
+                let at_end_of_stream = j >= raw.len();
+                let excusable_boundary = at_end_of_stream && run.len() < LINE_ID_DIGITS;
+                if run.len() == LINE_ID_DIGITS {
+                    scan.ids.push(run.parse::<u64>().expect("digits"));
+                } else if !excusable_boundary {
+                    scan.malformed.push((i, run.to_string()));
+                }
                 if j > i + 1 {
-                    ids.push(text[i + 1..j].parse::<u64>().expect("digits"));
                     i = j;
                     continue;
                 }
             }
             i += 1;
         }
-        ids
+        scan
+    }
+
+    /// Every complete `L<n>` id in `bytes`, in the order it appears.
+    fn line_ids(bytes: &[u8]) -> Vec<u64> {
+        scan_line_ids(bytes).ids
     }
 
     /// Poll `cond` until it holds, returning whether it ever did.
@@ -4347,100 +4661,139 @@ mod tests {
     }
 
     #[test]
-    fn a_chunk_ingested_between_registering_and_snapshotting_is_not_replayed_twice() {
-        // Construct the duplication window deterministically instead of racing for
-        // it. A subscriber is parked between "registered" and "snapshot taken" by
-        // holding the terminal lock it needs; meanwhile ingestion is PAUSED, which
-        // is a real dux state (a TUI operator scrolled back) in which the reader
-        // fans a chunk out to that subscriber WITHOUT needing the terminal lock. We
-        // then hand those same bytes to the grid ourselves, exactly as
-        // `resume_ingestion` would, while still holding the lock. Releasing it
-        // gives the parked subscriber a snapshot that already contains bytes queued
-        // on its channel.
+    fn scan_line_ids_names_a_join_of_two_different_lines_instead_of_inventing_one() {
+        // The exact shape the busy-PTY check parses: a repaint whose grid ends
+        // mid-number, immediately followed by the live chunk carrying the rest.
+        let repaint_tail = b"L00000454\r\nL00000455\r\nL0000";
+
+        // The halves belong together, so the join is the line they came from.
+        let ok = scan_line_ids(&[repaint_tail.as_slice(), b"0456\r\n"].concat());
+        assert_eq!(ok.ids, vec![454, 455, 456]);
+        assert!(ok.malformed.is_empty());
+
+        // They do not, because bytes went missing between them. Under a
+        // variable-width format this join reads as a perfectly well-formed line
+        // that neither side ever printed; the fixed width makes it the wrong
+        // length, so it is reported as what it is.
+        let lost = scan_line_ids(&[repaint_tail.as_slice(), b"04465\r\n"].concat());
+        assert_eq!(lost.ids, vec![454, 455]);
+        assert_eq!(
+            lost.malformed,
+            vec![(22usize, "000004465".to_string())],
+            "a wrong-width marker must be reported as itself, not turned into an id"
+        );
+
+        // A run cut short by the END of the stream is just a chunk boundary and
+        // is not a fault.
+        let cut = scan_line_ids(b"L00000454\r\nL0000");
+        assert_eq!(cut.ids, vec![454]);
+        assert!(cut.malformed.is_empty());
+
+        // A run LONGER than the fixed width is never a chunk cut short, so it is
+        // a fault wherever it sits, end of stream included.
+        let too_long = scan_line_ids(b"L00000454\r\nL0000045566");
+        assert_eq!(too_long.ids, vec![454]);
+        assert_eq!(
+            too_long.malformed,
+            vec![(11usize, "0000045566".to_string())],
+            "an over-length run cannot be a chunk cut short",
+        );
+
+        // A bare marker letter with no digits after it is likewise not a partial
+        // number, so long as there is a following byte to prove the stream did
+        // not simply stop on the letter.
+        let bare = scan_line_ids(b"L00000454\r\nL\r\n");
+        assert_eq!(bare.ids, vec![454]);
+        assert_eq!(
+            bare.malformed,
+            vec![(11usize, String::new())],
+            "a marker with no digits at a junction is a fault, not a boundary",
+        );
+
+        // A stream that ends ON the marker letter really could be a chunk cut in
+        // half, so it stays unrecorded.
+        let trailing = scan_line_ids(b"L00000454\r\nL");
+        assert_eq!(trailing.ids, vec![454]);
+        assert!(trailing.malformed.is_empty());
+    }
+
+    #[test]
+    fn a_client_does_not_join_the_fan_out_list_before_it_can_reach_its_snapshot() {
+        // The SUBSCRIBE half of the exactly-once handoff, guarded by the one
+        // thing about it that is directly observable: a client must not appear in
+        // the fan-out list while it is still blocked from taking its snapshot.
         //
-        // In the wild the same window is opened by plain lock unfairness: the
-        // reader releases the terminal lock, reads the next chunk and re-acquires
-        // while the subscriber is still parked in the futex, so the overlap is
-        // bounded only by how long the subscriber is starved (measured at thousands
-        // of lines on a busy PTY). The pause path just makes the size of the window
-        // ours to choose.
+        // Be honest about the gap between the name and the contract. The contract
+        // (see `subscribe_with_repaint`) is that registration and the snapshot
+        // happen under ONE hold of the terminal lock. This test does not pin
+        // that, and cannot cheaply: an implementation that took the lock,
+        // registered, released it, then re-took it to snapshot would satisfy
+        // every assertion below and still have the original bug. What it does
+        // pin, deterministically, is that registration is behind the terminal
+        // lock at all, which is the half that was actually missing. It
+        // constructs no duplicated byte and observes none.
+        //
+        // Registering first and snapshotting second, with the lock taken only for
+        // the snapshot, opens a window in which a chunk is fanned out to a client
+        // that is still parked waiting for its grid. That chunk then lands in the
+        // channel AND in the snapshot the client is about to be handed, so the
+        // client renders the snapshot's tail and then a replay of bytes already
+        // inside it. `Mutex` is not fair, so the window is not "a few bytes": the
+        // reader barges and the overlap is bounded only by how long the client is
+        // starved (measured at thousands of lines on a busy PTY).
+        //
+        // The window is CONSTRUCTED rather than raced for. A helper thread holds
+        // the terminal lock, so a `subscribe_with_repaint` on this thread cannot
+        // reach its snapshot, and the helper then watches the subscriber list. If
+        // the call registered anyway, the window exists. It must not.
+        //
+        // `PtyClient` is not `Sync`, so the orchestration runs on the helper with
+        // only the shared handles while THIS thread makes the real call.
         let client = spawn_line_echoer(500);
         client.write_bytes(b"1\r").expect("write");
-        wait_for_viewport(&client, "L1");
-        client.pause_ingestion();
+        wait_for_viewport(&client, "L00000001");
 
-        // `PtyClient` is not `Sync`, so the orchestration runs on a helper thread
-        // holding only the shared handles while THIS thread makes the real
-        // `subscribe_with_repaint` call under test.
         let terminal = Arc::clone(&client.terminal);
-        let pending = Arc::clone(&client.pending_bytes);
-        let paused = Arc::clone(&client.scroll_paused);
         let subscribers = Arc::clone(&client.subscribers);
-        let writer_tx = client.writer.tx.clone().expect("writer thread alive");
         let (holding_tx, holding_rx) = std::sync::mpsc::channel::<()>();
 
         let helper = thread::spawn(move || {
-            let mut held = terminal.lock().expect("terminal mutex poisoned");
+            let held = terminal.lock().expect("terminal mutex poisoned");
             // Only now may the subscriber try to snapshot, so it is guaranteed to
             // park on this lock rather than sail through.
             holding_tx.send(()).expect("main thread alive");
-
-            // Pre-fix the subscriber registers and THEN parks here, so this
-            // resolves immediately. Post-fix it parks BEFORE registering (that is
-            // the fix), so the window cannot be constructed and this times out.
-            let constructed = wait_until(std::time::Duration::from_millis(500), || {
+            // A one-sided wait: it can only give a client that registers early
+            // more time to have done so, and a client that cannot register until
+            // it holds this lock cannot register at all while the helper holds it,
+            // however long the wait runs.
+            let registered = wait_until(std::time::Duration::from_millis(300), || {
                 !subscribers
                     .lock()
                     .expect("subscribers mutex poisoned")
                     .is_empty()
             });
-            if !constructed {
-                paused.store(false, Ordering::Release);
-                return false;
-            }
-
-            // Produce lines that the reader fans out to the parked subscriber.
-            // Ingestion is paused, so it can do that without the terminal lock we
-            // are holding.
-            for n in 2..=6 {
-                pty_queue_send(&writer_tx, format!("{n}\r").into_bytes());
-            }
-            assert!(
-                wait_until(std::time::Duration::from_secs(5), || {
-                    pending
-                        .lock()
-                        .expect("pending mutex poisoned")
-                        .buf
-                        .windows(3)
-                        .any(|w| w == b"L6\r")
-                }),
-                "the reader never buffered the lines it fanned out"
-            );
-            // Hand those same bytes to the grid, exactly as `resume_ingestion`
-            // does, while the subscriber still waits for its snapshot.
-            let bytes = {
-                let mut pending = pending.lock().expect("pending mutex poisoned");
-                std::mem::take(&mut pending.buf)
-            };
-            paused.store(false, Ordering::Release);
-            held.process(&bytes);
-            true
+            drop(held);
+            registered
         });
 
         holding_rx.recv().expect("helper thread alive");
         let (_guard, repaint, rx) = client.subscribe_with_repaint();
-        let constructed = helper.join().expect("helper thread");
+        let registered_while_parked = helper.join().expect("helper thread");
 
-        if !constructed {
-            // Nothing was in flight, so send the same lines through the ordinary
-            // path and hold the invariant to the same standard.
-            for n in 2..=6 {
-                client
-                    .write_bytes(format!("{n}\r").as_bytes())
-                    .expect("write");
-            }
-            wait_for_viewport(&client, "L6");
+        assert!(
+            !registered_while_parked,
+            "a client appeared in the fan-out list while it was still parked \
+             waiting for the grid it is about to be handed; every chunk read in \
+             that window would reach the client twice"
+        );
+
+        // And the ordinary invariant the client cares about, end to end.
+        for n in 2..=6 {
+            client
+                .write_bytes(format!("{n}\r").as_bytes())
+                .expect("write");
         }
+        wait_for_viewport(&client, "L00000006");
 
         let mut combined = strip_ansi(&repaint);
         combined.extend_from_slice(&drain(&rx, std::time::Duration::from_millis(200)));
@@ -4449,6 +4802,84 @@ mod tests {
             vec![1, 2, 3, 4, 5, 6],
             "a freshly connected client must see each line exactly once and in \
              order (its whole byte stream reads {:?})",
+            String::from_utf8_lossy(&combined),
+        );
+    }
+
+    /// A line echoer that also rings the terminal bell on every line it prints.
+    ///
+    /// The bell is an ANCHOR, not decoration. The reader loop scans every chunk
+    /// for attention signals BEFORE it takes the terminal lock and before it fans
+    /// anything out, in either arrangement of those two steps, so a raised bell
+    /// proves the reader is already holding that chunk. Without it a test that
+    /// asserts "the reader has not fanned this out yet" cannot tell a correctly
+    /// parked reader from one that simply has not read the bytes yet.
+    const BELLING_LINE_ECHOER: &str =
+        "stty -echo; while IFS= read -r n; do printf '\\aL%08d\\r\\n' \"$n\"; done";
+
+    #[test]
+    fn a_chunk_the_reader_already_holds_still_reaches_a_client_that_registers_first() {
+        // The READER half of the exactly-once handoff, on its own and without
+        // racing for it. The fan-out has to happen UNDER the terminal lock; with
+        // it outside, this ordering loses a chunk outright:
+        //
+        //   reader:     fans chunk C out; nobody is subscribed, so C goes nowhere
+        //   subscriber: takes the terminal lock, registers, snapshots a grid
+        //               that does not contain C yet
+        //   reader:     finally gets the lock and parses C
+        //
+        // C is in neither the repaint nor the channel and the client never sees
+        // it, which is the missing-lines half of the reported corruption. Taking
+        // the lock first makes the ordering impossible: a reader parked on the
+        // lock has fanned nothing out, so a subscriber that registers while it is
+        // parked is guaranteed to be sent the chunk when the lock is released.
+        //
+        // The window is CONSTRUCTED. This thread holds the terminal lock and then
+        // performs, by hand, exactly the two steps `subscribe_with_repaint` takes
+        // once it owns that lock (register, then snapshot). It cannot call the
+        // real method, which would deadlock on the lock it is already holding.
+        //
+        // One acknowledged hole in the revert detection: it assumes the child's
+        // single small write arrives at the reader as ONE read, so that a
+        // fan-out placed before the lock would have carried the whole line
+        // before this thread subscribes. A short read splitting that line would
+        // let a reverted implementation still deliver the tail and pass. In
+        // practice a write this small is never split, so this is recorded rather
+        // than defended against.
+        let args = vec!["-c".to_string(), BELLING_LINE_ECHOER.to_string()];
+        let client =
+            PtyClient::spawn("/bin/sh", &args, Path::new("."), 6, 40, 500).expect("spawn pty");
+        client.write_bytes(b"1\r").expect("write");
+        wait_for_viewport(&client, "L00000001");
+
+        client.attention_bell.store(false, Ordering::Release);
+        let held = client.terminal.lock().expect("terminal mutex poisoned");
+        client.write_bytes(b"2\r").expect("write");
+        assert!(
+            wait_until(std::time::Duration::from_secs(5), || client
+                .attention_bell
+                .load(Ordering::Acquire)),
+            "the reader never read the chunk carrying the second line"
+        );
+        // Give a fan-out placed BEFORE the lock every chance to have happened.
+        // The wait is one-sided: it can only make an early fan-out more likely to
+        // have completed, and a reader parked on the terminal lock cannot make
+        // progress no matter how long it lasts, so it cannot turn a correct
+        // reader into a failure.
+        thread::sleep(std::time::Duration::from_millis(250));
+
+        let (_guard, rx) = client.subscribe();
+        let repaint = held.reconnect_repaint();
+        drop(held);
+
+        let mut combined = strip_ansi(&repaint);
+        combined.extend_from_slice(&drain(&rx, std::time::Duration::from_millis(300)));
+        assert_eq!(
+            line_ids(&combined),
+            vec![1, 2],
+            "a chunk the reader was already holding must still reach a client \
+             that registered before the chunk was parsed (its whole byte stream \
+             reads {:?})",
             String::from_utf8_lossy(&combined),
         );
     }
@@ -4463,7 +4894,7 @@ mod tests {
         // repaint has to carry the pause buffer as its tail.
         let client = spawn_line_echoer(500);
         client.write_bytes(b"1\r").expect("write");
-        wait_for_viewport(&client, "L1");
+        wait_for_viewport(&client, "L00000001");
 
         client.pause_ingestion();
         for n in 2..=4 {
@@ -4478,8 +4909,8 @@ mod tests {
                     .lock()
                     .expect("pending mutex poisoned")
                     .buf
-                    .windows(3)
-                    .any(|w| w == b"L4\r")
+                    .windows(10)
+                    .any(|w| w == b"L00000004\r")
             }),
             "the reader never buffered the paused lines"
         );
@@ -4492,11 +4923,11 @@ mod tests {
         client.resume_ingestion();
         client.write_bytes(b"5\r").expect("write");
         assert!(
-            wait_until(std::time::Duration::from_secs(5), || client
-                .snapshot()
-                .cells
-                .iter()
-                .any(|c| c.symbol == "5")),
+            wait_until(std::time::Duration::from_secs(5), || {
+                viewport_lines(&client.snapshot())
+                    .iter()
+                    .any(|line| line.contains("L00000005"))
+            }),
             "the child never echoed the last line"
         );
 
@@ -4519,12 +4950,21 @@ mod tests {
         // no id repeated and none skipped. Before the fix this failed within the
         // first few dozen attaches (measured: 5 of 78 attaches overlapped, one by
         // more than three thousand lines).
+        //
+        // This is the SYSTEM-level check and it is inherently sampled, so the two
+        // halves of the fix each also carry a constructed, deterministic test of
+        // their own (`a_chunk_ingested_between_registering_and_snapshotting_is_not_replayed_twice`
+        // for the subscribe side and
+        // `a_chunk_the_reader_already_holds_still_reaches_a_client_that_registers_first`
+        // for the reader side). Do not rely on this one to catch a revert.
+        //
         // Enough lines that the child cannot possibly finish before the checks
         // below do, even on a loaded machine; the loop leaves as soon as it has
         // seen enough attaches and dropping the client kills the child.
         let total = 400_000u64;
-        let script =
-            format!("i=1; while [ $i -le {total} ]; do echo \"L$i\"; i=$((i+1)); done; echo END");
+        let script = format!(
+            "i=1; while [ $i -le {total} ]; do printf 'L%08d\\n' \"$i\"; i=$((i+1)); done; echo END"
+        );
         let args = vec!["-c".to_string(), script];
         let client =
             PtyClient::spawn("/bin/sh", &args, Path::new("."), 6, 40, 500_000).expect("spawn pty");
@@ -4553,24 +4993,39 @@ mod tests {
 
             let mut joined = strip_ansi(&repaint);
             joined.extend_from_slice(&chunk);
-            let ids = line_ids(&joined);
-            if ids.len() < 3 {
-                continue;
-            }
-            // The last id may be a number the chunk cut in half; ignore it.
-            let ids = &ids[..ids.len() - 1];
-            for (i, pair) in ids.windows(2).enumerate() {
-                assert_eq!(
-                    pair[1],
-                    pair[0] + 1,
-                    "attach {attaches} handed a client a discontinuity at index {i}: \
-                     L{} is followed by L{} (repaint tail {:?}, first live chunk {:?})",
-                    pair[0],
-                    pair[1],
+            let scan = scan_line_ids(&joined);
+            let context = || {
+                format!(
+                    "repaint tail {:?}, first live chunk {:?}",
                     String::from_utf8_lossy(&strip_ansi(
                         &repaint[repaint.len().saturating_sub(60)..]
                     )),
                     String::from_utf8_lossy(&chunk[..chunk.len().min(60)]),
+                )
+            };
+            // A marker of the wrong width can only come from joining two halves
+            // that did not belong together, so it is a failure in its own right
+            // and is reported as itself rather than as some invented line number.
+            assert!(
+                scan.malformed.is_empty(),
+                "attach {attaches} handed a client a marker of the wrong width at \
+                 {:?}: every id is {LINE_ID_DIGITS} digits, so this is two halves \
+                 of different lines joined together ({})",
+                scan.malformed,
+                context(),
+            );
+            if scan.ids.len() < 3 {
+                continue;
+            }
+            for (i, pair) in scan.ids.windows(2).enumerate() {
+                assert_eq!(
+                    pair[1],
+                    pair[0] + 1,
+                    "attach {attaches} handed a client a discontinuity at index {i}: \
+                     L{} is followed by L{} ({})",
+                    pair[0],
+                    pair[1],
+                    context(),
                 );
             }
             checked += 1;
@@ -5199,6 +5654,109 @@ mod tests {
         assert_eq!(pending.buf.len(), 10);
         assert!(pending.buf.iter().all(|b| *b == b'X'));
         assert!(pending.dropped);
+    }
+
+    // The pause buffer is no longer private to the TUI: `subscribe_with_repaint`
+    // appends it verbatim to the bytes a browser is handed. An overflow drop that
+    // lands in the middle of a sequence therefore reaches a browser's parser as a
+    // fragment. Measured against the shipped xterm.js, that fragment renders as
+    // stray printable characters and does NOT swallow the live output behind it,
+    // so what this pins is a cosmetic tidy-up rather than a correctness property.
+    // See `resync_offset` for the measurements.
+    #[test]
+    fn append_with_cap_resynchronises_an_oversized_chunk_past_the_sequence_it_cut() {
+        let mut pending = PendingIngest::default();
+        let mut data = Vec::new();
+        data.extend_from_slice(b"first-line\n");
+        data.extend_from_slice(b"\x1b]0;a-window-title\x07");
+        data.extend_from_slice(b"second\n");
+        // Keeping the trailing 24 bytes cuts squarely inside the OSC.
+        append_with_cap(&mut pending, &data, 24);
+
+        assert!(pending.dropped);
+        assert_eq!(
+            pending.buf,
+            b"second\n",
+            "a drop that lands inside an OSC must move forward to the next byte a \
+             client can start parsing on, not hand it the tail of the sequence \
+             (got {:?})",
+            String::from_utf8_lossy(&pending.buf),
+        );
+    }
+
+    #[test]
+    fn append_with_cap_resynchronises_when_it_drains_the_front() {
+        let mut pending = PendingIngest::default();
+        let mut first = Vec::new();
+        first.extend_from_slice(b"aaaa\n");
+        first.extend_from_slice(b"\x1b]0;an-old-window-title\x07");
+        first.extend_from_slice(b"bbbb\n");
+        append_with_cap(&mut pending, &first, 35);
+        assert!(!pending.dropped);
+
+        // Overflows by eight bytes, which lands inside the OSC.
+        append_with_cap(&mut pending, b"cccccccc\n", 35);
+
+        assert!(pending.dropped);
+        assert_eq!(
+            pending.buf,
+            b"bbbb\ncccccccc\n",
+            "draining the front must leave the buffer starting at a boundary, not \
+             partway through the escape sequence it cut (got {:?})",
+            String::from_utf8_lossy(&pending.buf),
+        );
+    }
+
+    #[test]
+    fn resync_offset_keeps_a_cut_that_already_lands_on_a_line_start() {
+        // The cut is the FIRST byte kept, so a cut sitting immediately after a
+        // line feed is already a boundary and there is nothing to repair.
+        // Scanning forward unconditionally would throw away the whole line the
+        // survivor was supposed to open with, on every overflow, which is the
+        // ordinary case for line-oriented output.
+        let buf = b"AAAA\nBBBB\nCCCC\n";
+        assert_eq!(resync_offset(buf, 0), 0, "nothing was dropped at all");
+        assert_eq!(
+            &buf[resync_offset(buf, 5)..],
+            b"BBBB\nCCCC\n",
+            "a cut on a line start must keep that line",
+        );
+        assert_eq!(
+            &buf[resync_offset(buf, 10)..],
+            b"CCCC\n",
+            "a cut on a line start must keep that line",
+        );
+
+        // A BEL is the other boundary the scan accepts, so landing just after one
+        // is equally safe.
+        let belled = b"\x1b]0;title\x07rest\n";
+        assert_eq!(&belled[resync_offset(belled, 10)..], b"rest\n");
+
+        // And a cut that really does land mid-sequence still moves forward.
+        assert_eq!(&buf[resync_offset(buf, 2)..], b"BBBB\nCCCC\n");
+    }
+
+    #[test]
+    fn append_with_cap_never_leaves_the_buffer_starting_mid_utf8() {
+        // No line break and no bell to resynchronise on, so this exercises the
+        // fallback: step over the continuation bytes of the character the cut
+        // fell inside.
+        let mut pending = PendingIngest::default();
+        let data = "日本語です".as_bytes().to_vec();
+        append_with_cap(&mut pending, &data, 10);
+
+        assert!(pending.dropped);
+        assert!(
+            std::str::from_utf8(&pending.buf).is_ok(),
+            "a client is handed these bytes verbatim, so the buffer must not start \
+             inside a character (got {:?})",
+            pending.buf,
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&pending.buf),
+            "語です",
+            "the fallback drops the character the cut fell inside and no more",
+        );
     }
 
     #[test]

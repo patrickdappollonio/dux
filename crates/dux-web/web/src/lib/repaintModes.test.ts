@@ -43,20 +43,31 @@ const ALT_REPAINT_CELLS_ONLY =
 // The tail `mode_restore_sequence` now appends, for a child on the alt screen
 // with button-event tracking in SGR encoding, bracketed paste on and the cursor
 // hidden. Both polarities are always emitted, so this is a full assignment.
-// Copied verbatim from what dux-core actually produces for that child, not
-// hand-written: note that the tracking disables (1000l, 1003l) come BEFORE the
-// enable (1002h), because xterm collapses the three into one active protocol and
-// a later disable would clear it.
+// Copied verbatim from what dux-core actually produces for that child (checked
+// against `mode_restore_sequence` byte for byte), not hand-written: note that the tracking disables (1000l, 1003l) come BEFORE the enable (1002h),
+// because xterm collapses the three into one active protocol and a later disable
+// would clear it. The last two before the keypad byte are the ANSI (non-private,
+// no `?`) pair: IRM insert mode (4) and LNM line-feed/new-line mode (20).
+//
+// These strings are hand-fed rather than generated, so nothing here fails if the
+// Rust side changes shape; keep them true by hand. There is deliberately no
+// cross-language pin.
 const MODE_RESTORE_TAIL =
   "\x1b[?1l\x1b[?7h\x1b[?25l" +
   "\x1b[?1000l\x1b[?1003l\x1b[?1002h\x1b[?1004l\x1b[?1005l\x1b[?1006h\x1b[?1007h" +
-  "\x1b[?2004h\x1b>"
+  "\x1b[?2004h\x1b[4l\x1b[20l\x1b>"
 
 // The main-screen tail for a shell with bracketed paste on and autowrap off.
 const MAIN_MODE_RESTORE_TAIL =
   "\x1b[?1l\x1b[?7l\x1b[?25h" +
   "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1004l\x1b[?1005l\x1b[?1006l\x1b[?1007h" +
-  "\x1b[?2004h\x1b>"
+  "\x1b[?2004h\x1b[4l\x1b[20l\x1b>"
+
+// The same main-screen tail for a child that IS sitting in insert mode.
+const MAIN_MODE_RESTORE_TAIL_INSERT_ON = MAIN_MODE_RESTORE_TAIL.replace(
+  "\x1b[4l",
+  "\x1b[4h",
+)
 
 // Mirrors `TerminalPane.onTouchMove`'s gate. A finger drag on the alt screen is
 // forwarded to the app as SGR wheel reports only when this returns "forward";
@@ -141,6 +152,37 @@ describe("reconnect repaint, client side", () => {
     const term = make()
     await drain(term, ALT_REPAINT_CELLS_ONLY + MODE_RESTORE_TAIL)
     expect(touchScrollTarget(term, false)).toBe("ignore")
+  })
+
+  it("restores insert mode, so typed characters push the rest of the line right", async () => {
+    // The ANSI half of the block. Insert mode is the one whose loss is visible
+    // immediately: with it lost the client OVERWRITES at the cursor where the
+    // program expects each character to shove the rest of the line along.
+    const term = make()
+    term.reset()
+    await drain(term, "abcdef\x1b[1;1H" + MAIN_MODE_RESTORE_TAIL_INSERT_ON)
+    expect(term.modes.insertMode).toBe(true)
+
+    await drain(term, "XY")
+    expect(term.buffer.active.getLine(0)?.translateToString(true)).toBe(
+      "XYabcdef",
+    )
+  })
+
+  it("clears a stale insert mode a client arrived carrying", async () => {
+    // Both polarities are always emitted, so a client re-used from a program
+    // that was in insert mode comes back overwriting again.
+    const term = make()
+    await drain(term, "\x1b[4h")
+    expect(term.modes.insertMode).toBe(true)
+
+    await drain(term, "\x1b[2J\x1b[Habcdef\x1b[1;1H" + MAIN_MODE_RESTORE_TAIL)
+    expect(term.modes.insertMode).toBe(false)
+
+    await drain(term, "XY")
+    expect(term.buffer.active.getLine(0)?.translateToString(true)).toBe(
+      "XYcdef",
+    )
   })
 
   it("keeps the local scroll path on the main screen", async () => {
