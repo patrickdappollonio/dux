@@ -4112,6 +4112,54 @@ mod tests {
     }
 
     #[test]
+    fn a_scroll_step_clamps_to_the_available_history() {
+        // Both `set_scrollback` and `scroll` clamp to however much history the
+        // grid actually holds, so a seeded offset is NOT evidence that a
+        // further step of a given size is reachable. This is stated here
+        // because a TUI test relied on the opposite: it seeded 10 rows of
+        // scrollback while `seq` was still streaming (line buffered, so the
+        // lines land as many small writes), and when the poll happened to land
+        // with only 12 rows of history the seed succeeded at 10 while the
+        // 3-line wheel step could only reach 12, not 13. Roughly 1 run in 40.
+        //
+        // 35 lines into a 24-row grid leaves 12 rows above the screen, which is
+        // exactly the band that reproduced it, so the numbers below are the
+        // measured shape of that failure rather than an invented one.
+        //
+        // Be honest about what this pins: it characterises the DEPENDENCY, not
+        // dux logic. Deleting dux's own redundant clamp leaves this test still
+        // passing (measured), because the terminal library clamps first; it is
+        // kept because the scrolling helper depends on that behaviour and a
+        // dependency bump that loosened it would be caught here. It also drives
+        // `TerminalState` directly, so it skips the PtyClient/reader layer where
+        // the original flake actually lived.
+        let mut terminal = TerminalState::with_scrollback(24, 80, 12);
+        for n in 1..=60 {
+            terminal.process(format!("{n}\r\n").as_bytes());
+        }
+
+        terminal.set_scrollback(10);
+        assert_eq!(
+            terminal.scrollback_offset(),
+            10,
+            "12 rows of history must accept a seed of 10"
+        );
+
+        terminal.scroll(true, 3);
+        assert_eq!(
+            terminal.scrollback_offset(),
+            12,
+            "a 3-line step from 10 must CLAMP at the 12 rows of history \
+             available, not reach 13"
+        );
+
+        // And the clamp is the history depth, not the step size: from the top
+        // there is nowhere further to go.
+        terminal.scroll(true, 3);
+        assert_eq!(terminal.scrollback_offset(), 12);
+    }
+
+    #[test]
     fn osc_color_queries_produce_terminal_replies() {
         let mut terminal = TerminalState::with_scrollback(3, 16, 100);
 

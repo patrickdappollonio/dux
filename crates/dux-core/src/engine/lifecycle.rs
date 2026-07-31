@@ -858,19 +858,36 @@ mod tests {
         engine.providers.insert("tab-clean".into(), spawn("0"));
         engine.providers.insert("tab-crash".into(), spawn("3"));
 
-        // Wait until both children exited, then prune.
+        // Wait until both readers reached EOF, then prune ONCE.
+        //
+        // `is_exited()` alone is deliberate, and `try_wait()` must NOT be added
+        // back as a second break arm: they are different facts. `try_wait` only
+        // reaps the child and stamps the reap instant, while `is_exited` is set
+        // by the reader thread at EOF on the PTY read side. The prune policy is
+        // `agent_pty_ready_to_prune(reader_at_eof, since_reap)`, which REFUSES
+        // to prune a reaped-but-not-yet-EOF PTY until the reap is older than
+        // `REAPED_DRAIN_GRACE` (250ms), so a crash excerpt is captured off a
+        // fully drained buffer. Breaking on the reap arm lands this test inside
+        // that window, the single prune below returns nothing, and the
+        // "clean tab pruned" expect fires. Measured by construction: swapping
+        // these children for the grandchild-holding form used by
+        // `engine_with_reaped_but_undrained_agent` (where EOF never arrives)
+        // makes the reap-arm version print `PRUNED: []` and panic every run.
+        // A single prune, rather than a retry loop, is also deliberate:
+        // `agent_pty_ready_to_prune(true, _)` is unconditionally true, so a
+        // prune after EOF MUST take both tabs.
         let deadline = Instant::now() + Duration::from_secs(8);
         loop {
-            let all_done = ["tab-clean", "tab-crash"].iter().all(|id| {
-                engine
-                    .providers
-                    .get_mut(*id)
-                    .is_some_and(|c| c.is_exited() || c.try_wait().is_some())
-            });
+            let all_done = ["tab-clean", "tab-crash"]
+                .iter()
+                .all(|id| engine.providers.get(*id).is_some_and(|c| c.is_exited()));
             if all_done {
                 break;
             }
-            assert!(Instant::now() < deadline, "children never exited");
+            assert!(
+                Instant::now() < deadline,
+                "the tab PTYs never reached end of input"
+            );
             sleep(Duration::from_millis(20));
         }
         let pruned = engine.prune_exited_ptys();

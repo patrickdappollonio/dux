@@ -12849,32 +12849,56 @@ not_a_real_action = ["x"]
     }
 
     /// Spawn a real child that prints enough lines to build alacritty history,
-    /// then wait until the PTY has at least `lines` of scrollback (polling with
-    /// a reset each miss: `set_scrollback` to a positive offset PAUSES
-    /// ingestion, so a too-early probe must return to 0 or history would stop
-    /// growing and the wait could never succeed).
+    /// wait until ingestion is QUIESCENT, and only then seed the scrollback
+    /// offset to `lines`.
+    ///
+    /// Quiescence is the whole point. `seq` is line buffered on a terminal, so
+    /// its 200 lines arrive as many small writes, and the previous version of
+    /// this helper polled mid-stream: it seeded as soon as
+    /// `scrollback_offset() >= lines` succeeded, which it can while history is
+    /// still only 10, 11 or 12 rows deep. Both `set_scrollback` and `scroll`
+    /// CLAMP to the available history, and seeding a positive offset PAUSES
+    /// ingestion, so history froze wherever the poll happened to land: the seed
+    /// then succeeded at 10 while a 3-line wheel step could only reach 12, and
+    /// the caller's `assert_eq!(offset, 13)` failed. Measured at roughly 1 run
+    /// in 40.
+    ///
+    /// The child therefore prints a sentinel with NO trailing newline after the
+    /// numbers, so its cursor parks at a position no earlier write can produce
+    /// (every `seq` line ends in a newline and leaves the cursor at column 0).
+    /// `wait_for_agent_cursor` blocking on that position proves the whole
+    /// stream ahead of it was ingested, and `sleep` then keeps the PTY silent,
+    /// so 200 lines of history are all present before anything is seeded.
+    /// That guarantee rests on the tail of the command staying SILENT: anything
+    /// printed after the sentinel would move the cursor off the awaited
+    /// position, and the failure would surface as a confusing
+    /// `wait_for_agent_cursor` timeout rather than as "the sentinel is no longer
+    /// the last thing written".
     fn install_scrolled_pty(app: &mut App, lines: usize) {
         let session_id = app.engine.sessions[0].id.clone();
-        let args = vec!["-c".to_string(), "seq 1 200; sleep 30".to_string()];
+        let args = vec![
+            "-c".to_string(),
+            "seq 1 200; printf READY; sleep 30".to_string(),
+        ];
         let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 24, 80, 1000)
             .expect("spawn pty");
         app.engine.providers.insert(session_id, client);
         app.session_surface = SessionSurface::Agent;
 
+        // Last row of the 24-row grid, just past the 5-character sentinel.
+        crate::app::test_support::wait_for_agent_cursor(app, 23, 5);
+
         let provider = app
             .selected_terminal_surface_client()
             .expect("provider for selected session");
-        let mut seeded = false;
-        for _ in 0..200 {
-            provider.set_scrollback(lines);
-            if provider.scrollback_offset() >= lines {
-                seeded = true;
-                break;
-            }
-            provider.set_scrollback(0);
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        assert!(seeded, "PTY never accumulated {lines} lines of scrollback");
+        provider.set_scrollback(lines);
+        assert_eq!(
+            provider.scrollback_offset(),
+            lines,
+            "the seed itself failed: the PTY did not have {lines} rows of \
+             history to scroll back into, so any assertion about the wheel \
+             step past this point would be measuring the clamp instead"
+        );
     }
 
     /// One wheel tick over the inline PTY pane scrolls the LOCAL scrollback by

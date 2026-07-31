@@ -322,6 +322,38 @@ pub(crate) fn wait_for_agent_cursor(app: &mut App, row: u16, col: u16) {
     );
 }
 
+/// Block until the PTY client keyed by `key` has reached END OF INPUT, which is
+/// the precondition the exit-prune tests actually depend on, then return so the
+/// caller can `drain_events()` exactly ONCE and assert the prune happened.
+///
+/// Waiting on `is_exited()` alone is deliberate, and `try_wait()` must NOT be
+/// added back as a second break arm. They are different facts: `is_exited` is
+/// set by the reader thread when the read side EOFs, while `try_wait` merely
+/// reaps the child and stamps the reap instant. The prune policy is
+/// `dux_core::engine::agent_pty_ready_to_prune(reader_at_eof, since_reap)`,
+/// which REFUSES to prune a reaped-but-not-yet-EOF PTY until the reap is older
+/// than `REAPED_DRAIN_GRACE` (250ms), so a crash excerpt is captured off a
+/// fully drained buffer. Breaking out on the reap arm therefore lands the test
+/// inside that 250ms window, one drain sees nothing, and the prune assertion
+/// fires: measured at roughly 1 run in 40. `PtyClient::reaped_at`'s own doc
+/// states the same rule ("callers that need the child's output fully ingested
+/// must wait for `is_exited`").
+///
+/// A single drain, rather than a retry loop, is also deliberate:
+/// `agent_pty_ready_to_prune(true, _)` is unconditionally true, so a drain
+/// after EOF MUST prune. That is a product guarantee, and a loop would stop
+/// pinning it.
+pub(crate) fn wait_for_pty_eof(app: &App, key: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+    while !app.engine.providers.get(key).is_some_and(|c| c.is_exited()) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "PTY {key} never reached end of input"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
 /// Build the three provider pickers in a state a user can really reach:
 /// two options, the FIRST one already active (so it is the no-op row) and
 /// the second one a real change.

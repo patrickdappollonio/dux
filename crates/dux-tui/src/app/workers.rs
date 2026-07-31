@@ -1565,17 +1565,11 @@ mod tests {
         app.input_target = InputTarget::Agent;
         app.fullscreen_overlay = FullscreenOverlay::Agent;
 
-        // Wait for the child to exit, then let drain_events observe it.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
-        while !app
-            .engine
-            .providers
-            .get_mut("tab-x")
-            .is_some_and(|c| c.is_exited() || c.try_wait().is_some())
-        {
-            assert!(std::time::Instant::now() < deadline, "child never exited");
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
+        // Wait for END OF INPUT, not merely for the child to be reapable, then
+        // let a single drain_events observe it. See `wait_for_pty_eof`: a reaped
+        // but not-yet-EOF PTY is deliberately held back by REAPED_DRAIN_GRACE,
+        // so breaking out on `try_wait` makes this assertion flake.
+        crate::app::test_support::wait_for_pty_eof(&app, "tab-x");
         app.drain_events();
         assert!(
             !app.engine.providers.contains_key("tab-x"),
@@ -1623,16 +1617,10 @@ mod tests {
             .agent_viewed
             .insert(session_id.clone(), std::time::Instant::now());
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
-        while !app
-            .engine
-            .providers
-            .get_mut(&session_id)
-            .is_some_and(|c| c.is_exited() || c.try_wait().is_some())
-        {
-            assert!(std::time::Instant::now() < deadline, "child never exited");
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
+        // END OF INPUT, not `try_wait`: inside REAPED_DRAIN_GRACE the prune is
+        // deliberately deferred and one drain would see nothing. See
+        // `wait_for_pty_eof`.
+        crate::app::test_support::wait_for_pty_eof(&app, &session_id);
         app.drain_events();
 
         assert!(!app.engine.providers.contains_key(&session_id), "pruned");
