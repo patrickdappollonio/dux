@@ -13,6 +13,32 @@ jobs:
   # the static-serving tests SKIP rather than assert, so with the hatch set every
   # check here could go green on a binary with no web UI. Refuse it outright:
   # anything that builds or tests must run with the frontend build ON.
+  #
+  # EVERY job below declares `needs: no-ui-build-hatch`, including the ones that
+  # do not compile Rust. That is deliberate. CONTRIBUTING.md tells contributors
+  # this workflow refuses to run at all with the hatch set, and a guard that
+  # several jobs skip past makes that sentence false; the clippy job in particular
+  # compiled the crate (and therefore built the frontend) with no guard edge and
+  # no declared Node version, so it would have reported green on a hatched build.
+  # A blanket edge costs a few seconds of fan-out and keeps the promise exact.
+  #
+  # Know the LIMIT of this check: it reads the environment of its own job, so it
+  # catches a workflow-level `env:` and nothing else. A job-level `env:` or a
+  # committed .cargo/config.toml that injects the variable into build scripts is
+  # invisible to it, and so is a GitHub repository VARIABLE, which is not exported
+  # into the job environment at all and is only reachable through the `vars`
+  # context (so it can neither be caught here nor cause the problem in the first
+  # place). The gate that inspects the ARTIFACT rather than the configuration is
+  # .github/scripts/smoke_archive.sh, which greps the built binary for embedded
+  # content-hashed asset names; note that it runs in the RELEASE workflow only, so
+  # on a pull request there is no artifact gate and the real coverage here is the
+  # static-serving suite, which asserts the same properties with the same graph
+  # walk on every PR. Treat this job as the fast, legible failure.
+  #
+  # DUX_UI_BUILD_STATE is checked alongside the hatch, belt and braces. build.rs
+  # stamps that name on every path it takes and a cargo:rustc-env beats an ambient
+  # value, so a set one can no longer talk the suite into skipping; the two
+  # retired names could, and are listed so a branch still carrying one is caught.
   no-ui-build-hatch:
     name: Reject DUX_DISABLE_UI_BUILD
     runs-on: ubuntu-latest
@@ -20,17 +46,24 @@ jobs:
       - name: Fail if the frontend-build escape hatch is set
         run: |
           set -euo pipefail
-          if [ -n "${DUX_DISABLE_UI_BUILD:-}" ]; then
-            echo "DUX_DISABLE_UI_BUILD is set to '${DUX_DISABLE_UI_BUILD}' in this workflow's" >&2
-            echo "environment. It skips the React build, so the binary would carry no web UI" >&2
-            echo "and the static-serving tests would skip instead of asserting. Remove it." >&2
-            exit 1
-          fi
-          echo "OK: DUX_DISABLE_UI_BUILD is not set; the frontend will be built."
+          failed=""
+          for name in DUX_DISABLE_UI_BUILD DUX_UI_BUILD_STATE DUX_UI_BUILD_SKIPPED DUX_UI_BUILD_STALE; do
+            value="$(printenv "$name" || true)"
+            if [ -n "$value" ]; then
+              echo "$name is set to '$value' in this workflow's environment. It skips the" >&2
+              echo "React build or misreports whether one happened, so the binary could carry" >&2
+              echo "no web UI while the static-serving tests skip instead of asserting." >&2
+              echo "Remove it." >&2
+              failed="yes"
+            fi
+          done
+          [ -z "$failed" ] || exit 1
+          echo "OK: no frontend-build escape hatch or state marker is set; the frontend will be built."
 
   fmt:
     name: Format
     runs-on: ubuntu-latest
+    needs: no-ui-build-hatch
     steps:
       - uses: actions/checkout@v4
 
@@ -38,18 +71,36 @@ jobs:
         with:
           components: rustfmt
 
+      # No Node step: `cargo fmt` parses sources and never runs a build script,
+      # so this is the one Rust job that genuinely does not build the frontend.
       - name: Check formatting
         run: cargo fmt --check
 
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
+    # Gated, not merely accompanied. `cargo clippy` COMPILES the crate, so it runs
+    # crates/dux-web/build.rs and builds the frontend exactly as `cargo test`
+    # does; without this edge it would happily lint a hatched build and report
+    # green, which is the outcome the guard exists to prevent.
+    needs: no-ui-build-hatch
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+
+      # Node is REQUIRED here for the same reason it is in the test jobs: this job
+      # builds the frontend, and a failed frontend build is a hard build failure.
+      # The runner image happens to ship Node, which is why this worked while
+      # undeclared; relying on that turns an image update into a confusing
+      # build-script failure. Same version as every other job so they cannot drift.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: crates/dux-web/web/package-lock.json
 
       - uses: Swatinem/rust-cache@v2
 
@@ -68,6 +119,16 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # Node is REQUIRED here, not incidental: `cargo test` builds dux-web, whose
+      # build script builds the frontend, and a failed frontend build is a hard
+      # build failure. test.yml declares this and says it matches pr.yml; it did
+      # not, because pr.yml never declared it. Now both do, at the same version.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: crates/dux-web/web/package-lock.json
+
       - uses: Swatinem/rust-cache@v2
 
       - name: Run tests
@@ -76,6 +137,10 @@ jobs:
   web-lint:
     name: Web lint
     runs-on: ubuntu-latest
+    # This job runs no Rust and so cannot be fooled by the hatch. It carries the
+    # edge anyway so "this workflow refuses to run with DUX_DISABLE_UI_BUILD set"
+    # is true without an exceptions list.
+    needs: no-ui-build-hatch
     defaults:
       run:
         working-directory: crates/dux-web/web
@@ -127,6 +192,10 @@ jobs:
   dep-isolation:
     name: dux-web dependency isolation
     runs-on: ubuntu-latest
+    # `cargo tree` resolves the graph without compiling, so no build script and no
+    # frontend build. Same reasoning as web-lint: the edge keeps the promise in
+    # CONTRIBUTING.md exact rather than nearly true.
+    needs: no-ui-build-hatch
     steps:
       - uses: actions/checkout@v4
 

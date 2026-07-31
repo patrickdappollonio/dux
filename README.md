@@ -71,16 +71,26 @@ curl -sSfL https://github.com/patrickdappollonio/dux/releases/latest/download/in
 curl -sSfL https://github.com/patrickdappollonio/dux/releases/latest/download/install.sh | DUX_VERSION=v0.1.0 bash
 ```
 
-The script checks the downloaded archive against the SHA-256 checksum published beside it and refuses to install anything if the two disagree. Releases published before checksums existed do not have one, and the script says so loudly and carries on.
+The script checks the downloaded archive against the SHA-256 checksum published beside it and refuses to install anything if the two disagree. Releases published before checksums existed do not have one, and the script says so loudly and carries on. If the checksum cannot be *fetched* at all (no DNS, a refused connection, a TLS or proxy error) it says that instead, because a network problem on your machine is a different thing from a release without a checksum.
 
 **Binary download:**
 
 Grab the latest release for your platform from the [Releases](https://github.com/patrickdappollonio/dux/releases) page. Extract it, drop the `dux` binary somewhere on your `PATH`, and run it. On first launch, dux creates a fully commented config file. That file *is* the documentation.
 
-Every release also carries a `<archive>.sha256` next to each archive and a combined `dux-checksums.txt`, both in the format `sha256sum -c` (and macOS's `shasum -a 256 -c`) reads directly:
+Every release also carries a `<archive>.sha256` next to each archive and a combined `dux-checksums.txt`, both in the format `sha256sum -c` (and macOS's `shasum -a 256 -c`) reads directly.
+
+You downloaded one archive, so check it against its own file:
 
 ```bash
-# From a directory holding the downloaded archives
+# Next to the archive you downloaded
+curl -sSfLO https://github.com/patrickdappollonio/dux/releases/latest/download/dux-linux-amd64.tar.gz.sha256
+sha256sum -c dux-linux-amd64.tar.gz.sha256
+```
+
+`dux-checksums.txt` is the combined list of all four platforms. It is there for anyone mirroring or auditing a whole release, and `sha256sum -c` on it fails unless every one of the four archives is present in the directory:
+
+```bash
+# From a directory holding ALL four archives
 sha256sum -c dux-checksums.txt
 ```
 

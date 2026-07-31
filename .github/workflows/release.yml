@@ -12,6 +12,12 @@ jobs:
   # DUX_DISABLE_UI_BUILD makes crates/dux-web/build.rs skip the React build, which
   # would produce four platform archives serving a "web UI not built" notice page.
   # Every build job needs this one, so the hatch cannot ship.
+  #
+  # DUX_UI_BUILD_STATE is checked alongside it, belt and braces. build.rs stamps
+  # that name on every path it takes and a cargo:rustc-env beats an ambient value,
+  # so a set one can no longer talk the test suite into skipping; the two retired
+  # names could, and are listed here so a branch still carrying one is caught
+  # rather than quietly ignored.
   no-ui-build-hatch:
     name: Reject DUX_DISABLE_UI_BUILD
     runs-on: ubuntu-latest
@@ -19,17 +25,27 @@ jobs:
       - name: Fail if the frontend-build escape hatch is set
         run: |
           set -euo pipefail
-          if [ -n "${DUX_DISABLE_UI_BUILD:-}" ]; then
-            echo "DUX_DISABLE_UI_BUILD is set to '${DUX_DISABLE_UI_BUILD}' in this workflow's" >&2
-            echo "environment. It skips the React build, so every release archive would ship" >&2
-            echo "a placeholder page instead of the web UI. Refusing to build a release." >&2
-            exit 1
-          fi
-          echo "OK: DUX_DISABLE_UI_BUILD is not set; the web UI will be built in."
+          failed=""
+          for name in DUX_DISABLE_UI_BUILD DUX_UI_BUILD_STATE DUX_UI_BUILD_SKIPPED DUX_UI_BUILD_STALE; do
+            value="$(printenv "$name" || true)"
+            if [ -n "$value" ]; then
+              echo "$name is set to '$value' in this workflow's environment. It skips the" >&2
+              echo "React build or misreports whether one happened, so a release archive" >&2
+              echo "could ship a placeholder page instead of the web UI, or ship untested." >&2
+              echo "Refusing to build a release." >&2
+              failed="yes"
+            fi
+          done
+          [ -z "$failed" ] || exit 1
+          echo "OK: no frontend-build escape hatch or state marker is set; the web UI will be built in."
 
   prepare-release:
     name: Prepare release metadata
     runs-on: ubuntu-latest
+    # Carries the guard edge even though it only reads the tag, so that "the
+    # release workflow refuses to run with DUX_DISABLE_UI_BUILD set" is true of
+    # the whole workflow rather than of most of it.
+    needs: no-ui-build-hatch
     outputs:
       version: ${{ steps.release_version.outputs.value }}
       npm_tag: ${{ steps.npm_dist_tag.outputs.value }}
@@ -61,6 +77,11 @@ jobs:
     needs: [prepare-release, no-ui-build-hatch]
     runs-on: ${{ matrix.runner }}
     strategy:
+      # Deliberately NOT fail-fast. Nothing this job produces is publicly
+      # reachable (it uploads artifacts, not release assets), so letting the
+      # other platforms finish costs nothing and reports every broken target in
+      # one run instead of one per re-run. The gate is publish-archives below,
+      # which needs ALL of them.
       fail-fast: false
       matrix:
         include:
@@ -143,14 +164,12 @@ jobs:
       - name: Smoke-test the packaged archive
         run: .github/scripts/smoke_archive.sh ${{ matrix.archive }} ${{ matrix.target }}
 
-      - name: Upload to release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release upload ${{ github.event.release.tag_name }} \
-            ${{ matrix.archive }} ${{ matrix.archive }}.sha256
-
-      # The .sha256 rides along so the combined-checksums job can concatenate the
+      # NOTE: this job deliberately does NOT touch the release. It hands the
+      # archive to publish-archives as a workflow artifact instead, so a platform
+      # that fails cannot leave the other three downloadable against a tag that
+      # already exists. See publish-archives for the reasoning.
+      #
+      # The .sha256 rides along so the combined-checksums step can concatenate the
       # four of them without recomputing anything.
       - name: Upload archive artifact
         uses: actions/upload-artifact@v4
@@ -162,17 +181,28 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
-  # A single dux-checksums.txt holding all four lines, for a human who wants to
-  # verify a download by hand: `sha256sum -c dux-checksums.txt` in a directory
-  # holding the archives. The installer deliberately does NOT use this file, it
-  # fetches the per-archive .sha256 instead, so the install path never has to
-  # wait on a job that only finishes after the whole matrix does.
+  # THE PUBLISH GATE. Every release asset becomes publicly reachable here and
+  # nowhere else.
+  #
+  # The build matrix used to upload its own archive, which meant a platform whose
+  # smoke test failed left the other three downloadable against a tag that already
+  # existed. The tag is created before this workflow starts, so there is no
+  # "abort the release" to fall back on: the only lever is to publish nothing
+  # until every platform has passed. `needs: [build]` gives exactly that, because
+  # a needs edge requires ALL matrix legs to succeed. The smoke test still gates
+  # its own archive inside the build job; this gates the release.
+  #
+  # It also publishes a single dux-checksums.txt holding all four lines, for a
+  # human verifying a download by hand: `sha256sum -c dux-checksums.txt` in a
+  # directory holding the archives. The installer deliberately does NOT use that
+  # file, it fetches the per-archive .sha256 instead, so a single-platform user
+  # never needs the other three archives present.
   #
   # Same honesty as above: this is corruption detection and a value to check out
   # of band, not tamper protection. It is unsigned and served from the same place
   # as the archives.
-  checksums:
-    name: Publish combined checksums
+  publish-archives:
+    name: Publish archives and checksums
     needs: [build]
     runs-on: ubuntu-latest
     steps:
@@ -204,15 +234,26 @@ jobs:
           fi
           sha256sum -c dux-checksums.txt
 
+      # One upload call for everything, so the release page goes from "no assets"
+      # to "all assets" rather than filling in over several minutes.
+      #
+      # --clobber REPLACES an asset that is already there. Without it, re-running
+      # this job after a partial failure dies on the first name that already
+      # exists, which is precisely the state a re-run exists to repair.
+      #
       # No checkout in this job, so gh cannot infer the repo from a git remote.
       # GH_REPO tells it explicitly.
-      - name: Upload combined checksums to release
+      - name: Upload archives and checksums to release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          gh release upload ${{ github.event.release.tag_name }} \
-            dist/artifacts/dux-checksums.txt
+          set -euo pipefail
+          cd dist/artifacts
+          gh release upload "${{ github.event.release.tag_name }}" --clobber \
+            *.tar.gz *.tar.gz.sha256 dux-checksums.txt
+          echo "Published:"
+          ls -1
 
   build-npm-package:
     name: Build npm package
@@ -291,20 +332,33 @@ jobs:
           echo "+ ${publish_cmd[*]}"
           "${publish_cmd[@]}"
 
+  # Gated on the archives BEING PUBLISHED, not merely on the build matrix passing.
+  # The install script is not an archive, but publishing it against a tag whose
+  # archives never landed gives a user a one-line installer that 404s, and
+  # `latest/download/install.sh` resolves to whichever release most recently had
+  # one attached. Nothing becomes reachable until every archive is actually up.
+  #
+  # `needs: [build]` was the wrong edge for precisely the hazard described above:
+  # it runs this job in PARALLEL with publish-archives rather than after it, so a
+  # failed upload still left the installer attached to the tag.
+  #
+  # --clobber so re-running after a partial failure replaces the asset instead of
+  # dying on the name already being there.
   upload-install-script:
     name: Upload install script
     runs-on: ubuntu-latest
+    needs: [publish-archives]
     steps:
       - uses: actions/checkout@v4
       - name: Upload install script
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload ${{ github.event.release.tag_name }} install.sh
+        run: gh release upload "${{ github.event.release.tag_name }}" --clobber install.sh
 
   update-release-notes:
     name: Append install instructions
     runs-on: ubuntu-latest
-    needs: [build, upload-install-script]
+    needs: [build, publish-archives, upload-install-script]
     steps:
       - uses: actions/checkout@v4
 

@@ -14,18 +14,59 @@ use rust_embed::RustEmbed;
 #[folder = "web/dist"]
 struct WebAssets;
 
-/// True when this binary was compiled with `DUX_DISABLE_UI_BUILD` set and there
-/// was no previously built `web/dist` to embed, so the page served at `/` is
-/// build.rs's "web UI not built" notice rather than the real single-page app.
+/// What the page served at `/` actually is, decided at compile time by `build.rs`.
 ///
-/// `build.rs` sets `DUX_UI_BUILD_SKIPPED=1` exactly on that path (and declares
+/// Three states rather than a bool, because skipping the frontend build has two
+/// outcomes that need DIFFERENT things said about them. Telling an operator their
+/// binary "contains NO web UI" when it is serving a real (if old) one sends them
+/// hunting for the wrong problem, and so does the reverse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UiBuildState {
+    /// The frontend was built during this binary's compilation. The normal case.
+    Built,
+    /// `DUX_DISABLE_UI_BUILD` was set and there was no previously built
+    /// `web/dist`, so the page served at `/` is build.rs's notice page.
+    NotBuilt,
+    /// `DUX_DISABLE_UI_BUILD` was set and a previously built `web/dist` was
+    /// embedded unchanged. The served page is a REAL single-page app with real
+    /// hashed assets, of unknown age: it may predate this checkout by any amount.
+    StaleReuse,
+}
+
+/// Map the build-script marker onto a state. Split out from [`ui_build_state`]
+/// so it can be tested; `option_env!` is fixed at compile time and cannot be
+/// varied from a test.
+///
+/// ONE marker with three values, not two booleans, and not because it is tidier.
+/// `option_env!` reads the AMBIENT rustc environment as well as what the build
+/// script emits, and a `cargo:rustc-env` ALWAYS wins over an ambient value of the
+/// same name (measured with a throwaway crate, not assumed). The previous scheme
+/// emitted nothing at all on the SUCCESS path, so nothing overrode an ambient
+/// `DUX_UI_BUILD_SKIPPED=1`: setting it as a workflow-level `env:` made every
+/// real-build test print SKIPPED on a completely genuine build, and CI guarded
+/// only `DUX_DISABLE_UI_BUILD`. Emitting this marker on ALL THREE paths closes
+/// that, because there is no path left on which the ambient value survives.
+///
+/// An unrecognised or absent value means Built, which is the safe default here:
+/// the only states that let a test skip are the two spelled out below, so a
+/// garbled marker fails loudly against whatever page is embedded rather than
+/// quietly excusing the suite.
+fn state_from(marker: Option<&str>) -> UiBuildState {
+    match marker {
+        Some("not_built") => UiBuildState::NotBuilt,
+        Some("stale") => UiBuildState::StaleReuse,
+        _ => UiBuildState::Built,
+    }
+}
+
+/// This binary's UI build state.
+///
+/// `build.rs` sets `cargo:rustc-env=DUX_UI_BUILD_STATE` to `built`, `not_built`
+/// or `stale` on every path it can take (and declares
 /// `cargo:rerun-if-env-changed=DUX_DISABLE_UI_BUILD` so toggling the hatch is not
-/// masked by cargo's build-script cache). Two consumers read this back: the
-/// `dux server` startup banner, which turns it into a warning row, and the static
-/// serving tests, which SKIP with a printed reason rather than pass on a page
-/// that is not a build.
-pub const fn ui_build_skipped() -> bool {
-    option_env!("DUX_UI_BUILD_SKIPPED").is_some()
+/// masked by cargo's build-script cache).
+pub fn ui_build_state() -> UiBuildState {
+    state_from(option_env!("DUX_UI_BUILD_STATE"))
 }
 
 /// Operator-facing warning for a binary built without the web UI. Shown as a
@@ -35,6 +76,26 @@ pub const fn ui_build_skipped() -> bool {
 pub const UI_NOT_BUILT_WARNING: &str = "This binary was built with DUX_DISABLE_UI_BUILD set, so it contains NO web UI. \
      Every page serves a notice explaining that. Rebuild without DUX_DISABLE_UI_BUILD \
      (run `npm ci` in crates/dux-web/web first) to serve the real web UI.";
+
+/// Operator-facing warning for a binary that reused an existing `web/dist`.
+///
+/// Deliberately different wording from [`UI_NOT_BUILT_WARNING`]: there IS a web
+/// UI here and it will look completely normal, which is exactly why it has to be
+/// said out loud. Nothing records when that `dist` was built, so "old" is the
+/// strongest claim available and the message does not pretend otherwise.
+pub const UI_STALE_WARNING: &str = "This binary was built with DUX_DISABLE_UI_BUILD set and embedded a web/dist that \
+     was already on disk, so the web UI it serves was NOT built from this source \
+     and may be arbitrarily out of date. It will otherwise look and behave \
+     normally. Rebuild without DUX_DISABLE_UI_BUILD to serve a current web UI.";
+
+/// The warning row for a state, or `None` when there is nothing to say.
+pub const fn ui_build_warning(state: UiBuildState) -> Option<&'static str> {
+    match state {
+        UiBuildState::Built => None,
+        UiBuildState::NotBuilt => Some(UI_NOT_BUILT_WARNING),
+        UiBuildState::StaleReuse => Some(UI_STALE_WARNING),
+    }
+}
 
 /// Cache policy per request path. Vite fingerprints everything under `assets/`
 /// with a content hash in the filename, so a changed bundle is a changed URL and
@@ -209,6 +270,70 @@ fn inflate(bytes: &[u8]) -> std::io::Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reusing_an_existing_dist_is_a_marked_state_not_a_normal_build() {
+        // THE FINDING. build.rs used to emit nothing on the reuse path, so a
+        // binary serving an arbitrarily old UI was indistinguishable from a fresh
+        // one: no banner row, no log line, and every real-build test passing.
+        assert_eq!(state_from(Some("stale")), UiBuildState::StaleReuse);
+        assert_eq!(state_from(Some("not_built")), UiBuildState::NotBuilt);
+        assert_eq!(state_from(Some("built")), UiBuildState::Built);
+    }
+
+    #[test]
+    fn an_absent_or_garbled_marker_is_a_build_and_never_an_excuse_to_skip() {
+        // The safe default, and the reason the marker is one name rather than
+        // the two booleans it replaced. build.rs now writes this on every path it
+        // can take, so `None` cannot occur in a real build; if it somehow does,
+        // or if the value is misspelt, the suite must ASSERT against whatever is
+        // embedded rather than print SKIPPED and prove nothing. Only the two
+        // exact spellings above buy a skip.
+        assert_eq!(state_from(None), UiBuildState::Built);
+        assert_eq!(state_from(Some("")), UiBuildState::Built);
+        assert_eq!(state_from(Some("1")), UiBuildState::Built);
+        assert_eq!(state_from(Some("NOT_BUILT")), UiBuildState::Built);
+        assert_eq!(state_from(Some("skipped")), UiBuildState::Built);
+    }
+
+    #[test]
+    fn both_skip_states_warn_and_a_real_build_does_not() {
+        // What the banner and the static-serving tests gate on: "was a frontend
+        // build performed for THIS binary". False either way it was skipped, so
+        // both skip states carry a warning and only the real build is silent.
+        assert!(ui_build_warning(UiBuildState::Built).is_none());
+        assert!(ui_build_warning(UiBuildState::NotBuilt).is_some());
+        assert!(ui_build_warning(UiBuildState::StaleReuse).is_some());
+    }
+
+    #[test]
+    fn the_two_skip_warnings_say_different_things() {
+        // Collapsing these onto one message is the tempting fix and the wrong
+        // one: "contains NO web UI" is false of a reuse binary, which serves a
+        // real app, and a message the operator can see is wrong is a message
+        // they stop reading.
+        let not_built = ui_build_warning(UiBuildState::NotBuilt).unwrap();
+        let stale = ui_build_warning(UiBuildState::StaleReuse).unwrap();
+        assert_ne!(not_built, stale);
+        assert!(
+            not_built.contains("NO web UI"),
+            "the notice-page warning must say there is no web UI: {not_built}"
+        );
+        assert!(
+            !stale.contains("NO web UI"),
+            "the reuse warning must NOT claim there is no web UI, there is one: {stale}"
+        );
+        assert!(
+            stale.contains("out of date"),
+            "the reuse warning must say what is actually wrong: {stale}"
+        );
+        for warning in [not_built, stale] {
+            assert!(
+                warning.contains("DUX_DISABLE_UI_BUILD"),
+                "each warning must name the variable that caused it: {warning}"
+            );
+        }
+    }
 
     fn gzip(bytes: &[u8]) -> Vec<u8> {
         use std::io::Write;

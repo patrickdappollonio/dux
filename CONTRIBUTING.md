@@ -56,23 +56,47 @@ toolchain. What it does and does not do:
 
 - **The terminal UI is completely unaffected.** `dux` with no arguments behaves
   exactly as it does in a normal build.
-- **Server mode has no web UI to serve.** If `crates/dux-web/web/dist` is empty,
-  the binary embeds a notice page instead, and:
+- **Server mode has no web UI to serve, if `crates/dux-web/web/dist` is empty.**
+  The binary embeds a notice page instead, and:
   - every page served says the web UI was not built into this binary and how to
     rebuild it, so nobody stares at a blank screen;
   - the `dux server` startup banner carries a warning row saying the same thing;
   - `dux.log` gets a matching WARN line (this is the only one of the three the
     TUI-to-server flip reaches, since the flip keeps its themed status screen and
     must not print to stdout).
-- **The static-serving tests skip.** `crates/dux-web/tests/static_serving.rs`
-  cannot assert anything about a build that never happened, so the tests that need
-  a real build print a `SKIPPED` line and return. Run
-  `cargo test -- --nocapture` to see it. Because a skipped test is itself a place
-  for a defect to hide, the release and pull-request workflows **refuse to run at
-  all** with `DUX_DISABLE_UI_BUILD` set.
-- **An existing `dist` is left alone.** If you already have a real build in
-  `crates/dux-web/web/dist`, setting the hatch does not delete it; the build script
-  embeds it as-is and warns that it may be stale. Unset the variable to rebuild.
+- **An existing `dist` is left alone, and the binary says so.** If you already
+  have a real build in `crates/dux-web/web/dist`, setting the hatch does not
+  delete it; the build script embeds it exactly as it is. Because that binary
+  serves a real single-page app with real hashed assets, **nothing about using it
+  reveals that the UI could be arbitrarily old**, so it is marked too: the startup
+  banner and `dux.log` both carry a warning saying the web UI was not built from
+  this source. The wording differs from the notice-page one on purpose, since here
+  there IS a web UI. Unset the variable to rebuild.
+- **The static-serving tests skip, in both cases.**
+  `crates/dux-web/tests/static_serving.rs` cannot assert anything about a build
+  that never happened, so the tests that need a real build print a `SKIPPED` line
+  and return, with a reason naming which of the two cases you are in. Run
+  `cargo test -- --nocapture` to see it. That covers the reused `dist` as well:
+  those tests would otherwise pass against a UI of unknown age and tell you
+  nothing about the code you are changing. The few tests that are about ROUTING
+  rather than about the build deliberately do NOT skip; they read the same state
+  to decide whether to expect the notice page or a real single-page-app shell, so
+  they hold in both configurations.
+- **The workflows refuse to run.** Because a skipped test is itself a place for a
+  defect to hide, every job in the release and pull-request workflows depends on a
+  guard job that fails when `DUX_DISABLE_UI_BUILD` is set, or when the
+  `DUX_UI_BUILD_STATE` marker the build script stamps is set from outside. Be
+  aware of what that guard can and cannot see: it inspects its own job's
+  environment, so it catches a workflow-level `env:`, but not a job-level `env:`
+  or a committed `.cargo/config.toml` that injects the variable into build
+  scripts. A GitHub repository *variable* is neither caught nor a hazard: it is
+  not exported into the job environment at all and is reachable only through the
+  `vars` context. The gate that inspects the ARTIFACT rather than the
+  configuration is `.github/scripts/smoke_archive.sh`, which greps the built
+  binary for embedded content-hashed asset names before any release archive is
+  published. It runs in the **release** workflow only, so on a pull request there
+  is no artifact gate; the coverage there is the static-serving suite, which
+  walks the whole bundle graph and applies the same floors on every PR.
 
 Skipping the frontend build deliberately is supported. Letting a *failed* frontend
 build through quietly is not, and that distinction is the whole point of the flag.

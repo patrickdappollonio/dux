@@ -6,10 +6,8 @@
 //! A frontend build that is ATTEMPTED and fails is FATAL: this script panics and
 //! `cargo build` fails. It used to write a placeholder page, print a
 //! `cargo:warning` and succeed, which meant a release could ship four platform
-//! binaries containing "web assets not built" with every check green. There was
-//! also a fallback that silently re-embedded a previously built `dist/`, so a
-//! broken build shipped a stale UI instead. Both paths are gone: nothing here
-//! turns a failure into a successful build.
+//! binaries containing "web assets not built" with every check green. That path
+//! is gone: nothing here turns a FAILURE into a successful build.
 //!
 //! ## Escape hatch
 //!
@@ -18,13 +16,42 @@
 //! attempted at all and the Rust build succeeds. Skipping deliberately is
 //! supported; failing silently is not.
 //!
-//! When the hatch is set and there is no previously built `dist/`, this script
-//! writes a plain notice page (see `NOT_BUILT_PAGE`) and sets
-//! `cargo:rustc-env=DUX_UI_BUILD_SKIPPED=1` so the Rust side knows the embedded
-//! page is not a real build. `web_assets::ui_build_skipped` reads that back, the
-//! `dux server` startup banner turns it into a warning row, and the static
-//! serving tests use it to SKIP with a printed reason instead of passing on a
-//! page that is not a build.
+//! ## Marking the binary, in both skip cases
+//!
+//! Skipping has two outcomes, and BOTH mark the binary, because in neither case
+//! did a frontend build happen and in neither case can the user tell by looking:
+//!
+//! * **No previously built `dist/`.** This script writes a plain notice page (see
+//!   `NOT_BUILT_PAGE`) and sets `cargo:rustc-env=DUX_UI_BUILD_STATE=not_built`.
+//! * **A previously built `dist/` is present.** It is left alone and embedded as
+//!   it is, and this script sets `DUX_UI_BUILD_STATE=stale`.
+//!
+//! The second case used to set nothing at all. The result was a binary serving an
+//! arbitrarily old interface, with real hashed assets, that passed every test
+//! including the real-build ones, showed no banner row and wrote nothing to the
+//! log. A single build-time `cargo:warning` was the only trace, and nobody reads
+//! build output from last week.
+//!
+//! The state is spelled out rather than collapsed into one flag because the
+//! operator-facing message differs and the difference matters: the notice-page
+//! binary contains NO web UI, while the reuse binary contains a REAL one that may
+//! simply be old. Collapsing them would make the banner assert something false in
+//! whichever case it was not written for. `web_assets::ui_build_state` reads it
+//! back, the `dux server` startup banner turns the state into the matching
+//! warning row, and the static-serving tests use it to SKIP with a printed reason
+//! instead of passing on a page that is not a build.
+//!
+//! ## Why the SUCCESS path emits a marker too
+//!
+//! It has nothing to say, and it says it anyway, because `option_env!` reads the
+//! AMBIENT rustc environment and not only what this script emits. The earlier
+//! scheme used two markers and emitted NEITHER on success, so an ambient
+//! `DUX_UI_BUILD_SKIPPED=1` (a workflow-level `env:`, say) was never overridden
+//! and made every real-build test print SKIPPED on a genuine build, with the CI
+//! guard, which only ever looked at `DUX_DISABLE_UI_BUILD`, green throughout. A
+//! `cargo:rustc-env` always beats an ambient value of the same name (measured
+//! with a throwaway crate, not assumed), so writing the marker on EVERY path is
+//! what makes it unspoofable.
 
 use std::io::Write;
 use std::path::Path;
@@ -35,6 +62,18 @@ use flate2::write::GzEncoder;
 
 /// Set this to any non-empty value to skip the frontend build entirely.
 const DISABLE_ENV: &str = "DUX_DISABLE_UI_BUILD";
+
+/// The marker this script stamps into the binary on every path it can take, read
+/// back by `web_assets::ui_build_state`. Emitted even on success; see the module
+/// docs for why silence there was spoofable.
+const STATE_ENV: &str = "DUX_UI_BUILD_STATE";
+
+/// Stamp the UI build state into the binary. `cargo:rustc-env` overrides any
+/// ambient value of the same name, which is the whole point of calling this on
+/// the success path as well as the two skip paths.
+fn mark_state(state: &str) {
+    println!("cargo:rustc-env={STATE_ENV}={state}");
+}
 
 /// Sentinel embedded in `NOT_BUILT_PAGE` so a LATER build can tell "this dist is
 /// my own notice page" from "this dist is a real build".
@@ -50,11 +89,20 @@ const DISABLE_ENV: &str = "DUX_DISABLE_UI_BUILD";
 const NOT_BUILT_SENTINEL: &str = "dux-ui-not-built-notice";
 
 /// The page embedded when the frontend build was deliberately skipped and there
-/// is no previously built `dist/` to embed. Deliberately NOT the SPA shell: it
-/// carries no `id="root"` and no hashed asset reference, so neither a browser nor
-/// a test can mistake it for a real build. A user who reaches the server in a
+/// is no previously built `dist/` to embed. A user who reaches the server in a
 /// browser must be told what happened and how to fix it rather than staring at a
 /// blank page.
+///
+/// Deliberately NOT the SPA shell: it carries no `id="root"` and no hashed asset
+/// reference. Be precise about what that does and does not buy, because an
+/// earlier version of this comment claimed the page carries nothing a test could
+/// mistake for a build, and two tests in `tests/static_serving.rs` were at that
+/// moment asserting only `<!doctype html> OR id="root"`, which this page
+/// satisfies, since it is a real HTML document with a doctype. What the missing
+/// root element and missing hashed reference defeat is a test that checks for
+/// THOSE; they cannot defeat a test that checks for a doctype. The tests were
+/// corrected rather than the page, and the sentence is now scoped to what it can
+/// actually support.
 const NOT_BUILT_PAGE: &str = r#"<!doctype html>
 <!-- dux-ui-not-built-notice -->
 <html lang="en">
@@ -122,9 +170,44 @@ fn main() {
     println!("cargo:rerun-if-changed=web/package.json");
     println!("cargo:rerun-if-changed=web/package-lock.json");
     println!("cargo:rerun-if-changed=web/vite.config.ts");
+    // The rest of the build's inputs. `npm run build` runs tsc before Vite, so a
+    // tsconfig edit (a compiler target, a path alias, strictness) changes the
+    // output; the lint config is part of what `npm run build` can fail on; and
+    // web/scripts holds the helper scripts package.json invokes. Without these,
+    // editing a compiler target and rebuilding left the OLD bundle embedded,
+    // which looks exactly like the change having no effect.
+    println!("cargo:rerun-if-changed=web/tsconfig.json");
+    println!("cargo:rerun-if-changed=web/tsconfig.app.json");
+    println!("cargo:rerun-if-changed=web/tsconfig.node.json");
+    println!("cargo:rerun-if-changed=web/eslint.config.js");
+    // KNOWN GAP, deliberately not "fixed": emptying web/dist WITHOUT touching a
+    // source file leaves this script un-run, rust-embed then bakes in zero files,
+    // and the server answers 404 at the root with no warning anywhere. Measured,
+    // not theorised: `rm -rf web/dist/*` followed by `cargo build -p dux-web`
+    // re-runs this script ZERO times and leaves dist empty.
+    //
+    // The obvious repair, `cargo:rerun-if-changed=web/dist`, is WORSE, and that
+    // was measured too: it re-runs this script on EVERY build, forever. Cargo
+    // creates its `invoked.timestamp` BEFORE running a build script, so any file
+    // the script itself writes under a watched path is newer than the reference
+    // the next build compares against, and the path is permanently dirty. Both
+    // Vite and the gzip step below write all over web/dist, so watching it means
+    // running `npm run build` on every single cargo invocation. Preserving mtimes
+    // across the gzip does not save it either, because the Vite run inside the
+    // same script rewrites the files regardless.
+    //
+    // Watching a generated directory is simply not what rerun-if-changed is for.
+    // The real fix is to stop generating into the watched tree at all: stage the
+    // gzipped output under OUT_DIR and point rust-embed's `folder` there, leaving
+    // web/dist as pure Vite output. That is a layout change spanning this file and
+    // web_assets.rs, so it is written down here rather than smuggled in.
+    //
+    // Until then: if the root 404s, run `touch crates/dux-web/web/index.html` (or
+    // any web source) and rebuild.
+    println!("cargo:rerun-if-changed=web/scripts");
     // Without this, cargo caches the build-script result and toggling the hatch
-    // appears to do nothing: the stale `DUX_UI_BUILD_SKIPPED` (or its absence)
-    // sticks across builds. Verified by probe, not assumed.
+    // appears to do nothing: the previous `DUX_UI_BUILD_STATE` sticks across
+    // builds. Verified by probe, not assumed.
     println!("cargo:rerun-if-env-changed={DISABLE_ENV}");
 
     let dist = web.join("dist");
@@ -163,6 +246,11 @@ fn main() {
         fail("the frontend build reported success but left no web/dist/index.html");
     }
 
+    // A real build. Say so explicitly: an ambient DUX_UI_BUILD_STATE would
+    // otherwise reach `option_env!` unopposed and could talk the test suite into
+    // skipping on a genuine build. See the module docs.
+    mark_state("built");
+
     // Gzip the text assets IN PLACE so rust-embed bakes the compressed bytes into
     // the binary (and `web_assets` serves them with `Content-Encoding: gzip`).
     // Runs after the Vite build (which writes raw files); idempotent via the gzip
@@ -195,14 +283,22 @@ fn fail(what: &str) -> ! {
 
 /// The deliberate-skip path. Nothing failed here, so an already-built `dist/` is
 /// left exactly as it is and embedded: destroying a good build would be worse
-/// than embedding one that may be a few commits stale, and the warning says so.
-/// With no `dist/` at all, write the notice page and tell the Rust side that the
-/// embedded page is not a build.
+/// than embedding one that may be a few commits stale. With no `dist/` at all,
+/// write the notice page.
+///
+/// Either way the binary is MARKED as not carrying a fresh build. The reuse path
+/// is the one that needs saying twice, because it is invisible: the binary serves
+/// a real single-page app with real hashed assets, so nothing about running it
+/// suggests the source in this checkout was never compiled into it.
 fn skip_frontend_build(dist: &Path, dist_index: &Path) {
     if dist_index.exists() && !is_not_built_notice(dist_index) {
+        mark_state("stale");
         println!(
             "cargo:warning=dux-web: {DISABLE_ENV} is set, so the frontend build was skipped. \
-             Embedding the existing web/dist, which may be stale. Unset {DISABLE_ENV} to rebuild it."
+             Embedding the existing web/dist, which may be ARBITRARILY stale. This binary is \
+             marked as carrying no fresh web UI: `dux server` says so in its startup banner and \
+             in dux.log, and the static-serving tests skip rather than assert against it. Unset \
+             {DISABLE_ENV} to rebuild it."
         );
         return;
     }
@@ -211,7 +307,7 @@ fn skip_frontend_build(dist: &Path, dist_index: &Path) {
         .unwrap_or_else(|err| {
             panic!("dux-web: could not write the notice page to {dist_index:?}: {err}")
         });
-    println!("cargo:rustc-env=DUX_UI_BUILD_SKIPPED=1");
+    mark_state("not_built");
     println!(
         "cargo:warning=dux-web: {DISABLE_ENV} is set and web/dist is empty, so this binary has NO \
          web UI. Server mode will serve a notice page explaining that. The terminal UI is \
