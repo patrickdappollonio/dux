@@ -1,0 +1,51 @@
+{
+  "note": "Release-body entries that BOTH surfaces must judge the same way. Read by `the_two_surfaces_agree_on_every_shared_release_body_fixture` in crates/dux-core/src/release_notes.rs and by releaseNotes.test.ts in crates/dux-web/web. `renderable` is what `entry_is_renderable` / `entryIsRenderable` must answer. The four cases marked `divergence` were measured disagreeing before the matchers were built from the shared invisible set and given the same single left-to-right pass: one surface showed the notes and the other the no-notes explanation for the same release.",
+  "cases": [
+    {
+      "what": "an HTML break split by a next-line character",
+      "entry": "<br\u0085/>",
+      "renderable": false,
+      "divergence": "Rust's char::is_whitespace covers U+0085 and JavaScript's \\s does not, so this was empty in the terminal and renderable in the browser"
+    },
+    {
+      "what": "an HTML break split by a byte-order mark",
+      "entry": "<br\uFEFF>",
+      "renderable": false,
+      "divergence": "JavaScript's \\s covers U+FEFF and Rust's char::is_whitespace does not, so this was empty in the browser and renderable in the terminal"
+    },
+    {
+      "what": "a self-closed HTML break split by a byte-order mark",
+      "entry": "<br\uFEFF/>",
+      "renderable": false,
+      "divergence": "same U+FEFF split, on the self-closing spelling"
+    },
+    {
+      "what": "an HTML break interrupted by a comment",
+      "entry": "<br<!--x-->>",
+      "renderable": true,
+      "divergence": "the web ran comments, breaks and invisibles as three sequential passes, so removing the comment first MANUFACTURED a break out of text that never held one; one left-to-right pass on both sides leaves the visible `<br>` text instead"
+    },
+    { "what": "a plain HTML break", "entry": "<br>", "renderable": false },
+    { "what": "a self-closed HTML break", "entry": "<br />", "renderable": false },
+    { "what": "an uppercase HTML break", "entry": "<BR/>", "renderable": false },
+    {
+      "what": "an HTML break spaced with an ordinary space",
+      "entry": "<br  / >",
+      "renderable": false
+    },
+    { "what": "the rule the release pipeline appends", "entry": "---", "renderable": false },
+    { "what": "a zero-width space", "entry": "\u200B", "renderable": false },
+    { "what": "a next-line character", "entry": "\u0085", "renderable": false },
+    { "what": "a byte-order mark", "entry": "\uFEFF", "renderable": false },
+    { "what": "an unterminated HTML comment", "entry": "<!-- oops", "renderable": false },
+    { "what": "ordinary prose", "entry": "Fixes the thing.", "renderable": true },
+    { "what": "prose around a break", "entry": "Line one<br>line two.", "renderable": true },
+    {
+      "what": "prose around a comment",
+      "entry": "A note <!-- aside --> that still reads.",
+      "renderable": true
+    },
+    { "what": "a lone dash, which is not a thematic break", "entry": "-", "renderable": true },
+    { "what": "text that merely starts like a break", "entry": "<breaking change>", "renderable": true }
+  ]
+}

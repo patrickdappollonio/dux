@@ -196,12 +196,12 @@ impl SessionStore {
             "auto_reopen_enabled",
             "integer not null default 1",
         )?;
-        // Persisted per-project display order for agent sessions. The ALTER runs
-        // in AUTOCOMMIT (same duplicate-column-tolerance rationale as
-        // `initial_branch` above); the backfill numbers positions per project
-        // from the legacy `updated_at DESC` order so the visible order is
-        // preserved exactly across the upgrade, and it runs inside its own
-        // transaction (see `backfill_session_sort_order`).
+        // Persisted display order for agent sessions. The ALTER runs in AUTOCOMMIT
+        // (same duplicate-column-tolerance rationale as `initial_branch` above);
+        // the backfill numbers positions GLOBALLY (agents are one flat list) from
+        // the legacy `updated_at DESC` order so the visible order is preserved
+        // exactly across the upgrade, and it runs inside its own transaction (see
+        // `backfill_session_sort_order`).
         //
         // Retryable: run the backfill when the column was just added, OR when a
         // prior crash stranded the table in the gap between the (autocommitted)
@@ -982,9 +982,10 @@ impl SessionStore {
     }
 
     /// One-time backfill run when the `sort_order` column is first added to an
-    /// existing `agent_sessions` table. Numbers each project's sessions
-    /// `0,1,2,…` following the legacy `updated_at DESC` order so the visible
-    /// order is preserved exactly after the upgrade.
+    /// existing `agent_sessions` table. Numbers ALL sessions `0,1,2,…` in one
+    /// global sequence (agents are a single flat list) following the legacy
+    /// `updated_at DESC` order, so the visible order is preserved exactly after
+    /// the upgrade.
     fn backfill_session_sort_order(&self) -> Result<()> {
         // Assign a GLOBAL 0..n order (flat model: agents are one independent list).
         // Order by the CURRENT effective order (`sort_order asc, updated_at desc` —

@@ -153,12 +153,19 @@ Whatever detail you like here.
 More detail.
 ```
 
+Two generators add to whatever you write, and both **append**, after your own
+sections: GitHub's "Generate release notes" button adds `## What's Changed` at the
+end (look at the body of any past dux release), and the release workflow then adds
+a `---` rule and a `## Installation` section after that. Nothing is ever prepended,
+which is why your own `## ` line has to be the first thing in the body.
+
 The rules, and what breaks if you skip one:
 
 - **The body MUST begin with a single `## ` line.** That line becomes the screen's
-  title. Skip it and the first `## ` in the file is GitHub's own
+  title. Skip it and the first `## ` in the file is GitHub's appended
   `## What's Changed`, so *that* becomes the headline, and any `### ` in the
-  machine-written tail is merged into your feature list.
+  machine-written tail is merged into your feature list. Write nothing at all and
+  the screen renders the commit list as one run-on paragraph.
 - **Feature titles are `### ` lines.** They are rendered as a bulleted
   "In this release" list.
 - **`# `, `#### `, and `##Title` (no space) are not headings to this parser.** They
@@ -166,19 +173,26 @@ The rules, and what breaks if you skip one:
 - **Only the prose before the first `### ` is shown.** The body text under each
   feature is deliberately dropped: the screen shows titles and links to the full
   notes for the rest.
-- **The parse stops at the SECOND `## ` line.** That is how GitHub's
-  `## What's Changed` and the release workflow's appended `## Installation` are
-  kept off the screen. Do not use `## ` for anything of your own.
+- **The parse stops at the SECOND `## ` line.** That is how both appended
+  sections, `## What's Changed` and `## Installation`, are kept off the screen. Do
+  not use `## ` for anything of your own.
 - **Close every code fence.** An unterminated ` ``` ` swallows the rest of the
   body.
-- **A body of only a headline shows no notes.** It is handled (both screens say
-  "This release published no notes we could read" and point at the full notes),
-  but it is not what you want for a release people are upgrading into.
+- **A body with no readable notes says so.** A headline and nothing else is the
+  obvious case, but so are a body that is only the appended `---` rule, only an
+  HTML comment or `<br>`, or only invisible characters such as a zero-width space
+  or a byte-order mark. Both screens then say "This release published no notes we
+  could read" and point at the full notes. That is handled, but it is not what you
+  want for a release people are upgrading into.
 
-A malformed body never panics and never blanks the screen; the failure mode is a
-screen that says less than it should. `crates/dux-core/src/release_notes.rs` holds
-a test per shape above, so if you change the parser those tests are the contract
-to read first.
+A malformed body never panics. It can leave the screen with nothing to show, and
+then the screen SAYS so rather than rendering an empty panel; the failure mode is a
+screen that says less than it should, not a blank one.
+`crates/dux-core/src/release_notes.rs` holds a test per shape above, so if you
+change the parser those tests are the contract to read first. The web mirrors the
+"is there a body" rule in `crates/dux-web/web/src/lib/releaseNotes.ts`, and a Rust
+test reads that file back so the two surfaces cannot drift into disagreeing about
+the same release.
 
 ## Interactive testing
 

@@ -38,25 +38,175 @@ impl ParsedBody {
     /// empty, and an empty body area with no explanation is the failure this
     /// predicate exists to detect. See [`ReleaseNotes::has_renderable_body`],
     /// which is the one the screens actually call.
+    ///
+    /// Delegates rather than repeating the rule: this and
+    /// [`ReleaseNotes::has_renderable_body`] used to be byte-identical copies of
+    /// the same three lines, free to drift apart with only one of them under test.
     pub fn has_renderable_body(&self) -> bool {
-        has_content(&self.paragraphs) || has_content(&self.sections)
+        body_is_renderable(&self.paragraphs, &self.sections)
     }
 }
 
-/// Whether any entry carries non-whitespace text. A vector of empty strings is
-/// not content: a release heading that was entirely inline markup collapses to
-/// `""`, and rendering that as a lone blank bullet is the same empty screen with
-/// extra steps.
+/// THE predicate: whether a parsed body has anything worth putting under the
+/// title. The single definition behind both `has_renderable_body` methods and the
+/// thing `hasRenderableBody` in `crates/dux-web/web/src/lib/releaseNotes.ts`
+/// mirrors.
+pub fn body_is_renderable(paragraphs: &[String], sections: &[String]) -> bool {
+    has_content(paragraphs) || has_content(sections)
+}
+
+/// Whether any entry carries text a reader would actually see. A vector of empty
+/// strings is not content: a release heading that was entirely inline markup
+/// collapses to `""`, and rendering that as a lone blank bullet is the same empty
+/// screen with extra steps.
 fn has_content(entries: &[String]) -> bool {
-    entries.iter().any(|entry| !entry.trim().is_empty())
+    entries.iter().any(|entry| entry_is_renderable(entry))
+}
+
+/// The code points BOTH surfaces treat as invisible.
+///
+/// Neither language's own `trim` can be the definition, because they trim
+/// DIFFERENT sets, which is a real divergence and not a theoretical one: Rust
+/// trims U+0085 (next line) and JavaScript does not; JavaScript trims U+FEFF
+/// (byte-order mark) and Rust does not. So the same release body emptied out in
+/// the browser and kept a body in the terminal, or the reverse, and the two
+/// screens disagreed about whether to show the no-notes explanation.
+///
+/// The set is Unicode `White_Space` (which is exactly what `char::is_whitespace`
+/// answers, U+0085 included) plus the zero-width characters, which are worse than
+/// whitespace: they render as literally nothing, so a body made of them is the
+/// original blank-panel bug with an extra step. The web declares the same set as
+/// `INVISIBLE_CODE_POINTS`, and a test here reads that declaration back.
+///
+/// Sharing the SET is not on its own enough, and for a while it was all that was
+/// shared: [`html_line_break_at`] still asked `char::is_whitespace` about the gaps
+/// inside a `<br>` while the web asked `\s`, so `<br` U+0085 `/>` and `<br` U+FEFF
+/// `/>` still landed on opposite answers, measured. Both matchers now call this
+/// function, and `tests/fixtures/release_notes_cross_language.json` pins the
+/// ANSWERS from both languages rather than only the set.
+pub fn is_invisible_char(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '\u{200B}'..='\u{200D}' | '\u{2060}' | '\u{FEFF}')
+}
+
+/// Whether one parsed entry (an intro paragraph or a feature title) is worth
+/// rendering.
+///
+/// Emptiness is not enough of a test. The release pipeline appends a horizontal
+/// rule before its `## Installation` section, so the commonest degraded body in
+/// practice parses to a headline plus a paragraph of `---`, and rendering a title
+/// above a lone dash-run is the blank panel with one extra character. HTML line
+/// breaks and comments are the same story: legal in a release body, meaningless
+/// to a parser that renders plain text.
+fn entry_is_renderable(entry: &str) -> bool {
+    let visible = strip_invisible_markup(entry);
+    !visible.is_empty() && !is_thematic_break(&visible)
+}
+
+/// Drops HTML comments, HTML line breaks, and every invisible code point, leaving
+/// what a reader would actually see. Char-based throughout (see
+/// [`parse_release_body`]).
+fn strip_invisible_markup(entry: &str) -> String {
+    let chars: Vec<char> = entry.chars().collect();
+    let mut out = String::with_capacity(entry.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if matches_at(&chars, i, "<!--") {
+            // An unterminated comment swallows the rest, which is what a Markdown
+            // renderer does with it too.
+            i = match find_at(&chars, i + 4, "-->") {
+                Some(close) => close + 3,
+                None => chars.len(),
+            };
+            continue;
+        }
+        if let Some(after) = html_line_break_at(&chars, i) {
+            i = after;
+            continue;
+        }
+        if !is_invisible_char(chars[i]) {
+            out.push(chars[i]);
+        }
+        i += 1;
+    }
+    out
+}
+
+/// The index just past a `<br>`, `<br/>`, or `<br />` starting at `i`, if there is
+/// one. Case-insensitive, because release bodies are hand-written HTML-in-Markdown.
+///
+/// The gaps are measured with [`is_invisible_char`], NOT with `char::is_whitespace`.
+/// Asking each language what whitespace is, is the very bug the shared set exists to
+/// close: `char::is_whitespace` covers U+0085 and excludes U+FEFF, and JavaScript's
+/// `\s` does the opposite, so `<br` U+0085 `/>` was empty here and renderable in the
+/// browser while `<br` U+FEFF `/>` was the reverse. The cases are in
+/// `tests/fixtures/release_notes_cross_language.json`, which both surfaces read.
+fn html_line_break_at(chars: &[char], i: usize) -> Option<usize> {
+    if chars.get(i) != Some(&'<') {
+        return None;
+    }
+    if !chars
+        .get(i + 1)
+        .is_some_and(|c| c.eq_ignore_ascii_case(&'b'))
+    {
+        return None;
+    }
+    if !chars
+        .get(i + 2)
+        .is_some_and(|c| c.eq_ignore_ascii_case(&'r'))
+    {
+        return None;
+    }
+    let mut j = i + 3;
+    while chars.get(j).is_some_and(|c| is_invisible_char(*c)) {
+        j += 1;
+    }
+    if chars.get(j) == Some(&'/') {
+        j += 1;
+        while chars.get(j).is_some_and(|c| is_invisible_char(*c)) {
+            j += 1;
+        }
+    }
+    (chars.get(j) == Some(&'>')).then_some(j + 1)
+}
+
+/// Whether the visible remainder is a Markdown thematic break: three or more of
+/// the same `-`, `*`, or `_`. The spaced forms (`- - -`) arrive here already
+/// closed up, because the spaces are invisible and have been dropped.
+fn is_thematic_break(visible: &str) -> bool {
+    let mut chars = visible.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !matches!(first, '-' | '*' | '_') {
+        return false;
+    }
+    visible.chars().count() >= 3 && chars.all(|c| c == first)
+}
+
+fn matches_at(chars: &[char], i: usize, needle: &str) -> bool {
+    needle
+        .chars()
+        .enumerate()
+        .all(|(offset, want)| chars.get(i + offset) == Some(&want))
+}
+
+fn find_at(chars: &[char], from: usize, needle: &str) -> Option<usize> {
+    (from..chars.len()).find(|i| matches_at(chars, *i, needle))
 }
 
 /// Splits a release body into headline, intro paragraphs, and feature titles.
 ///
-/// Stops at the SECOND `## ` heading, which is where GitHub's auto-generated
-/// `## What's Changed` commit list and the release workflow's appended
-/// `## Installation` boilerplate begin. Everything after that is machine-written
-/// and not worth showing in a modal.
+/// Stops at the SECOND `## ` heading, which is where the machine-written tail
+/// begins. BOTH generators APPEND: GitHub's auto-generated `## What's Changed`
+/// commit list lands after every human-written section (check the body of any
+/// real dux release), and the release workflow then appends a horizontal rule and
+/// `## Installation`. Everything after that second heading is machine-written and
+/// not worth showing in a modal.
+///
+/// Getting that direction right matters for the next reader, not for the code: it
+/// is why the human's own `## ` line comes FIRST and is therefore the headline,
+/// and why a body with no human `## ` line hands the headline to the boilerplate
+/// instead of merely stopping early.
 ///
 /// Char-based throughout: release prose is full of multi-byte punctuation and
 /// byte slicing would panic mid-character.
@@ -202,8 +352,10 @@ pub struct ReleaseNotes {
 /// full notes are one click away. Never an empty pane with no explanation.
 ///
 /// The TUI renders this string directly. The web keeps its own copy in
-/// `FirstLoadDialog.tsx` (a TS surface cannot import a Rust const); if you reword
-/// one, reword the other.
+/// `crates/dux-web/web/src/lib/releaseNotes.ts` (a TS surface cannot import a Rust
+/// const), which `FirstLoadDialog.tsx` imports; if you reword one, reword the
+/// other. `the_web_mirror_of_the_no_notes_surface_has_not_drifted` reads that file
+/// and fails if you do not.
 pub const NO_NOTES_EXPLANATION: &str =
     "This release published no notes we could read. Open the full notes to see what changed.";
 
@@ -217,7 +369,7 @@ impl ReleaseNotes {
     /// `whats_new_lines`, and the web in `FirstLoadDialog`. Living here rather
     /// than being re-derived per surface is what keeps them saying the same thing.
     pub fn has_renderable_body(&self) -> bool {
-        has_content(&self.paragraphs) || has_content(&self.sections)
+        body_is_renderable(&self.paragraphs, &self.sections)
     }
 }
 
@@ -885,10 +1037,10 @@ mod tests {
 
     #[test]
     fn a_body_that_is_only_a_headline_leaves_the_screen_with_nothing_but_a_title() {
-        // Very reachable: dux's release workflow APPENDS `## Installation`, and
-        // GitHub prepends `## What's Changed`, so a one-line human headline plus
-        // that boilerplate parses to a headline and nothing else. Both screens
-        // must say so rather than showing a blank body.
+        // Very reachable: GitHub APPENDS `## What's Changed` and dux's release
+        // workflow APPENDS `## Installation` after it, so a one-line human
+        // headline plus that boilerplate parses to a headline and nothing else.
+        // Both screens must say so rather than showing a blank body.
         let n = parse_release_body("## Quieter plumbing\n\n## What's Changed\n* a PR\n");
         assert_eq!(n.headline, "Quieter plumbing");
         assert!(n.paragraphs.is_empty(), "{n:#?}");
@@ -973,12 +1125,57 @@ Its description.
             vec!["First feature", "Second feature", "Bumped a dependency"],
             "boilerplate subsections are merged into the feature list: {n:#?}"
         );
-        // The commit bullets themselves are still dropped, because prose is only
-        // collected before the first feature section.
+        // The commit bullets are dropped HERE, but not as a general property:
+        // prose is only collected before the first feature section, and this
+        // fixture happens to have one. Remove the `### ` lines and the same
+        // bullets become intro prose. See
+        // `a_body_of_only_generated_notes_renders_the_commit_list_as_prose`.
         assert!(
             !n.paragraphs.iter().any(|p| p.contains("a PR by")),
             "{n:#?}"
         );
+    }
+
+    /// The shape a release gets when the human writes NOTHING and only ticks
+    /// "Generate release notes": no `## ` of their own, so the boilerplate heading
+    /// becomes the title, and with no `### ` anywhere the commit bullets are
+    /// collected as INTRO PROSE. They are also merged, because consecutive
+    /// non-blank lines join into one paragraph, so the screen renders the commit
+    /// list as a single run-on sentence with the `*` markers stripped.
+    ///
+    /// Measured and pinned rather than fixed: it is machine text rendered as human
+    /// prose, it is ugly, and it is exactly what the format rules in
+    /// CONTRIBUTING.md exist to prevent. Recorded here so the "bullets are
+    /// dropped" claim above cannot be read as a general one again.
+    ///
+    /// The exact strings below are MEASURED. `strip_inline_markup` eats the `*`
+    /// bullet marker along with the emphasis markers, so each line keeps the space
+    /// that followed it and the join leaves a double space in the middle. A first
+    /// draft of this test predicted the markers would survive and was wrong.
+    #[test]
+    fn a_body_of_only_generated_notes_renders_the_commit_list_as_prose() {
+        let body = "\
+## What's Changed
+* First PR by @someone in https://example.invalid/1
+* Second PR by @other in https://example.invalid/2
+
+**Full Changelog**: https://example.invalid/compare
+";
+        let n = parse_release_body(body);
+        assert_eq!(n.headline, "What's Changed");
+        assert!(n.sections.is_empty(), "{n:#?}");
+        assert_eq!(
+            n.paragraphs,
+            vec![
+                " First PR by @someone in https://example.invalid/1  \
+                 Second PR by @other in https://example.invalid/2",
+                "Full Changelog: https://example.invalid/compare",
+            ],
+            "two separate bullets merged into one run-on paragraph: {n:#?}"
+        );
+        // ...and it counts as a body, so the screen shows this rather than the
+        // no-notes explanation. Degraded, not blank.
+        assert!(n.has_renderable_body());
     }
 
     #[test]
@@ -1099,6 +1296,203 @@ Its description.
             }
             .has_renderable_body()
         );
+    }
+
+    /// THE SHAPE THE RELEASE PIPELINE ITSELF PRODUCES. `.github/workflows/release.yml`
+    /// appends a horizontal rule and then `## Installation`, so a release whose
+    /// human-written part is a single `## ` line leaves the parser a headline and
+    /// that rule. The rule is not a heading, so it was collected as intro PROSE
+    /// and the screen rendered a title above a literal `---`: the empty panel with
+    /// one extra character.
+    #[test]
+    fn the_separator_the_release_pipeline_appends_is_not_a_body() {
+        let body = "## Quieter plumbing\n\n---\n\n## Installation\n\nbrew install dux\n";
+        let n = parse_release_body(body);
+        assert_eq!(n.headline, "Quieter plumbing");
+        assert!(
+            !n.has_renderable_body(),
+            "a horizontal rule is not notes; the screen owes the reader an explanation: {n:#?}"
+        );
+    }
+
+    /// The same shape with GitHub's generated section present as well, which is
+    /// what a release with "Generate release notes" ticked actually looks like.
+    #[test]
+    fn a_headline_a_rule_and_the_generated_section_still_leave_no_body() {
+        let body = "## Quieter plumbing\n\n## What's Changed\n* a PR by @someone\n\n---\n\n## Installation\n";
+        let n = parse_release_body(body);
+        assert!(!n.has_renderable_body(), "{n:#?}");
+    }
+
+    /// Bodies a human would call empty that used to count as renderable. Each one
+    /// put the screen back where it started: a title over something invisible or
+    /// meaningless, with no explanation and nothing to do.
+    #[test]
+    fn bodies_that_look_empty_to_a_human_are_treated_as_empty() {
+        let cases = [
+            ("a horizontal rule", "## T\n\n---\n"),
+            ("an asterisk rule", "## T\n\n***\n"),
+            ("an underscore rule", "## T\n\n___\n"),
+            ("a spaced rule", "## T\n\n- - -\n"),
+            ("an HTML line break", "## T\n\n<br>\n"),
+            ("a self-closed HTML line break", "## T\n\n<br />\n"),
+            ("a zero-width space", "## T\n\n\u{200B}\n"),
+            ("a byte-order mark", "## T\n\n\u{FEFF}\n"),
+            ("a next-line character", "## T\n\n\u{0085}\n"),
+            (
+                "an HTML comment",
+                "## T\n\n<!-- release notes go here -->\n",
+            ),
+            ("an unterminated HTML comment", "## T\n\n<!-- oops\n"),
+        ];
+        for (what, body) in cases {
+            let n = parse_release_body(body);
+            assert!(!n.has_renderable_body(), "{what} counted as a body: {n:#?}");
+        }
+    }
+
+    /// ...and the guard must not swallow real notes that merely contain one of
+    /// those characters.
+    #[test]
+    fn a_body_that_only_contains_a_rule_or_a_break_still_renders() {
+        for body in [
+            "## T\n\nBefore --- after.\n",
+            "## T\n\nLine one<br>line two.\n",
+            "## T\n\nA note <!-- with an aside --> that still reads.\n",
+            "## T\n\n### A feature\n",
+        ] {
+            let n = parse_release_body(body);
+            assert!(n.has_renderable_body(), "{body:?} -> {n:#?}");
+        }
+    }
+
+    /// The two surfaces must agree on what counts as invisible, or the same
+    /// release shows a body in the browser and the no-notes explanation in the
+    /// terminal. They cannot share code, so they share an explicit code-point set
+    /// instead: `String::trim` and JavaScript's `String.prototype.trim` do NOT
+    /// trim the same characters (measured: Rust trims U+0085 and JS does not; JS
+    /// trims U+FEFF and Rust does not), so neither language's own trim can be the
+    /// definition.
+    #[test]
+    fn the_invisible_set_covers_what_each_languages_own_trim_would_miss() {
+        // Rust's `trim` misses this one; the browser's would have emptied it.
+        assert!(is_invisible_char('\u{FEFF}'), "byte-order mark");
+        // JavaScript's `trim` misses this one; Rust's would have emptied it.
+        assert!(is_invisible_char('\u{0085}'), "next line");
+        // Zero-width characters render as literally nothing on both surfaces.
+        for c in ['\u{200B}', '\u{200C}', '\u{200D}', '\u{2060}'] {
+            assert!(is_invisible_char(c), "{:04X}", c as u32);
+        }
+        // ...and ordinary text is not invisible.
+        for c in ['a', '-', '#', '日', '🦆'] {
+            assert!(!is_invisible_char(c), "{c}");
+        }
+    }
+
+    /// CROSS-LANGUAGE PIN, in the same idiom as `editor_keys_match_the_typescript_menu`:
+    /// the web mirrors this module's predicate and its explanation string, and a
+    /// TS surface cannot import a Rust const. So a Rust test READS the TypeScript
+    /// and fails when the two drift. Skips when the web tree isn't present (a
+    /// crate build outside the workspace).
+    #[test]
+    fn the_web_mirror_of_the_no_notes_surface_has_not_drifted() {
+        let ts_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../dux-web/web/src/lib/releaseNotes.ts");
+        let Ok(source) = std::fs::read_to_string(&ts_path) else {
+            eprintln!("skipping: {} not present", ts_path.display());
+            return;
+        };
+
+        // 1. The explanation string, character for character.
+        let quoted = format!("\"{NO_NOTES_EXPLANATION}\"");
+        assert!(
+            source.contains(&quoted),
+            "releaseNotes.ts no longer carries NO_NOTES_EXPLANATION verbatim; \
+             reword both sides in the same change. Expected to find {quoted}"
+        );
+
+        // 2. The invisible code-point set, as a set rather than as text: every
+        //    code point the web calls invisible, this module must too, and the
+        //    other way round.
+        // The declaration, not the mentions of it in the comments. The formatter
+        // is free to wrap after the `=`, so take everything up to the first quote
+        // rather than assuming the literal is on the same line.
+        let declared = source
+            .split("INVISIBLE_CODE_POINTS =")
+            .nth(1)
+            .and_then(|rest| rest.split_once('"'))
+            .and_then(|(_, rest)| rest.split('"').next())
+            .expect("releaseNotes.ts must declare INVISIBLE_CODE_POINTS");
+        let mut from_ts: Vec<u32> = Vec::new();
+        for range in declared.split(',') {
+            let mut ends = range.split('-').map(|hex| {
+                u32::from_str_radix(hex.trim(), 16)
+                    .unwrap_or_else(|_| panic!("not a code point: {hex:?}"))
+            });
+            let start = ends.next().expect("a range needs a start");
+            let end = ends.next().unwrap_or(start);
+            from_ts.extend(start..=end);
+        }
+        from_ts.sort_unstable();
+
+        let mut from_rust: Vec<u32> = (0u32..=0x10FFFF)
+            .filter(|point| char::from_u32(*point).is_some_and(is_invisible_char))
+            .collect();
+        from_rust.sort_unstable();
+
+        assert_eq!(
+            from_rust, from_ts,
+            "the invisible-character set has drifted between release_notes.rs and \
+             releaseNotes.ts, so the same release body can show a body on one \
+             surface and the no-notes explanation on the other"
+        );
+    }
+
+    /// The other half of the cross-language pin, and the half that catches a
+    /// divergence the code-point comparison above cannot see: the two surfaces can
+    /// hold the same invisible SET and still disagree, because each `<br>` matcher
+    /// used to ask its own language what whitespace is, and because the web ran
+    /// three sequential passes where this module runs one left-to-right.
+    ///
+    /// Both surfaces read the SAME fixture file, so a fixture case only passes when
+    /// both agree with it (`releaseNotes.test.ts` reads it too, by relative path).
+    #[test]
+    fn the_two_surfaces_agree_on_every_shared_release_body_fixture() {
+        let cases = shared_cross_language_cases();
+        assert!(
+            cases.len() >= 10,
+            "the shared fixture lost its cases: {}",
+            cases.len()
+        );
+        for case in cases {
+            let what = case["what"].as_str().expect("every case names itself");
+            let entry = case["entry"].as_str().expect("every case has an entry");
+            let want = case["renderable"]
+                .as_bool()
+                .expect("every case says what it must answer");
+            assert_eq!(
+                entry_is_renderable(entry),
+                want,
+                "{what}: {entry:?} (visible remainder {:?})",
+                strip_invisible_markup(entry)
+            );
+        }
+    }
+
+    /// The shared fixture, or an empty list when the file is missing (a crate build
+    /// outside the workspace), in the same idiom as the TypeScript-reading test
+    /// above.
+    fn shared_cross_language_cases() -> Vec<serde_json::Value> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/release_notes_cross_language.json");
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let parsed: serde_json::Value =
+            serde_json::from_str(&source).expect("the shared fixture must be valid JSON");
+        parsed["cases"]
+            .as_array()
+            .expect("the shared fixture must hold a `cases` array")
+            .clone()
     }
 
     #[test]

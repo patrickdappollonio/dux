@@ -17,7 +17,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use toml_edit::{Array, DocumentMut, Formatted, InlineTable, Item, Key, Table, Value};
+use toml_edit::{Array, Decor, DocumentMut, Formatted, InlineTable, Item, Key, Table, Value};
 
 /// Permission bits for `config.toml`: owner read/write only (`0600`). The file
 /// may hold secrets such as tokens under `[env]`, so it must not be group/world
@@ -716,48 +716,230 @@ const PROJECT_MANAGED_KEYS: &[&str] = &[
 /// field; only the writer refuses to emit it.
 const PROJECT_KEYS_DROPPED_ON_WRITE: &[&str] = &["leading_branch"];
 
-/// Every key the user's own `[[projects]]` entries carry that this writer does
-/// not manage, indexed by project `id` so it survives projects being added,
-/// removed, or reordered between saves.
+/// One existing `[[projects]]` entry's user-owned material, captured before the
+/// rebuild replaces it.
+#[derive(Default)]
+struct CarriedProject {
+    /// The entry's `id`, when it wrote one. A hand-written entry may legally leave
+    /// it out: `ProjectConfig::id` carries `#[serde(default = "new_project_id")]`,
+    /// so the loader mints an identifier and the file works. Such an entry used to
+    /// be SKIPPED here, which deleted both its unmanaged keys and its comment on
+    /// the next save (measured on the file in
+    /// `patch_keeps_the_keys_and_comment_of_an_entry_that_carries_no_id`).
+    id: Option<String>,
+    /// The entry's `path` AS SPELLED IN THE FILE. It is the fallback identity for
+    /// an entry with no id, and the tie-breaker between two entries that share one.
+    ///
+    /// The raw spelling is deliberately not normalized: the loader env-expands the
+    /// path, so `$HOME/p` in the file is `/home/user/p` in memory and the two do
+    /// not compare equal. A miss is the correct outcome there. Guessing past it
+    /// would mean attaching one project's keys to another project's entry, which is
+    /// worse than dropping them.
+    path: Option<String>,
+    /// The comment block the user wrote ABOVE the entry, as comment lines with the
+    /// surrounding whitespace already dropped (see [`carried_comment_prefix`]).
+    /// `toml_edit` files it on the entry's own decor rather than on any of its keys,
+    /// so carrying the keys alone deleted it.
+    ///
+    /// Present for BOTH spellings. The array-of-tables spelling keeps it on the
+    /// table's decor; the multi-line `projects = [ ... ]` spelling can carry a
+    /// comment between its elements (legal TOML, and pure user data), and
+    /// `toml_edit` files that on the following element's value decor.
+    header_comment: Option<String>,
+    /// The comment block written between the `[[projects]]` header and the entry's
+    /// FIRST key. `toml_edit` files that as the first key's prefix, and the first
+    /// key is `id`, which this writer rebuilds from scratch, so it reached neither
+    /// the decor carry nor the key carry and was deleted.
+    first_key_comment: Option<String>,
+    /// The keys this writer does not manage, each with its own [`Key`] so a
+    /// comment attached to it travels along, exactly as in
+    /// [`merge_unmanaged_keys`].
+    keys: Vec<(Key, Item)>,
+}
+
+/// Every key and comment the user's own `[[projects]]` entries carry that this
+/// writer does not manage, in FILE ORDER. Each entry keeps its own identity
+/// (`id`, `path`) so it can be matched back to the right project even when
+/// projects were added, removed, or reordered between saves.
 ///
 /// Captured BEFORE the rebuild below. `patch_projects` replaces the whole array
-/// of tables (it has to: a project can be removed, and per-project keys are
-/// optional, so there is no in-place edit that covers every case), and without
-/// this capture that replacement silently deleted anything the user had put
-/// there. Each key is carried with its own [`Key`], so a comment attached to it
-/// travels along, exactly as in [`merge_unmanaged_keys`].
-fn unmanaged_project_keys(doc: &DocumentMut) -> BTreeMap<String, Vec<(Key, Item)>> {
-    let mut carried: BTreeMap<String, Vec<(Key, Item)>> = BTreeMap::new();
-    let Some(existing) = doc.get("projects").and_then(Item::as_array_of_tables) else {
-        return carried;
-    };
-    for table in existing.iter() {
-        // No `id` means nothing to match the rebuilt entry against, so there is
-        // no safe place to put the extras back. A project without an id also
-        // cannot round-trip through `ProjectConfig`, so this cannot happen for a
-        // config dux itself wrote.
-        let Some(id) = table.get("id").and_then(Item::as_str) else {
-            continue;
-        };
-        let names: Vec<String> = table
-            .iter()
-            .map(|(key, _)| key.to_string())
-            .filter(|key| {
-                !PROJECT_MANAGED_KEYS.contains(&key.as_str())
-                    && !PROJECT_KEYS_DROPPED_ON_WRITE.contains(&key.as_str())
-            })
-            .collect();
-        if names.is_empty() {
-            continue;
-        }
-        let entry = carried.entry(id.to_string()).or_default();
-        for name in names {
-            if let Some((key, item)) = table.get_key_value(&name) {
-                entry.push((key.clone(), item.clone()));
+/// (it has to: a project can be removed, and per-project keys are optional, so
+/// there is no in-place edit that covers every case), and without this capture
+/// that replacement silently deleted anything the user had put there.
+///
+/// BOTH legal spellings of the array are read. `[[projects]]` (an array of
+/// tables) is what dux writes, but `projects = [ { ... } ]` (an array of inline
+/// tables) parses to the identical `Config`, so a user who hand-wrote that form
+/// has a working config, and reading only one spelling deleted their keys on the
+/// next save.
+///
+/// Every entry is captured, including one with no unmanaged keys and one with no
+/// `id` at all, because the comments hang off the entry rather than off its keys.
+/// [`take_carried_project`] owns the matching rules.
+fn unmanaged_project_keys(doc: &DocumentMut) -> Vec<Option<CarriedProject>> {
+    let mut carried: Vec<Option<CarriedProject>> = Vec::new();
+    match doc.get("projects") {
+        Some(Item::ArrayOfTables(existing)) => {
+            for table in existing.iter() {
+                let keys: Vec<(Key, Item)> = table
+                    .iter()
+                    .map(|(name, _)| name.to_string())
+                    .filter(|name| is_unmanaged_project_key(name))
+                    .filter_map(|name| {
+                        table
+                            .get_key_value(&name)
+                            .map(|(key, item)| (key.clone(), item.clone()))
+                    })
+                    .collect();
+                // Only when the first key is one this writer REBUILDS. An
+                // unmanaged key written first keeps that comment on its own decor
+                // and is carried with it, so re-homing it onto `id` as well
+                // duplicated it further down the file on every save.
+                let first_key_comment = table
+                    .iter()
+                    .next()
+                    .filter(|(name, _)| !is_unmanaged_project_key(name))
+                    .and_then(|(name, _)| table.get_key_value(name))
+                    .and_then(|(key, _)| decor_comment(key.leaf_decor()));
+                carried.push(Some(CarriedProject {
+                    id: table.get("id").and_then(Item::as_str).map(str::to_string),
+                    path: table.get("path").and_then(Item::as_str).map(str::to_string),
+                    header_comment: decor_comment(table.decor()),
+                    first_key_comment,
+                    keys,
+                }));
             }
         }
+        Some(Item::Value(Value::Array(existing))) => {
+            for value in existing.iter() {
+                let Some(inline) = value.as_inline_table() else {
+                    continue;
+                };
+                let keys: Vec<(Key, Item)> = inline
+                    .iter()
+                    .map(|(name, _)| name.to_string())
+                    .filter(|name| is_unmanaged_project_key(name))
+                    .filter_map(|name| {
+                        inline
+                            .get_key_value(&name)
+                            .map(|(key, item)| (strip_inline_decor(key), item.clone()))
+                    })
+                    .map(|(key, item)| (key, block_spaced_item(item)))
+                    .collect();
+                carried.push(Some(CarriedProject {
+                    id: inline.get("id").and_then(Value::as_str).map(str::to_string),
+                    path: inline
+                        .get("path")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    // A comment written between two elements of a multi-line array
+                    // is filed as the prefix of the element that FOLLOWS it, which
+                    // is where an inline entry's comment lives. (A comment after the
+                    // LAST element is the array's own trailing trivia and is not an
+                    // entry's data, the same call the array-of-tables spelling makes
+                    // for a comment below the last key.)
+                    header_comment: decor_comment(value.decor()),
+                    // An inline table is one line, so there is no "between the
+                    // header and the first key" position to capture.
+                    first_key_comment: None,
+                    keys,
+                }));
+            }
+        }
+        // No projects yet, or a `projects` key of some other type entirely (a
+        // string, say). Nothing to carry, and the rebuild replaces it.
+        _ => {}
     }
     carried
+}
+
+/// The captured entry that belongs to `project`, removed from `carried` so no two
+/// projects can claim the same one.
+///
+/// Identity is tried in three steps, most specific first:
+///
+/// 1. the PAIR of `id` and raw `path`. Matching on the id alone kept each entry's
+///    keys with whatever landed in the same SLOT, so two entries sharing an id
+///    (a hand-edit the project sync rejects, but that a file can hold) swapped
+///    their keys the moment the two projects were reordered in memory: measured,
+///    `/b` came back carrying `/a`'s key.
+/// 2. the `id` alone, because the raw path is not always comparable: the loader
+///    env-expands it, so a file that spells it `$HOME/p` holds `/home/ada/p` in
+///    memory and never matches on the pair.
+/// 3. the raw `path` alone, and only for an entry that carried NO id, whose id was
+///    minted by the loader and therefore cannot match anything in the file.
+///
+/// Step 3 accepts a miss (an id-less entry whose path is env-expanded loses its
+/// extras) rather than guessing, because the wrong guess attaches one project's
+/// keys and comments to a different project's worktree.
+fn take_carried_project(
+    carried: &mut [Option<CarriedProject>],
+    project: &ProjectConfig,
+) -> Option<CarriedProject> {
+    let position = |matches: &dyn Fn(&CarriedProject) -> bool| {
+        carried
+            .iter()
+            .position(|slot| slot.as_ref().is_some_and(matches))
+    };
+    let found = position(&|entry: &CarriedProject| {
+        entry.id.as_deref() == Some(project.id.as_str())
+            && entry.path.as_deref() == Some(project.path.as_str())
+    })
+    .or_else(|| {
+        position(&|entry: &CarriedProject| entry.id.as_deref() == Some(project.id.as_str()))
+    })
+    .or_else(|| {
+        position(&|entry: &CarriedProject| {
+            entry.id.is_none() && entry.path.as_deref() == Some(project.path.as_str())
+        })
+    })?;
+    carried[found].take()
+}
+
+/// A key carried out of an inline table, with the inline spacing dropped.
+///
+/// Inside `{ id = "a", note = 1 }` the key records a leading and trailing space of
+/// its own; pasted into a block table those become ` note = 1 `. The document still
+/// reparses, so this is cosmetic, but it accumulates over saves.
+fn strip_inline_decor(key: &Key) -> Key {
+    let mut key = key.clone();
+    *key.leaf_decor_mut() = Decor::default();
+    key
+}
+
+/// The same for the value half of a carried inline entry: back to the default
+/// decor, so the block table spaces it the way it spaces everything else.
+fn block_spaced_item(mut item: Item) -> Item {
+    if let Some(value) = item.as_value_mut() {
+        *value.decor_mut() = Decor::default();
+    }
+    item
+}
+
+/// Whether a key found in an existing project entry is the user's rather than
+/// this writer's, and so has to be carried over.
+fn is_unmanaged_project_key(name: &str) -> bool {
+    !PROJECT_MANAGED_KEYS.contains(&name) && !PROJECT_KEYS_DROPPED_ON_WRITE.contains(&name)
+}
+
+/// The comment lines in a captured decor prefix, or `None` when it holds only the
+/// whitespace `toml_edit` records by default.
+///
+/// The whitespace is deliberately NOT kept. Pasting the recorded prefix verbatim
+/// re-used the source entry's own separation, and the file's FIRST entry has no
+/// leading blank line because nothing precedes it, so moving that project to
+/// second position ran the two entries together (measured in
+/// `a_commented_project_moved_later_keeps_a_blank_line_before_its_header`). Only
+/// the comment lines are the user's data; the spacing around them belongs to
+/// wherever the entry ends up.
+fn decor_comment(decor: &Decor) -> Option<String> {
+    let prefix = decor.prefix().and_then(|prefix| prefix.as_str())?;
+    let comments: Vec<&str> = prefix
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with('#'))
+        .collect();
+    (!comments.is_empty()).then(|| comments.join("\n"))
 }
 
 fn patch_projects(doc: &mut DocumentMut, projects: &[ProjectConfig]) {
@@ -791,12 +973,27 @@ fn patch_projects(doc: &mut DocumentMut, projects: &[ProjectConfig]) {
             }
             table["env"] = toml_edit::value(Value::InlineTable(inline));
         }
-        // Put the user's own keys back, after the ones dux manages. `remove` so a
-        // duplicate id (which the project sync rejects, but which a hand-edited
-        // file can hold) contributes its extras once rather than to every entry.
-        if let Some(extras) = carried.remove(&project.id) {
-            for (key, item) in extras {
+        // Put the user's own keys and comments back. The source entry is matched
+        // by identity rather than by position (see `take_carried_project`) and is
+        // consumed, so no two rebuilt entries can claim the same one.
+        if let Some(extras) = take_carried_project(&mut carried, project) {
+            for (key, item) in extras.keys {
                 table.insert_formatted(&key, item);
+            }
+            // The comment block the user wrote above this entry's header, which
+            // lives on the entry's decor rather than on any of its keys. The
+            // leading newline is what separates it from whatever now precedes it,
+            // whether or not anything did in the source file.
+            if let Some(comment) = extras.header_comment {
+                table.decor_mut().set_prefix(format!("\n{comment}\n"));
+            }
+            // ...and the comment block between the header and the first key, which
+            // `toml_edit` files as the prefix of that first key. The rebuilt first
+            // key is always `id`, written just above.
+            if let Some(comment) = extras.first_key_comment
+                && let Some(mut key) = table.key_mut("id")
+            {
+                key.leaf_decor_mut().set_prefix(format!("{comment}\n"));
             }
         }
         array.push(table);
@@ -1653,6 +1850,454 @@ unknown_key = \"untouched\"
         assert!(
             !saved.contains("note_a"),
             "a removed project's keys must go with it: {saved}"
+        );
+    }
+
+    /// A bare `ProjectConfig` with only the two required fields, for the carry
+    /// tests below.
+    fn bare_project(id: &str, path: &str) -> ProjectConfig {
+        ProjectConfig {
+            id: id.to_string(),
+            path: path.to_string(),
+            name: None,
+            default_provider: None,
+            leading_branch: None,
+            auto_reopen_agents: None,
+            startup_command: None,
+            env: BTreeMap::new(),
+        }
+    }
+
+    /// `projects = [ { ... } ]` is the OTHER legal TOML spelling of the same
+    /// array. `toml` loads it identically, so a user who writes it that way has a
+    /// working config, and the carry has to see it too. It used to look only for
+    /// the array-of-tables spelling, so the key survived one spelling and was
+    /// deleted in the other.
+    #[test]
+    fn patch_keeps_a_hand_added_key_written_in_the_inline_array_spelling() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        fs::write(
+            &config_path,
+            "projects = [ { id = \"project-1\", path = \"/p\", custom_note = \"hand added\" } ]\n",
+        )
+        .expect("write initial");
+
+        let mut config = Config::default();
+        config.projects.push(bare_project("project-1", "/p"));
+
+        patch_config_file(&config_path, &config).expect("patch");
+
+        let saved = fs::read_to_string(&config_path).expect("read back");
+        assert!(
+            saved.contains("custom_note = \"hand added\""),
+            "the inline-array spelling lost the hand-added key: {saved}"
+        );
+    }
+
+    /// Two entries sharing an id is a hand-edit dux itself never writes, and the
+    /// project sync rejects it. The writer still must not SCRAMBLE it: each
+    /// entry's own extras belong to that entry, matched by occurrence, and a key
+    /// name reused across the two must not be collapsed to one value.
+    #[test]
+    fn duplicate_project_ids_keep_their_own_keys_rather_than_pooling_them() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        fs::write(
+            &config_path,
+            "[[projects]]\nid = \"dup\"\npath = \"/a\"\nnote = \"from-first\"\n\n\
+             [[projects]]\nid = \"dup\"\npath = \"/b\"\nnote = \"from-second\"\n",
+        )
+        .expect("write initial");
+
+        let mut config = Config::default();
+        config.projects.push(bare_project("dup", "/a"));
+        config.projects.push(bare_project("dup", "/b"));
+
+        patch_config_file(&config_path, &config).expect("patch");
+
+        let saved = fs::read_to_string(&config_path).expect("read back");
+        let doc: DocumentMut = saved.parse().expect("reparse");
+        let entries = doc
+            .get("projects")
+            .and_then(Item::as_array_of_tables)
+            .expect("projects array");
+        assert_eq!(entries.len(), 2, "{saved}");
+        assert_eq!(
+            entries
+                .get(0)
+                .and_then(|t| t.get("note"))
+                .and_then(Item::as_str),
+            Some("from-first"),
+            "the first entry lost its own key: {saved}"
+        );
+        assert_eq!(
+            entries
+                .get(1)
+                .and_then(|t| t.get("note"))
+                .and_then(Item::as_str),
+            Some("from-second"),
+            "the second entry's key was pooled onto the first: {saved}"
+        );
+    }
+
+    /// A comment block written ABOVE a `[[projects]]` header is user data, and it
+    /// used to be deleted on save: `toml_edit` files it on the entry's own decor
+    /// rather than on any of its keys, so carrying the keys was not enough.
+    #[test]
+    fn patch_keeps_the_comment_written_above_a_project_header() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        fs::write(
+            &config_path,
+            "# projects I care about\n\
+             [[projects]]\n\
+             id = \"project-1\"\n\
+             path = \"/p\"\n",
+        )
+        .expect("write initial");
+
+        let mut config = Config::default();
+        config.projects.push(bare_project("project-1", "/p"));
+
+        patch_config_file(&config_path, &config).expect("patch");
+
+        let saved = fs::read_to_string(&config_path).expect("read back");
+        let lines: Vec<&str> = saved.lines().collect();
+        let header = lines
+            .iter()
+            .position(|l| l.trim() == "[[projects]]")
+            .unwrap_or_else(|| panic!("the projects header vanished: {saved}"));
+        assert_eq!(
+            lines.get(header.wrapping_sub(1)).map(|l| l.trim()),
+            Some("# projects I care about"),
+            "the comment above the header was deleted or moved: {saved}"
+        );
+    }
+
+    /// A comment written after the LAST key of the last entry is NOT the entry's
+    /// data in `toml_edit`'s model: it becomes the prefix of whatever item follows
+    /// it, or the DOCUMENT's trailing trivia when nothing does. So a save that
+    /// appends sections (which every save does, materializing keys the file
+    /// predates) leaves it at the very end of the file, below those new sections.
+    ///
+    /// It is not lost, and it is not the projects rebuild that moves it. Re-homing
+    /// it onto the entry would mean guessing that document-trailing trivia belongs
+    /// to whichever block happened to be last, which would just as readily steal a
+    /// comment the user wrote about the file as a whole. Measured and pinned
+    /// rather than "fixed", so the next reader knows which of the two it is.
+    #[test]
+    fn a_comment_below_the_last_project_key_survives_but_stays_document_trailing() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        fs::write(
+            &config_path,
+            "[[projects]]\n\
+             id = \"project-1\"\n\
+             path = \"/p\"\n\
+             # a note at the end of this entry\n",
+        )
+        .expect("write initial");
+
+        let mut config = Config::default();
+        config.projects.push(bare_project("project-1", "/p"));
+
+        patch_config_file(&config_path, &config).expect("patch");
+
+        let saved = fs::read_to_string(&config_path).expect("read back");
+        assert!(
+            saved.contains("# a note at the end of this entry"),
+            "the trailing comment was deleted outright: {saved}"
+        );
+        assert_eq!(
+            saved.trim_end().lines().last().map(str::trim),
+            Some("# a note at the end of this entry"),
+            "trailing trivia is expected to render last, below the appended sections: {saved}"
+        );
+    }
+
+    /// An entry with no `id` is a legal, loadable hand-edit: `ProjectConfig::id`
+    /// carries `#[serde(default = "new_project_id")]`, so the loader mints one and
+    /// the file keeps working. The capture used to SKIP such an entry, which threw
+    /// away both its unmanaged keys and the comment above its header. `path` is the
+    /// only other stable field the rebuild writes, so it is the fallback identity.
+    #[test]
+    fn patch_keeps_the_keys_and_comment_of_an_entry_that_carries_no_id() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        fs::write(
+            &config_path,
+            "# my only project\n\
+             [[projects]]\n\
+             path = \"/p\"\n\
+             custom_note = \"hand added\"\n",
+        )
+        .expect("write initial");
+
+        // What the loader does with that file: it mints an id and keeps the path.
+        let loaded: Config = toml::from_str(&fs::read_to_string(&config_path).expect("read"))
+            .expect("a project entry with no id must still load");
+        assert_eq!(loaded.projects.len(), 1);
+        assert_eq!(loaded.projects[0].path, "/p");
+        assert!(!loaded.projects[0].id.is_empty(), "the loader mints an id");
+
+        patch_config_file(&config_path, &loaded).expect("patch");
+
+        let saved = fs::read_to_string(&config_path).expect("read back");
+        assert!(
+            saved.contains("custom_note = \"hand added\""),
+            "an entry with no id lost its hand-added key: {saved}"
+        );
+        assert!(
+            saved.contains("# my only project"),
+            "an entry with no id lost the comment above its header: {saved}"
+        );
+    }
+
+    /// A comment sitting BETWEEN the `[[projects]]` header and the first key is
+    /// filed by `toml_edit` as the prefix of that first key, which is `id`, a
+    /// managed key rebuilt from scratch. Carrying only the header decor therefore
+    /// deleted it. The fixture puts a comment in five different positions so the
+    /// test says which ones survive rather than testing one and hoping.
+    #[test]
+    fn patch_keeps_a_comment_in_every_position_inside_a_project_entry() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        fs::write(
+            &config_path,
+            "# 1 above the header\n\
+             [[projects]]\n\
+             # 2 between the header and the first key\n\
+             id = \"project-1\"\n\
+             path = \"/p\"\n\
+             # 3 above an unmanaged key\n\
+             custom_note = \"hand added\" # 4 at the end of its line\n\
+             # 5 after the last key\n",
+        )
+        .expect("write initial");
+
+        let mut config = Config::default();
+        config.projects.push(bare_project("project-1", "/p"));
+
+        patch_config_file(&config_path, &config).expect("patch");
+
+        let saved = fs::read_to_string(&config_path).expect("read back");
+        for comment in [
+            "# 1 above the header",
+            "# 2 between the header and the first key",
+            "# 3 above an unmanaged key",
+            "# 4 at the end of its line",
+            // Position 5 is document-trailing trivia in `toml_edit`'s model and is
+            // pinned separately by
+            // `a_comment_below_the_last_project_key_survives_but_stays_document_trailing`.
+            "# 5 after the last key",
+        ] {
+            assert!(saved.contains(comment), "{comment:?} was deleted: {saved}");
+        }
+        // ...and position 2 is still where it was written, not floated elsewhere.
+        let lines: Vec<&str> = saved.lines().collect();
+        let header = lines
+            .iter()
+            .position(|l| l.trim() == "[[projects]]")
+            .unwrap_or_else(|| panic!("the projects header vanished: {saved}"));
+        assert_eq!(
+            lines.get(header + 1).map(|l| l.trim()),
+            Some("# 2 between the header and the first key"),
+            "the comment under the header moved: {saved}"
+        );
+        // The file still parses, which a mis-placed decor prefix can break.
+        let _: Config = toml::from_str(&saved).expect("reparse");
+
+        // A carried prefix is re-captured on the next save, so it has to settle
+        // rather than grow a blank line per save. Measured from the SECOND save
+        // on: the first save also materializes sections the file predates (here
+        // `[macros]`) and re-appends the rebuilt `projects` array after them, which
+        // moves the array within the document exactly once and is unrelated to the
+        // carry. Saves two and three are byte-identical.
+        patch_config_file(&config_path, &config).expect("second save");
+        let second = fs::read_to_string(&config_path).expect("read back");
+        patch_config_file(&config_path, &config).expect("third save");
+        assert_eq!(
+            fs::read_to_string(&config_path).expect("read back"),
+            second,
+            "the carried comments must settle rather than drift on every save"
+        );
+        for comment in [
+            "# 1 above the header",
+            "# 2 between the header and the first key",
+            "# 3 above an unmanaged key",
+            "# 4 at the end of its line",
+            "# 5 after the last key",
+        ] {
+            assert!(
+                second.contains(comment),
+                "{comment:?} survived one save and was lost by the next: {second}"
+            );
+        }
+    }
+
+    /// The comment above the entry's FIRST key is re-homed onto the rebuilt `id`,
+    /// but only when the source's first key was one this writer rebuilds. When the
+    /// user put an UNMANAGED key first, that same comment also travels on the key's
+    /// own decor, and carrying it twice duplicates it further down the file.
+    #[test]
+    fn a_comment_above_an_unmanaged_first_key_is_carried_once_not_twice() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        fs::write(
+            &config_path,
+            "[[projects]]\n\
+             # about the note\n\
+             custom_note = \"hand added\"\n\
+             id = \"project-1\"\n\
+             path = \"/p\"\n",
+        )
+        .expect("write initial");
+
+        let mut config = Config::default();
+        config.projects.push(bare_project("project-1", "/p"));
+
+        patch_config_file(&config_path, &config).expect("patch");
+
+        let saved = fs::read_to_string(&config_path).expect("read back");
+        assert_eq!(
+            saved.matches("# about the note").count(),
+            1,
+            "the comment was carried twice: {saved}"
+        );
+    }
+
+    /// Two entries sharing an id is a hand-edit the project sync rejects, but the
+    /// writer must not SCRAMBLE it. Matching by occurrence alone kept each entry's
+    /// keys with whatever landed in the same SLOT, so merely reordering the two in
+    /// memory moved one project's key onto the other, a different worktree.
+    /// Identity is therefore the pair of id and path.
+    #[test]
+    fn duplicate_project_ids_keep_their_own_keys_when_the_entries_are_reordered() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        fs::write(
+            &config_path,
+            "[[projects]]\nid = \"dup\"\npath = \"/a\"\nnote = \"from-a\"\n\n\
+             [[projects]]\nid = \"dup\"\npath = \"/b\"\nnote = \"from-b\"\n",
+        )
+        .expect("write initial");
+
+        let mut config = Config::default();
+        config.projects.push(bare_project("dup", "/b"));
+        config.projects.push(bare_project("dup", "/a"));
+
+        patch_config_file(&config_path, &config).expect("patch");
+
+        let saved = fs::read_to_string(&config_path).expect("read back");
+        let doc: DocumentMut = saved.parse().expect("reparse");
+        let entries = doc
+            .get("projects")
+            .and_then(Item::as_array_of_tables)
+            .expect("projects array");
+        let note_at = |index: usize| {
+            entries
+                .get(index)
+                .and_then(|t| t.get("note"))
+                .and_then(Item::as_str)
+                .map(str::to_string)
+        };
+        assert_eq!(
+            entries
+                .get(0)
+                .and_then(|t| t.get("path"))
+                .and_then(Item::as_str),
+            Some("/b"),
+            "{saved}"
+        );
+        assert_eq!(
+            note_at(0).as_deref(),
+            Some("from-b"),
+            "/b took /a's key: {saved}"
+        );
+        assert_eq!(
+            note_at(1).as_deref(),
+            Some("from-a"),
+            "/a took /b's key: {saved}"
+        );
+    }
+
+    /// `projects = [ ... ]` spelled across several lines can carry a comment
+    /// BETWEEN its elements, which is legal TOML and pure user data. `toml_edit`
+    /// files it as the prefix of the element that follows, so it is carryable
+    /// exactly like an array-of-tables header comment, and it used to be dropped.
+    #[test]
+    fn patch_keeps_comments_written_between_inline_array_entries() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        fs::write(
+            &config_path,
+            "projects = [\n  \
+             # about a\n  \
+             { id = \"a\", path = \"/a\", note_a = 1 },\n  \
+             # about b\n  \
+             { id = \"b\", path = \"/b\" },\n  \
+             # about c\n  \
+             { id = \"c\", path = \"/c\" },\n]\n",
+        )
+        .expect("write initial");
+
+        let mut config = Config::default();
+        config.projects.push(bare_project("a", "/a"));
+        config.projects.push(bare_project("b", "/b"));
+        config.projects.push(bare_project("c", "/c"));
+
+        patch_config_file(&config_path, &config).expect("patch");
+
+        let saved = fs::read_to_string(&config_path).expect("read back");
+        for comment in ["# about a", "# about b", "# about c"] {
+            assert!(
+                saved.contains(comment),
+                "the inline-array spelling dropped {comment:?}: {saved}"
+            );
+        }
+        // ...and the key carried out of an inline table is re-spaced for the block
+        // table it lands in, rather than bleeding its inline spacing. Asserted as a
+        // whole LINE, because `contains("note_a = 1")` also matches the bleeding
+        // form `" note_a = 1 "` and so would pass without the fix.
+        assert!(
+            saved.lines().any(|line| line == "note_a = 1"),
+            "the carried key kept its inline spacing: {saved}"
+        );
+    }
+
+    /// The carried prefix is normalized to the comment lines rather than pasted
+    /// verbatim. The recorded prefix of the FILE'S FIRST entry has no leading blank
+    /// line (nothing precedes it), so pasting it onto that project once it has moved
+    /// to second position ran the two entries together.
+    #[test]
+    fn a_commented_project_moved_later_keeps_a_blank_line_before_its_header() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        fs::write(
+            &config_path,
+            "# about a\n[[projects]]\nid = \"a\"\npath = \"/a\"\n\n\
+             [[projects]]\nid = \"b\"\npath = \"/b\"\n",
+        )
+        .expect("write initial");
+
+        let mut config = Config::default();
+        config.projects.push(bare_project("b", "/b"));
+        config.projects.push(bare_project("a", "/a"));
+
+        patch_config_file(&config_path, &config).expect("patch");
+
+        let saved = fs::read_to_string(&config_path).expect("read back");
+        let lines: Vec<&str> = saved.lines().collect();
+        let comment = lines
+            .iter()
+            .position(|l| l.trim() == "# about a")
+            .unwrap_or_else(|| panic!("the comment was deleted: {saved}"));
+        assert!(
+            lines
+                .get(comment.wrapping_sub(1))
+                .is_some_and(|l| l.trim().is_empty()),
+            "the moved entry ran into the one above it: {saved}"
         );
     }
 

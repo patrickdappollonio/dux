@@ -32,6 +32,9 @@ use dux_core::config_write::{Durability, patch_config_file_with, save_config_wit
 ///
 /// - `[server] bind` is a DEPRECATED key with a migration to `host`/`port`.
 /// - `[server] max_websocket_connections` is a RETIRED key with no replacement.
+/// - `[server] access_log` is a plain, still-current key set AWAY from its default,
+///   sitting in the same section as the retired one. It is what proves the retired
+///   key does not cost the user that section.
 /// - `[server.acme]` and `[auth]` are ORPHANED sections dux once wrote.
 /// - `[defaults] prompt_for_name` is a deprecated key whose replacement inverts
 ///   its meaning.
@@ -52,6 +55,7 @@ prompt_for_name = false
 [server]
 bind = "0.0.0.0:9100"
 max_websocket_connections = 12
+access_log = false
 
 [server.acme]
 enabled = true
@@ -204,7 +208,10 @@ fn keys_added_since_the_old_config_was_written_fall_back_to_their_defaults() {
         config.server.tailscale_enabled,
         fresh.server.tailscale_enabled
     );
-    assert_eq!(config.server.access_log, fresh.server.access_log);
+    // `access_log` is deliberately NOT checked here: the fixture sets it, because
+    // the retired-key test needs a user-set value inside `[server]` to notice that
+    // section reverting. `color` is the untouched sibling that makes the point.
+    assert_eq!(config.server.color, fresh.server.color);
     assert_eq!(
         config.defaults.pull_before_creating_agent_by_default,
         fresh.defaults.pull_before_creating_agent_by_default
@@ -217,14 +224,31 @@ fn a_retired_key_dux_no_longer_reads_does_not_fail_the_load() {
     // No struct in dux uses `deny_unknown_fields`, so the key is ignored rather
     // than fatal, and the operator learns about it from `dux.log` (see
     // `warn_on_removed_max_websocket_connections`). What must NOT happen is the
-    // whole config falling back to defaults.
+    // whole config, or the section the key sits in, falling back to defaults.
     let (_tmp, _paths, config) = load_old(OLD_CONFIG);
     assert_eq!(
         config.shutdown_timeout_seconds, 17,
         "a retired key must not cost the user the rest of their config"
     );
-    // The three replacements are in force at their defaults.
+    // The assertion that actually watches the named hazard. `shutdown_timeout_seconds`
+    // is OUTSIDE `[server]` and the three replacement caps hold their defaults
+    // either way, so neither can see `[server]` reverting wholesale; a test with
+    // only those two stayed green while exactly that was induced. `access_log` is
+    // set away from its default INSIDE the same section, so losing the section
+    // shows up here.
     let fresh = Config::default();
+    assert!(
+        fresh.server.access_log,
+        "the fixture must differ from default"
+    );
+    assert!(
+        !config.server.access_log,
+        "a retired key cost the user the rest of the section it lives in"
+    );
+    // ...and the migrated values from that same section are still in force.
+    assert_eq!(config.server.host, "0.0.0.0");
+    assert_eq!(config.server.port, 9100);
+    // The three replacements are in force at their defaults.
     assert_eq!(
         config.server.max_websocket_events_connections,
         fresh.server.max_websocket_events_connections

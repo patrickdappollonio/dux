@@ -7,8 +7,9 @@
 //! `SessionStore::open`. That makes these the properties worth pinning:
 //!
 //! - opening an old database succeeds rather than erroring on a missing column;
-//! - tables added since (`session_prs`, `changes_rev`, `agent_tabs`,
-//!   `app_state`) are created empty and immediately usable;
+//! - tables added since are created empty and immediately usable (`changes_rev`,
+//!   `agent_tabs` and `app_state` for every era below; `session_prs` and
+//!   `projects` too for a database from the very first release);
 //! - columns added since arrive at their documented default, and the one-time
 //!   backfills (`title`, `initial_branch`, `sort_order`) run;
 //! - none of it is destructive on the second open, because `open` is what every
@@ -19,16 +20,28 @@
 //! one exists in a checkout. The relevant mitigating property IS testable and is
 //! tested here: every column added is nullable or has a default, so an older
 //! binary's `INSERT` (which names none of them) still satisfies the schema.
+//!
+//! The two fixtures below are TRANSCRIBED from the real history rather than
+//! invented, because an invented "old" schema tests a user who never existed and
+//! quietly leaves the shipped one untested. They are the first public release
+//! (`agent_sessions` alone) and the commit that introduced `projects`.
 
 use chrono::Utc;
 use dux_core::model::{AgentSession, AgentTab, ProviderKind, SessionStatus};
 use dux_core::storage::{SessionStore, StoredPr};
 use rusqlite::Connection;
 
-/// `sessions.sqlite3` as an early dux created it: the two original tables, with
-/// only the columns that existed then. Everything the current schema adds is
-/// absent, including all four of the tables added later.
-const OLD_SCHEMA: &str = r#"
+/// `sessions.sqlite3` exactly as the FIRST public dux created it (`ed917a4`,
+/// "First upload"): ONE table, and it already carried `title` and `project_path`.
+/// There was no `projects` table at all, and no `session_prs`, `agent_tabs`,
+/// `changes_rev` or `app_state`.
+///
+/// Transcribed from that commit's `migrate()` rather than invented. An earlier
+/// version of this file used a hand-written "old schema" that dropped `title` and
+/// `project_path` and paired `agent_sessions` with a stripped `projects` table,
+/// which is a database no dux version ever wrote: several of its assertions
+/// therefore described a user who cannot exist.
+const FIRST_RELEASE_SCHEMA: &str = r#"
 create table agent_sessions (
     id text primary key,
     project_id text not null,
@@ -36,6 +49,45 @@ create table agent_sessions (
     source_branch text not null,
     branch_name text not null,
     worktree_path text not null,
+    title text,
+    project_path text,
+    status text not null,
+    created_at text not null,
+    updated_at text not null
+);
+"#;
+
+/// `sessions.sqlite3` as of `a4f628b` ("Move project state out of config"), the
+/// commit that introduced the `projects` table. It arrived ALREADY carrying
+/// `name`, `default_provider`, `leading_branch` and `sort_order`, so a real
+/// database of this era has all four; only the project columns added after it
+/// (`auto_reopen_agents`, `startup_command`, `env`) are missing. `agent_sessions`
+/// picked up `started_providers` in the same commit, and `session_prs` appeared
+/// with it.
+///
+/// This is the "old database" the bulk of these tests run against, because it is
+/// the last shape that predates everything the current migrations add
+/// (`initial_branch`, session `sort_order`, `desired_running`,
+/// `auto_reopen_enabled`, `last_focused_tab`, `agent_tabs`, `changes_rev`,
+/// `app_state`).
+///
+/// One deliberate, immaterial difference from a real database of that era: the
+/// columns that commit added through `ensure_column` (`agent_sessions.started_providers`,
+/// `session_prs.title` and `.url`) are spelled INLINE here, where a real file got
+/// them as trailing `alter table ... add column`s and so holds them LAST. Only the
+/// physical column order differs, and every query in `storage.rs` names its columns,
+/// so nothing under test can see it.
+const PROJECTS_ERA_SCHEMA: &str = r#"
+create table agent_sessions (
+    id text primary key,
+    project_id text not null,
+    provider text not null,
+    source_branch text not null,
+    branch_name text not null,
+    worktree_path text not null,
+    title text,
+    project_path text,
+    started_providers text not null default '[]',
     status text not null,
     created_at text not null,
     updated_at text not null
@@ -43,39 +95,84 @@ create table agent_sessions (
 create table projects (
     id text primary key,
     path text not null unique,
+    name text,
+    default_provider text,
+    leading_branch text,
+    sort_order integer not null default 0,
     created_at text not null,
     updated_at text not null
 );
+create table session_prs (
+    session_id text not null,
+    pr_number integer not null,
+    host text not null default 'github.com',
+    owner_repo text not null,
+    state text not null default 'OPEN',
+    title text not null default '',
+    url text not null default '',
+    primary key (session_id, pr_number),
+    foreign key (session_id) references agent_sessions(id) on delete cascade
+);
 "#;
 
-/// Build an old-shaped database with two projects and three sessions, using raw
-/// SQL so the rows are written exactly as the old binary would have written them
-/// (naming only the columns that existed).
+/// The three session rows both eras share, written with raw SQL naming only the
+/// columns that existed then. `sess-1` carries a hand-set `title` (a renamed
+/// agent), the other two leave it NULL (auto-named agents), which is what makes
+/// the one-time title freeze observable in both directions.
+const SESSION_ROWS: &str = r#"
+insert into agent_sessions
+  (id, project_id, provider, source_branch, branch_name, worktree_path, title, project_path, status, created_at, updated_at)
+values
+  ('sess-1', 'proj-widget', 'claude', 'main', 'dux/lively-otter',
+   '/home/ada/.config/dux/worktrees/lively-otter', 'Lively otter', '/home/ada/code/widget',
+   'active', '2024-01-01T00:00:00Z', '2024-01-05T00:00:00Z'),
+  ('sess-2', 'proj-widget', 'codex', 'main', 'dux/brave-ferret',
+   '/home/ada/.config/dux/worktrees/brave-ferret', null, '/home/ada/code/widget',
+   'detached', '2024-01-02T00:00:00Z', '2024-01-04T00:00:00Z'),
+  ('sess-3', 'proj-gadget', 'opencode', 'develop', 'dux/quiet-moose',
+   '/home/ada/.config/dux/worktrees/quiet-moose', null, '/home/ada/code/gadget',
+   'active', '2024-01-03T00:00:00Z', '2024-01-06T00:00:00Z');
+"#;
+
+/// A database from the very first release: `agent_sessions` and nothing else.
+/// This is the shape a genuine early adopter still has, and until now nothing
+/// tested it.
+fn first_release_database() -> (tempfile::TempDir, std::path::PathBuf) {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("sessions.sqlite3");
+    let conn = Connection::open(&path).expect("open");
+    conn.execute_batch(FIRST_RELEASE_SCHEMA)
+        .expect("first-release schema");
+    conn.execute_batch(SESSION_ROWS).expect("seed sessions");
+    drop(conn);
+    (tmp, path)
+}
+
+/// A database from the era the `projects` table arrived: two projects (one the
+/// user had customized, one left bare) and three sessions.
 fn old_database() -> (tempfile::TempDir, std::path::PathBuf) {
     let tmp = tempfile::tempdir().expect("tempdir");
     let path = tmp.path().join("sessions.sqlite3");
     let conn = Connection::open(&path).expect("open");
-    conn.execute_batch(OLD_SCHEMA).expect("old schema");
+    conn.execute_batch(PROJECTS_ERA_SCHEMA)
+        .expect("projects-era schema");
     conn.execute_batch(
         r#"
-        insert into projects (id, path, created_at, updated_at) values
-          ('proj-widget', '/home/ada/code/widget', '2024-01-01T00:00:00Z', '2024-01-02T00:00:00Z'),
-          ('proj-gadget', '/home/ada/code/gadget', '2024-01-01T00:00:00Z', '2024-01-03T00:00:00Z');
-        insert into agent_sessions
-          (id, project_id, provider, source_branch, branch_name, worktree_path, status, created_at, updated_at)
+        insert into projects (id, path, name, default_provider, leading_branch, sort_order, created_at, updated_at)
         values
-          ('sess-1', 'proj-widget', 'claude', 'main', 'dux/lively-otter',
-           '/home/ada/.config/dux/worktrees/lively-otter', 'active',
-           '2024-01-01T00:00:00Z', '2024-01-05T00:00:00Z'),
-          ('sess-2', 'proj-widget', 'codex', 'main', 'dux/brave-ferret',
-           '/home/ada/.config/dux/worktrees/brave-ferret', 'detached',
-           '2024-01-02T00:00:00Z', '2024-01-04T00:00:00Z'),
-          ('sess-3', 'proj-gadget', 'opencode', 'develop', 'dux/quiet-moose',
-           '/home/ada/.config/dux/worktrees/quiet-moose', 'active',
-           '2024-01-03T00:00:00Z', '2024-01-06T00:00:00Z');
+          ('proj-widget', '/home/ada/code/widget', 'widget', 'codex', 'trunk', 0,
+           '2024-01-01T00:00:00Z', '2024-01-02T00:00:00Z'),
+          ('proj-gadget', '/home/ada/code/gadget', null, null, null, 1,
+           '2024-01-01T00:00:00Z', '2024-01-03T00:00:00Z');
         "#,
     )
-    .expect("seed rows");
+    .expect("seed projects");
+    conn.execute_batch(SESSION_ROWS).expect("seed sessions");
+    conn.execute(
+        "update agent_sessions set started_providers = '[\"claude\"]' where id = 'sess-1'",
+        [],
+    )
+    .expect("seed started_providers");
     drop(conn);
     (tmp, path)
 }
@@ -116,6 +213,64 @@ fn an_old_database_opens_and_every_session_row_survives_intact() {
 }
 
 #[test]
+fn a_first_release_database_with_no_projects_table_at_all_opens_and_keeps_its_sessions() {
+    // The genuinely shipped shape nothing used to cover: `agent_sessions` alone.
+    // Every other table in the current schema has to be CREATED, not merely
+    // migrated, and the sessions have to come through with their project ids
+    // intact even though there are no project rows to point at.
+    let (_tmp, path) = first_release_database();
+    let store = SessionStore::open(&path).expect("a first-release database must open");
+
+    let sessions = store.load_sessions().expect("load sessions");
+    assert_eq!(sessions.len(), 3, "{sessions:#?}");
+    assert_eq!(session(&sessions, "sess-1").project_id, "proj-widget");
+    assert_eq!(
+        session(&sessions, "sess-1").project_path.as_deref(),
+        Some("/home/ada/code/widget"),
+        "`project_path` existed in the first release and must survive"
+    );
+    assert_eq!(session(&sessions, "sess-3").provider.as_str(), "opencode");
+
+    // The `projects` table did not exist, so it is created empty. A user of this
+    // era gets their projects back from `config.toml`, not from SQLite.
+    assert!(
+        store.load_projects().expect("load projects").is_empty(),
+        "the projects table must be created empty, not populated from thin air"
+    );
+
+    // Both one-time backfills still run against a table this old.
+    for s in &sessions {
+        assert_eq!(s.initial_branch, s.branch_name, "{}", s.id);
+    }
+    assert_eq!(
+        session(&sessions, "sess-1").title.as_deref(),
+        Some("Lively otter"),
+        "a name set in the first release must not be overwritten on upgrade"
+    );
+    assert_eq!(
+        session(&sessions, "sess-2").title.as_deref(),
+        Some("dux/brave-ferret")
+    );
+
+    // ...and the sort-order backfill numbers them, rather than leaving the whole
+    // table at the default 0.
+    assert_eq!(
+        persisted_sort_orders(&path),
+        vec![
+            ("sess-3".to_string(), 0),
+            ("sess-1".to_string(), 1),
+            ("sess-2".to_string(), 2),
+        ]
+    );
+
+    // The tables added since are usable straight away.
+    assert_eq!(store.last_seen_version().expect("app state"), None);
+    assert!(store.load_agent_tabs().expect("tabs").is_empty());
+    assert!(store.load_prs("sess-1").expect("prs").is_empty());
+    assert_eq!(store.next_changes_rev("sess-1").expect("rev"), 1);
+}
+
+#[test]
 fn an_old_database_opens_and_every_project_row_survives_intact() {
     let (_tmp, path) = old_database();
     let store = SessionStore::open(&path).expect("open");
@@ -126,14 +281,33 @@ fn an_old_database_opens_and_every_project_row_survives_intact() {
     assert!(paths.contains(&"/home/ada/code/widget"), "{paths:?}");
     assert!(paths.contains(&"/home/ada/code/gadget"), "{paths:?}");
 
-    // Columns added after these rows were written: absent means None, not an
-    // error and not a wrong value.
+    // The `projects` table arrived ALREADY carrying `name`, `default_provider`
+    // and `leading_branch`, so a real database of this era can have them set, and
+    // those values must survive the upgrade rather than being read as absent.
+    let widget = projects
+        .iter()
+        .find(|p| p.id == "proj-widget")
+        .expect("proj-widget");
+    assert_eq!(widget.name.as_deref(), Some("widget"));
+    assert_eq!(widget.default_provider.as_deref(), Some("codex"));
+    assert_eq!(widget.leading_branch.as_deref(), Some("trunk"));
+
+    // A project the user never customized: those same columns are NULL, which
+    // must read as None rather than as an empty string.
+    let gadget = projects
+        .iter()
+        .find(|p| p.id == "proj-gadget")
+        .expect("proj-gadget");
+    assert_eq!(gadget.name, None);
+    assert_eq!(gadget.default_provider, None);
+    assert_eq!(gadget.leading_branch, None);
+
+    // Columns added AFTER that era: absent means None/empty, not an error and not
+    // a wrong value.
     for project in &projects {
-        assert_eq!(project.name, None);
-        assert_eq!(project.default_provider, None);
-        assert_eq!(project.startup_command, None);
-        assert_eq!(project.auto_reopen_agents, None);
-        assert!(project.env.is_empty());
+        assert_eq!(project.startup_command, None, "{}", project.id);
+        assert_eq!(project.auto_reopen_agents, None, "{}", project.id);
+        assert!(project.env.is_empty(), "{}", project.id);
     }
 
     // `created_at` was already stored and must not be re-stamped to now.
@@ -154,8 +328,7 @@ fn columns_added_since_arrive_at_their_documented_defaults() {
     let sessions = store.load_sessions().expect("load");
 
     for s in &sessions {
-        // `project_path` and `last_focused_tab` are nullable additions.
-        assert_eq!(s.project_path, None, "{}", s.id);
+        // `last_focused_tab` is a nullable addition postdating this era.
         assert_eq!(s.last_focused_tab, None, "{}", s.id);
         // Auto-reopen INTENT defaults off (nothing was running at upgrade time),
         // while auto-reopen PERMISSION defaults on. Getting these two backwards
@@ -163,8 +336,23 @@ fn columns_added_since_arrive_at_their_documented_defaults() {
         // feature for everyone who upgrades.
         assert!(!s.desired_running, "{}", s.id);
         assert!(s.auto_reopen_enabled, "{}", s.id);
-        assert!(s.started_providers.is_empty(), "{}", s.id);
     }
+
+    // `project_path` and `started_providers` are NOT additions relative to this
+    // era: both already existed and both were written, so the upgrade has to read
+    // them back rather than default them away.
+    assert_eq!(
+        session(&sessions, "sess-1").project_path.as_deref(),
+        Some("/home/ada/code/widget")
+    );
+    assert_eq!(
+        session(&sessions, "sess-1").started_providers,
+        vec!["claude".to_string()]
+    );
+    assert!(
+        session(&sessions, "sess-2").started_providers.is_empty(),
+        "the column default is an empty list"
+    );
 }
 
 #[test]
@@ -178,28 +366,85 @@ fn the_one_time_backfills_run_on_the_first_open_after_the_upgrade() {
         // to the old schema, so the current branch is the best available answer,
         // and it must not be left empty.
         assert_eq!(s.initial_branch, s.branch_name, "{}", s.id);
-        // A legacy agent's displayed name is frozen so it can never drift with a
-        // later branch rename.
-        assert_eq!(s.title.as_deref(), Some(s.branch_name.as_str()), "{}", s.id);
     }
+
+    // The title freeze fills in the auto-named agents (`title IS NULL`) so their
+    // displayed name can never drift with a later branch rename...
+    assert_eq!(
+        session(&sessions, "sess-2").title.as_deref(),
+        Some("dux/brave-ferret")
+    );
+    assert_eq!(
+        session(&sessions, "sess-3").title.as_deref(),
+        Some("dux/quiet-moose")
+    );
+    // ...and leaves a title the user actually chose alone. `title` has existed
+    // since the very first release, so a legacy row carrying a hand-set name is
+    // the normal case, not an exotic one, and overwriting it with the branch name
+    // would rename the agent behind the user's back on upgrade.
+    assert_eq!(
+        session(&sessions, "sess-1").title.as_deref(),
+        Some("Lively otter"),
+        "the freeze overwrote a name the user chose"
+    );
+}
+
+/// Every `sort_order` in the database, keyed by session id. `load_sessions` does
+/// not expose the column (nothing in `AgentSession` carries it), so the only way
+/// to see what the backfill actually WROTE is to read it back with raw SQL.
+fn persisted_sort_orders(path: &std::path::Path) -> Vec<(String, i64)> {
+    let conn = Connection::open(path).expect("reopen for inspection");
+    let mut stmt = conn
+        .prepare("select id, sort_order from agent_sessions order by sort_order asc, id asc")
+        .expect("prepare");
+    stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    })
+    .expect("query")
+    .collect::<rusqlite::Result<Vec<_>>>()
+    .expect("rows")
 }
 
 #[test]
 fn the_sort_order_backfill_preserves_the_order_the_user_last_saw() {
-    // Before `sort_order` existed the list was ordered `updated_at DESC` per
-    // project. The backfill has to reproduce exactly that, or every agent in the
-    // sidebar moves on the first launch after the upgrade.
+    // Before `sort_order` existed the list was ordered `updated_at DESC`. The
+    // backfill has to reproduce exactly that as a GLOBAL 0..n sequence, or every
+    // agent in the sidebar moves on the first launch after the upgrade.
+    //
+    // Asserting the ORDER `load_sessions` returns is not enough, and a version of
+    // this test that stopped there was VACUOUS: that query's tiebreak is
+    // `sort_order asc, updated_at desc`, so with every row left at the default 0
+    // it reproduces the very same order and the test stayed green with the
+    // backfill deleted outright. The persisted VALUES are the subject, so read
+    // them back.
     let (_tmp, path) = old_database();
     let store = SessionStore::open(&path).expect("open");
     let sessions = store.load_sessions().expect("load");
 
-    let widget: Vec<&str> = sessions
-        .iter()
-        .filter(|s| s.project_id == "proj-widget")
-        .map(|s| s.id.as_str())
-        .collect();
-    // sess-1 updated 2024-01-05, sess-2 updated 2024-01-04.
-    assert_eq!(widget, vec!["sess-1", "sess-2"], "{sessions:#?}");
+    // sess-3 updated 2024-01-06, sess-1 2024-01-05, sess-2 2024-01-04.
+    let order: Vec<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
+    assert_eq!(order, vec!["sess-3", "sess-1", "sess-2"], "{sessions:#?}");
+
+    let persisted = persisted_sort_orders(&path);
+    assert_eq!(
+        persisted,
+        vec![
+            ("sess-3".to_string(), 0),
+            ("sess-1".to_string(), 1),
+            ("sess-2".to_string(), 2),
+        ],
+        "the backfill must write a distinct position per session, not leave the default 0"
+    );
+    // Stated separately, because "all still 0" is the exact failure the old
+    // assertion could not see.
+    let mut values: Vec<i64> = persisted.iter().map(|(_, order)| *order).collect();
+    values.sort_unstable();
+    values.dedup();
+    assert_eq!(
+        values.len(),
+        persisted.len(),
+        "two sessions share a sort_order, so the order is decided by a tiebreak rather than by the backfill: {persisted:?}"
+    );
 }
 
 #[test]
@@ -368,10 +613,15 @@ fn a_migrated_title_is_not_re_frozen_when_a_later_agent_leaves_it_null() {
         None,
         "the one-time title freeze re-ran and pinned an auto-named agent"
     );
-    // ...while the legacy agents keep the title the freeze gave them.
+    // ...while the legacy agents keep the title they came out of the freeze with:
+    // the one the user had set, and the branch name for the auto-named one.
     assert_eq!(
         session(&sessions, "sess-1").title.as_deref(),
-        Some("dux/lively-otter")
+        Some("Lively otter")
+    );
+    assert_eq!(
+        session(&sessions, "sess-2").title.as_deref(),
+        Some("dux/brave-ferret")
     );
 }
 

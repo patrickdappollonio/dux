@@ -383,10 +383,12 @@ pub(crate) fn whats_new_lines(
     // A release whose body had nothing the parser could read gets an explanation
     // and stops here. The guard is `has_renderable_body`, NOT `lines.is_empty()`:
     // a headline alone makes `lines` non-empty while leaving the body blank, and
-    // that shape is what GitHub's own `## What's Changed` plus the release
-    // workflow's appended `## Installation` leave behind when the human writes a
-    // one-line headline and no prose. See `dux_core::release_notes` for the
-    // format a release body has to follow.
+    // that shape is what GitHub's APPENDED `## What's Changed` plus the release
+    // workflow's APPENDED horizontal rule and `## Installation` leave behind when
+    // the human writes a one-line headline and no prose. (Both generators append,
+    // after the human's own sections; the rule is why "no body" cannot simply mean
+    // "no text".) See `dux_core::release_notes` for the format a release body has
+    // to follow.
     if !notes.has_renderable_body() {
         lines.push(Line::from(Span::styled(
             dux_core::release_notes::NO_NOTES_EXPLANATION.to_string(),
@@ -1376,9 +1378,9 @@ mod tests {
     /// REGRESSION. The empty-body guard used to be `lines.is_empty()`, which is
     /// FALSE the moment a headline exists, so a release body that parsed to a
     /// headline and nothing else rendered a title above a blank pane with no
-    /// explanation. That shape is very reachable: GitHub prepends
-    /// `## What's Changed` and the release workflow appends `## Installation`, so
-    /// a one-line human headline is all the parser is left with.
+    /// explanation. That shape is very reachable: GitHub APPENDS
+    /// `## What's Changed` and the release workflow APPENDS `## Installation`
+    /// after it, so a one-line human headline is all the parser is left with.
     #[test]
     fn a_release_whose_body_is_only_a_headline_still_explains_itself() {
         let notes = ReleaseNotes {
@@ -1396,6 +1398,43 @@ mod tests {
             text.contains(dux_core::release_notes::NO_NOTES_EXPLANATION),
             "a blank body with no explanation: {text:?}"
         );
+    }
+
+    /// THE SHAPE THE RELEASE PIPELINE ACTUALLY PRODUCES, parsed rather than
+    /// hand-built, because the hand-built fixture above cannot catch this one.
+    /// `.github/workflows/release.yml` appends a horizontal rule before its
+    /// `## Installation` section, so a one-line human note leaves the parser a
+    /// headline plus a paragraph of `---`, and the screen rendered a title above a
+    /// literal dash-run. Neither surface tested the pipeline's own output shape.
+    #[test]
+    fn the_body_the_release_pipeline_produces_explains_itself_rather_than_showing_a_rule() {
+        let body =
+            "## Quieter plumbing, louder failures\n\n---\n\n## Installation\n\nbrew install dux\n";
+        let notes = ReleaseNotes {
+            version: "v0.7.0".to_string(),
+            html_url: "https://example.invalid/v0.7.0".to_string(),
+            ..from_parsed(dux_core::release_notes::parse_release_body(body))
+        };
+        let text = flatten(&whats_new_lines(&notes, 60, &colors()));
+        assert!(
+            text.contains(dux_core::release_notes::NO_NOTES_EXPLANATION),
+            "the appended rule was rendered as if it were notes: {text:?}"
+        );
+        assert!(
+            !text.contains("---"),
+            "a horizontal rule is not a body: {text:?}"
+        );
+    }
+
+    /// Fills the parsed fields of a `ReleaseNotes`, so a test can start from a
+    /// real release BODY rather than from fields it made up.
+    fn from_parsed(parsed: dux_core::release_notes::ParsedBody) -> ReleaseNotes {
+        ReleaseNotes {
+            headline: parsed.headline,
+            paragraphs: parsed.paragraphs,
+            sections: parsed.sections,
+            ..Default::default()
+        }
     }
 
     /// A release body that parsed to one EMPTY section (a `### **__**` heading
