@@ -1,7 +1,7 @@
 ---
 title: Agents from the browser
 description: Create, fork, adopt, and manage agents in server mode, plus provider tabs, dormant tabs after a restart, attention indicators and browser notifications, and the difference between killing and deleting an agent.
-group: Server mode
+group: Web UI
 order: 64
 ---
 

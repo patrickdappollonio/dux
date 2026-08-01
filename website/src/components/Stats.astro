@@ -45,6 +45,23 @@ if (downloads !== null && npm !== null) {
 }
 ---
 
+{/* Sits above the counters and shares their card styling, so the two read as
+    one stack rather than two unrelated boxes. Rendered unconditionally, unlike
+    the counters below it, which disappear when the stats fetch fails: how to
+    START dux should not depend on whether GitHub answered.
+
+    No keybinding is printed here on purpose. Every binding in dux is
+    user-configurable, so a printed key is wrong for anyone who has rebound it,
+    and this site's own rule is that the in-app help overlay is the authority
+    for keys. The palette COMMAND name is stable and is the honest thing to
+    name. A printed key was removed from this same page earlier for exactly
+    this reason. */}
+<p
+  class="mt-4 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-panel)]/40 px-4 py-3 text-center text-sm leading-relaxed text-[color:var(--color-muted)] backdrop-blur"
+>
+  <span class="mono text-[color:var(--color-text)]">dux</span> for the terminal, <span class="mono text-[color:var(--color-text)]">dux server</span> for the browser. Already running? <span class="mono text-[color:var(--color-text)]">start-web-server</span> in the palette hands it over, live.
+</p>
+
 {
   stats.length > 0 && (
     <dl class="mt-4 flex flex-wrap items-stretch justify-center gap-x-4 gap-y-3 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-panel)]/40 px-4 py-3 backdrop-blur">

@@ -164,7 +164,7 @@ pub fn print_help() {
 /// subcommand.
 pub fn help_text() -> &'static str {
     "dux\n\n\
-         Terminal UI for AI worktree sessions.\n\n\
+         Terminal and web UI for AI worktree sessions.\n\n\
          Usage:\n\
           dux              Launch the TUI\n\
           dux server       Serve the web UI over the headless engine\n\

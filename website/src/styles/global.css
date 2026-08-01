@@ -98,8 +98,15 @@
 }
 
 @layer components {
+  /* One width for the whole site, so the homepage and the docs cannot drift.
+     Widened from `max-w-6xl` (1152px) because the docs' three-column layout was
+     squeezing its middle column: 1088px of content minus a 240px sidebar, a
+     208px table of contents and two 40px gutters left the prose about 560px
+     wide, narrower than the sidebar and the contents put together. At 1280px
+     that column gets about 688px, which is a reading measure rather than a
+     slot. */
   .container-app {
-    @apply mx-auto w-full max-w-6xl px-5 sm:px-8;
+    @apply mx-auto w-full max-w-7xl px-5 sm:px-8;
   }
 
   .grid-bg {
@@ -113,6 +120,14 @@
 
   .pill {
     @apply inline-flex items-center gap-2 rounded-full border border-[color:var(--color-border)] bg-[color:var(--color-panel)]/70 px-3 py-1 text-xs font-medium text-[color:var(--color-muted)] backdrop-blur;
+  }
+
+  /* A tile-sized derivative of `.pill`: same shape, same tokens, smaller and
+     quieter. Used for the feature grid's Web / Terminal / Both surface markers,
+     where the pill answers a question rather than announcing a section. It
+     carries no colour of its own on purpose: the word is the whole signal. */
+  .pill-xs {
+    @apply gap-1 px-2 py-0.5 text-[10px] tracking-wide text-[color:var(--color-dim)];
   }
 
   .btn-primary,

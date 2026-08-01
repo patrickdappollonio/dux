@@ -34,8 +34,15 @@ pub struct WelcomeScreen {
     pub steps: &'static [WelcomeStep],
 }
 
+/// The one bold line at the top of the screen.
+///
+/// It names BOTH front ends on purpose. 0.7.0 is the release that announces the
+/// web UI, and this screen is the first thing a brand new install shows, before
+/// the user has any reason to visit the website: a headline that mentioned only
+/// a terminal would teach them dux is a terminal-only product and they would
+/// have no later prompt to unlearn it.
 pub const TAGLINE: &str =
-    "One git worktree per coding agent, and a real terminal to watch it work.";
+    "One git worktree per coding agent, watched from your terminal or your browser.";
 
 pub const STEPS: &[WelcomeStep] = &[
     WelcomeStep {
@@ -51,7 +58,8 @@ pub const STEPS: &[WelcomeStep] = &[
     WelcomeStep {
         number: 3,
         title: "Launch",
-        detail: "Your provider CLI runs in a real terminal you can watch and type into.",
+        detail: "Your provider CLI runs in a real terminal you can watch and type into, \
+                 here or in a browser tab.",
     },
 ];
 
@@ -69,6 +77,27 @@ pub fn welcome_screen(config_path: &Path) -> WelcomeScreen {
                 .to_string(),
             "Each agent runs whatever AI CLI you point it at. There is no protocol layer \
              and no adapter to write: if a tool runs in a terminal, it can be a provider."
+                .to_string(),
+            // The two-front-ends paragraph. Deliberately worded from NEITHER
+            // surface's point of view (no "this terminal", no "this page"):
+            // the same `WelcomeScreen` is projected into the web UI's bootstrap
+            // (`viewmodel::BootstrapView::welcome_screen`), so a sentence that
+            // assumed a terminal reader would be false in a browser and the
+            // other way round. It follows the framing already used in README.md
+            // and website/docs/introduction.md rather than inventing a third
+            // description of the same thing.
+            //
+            // The "or flip a running terminal UI over to it" clause is load
+            // bearing, not filler: one dux process owns the config directory
+            // (see `crate::lockfile`), so a reader who took "run dux server" as
+            // the only route would try it in a second shell alongside a running
+            // TUI and hit the lock. The hand-off is the honest instruction.
+            "dux has two front ends over one engine: a terminal UI and a web UI. Both are \
+             first class, and they share the same projects, the same agents, the same \
+             worktrees and the same config file, so an agent you start in one is the same \
+             agent in the other. Start the web one with dux server, or flip a running \
+             terminal UI over to it; either way the agents you left working carry on, now \
+             reachable from your laptop or your phone."
                 .to_string(),
             // `display()` is lossy for non-UTF-8 paths, which is the right
             // tradeoff for a sentence a human reads: the alternative is showing
@@ -113,6 +142,27 @@ mod tests {
             assert!(
                 all.contains(needle),
                 "the intro never mentions {needle}: {all}"
+            );
+        }
+    }
+
+    /// The screen a brand new install sees must teach that dux has TWO front
+    /// ends, because it is seen before the website is and there is no second
+    /// chance to correct a terminal-only first impression.
+    ///
+    /// Pinned as a PROPERTY (both surfaces named, plus the command that starts
+    /// the web one) rather than as an exact sentence: the wording is expected to
+    /// be reworked, and a literal-string assertion would fail on a rewrite that
+    /// still says the right thing.
+    #[test]
+    fn the_screen_teaches_that_dux_has_two_front_ends_over_one_engine() {
+        let s = screen();
+        let all = format!("{} {}", s.tagline, s.paragraphs.join(" ")).to_lowercase();
+        for needle in ["terminal", "browser", "web ui", "dux server"] {
+            assert!(
+                all.contains(needle),
+                "the first-run screen never mentions {needle}, so a new user learns \
+                 dux is terminal-only: {all}"
             );
         }
     }

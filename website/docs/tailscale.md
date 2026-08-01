@@ -1,7 +1,7 @@
 ---
 title: Reaching dux over Tailscale
-description: How dux finds and binds your Tailscale address, what happens when Tailscale isn't there, why a MagicDNS name needs allowed_hosts, what plain HTTP costs you in the browser, and the caveats worth knowing before you open your agents to a tailnet.
-group: Server mode
+description: How dux finds and binds your Tailscale address, what happens when Tailscale isn't there, why a MagicDNS name needs allowed_hosts, what plain HTTP costs you in the browser, how to put Tailscale's HTTPS proxy in front, and the caveats worth knowing before you open your agents to a tailnet.
+group: Web UI
 order: 65
 ---
 
@@ -67,10 +67,12 @@ with `dux server`.
 
 ## The MagicDNS gotcha
 
-This is the single most common Tailscale support question, so here it is up front.
+Both ways in work: the raw `100.x` address and the MagicDNS name. This is the single
+most common Tailscale support question because they do not need the same amount of
+setup, so here it is up front.
 
-**The `100.x` address works with no configuration. A MagicDNS hostname returns
-`403` until you allow it.**
+**The `100.x` address works with no configuration. A MagicDNS hostname works too,
+but returns `403` until you allow it.**
 
 dux runs a Host-header allowlist in front of everything, which is what stops a
 malicious web page from DNS-rebinding your browser into your server. It accepts
@@ -78,10 +80,11 @@ malicious web page from DNS-rebinding your browser into your server. It accepts
 actually bound. Your tailnet `100.x` address is exactly that, so
 `http://100.101.102.103:8080` just works.
 
-A MagicDNS name like `box.tailnet.ts.net` is not an IP literal and is not something
-dux bound, so it fails the check and you get a plain `403` reading *"this dux server
-does not serve the requested host"*. Nothing is broken; you simply have to say the
-name out loud:
+A MagicDNS name like `box.tailnet.ts.net` is a hostname, not an IP literal, and a
+hostname is never something dux bound, so it fails the check and you get a plain
+`403` reading *"this dux server does not serve the requested host"*. Nothing is
+broken and nothing about the name is second class; you simply have to say it out
+loud once:
 
 ```toml
 [server]
@@ -89,7 +92,8 @@ allowed_hosts = ["box.tailnet.ts.net"]
 ```
 
 Hostnames only, no scheme and no port. Entries are matched case-insensitively and
-the port is ignored, so one entry covers every port you might serve on. There is no
+the port is ignored, so one entry covers every port you might serve on. A trailing
+dot is stripped too, so `box.tailnet.ts.net.` matches the same entry. There is no
 wildcard: `"*"` is treated as a literal hostname and will not match anything.
 
 dux's other browser defense, a same-origin check on socket upgrades and write
@@ -134,7 +138,8 @@ is disabled on any tailnet address. That is a deliberate host check, because a r
 URL means "your editor is not on that machine," and no certificate would change it.
 
 If those tradeoffs bother you, terminate TLS in a reverse proxy in front of dux and
-add its hostname to `allowed_hosts`.
+add its hostname to `allowed_hosts`. Tailscale ships one, and
+[the recipe is below](#putting-the-tailscale-https-proxy-in-front).
 
 ## Caveats worth knowing
 
@@ -159,24 +164,62 @@ phone, disable key expiry for it in the Tailscale admin console.
 public internet. dux has no login. Those two facts do not belong in the same sentence,
 and dux offers no support for it.
 
-### Untested: putting Tailscale's own HTTPS proxy in front
+## Putting the Tailscale HTTPS proxy in front
 
-Tailscale can terminate HTTPS for a local service, which would in principle buy back
-the clipboard and notification features above. **We have not tested this with dux, so
-this page will not give you a recipe for it.**
+Tailscale can terminate HTTPS for a local service, which buys back the clipboard and
+notification features listed above, because `https://box.tailnet.ts.net` is a secure
+context and a plain tailnet IP is not. dux needs no TLS setup of its own for this. It
+keeps serving plain HTTP on loopback and Tailscale owns the certificate.
 
-Two things would have to hold, and neither can be established from documentation
-alone:
+Serve dux on loopback, then point the proxy at that port:
 
-1. **It must proxy WebSockets.** dux is not merely degraded without them, it is
-   unusable: every terminal, and the live workspace state itself, rides a WebSocket.
-2. **It must preserve the `Host` header**, or dux's host allowlist rejects the
-   proxied request with the same `403` described above. If it forwards its own
-   hostname instead, that hostname is what belongs in `allowed_hosts`.
+```bash
+dux server --bind 127.0.0.1:8080
+tailscale serve --bg 8080
+```
 
-If you try it, those are the two things to check first, and the `403` is the friendly
-failure rather than the confusing one. The tested, boring path is the plain `100.x`
-address, which needs no configuration at all.
+Then allow the node's MagicDNS name, which is the same single line the plain MagicDNS
+path needs:
+
+```toml
+[server]
+allowed_hosts = ["box.tailnet.ts.net"]
+```
+
+Open `https://box.tailnet.ts.net` and you are done. The socket URLs are derived from
+the page, so they become `wss://` on their own with nothing to configure.
+
+Note that the Tailscale leg is still added on top of your `--bind` address, so dux is
+also answering plain HTTP directly on `100.x:8080` alongside the proxied URL. If you
+want the HTTPS path to be the only way in, add `--no-tailscale` to the `dux server`
+line and let the proxy own the tailnet side.
+
+One honest clause: the plain address is the path the maintainer uses daily, and this
+proxy path is documented from dux's behaviour rather than from a tested recipe. If it
+does not work, two things are worth checking first, and they fail in very different
+ways.
+
+**Check that the proxy passes WebSockets through.** dux is not merely degraded
+without them, it is unusable: every terminal rides a WebSocket, and so does the
+change feed that tells the page when anything moved. This is the confusing failure, because nothing returns an error
+you can see. The page loads, looks right, and then nothing is live: no output, no
+status changes, and the in-app *Reconnecting…* overlay sitting there. If the UI
+arrives but never comes alive, suspect the upgrade rather than dux.
+
+**Check the `Host` and `Origin` the proxy sends.** dux runs two separate checks. The
+host allowlist tests `Host` on every request, and a same-origin check compares the
+`Origin`'s host and port against `Host` on every WebSocket upgrade and every write
+request. A proxy that forwards the original `Host` satisfies both, once that hostname
+is in `allowed_hosts`. A proxy that rewrites `Host` to its backend target
+(`127.0.0.1:8080`) passes the allowlist, since loopback is always allowed, and then
+fails the origin check, because the browser still sends the external name as
+`Origin`. So preserving the original `Host` is the fix; adding a rewritten one to
+`allowed_hosts` only silences the first check and leaves the second.
+
+The `403` is the friendly failure of the two, and the response body says which check
+fired: *"this dux server does not serve the requested host"* is the allowlist, and
+*"cross-origin WebSocket upgrade rejected"* (or *"cross-origin request rejected"* on
+a write) is the same-origin check. Either way you know exactly what to change.
 
 ## Where to go next
 
@@ -184,3 +227,5 @@ address, which needs no configuration at all.
   banner, graceful shutdown, and the trust model.
 - [The workspace in the browser](/docs/web-workspace): what you actually get once you
   are in, including the phone layout.
+- [Hosting dux behind a login](/docs/public-hosting): the other answer, for when the
+  machine is not on a private network and something has to ask who you are first.

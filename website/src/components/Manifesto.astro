@@ -1,17 +1,118 @@
 ---
-// "Three panes": uses the real dux screenshot (assets/dux-screenshot.svg,
-// copied into public/ at build time) instead of a CSS approximation.
+// The surfaces section: dux's three-pane shape, and the two front ends that
+// draw it. It sits directly under the asciinema demo so the terminal UI and the
+// web UI are met as a pair rather than as a product and an add-on.
+//
+// THE FIGURE IS SWITCHABLE, AND THE SWITCH COSTS NO JAVASCRIPT.
+//
+// Two radio inputs wrapped in their own labels, plus `:has()` in the scoped
+// style block below, do the whole job. That buys three things a scripted tab
+// strip does not: the panel is correct in the HTML the server sends, arrow-key
+// navigation between the two is the browser's own radio-group behaviour, and
+// there is nothing to fail. The chip styling is lifted from InstallTabs.astro so
+// the control reads as the same control the install section uses.
+//
+// Because every rule that hides a panel is an override, a browser without
+// `:has()` shows the terminal panel and never blanks: the default is the plain
+// cascade, not a JavaScript boot step.
+//
+// TERMINAL PANEL: the real dux screenshot (assets/dux-screenshot.svg, copied
+// into public/ at build time), not a CSS approximation.
+//
+// WEB PANEL: NOT A SCREENSHOT AND NOT A DRAWING.
+//
+// It is the dux web UI's own React components, imported out of
+// `crates/dux-web/web/src` and rendered to static HTML while this site builds,
+// against a fabricated workspace seeded into the app's real store. It ships zero
+// JavaScript. Live at /figure/web-ui (noindex, out of the sitemap) and embedded
+// below in an iframe; see `src/figure/` for the whole apparatus and
+// `src/figure/figure.css` for why it has to be its own document.
+//
+// A screenshot was the obvious alternative and was turned down on purpose: a
+// capture goes stale the week the UI changes and needs a person in the loop
+// every time. This cannot go stale, because there is no copy of the UI here to
+// go stale. If a component changes, the figure changes with it on the next
+// build, and if a component stops rendering standalone the drift guard in
+// `src/figure/figure.test.tsx` fails the build rather than shipping a blank box.
+//
+// The web panel carries no caption. The tab above it already names it, the prose
+// says what it is, and a line of small type claiming authenticity would be
+// protesting too much.
+//
+// THE PHONE SLOT IS STILL A REAL CAPTURE, AND STILL OPTIONAL. The figure is
+// desktop chrome; the mobile shell is a different composition and its centre is
+// a live terminal, so a genuine capture is the honest way to show it.
+// `publicPng` returns null when the file is absent and the whole block is
+// skipped, so the panel renders complete without it:
+//
+//   public/dux-web-phone.png    a PORTRAIT capture of the mobile shell on a
+//                               phone, ideally showing an agent's terminal with
+//                               the accessory bar and compose bar. Target
+//                               1170x2532 (iPhone native).
+//
+// PNG only (the size is read from the PNG header). `npm run prep` writes a
+// `.webp` sibling automatically, and this picks it up when present.
+import { publicPng } from "../lib/public-image";
+
+const phone = publicPng("dux-web-phone");
+
+// The embedded figure's logical viewport. The iframe is laid out at exactly this
+// size and then scaled down to whatever width it is given, entirely in CSS
+// (container query units), so the app always renders its DESKTOP layout no
+// matter how narrow the visitor's screen is.
+//
+// The two numbers are declared once, here, and reach the CSS as custom
+// properties on the figure's wrapper. Deliberately NOT `define:vars`, which
+// stamps the variables onto EVERY top-level element the component renders: it
+// works, but it repeats the pair on a few dozen unrelated tags in the shipped
+// HTML when exactly one element needs them.
+const FIGURE_W = 1440;
+const FIGURE_H = 900;
+const figureVars = `--figure-w: ${FIGURE_W}; --figure-h: ${FIGURE_H};`;
+
+// One class list for both tabs so the two can never drift apart. The rest state
+// is here; the checked and focused states live in the scoped stylesheet, because
+// they hang off `:has()` rather than off a class this file can toggle.
+//
+// `min-h-10` is 40px, the same floor the dux web UI holds its own controls to on
+// a phone, and the pair stretches to fill the bar's width below `sm` so the
+// targets are as large as the screen allows. This is the figure's primary
+// control, so it is sized like one rather than like a caption.
+const tab =
+  "surface-tab relative -mb-px inline-flex min-h-11 flex-1 cursor-pointer items-center justify-center rounded-t-lg border border-transparent px-3 text-[13px] font-medium text-[color:var(--color-muted)] transition-colors hover:bg-[color:var(--color-panel)] hover:text-[color:var(--color-text)] sm:flex-none sm:px-5 sm:text-sm";
 ---
 
-<section class="anchor-offset py-16 sm:py-24">
+{/* `id="surfaces"` is new and nothing links to it yet. It exists so anything
+    that wants to point at the two front ends themselves has a target, rather
+    than borrowing `#web`, which belonged to a section that no longer exists. */}
+<section id="surfaces" class="anchor-offset py-16 sm:py-24">
   <div class="container-app">
-    <div class="max-w-2xl">
+    {/* Full width, deliberately. This intro is not a narrow reading column
+        beside anything: nothing sits to its right, so a cap just left a hole
+        there. The pane cards and the window below both run the full container,
+        and the prose lines up with them. */}
+    <div>
       <span class="pill">▸ the office tour</span>
       <h2 class="heading mt-3 text-3xl font-bold tracking-tight sm:text-4xl">
         Three panes. <span class="text-[color:var(--color-accent)]">Unlimited</span> agents.
       </h2>
       <p class="mt-4 text-[color:var(--color-muted)] leading-relaxed">
         Most AI coding tools give you one agent in one directory. dux gives you unlimited agents across unlimited worktrees, all visible at once. Spawn five agents on five branches and let them work in parallel.
+      </p>
+      <p class="mt-4 text-[color:var(--color-muted)] leading-relaxed">
+        Two front ends draw that layout: a terminal UI and a web UI. Both are first
+        class, and both are staying. They share the same projects, the same agents,
+        the same worktrees and the same config file, so an agent you start in one is
+        the same agent in the other. Flip the figure below between them.
+      </p>
+      <p class="mt-4 text-[color:var(--color-muted)] leading-relaxed">
+        One dux owns your dux directory at a time, so moving between the two is a
+        hand-off rather than a second window: a palette command hands the running
+        engine straight to the web server, and leaving that screen drops you back
+        into the terminal around the same still-running engine. Nothing relaunches
+        and no conversation is lost. Browsers, though, are plural. Point as many at
+        the workspace as you like and they all see the same session at the same
+        moment.
       </p>
     </div>
 
@@ -39,23 +140,311 @@
       </div>
     </div>
 
-    <figure class="mt-10">
-      <div
-        class="overflow-hidden rounded-xl border border-[color:var(--color-border)]"
-        style="box-shadow: 0 0 0 1px color-mix(in oklab, var(--color-accent) 8%, transparent), 0 30px 80px -30px color-mix(in oklab, var(--color-accent) 30%, transparent), 0 50px 140px -50px color-mix(in oklab, var(--color-pink) 22%, transparent);"
-      >
-        <img
-          src="/dux-screenshot.svg"
-          alt="dux running: a projects pane with a tree of agent sessions on the left, a Claude agent's live terminal in the center, and the dux header bar showing project, branch, agent, and provider."
-          width="1609"
-          height="784"
-          loading="lazy"
-          class="block w-full bg-[color:var(--color-ink)]"
-        />
+    <div class="surface-switch mt-10">
+      {/* The chrome bar is the install section's bar with the same dots, label
+          treatment and chip shapes, rebuilt from the same utilities rather than
+          reusing `.term-bar`: that class carries a bottom-only border because it
+          caps a `.term` frame, and this bar stands alone above a panel that
+          brings its own rounded border and glow. The label hides below `sm` so
+          the two chips keep their full width on a phone. */}
+      {/* ONE box. `.term` is the site's own window primitive and supplies the
+          single border, the single rounding, the overflow clip and the glow, so
+          the bar and the figure share a frame instead of being two objects with
+          a gap between them. Nothing inside carries its own border, rounding or
+          shadow, and nothing inside carries padding: the figure meets the bar's
+          bottom edge and the frame's own left, right and bottom edges. */}
+      <div class="surface-window">
+        {/* Not `.term-bar`: that class centres its children inside `py-2`, and
+            these tabs have to reach the bar's bottom edge to join the panel
+            below them. Same dots, same background, same divider, tabs sitting on
+            the divider instead of floating above it. The title text hides below
+            `sm` so the two tabs keep their width on a phone. */}
+        <div class="surface-window__bar">
+          <div class="surface-window__title">
+            <span class="term-dot" style="background:#ff5f56"></span>
+            <span class="term-dot" style="background:#febc2e"></span>
+            <span class="term-dot" style="background:#28c840"></span>
+            <span class="ml-2 hidden mono text-[11px] text-[color:var(--color-dim)] sm:inline">
+              one engine · two surfaces
+            </span>
+          </div>
+          <fieldset class="ml-auto flex min-w-0 flex-1 items-end justify-end gap-1 border-0 p-0 sm:flex-none">
+            <legend class="sr-only">Choose which dux surface to show</legend>
+            <label class={tab}>
+              <input class="surface-radio" type="radio" name="dux-surface" value="web" checked />
+              Web UI
+            </label>
+            <label class={tab}>
+              <input class="surface-radio" type="radio" name="dux-surface" value="tui" />
+              Terminal UI
+            </label>
+          </fieldset>
+        </div>
+
+        {/* The window's content. Edge to edge, on the terminal's own background,
+            so the frame is the only thing framing it. */}
+        <div class="surface-window__body">
+          <div class="surface-panel" data-surface="tui">
+            <img
+              src="/dux-screenshot.svg"
+              alt="dux running in a terminal: a projects pane with a tree of agent sessions on the left, a Claude agent's live terminal in the center, and the dux header bar showing project, branch, agent, and provider."
+              width="1609"
+              height="784"
+              loading="lazy"
+              class="block w-full"
+            />
+          </div>
+
+          <div class="surface-panel" data-surface="web">
+            <div class="webui-figure" style={figureVars}>
+              {/* Presented as a picture, deliberately: `sandbox=""` gives the
+                  frame no script, no form submission and no navigation, and the
+                  pointer and tab stops are turned off in CSS, so nothing inside
+                  is clickable and nothing can be tabbed into. The prose above
+                  carries the meaning for anyone not looking at it. */}
+              <iframe
+                src="/figure/web-ui"
+                title="The dux web UI, rendered from its own components"
+                width={FIGURE_W}
+                height={FIGURE_H}
+                loading="lazy"
+                sandbox=""
+                tabindex="-1"
+                aria-hidden="true"
+              />
+            </div>
+          </div>
+        </div>
       </div>
-      <figcaption class="mt-3 text-center mono text-[11px] text-[color:var(--color-dim)]">
-        actual dux · not a mockup · Tab between panes · resize with keys or mouse · go fullscreen with interactive mode
-      </figcaption>
-    </figure>
+
+      {/* Captions live OUTSIDE the window, because a strip of small type inside
+          the frame would be exactly the sort of half-measure the window is meant
+          to avoid. Each one is a panel in its own right, switched by the same
+          two rules as the figures. The web surface deliberately has no caption:
+          the tab above it names it, and a line claiming authenticity under a
+          figure that is literally the real components would be protesting too
+          much. */}
+      <p
+        class="surface-panel mt-3 text-center mono text-[11px] text-[color:var(--color-dim)]"
+        data-surface="tui"
+      >
+        actual dux · not a mockup · move between panes without the mouse · resize with keys or mouse · go fullscreen with interactive mode
+      </p>
+
+      {
+        phone && (
+          <figure class="surface-panel mx-auto mt-6 max-w-[280px]" data-surface="web">
+            <div class="overflow-hidden rounded-xl border border-[color:var(--color-border)]">
+              <picture>
+                {phone.webp && <source srcset={phone.webp} type="image/webp" />}
+                <img
+                  src={phone.src}
+                  alt="The dux web UI on a phone in portrait: an agent's terminal filling the screen with the accessory key bar and compose bar below it."
+                  width={phone.width}
+                  height={phone.height}
+                  loading="lazy"
+                  class="block w-full bg-[color:var(--color-ink)]"
+                />
+              </picture>
+            </div>
+            <figcaption class="mt-3 text-center mono text-[11px] text-[color:var(--color-dim)]">
+              same workspace, phone-shaped
+            </figcaption>
+          </figure>
+        )
+      }
+    </div>
   </div>
 </section>
+
+<style>
+  /* A WINDOW, built for this and nothing else.
+     It deliberately does NOT reuse `.term`, the site's terminal primitive. That
+     class is a frame that expects to sit around a padded body, so a title bar
+     plus a figure inside it rendered as a bar with a gap beneath it, which is
+     the half-committed look this replaces. A window is one object: one border,
+     one radius, one shadow, and content that meets its own edges.
+
+     `overflow: hidden` is what actually enforces it. The radius clips whatever
+     is inside, so the figure cannot poke a square corner through a round frame
+     and nothing inside needs its own rounding.
+
+     The margin reset on the body's children is not defensive tidiness. The
+     figure, the SVG and the iframe wrapper all arrive with their own spacing
+     from elsewhere, and any one of them reintroduces the gap. The frame refuses
+     it once, here, rather than asking every future child to remember. */
+  .surface-window {
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--color-border);
+    border-radius: 0.75rem;
+    overflow: hidden;
+    background: var(--color-ink);
+    box-shadow:
+      0 0 0 1px color-mix(in oklab, var(--color-accent) 8%, transparent),
+      0 20px 60px -20px color-mix(in oklab, var(--color-accent) 25%, transparent),
+      0 40px 120px -40px color-mix(in oklab, var(--color-pink) 20%, transparent);
+  }
+
+  /* The title bar. `align-items: flex-end` is load-bearing: it drops the tabs
+     onto the bar's bottom edge so the active one can join the panel below,
+     which is the whole reason the tabs live in the bar rather than above it. */
+  /* The bar carries ONE inset, on the left and right, and no vertical padding
+     of its own. Its height comes from the tabs, which reach its bottom edge so
+     the active one can join the panel.
+
+     The lights and the title then CENTRE themselves in whatever height that
+     produces, rather than being pushed into place by a hand-picked offset. The
+     previous version padded the bar 8px at the top, 12px at the sides and 0 at
+     the bottom, then shoved the lights up 14px with their own padding: four
+     numbers, none of them agreeing, which is why the cluster never sat evenly.
+     Now there is one number for the horizontal inset and the vertical is
+     symmetric by construction, so it stays even if the tabs change size. */
+  .surface-window__bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    column-gap: 0.5rem;
+    padding: 0 0.875rem;
+    background: var(--color-panel-2);
+    border-bottom: 1px solid var(--color-border-soft);
+  }
+
+  .surface-window__title {
+    display: flex;
+    align-self: center;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  /* The tabs own the bar's height and the gap above themselves, since they are
+     what the bar is sized around. */
+  .surface-tab {
+    margin-top: 0.5rem;
+  }
+
+  /* The content. No padding, no background of its own, no margins from any
+     child: the figure meets the bar's bottom edge and the frame's other three. */
+  .surface-window__body {
+    display: block;
+    min-width: 0;
+  }
+
+  .surface-window__body > * {
+    margin: 0;
+  }
+
+  .surface-window__body img,
+  .surface-window__body iframe {
+    display: block;
+  }
+
+  /* The switch. Every rule here is an OVERRIDE of a panel that is visible by
+     default, so the WEB panel survives anything: no `:has()` support, no
+     stylesheet at all, no JavaScript (there is none to miss).
+
+     The web surface is the default deliberately. The section directly above
+     already shows the terminal UI, as a recorded cast, so opening on the
+     terminal again would spend this figure repeating it. Defaulting to the web
+     panel also means its iframe is not `display: none` at load, so it starts
+     fetching immediately instead of on the first click.
+
+     Anchored on the class, not on the attribute alone: Astro scopes a selector
+     by hanging its component id off a class or an element, and a lone
+     `[data-surface="web"]` picks up no id at all and ships as a page-wide rule. */
+  .surface-panel[data-surface="tui"] {
+    display: none;
+  }
+
+  .surface-switch:has(.surface-radio[value="tui"]:checked) [data-surface="web"] {
+    display: none;
+  }
+
+  .surface-switch:has(.surface-radio[value="tui"]:checked) [data-surface="tui"] {
+    display: block;
+  }
+
+  /* The radio itself is the accessible control and stays focusable and
+     keyboard-operable; it is only visually replaced by its own tab. `sr-only`
+     would do this too, but the tab has to be the thing the focus ring lands on,
+     so the input is collapsed inside it rather than moved out of it. */
+  .surface-radio {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  /* The active tab JOINS THE PANEL. It takes the panel's own background, draws
+     the frame's border up its sides, and then paints its bottom border in that
+     same background over the bar's divider (the `-mb-px` in the tab's class list
+     is what puts it on top of the line). The result is a tab with no floor,
+     opening into the content below it.
+
+     That is the primary signal and it is a SHAPE, not a colour: the active tab
+     is a different silhouette, sits on a different background, and is the only
+     one connected to the panel. The accent text is a second, redundant cue. */
+  .surface-tab:has(.surface-radio:checked) {
+    background: var(--color-ink);
+    border-color: var(--color-border);
+    border-bottom-color: var(--color-ink);
+    color: var(--color-accent);
+  }
+
+  .surface-tab:has(.surface-radio:checked):hover {
+    background: var(--color-ink);
+  }
+
+  .surface-tab:has(.surface-radio:focus-visible) {
+    outline: 2px solid var(--color-accent);
+    outline-offset: -2px;
+  }
+
+  /* The web figure's frame is laid out at its own logical desktop size and then
+     scaled to whatever width it is given, with no JavaScript measuring anything.
+     Container query units do the arithmetic: `100cqw` is the wrapper's width, so
+     the scale factor is simply "how much of 1440px do we have". Because that is
+     resolved during layout, it is resolved afresh the moment the panel stops
+     being `display: none`, which is what makes it safe to hide behind a tab.
+
+     `--figure-w` / `--figure-h` are set inline on `.webui-figure` from the
+     single pair of constants in the frontmatter, so the iframe's own width and
+     height attributes and this scaling can never disagree.
+
+     The wrapper's aspect-ratio reserves the right box before the lazy iframe
+     loads, so nothing on the page jumps when it arrives.
+
+     Presentation only: the frame is sandboxed and aria-hidden, and these two
+     rules make sure a pointer or a caret cannot get into it either. */
+  /* The frame is simply the width it is given, and the app inside lays itself
+     out for that width. There is no scaling.
+     
+     It used to scale a fixed 1440px render down with
+     `transform: scale(calc(100cqw / var(--figure-w)))`, which is invalid CSS:
+     `100cqw` is a length and `var(--figure-w)` is a number, so the result is a
+     length and `scale()` takes a number. Browsers dropped the whole transform,
+     the iframe kept its full 1440px layout width, and the window's `overflow:
+     hidden` cropped it. On a wide screen that looks fine, which is why it
+     survived; narrow the page and you are looking at the left third of a
+     desktop app.
+     
+     Not scaling is better than fixing the arithmetic. The web UI is genuinely
+     responsive, with its own phone shell, so at a phone width the figure now
+     shows the REAL mobile layout rather than a shrunken desktop one. The figure
+     is built from the actual components, and this keeps that true at every
+     width instead of only at one. */
+  .webui-figure {
+    aspect-ratio: var(--figure-w) / var(--figure-h);
+    background: var(--color-ink);
+  }
+
+  .webui-figure iframe {
+    display: block;
+    width: 100%;
+    height: 100%;
+    border: 0;
+    pointer-events: none;
+    user-select: none;
+  }
+</style>

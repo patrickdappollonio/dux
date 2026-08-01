@@ -1,0 +1,33 @@
+/*
+  The stylesheet for the web-UI figure page, and NOT for the marketing site.
+
+  It is one line long on purpose: the web app's own `index.css`, unmodified. The
+  figure renders the app's real components, so it needs the app's real design
+  tokens, its real Tailwind theme and its real base layer. Restating any of that
+  here would be a copy to keep in sync, which is the exact failure mode the whole
+  figure exists to avoid.
+
+  This is also WHY the figure is served in its own document and embedded as an
+  iframe (see `Manifesto.astro`). The two stylesheets cannot share a page: they are
+  two independent Tailwind builds whose theme namespaces overlap by name and
+  disagree by value. `--color-border` is `#2a2e4c` on the site and the app's
+  `var(--border)` in the app; `--color-accent`, `--color-muted` and `--font-sans`
+  collide the same way, and Tailwind's preflight paints `border-color` from
+  `--color-border` onto EVERY element, so whichever sheet loaded second would
+  silently restyle the other's borders. On top of that the app's base rules
+  (`html, body, #root { height: 100% }`, `body { overflow: hidden }`) are correct
+  for an application filling a viewport and ruinous for a scrolling marketing
+  page. A separate document gives the app exactly the environment it was written
+  for and gives the site perfect isolation, with no selector rewriting, no
+  prefixing pass, and no JavaScript.
+
+  The `@source` lines are required. Tailwind's automatic content detection starts
+  from the project this CSS entry lives in, which is `website/`, so without them
+  it would scan the site and generate none of the classes the app's components
+  actually use.
+*/
+
+@import "../../../crates/dux-web/web/src/index.css";
+
+@source "../../../crates/dux-web/web/src/**/*.{ts,tsx}";
+@source "./*.tsx";

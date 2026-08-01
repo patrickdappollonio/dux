@@ -314,6 +314,20 @@ pub const WELCOME_TIPS: &[WelcomeTip] = &[
         ),
         tui: None,
     },
+    // The REACH tip: what a second front end BUYS you. Deliberately mechanism-
+    // light on both sides, because the tip right below already teaches the how
+    // (`start-web-server`), and because naming `dux server` here would be a
+    // half-truth in the TUI: one dux process owns the config directory
+    // (`crate::lockfile`), so a reader who ran it in a second shell alongside
+    // their running TUI would meet the lock rather than their agents.
+    WelcomeTip {
+        web: Some(
+            "That agent grinding away in your terminal? It's this one. Same worktree, same branch, one engine wearing two faces.",
+        ),
+        tui: Some(|_resolve| {
+            "Your agents don't live in this window, they live in worktrees. Serve dux over the web and the very same sessions turn up on your phone, mid-thought. No protocol layer, no adapter.".into()
+        }),
+    },
     // The in-process flip: discoverable from both sides. The web variant winks
     // at how the user may have gotten here; the TUI variant advertises the way
     // out. `start-web-server` is a palette-only command (no keybinding), so

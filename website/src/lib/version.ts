@@ -61,8 +61,14 @@ export async function getLatestVersion(repo: string): Promise<string | null> {
  *   - point it at the new thing, keeping the same "now with …" shape, or
  *   - set this to `null`, which removes the badge from every place it renders
  *     with no markup changes.
+ *
+ * IT ANNOUNCES THE SURFACE, NOT THE TRAVEL. This used to read "now with remote
+ * work", which sold the web UI as a thing you use when you are away from the
+ * terminal. It is not: dux has two front ends over one engine and both are first
+ * class. Reaching the workspace from a phone is a consequence of the web UI
+ * existing, and it is a nice one, but it is not what the release added.
  */
-export const WHATS_NEW_BADGE: string | null = "now with remote work";
+export const WHATS_NEW_BADGE: string | null = "now with a web UI";
 
 /** Where the badge sends you: the section that explains what it is announcing. */
-export const WHATS_NEW_HREF = "#web";
+export const WHATS_NEW_HREF = "#surfaces";

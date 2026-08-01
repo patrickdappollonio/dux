@@ -1,7 +1,7 @@
 ---
 title: Git without leaving the browser
 description: The Changes pane in server mode, staged and unstaged groups, stage, unstage, discard with confirmation, commit, push, pull, the PR banner, and the shared file-status icons.
-group: Server mode
+group: Web UI
 order: 63
 ---
 

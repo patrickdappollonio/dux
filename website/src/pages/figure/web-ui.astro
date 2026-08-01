@@ -1,0 +1,36 @@
+---
+// The web-UI figure, as its own document.
+//
+// This page exists to be embedded by `WebUI.astro` on the homepage. It is not a
+// destination: it carries `noindex`, it is filtered out of the sitemap
+// (`astro.config.mjs`), and it deliberately does NOT use `Layout.astro`: it
+// must not load the marketing site's stylesheet, only the app's own (see
+// `figure.css` for why the two cannot share a document).
+//
+// What renders here is the dux web UI's REAL React components, out of
+// `crates/dux-web/web/src`, against a fabricated workspace seeded into the real
+// store. There is no `client:*` directive anywhere on this page, so Astro
+// renders the tree at build time and ships ZERO JavaScript: the visitor gets
+// markup and CSS. It is the actual UI, simply not photographed.
+import "../../figure/figure.css";
+import { WebUIFigure } from "../../figure/WebUIFigure";
+import { seedFigureWorkspace } from "../../figure/seed";
+
+// Seed before the component renders: the components read the store, so the store
+// has to already hold the workspace by the time Astro asks React for markup.
+seedFigureWorkspace();
+---
+
+<!doctype html>
+<!-- The app is dark-only; its runtime does this in `main.tsx`. -->
+<html lang="en" class="dark" style="color-scheme: dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>dux web UI</title>
+  </head>
+  <body>
+    <div id="root"><WebUIFigure /></div>
+  </body>
+</html>

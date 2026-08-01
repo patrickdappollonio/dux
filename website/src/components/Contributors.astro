@@ -15,7 +15,8 @@ const list = Array.isArray(contributors) ? contributors : [];
   list.length > 0 && (
     <section class="py-16 sm:py-24">
       <div class="container-app">
-        <div class="max-w-2xl">
+        {/* Full width: nothing sits to the right of this intro, so a cap would just leave a hole there. */}
+        <div>
           <span class="pill">▸ contributors</span>
           <h2 class="heading mt-3 text-3xl font-bold tracking-tight sm:text-4xl">
             We couldn't have made it happen without our{" "}

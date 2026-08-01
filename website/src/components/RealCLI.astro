@@ -36,14 +36,14 @@ const duck = [
           <div class="flex gap-3">
             <span class="mt-0.5 shrink-0 text-[color:var(--color-pink)]">✦</span>
             <p class="text-sm text-[color:var(--color-muted)]">
-              <strong class="text-[color:var(--color-text)]">Skip the protocol tax.</strong>
+              <strong class="text-[color:var(--color-text)]">Skip the protocol tax.</strong>{" "}
               Agent protocols like ACP are increasingly metered and billed on their own. Generous to start, sure, but a separate meter all the same. Running the real CLI keeps you on the subscription and auth you already pay for.
             </p>
           </div>
           <div class="flex gap-3">
             <span class="mt-0.5 shrink-0 text-[color:var(--color-pink)]">✦</span>
             <p class="text-sm text-[color:var(--color-muted)]">
-              <strong class="text-[color:var(--color-text)]">Keep everything that makes your agent yours.</strong>
+              <strong class="text-[color:var(--color-text)]">Keep everything that makes your agent yours.</strong>{" "}
               Your skills, MCP servers, hooks, slash commands, and permission prompts all work, because dux doesn't touch your setup. It just runs the tool you already configured.
             </p>
           </div>
@@ -67,11 +67,16 @@ const duck = [
             class="mono text-[color:var(--color-accent)] inline-block text-left"
             style="font-size:13px; line-height:1.4"
           >{duck}</pre>
+          {/* No key printed here on purpose: every binding in dux is
+              user-configurable, so a key in marketing copy is stale the moment
+              someone rebinds it, and the in-app help overlay is the authoritative
+              list. Scoped to the terminal UI too, because the palette is a
+              terminal-side thing; the web UI's equivalent home is its cog menu. */}
           <p class="mt-5 mono text-[11px] text-[color:var(--color-muted)]">
-            Lost? <span class="text-[color:var(--color-accent)]">Ctrl-P</span> opens the command palette.
+            Lost? The <span class="text-[color:var(--color-accent)]">command palette</span> lists every action in the terminal UI.
           </p>
           <p class="mt-1 mono text-[11px] text-[color:var(--color-dim)]">
-            Every action lives there, even the ones you forgot existed.
+            Even the ones you forgot existed. Its key is yours to change, like every other binding.
           </p>
         </div>
       </div>

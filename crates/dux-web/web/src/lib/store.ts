@@ -543,6 +543,19 @@ export interface DuxState {
 // file defaults to "diff"; the file tree / edit actions default to "file".
 export type EditorViewMode = "file" | "diff"
 
+// Is there a browser around this module at all? Everything in the app runs in
+// one, and every existing guard below (`typeof location === "undefined"`, the
+// `typeof document` check in `refreshAttentionChrome`) says the same thing in
+// its own words; this names it once.
+//
+// It is false in exactly one place: a build-time render outside a browser. The
+// marketing site renders the REAL components to static HTML (see
+// `website/src/figure/`), which imports this module under plain Node, where
+// `localStorage`, `location` and `window` do not exist and a WebSocket has
+// nothing to connect to. Under jsdom (the unit tests) and in a browser this is
+// true and NOTHING below changes.
+const hasBrowser = typeof window !== "undefined"
+
 // The expanded sidebar width is drag-resizable and persisted across reloads.
 // 18rem gives agent names breathing room next to the PR/status badges; a
 // previously persisted width still wins.
@@ -550,13 +563,14 @@ const SIDEBAR_WIDTH_KEY = "dux:sidebar-width"
 const DEFAULT_SIDEBAR_WIDTH = "18rem"
 
 function loadSidebarWidth(): string {
+  if (!hasBrowser) return DEFAULT_SIDEBAR_WIDTH
   return localStorage.getItem(SIDEBAR_WIDTH_KEY) || DEFAULT_SIDEBAR_WIDTH
 }
 
 // One-time cleanup: the diff line-number toggle (and its persisted preference)
 // went away when the web diff moved to Monaco, which manages its own gutters.
 // Drop the orphaned key so it can't linger or be misread by a future feature.
-localStorage.removeItem("dux:show-diff-line-numbers")
+if (hasBrowser) localStorage.removeItem("dux:show-diff-line-numbers")
 
 // The `/ws/events` topic for one session's changed files.
 function changesTopic(sessionId: string): string {
@@ -710,9 +724,25 @@ export function getSnapshot(): DuxState {
   return state
 }
 
+// Seed the store directly, for a render that has no server to fetch from. The
+// marketing site's static figure (`website/src/figure/`) is the only caller: it
+// runs at build time under plain Node, where `boot()` is skipped and the state
+// would otherwise sit at its empty initial value forever. It is deliberately a
+// thin pass-through to `setState` so the seeded state settles through exactly
+// the same derivation (mobile screen, not-found) that a live patch does. Not
+// used by the app at runtime, and it opens no socket and fires no fetch.
+export function seedStaticSnapshot(patch: Partial<DuxState>): void {
+  setState(patch)
+}
+
 // Derive the WebSocket scheme from the page protocol so an HTTPS deployment uses
 // `wss://` (a hardcoded `ws://` would be blocked as mixed content under HTTPS).
-const wsScheme = location.protocol === "https:" ? "wss:" : "ws:"
+const wsScheme = hasBrowser && location.protocol === "https:" ? "wss:" : "ws:"
+
+// The host half of the same URL. Off-browser there is no page to derive it from
+// and no socket will ever be opened (`boot()` is skipped), so the placeholder
+// only has to keep the `EventsSocket` constructor happy.
+const wsHost = hasBrowser ? location.host : "localhost"
 
 // The single JSON socket for the whole app (`/ws/events`), separate from the
 // per-PTY byte sockets (`lib/ptySocket.ts`). Since the Phase 6 cutover it carries
@@ -722,7 +752,7 @@ const wsScheme = location.protocol === "https:" ? "wss:" : "ws:"
 // connection-state UX (the status-bar indicator). Exported so tests can drive
 // its callbacks / inspect its interest set; connected on boot.
 export const eventsSocket = new EventsSocket(
-  `${wsScheme}//${location.host}/ws/events`,
+  `${wsScheme}//${wsHost}/ws/events`,
 )
 
 // App-wide coarse topics, subscribed once at module load. They are added to the
@@ -1507,19 +1537,29 @@ function boot(): void {
   loadBootstrap()
   loadSpine()
 }
-boot()
+// Off-browser (a build-time static render) there is no server to talk to and no
+// socket to open, so the store simply stays at its initial state until whoever
+// is rendering seeds it. In a browser and under jsdom this runs exactly as before.
+if (hasBrowser) boot()
 
 // Browser/hardware Back and Forward. Registered ONCE at module scope (never in a
 // React effect) so it survives re-renders and shell switches. The browser has
 // already moved its own cursor by the time this fires, so the only job here is
 // to read the URL it landed on and make the app match it. Nothing is derived
 // from `event.state`, and nothing is counted: the hash alone says where we are.
-window.addEventListener("popstate", () => {
-  applyUrlRoute()
-})
+if (hasBrowser) {
+  window.addEventListener("popstate", () => {
+    applyUrlRoute()
+  })
+}
 
 export function useDux(): DuxState {
-  return useSyncExternalStore(subscribe, getSnapshot)
+  // The third argument is the SERVER snapshot, which React demands whenever a
+  // component is rendered outside a browser (`renderToString`). The state lives
+  // in a module-level variable rather than in the DOM, so the server reads the
+  // same one the client does and `getSnapshot` serves both. In a browser React
+  // never calls it.
+  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
 }
 
 // --- Routing (a tiny hash router) -----------------------------------------

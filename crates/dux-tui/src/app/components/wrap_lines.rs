@@ -382,7 +382,7 @@ mod tests {
         let mut lines = vec![
             Line::from(""),
             Line::from(Span::styled(
-                "dux is a terminal UI for orchestrating AI coding agents.",
+                "dux has two front ends over one engine: a terminal UI",
                 body,
             )),
             Line::from(vec![

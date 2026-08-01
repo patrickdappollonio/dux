@@ -1,7 +1,7 @@
 ---
 title: The workspace in the browser
 description: The three-pane web layout, deep links, the browser terminals, the one-writer take-over model, copy-on-select and right-click paste, Shift-Enter soft newlines, companion terminals, and the mobile hub-and-spoke shell.
-group: Server mode
+group: Web UI
 order: 61
 ---
 

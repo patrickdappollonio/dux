@@ -4,7 +4,8 @@ import InstallTabs from "./InstallTabs.astro";
 
 <section id="install" class="anchor-offset py-16 sm:py-24">
   <div class="container-app">
-    <div class="max-w-2xl">
+    {/* Full width: nothing sits to the right of this intro, so a cap would just leave a hole there. */}
+    <div>
       <span class="pill">▸ install</span>
       <h2 class="heading mt-3 text-3xl font-bold tracking-tight sm:text-4xl">
         Get dux on your <span class="text-[color:var(--color-accent)]">PATH</span>, your way.
@@ -14,18 +15,31 @@ import InstallTabs from "./InstallTabs.astro";
       </p>
     </div>
 
-    <div class="mt-6 mb-10 flex items-start gap-2.5 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-panel-2)]/50 px-3.5 py-2.5 text-sm text-[color:var(--color-muted)]">
-      <span class="mt-0.5 shrink-0 text-[color:var(--color-success)]">✓</span>
-      <p>
-        The only hard requirement is <code>git</code> (dux is built on worktrees). Beyond that the CLI needs <strong class="text-[color:var(--color-text)]">no dependencies</strong>. The <code>gh</code> CLI is optional: install it for PR tracking and agent-opened PRs; skip it and dux quietly disables anything GitHub.
-      </p>
+    {/* Side by side where there is room, stacked where there is not. `md` is
+        the breakpoint because these are two dense paragraphs: at `sm` widths a
+        pair of columns leaves each one a few words per line. `items-stretch`
+        so the two cards match height rather than one floating short. */}
+    <div class="mt-6 mb-10 grid items-stretch gap-2.5 md:grid-cols-2">
+      <div class="flex items-start gap-2.5 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-panel-2)]/50 p-4 text-sm text-[color:var(--color-muted)]">
+        <span class="mt-0.5 shrink-0 text-[color:var(--color-success)]">✓</span>
+        <p>
+          <strong class="text-[color:var(--color-text)]">One binary, both front ends.</strong>{" "}
+          There is no separate server package and no second thing to install. <span class="mono text-[color:var(--color-text)]">dux</span> opens the terminal UI; <span class="mono text-[color:var(--color-text)]">dux server</span> serves the web UI out of that same executable, assets and all.
+        </p>
+      </div>
+      <div class="flex items-start gap-2.5 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-panel-2)]/50 p-4 text-sm text-[color:var(--color-muted)]">
+        <span class="mt-0.5 shrink-0 text-[color:var(--color-success)]">✓</span>
+        <p>
+          The only hard requirement is <code>git</code> (dux is built on worktrees). Beyond that the CLI needs <strong class="text-[color:var(--color-text)]">no dependencies</strong>. The <code>gh</code> CLI is optional: install it for PR tracking and agent-opened PRs; skip it and dux quietly disables anything GitHub.
+        </p>
+      </div>
     </div>
 
     <div class="grid items-start gap-6 lg:grid-cols-[1.1fr_0.9fr]">
       <div class="min-w-0 space-y-5">
         <InstallTabs />
         <div class="rounded-lg border border-dashed border-[color:var(--color-border)] bg-[color:var(--color-panel-2)]/60 p-4 text-xs text-[color:var(--color-muted)]">
-          <strong class="text-[color:var(--color-text)]">Prefer to read it first?</strong>
+          <strong class="text-[color:var(--color-text)]">Prefer to read it first?</strong>{" "}
           Of course you do. <a href="/install.sh" class="text-[color:var(--color-accent)] hover:underline mono">view install.sh</a> or grab it straight from the <a href="https://github.com/patrickdappollonio/dux/releases/latest" class="text-[color:var(--color-accent)] hover:underline">latest release</a>.
         </div>
       </div>

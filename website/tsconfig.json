@@ -1,5 +1,14 @@
 {
   "extends": "astro/tsconfigs/strict",
   "include": [".astro/types.d.ts", "**/*"],
-  "exclude": ["dist"]
+  "exclude": ["dist"],
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "jsxImportSource": "react",
+    // The web-UI figure (src/figure/) imports the dux web app's components
+    // through the app's own `@` alias. This mirrors the build/test alias in
+    // src/lib/web-ui-alias.mjs so an editor resolves them the way the build
+    // does.
+    "paths": { "@/*": ["../crates/dux-web/web/src/*"] }
+  }
 }

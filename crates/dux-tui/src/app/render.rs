@@ -3331,7 +3331,11 @@ impl App {
         // ── About dux ──────────────────────────────────────────
         push_banner(&mut lines, "About dux", content_width);
         lines.push(Line::from(Span::styled(
-            "dux is a terminal UI for orchestrating AI coding agents.",
+            "dux has two front ends over one engine: a terminal UI",
+            body_style,
+        )));
+        lines.push(Line::from(Span::styled(
+            "and a web UI, both driving the same workspace.",
             body_style,
         )));
         lines.push(Line::from(Span::styled(
@@ -3339,11 +3343,11 @@ impl App {
             body_style,
         )));
         lines.push(Line::from(Span::styled(
-            "unlimited agents — and unlimited companion terminals for",
+            "unlimited agents, and unlimited companion terminals",
             body_style,
         )));
         lines.push(Line::from(Span::styled(
-            "each agent — all running side by side.",
+            "for each agent, all running side by side.",
             body_style,
         )));
         lines.push(Line::from(""));

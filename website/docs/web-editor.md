@@ -1,7 +1,7 @@
 ---
 title: The code editor
 description: A real Monaco editor in the browser for any file in a worktree, with syntax highlighting, JSON and TOML help, Markdown preview, path search, diffs against HEAD, and open-in-local-editor.
-group: Server mode
+group: Web UI
 order: 62
 ---
 

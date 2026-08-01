@@ -1,7 +1,7 @@
 ---
 title: Server mode overview
 description: What server mode is, how to start it (the dux server command or the in-app flip), the startup banner, the honest no-login trust model, and every [server] config key with its default.
-group: Server mode
+group: Web UI
 order: 60
 ---
 
@@ -121,6 +121,8 @@ Access control is delegated to where you bind and who can reach it.
   `--bind 0.0.0.0:8080`) puts your agents and worktrees in reach of anyone who
   can hit that address, with no login in front. dux prints a loud warning before
   it does this. Put it behind a trusted reverse proxy or keep it on Tailscale.
+  [Hosting dux behind a login](/docs/public-hosting) is one worked example of the
+  proxy half: TLS, `oauth2-proxy` with GitHub, and dux on a private network.
 
 Two automatic defenses always run, and they are about browser attacks, not user
 authentication: a **Host-header allowlist** (so a malicious page cannot
@@ -220,3 +222,6 @@ they have rows in **Preferences…**.
 - [Reaching dux over Tailscale](/docs/tailscale): how the tailnet address is found
   and bound, why a MagicDNS name needs `allowed_hosts`, and what plain HTTP costs
   you in the browser.
+- [Hosting dux behind a login](/docs/public-hosting): a reverse proxy plus
+  `oauth2-proxy` with GitHub in one Compose file, for when the server is not on a
+  private network.
