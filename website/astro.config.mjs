@@ -2,7 +2,7 @@ import { defineConfig } from "astro/config";
 import sitemap from "@astrojs/sitemap";
 import mdx from "@astrojs/mdx";
 import react from "@astrojs/react";
-import { webUiAlias } from "./src/lib/web-ui-alias.mjs";
+import { webUiAlias, webUiReactBridge } from "./src/lib/web-ui-alias.mjs";
 import pagefind from "astro-pagefind";
 import tailwindcss from "@tailwindcss/vite";
 import { unified } from "@astrojs/markdown-remark";
@@ -32,7 +32,7 @@ export default defineConfig({
     // React is here for ONE thing: the homepage's web-UI figure, which renders
     // the dux web app's real components (from crates/dux-web/web/src) to static
     // HTML at build time. No page carries a `client:*` directive, so no React
-    // runtime is shipped to any visitor. Keep it that way — the figure's whole
+    // runtime is shipped to any visitor. Keep it that way: the figure's whole
     // claim is that it is the real UI with zero JavaScript behind it.
     react(),
     pagefind(),
@@ -55,7 +55,7 @@ export default defineConfig({
   // global.css as a relative file and fails before Tailwind's plugin ever
   // runs. The Vite plugin resolves the bare package import itself.
   vite: {
-    plugins: [tailwindcss()],
+    plugins: [webUiReactBridge(), tailwindcss()],
     // The web-UI figure imports the dux web app's components straight out of
     // `crates/dux-web/web/src`. They resolve through the app's own `@` alias,
     // and every React copy in play has to collapse to one. Shared with the test
