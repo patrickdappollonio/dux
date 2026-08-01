@@ -1,3 +1,4 @@
+import { createRequire } from "node:module"
 import { fileURLToPath } from "node:url"
 
 // The web UI figure on the homepage renders the REAL React components out of
@@ -34,32 +35,69 @@ export const WEB_UI_MODULES = here("../../../crates/dux-web/web/node_modules")
  * node_modules with a React beside them, and anything that lets them resolve it
  * themselves produces a second copy and a null dispatcher on `useContext`.
  *
- * KNOWN LIMITATION: `astro dev` cannot serve the figure. React is CommonJS, and
- * these paths are outside this project, so Vite's dev SSR runner treats them as
- * source, inlines them, evaluates them as ES modules, and throws
- * `module is not defined` at the first `module.exports`. `astro build` bundles,
- * so the built site is correct; `npm run build && npm run preview` is the way to
- * look at the figure.
- *
- * What was measured, so the next person does not repeat it. Aliasing React to
- * THIS project's copy instead: does not fix dev, fails identically. Adding
- * `ssr.external`: no change. `ssr.noExternal` over the app's tree: no change.
- * `resolve.dedupe`: no change. `ssr.optimizeDeps.include` DOES make a bare
- * `import "react"` load, which is the one thing that worked, but the render then
- * dies on `react-dom/server` because the subpath aliases point at concrete files
- * and the dep optimizer never sees them. Dropping the subpath aliases breaks
- * resolution a different way. The remaining lead is making the dep optimizer
- * cover the subpaths, or vendoring the figure's React imports behind a module
- * this project owns.
+ * Vite's dev SSR runner deliberately does not externalize an import that
+ * matches an alias. Aliasing these CommonJS packages straight to files made
+ * Vite inline those files as if they were ESM (`module is not defined`). The
+ * site-owned bridge modules below become ESM facades which use Node's
+ * `createRequire` to load the app's packages natively. That also preserves the
+ * singleton: externalized app-side UI packages use Node resolution and reach
+ * these exact same files.
  */
+const BRIDGE_ROOT = here("./web-ui-react-bridge")
+
+const reactEntries = new Map([
+  [BRIDGE_ROOT + "/react.mjs", WEB_UI_MODULES + "/react/index.js"],
+  [BRIDGE_ROOT + "/react-jsx-runtime.mjs", WEB_UI_MODULES + "/react/jsx-runtime.js"],
+  [BRIDGE_ROOT + "/react-jsx-dev-runtime.mjs", WEB_UI_MODULES + "/react/jsx-dev-runtime.js"],
+  [BRIDGE_ROOT + "/react-dom.mjs", WEB_UI_MODULES + "/react-dom/index.js"],
+  [BRIDGE_ROOT + "/react-dom-client.mjs", WEB_UI_MODULES + "/react-dom/client.js"],
+  [BRIDGE_ROOT + "/react-dom-server.mjs", WEB_UI_MODULES + "/react-dom/server.js"],
+])
+
 export function webUiAlias() {
+  // Put subpaths before package names: Vite aliases also match `find/…`, so a
+  // bare `react` entry placed first would swallow `react/jsx-runtime`.
+  return [
+    { find: "@", replacement: WEB_UI_SRC },
+    { find: "react/jsx-runtime", replacement: BRIDGE_ROOT + "/react-jsx-runtime.mjs" },
+    { find: "react/jsx-dev-runtime", replacement: BRIDGE_ROOT + "/react-jsx-dev-runtime.mjs" },
+    { find: "react-dom/client", replacement: BRIDGE_ROOT + "/react-dom-client.mjs" },
+    { find: "react-dom/server", replacement: BRIDGE_ROOT + "/react-dom-server.mjs" },
+    { find: "react", replacement: BRIDGE_ROOT + "/react.mjs" },
+    { find: "react-dom", replacement: BRIDGE_ROOT + "/react-dom.mjs" },
+  ]
+}
+
+/**
+ * Turn the site-owned bridge modules into SSR-safe ESM facades around the
+ * app's CommonJS React entry points. Client/build transforms read the bridge
+ * files normally, where Vite's production CommonJS pipeline handles them.
+ *
+ * Named exports are derived from the installed entry point so this stays in
+ * lockstep with React upgrades instead of maintaining a handwritten export
+ * list. `createRequire` and every target path are embedded in the facade, so
+ * Node caches the same real files for the facade and for app-side packages.
+ */
+export function webUiReactBridge() {
+  const require = createRequire(import.meta.url)
+
   return {
-    "@": WEB_UI_SRC,
-    react: WEB_UI_MODULES + "/react",
-    "react/jsx-runtime": WEB_UI_MODULES + "/react/jsx-runtime.js",
-    "react/jsx-dev-runtime": WEB_UI_MODULES + "/react/jsx-dev-runtime.js",
-    "react-dom": WEB_UI_MODULES + "/react-dom",
-    "react-dom/client": WEB_UI_MODULES + "/react-dom/client.js",
-    "react-dom/server": WEB_UI_MODULES + "/react-dom/server.js",
+    name: "web-ui-react-bridge",
+    enforce: "pre",
+    transform(_code, id, options) {
+      const target = reactEntries.get(id)
+      if (!target || !options?.ssr) return
+
+      const names = Object.keys(require(target)).filter(
+        (name) => name !== "default" && /^[$A-Z_a-z][$\w]*$/.test(name),
+      )
+
+      return [
+        'import { createRequire } from "node:module"',
+        `const value = createRequire(import.meta.url)(${JSON.stringify(target)})`,
+        "export default value",
+        ...names.map((name) => `export const ${name} = value.${name}`),
+      ].join("\n")
+    },
   }
 }
