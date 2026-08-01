@@ -1,0 +1,24 @@
+---
+// A Graphviz diagram rendered to inline SVG at build time.
+//
+// The Markdown side gets the same thing from a ```dot fence (see
+// src/lib/remark-graphviz.mjs); this is the component for .astro pages, so the
+// homepage and the docs draw through one renderer and share one stylesheet.
+// Nothing ships to the browser but the SVG.
+import { renderDiagram } from "../lib/graphviz.mjs";
+
+interface Props {
+  /** Graphviz DOT source. Name classes, never colors: CSS owns the palette. */
+  dot: string;
+  /** Rendered under the drawing, and used as the SVG's accessible name. */
+  caption?: string;
+  /** Overrides the accessible name when the caption is not the right label. */
+  label?: string;
+  class?: string;
+}
+
+const { dot, caption = "", label = "", class: className = "" } = Astro.props;
+const html = await renderDiagram(dot, { caption, label, className });
+---
+
+<Fragment set:html={html} />

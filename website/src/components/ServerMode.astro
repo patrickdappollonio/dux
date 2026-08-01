@@ -30,9 +30,47 @@
 // the URL. Leaving them unmentioned invites the reader to discover them and
 // mistake them for a gate, so the section names them and then disowns them.
 //
-// The topology block is `<pre>` inside an `overflow-x-auto` wrapper: it is
-// about 66 columns wide, so it fits most phones outright and scrolls in its own
-// box rather than the page body where it does not.
+// The topology is a real diagram, laid out by Graphviz at build time and
+// emitted as inline SVG (see src/lib/graphviz.mjs). It was ASCII box drawing
+// once, which read as terminal output when the subject is a deployment, and
+// then a row of styled cards, which read as three cards. A deployment has
+// nodes and edges, so it is drawn with nodes and edges. Every color comes from
+// the site's tokens through the `.diagram` rules in global.css, the DOT below
+// names classes and never colors, and nothing ships to the visitor but markup.
+import Diagram from "./Diagram.astro";
+
+const topology = `digraph server_mode {
+  bgcolor="transparent";
+  // Left to right, unlike the docs diagrams, which stack. This one sits in a
+  // full-width homepage panel, so a vertical stack wastes the width and then
+  // scales itself small to fit the height. The flow is also literally a journey
+  // from outside to inside, which reads better along the page than down it.
+  rankdir=LR;
+  nodesep=0.30;
+  ranksep=0.55;
+  node [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=13, margin="0.30,0.18", penwidth=1];
+  edge [fontname="Helvetica", fontsize=10, arrowsize=0.7, penwidth=1];
+
+  client [class="d-outside", label=<you, anywhere<br/><font point-size="9">a browser, or a phone</font>>];
+
+  subgraph cluster_box {
+    label="a box that is not your laptop";
+    fontname="Helvetica";
+    fontsize=10;
+    labeljust="l";
+    style="rounded";
+    margin=16;
+
+    proxy [class="d-tls",  label=<reverse proxy<br/><font point-size="9">terminates TLS</font>>];
+    gate  [class="d-gate", label=<oauth2&#45;proxy<br/><font point-size="9">decides who you are</font>>];
+    dux   [class="d-app",  label=<dux server<br/><font point-size="9">claude &#183; codex &#183; git &#183; gh</font>>];
+
+    proxy -> gate [label="  http"];
+    gate  -> dux  [label="  http, private"];
+  }
+
+  client -> proxy [label="  https"];
+}`;
 ---
 
 <section id="server-mode" class="anchor-offset py-16 sm:py-24">
@@ -65,54 +103,16 @@
       </p>
     </div>
 
-    {/* The diagram is real elements, not a picture of one. ASCII box drawing
-        reads as a terminal, and this is the one part of the page that is not
-        about a terminal: it is a deployment. It also could not reflow, so on a
-        phone it either scrolled sideways or shrank into nothing.
-
-        Laid out as a row that wraps: on a phone the three stages stack and the
-        connectors turn to point down. */}
-    <div class="mt-10 rounded-xl border border-[color:var(--color-border)] bg-[color:var(--color-panel)]/40 p-5 backdrop-blur sm:p-6">
-      <div class="flex flex-col items-stretch gap-3 lg:flex-row lg:items-center">
-        <div class="flex-1 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-ink)] p-4">
-          <div class="mono text-[10px] uppercase tracking-wider text-[color:var(--color-dim)]">you, anywhere</div>
-          <div class="mt-1.5 text-sm font-medium text-[color:var(--color-text)]">A browser, or a phone</div>
-          <p class="mt-1 text-xs text-[color:var(--color-muted)]">Nothing installed. The workspace is wherever dux is.</p>
-        </div>
-
-        <div class="flex items-center justify-center gap-2 text-[color:var(--color-dim)] lg:flex-col">
-          <span class="mono text-[10px] uppercase tracking-wider">https</span>
-          <span aria-hidden="true" class="text-[color:var(--color-accent)] lg:rotate-0">
-            <span class="lg:hidden">↓</span><span class="hidden lg:inline">→</span>
-          </span>
-        </div>
-
-        <div class="flex-[1.4] rounded-lg border border-[color:var(--color-accent)]/40 bg-[color:var(--color-ink)] p-4">
-          <div class="mono text-[10px] uppercase tracking-wider text-[color:var(--color-dim)]">a box that is not your laptop</div>
-          <div class="mt-1.5 text-sm font-medium text-[color:var(--color-text)]">Reverse proxy, TLS, and a login</div>
-          <p class="mt-1 text-xs text-[color:var(--color-muted)]">
-            oauth2-proxy decides who you are. Everything past this point has already been let in.
-          </p>
-
-          <div class="mt-3 flex items-center gap-2 text-[color:var(--color-dim)]">
-            <span aria-hidden="true" class="text-[color:var(--color-accent)]">↓</span>
-            <span class="mono text-[10px] uppercase tracking-wider">http, loopback only</span>
-          </div>
-
-          <div class="mt-2 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-panel-2)]/60 p-3">
-            <div class="mono text-xs font-medium text-[color:var(--color-text)]">dux server</div>
-            <div class="mt-1.5 flex flex-wrap gap-1.5">
-              <span class="pill pill-xs">claude</span>
-              <span class="pill pill-xs">codex</span>
-              <span class="pill pill-xs">git</span>
-              <span class="pill pill-xs">gh</span>
-            </div>
-          </div>
-        </div>
-      </div>
+    <div class="mt-10">
+      <Diagram
+        class="diagram--full"
+        dot={topology}
+        caption="Nothing installed on your side. Everything past the login has already been let in."
+        label="A browser or phone reaches a reverse proxy over HTTPS; the proxy hands the request to oauth2-proxy, which passes it to dux server on a private network."
+      />
     </div>
 
-      <div class="mt-6 grid items-start gap-4 md:grid-cols-3">
+      <div class="mt-6 grid items-stretch gap-4 md:grid-cols-3">
         <div class="card p-4">
           <div class="flex items-center gap-2">
             <span class="shrink-0 text-[color:var(--color-warning)]">▲</span>

@@ -27,12 +27,18 @@
 // The failure mode is deliberately "show nothing", not "show something old":
 // when the lookup fails (offline build, rate limit, timeout) the caller drops
 // the version segment from the pill entirely. The pill can be missing a version.
-// It can never display a wrong one.
+// It can never display a wrong one. It does not fail the build either, because
+// the release lives on GitHub's API and their rate limiter is not a reason a
+// contributor cannot build this site. What it DOES do is say so: every skipped
+// lookup prints a line naming the endpoint and the fix, so a pill with no
+// version is a reported outcome rather than a silent one.
 //
 // Known limitation: GitHub's `releases/latest` endpoint skips drafts and
 // prereleases. Publish a version as a prerelease and the site keeps showing the
 // previous stable one, which is the correct answer for a marketing page anyway.
 import { fetchJson, githubHeaders } from "./remote-json";
+// @ts-expect-error - plain .mjs helper, shared with the plain-Node build scripts
+import { unexpectedShapeWarning } from "./remote-failure.mjs";
 
 /** Looks like a release tag: `v1`, `v1.2`, `v1.2.3`, optional `-rc.1` suffix. */
 const TAG_SHAPE = /^v\d+(\.\d+){0,2}(-[0-9A-Za-z.-]+)?$/;
@@ -43,12 +49,30 @@ const TAG_SHAPE = /^v\d+(\.\d+){0,2}(-[0-9A-Za-z.-]+)?$/;
  * as a version string.
  */
 export async function getLatestVersion(repo: string): Promise<string | null> {
-  const data = await fetchJson<{ tag_name?: string }>(
-    `https://api.github.com/repos/${repo}/releases/latest`,
-    githubHeaders(),
-  );
-  const tag = data?.tag_name?.trim();
-  return tag && TAG_SHAPE.test(tag) ? tag : null;
+  const url = `https://api.github.com/repos/${repo}/releases/latest`;
+  const label = `the latest release tag for ${repo}`;
+  const effect = "The hero pill renders without a version";
+  const data = await fetchJson<{ tag_name?: string }>(url, {
+    label,
+    effect,
+    headers: githubHeaders(),
+  });
+  if (!data) return null;
+  const tag = data.tag_name?.trim();
+  if (!tag || !TAG_SHAPE.test(tag)) {
+    console.warn(
+      unexpectedShapeWarning({
+        label,
+        url,
+        effect,
+        detail: tag
+          ? `the tag \`${tag}\` is not version-shaped, so it is not rendered as one`
+          : "the release carried no `tag_name`",
+      }),
+    );
+    return null;
+  }
+  return tag;
 }
 
 /**

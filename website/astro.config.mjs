@@ -2,7 +2,7 @@ import { defineConfig } from "astro/config";
 import sitemap from "@astrojs/sitemap";
 import mdx from "@astrojs/mdx";
 import react from "@astrojs/react";
-import { webUiAlias, webUiReactBridge } from "./src/lib/web-ui-alias.mjs";
+import { webUiAlias, webUiReactBridge, WEB_UI_ROOT } from "./src/lib/web-ui-alias.mjs";
 import pagefind from "astro-pagefind";
 import tailwindcss from "@tailwindcss/vite";
 import { unified } from "@astrojs/markdown-remark";
@@ -11,6 +11,7 @@ import rehypeAutolinkHeadings from "rehype-autolink-headings";
 import rehypeProseImages from "./src/lib/rehype-prose-images.mjs";
 import remarkGemoji from "remark-gemoji";
 import remarkAdmonitions from "./src/lib/remark-admonitions.mjs";
+import remarkGraphviz from "./src/lib/remark-graphviz.mjs";
 
 export default defineConfig({
   site: "https://getdux.app",
@@ -56,6 +57,20 @@ export default defineConfig({
   // runs. The Vite plugin resolves the bare package import itself.
   vite: {
     plugins: [webUiReactBridge(), tailwindcss()],
+    server: {
+      fs: {
+        // The figure renders the app's real components, and those components
+        // load real assets from the app's own dependencies: the variable font
+        // is the one that shows up first. Vite will RESOLVE a module outside its
+        // root but refuses to SERVE a file from there, so the dev server
+        // answered the font request with "outside of Vite serving allow list"
+        // and the figure rendered in a fallback face.
+        //
+        // Only the app's directory is added. This is a dev-server read
+        // permission, so it stays as narrow as the thing it exists for.
+        allow: [".", WEB_UI_ROOT],
+      },
+    },
     // The web-UI figure imports the dux web app's components straight out of
     // `crates/dux-web/web/src`. They resolve through the app's own `@` alias,
     // and every React copy in play has to collapse to one. Shared with the test
@@ -87,7 +102,13 @@ export default defineConfig({
       //
       // remarkAdmonitions turns GitHub-style `> [!NOTE]` blockquotes into styled
       // alert callouts (see src/lib/remark-admonitions.mjs; styled in global.css).
-      remarkPlugins: [remarkGemoji, remarkAdmonitions],
+      //
+      // remarkGraphviz turns a ```dot fenced block into a themed inline SVG,
+      // laid out at build time by Graphviz-WASM. It runs after the others
+      // because it replaces those nodes with raw HTML. The same renderer backs
+      // the <Diagram> component used on the homepage, so both surfaces draw
+      // through one pipeline (see src/lib/graphviz.mjs).
+      remarkPlugins: [remarkGemoji, remarkAdmonitions, remarkGraphviz],
       rehypePlugins: [
         // Give every heading a stable slug id, then append a clickable "#"
         // anchor so docs headings are linkable. The slug ids also power the

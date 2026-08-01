@@ -575,4 +575,143 @@
   .prose-docs .heading-anchor:hover {
     color: var(--color-accent);
   }
+
+  /* ── Graphviz diagrams ────────────────────────────────────────────────────
+     Inline SVG produced at build time from DOT (src/lib/graphviz.mjs), used by
+     both the ```dot fences in the docs and the <Diagram> component on the
+     homepage. Graphviz writes its colors as presentation attributes
+     (fill="lightgrey", stroke="black"), which lose to any CSS rule, so every
+     color a reader sees comes from the tokens below and the DOT sources name
+     no colors at all. Colors ONLY: the CSS here never sets font-family or
+     font-size, because Graphviz measured every box against the metrics it
+     emitted, and a wider face at render time would push labels out of their
+     boxes.
+
+     Sizing: the renderer strips Graphviz's fixed pt width/height, keeps the
+     viewBox, and publishes the intrinsic width as --diagram-width plus a
+     readability floor as --diagram-min-width. The figure scrolls in its own box
+     rather than shrinking labels into nothing on a phone. */
+  .diagram {
+    /* Capped and centred rather than stretched across a full-width section
+       around a thin drawing. The cap is the diagram's OWN intrinsic width where
+       that is smaller, so a narrow vertical topology (around 260px) sits in a
+       card that fits it, while a wide left-to-right one gets the room it needs
+       instead of being squeezed back down by a fixed cap. 46rem is the ceiling
+       for the widest of them; on a phone neither limit applies because the
+       viewport is smaller than both. */
+    max-width: min(46rem, max(var(--diagram-width, 34rem), 20rem));
+    margin: 1.75rem auto;
+    padding: 1.1rem 0.75rem 0.9rem;
+    border: 1px solid var(--color-border-soft);
+    border-radius: 0.75rem;
+    background: color-mix(in oklab, var(--color-panel) 55%, transparent);
+  }
+  /* Full bleed within its section, for a diagram that IS the illustration
+     rather than an aside inside prose. The capped card is right in the docs,
+     where a diagram sits between paragraphs and a full-width drawing would
+     break the reading column. On the homepage the section has nothing else in
+     that row, so the cap only made a wide diagram look squished inside an
+     unnecessary box. */
+  .diagram--full {
+    max-width: none;
+  }
+
+  /* The SVG normally stops at its own intrinsic width so a small diagram is not
+     blown up to fill a column. A full-bleed one is the opposite case: it should
+     take the section. Scaling up costs nothing here because it is vector, and
+     the labels get larger rather than fuzzier. */
+  .diagram--full .diagram-svg {
+    width: 100%;
+    max-width: none;
+  }
+
+  .diagram-scroll {
+    overflow-x: auto;
+    display: flex;
+    justify-content: center;
+  }
+  .diagram-svg {
+    height: auto;
+    max-width: var(--diagram-width);
+    min-width: var(--diagram-min-width);
+  }
+  .diagram-caption {
+    margin-top: 0.85rem;
+    padding-top: 0.7rem;
+    border-top: 1px solid var(--color-border-soft);
+    text-align: center;
+    font-size: 0.8rem;
+    line-height: 1.5;
+    color: var(--color-dim);
+  }
+
+  /* Nodes: a filled rounded box (Graphviz emits a <path> for rounded corners
+     and a <polygon> for square ones, so both are covered). */
+  .diagram .node > path,
+  .diagram .node > polygon {
+    fill: var(--color-panel-2);
+    stroke: var(--color-border);
+  }
+  .diagram .node > text {
+    fill: var(--color-text);
+  }
+  /* The secondary label line is authored at 9pt in the DOT source and dimmed
+     here. Graphviz gives no per-line hook, and the point size is the one thing
+     it does emit that identifies the line; if a DOT source changes that size,
+     change it here too. */
+  .diagram .node > text[font-size="9.00"] {
+    fill: var(--color-dim);
+  }
+
+  /* Edges: line, arrowhead, and the label riding beside it. */
+  .diagram .edge > path {
+    stroke: var(--color-dim);
+  }
+  .diagram .edge > polygon {
+    fill: var(--color-dim);
+    stroke: var(--color-dim);
+  }
+  .diagram .edge > text {
+    fill: var(--color-dim);
+  }
+
+  /* Clusters: the dashed enclosure and its title. */
+  .diagram .cluster > path,
+  .diagram .cluster > polygon {
+    fill: color-mix(in oklab, var(--color-accent) 4%, transparent);
+    stroke: color-mix(in oklab, var(--color-border) 70%, transparent);
+    stroke-dasharray: 4 4;
+  }
+  .diagram .cluster > text {
+    fill: var(--color-dim);
+  }
+
+  /* Semantic node roles. A DOT source picks one of these by class; it never
+     picks a color. `d-outside` is the untrusted side of the boundary,
+     `d-gate` is whatever authenticates, `d-app` is dux itself, and `d-plain`
+     is scenery. */
+  .diagram .d-outside > path,
+  .diagram .d-outside > polygon {
+    fill: transparent;
+    stroke: var(--color-border);
+    stroke-dasharray: 4 3;
+  }
+  .diagram .d-outside > text {
+    fill: var(--color-muted);
+  }
+  .diagram .d-gate > path,
+  .diagram .d-gate > polygon {
+    fill: color-mix(in oklab, var(--color-accent) 12%, var(--color-panel-2));
+    stroke: color-mix(in oklab, var(--color-accent) 65%, transparent);
+  }
+  .diagram .d-app > path,
+  .diagram .d-app > polygon {
+    fill: color-mix(in oklab, var(--color-pink) 10%, var(--color-panel-2));
+    stroke: color-mix(in oklab, var(--color-pink) 55%, transparent);
+  }
+  .diagram .d-tls > path,
+  .diagram .d-tls > polygon {
+    fill: color-mix(in oklab, var(--color-success) 10%, var(--color-panel-2));
+    stroke: color-mix(in oklab, var(--color-success) 50%, transparent);
+  }
 }

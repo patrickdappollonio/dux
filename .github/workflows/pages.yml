@@ -67,8 +67,16 @@ jobs:
         with:
           node-version: 24
           cache: npm
-          cache-dependency-path: website/package-lock.json
+          # Both projects: the site renders the web UI's real components, so its
+          # dependencies are part of this build too.
+          cache-dependency-path: |
+            website/package-lock.json
+            crates/dux-web/web/package-lock.json
 
+      # No separate install for the dux web app here. `prep` installs it when it
+      # is missing (see website/scripts/render-figure.mjs), so a local
+      # `npm run dev`, a local `npm run build` and this workflow all take the
+      # same path and cannot drift. The Node cache above covers both lockfiles.
       - name: Install dependencies
         working-directory: website
         run: |

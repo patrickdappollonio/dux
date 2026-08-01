@@ -27,6 +27,11 @@ const here = (p) => fileURLToPath(new URL(p, import.meta.url))
 
 export const WEB_UI_SRC = here("../../../crates/dux-web/web/src")
 export const WEB_UI_MODULES = here("../../../crates/dux-web/web/node_modules")
+// The app's project root. The dev server has to be allowed to READ from here,
+// not just resolve into it: the components pull real assets out of the app's
+// dependencies (the variable font among them), and Vite refuses to serve a file
+// outside its own root unless the path is on the allow list.
+export const WEB_UI_ROOT = here("../../../crates/dux-web/web")
 
 /**
  * Every React import, from this project AND from the app's components, points at

@@ -197,18 +197,29 @@ const tab =
 
           <div class="surface-panel" data-surface="web">
             <div class="webui-figure" style={figureVars}>
-              {/* Presented as a picture, deliberately: `sandbox=""` gives the
-                  frame no script, no form submission and no navigation, and the
-                  pointer and tab stops are turned off in CSS, so nothing inside
-                  is clickable and nothing can be tabbed into. The prose above
-                  carries the meaning for anyone not looking at it. */}
+              {/* Presented as a picture, deliberately: the sandbox withholds
+                  scripts, form submission and navigation, and the pointer and
+                  tab stops are turned off in CSS, so nothing inside is
+                  clickable and nothing can be tabbed into. The prose above
+                  carries the meaning for anyone not looking at it.
+
+                  `allow-same-origin` is granted, and only that. A bare
+                  `sandbox=""` gives the frame an OPAQUE origin, which makes
+                  every subresource request cross-origin. In production that is
+                  survivable because the stylesheet is a plain file, but the dev
+                  server hands CSS over as a JavaScript module, so the request
+                  was refused outright and the figure rendered with no styling
+                  at all: no theme, and the wordmark image apparently missing.
+                  Granting the origin back does NOT make the frame interactive,
+                  because `allow-scripts` is still withheld and nothing can run
+                  inside it. */}
               <iframe
                 src="/figure/web-ui"
                 title="The dux web UI, rendered from its own components"
                 width={FIGURE_W}
                 height={FIGURE_H}
                 loading="lazy"
-                sandbox=""
+                sandbox="allow-same-origin"
                 tabindex="-1"
                 aria-hidden="true"
               />
@@ -217,20 +228,10 @@ const tab =
         </div>
       </div>
 
-      {/* Captions live OUTSIDE the window, because a strip of small type inside
-          the frame would be exactly the sort of half-measure the window is meant
-          to avoid. Each one is a panel in its own right, switched by the same
-          two rules as the figures. The web surface deliberately has no caption:
-          the tab above it names it, and a line claiming authenticity under a
-          figure that is literally the real components would be protesting too
-          much. */}
-      <p
-        class="surface-panel mt-3 text-center mono text-[11px] text-[color:var(--color-dim)]"
-        data-surface="tui"
-      >
-        actual dux · not a mockup · move between panes without the mouse · resize with keys or mouse · go fullscreen with interactive mode
-      </p>
-
+      {/* Neither surface carries a caption. The tab above the window names which
+          one you are looking at, and the prose above the section has already
+          made the case, so a strip of small type under the frame was repeating
+          both. */}
       {
         phone && (
           <figure class="surface-panel mx-auto mt-6 max-w-[280px]" data-surface="web">
@@ -434,9 +435,52 @@ const tab =
      shows the REAL mobile layout rather than a shrunken desktop one. The figure
      is built from the actual components, and this keeps that true at every
      width instead of only at one. */
+  /* The frame is a PICTURE of the app, not a small viewport it lays out into.
+     The iframe is given the app's real desktop size and then scaled down to
+     whatever room the box has, so a phone shows the whole desktop UI shrunk,
+     the way a screenshot would, rather than the app re-flowing into a letterbox.
+
+     `--figure-scale` is set by the script below, because the factor is a ratio
+     of two widths and CSS cannot divide one length by another. The media-query
+     values are the no-JavaScript floor: roughly right at each size, replaced by
+     the exact value the moment the script runs. */
   .webui-figure {
     aspect-ratio: var(--figure-w) / var(--figure-h);
     background: var(--color-ink);
+    overflow: hidden;
+  }
+
+  .webui-figure iframe {
+    width: calc(var(--figure-w) * 1px);
+    height: calc(var(--figure-h) * 1px);
+    transform-origin: top left;
+    transform: scale(var(--figure-scale, 0.84));
+  }
+
+  @media (max-width: 1279px) {
+    .webui-figure {
+      --figure-scale: 0.72;
+    }
+  }
+
+  @media (max-width: 1023px) {
+    .webui-figure {
+      --figure-scale: 0.55;
+    }
+  }
+
+  @media (max-width: 767px) {
+    .webui-figure {
+      --figure-scale: 0.44;
+    }
+  }
+
+  @media (max-width: 639px) {
+    .webui-figure {
+      --figure-scale: 0.24;
+    }
+  }
+
   }
 
   .webui-figure iframe {
@@ -448,3 +492,31 @@ const tab =
     user-select: none;
   }
 </style>
+
+<script>
+  // Scale the figure so the whole desktop UI always fits its box, exactly.
+  //
+  // CSS gets close with breakpoints but cannot do this itself: the factor is one
+  // width divided by another, and `calc()` will not divide a length by a length.
+  // Without this the picture is right at four sizes and slightly off everywhere
+  // between them.
+  //
+  // The iframe itself still ships no JavaScript. This runs on the page AROUND
+  // it, and if it never runs the media-query values above still show the whole
+  // UI, just not to the pixel.
+  const frames = document.querySelectorAll<HTMLElement>(".webui-figure")
+  if (frames.length > 0 && "ResizeObserver" in window) {
+    const fit = (frame: HTMLElement) => {
+      const design = Number(getComputedStyle(frame).getPropertyValue("--figure-w")) || 1440
+      const width = frame.clientWidth
+      if (width > 0) frame.style.setProperty("--figure-scale", String(width / design))
+    }
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) fit(entry.target as HTMLElement)
+    })
+    for (const frame of frames) {
+      fit(frame)
+      observer.observe(frame)
+    }
+  }
+</script>

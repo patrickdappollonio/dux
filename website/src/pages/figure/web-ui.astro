@@ -13,12 +13,10 @@
 // renders the tree at build time and ships ZERO JavaScript: the visitor gets
 // markup and CSS. It is the actual UI, simply not photographed.
 import "../../figure/figure.css";
-import { WebUIFigure } from "../../figure/WebUIFigure";
-import { seedFigureWorkspace } from "../../figure/seed";
-
-// Seed before the component renders: the components read the store, so the store
-// has to already hold the workspace by the time Astro asks React for markup.
-seedFigureWorkspace();
+// The markup is produced by `scripts/render-figure.mjs`, a `prep` step that runs
+// before `astro dev` and `astro build` alike, the same way contributor data and
+// the webp images are produced. The page reads the artifact.
+import figure from "../../figure/figure.html?raw";
 ---
 
 <!doctype html>
@@ -31,6 +29,6 @@ seedFigureWorkspace();
     <title>dux web UI</title>
   </head>
   <body>
-    <div id="root"><WebUIFigure /></div>
+    <div id="root" set:html={figure}></div>
   </body>
 </html>
