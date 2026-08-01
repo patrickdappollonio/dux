@@ -84,11 +84,13 @@ works and the per-agent tab cap, is in [Agent tabs](/docs/agent-tabs).
 
 ### Dormant tabs after a restart
 
-When the server restarts, your tabs come back **dormant**, not running. dux does
-not restore a tab's conversation across a restart, so instead of silently
-relaunching (and instead of quietly re-attaching, which would force a launch), a
-dormant tab shows a card explaining it is not running with a **Start session**
-button. Nothing launches until you ask it to. Your provider CLI likely still has
+When the server restarts, an agent's **extra** tabs come back **dormant**, not
+running. dux does not restore a tab's conversation across a restart, so instead of
+silently relaunching (and instead of quietly re-attaching, which would force a
+launch), a dormant tab shows a card explaining it is not running with a **Start
+session** button. Nothing launches on an extra tab until you ask it to. Opening the
+agent's own tab is different: that view is the terminal, so opening it starts or
+resumes the agent's provider. Your provider CLI likely still has
 the conversation in its own history, so a started tab often picks up where it left
 off, and every provider offers its own command to browse and choose a past
 conversation if you want a specific one.
@@ -104,11 +106,13 @@ make sure your agents actually emit the signal, is covered in
 [Attention indicators](/docs/attention-indicators).
 
 Server mode can go one step further and raise a **real browser desktop
-notification** when a backgrounded agent asks for you, bridged from the agent's
-own notification escape codes. It is strictly opt-in: dux never auto-prompts for
-permission. Open **Preferences…** from the cog menu and use **Enable browser
-notifications** once, grant permission, and you are set. It fires only while the tab is in the
-background, so an agent you are watching never nags you. This is governed by the
+notification** when an agent asks for you, bridged from the agent's
+own notification escape codes. The permission is strictly opt-in: dux never
+auto-prompts for it. Open **Preferences…** from the cog menu and use **Enable
+browser notifications** once, grant permission, and you are set. It fires only
+while the dux browser window itself is hidden or unfocused, so dux never nags you
+while you are looking at it. Only the agent whose view is open can raise one,
+because that is the only PTY the browser is subscribed to. This is governed by the
 `web_notifications` capability, detailed in
 [Terminal capabilities](/docs/terminal-capabilities).
 

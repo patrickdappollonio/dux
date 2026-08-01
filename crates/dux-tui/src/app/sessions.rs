@@ -931,9 +931,11 @@ impl App {
     /// and report the outcome via the status line. Shared by the
     /// new-agent-tab picker's single-provider skip and its Apply branch, so
     /// the status copy and focus behavior never drift between the entry
-    /// points. Every new-tab entry point (palette command, `Action::NewTab`
-    /// key, the tab strip's `+` button) routes through
-    /// `open_new_tab_provider_prompt` first, which calls this.
+    /// points. Both new-tab entry points (the `new-agent-tab` palette command
+    /// and the `Action::NewTab` key) route through
+    /// `open_new_tab_provider_prompt` first, which calls this. The TUI strip
+    /// deliberately draws no `+` button (see `render.rs`), so there is no
+    /// third entry point.
     fn spawn_tab_with_provider(&mut self, session_id: &str, provider: ProviderKind) {
         let pty_size = self.pty_size_for_launch();
         match self.engine.create_tab(session_id, provider, pty_size) {

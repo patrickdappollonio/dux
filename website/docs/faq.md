@@ -159,7 +159,8 @@ keystroke. See [Managing Macros](/docs/macros).
 
 ### How do I see every keyboard shortcut?
 
-Press `?` in the app: the help overlay is the authoritative reference. Every
+Open the help overlay in the terminal UI; its key is shown in the footer hint bar,
+and it is the authoritative reference. Every
 binding is configurable under `[keys]`. See
 [keybindings](/docs/configuration#keybindings).
 

@@ -80,9 +80,11 @@ clipboard_passthrough = "focused"
   forwarded on either surface, because a reply would get typed straight back into
   dux.
 
-Notifications and progress reports forward from **every** agent, background ones
-included, because a notification from an agent you are not watching is precisely
-the one you want to see.
+In the terminal UI, notifications and progress reports forward from **every**
+agent, background ones included, because a notification from an agent you are not
+watching is precisely the one you want to see. In the web UI only the agent whose
+view is currently open can raise a browser notification, because that is the only
+PTY the browser is subscribed to, and progress reports are not bridged at all.
 
 ### One tmux gotcha
 
@@ -109,8 +111,9 @@ is the **web-only** switch for this; it has no effect on the TUI, whose
 host-terminal notifications are governed by `passthrough` above. Two things gate
 them, on purpose:
 
-1. **The tab has to be in the background.** dux never pops a desktop notification
-   for an agent whose tab you are already staring at.
+1. **The dux browser window has to be backgrounded.** dux never pops a desktop
+   notification while you are looking at dux itself. The gate is the browser
+   window being hidden or unfocused, not which agent you have selected.
 2. **You have to opt in.** dux never auto-prompts for notification permission,
    because a surprise permission popup is nobody's idea of a good time. Open
    **Preferences…** from the cog menu and use **Enable browser notifications**

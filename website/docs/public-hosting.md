@@ -177,7 +177,9 @@ services:
       # Your config, your session database and your log. Keep it on a named
       # volume or a bind mount: this is where projects and agents live.
       - dux_config:/root/.config/dux
-      # Your repositories. dux creates worktrees next to them.
+      # Your repositories. dux does NOT create worktrees next to them: they go
+      # under its own config directory, so they live on the dux_config volume
+      # above. Do not treat that volume as disposable.
       - ./code:/root/code
 
 volumes:
@@ -281,8 +283,11 @@ WORKDIR /root/code
 ```
 
 Then `docker compose exec dux gh auth login` and the equivalent for each agent CLI,
-once, so the credentials land on the `dux_config` volume and survive a restart. This
-is the part that takes an afternoon, and it has nothing to do with dux.
+once. Those credentials do **not** land on the `dux_config` volume: `gh` writes
+`/root/.config/gh` and each agent CLI writes its own directory, none of which is
+mounted above. Add volumes for them (or mount all of `/root`) if you want them to
+survive a restart. This is the part that takes an afternoon, and it has nothing to
+do with dux.
 
 If containerising your dev environment is not appealing, run `dux server` on the
 host instead and delete the `dux` service. One gotcha if you do: the proxy container
@@ -348,9 +353,10 @@ all.** Nothing in dux inspects `X-Forwarded-For`, `X-Forwarded-Proto` or
 `X-Forwarded-Host`, even though Caddy sets all three and `oauth2-proxy` adds
 `X-Forwarded-User` and `X-Forwarded-Email` on top (`--pass-user-headers` and
 `--pass-basic-auth` both default to `true`). Practically
-that means dux's access log records the proxy's IP for every request, and the
-identity `oauth2-proxy` established is not visible to dux. Your audit trail lives in
-the proxy's logs, not in dux's.
+that means dux's access log carries no client identity at all: it records only the
+timestamp, method, path, status and latency, so the identity `oauth2-proxy`
+established is invisible to dux. Your audit trail lives in the proxy's logs, not in
+dux's.
 
 > [!CAUTION]
 > Do not use Tailscale Funnel, `ngrok`, `cloudflared` in its no-authentication mode,
@@ -449,11 +455,12 @@ allowlist is empty and rejects everybody. Or `--scope` was set by hand without
 nobody. Both look identical from the browser, so check the `oauth2-proxy` logs, which
 name the org it wanted and the orgs it saw.
 
-### Everything works, but the access log is all one IP
+### The console shows one client IP for everybody
 
-Working as designed. dux reads no forwarded headers, so it logs the connecting
-socket, which behind a proxy is always the proxy. Use the proxy's logs when you want
-to know who did something.
+dux's per-request access log records no IP at all: only the timestamp, method, path,
+status and latency. The console's connect and disconnect lines do print a peer
+address, and since dux reads no forwarded headers that address is the proxy's for
+every client. Use the proxy's logs when you want to know who did something.
 
 ## Where to go next
 

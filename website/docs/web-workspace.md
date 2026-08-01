@@ -175,8 +175,9 @@ input method's confirm keystroke.
 
 An agent is not limited to its provider CLI. You can spawn **companion terminals**
 alongside it, plain shells in the same worktree, for running tests, poking at git,
-or tailing a log while the agent works. They nest under their agent in the sidebar
-with their own icon, and the title tracks whatever is running in the foreground
+or tailing a log while the agent works. They live in their own collapsible
+**Terminals** section in the sidebar, with the owning agent named on the row, and
+the title tracks whatever is running in the foreground
 ("vim", "htop"). Unlike agents, which detach when you kill them, killing a
 companion terminal destroys it.
 
@@ -184,7 +185,8 @@ Projects get the same treatment: a **project terminal** is a plain shell opened 
 the project's repo root with no agent attached. It is the escape hatch when dux
 won't do something for you remotely: open a shell at the repo and do it by hand,
 even over Tailscale with no local terminal in sight. Spawn one from the project's
-⋯ menu ("New project terminal"); it nests under the project in the sidebar, shows
+⋯ menu ("New project terminal"); it joins the same **Terminals** section with the
+project named as its owner, shows
 up in the Task Manager, and is destroyed on close exactly like any other terminal.
 Removing the project closes its project terminals.
 

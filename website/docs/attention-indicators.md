@@ -134,8 +134,10 @@ immediately as usual.
 By default this feature stays inside dux: bells rung inside an agent's session are
 consumed by dux's embedded terminal and not re-forwarded to the terminal you run
 dux in. If you would rather have the agent's real desktop notifications reach your
-host terminal (or your browser, in the web UI), that is a separate, opt-in feature
-covered in [Terminal capabilities](/docs/terminal-capabilities).
+host terminal (or your browser, in the web UI), that is a separate feature, on by
+default in config and covered in
+[Terminal capabilities](/docs/terminal-capabilities). Only the browser side needs
+an explicit permission grant.
 
 ## When nothing lights up
 
@@ -148,9 +150,11 @@ terminals they recognize. Work down this list before concluding it is broken:
    ghostty, an identity the browser terminal renders well. Open a companion
    terminal (which gets the same identity as the agent) and run
    `echo $TERM_PROGRAM`. If you see your real terminal (or `ghostty` on the web),
-   identity is doing its job. If you see nothing, someone set
-   `terminal_identity = "none"` in `[capabilities]`, and agents like Claude Code
-   will quietly emit nothing at all. The full story lives in
+   identity is doing its job. An empty `TERM_PROGRAM` is not proof of a problem on
+   its own: several terminals (kitty, alacritty, foot, xterm) never set it, and
+   dux's forced `kitty` identity deliberately does not either. Check
+   `[capabilities] terminal_identity` in your config, and under kitty look for its
+   own markers (`KITTY_WINDOW_ID`, `TERM`) instead. The full story lives in
    [Terminal capabilities](/docs/terminal-capabilities).
 2. **Give it a few seconds.** Some agents wait for a beat of true idleness before
    notifying (Claude Code holds off for about six seconds after a question

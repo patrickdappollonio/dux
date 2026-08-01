@@ -56,13 +56,15 @@ Both front ends lay the workspace out the same way, in three panes:
 
 - The **left pane** lists your agents in a single flat list, most-active first,
   with a search filter and a project chooser for creating or targeting a project.
-- The **center pane** shows the focused agent's live terminal output, or a diff
-  view when you want to review changes.
+- The **center pane** shows the focused agent's live terminal output. In the
+  terminal UI it doubles as the diff view when you review changes; in the browser
+  a diff opens in the file-editor overlay instead.
 - The **right pane** shows the files an agent has changed, with diffs.
 
-In the terminal UI, `Tab` and `Shift-Tab` move between panes, and that's the
-primary way you get around. Every pane has its own local key combinations, and the
-authoritative list of every binding lives in the in-app help overlay (press `?`).
+In the terminal UI, dedicated focus-next and focus-previous keys move between
+panes, and that's the primary way you get around. Every pane has its own local key
+combinations, and the authoritative list of every binding lives in the in-app help
+overlay.
 Everything is rebindable; see [Configuration](/docs/configuration) for how. In the
 browser the same three panes are click-driven, with a collapsible sidebar and a
 resizable Changes split; see

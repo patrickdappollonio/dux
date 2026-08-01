@@ -20,15 +20,16 @@ There's no "main" tab and no "support" tab. Every tab is just a provider session
 in the agent's shared worktree, and they all look and behave the same. Add one,
 close one, switch between them freely.
 
-Add a tab with the `+` button on the strip. On the web it spawns the project's
-default provider immediately. In the terminal UI, adding a tab (the `+` button, the
-new-agent-tab command, or the equivalent key) opens a picker so you can choose
-which configured provider the new tab runs, with the project default
+On the web, add a tab with the `+` button on the strip; it spawns the project's
+default provider immediately, and the dropdown attached to it lets you pick a
+different one. The terminal UI has no `+` button: add a tab with the
+`new-agent-tab` palette command (or its binding), which opens a picker so you can
+choose which configured provider the new tab runs, with the project default
 preselected; when only one provider is configured it skips the picker and just
 uses it. Want a different provider on a tab later? Retarget it from its `⋯` menu
-on the web, or with the change-provider action in the TUI. There's a per-agent
-cap (20 by default, and fully configurable) so the strip stays sane; adding a
-tab politely bows out once you hit it.
+on the web, or with the `change-agent-provider` palette command in the TUI.
+There's a per-agent cap (20 by default, and fully configurable) so the strip
+stays sane; adding a tab politely bows out once you hit it.
 
 ## How resume works
 
@@ -105,7 +106,7 @@ dux remembers, so a coworker sending you a link to their tab never changes
 which tab you land on next time you (or anyone else) simply reopen the agent.
 
 In the terminal UI, switching is keyboard-driven and the keys are yours to rebind
-(the `?` overlay always shows your current bindings). One deliberate quirk: tab
+(the in-app help overlay always shows your current bindings). One deliberate quirk: tab
 switching is a non-interactive-mode action. While you're actively typing into an
 agent in fullscreen, those keys belong to the agent, not to dux, so drop out of
 the agent first to hop between tabs.

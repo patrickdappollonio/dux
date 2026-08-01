@@ -37,10 +37,9 @@ for a project terminal), so you always know whose shell you're looking at.
 ## Sorting
 
 Reach for the sort control, the sort dropdown on the web or the `sort-agents`
-command in the TUI's command palette (**Ctrl-P** by default, and it cycles
-through the modes), and choose:
+command in the TUI's command palette (it cycles through the modes), and choose:
 
-- **Active first** — anything working, typing, or waiting on you floats to the
+- **Active first**: anything working or waiting on you floats to the
   top; everything else keeps its order. This is the default, and the one you'll
   live in.
 - **Recently updated** / **Recently created** — newest at the top.

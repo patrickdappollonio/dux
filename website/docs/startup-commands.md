@@ -112,9 +112,10 @@ addition to any `[env]` and `[[projects]] env` keys you configure:
 | `DUX_PROVIDER` | Provider name used for this agent (e.g. `claude`, `codex`) |
 | `DUX_STARTUP_COMMAND_LOG` | Absolute path to the log file for this run |
 
-These variables are available exclusively inside startup commands. Agent PTY
-sessions and companion terminals receive only your configured `[env]` and
-`[[projects]] env` variables.
+These `DUX_*` variables are set only for startup commands. Agent PTY sessions and
+companion terminals do not get them: they inherit dux's own environment, plus the
+`TERM`/`COLORTERM` and terminal-identity values dux sets, with your `[env]` and
+`[[projects]] env` keys layered on top.
 
 ## The startup shell
 

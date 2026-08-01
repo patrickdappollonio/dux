@@ -125,7 +125,7 @@ Dockerfile, Markdown, and many more, including bare-filename matches like
 `Makefile` and `Dockerfile`. Two file types get extra help beyond coloring:
 
 - **JSON** gets full validation, so a misplaced comma is flagged as you type. This
-  is the same editor that powers dux's own **Edit config** palette command.
+  is the same editor behind the app menu's **Edit config file…** entry.
 - **TOML** gets a dedicated tokenizer, which is exactly what you want when you are
   editing a `config.toml`.
 

@@ -74,8 +74,11 @@ name = "web-app"
 default_provider = "myagent"
 ```
 
-You can still pick a different provider when you create an individual agent; this
-just sets the default.
+New agents in this project use this provider. There is no provider picker in the
+create-agent prompt: to move an existing agent to a different CLI, run the
+`change-agent-provider` palette command in the terminal UI, or pick **Change agent
+provider…** on the agent's `⋯` menu in the browser. It takes effect the next time
+that tab launches.
 
 ## Why no adapters?
 

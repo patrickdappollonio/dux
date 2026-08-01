@@ -21,9 +21,12 @@ import type { SelectedTarget } from "@/lib/store"
 
 // A small quick-picker for sending a text macro to the focused target. Mirrors
 // the TUI's Ctrl-\ macro bar: a filterable list of macros restricted to the
-// focused target's surface, run by Enter/click. The verbose `Sent macro
-// "<name>".` confirmation rides the existing status lane (toast) — no bespoke
-// toast here.
+// focused target's surface, run by Enter/click. There is deliberately NO
+// confirmation of any kind here: `runMacro` writes the payload straight to the
+// focused PTY socket and emits no status, so nothing reaches the toast lane.
+// (The TUI's `Sent macro "<name>".` status line has no web counterpart, because
+// there is no server round trip to carry one; the feedback is the macro text
+// appearing at the prompt.)
 //
 // LAYOUT SAFETY: the trigger button is rendered by `TerminalPane` as an
 // absolutely-positioned sibling of the xterm host (NOT inside the unpadded

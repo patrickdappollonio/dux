@@ -57,7 +57,8 @@ The pane header's `⋯` **Actions** menu carries the rest:
 - **Push** and **Pull** are one click each, with a progress toast that reports
   back to the browser tab you triggered them from.
 - **Hide Changes pane** tucks the whole pane away when you want the terminal full
-  width (you can bring it back the same way).
+  width. Bring it back from the **Show the Changes pane** row in **Preferences**:
+  hiding the pane takes this menu with it.
 
 ## The PR banner
 

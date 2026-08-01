@@ -102,11 +102,13 @@
      Widened from `max-w-6xl` (1152px) because the docs' three-column layout was
      squeezing its middle column: 1088px of content minus a 240px sidebar, a
      208px table of contents and two 40px gutters left the prose about 560px
-     wide, narrower than the sidebar and the contents put together. At 1280px
-     that column gets about 688px, which is a reading measure rather than a
-     slot. */
+     wide, narrower than the sidebar and the contents put together. It went to
+     1280px, then to 1344px, which gives that column about 752px: a reading
+     measure rather than a slot. Past roughly this width the homepage's
+     full-width prose starts running to uncomfortably long lines, so the next
+     step is a second column or shorter copy, not more width. */
   .container-app {
-    @apply mx-auto w-full max-w-7xl px-5 sm:px-8;
+    @apply mx-auto w-full max-w-[84rem] px-5 sm:px-8;
   }
 
   .grid-bg {

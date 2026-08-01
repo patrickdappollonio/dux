@@ -12,12 +12,13 @@ you can create agents, you need at least one project added to dux: the Add-proje
 button in the browser, or the `add-project` command in the terminal UI's palette.
 Either one opens a project browser over the same filesystem.
 
-All four creation paths below work from both front ends, and this guide describes
-them once for both, because what dux actually does is identical either way. Only
+The creation paths below are available from both front ends, and this guide
+describes them once for both, because what dux does is the same either way. Only
 the way you reach an action differs, so each section names both: in the browser it
 is a button or an entry in a row's `⋯` menu, and in the terminal UI it is a command
-palette entry. Palette commands also have default keybindings you can view and
-rebind in the in-app help overlay (`?`); this guide names the stable command rather
+palette entry. Where a path or a detail exists on only one front end, the text
+says so. Palette commands also have default keybindings you can view and
+rebind in the in-app help overlay; this guide names the stable command rather
 than a key you might have remapped.
 
 ## The mental model
@@ -116,13 +117,15 @@ github_integration = true
 dux checks `gh` availability at startup. If it is missing or not authenticated, the
 path is hidden outright on both front ends: no palette command, no menu entry.
 
-When you trigger it, dux opens a prompt where you can paste a GitHub PR
-URL or type a PR number. After you confirm, dux:
+When you trigger it, dux resolves the PR you paste or type, then asks you to
+confirm or edit the branch name, pre-filled with the PR's head branch name. In the
+terminal UI that is a second prompt after the PR reference; in the browser the PR
+reference and the name are two fields in one dialog. The name you confirm is what
+the fetch targets, so on confirmation dux:
 
-1. Fetches the PR's head ref into a local branch using
+1. Fetches the PR's head ref into that local branch using
    `git fetch origin pull/<number>/head:refs/heads/<branch>`.
 2. Creates a worktree on that branch.
-3. Opens the naming prompt (pre-filled with the PR's head branch name).
 
 If the branch already exists locally (for example, from a previous fetch), dux
 attaches to it without fetching again.
@@ -145,7 +148,8 @@ pr_poll_interval_seconds = 180
 Each poll batches your tracked PRs into as few GraphQL requests as possible — one
 per GitHub host, up to ~100 PRs each — so the cost to your API quota stays low
 even with many agents. If your quota ever runs low (or GitHub starts erroring),
-dux pauses PR checks until it recovers and tells you in the status line.
+dux pauses PR checks until it recovers, and tells you: a status line in the
+terminal UI, a toast in the browser.
 
 ## Creating an agent from an existing worktree
 
@@ -157,18 +161,23 @@ for that project's repository. Worktrees are grouped into two categories:
 - **Managed worktrees**: worktrees already under dux's `worktrees/` directory.
   If one has no agent yet, dux attaches a new session to it without touching the
   branch or files.
-- **External worktrees**: worktrees that exist in the repository but live
-  outside dux's managed directory (for example, one you created with
-  `git worktree add` yourself). dux forks these: it creates a new managed
-  worktree branched from the external worktree's current `HEAD` commit and copies
-  any dirty and untracked files across (gitignored files do not travel) so you
-  don't lose in-progress work.
+- **External worktrees** (terminal UI only): worktrees that exist in the
+  repository but live outside dux's managed directory (for example, one you
+  created with `git worktree add` yourself). dux forks these: it creates a new
+  managed worktree branched from the external worktree's current `HEAD` commit
+  and copies any dirty and untracked files across (gitignored files do not
+  travel) so you don't lose in-progress work.
+
+The browser's **New agent from existing worktree…** dialog lists managed
+worktrees only. To adopt an external one, use the `new-agent-from-worktree`
+palette command in the terminal UI.
 
 The main checkout itself is not selectable; dux keeps that for you to work in
 outside of agent sessions.
 
-Worktrees that already have an active agent are shown in the picker but cannot be
-selected; the error "That worktree already has an agent." is shown if you try.
+Worktrees that already have an agent are shown but cannot be selected. In the
+terminal UI, selecting one reports "That worktree already has an agent."; in the
+browser the row is disabled and its tooltip explains why.
 
 ## Forking an existing agent
 
@@ -211,7 +220,8 @@ All three levels are editable from either front end. In the terminal UI they are
 `change-agent-provider` palette commands. In the browser, the global default is the
 **Default provider for new agents** row in **Preferences…**, a project's default
 lives in **Project settings…** on its `⋯` menu, and an agent's provider in **Change
-provider…** on its own `⋯` menu. Swapping an agent's provider never yanks a running
+agent provider…** on its own `⋯` menu (a single tab is retargeted with **Change
+provider…** on the tab's `⋯` menu). Swapping an agent's provider never yanks a running
 session out from under itself; it takes effect the next time that tab launches.
 
 ## Auto-reopening agents on startup
@@ -238,5 +248,5 @@ agent's own is **Enable/Disable agent auto-reopen** on its `⋯` menu. Changes t
 effect the next time dux starts.
 
 If an agent's provider command is not found when dux tries to reopen it, the
-worktree is left intact and the error is shown in the status bar; the agent
+worktree is left intact and the error is reported; the agent
 appears in the list and you can reconnect it manually once the CLI is available.

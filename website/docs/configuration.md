@@ -78,7 +78,7 @@ and it travels between machines without leaking your username or your secrets.
 ## Keybindings
 
 Every keybinding dux uses is configurable under the `[keys]` section, and the
-in-app help overlay (`?`) is the authoritative reference for what's currently bound.
+in-app help overlay is the authoritative reference for what's currently bound.
 Bindings are arrays, so an action can answer to more than one key:
 
 ```toml
@@ -91,8 +91,9 @@ Modifier and control-key parsing is case-insensitive: `Ctrl-g`, `ctrl-g`, and
 `CTRL-g` all mean the same thing. Letter keys are lowercased too, so to bind an
 uppercase letter you write the shifted form, e.g. `shift-p`.
 
-Rather than memorizing hotkeys, you can reach most actions through the command
-palette (`Ctrl-P` by default). It's the fastest way to discover what dux can do.
+Rather than memorizing hotkeys, you can reach most actions through the terminal
+UI's command palette; the in-app help overlay names the key it is currently bound
+to. It's the fastest way to discover what dux can do.
 
 ## Per-project startup commands
 
@@ -141,7 +142,7 @@ to every open tab immediately, so it sticks across restarts.
 ## Editing settings from the web
 
 The same **Preferences…** dialog is where every web-adjustable setting lives, a
-curated set of `[ui]`/`[capabilities]`/`[defaults]` preferences, so you don't
+curated set of `[server]`/`[ui]`/`[capabilities]`/`[defaults]` preferences, so you don't
 have to hand-edit `config.toml` for the common ones. Rows are grouped by which
 surface they affect:
 

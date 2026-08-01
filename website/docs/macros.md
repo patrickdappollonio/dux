@@ -68,9 +68,9 @@ exactly what gets sent.
 
 ## Sending a macro in the terminal UI
 
-The macro bar is bound to **Ctrl-\\** by default (configurable under
-`open_macro_bar` in `[keys]`). It is available while a pane is in interactive
-mode. If no macros are defined for the current surface, dux shows a status
+The macro bar is opened by the `open_macro_bar` binding in `[keys]`; the in-app
+help overlay shows the key it is currently bound to. It is available while a pane
+is in interactive mode. If no macros are defined for the current surface, dux shows a status
 message and does nothing.
 
 Once the bar is open:
@@ -90,8 +90,10 @@ In the browser, every terminal pane (agent or companion terminal) has a macro
 button in its corner. Click it to open a quick-picker popover listing the macros
 that match that pane's surface — the same filtering the TUI macro bar does, just
 scoped to the pane you clicked rather than whatever is focused. Type to filter,
-then click a macro (or press Enter) to send it. The familiar
-`Sent macro "<name>".` confirmation shows in the status line.
+then click a macro (or press Enter) to send it. The web writes the macro straight
+into that pane's PTY, so there is no confirmation toast; the macro text simply
+appears at the prompt. (The TUI's `Sent macro "<name>".` status line has no
+counterpart here.)
 
 If a pane has no macros for its surface, the popover says so and points you at
 the editor; if you have no macros at all, it links straight to **Edit macros**.
@@ -99,46 +101,47 @@ the editor; if you have no macros at all, it links straight to **Edit macros**.
 ## Managing macros in the terminal UI
 
 The `edit-macros` command palette action opens the macros editor overlay. You
-can reach it through the command palette (open with **Ctrl-P** by default and
-search for `edit-macros`). The `EditMacros` action has no default key binding;
-the palette is the intended entry point.
+can reach it through the command palette (the help overlay shows the palette's
+current binding) by searching for `edit-macros`. The `EditMacros` action has no
+default key binding; the palette is the intended entry point.
 
 Inside the list:
 
-- The list shows all defined macros in declaration order.
-- The list is an ordinary picker: the movement keys walk it, `confirm`
-  (**Enter** by default) on a highlighted entry opens it for editing, and
-  `close_overlay` (**Esc** by default) closes the overlay. Every key is
-  resolved through `[keys]`, so rebinding one moves the footer hint with it.
-- `new_macro` (**n** by default) creates a new macro. Either it or `confirm`
-  opens the macro form described below.
-- `delete_macro` (**d** or **Delete** by default) stages a deletion and shows
-  a confirmation dialog.
+- The list opens in declaration order. After you add or edit a macro the list
+  re-sorts alphabetically by name for the rest of the session; the order in
+  `config.toml` is unchanged, except that renaming a macro moves its entry to
+  the end.
+- The list is an ordinary picker: the movement keys walk it, `confirm` on a
+  highlighted entry opens it for editing, and `close_overlay` closes the
+  overlay. Every key is resolved through `[keys]`, so rebinding one moves the
+  footer hint with it.
+- `new_macro` creates a new macro. Either it or `confirm` opens the macro form
+  described below.
+- `delete_macro` stages a deletion and shows a confirmation dialog.
 - Rows are clickable: one click highlights a macro, a double click opens it.
 
 The macro form is an ordinary modal, not a wizard. It shows the name field, the
 text field, the Agent / Terminal / Both selector, and **Cancel** and **Save**
 buttons all at once, and every one of them is a focus stop:
 
-- The movement keys (`toggle_selection` in `[keys]`, **Tab** / **Shift-Tab** by
-  default) move focus between the five controls. They never change a value.
+- The movement keys (`toggle_selection` in `[keys]`) move focus between the five
+  controls. They never change a value.
 - **Space** acts on whichever control has focus: it types a space in the name
   field or in the engaged text field, advances the surface selector, and
   activates a button.
 - The name field takes typing immediately. The text field is multiline, so
   **Enter** there has to mean "new line" rather than "confirm", and it
   therefore has an edit mode. Three things engage it, and nothing else does:
-  `confirm` (**Enter** by default) while the field has focus,
-  `engage_commit_input` (**i** by default), and a double click on the field.
-  Leave edit mode with `exit_commit_input` (**Esc** or **Ctrl-G**), which keeps
-  the form open and your text intact. `clear_text_field` (**Ctrl-D** by
-  default) empties the text field whenever the text field is the focused
+  `confirm` while the field has focus, `engage_commit_input`, and a double click
+  on the field. Leave edit mode with `exit_commit_input`, which keeps
+  the form open and your text intact. `clear_text_field`
+  empties the text field whenever the text field is the focused
   control, engaged or not; from any other focus stop it does nothing, so it can
   never wipe the body while you are on the name field or a button. Typing on an
   unengaged field does
   nothing: the footer names the key that starts editing, and the field draws no
   caret until it is really taking your keystrokes.
-- **Esc** outside the text field's edit mode cancels the edit and writes
+- `close_overlay` outside the text field's edit mode cancels the edit and writes
   nothing.
 - Everything is clickable: clicking a field focuses it (clicking the text field
   again engages it), clicking a selector option picks it, clicking a button
