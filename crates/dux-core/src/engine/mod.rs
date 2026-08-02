@@ -63,6 +63,36 @@ use crate::worker::{
     WorkerEvent,
 };
 
+/// Engine-side state of the `gh` host probe.
+///
+/// It lives on the engine and is passed EXPLICITLY to the things that need it,
+/// rather than being a process-global any code can reach into, which is how the
+/// name-based heuristic it replaces ended up duplicated.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GhProbeState {
+    /// Which hosts dux may name when it calls `gh`. Starts denying everything:
+    /// before any probe completes no host qualifies and the GitHub features are
+    /// off. Replaced atomically on a decisive result, so it is last-known-good
+    /// rather than immutable for the process lifetime.
+    pub policy: crate::gh::GithubHostPolicy,
+    /// Monotonic stamp for ordering overlapping probes. Bumped before each
+    /// spawn; a result carrying an older stamp is discarded.
+    pub generation: u64,
+    /// The program the probe runs. `gh` in production; a test points it at a
+    /// stand-in so the wiring can be exercised without a network call.
+    pub program: std::ffi::OsString,
+}
+
+impl Default for GhProbeState {
+    fn default() -> Self {
+        Self {
+            policy: crate::gh::GithubHostPolicy::DenyAll,
+            generation: 0,
+            program: std::ffi::OsString::from("gh"),
+        }
+    }
+}
+
 pub struct Engine {
     pub config: Config,
     pub paths: DuxPaths,
@@ -145,6 +175,9 @@ pub struct Engine {
     /// members reap.
     pub pending_group_removals: Vec<lifecycle::GroupWorktreeRemoval>,
     pub gh_status: GhStatus,
+    /// State owned by the `gh` host probe: which hosts qualify, the generation
+    /// stamp that keeps overlapping probes ordered, and the program to run.
+    pub gh_probe: GhProbeState,
     pub pr_statuses: HashMap<String, PrInfo>,
     pub branch_sync_sessions: Arc<Mutex<Vec<BranchSyncEntry>>>,
     pub pr_sync_sessions: Arc<Mutex<Vec<PrSyncEntry>>>,
@@ -1340,7 +1373,13 @@ impl Engine {
     /// project/branch-sync state. View concerns (theme, keybindings, panes) are
     /// the surface's responsibility and are not touched here.
     pub fn apply_reloaded_config(&mut self, config: Config) -> anyhow::Result<()> {
+        let github_was_enabled = self.github_integration_enabled;
         self.github_integration_enabled = config.ui.github_integration;
+        if !github_was_enabled && self.github_integration_enabled {
+            // Off-to-on through a config reload is the same transition as the
+            // toggle, and needs the same fresh answer from `gh`.
+            self.spawn_gh_status_check();
+        }
         self.projects = crate::project_browser::load_projects(
             &self.session_store.load_projects()?,
             &self.session_store.load_project_created_ats()?,
@@ -1539,53 +1578,46 @@ impl Engine {
             && matches!(self.gh_status, crate::model::GhStatus::Available)
     }
 
+    /// Ask `gh` which hosts it can serve, on a worker.
+    ///
+    /// This is the same call the surfaces already make at startup to decide
+    /// whether the GitHub features are available at all, so the startup case
+    /// costs no extra process; it now keeps the parsed hosts instead of reducing
+    /// the answer to a yes or a no. It is RE-RUN on every off-to-on transition of
+    /// the GitHub integration (both toggles, both config reload paths), because
+    /// an enterprise user who enables the integration after starting dux would
+    /// otherwise be stuck with whatever the value was at boot.
     pub fn spawn_gh_status_check(&mut self) {
-        // Not guarded against re-spawn: this is a one-shot job (check PATH +
-        // auth, post one `GhStatusChecked` event, exit). Re-running it on a
-        // flip-back is harmless and desirable — a fresh check picks up any
-        // `gh login` the user did while the other surface was active.
+        // Not guarded against re-spawn: this is a one-shot job, and a fresh check
+        // picks up any `gh login` the user did in the meantime. Overlapping runs
+        // are made safe by the generation stamp rather than by a guard.
         if !self.github_integration_enabled {
             return;
         }
+        // Stamped BEFORE the spawn, and carried on every way this probe can
+        // finish, including the synthesised result of a panicking worker.
+        self.gh_probe.generation = self.gh_probe.generation.wrapping_add(1);
+        let generation = self.gh_probe.generation;
+        let program = self.gh_probe.program.clone();
         self.spawn_background_worker(
             BackgroundWorkerSpec {
                 label: "gh-status-check".into(),
                 in_flight_key: None,
-                panic_event: Some(Box::new(|_reason| {
-                    // Fall back to `NotInstalled` on panic so the UI does not
-                    // sit in an indeterminate state — the worst case is a
-                    // harmless "gh CLI not found" message.
-                    WorkerEvent::GhStatusChecked(crate::model::GhStatus::NotInstalled)
+                panic_event: Some(Box::new(move |reason| WorkerEvent::GhStatusChecked {
+                    generation,
+                    // A panic decided nothing, so it is reported as transient:
+                    // the last known good host set stands, and a first probe
+                    // that panics still moves the status off Unknown.
+                    outcome: crate::gh::GhProbe::Transient(format!(
+                        "gh host probe panicked: {reason}"
+                    )),
                 })),
             },
             move |tx| {
-                use crate::model::GhStatus;
-                // Step 1: Is `gh` on PATH?
-                let on_path = std::process::Command::new("which")
-                    .arg("gh")
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status()
-                    .map(|s| s.success())
-                    .unwrap_or(false);
-                if !on_path {
-                    crate::logger::info("[gh-integration] gh CLI not found on PATH");
-                    let _ = tx.send(WorkerEvent::GhStatusChecked(GhStatus::NotInstalled));
-                    return;
-                }
-                // Step 2: Is `gh` authenticated? Bounded so a wedged credential
-                // helper can't park the boot probe indefinitely.
-                let authed = matches!(
-                    crate::gh::run_gh_with_timeout(&["auth", "status"], crate::gh::GH_CALL_TIMEOUT),
-                    crate::gh::GhCallOutcome::Completed(o) if o.status.success()
-                );
-                if !authed {
-                    crate::logger::info("[gh-integration] gh CLI found but not authenticated");
-                    let _ = tx.send(WorkerEvent::GhStatusChecked(GhStatus::NotAuthenticated));
-                    return;
-                }
-                crate::logger::info("[gh-integration] gh CLI available and authenticated");
-                let _ = tx.send(WorkerEvent::GhStatusChecked(GhStatus::Available));
+                let _ = tx.send(WorkerEvent::GhStatusChecked {
+                    generation,
+                    outcome: crate::gh::probe_github_hosts(&program),
+                });
             },
         );
     }
@@ -4246,9 +4278,201 @@ mod tests {
         );
     }
 
+    // ── gh host probe ──────────────────────────────────────────────────────
+
+    use crate::gh::probe_test_support::{stand_in_gh, stand_in_gh_serving};
+    use crate::gh::{GhProbe, GithubHostPolicy};
+
+    fn eligible(engine: &Engine) -> GithubHostPolicy {
+        engine.gh_probe.policy.clone()
+    }
+
+    fn hosts(names: &[&str]) -> GithubHostPolicy {
+        GithubHostPolicy::Hosts(names.iter().map(|n| n.to_string()).collect())
+    }
+
+    /// Pump worker events until the host probe's result has been applied.
+    fn settle_gh_probe(engine: &mut Engine) {
+        let deadline = Instant::now() + std::time::Duration::from_secs(20);
+        while Instant::now() < deadline {
+            let Ok(event) = engine
+                .worker_rx
+                .recv_timeout(std::time::Duration::from_millis(500))
+            else {
+                continue;
+            };
+            let is_probe = matches!(event, WorkerEvent::GhStatusChecked { .. });
+            engine.process_worker_event(event);
+            if is_probe {
+                return;
+            }
+        }
+        panic!("host probe never reported");
+    }
+
+    #[test]
+    fn a_stale_probe_result_is_discarded_before_it_changes_anything() {
+        let (mut engine, _tmp) = test_engine();
+        engine.github_integration_enabled = true;
+        engine.gh_probe.generation = 2;
+        engine.gh_probe.policy = hosts(&["git.company.example"]);
+        engine.gh_status = GhStatus::Available;
+
+        // An older probe finishing late, with a decisive but out-of-date answer.
+        engine.process_worker_event(WorkerEvent::GhStatusChecked {
+            generation: 1,
+            outcome: GhProbe::Decided {
+                available: false,
+                policy: GithubHostPolicy::Hosts(Default::default()),
+            },
+        });
+
+        assert_eq!(
+            eligible(&engine),
+            hosts(&["git.company.example"]),
+            "the newer answer must survive a late older one",
+        );
+        assert_eq!(engine.gh_status, GhStatus::Available);
+
+        // Including when the older probe ended in a panic rather than a normal
+        // result: the synthesised event carries the same stamp and is dropped
+        // by the same check.
+        engine.process_worker_event(WorkerEvent::GhStatusChecked {
+            generation: 1,
+            outcome: GhProbe::Transient("gh host probe panicked: boom".to_string()),
+        });
+        assert_eq!(eligible(&engine), hosts(&["git.company.example"]));
+        assert_eq!(engine.gh_status, GhStatus::Available);
+    }
+
+    #[test]
+    fn the_first_probe_failing_transiently_reports_unavailable_rather_than_unknown() {
+        let (mut engine, _tmp) = test_engine();
+        engine.github_integration_enabled = true;
+        assert_eq!(engine.gh_status, GhStatus::Unknown);
+        assert_eq!(eligible(&engine), GithubHostPolicy::DenyAll);
+
+        engine.process_worker_event(WorkerEvent::GhStatusChecked {
+            generation: engine.gh_probe.generation,
+            outcome: GhProbe::Transient("timed out".to_string()),
+        });
+
+        assert_eq!(
+            engine.gh_status,
+            GhStatus::NotAuthenticated,
+            "the status must leave Unknown so the interface reports something",
+        );
+        assert_eq!(
+            eligible(&engine),
+            GithubHostPolicy::DenyAll,
+            "and nothing is eligible",
+        );
+    }
+
+    #[test]
+    fn a_transient_failure_leaves_the_previously_computed_policy_in_place() {
+        let (mut engine, _tmp) = test_engine();
+        engine.github_integration_enabled = true;
+        engine.gh_status = GhStatus::Available;
+        engine.gh_probe.policy = hosts(&["git.company.example"]);
+
+        engine.process_worker_event(WorkerEvent::GhStatusChecked {
+            generation: engine.gh_probe.generation,
+            outcome: GhProbe::Transient("failed to launch".to_string()),
+        });
+
+        assert_eq!(eligible(&engine), hosts(&["git.company.example"]));
+        assert_eq!(engine.gh_status, GhStatus::Available);
+    }
+
+    #[test]
+    fn gh_disappearing_from_the_path_denies_every_host() {
+        let (mut engine, _tmp) = test_engine();
+        engine.github_integration_enabled = true;
+        engine.gh_status = GhStatus::Available;
+        engine.gh_probe.policy = hosts(&["git.company.example"]);
+
+        engine.process_worker_event(WorkerEvent::GhStatusChecked {
+            generation: engine.gh_probe.generation,
+            outcome: GhProbe::NotInstalled,
+        });
+
+        assert_eq!(
+            eligible(&engine),
+            GithubHostPolicy::DenyAll,
+            "a removed gh must not preserve the host set: dux can reach none of them",
+        );
+        assert_eq!(engine.gh_status, GhStatus::NotInstalled);
+    }
+
+    #[test]
+    fn a_config_reload_that_enables_the_integration_re_runs_the_probe() {
+        // Journey: a user logged in to only their company server starts dux with
+        // the integration off, then turns it on by editing the config. The
+        // enterprise host must become eligible without a restart.
+        let (mut engine, _tmp) = test_engine();
+        let dir = tempfile::tempdir().expect("tempdir");
+        engine.gh_probe.program = stand_in_gh_serving(dir.path(), &["git.company.example"]).into();
+        engine.github_integration_enabled = false;
+        engine.config.ui.github_integration = false;
+        assert_eq!(eligible(&engine), GithubHostPolicy::DenyAll);
+
+        let mut new_config = Config::default();
+        new_config.ui.github_integration = true;
+        engine
+            .apply_reloaded_config(new_config)
+            .expect("apply reloaded config");
+        settle_gh_probe(&mut engine);
+
+        assert_eq!(eligible(&engine), hosts(&["git.company.example"]));
+        assert_eq!(engine.gh_status, GhStatus::Available);
+    }
+
+    #[test]
+    fn a_config_reload_that_leaves_the_integration_on_is_not_a_transition() {
+        // Starting up is not an off-to-on transition and is already covered by
+        // the surface's own boot probe, so a reload that changes nothing must
+        // not fire another one.
+        let (mut engine, _tmp) = test_engine();
+        let dir = tempfile::tempdir().expect("tempdir");
+        engine.gh_probe.program = stand_in_gh(dir.path(), "exit 0").into();
+        engine.github_integration_enabled = true;
+        engine.config.ui.github_integration = true;
+        let before = engine.gh_probe.generation;
+
+        let mut new_config = Config::default();
+        new_config.ui.github_integration = true;
+        engine
+            .apply_reloaded_config(new_config)
+            .expect("apply reloaded config");
+
+        assert_eq!(engine.gh_probe.generation, before, "no new probe");
+    }
+
+    #[test]
+    fn a_probe_stamps_its_generation_before_it_is_spawned() {
+        let (mut engine, _tmp) = test_engine();
+        let dir = tempfile::tempdir().expect("tempdir");
+        engine.gh_probe.program = stand_in_gh(dir.path(), "exit 0").into();
+        engine.github_integration_enabled = true;
+
+        engine.spawn_gh_status_check();
+        assert_eq!(engine.gh_probe.generation, 1);
+        engine.spawn_gh_status_check();
+        assert_eq!(
+            engine.gh_probe.generation, 2,
+            "each spawn takes a fresh stamp, so two overlapping probes are ordered",
+        );
+    }
+
     #[test]
     fn apply_reloaded_config_swaps_config_and_refreshes_state() {
         let (mut engine, _tmp) = test_engine();
+        let dir = tempfile::tempdir().expect("tempdir");
+        // The reload below flips the integration on, which now re-runs the host
+        // probe. Point it at a harmless stand-in so the suite never shells out
+        // to the real `gh`.
+        engine.gh_probe.program = stand_in_gh(dir.path(), "exit 0").into();
         // Baseline differs from the values we'll reload.
         engine.config.ui.github_integration = false;
         engine.config.defaults.provider = "claude".to_string();

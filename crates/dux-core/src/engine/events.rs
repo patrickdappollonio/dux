@@ -2051,10 +2051,56 @@ impl Engine {
                     EventReaction::Nothing
                 }
             }
-            WorkerEvent::GhStatusChecked(status) => {
+            WorkerEvent::GhStatusChecked {
+                generation,
+                outcome,
+            } => {
+                // Discard a stale result FIRST: before the status changes,
+                // before the host policy changes, before it is logged, and
+                // before it can start the pull-request workers. Two probes
+                // launched close together can finish out of order, and an older
+                // answer overwriting a newer one presents as intermittent.
+                if generation != self.gh_probe.generation {
+                    return EventReaction::Nothing;
+                }
+                let status = match outcome {
+                    crate::gh::GhProbe::NotInstalled => {
+                        // Deny all rather than preserving the last known set:
+                        // `gh` is gone, so dux can reach none of those hosts.
+                        self.gh_probe.policy = crate::gh::GithubHostPolicy::DenyAll;
+                        GhStatus::NotInstalled
+                    }
+                    crate::gh::GhProbe::Transient(reason) => {
+                        logger::info(&format!(
+                            "[gh-integration] gh host probe did not decide ({reason}); \
+                             keeping the last known host policy",
+                        ));
+                        // The previously computed value stands unchanged. The one
+                        // exception is the very first probe: it must still move
+                        // the status off Unknown to an unavailable one, so the
+                        // interface reports something rather than rendering as
+                        // neither available nor unavailable.
+                        if matches!(self.gh_status, GhStatus::Unknown) {
+                            GhStatus::NotAuthenticated
+                        } else {
+                            self.gh_status
+                        }
+                    }
+                    crate::gh::GhProbe::Decided { available, policy } => {
+                        self.gh_probe.policy = policy;
+                        if available {
+                            GhStatus::Available
+                        } else {
+                            GhStatus::NotAuthenticated
+                        }
+                    }
+                };
                 self.gh_status = status;
                 if matches!(status, GhStatus::Available) && self.github_integration_enabled {
-                    logger::info("[gh-integration] gh CLI is available and authenticated");
+                    logger::info(&format!(
+                        "[gh-integration] gh CLI is available; host policy: {:?}",
+                        self.gh_probe.policy,
+                    ));
                     self.update_pr_sync_sessions();
                     self.spawn_refs_watcher();
                     self.spawn_pr_sync_worker();

@@ -1627,6 +1627,13 @@ impl Engine {
         }
         self.github_integration_enabled = next;
         self.config.ui.github_integration = next;
+        if next {
+            // Off-to-on: re-ask `gh` which hosts it can serve. Without this the
+            // host policy would stay whatever it was when the server booted, so
+            // a user who logs in to their enterprise host and then enables the
+            // integration would get an empty eligible set and no explanation.
+            self.spawn_gh_status_check();
+        }
         if next && matches!(self.gh_status, crate::model::GhStatus::Available) {
             self.update_pr_sync_sessions();
             self.spawn_initial_pr_refresh();
@@ -4586,10 +4593,50 @@ mod tests {
     }
 
     #[test]
+    fn the_web_toggle_re_runs_the_host_probe_on_every_off_to_on_transition() {
+        // A user who logs in to their enterprise host after starting the server
+        // and then enables the integration must get a fresh answer from `gh`,
+        // not the empty set the server booted with.
+        let (mut engine, _tmp) = test_engine();
+        let dir = tempfile::tempdir().expect("tempdir");
+        engine.gh_probe.program =
+            crate::gh::probe_test_support::stand_in_gh(dir.path(), "exit 0").into();
+        engine.github_integration_enabled = false;
+        engine.config.ui.github_integration = false;
+        assert_eq!(engine.gh_probe.generation, 0);
+
+        engine
+            .apply_wire(WireCommand::ToggleGithubIntegration {})
+            .expect("toggle on");
+        assert_eq!(engine.gh_probe.generation, 1, "enabling re-runs the probe");
+
+        engine
+            .apply_wire(WireCommand::ToggleGithubIntegration {})
+            .expect("toggle off");
+        assert_eq!(
+            engine.gh_probe.generation, 1,
+            "disabling asks gh nothing new",
+        );
+
+        engine
+            .apply_wire(WireCommand::ToggleGithubIntegration {})
+            .expect("toggle on again");
+        assert_eq!(
+            engine.gh_probe.generation, 2,
+            "off and on again re-runs the probe a second time",
+        );
+    }
+
+    #[test]
     fn apply_wire_toggle_github_integration_flips_flag() {
         use std::sync::atomic::Ordering;
 
         let (mut engine, _tmp) = test_engine();
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Enabling now re-runs the host probe; point it at a harmless stand-in
+        // so the suite never shells out to the real `gh`.
+        engine.gh_probe.program =
+            crate::gh::probe_test_support::stand_in_gh(dir.path(), "exit 0").into();
         engine.github_integration_enabled = false;
         engine.config.ui.github_integration = false;
         // gh present so the enable path arms PR sync (the side effect, not just

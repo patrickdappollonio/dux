@@ -2620,6 +2620,7 @@ impl App {
             terminating_ptys: Vec::new(),
             pending_group_removals: Vec::new(),
             gh_status: crate::model::GhStatus::Unknown,
+            gh_probe: Default::default(),
             pr_statuses: HashMap::new(),
             branch_sync_sessions,
             pr_sync_sessions,
@@ -3707,6 +3708,12 @@ impl App {
             "toggle-github-integration" => {
                 self.engine.github_integration_enabled = !self.engine.github_integration_enabled;
                 self.engine.config.ui.github_integration = self.engine.github_integration_enabled;
+                if self.engine.github_integration_enabled {
+                    // Off-to-on: re-ask `gh` which hosts it can serve, so a user
+                    // who logs in to their enterprise host and then enables the
+                    // integration is not stuck with the answer from boot.
+                    self.engine.spawn_gh_status_check();
+                }
                 if self.engine.github_integration_enabled
                     && matches!(self.engine.gh_status, crate::model::GhStatus::Available)
                 {
@@ -3847,7 +3854,13 @@ impl App {
         self.terminal_pane_height_pct = config.ui.terminal_pane_height_pct;
         self.staged_pane_height_pct = config.ui.staged_pane_height_pct;
         self.commit_pane_height_pct = config.ui.commit_pane_height_pct;
+        let github_was_enabled = self.engine.github_integration_enabled;
         self.engine.github_integration_enabled = config.ui.github_integration;
+        if !github_was_enabled && self.engine.github_integration_enabled {
+            // Off-to-on through a config reload is the same transition as the
+            // palette toggle, and needs the same fresh answer from `gh`.
+            self.engine.spawn_gh_status_check();
+        }
         self.pr_banner_at_bottom = config.ui.pr_banner_position == "bottom";
         // Re-seed the changes (right) pane's hidden state from the reloaded
         // config, mirroring startup; if it just became hidden while the Files
@@ -6477,6 +6490,79 @@ leading_branch = "main"
             ..Default::default()
         };
         assert_eq!(sel.to_origin_row(0, now), Some(20));
+    }
+
+    /// Write a harmless executable stand-in for `gh`, so a test that trips an
+    /// off-to-on transition spawns the probe against it rather than shelling out
+    /// to the real `gh` (which would need a network call and a real login).
+    fn stand_in_gh(dir: &std::path::Path) -> std::ffi::OsString {
+        let script = dir.join("fake-gh");
+        std::fs::write(&script, "#!/bin/sh\nexit 0\n").expect("write stand-in gh");
+        std::fs::set_permissions(
+            &script,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+        )
+        .expect("chmod stand-in gh");
+        script.into()
+    }
+
+    /// The palette toggle is one of the four off-to-on transitions that must
+    /// re-ask `gh` which hosts it can serve. Without it a user who logs in to
+    /// their enterprise host and then enables the integration would be stuck
+    /// with the answer dux computed at boot.
+    #[test]
+    fn the_palette_toggle_re_runs_the_host_probe() {
+        let mut app = test_support::test_app(test_support::default_bindings());
+        let dir = tempfile::tempdir().expect("tempdir");
+        app.engine.gh_probe.program = stand_in_gh(dir.path());
+        app.engine.github_integration_enabled = false;
+        app.engine.config.ui.github_integration = false;
+        assert_eq!(app.engine.gh_probe.generation, 0);
+
+        app.execute_command("toggle-github-integration".to_string())
+            .expect("toggle on");
+        assert_eq!(
+            app.engine.gh_probe.generation, 1,
+            "enabling re-runs the probe",
+        );
+
+        app.execute_command("toggle-github-integration".to_string())
+            .expect("toggle off");
+        assert_eq!(
+            app.engine.gh_probe.generation, 1,
+            "disabling asks gh nothing new",
+        );
+
+        app.execute_command("toggle-github-integration".to_string())
+            .expect("toggle on again");
+        assert_eq!(
+            app.engine.gh_probe.generation, 2,
+            "off and on again re-runs the probe a second time",
+        );
+    }
+
+    /// The other TUI transition: the same flip arriving through a config reload.
+    #[test]
+    fn a_tui_config_reload_that_enables_the_integration_re_runs_the_probe() {
+        let mut app = test_support::test_app(test_support::default_bindings());
+        let dir = tempfile::tempdir().expect("tempdir");
+        app.engine.gh_probe.program = stand_in_gh(dir.path());
+        app.engine.github_integration_enabled = false;
+        app.engine.config.ui.github_integration = false;
+
+        let mut config = app.engine.config.clone();
+        config.ui.github_integration = true;
+        app.apply_reloaded_config(config.clone())
+            .expect("apply reloaded config");
+        assert_eq!(
+            app.engine.gh_probe.generation, 1,
+            "a reload that turns the integration on re-runs the probe",
+        );
+
+        // A reload that leaves it on is not a transition and must not re-run it.
+        app.apply_reloaded_config(config)
+            .expect("apply reloaded config again");
+        assert_eq!(app.engine.gh_probe.generation, 1);
     }
 
     /// A reentrant config reload (one already in flight) returns an Info status

@@ -421,7 +421,18 @@ pub enum WorkerEvent {
     /// reading measured over the short baseline window rather than the
     /// caller's normal poll interval.
     ResourceStatsReady(Vec<ResourceStats>, bool),
-    GhStatusChecked(crate::model::GhStatus),
+    /// One run of the `gh` host probe finished.
+    ///
+    /// `generation` is stamped BEFORE the probe is spawned and travels on every
+    /// way it can finish, including the result synthesised when the worker
+    /// panics. The handler discards a stale generation FIRST, before the status
+    /// changes, before the host policy changes, before it is logged, and before
+    /// it can start the pull-request workers, so two probes launched close
+    /// together cannot let the older answer win.
+    GhStatusChecked {
+        generation: u64,
+        outcome: crate::gh::GhProbe,
+    },
     PrStatusReady(Vec<(String, Option<crate::model::PrInfo>)>),
     /// A one-shot PR check worker panicked; carries the session id so its
     /// `InFlightKey::PrCheck` guard is cleared without wiping the PR badge.

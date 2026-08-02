@@ -2,6 +2,8 @@
 //! (`spawn_pr_sync_worker`, `spawn_initial_pr_refresh`, `spawn_pr_check_for_session`).
 //! All helpers shell out to `gh` and parse JSON; no UI deps.
 
+use std::collections::BTreeSet;
+use std::ffi::OsStr;
 use std::io::Read;
 use std::path::Path;
 use std::process::Stdio;
@@ -341,6 +343,190 @@ fn num_alias(pos: usize) -> String {
     format!("s{pos}_num")
 }
 
+/// Which hosts dux may name when it calls `gh`.
+///
+/// This replaces the name-based guess (`github.com` or `github.*`) that decided
+/// it before, which rejected a company server at `git.company.example` purely on
+/// the strength of its name. The policy is computed by asking `gh` which hosts it
+/// can actually serve; it is stored on the engine and passed explicitly to its
+/// consumers rather than reached for through a process-global.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum GithubHostPolicy {
+    /// No probe has produced a decisive answer yet, so nothing qualifies. This
+    /// is the initial value, and it is also what a missing `gh` restores: a
+    /// removed `gh` must not leave dux believing in hosts it can no longer reach.
+    #[default]
+    DenyAll,
+    /// `gh` answered in machine-readable form. Exactly these hosts (lowercased)
+    /// have an ACTIVE account reporting `success`. Nothing is unioned onto this
+    /// set from the name rule: a host `gh` cannot serve must not qualify just
+    /// because it is spelled `github.something`.
+    Hosts(BTreeSet<String>),
+    /// The installed `gh` is too old to report its hosts, so eligibility falls
+    /// back to the rule dux shipped before. Nobody on an older `gh` is worse off
+    /// than they were, and arbitrary enterprise hostnames need a newer one.
+    LegacyNameRule,
+}
+
+impl GithubHostPolicy {
+    /// Whether `host` may be handed to `gh`. Compared lowercased. An empty host
+    /// never qualifies: callers that mean github.com say so (see
+    /// `normalize_github_host`), and treating "" as github.com here would let an
+    /// unparsed remote through the gate.
+    pub fn allows(&self, host: &str) -> bool {
+        let host = host.trim().to_ascii_lowercase();
+        if host.is_empty() {
+            return false;
+        }
+        match self {
+            Self::DenyAll => false,
+            Self::Hosts(hosts) => hosts.contains(&host),
+            Self::LegacyNameRule => host == "github.com" || host.starts_with("github."),
+        }
+    }
+}
+
+/// What one run of the `gh` host probe concluded.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GhProbe {
+    /// `gh` is not on PATH.
+    NotInstalled,
+    /// The probe timed out or failed to launch. This is NOT the older-`gh`
+    /// case: it decides nothing, must not reach the name-rule fallback, and
+    /// leaves the previously computed policy in place.
+    Transient(String),
+    /// `gh` answered. `available` is whether any GitHub feature can work at all.
+    Decided {
+        available: bool,
+        policy: GithubHostPolicy,
+    },
+}
+
+/// Parse the stdout of `gh auth status --active --json hosts` into the set of
+/// hosts whose active account works.
+///
+/// Returns `None` when the output is not that shape, which is how an older `gh`
+/// that does not know the flag presents itself (it writes a usage error to
+/// stderr and leaves stdout empty). `None` is the ONLY thing that selects the
+/// fallback mode.
+///
+/// Measured against gh 2.95.0, whose output is one entry per account:
+/// `{"hosts":{"github.com":[{"state":"success","active":true,"host":"github.com",…}]}}`.
+/// Neither the map keys nor the exit code can stand in for `state`: `gh` lists
+/// every host it merely KNOWS, including one whose login has expired, and in
+/// JSON mode it exits zero regardless.
+pub(crate) fn parse_auth_status_hosts(stdout: &str) -> Option<BTreeSet<String>> {
+    let value: serde_json::Value = serde_json::from_str(stdout.trim()).ok()?;
+    let hosts = value.get("hosts")?.as_object()?;
+    let mut eligible = BTreeSet::new();
+    for (host, accounts) in hosts {
+        // A `hosts` map whose values are not account arrays is not the shape we
+        // know how to read, so treat the whole answer as unparseable rather than
+        // silently skipping entries.
+        for account in accounts.as_array()? {
+            // `--active` already narrows gh's output to the account it would
+            // actually use for this host, so in practice there is one entry.
+            // The explicit `active: false` guard is belt and braces for a `gh`
+            // that ever widens it: a host whose active login is broken must not
+            // qualify on the strength of some other working account.
+            let succeeded = account.get("state").and_then(|v| v.as_str()) == Some("success");
+            let inactive = account.get("active").and_then(|v| v.as_bool()) == Some(false);
+            if succeeded && !inactive {
+                eligible.insert(host.to_ascii_lowercase());
+                break;
+            }
+        }
+    }
+    Some(eligible)
+}
+
+/// Decide the probe's outcome from the machine-readable call, running the plain
+/// `gh auth status` fallback ONLY when that output does not parse.
+pub(crate) fn decide_gh_probe(
+    json: GhCallOutcome,
+    plain: impl FnOnce() -> GhCallOutcome,
+) -> GhProbe {
+    let stdout = match json {
+        GhCallOutcome::TimedOut => {
+            return GhProbe::Transient(format!(
+                "gh auth status --json timed out after {}s",
+                GH_CALL_TIMEOUT.as_secs()
+            ));
+        }
+        GhCallOutcome::Failed(msg) => {
+            return GhProbe::Transient(format!("could not run gh auth status --json: {msg}"));
+        }
+        // The exit status is deliberately ignored here. In JSON mode `gh` exits
+        // zero even when a known host is broken, and an older `gh` rejecting the
+        // flag exits non-zero with nothing parseable on stdout, which the parse
+        // below is what actually detects. Only the parse selects the mode.
+        GhCallOutcome::Completed(output) => String::from_utf8_lossy(&output.stdout).into_owned(),
+    };
+
+    // Step 1. A parseable answer IS the answer, and nothing is unioned onto it.
+    if let Some(eligible) = parse_auth_status_hosts(&stdout) {
+        return GhProbe::Decided {
+            // GitHub is available when at least one host reports success. This
+            // is the behaviour change: plain `gh auth status` exits non-zero
+            // when ANY known host has a problem, so one stale token used to
+            // disable every GitHub feature on every host.
+            available: !eligible.is_empty(),
+            policy: GithubHostPolicy::Hosts(eligible),
+        };
+    }
+
+    // Step 2, reached ONLY because the machine-readable form did not exist in
+    // older `gh`. Its exit status decides availability and the name rule decides
+    // eligibility, which is exactly what dux shipped before.
+    match plain() {
+        GhCallOutcome::TimedOut => GhProbe::Transient(format!(
+            "gh auth status timed out after {}s",
+            GH_CALL_TIMEOUT.as_secs()
+        )),
+        GhCallOutcome::Failed(msg) => GhProbe::Transient(format!("could not run gh: {msg}")),
+        GhCallOutcome::Completed(output) => GhProbe::Decided {
+            available: output.status.success(),
+            policy: GithubHostPolicy::LegacyNameRule,
+        },
+    }
+}
+
+/// Ask `gh` which hosts it can serve. Runs on a background worker; both calls
+/// are bounded so a wedged credential helper cannot park the probe.
+///
+/// `program` is `gh` in production. It is named rather than hardcoded so the
+/// wiring can be tested against a stand-in whose answers are controlled, without
+/// a network call, a real login, or mutating the test process's `PATH`.
+pub fn probe_github_hosts(program: &OsStr) -> GhProbe {
+    // Kept deliberately: without it, "a failure to launch preserves the last
+    // known good value" would quietly cover `gh` having been uninstalled, and
+    // dux would go on believing in hosts it can no longer reach.
+    let on_path = std::process::Command::new("which")
+        .arg(program)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !on_path {
+        return GhProbe::NotInstalled;
+    }
+    probe_github_hosts_with(program)
+}
+
+/// [`probe_github_hosts`] without the PATH check, against a named program, so
+/// the two-mode protocol can be tested against a stand-in `gh`.
+pub(crate) fn probe_github_hosts_with(program: &OsStr) -> GhProbe {
+    let json = run_program_with_timeout(
+        program,
+        &["auth", "status", "--active", "--json", "hosts"],
+        GH_CALL_TIMEOUT,
+    );
+    decide_gh_probe(json, || {
+        run_program_with_timeout(program, &["auth", "status"], GH_CALL_TIMEOUT)
+    })
+}
+
 /// Outcome of a bounded `gh` invocation. `Failed` carries the failure text (a
 /// spawn or wait error) so callers can log the real cause instead of conflating
 /// it with a timeout.
@@ -355,7 +541,14 @@ pub(crate) enum GhCallOutcome {
 /// the reader threads are drained with a bounded wait ([`GH_READER_DRAIN`]) and
 /// then abandoned (they self-terminate at EOF) so the caller can never block.
 pub(crate) fn run_gh_with_timeout(args: &[&str], timeout: Duration) -> GhCallOutcome {
-    let mut cmd = std::process::Command::new("gh");
+    run_program_with_timeout(OsStr::new("gh"), args, timeout)
+}
+
+/// [`run_gh_with_timeout`] with the program named explicitly, so the host probe
+/// can be exercised end to end against a stand-in `gh` without touching the test
+/// process's `PATH` (which is shared, and unsafe to mutate under a test runner).
+fn run_program_with_timeout(program: &OsStr, args: &[&str], timeout: Duration) -> GhCallOutcome {
+    let mut cmd = std::process::Command::new(program);
     cmd.args(args);
     run_command_with_timeout(cmd, timeout)
 }
@@ -968,6 +1161,286 @@ fn parse_resolved_pull_request_json(
         head_ref_name,
         custom_name,
     })
+}
+
+/// Stand-in `gh` builders, shared by the probe's own tests and by the wiring
+/// tests on both surfaces. A stand-in is preferred over mocking dux's internals:
+/// it exercises the real two-call protocol, and it needs neither the network,
+/// nor a real login, nor a mutation of the test process's `PATH`.
+#[cfg(test)]
+pub(crate) mod probe_test_support {
+    use std::path::{Path, PathBuf};
+
+    /// Write an executable `/bin/sh` stand-in for `gh` into `dir`.
+    pub(crate) fn stand_in_gh(dir: &Path, body: &str) -> PathBuf {
+        let script = dir.join("fake-gh");
+        std::fs::write(&script, format!("#!/bin/sh\n{body}\n")).expect("write stand-in gh");
+        std::fs::set_permissions(
+            &script,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+        )
+        .expect("chmod stand-in gh");
+        script
+    }
+
+    /// A stand-in whose machine-readable answer reports each of `hosts` with a
+    /// successful active account, and which fails the plain call (so a test can
+    /// tell the two modes apart).
+    pub(crate) fn stand_in_gh_serving(dir: &Path, hosts: &[&str]) -> PathBuf {
+        let entries: Vec<String> = hosts
+            .iter()
+            .map(|h| format!(r#""{h}":[{{"state":"success","active":true,"host":"{h}"}}]"#))
+            .collect();
+        let json = format!(r#"{{"hosts":{{{}}}}}"#, entries.join(","));
+        stand_in_gh(
+            dir,
+            &format!("case \"$*\" in\n  *--json*) printf '%s' '{json}' ;;\n  *) exit 1 ;;\nesac\n"),
+        )
+    }
+}
+
+#[cfg(test)]
+mod host_policy_tests {
+    use super::probe_test_support::stand_in_gh;
+    use super::*;
+
+    /// The real shape, copied from `gh auth status --active --json hosts` run
+    /// against gh 2.95.0 on a logged-in machine (token fields are absent from
+    /// this output; nothing secret is reproduced here).
+    const MEASURED_GH_2_95_OUTPUT: &str = r#"{"hosts":{"github.com":[{"active":true,"gitProtocol":"ssh","host":"github.com","login":"someone","scopes":["gist","read:org","repo"],"state":"success","tokenSource":"keyring"}]}}"#;
+
+    fn hosts(policy: &GhProbe) -> Vec<String> {
+        match policy {
+            GhProbe::Decided {
+                policy: GithubHostPolicy::Hosts(h),
+                ..
+            } => h.iter().cloned().collect(),
+            other => panic!("expected a machine-readable host set, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_host_qualifies_only_when_its_active_account_reports_success() {
+        let parsed = parse_auth_status_hosts(MEASURED_GH_2_95_OUTPUT).expect("expected shape");
+        assert_eq!(
+            parsed.iter().cloned().collect::<Vec<_>>(),
+            vec!["github.com".to_string()],
+        );
+
+        let errored =
+            r#"{"hosts":{"github.com":[{"state":"error","active":true,"host":"github.com"}]}}"#;
+        assert!(
+            parse_auth_status_hosts(errored)
+                .expect("expected shape")
+                .is_empty(),
+            "a host whose active account errors must not qualify",
+        );
+    }
+
+    #[test]
+    fn a_host_never_qualifies_on_its_name_alone() {
+        // `gh` lists every host it merely KNOWS. A `github.`-prefixed name in
+        // the map is not evidence the host works.
+        let known_but_broken = r#"{"hosts":{"github.enterprise.example":[{"state":"error","active":true,"host":"github.enterprise.example"}]}}"#;
+        let parsed = parse_auth_status_hosts(known_but_broken).expect("expected shape");
+        assert!(
+            parsed.is_empty(),
+            "a `github.`-named host that never succeeded must not qualify, got {parsed:?}",
+        );
+    }
+
+    #[test]
+    fn a_broken_active_account_is_not_rescued_by_a_working_sibling() {
+        // Every call dux makes names a host and never an account, so `gh` uses
+        // that host's ACTIVE account. A host whose active login is broken must
+        // not qualify because some other account on it happens to work.
+        let mixed = r#"{"hosts":{"git.company.example":[
+            {"state":"error","active":true,"host":"git.company.example","login":"work"},
+            {"state":"success","active":false,"host":"git.company.example","login":"personal"}
+        ]}}"#;
+        let parsed = parse_auth_status_hosts(mixed).expect("expected shape");
+        assert!(
+            parsed.is_empty(),
+            "only the active account's state counts, got {parsed:?}",
+        );
+    }
+
+    #[test]
+    fn output_that_is_not_the_expected_shape_does_not_parse() {
+        // How an older `gh` presents itself: it rejects the flag and writes
+        // nothing usable to stdout.
+        assert_eq!(parse_auth_status_hosts(""), None);
+        assert_eq!(parse_auth_status_hosts("unknown flag: --json"), None);
+        // Valid JSON of the wrong shape is still not an answer.
+        assert_eq!(parse_auth_status_hosts(r#"{"other":1}"#), None);
+    }
+
+    #[test]
+    fn policy_allows_exactly_the_hosts_gh_named() {
+        let policy =
+            GithubHostPolicy::Hosts(["git.company.example".to_string()].into_iter().collect());
+        assert!(policy.allows("git.company.example"));
+        assert!(policy.allows("GIT.Company.Example"), "compared lowercased");
+        assert!(
+            !policy.allows("github.com"),
+            "nothing is unioned onto the answered set",
+        );
+        assert!(!policy.allows("gitlab.com"));
+        assert!(!policy.allows(""));
+    }
+
+    #[test]
+    fn the_legacy_policy_is_the_rule_dux_shipped_before() {
+        let policy = GithubHostPolicy::LegacyNameRule;
+        assert!(policy.allows("github.com"));
+        assert!(policy.allows("github.company.example"));
+        assert!(!policy.allows("git.company.example"));
+        assert!(!policy.allows("gitlab.com"), "GitLab is rejected");
+        assert!(!GithubHostPolicy::DenyAll.allows("github.com"));
+        assert!(
+            !GithubHostPolicy::DenyAll.allows("gitlab.com"),
+            "GitLab is rejected under every mode",
+        );
+    }
+
+    #[test]
+    fn one_working_host_alongside_one_broken_host_reports_github_available() {
+        // The behaviour change. Plain `gh auth status` exits non-zero when ANY
+        // known host has a problem, so one stale token used to disable every
+        // GitHub feature on every host. The stand-in reproduces exactly that:
+        // it answers the machine-readable call and exits non-zero on the plain
+        // one, as a real `gh` in this state does.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let json = r#"{"hosts":{"git.company.example":[{"state":"success","active":true,"host":"git.company.example"}],"github.com":[{"state":"error","active":true,"host":"github.com"}]}}"#;
+        let gh = stand_in_gh(
+            dir.path(),
+            &format!(
+                "case \"$*\" in\n  *--json*) printf '%s' '{json}' ;;\n  *) echo 'error: could not authenticate to github.com' >&2; exit 1 ;;\nesac\n"
+            ),
+        );
+
+        let probe = probe_github_hosts_with(gh.as_os_str());
+        assert!(
+            matches!(
+                probe,
+                GhProbe::Decided {
+                    available: true,
+                    ..
+                }
+            ),
+            "one working host means GitHub is available, got {probe:?}",
+        );
+        assert_eq!(
+            hosts(&probe),
+            vec!["git.company.example".to_string()],
+            "only the working host qualifies",
+        );
+    }
+
+    #[test]
+    fn a_gh_logged_out_of_everything_is_decisive_and_unavailable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let gh = stand_in_gh(dir.path(), "printf '%s' '{\"hosts\":{}}'");
+        assert_eq!(
+            probe_github_hosts_with(gh.as_os_str()),
+            GhProbe::Decided {
+                available: false,
+                policy: GithubHostPolicy::Hosts(BTreeSet::new()),
+            },
+        );
+    }
+
+    #[test]
+    fn an_older_gh_falls_back_to_the_name_rule_after_exactly_one_retry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join("calls.log");
+        let gh = stand_in_gh(
+            dir.path(),
+            &format!(
+                "printf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in\n  *--json*) echo 'unknown flag: --json' >&2; exit 1 ;;\n  *) exit 0 ;;\nesac\n",
+                log.display()
+            ),
+        );
+
+        let probe = probe_github_hosts_with(gh.as_os_str());
+        assert_eq!(
+            probe,
+            GhProbe::Decided {
+                available: true,
+                policy: GithubHostPolicy::LegacyNameRule,
+            },
+        );
+        let calls: Vec<String> = std::fs::read_to_string(&log)
+            .expect("stand-in logged its calls")
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(
+            calls,
+            vec![
+                "auth status --active --json hosts".to_string(),
+                "auth status".to_string(),
+            ],
+            "exactly one plain retry, after the machine-readable call",
+        );
+    }
+
+    #[test]
+    fn a_timeout_is_transient_and_triggers_no_retry() {
+        // A timeout is not the older-`gh` case: it must not reach the
+        // permissive name rule, and it must leave the previous value alone.
+        let mut retried = false;
+        let probe = decide_gh_probe(GhCallOutcome::TimedOut, || {
+            retried = true;
+            GhCallOutcome::Completed(completed(0, ""))
+        });
+        assert!(matches!(probe, GhProbe::Transient(_)), "got {probe:?}");
+        assert!(
+            !retried,
+            "a timeout must not trigger the plain-status retry"
+        );
+
+        let mut retried = false;
+        let probe = decide_gh_probe(GhCallOutcome::Failed("no such file".to_string()), || {
+            retried = true;
+            GhCallOutcome::Completed(completed(0, ""))
+        });
+        assert!(matches!(probe, GhProbe::Transient(_)), "got {probe:?}");
+        assert!(
+            !retried,
+            "a failure to launch must not trigger the plain-status retry",
+        );
+    }
+
+    #[test]
+    fn a_parsed_answer_stands_regardless_of_the_exit_status() {
+        // In JSON mode `gh` exits zero even when a known host is broken, so the
+        // exit code carries no information; only the parse does.
+        let mut retried = false;
+        let probe = decide_gh_probe(
+            GhCallOutcome::Completed(completed(1, MEASURED_GH_2_95_OUTPUT)),
+            || {
+                retried = true;
+                GhCallOutcome::Completed(completed(0, ""))
+            },
+        );
+        assert!(!retried, "a parseable answer needs no retry");
+        assert_eq!(hosts(&probe), vec!["github.com".to_string()]);
+    }
+
+    /// Build a `std::process::Output` with a real exit status, by running
+    /// `sh -c 'exit N'`. `ExitStatus` cannot be constructed portably by hand.
+    fn completed(code: i32, stdout: &str) -> std::process::Output {
+        let status = std::process::Command::new("sh")
+            .args(["-c", &format!("exit {code}")])
+            .status()
+            .expect("sh");
+        std::process::Output {
+            status,
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: Vec::new(),
+        }
+    }
 }
 
 #[cfg(test)]

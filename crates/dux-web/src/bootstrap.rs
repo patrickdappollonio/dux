@@ -152,6 +152,7 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
         terminating_ptys: Vec::new(),
         pending_group_removals: Vec::new(),
         gh_status: GhStatus::Unknown,
+        gh_probe: Default::default(),
         pr_statuses: HashMap::new(),
         branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
         pr_sync_sessions: Arc::new(Mutex::new(Vec::new())),

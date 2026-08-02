@@ -114,8 +114,17 @@ chooser. This path is only available when the `gh` CLI is installed, authenticat
 github_integration = true
 ```
 
-dux checks `gh` availability at startup. If it is missing or not authenticated, the
-path is hidden outright on both front ends: no palette command, no menu entry.
+dux checks `gh` availability at startup, and again whenever you switch the
+integration on, so running `gh auth login` while dux is up is enough: turn the
+setting off and on again and dux picks it up without a restart. If `gh` is missing,
+or none of the hosts it is logged in to are working, the path is hidden outright on
+both front ends: no palette command, no menu entry.
+
+dux asks `gh` for its per-host login status, so one expired login no longer takes
+the rest down with it. Signed in to two hosts with a stale token on one of them,
+the working host still counts and the GitHub features stay on. On an older `gh`
+that cannot report its hosts, dux falls back to a single yes-or-no authentication
+check, which is stricter: any host in trouble turns the features off.
 
 When you trigger it, dux resolves the PR you paste or type, then asks you to
 confirm or edit the branch name, pre-filled with the PR's head branch name. In the
