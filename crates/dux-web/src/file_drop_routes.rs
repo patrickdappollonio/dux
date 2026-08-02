@@ -185,7 +185,13 @@ async fn upload_dropped_file(
     // read, or an `lsof` process on macOS) and writing the file. Off the async
     // reactor, exactly like the editor's file routes.
     let saved = tokio::task::spawn_blocking(move || {
-        let dir = destination.open()?;
+        // A destination that cannot be used is a refusal in its OWN words: a
+        // path that could not be sent to the terminal, or a process dux is not
+        // allowed to read. Flattening those into "could not write the file"
+        // would describe the wrong problem.
+        let dir = destination
+            .open()
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
         let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
         let saved = dux_core::file_drop::save_drop(&dir, &filename, &bytes, &stamp)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
