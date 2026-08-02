@@ -3243,7 +3243,10 @@ impl App {
             }
         }
 
-        for (terminal_id, terminal) in self.terminal_items() {
+        // The UNFILTERED list: the kill overlay is its own surface with its own
+        // filter row, so a query typed into the sidebar must not decide which
+        // processes it offers to stop.
+        for (terminal_id, terminal) in self.sorted_terminal_items() {
             let context_owner = match &terminal.owner {
                 TerminalOwner::Session(session_id) => {
                     let (project_name, session_label) = self

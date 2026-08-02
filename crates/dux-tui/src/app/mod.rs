@@ -4026,6 +4026,10 @@ impl App {
             &|i| visible[i],
         );
         self.ensure_selectable_left_item();
+        // The same query prunes the terminal list (`terminal_items`), so the
+        // terminal cursor is repaired in the same breath as the agent one: this
+        // is the one path every filter edit goes through.
+        self.clamp_terminal_cursor();
     }
 
     /// Build the per-session visibility mask for the current agent-list filter.
@@ -4660,9 +4664,113 @@ impl App {
         self.engine.companion_terminals.len()
     }
 
+    /// The terminals the sidebar is SHOWING: [`Self::sorted_terminal_items`] with
+    /// the live sidebar filter applied, so a query prunes the terminal list the
+    /// same way it prunes the agent list.
+    ///
+    /// This is the list every index-bearing caller works against (the rendered
+    /// rows, the pane count, the selection cursor, and the mouse row map), so
+    /// what a click lands on is what the user can see. The one caller that
+    /// deliberately wants the WHOLE list is the manual reorder, which resolves
+    /// the selection by id and then moves it within the unfiltered order, exactly
+    /// as the agent reorder does against `engine.sessions`.
+    pub(crate) fn terminal_items(&self) -> Vec<(&String, &CompanionTerminal)> {
+        let items = self.sorted_terminal_items();
+        let Some(query) = self.active_filter_query() else {
+            return items;
+        };
+        items
+            .into_iter()
+            .filter(|(_, t)| self.terminal_matches_filter(t, &query))
+            .collect()
+    }
+
+    /// Whether `terminal` passes a live sidebar query, through the shared core
+    /// matcher (`dux_core::agent_search::matches_terminal`, the twin of the web's
+    /// `matchesTerminalQuery`).
+    ///
+    /// The owner element is the SAME resolved string the row renders
+    /// ([`Self::terminal_owner_label`]), so what matches is what the user is
+    /// looking at: `agent@project` for a companion terminal, the project name for
+    /// a project terminal, and the `~`-shortened spawn directory for a standalone
+    /// one (which has no owner to name).
+    fn terminal_matches_filter(&self, terminal: &CompanionTerminal, query: &str) -> bool {
+        dux_core::agent_search::matches_terminal(
+            &terminal.label,
+            terminal.foreground_cmd.as_deref(),
+            &self.terminal_owner_label(terminal),
+            &self.terminal_owner_project_name(terminal),
+            query,
+        )
+    }
+
+    /// The owner element on a terminal row's second line, resolved once so the
+    /// renderer and the sidebar filter can never disagree about what a row says.
+    ///
+    /// Exhaustive over the owner kinds rather than a `matches!`: naming a row is
+    /// one of the owner-presentation decisions, so a fourth kind has to answer
+    /// here.
+    pub(crate) fn terminal_owner_label(&self, terminal: &CompanionTerminal) -> String {
+        match &terminal.owner {
+            // A companion terminal shows `agent@project`; a project terminal
+            // shows just the project name (it has no agent).
+            TerminalOwner::Session(sid) => self
+                .engine
+                .sessions
+                .iter()
+                .find(|s| &s.id == sid)
+                .map(|s| {
+                    let agent = s.title.clone().unwrap_or_else(|| s.branch_name.clone());
+                    match self.engine.projects.iter().find(|p| p.id == s.project_id) {
+                        Some(p) => format!("{agent}@{}", p.name),
+                        None => agent,
+                    }
+                })
+                .unwrap_or_else(|| sid.clone()),
+            TerminalOwner::Project(pid) => self
+                .engine
+                .projects
+                .iter()
+                .find(|p| &p.id == pid)
+                .map(|p| p.name.clone())
+                .unwrap_or_else(|| pid.clone()),
+            // No owner to name, so the row names the DIRECTORY instead, with the
+            // home directory collapsed to `~`. Truthful, useful, ellipsizes
+            // cleanly as the left element on that line must, and gives the
+            // sidebar search something to match.
+            TerminalOwner::Standalone => {
+                dux_core::home_path::shorten_home(terminal.client.spawn_dir())
+            }
+        }
+    }
+
+    /// The project a terminal belongs to, named, or an empty string when it
+    /// belongs to none. A separate search field from the owner label (which is
+    /// what the row shows), keeping the TUI's searched fields identical to the
+    /// web's `matchesTerminalQuery`.
+    fn terminal_owner_project_name(&self, terminal: &CompanionTerminal) -> String {
+        let project_id = match &terminal.owner {
+            TerminalOwner::Session(sid) => match self.engine.sessions.iter().find(|s| &s.id == sid)
+            {
+                Some(session) => session.project_id.clone(),
+                None => return String::new(),
+            },
+            TerminalOwner::Project(pid) => pid.clone(),
+            // Truthfully empty: a standalone terminal belongs to no project.
+            TerminalOwner::Standalone => return String::new(),
+        };
+        self.engine
+            .projects
+            .iter()
+            .find(|p| p.id == project_id)
+            .map(|p| p.name.clone())
+            .unwrap_or_default()
+    }
+
     /// Returns all running companion terminals as (terminal_id, terminal) pairs,
     /// ordered by the shared active sort mode (`config.ui.agent_sort`), mirroring
-    /// the agent comparators in [`build_left_items`].
+    /// the agent comparators in [`build_left_items`]. UNFILTERED: the sidebar's
+    /// visible list is [`Self::terminal_items`].
     ///
     /// The terminal comparators are kept in LOCKSTEP with the web surface's
     /// `sortFlatTerminals` (`crates/dux-web/web/src/lib/flatTerminals.ts`); the two
@@ -4681,7 +4789,7 @@ impl App {
     /// The base sort by `sort_order` runs first in every mode: `sort_by_key` is
     /// stable, so equal keys (and the `Active` float) keep the manual base order,
     /// matching the agents' tie-stability.
-    pub(crate) fn terminal_items(&self) -> Vec<(&String, &CompanionTerminal)> {
+    pub(crate) fn sorted_terminal_items(&self) -> Vec<(&String, &CompanionTerminal)> {
         let mode = AgentSortMode::from_config_str(&self.engine.config.ui.agent_sort);
         let mut items: Vec<_> = self.engine.companion_terminals.iter().collect();
         // Base order: manual `sort_order` ascending (creation order). Every mode
@@ -4731,10 +4839,19 @@ impl App {
         items
     }
 
+    /// Whether the terminals section has anything in it RIGHT NOW. Filter-aware,
+    /// because it gates the navigation that jumps into that section: a query that
+    /// hides every terminal hides the section too, and stepping into an empty
+    /// section would strand the cursor there.
     pub(crate) fn has_terminal_items(&self) -> bool {
-        !self.engine.companion_terminals.is_empty()
+        !self.terminal_items().is_empty()
     }
 
+    /// Keep the terminal cursor inside the VISIBLE list. It repairs two things:
+    /// a terminal that went away, and a terminal the live filter just hid (the
+    /// query is part of what "visible" means, so a filter that prunes the row
+    /// under the cursor has to move the cursor, and a filter that empties the
+    /// section sends focus back to the agents).
     pub(crate) fn clamp_terminal_cursor(&mut self) {
         let count = self.terminal_items().len();
         if count == 0 {

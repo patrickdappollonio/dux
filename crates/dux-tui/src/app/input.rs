@@ -17577,26 +17577,64 @@ cyan = "#00ffff"
         );
     }
 
-    /// The sidebar search matches a standalone terminal on the thing its row
-    /// actually says: the `~`-shortened directory, which stands in for the owner
-    /// label it does not have.
+    // The sidebar search over terminals is proved by a JOURNEY test rather than a
+    // matcher call: see
+    // `render::tests::the_sidebar_filter_hides_terminals_that_do_not_match_the_query`,
+    // which opens the filter, types a query, and reads the surviving rows out of
+    // the frame buffer. The test that used to live here called
+    // `agent_search::matches_terminal` directly, so it passed whether or not the
+    // terminal list was filtered at all, which is exactly how the missing filter
+    // shipped.
+
+    /// The cursor is an index into the VISIBLE terminals, so a query that hides
+    /// the selected row has to move it, and a query that empties the section has
+    /// to hand focus back to the agents. Without the repair the selection would
+    /// point past the end of the list and act on the wrong terminal.
     #[test]
-    fn sidebar_search_matches_a_standalone_terminal_by_its_directory() {
-        let dir = dux_core::home_path::standalone_terminal_dir();
-        let label = dux_core::home_path::shorten_home(&dir);
-        assert!(
-            dux_core::agent_search::matches_terminal("Terminal 1", None, &label, "", &label),
-            "the directory label must be searchable; label was {label:?}"
+    fn filtering_away_the_selected_terminal_repairs_the_cursor() {
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        app.engine.config.terminal.command = "cat".to_string();
+        app.engine.config.terminal.args = vec![];
+        let (session_tid, _) = app
+            .engine
+            .create_companion_terminal(&session_id, 24, 80)
+            .expect("session terminal");
+        let (_standalone_tid, _) = app
+            .engine
+            .create_standalone_terminal(24, 80)
+            .expect("standalone terminal");
+        app.engine.config.ui.agent_sort = "manual".to_string();
+        app.focus = FocusPane::Left;
+        app.left_section = LeftSection::Terminals;
+        // The cursor is on the second (standalone) row.
+        app.selected_terminal_index = 1;
+
+        // "demo" is the project, so it matches the agent's terminal only.
+        app.agent_filter = Some(TextInput::with_text("demo".to_string()));
+        app.rebuild_left_items();
+        assert_eq!(
+            app.terminal_items()
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>(),
+            vec![session_tid.as_str()],
         );
-        assert!(
-            !dux_core::agent_search::matches_terminal(
-                "Terminal 1",
-                None,
-                &label,
-                "",
-                "definitely-not-in-any-path"
-            ),
-            "an unrelated query must not match"
+        assert_eq!(
+            app.selected_terminal_index, 0,
+            "the cursor must move onto a row that still exists"
+        );
+        assert_eq!(app.left_section, LeftSection::Terminals);
+
+        // A query nothing matches empties the section, which cannot hold focus.
+        app.agent_filter = Some(TextInput::with_text("zzz-nothing".to_string()));
+        app.rebuild_left_items();
+        assert!(app.terminal_items().is_empty());
+        assert_eq!(app.selected_terminal_index, 0);
+        assert_eq!(
+            app.left_section,
+            LeftSection::Projects,
+            "an empty terminals section hands focus back to the agents"
         );
     }
 
