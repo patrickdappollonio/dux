@@ -434,3 +434,124 @@ describe("the flat terminal list pipeline with both owners", () => {
     ])
   })
 })
+
+// A terminal that belongs to nothing is an ordinary sidebar element. It has no
+// owner to name, so its row's second line names the DIRECTORY it opened in, and
+// that is also what the sidebar search matches. These are the journeys that
+// would have silently failed before the owner became a tagged value: a kind with
+// no loop of its own simply never appeared.
+describe("the flat terminal list with a standalone terminal in it", () => {
+  const projectName = (id: string) => ({ p1: "Web App" })[id] ?? id
+  const sessions = [session({ id: "s1", title: "Login flow", project_id: "p1" })]
+  const projects = [project({ id: "p1" })]
+
+  const terminals = [
+    term({
+      id: "t-s1",
+      owner: { kind: "session", session_id: "s1" },
+      sort_order: 0,
+      foreground_cmd: "htop",
+      created_at: "2026-08-01T12:00:00Z",
+      updated_at: "2026-08-01T12:00:00Z",
+    }),
+    term({
+      id: "t-solo",
+      owner: { kind: "standalone", cwd_label: "~/code" },
+      label: "Terminal 2",
+      sort_order: 1,
+      foreground_cmd: null,
+      created_at: "2026-08-01T12:00:10Z",
+      updated_at: "2026-08-01T12:00:10Z",
+    }),
+    term({
+      id: "t-p1",
+      owner: { kind: "project", project_id: "p1" },
+      sort_order: 2,
+      foreground_cmd: "vim",
+      created_at: "2026-08-01T12:00:20Z",
+      updated_at: "2026-08-01T12:00:20Z",
+    }),
+  ]
+
+  function pipeline(key: FlatSortKey, query = ""): string[] {
+    const assembled = assembleFlatTerminals(
+      terminals,
+      sessions,
+      projects,
+      projectName,
+    )
+    const base = assembled
+      .slice()
+      .sort((a, b) => a.terminal.sort_order - b.terminal.sort_order)
+    return sortFlatTerminals(base, key)
+      .filter((ft) =>
+        matchesTerminalQuery(ft.terminal, ft.ownerLabel, ft.projectName, query),
+      )
+      .map((ft) => ft.terminal.id)
+  }
+
+  it("labels a standalone terminal with its directory and no project tag", () => {
+    const flat = assembleFlatTerminals(
+      terminals,
+      sessions,
+      projects,
+      projectName,
+    )
+    const solo = flat.find((f) => f.terminal.id === "t-solo")
+    expect(solo?.ownerLabel).toBe("~/code")
+    // Truthfully empty: it belongs to no project, so there is no project tag.
+    expect(solo?.projectName).toBe("")
+    expect(solo?.owner).toEqual({ kind: "standalone" })
+  })
+
+  it("groups two standalone terminals as each other's siblings", () => {
+    const two = [
+      term({ id: "a", owner: { kind: "standalone", cwd_label: "~" } }),
+      term({ id: "b", owner: { kind: "standalone", cwd_label: "~/code" } }),
+      term({ id: "c", owner: { kind: "session", session_id: "s1" } }),
+    ]
+    const flat = assembleFlatTerminals(two, sessions, projects, projectName)
+    expect(flat[0].siblings.map((t) => t.id)).toEqual(["a", "b"])
+  })
+
+  it("takes part in every sort mode, manual drag order included", () => {
+    expect(pipeline("manual")).toEqual(["t-s1", "t-solo", "t-p1"])
+    expect(pipeline("created")).toEqual(["t-p1", "t-solo", "t-s1"])
+    expect(pipeline("updated")).toEqual(["t-p1", "t-solo", "t-s1"])
+    // Displayed labels: htop (s1), Terminal 2 (solo, no foreground), vim (p1).
+    expect(pipeline("name")).toEqual(["t-s1", "t-solo", "t-p1"])
+    expect(pipeline("name_desc")).toEqual(["t-p1", "t-solo", "t-s1"])
+    // Nothing is hot, so active is the base order and the standalone row keeps
+    // its place rather than sinking below the others.
+    expect(pipeline("active")).toEqual(["t-s1", "t-solo", "t-p1"])
+  })
+
+  it("is findable by searching for its directory", () => {
+    expect(pipeline("manual", "code")).toEqual(["t-solo"])
+    expect(pipeline("manual", "~")).toEqual(["t-solo"])
+    // And is not swept up by a query matching somebody else's owner.
+    expect(pipeline("manual", "login")).toEqual(["t-s1"])
+  })
+
+  it("is named in the drag baseline, so a drop persists a total order", () => {
+    const assembled = assembleFlatTerminals(
+      terminals,
+      sessions,
+      projects,
+      projectName,
+    )
+    const base = assembled
+      .slice()
+      .sort((a, b) => a.terminal.sort_order - b.terminal.sort_order)
+    expect(displayedTerminalOrder(base, "manual")).toEqual([
+      "t-s1",
+      "t-solo",
+      "t-p1",
+    ])
+    expect(displayedTerminalOrder(base, "created")).toEqual([
+      "t-p1",
+      "t-solo",
+      "t-s1",
+    ])
+  })
+})

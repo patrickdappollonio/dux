@@ -36,6 +36,7 @@ import {
   Rocket,
   SlidersHorizontal,
   SquarePen,
+  SquareTerminal,
   Wrench,
   type LucideIcon,
 } from "lucide-react"
@@ -51,6 +52,7 @@ import {
   openTaskManager,
   openMacrosDialog,
   sortAgents,
+  createStandaloneTerminal,
 } from "@/lib/store"
 
 export type AppMenuEntry = AppMenuItem | AppMenuSubmenu | AppMenuSeparator
@@ -182,6 +184,18 @@ export function appMenuModel(): AppMenuEntry[] {
       ],
     },
     { kind: "separator", id: "sep-agents" },
+    {
+      kind: "item",
+      id: "new-standalone-terminal",
+      // GLOBAL and parameter-free: it needs no agent, no project and nothing
+      // selected, which is exactly why it belongs here rather than in a row's
+      // own `⋯` menu (the twin of the TUI's `new-standalone-terminal` palette
+      // command). No trailing "…": it opens the terminal immediately, with no
+      // dialog and nothing to confirm.
+      title: "New standalone terminal",
+      icon: SquareTerminal,
+      run: () => createStandaloneTerminal(),
+    },
     {
       kind: "item",
       id: "task-manager",

@@ -47,6 +47,7 @@ describe("appMenuModel", () => {
       ["submenu", "sort-agents"],
       ["submenu", "configuration"],
       ["separator", "sep-agents"],
+      ["item", "new-standalone-terminal"],
       ["item", "task-manager"],
       ["separator", "sep-about"],
       ["item", "welcome-screen"],

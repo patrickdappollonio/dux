@@ -21,6 +21,13 @@ import { assertNever } from "@/lib/assertNever"
 export type TerminalOwnerWire =
   | { kind: "session"; session_id: string }
   | { kind: "project"; project_id: string }
+  // Owned by nothing: a standalone terminal, opened in the user's home
+  // directory. There is no owner id to carry, so it carries what its row names
+  // it by instead: the server-side directory it opened in, already written with
+  // the home directory collapsed to `~`. The server shortens it because the
+  // browser is not necessarily on the same machine and has no `~` of the
+  // server's to collapse against.
+  | { kind: "standalone"; cwd_label: string }
 
 // The client-side owner reference: the same union, in the app's own spelling.
 // It is what the selected target carries, what the deep-link parser produces,
@@ -28,6 +35,11 @@ export type TerminalOwnerWire =
 export type TerminalOwnerRef =
   | { kind: "session"; sessionId: string }
   | { kind: "project"; projectId: string }
+  // No id, because there is no owner. Every standalone terminal shares this one
+  // reference value, which is exactly right: the terminal id is what tells two
+  // of them apart, and the address they live at (`#/terminal/<id>`) carries no
+  // owner segment for the same reason.
+  | { kind: "standalone" }
 
 // Wire → client. The one ingestion point for ownership, so nothing downstream
 // reads the server's field names.
@@ -37,6 +49,8 @@ export function ownerRefFromWire(owner: TerminalOwnerWire): TerminalOwnerRef {
       return { kind: "session", sessionId: owner.session_id }
     case "project":
       return { kind: "project", projectId: owner.project_id }
+    case "standalone":
+      return { kind: "standalone" }
     default:
       return assertNever(owner)
   }
@@ -67,6 +81,8 @@ export function matchOwner<T>(owner: TerminalOwnerRef, on: OwnerMatch<T>): T {
       return on.session(owner)
     case "project":
       return on.project(owner)
+    case "standalone":
+      return on.standalone(owner)
     default:
       return assertNever(owner)
   }
@@ -90,6 +106,8 @@ export function matchWireOwner<T>(
       return on.session(owner)
     case "project":
       return on.project(owner)
+    case "standalone":
+      return on.standalone(owner)
     default:
       return assertNever(owner)
   }
@@ -110,6 +128,7 @@ export function ownerSessionId(owner: TerminalOwnerRef): string | null {
     case "session":
       return owner.sessionId
     case "project":
+    case "standalone":
       return null
     default:
       return assertNever(owner)
@@ -121,6 +140,8 @@ export function ownerSessionId(owner: TerminalOwnerRef): string | null {
 export function ownerProjectId(owner: TerminalOwnerRef): string | null {
   switch (owner.kind) {
     case "session":
+      return null
+    case "standalone":
       return null
     case "project":
       return owner.projectId
@@ -141,6 +162,11 @@ export function sameOwner(
       return ref.kind === "session" && ref.sessionId === wire.session_id
     case "project":
       return ref.kind === "project" && ref.projectId === wire.project_id
+    // Every standalone terminal has the same owner, so this is a kind test and
+    // nothing more. Two standalone terminals ARE each other's siblings, which
+    // is what makes `terminalTitle` disambiguate two of them running `vim`.
+    case "standalone":
+      return ref.kind === "standalone"
     default:
       return assertNever(wire)
   }
@@ -159,6 +185,8 @@ export function sameWireOwner(
       return b.kind === "session" && a.session_id === b.session_id
     case "project":
       return b.kind === "project" && a.project_id === b.project_id
+    case "standalone":
+      return b.kind === "standalone"
     default:
       return assertNever(a)
   }
@@ -173,6 +201,11 @@ export function ownerKey(owner: TerminalOwnerWire): string {
       return `session:${owner.session_id}`
     case "project":
       return `project:${owner.project_id}`
+    // One group for every standalone terminal, which is correct: they all share
+    // the one owner. The `standalone` prefix cannot collide with an id-bearing
+    // key, and the absence of an id after it is the point.
+    case "standalone":
+      return "standalone"
     default:
       return assertNever(owner)
   }

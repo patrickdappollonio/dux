@@ -111,6 +111,15 @@ export function taskManagerRows(
         sessionId: null,
         projectId: o.project_id,
       }),
+      // No owner, so the secondary text says where it is instead, which is what
+      // its sidebar row says too. Both ids are null because there is genuinely
+      // no owner to scope the row to; the stop action is keyed by `targetId`
+      // (the terminal id) and works regardless.
+      standalone: (o) => ({
+        detail: o.cwd_label,
+        sessionId: null,
+        projectId: null,
+      }),
     })
     const title = terminalTitle(terminal, group)
     return {
@@ -217,6 +226,14 @@ export function taskManagerRows(
   for (const project of projects) {
     emitTerminalGroup(ownerKey({ kind: "project", project_id: project.id }))
   }
+
+  // Standalone terminals: live shells in the user's home directory with neither
+  // an agent nor a project behind them. They have no owner section to sit under,
+  // so they get their own emit, before the sweep below, so their rows land in a
+  // predictable place rather than wherever the leftover pass happens to put
+  // them. The sweep would catch them either way, which is the safety net, not
+  // the plan.
+  emitTerminalGroup(ownerKey({ kind: "standalone", cwd_label: "" }))
 
   // Anything the two walks never reached: a terminal whose owner id resolves to
   // nothing in this spine, or one belonging to a kind of owner these walks have

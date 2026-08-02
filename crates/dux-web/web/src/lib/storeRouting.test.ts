@@ -92,6 +92,9 @@ interface SessionSpec {
 function makeSpine(
   sessions: SessionSpec[],
   projects: { id: string; terminals?: string[] }[] = [],
+  // Terminals owned by nothing. They hang off no session and no project, which
+  // is exactly why they need their own argument here.
+  standaloneTerminals: string[] = [],
 ): Spine {
   return {
     projects: projects.map((p) => ({
@@ -128,6 +131,11 @@ function makeSpine(
           owner: { kind: "project", project_id: p.id },
         })),
       ),
+      ...standaloneTerminals.map((id) => ({
+        id,
+        label: id,
+        owner: { kind: "standalone", cwd_label: "~/code" },
+      })),
     ] as unknown as Spine["terminals"],
     sidebar: { groups: [], agentless_start: null },
   }
@@ -225,6 +233,7 @@ async function loadStore(
   hash: string,
   sessions: SessionSpec[],
   projects: { id: string; terminals?: string[] }[] = [],
+  standaloneTerminals: string[] = [],
 ) {
   entries = [OUTSIDE_ENTRY, hash === "" ? "/" : hash]
   index = DUX_ENTRY_INDEX
@@ -236,7 +245,7 @@ async function loadStore(
     search: "",
   }
   vi.stubGlobal("location", loc)
-  spineBody = makeSpine(sessions, projects)
+  spineBody = makeSpine(sessions, projects, standaloneTerminals)
   const mod = await import("./store")
   await vi.waitFor(() => {
     expect(mod.getSnapshot().spine).not.toBeNull()
@@ -287,8 +296,9 @@ async function pushSpine(
   mod: Awaited<ReturnType<typeof loadStore>>,
   sessions: SessionSpec[],
   projects: { id: string; terminals?: string[] }[] = [],
+  standaloneTerminals: string[] = [],
 ) {
-  spineBody = makeSpine(sessions, projects)
+  spineBody = makeSpine(sessions, projects, standaloneTerminals)
   mod.eventsSocket.onEvent({ event: "sessions.changed" })
   // Wait on the ids, not just the session count: a push that only closes a
   // project terminal or one tab leaves the count untouched, and a count-only
@@ -424,6 +434,22 @@ describe("a deleted agent never throws the user out of dux", () => {
     )
     expect(mod.getSnapshot().selectedTarget).not.toBeNull()
     await pushSpine(mod, [{ id: "s1", project_id: "p1" }], [{ id: "p1", terminals: [] }])
+    expect(mod.getSnapshot().selectedTarget).toBeNull()
+    expect(mod.getSnapshot().mobileScreen).toBe("home")
+    expect(loc.hash).toBe("")
+  })
+
+  it("goes home when a STANDALONE terminal closes under the user", async () => {
+    // It has neither an agent nor a project above it, so home is the only
+    // honest destination, and the address bar must say so rather than going on
+    // naming a terminal that is gone.
+    const mod = await loadStore("#/terminal/solo-1", [], [], ["solo-1"])
+    expect(mod.getSnapshot().selectedTarget).toEqual({
+      kind: "terminal",
+      terminalId: "solo-1",
+      owner: { kind: "standalone" },
+    })
+    await pushSpine(mod, [], [], [])
     expect(mod.getSnapshot().selectedTarget).toBeNull()
     expect(mod.getSnapshot().mobileScreen).toBe("home")
     expect(loc.hash).toBe("")
@@ -891,5 +917,46 @@ describe("the changes screen needs something to show changes for", () => {
     mod.openChangesScreen()
     expect(mod.getSnapshot().mobileScreen).toBe("home")
     expect(loc.hash).toBe("")
+  })
+})
+
+// A terminal owned by nothing lives at an address that names no owner. It must
+// be reachable there, land on a real screen rather than falling through to the
+// hub, and write that same address back out.
+describe("a standalone terminal is addressable in its own right", () => {
+  it("boots onto the un-nested address and lands on a real screen", async () => {
+    const mod = await loadStore("#/terminal/solo-1", [], [], ["solo-1"])
+    expect(mod.getSnapshot().selectedTarget).toEqual({
+      kind: "terminal",
+      terminalId: "solo-1",
+      owner: { kind: "standalone" },
+    })
+    // The phone journey: NOT the home screen. Before the owner was a tagged
+    // value, a kind with no screen of its own fell through to the hub, which
+    // looks exactly like the app ignoring the tap.
+    expect(mod.getSnapshot().mobileScreen).toBe("terminal")
+    expect(mod.getSnapshot().selectedSessionId).toBeNull()
+    // It came in on this address, so it stays on it rather than being rewritten.
+    expect(loc.hash).toBe("#/terminal/solo-1")
+    expect(leftApp).toBe(false)
+  })
+
+  it("writes the un-nested address when one is selected from elsewhere", async () => {
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1" }], [], [
+      "solo-1",
+    ])
+    mod.selectTerminal("solo-1", { kind: "standalone" })
+    expect(loc.hash).toBe("#/terminal/solo-1")
+    expect(mod.getSnapshot().mobileScreen).toBe("terminal")
+  })
+
+  it("goes up to home, by naming it, never by stepping history", async () => {
+    const mod = await loadStore("#/terminal/solo-1", [], [], ["solo-1"])
+    const depth = index
+    mod.navigateUp()
+    expect(leftApp).toBe(false)
+    expect(mod.getSnapshot().mobileScreen).toBe("home")
+    expect(loc.hash).toBe("")
+    expect(index).toBe(depth + 1)
   })
 })
