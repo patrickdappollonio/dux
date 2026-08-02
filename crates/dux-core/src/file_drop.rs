@@ -1764,3 +1764,54 @@ mod tests {
         format!("'{}'", s.replace('\'', "'\\''"))
     }
 }
+
+#[cfg(test)]
+mod independent_path_safety_check {
+    use super::*;
+    use std::os::unix::ffi::OsStrExt;
+
+    /// A path dux cannot paste losslessly must be refused BEFORE anything is
+    /// written. Saving a file and handing back a reference that names something
+    /// else is worse than refusing the drop.
+    #[test]
+    fn a_directory_dux_cannot_name_is_refused_before_writing() {
+        let root = tempfile::tempdir().expect("tempdir");
+        for raw in [
+            b"dir\nname".as_slice(),
+            b"dir\x1bname".as_slice(),
+            b"dir\xffname".as_slice(),
+        ] {
+            let name = std::ffi::OsStr::from_bytes(raw);
+            let dir = root.path().join(name);
+            std::fs::create_dir(&dir).expect("create dir");
+            let opened = DropDir::open(&dir);
+            assert!(
+                opened.is_err(),
+                "must refuse a directory it cannot name: {:?}",
+                dir
+            );
+            assert!(
+                std::fs::read_dir(&dir).expect("read").next().is_none(),
+                "and must not have written anything into it"
+            );
+        }
+    }
+
+    /// The shapes the review confirmed are SAFE must keep working, or the fix
+    /// has over-corrected into refusing ordinary directories.
+    #[test]
+    fn ordinary_awkward_directories_still_work() {
+        let root = tempfile::tempdir().expect("tempdir");
+        for name in [
+            "has space",
+            "has$dollar",
+            "has`backtick",
+            "has'quote",
+            "has(parens)",
+        ] {
+            let dir = root.path().join(name);
+            std::fs::create_dir(&dir).expect("create dir");
+            assert!(DropDir::open(&dir).is_ok(), "must still accept {name:?}");
+        }
+    }
+}
