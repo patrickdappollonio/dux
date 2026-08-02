@@ -1415,3 +1415,71 @@ mod resolution_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod independent_typed_parser_check {
+    use super::*;
+
+    fn repo(raw: &str) -> Option<String> {
+        parse_typed_reference(raw)
+            .ok()
+            .and_then(|r| r.repository_label())
+    }
+
+    /// A typed address must name the repository a BROWSER would name. Every case
+    /// here previously answered with a different, real repository, or read a
+    /// scheme as a hostname.
+    #[test]
+    fn a_typed_address_names_what_a_browser_names() {
+        // Dot segments must normalise, not be taken literally.
+        assert_eq!(
+            repo("https://github.com/acme/widget/../gadget#123").as_deref(),
+            Some("github.com/acme/gadget")
+        );
+        assert_eq!(
+            repo("https://github.com/acme/./widget").as_deref(),
+            Some("github.com/acme/widget")
+        );
+        // Dot components as repository names are refused.
+        for bad in [
+            "acme/..",
+            "example/../application",
+            "acme/.",
+            "github.com/acme/..",
+        ] {
+            assert_eq!(repo(bad), None, "must refuse {bad}");
+        }
+        // Percent escapes decode; an encoded separator is refused.
+        assert_eq!(
+            repo("https://github.com/acme/wid%67et/pull/1").as_deref(),
+            Some("github.com/acme/widget")
+        );
+        assert_eq!(repo("https://github.com/acme%2Fwidget/pull/1"), None);
+        // A scheme is never a hostname.
+        for bad in [
+            "ftp://github.com/acme/widget",
+            "file:///acme/widget",
+            "javascript://github.com/acme/widget",
+            "data://github.com/acme/widget",
+        ] {
+            assert_eq!(repo(bad), None, "a scheme must not become a host: {bad}");
+        }
+        // A malformed authority is refused rather than guessed at.
+        assert_eq!(repo("https://[::1/acme/widget"), None);
+        // The lenient shapes still work.
+        for good in [
+            "example/application",
+            "github.com/example/application",
+            "https://github.com/example/application",
+            "https://github.com/example/application/issues",
+            "https://github.com/example/application/security/dependabot",
+            "https://github.com/example/application/this/is/a/made/up/path",
+            "git@github.com:example/application.git",
+        ] {
+            assert!(
+                parse_typed_reference(good).is_ok(),
+                "must still accept {good}"
+            );
+        }
+    }
+}
