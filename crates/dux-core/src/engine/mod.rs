@@ -4183,6 +4183,12 @@ mod tests {
         engine.config.capabilities.clipboard_passthrough = "off".to_string();
         let _a = seed_passthrough_provider(&mut engine, "s1");
         let off = engine.take_host_passthrough(Some("s1"), false);
+        // Prove the pipe is live before claiming the clipboard is not on it: a
+        // forward of nothing at all also carries no `]52;`.
+        assert!(
+            off.windows(4).any(|w| w == b"]9;h"),
+            "notify still forwards, so the passthrough pipe is live"
+        );
         assert!(
             !off.windows(4).any(|w| w == b"]52;"),
             "clipboard off never forwards even for the focused tab"
