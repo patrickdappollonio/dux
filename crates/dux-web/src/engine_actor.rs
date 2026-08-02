@@ -1183,6 +1183,110 @@ pub fn spawn_engine_thread(mut engine: Engine) -> (EngineHandle, JoinHandle<()>)
     (handle, join)
 }
 
+/// Whether handling `req` can change the projected spine (the projects /
+/// sessions / sidebar snapshot that [`spine_fingerprints`] serializes), and so
+/// must bump `mutation_version` to open the change-gated spine check.
+///
+/// EXHAUSTIVE ON PURPOSE, with no wildcard arm. This used to be a `matches!`
+/// naming five variants, which compiled no matter what was added to
+/// [`EngineRequest`] and silently answered "changed nothing" for everything
+/// else — so a new request kind's change reached the browser only when the ~2s
+/// self-healing backstop happened to notice it. Now a new variant does not
+/// build until somebody says which answer it deserves.
+///
+/// The two errors are not symmetric, so lean one way. Answering `false` for a
+/// real mutator is the BUG this shape exists to prevent (the browser is told
+/// late, or the fingerprint compare never runs at all in that window).
+/// Answering `true` for something that turns out to be a read costs one extra
+/// fingerprint serialize per ~250ms interval and nothing else. Where the answer
+/// is not obvious from the handler, answer `true` and say so on the arm.
+fn request_mutates_spine(req: &EngineRequest) -> bool {
+    match req {
+        // Writers. `ApplyWire` is the named loop chokepoint (every wire command
+        // the web can issue). The three terminal creates and the tab create each
+        // add a row the sidebar renders. `SubscribePty` is a writer too, and was
+        // the omission that proved the point: opening an agent's socket launches
+        // the provider when it is not already up (`handle_subscribe` ->
+        // `launch_agent`), which flips the session live, and it also spawns a PR
+        // check and stamps the viewed/attention state.
+        EngineRequest::ApplyWire(..)
+        | EngineRequest::SubscribePty(..)
+        | EngineRequest::CreateTerminal(..)
+        | EngineRequest::CreateProjectTerminal(..)
+        | EngineRequest::CreateStandaloneTerminal(..)
+        | EngineRequest::CreateAgentTab(..) => true,
+
+        // Writers of the per-tab activity/attention state that the spine
+        // projects. `WritePty` calls `note_pty_input`, which is what lights the
+        // `typing` flag on `SessionView` / `TerminalView` / the tab views;
+        // `NoteViewed` calls `note_agent_viewed_if_known`, which clears
+        // `needs_attention`. Both are also observed by the per-tick
+        // `poll_attention_transitions` / streaming polls, so answering `true`
+        // here mostly makes the same-tick case prompt rather than next-tick.
+        EngineRequest::WritePty(..) | EngineRequest::NoteViewed(..) => true,
+
+        // Tears down every PTY and marks the agent sessions Detached, so it is a
+        // mutator by any reading. Handled inline in the loop, which then breaks
+        // out, so this answer is never actually consulted; it is stated
+        // truthfully rather than left as a convenient `false`.
+        EngineRequest::Shutdown(..) => true,
+
+        // Pure projections and instant clones off engine state: `Spine`,
+        // `Session`, `Bootstrap`, `ResourceTargets` and `CreatedSessionForOp`
+        // all call `&self` methods on `Engine`; `SpineJson` serves the loop's
+        // cached string. Nothing here can write.
+        EngineRequest::Spine(..)
+        | EngineRequest::SpineJson(..)
+        | EngineRequest::Session(..)
+        | EngineRequest::Bootstrap(..)
+        | EngineRequest::ResourceTargets(..)
+        | EngineRequest::CreatedSessionForOp(..) => false,
+
+        // Lookups: each arm is an `iter().find()` or a `HashMap::get` followed by
+        // a clone of what it found (worktree path, repo root, terminal owner, tab
+        // owner, project/session log context, worktree inputs). Read-only by
+        // construction.
+        EngineRequest::TerminalOwnerOf(..)
+        | EngineRequest::TabSession(..)
+        | EngineRequest::SessionWorktree(..)
+        | EngineRequest::ProjectPath(..)
+        | EngineRequest::ProjectWorktreeInputs(..)
+        | EngineRequest::SessionStartupLogContext(..)
+        | EngineRequest::ProjectStartupLogContext(..)
+        | EngineRequest::EditorDefault(..)
+        | EngineRequest::BrowseStartDir(..) => false,
+
+        // Attach to an ALREADY-RUNNING PTY, or push bytes at one. Deliberately
+        // distinct from `SubscribePty`: `SubscribeTerminal` never launches
+        // anything (an unknown terminal id is an error, not a spawn), and
+        // `ResizePty` resolves the client through `pty_for`, which borrows the
+        // engine immutably. Neither adds, removes, or restates a spine row.
+        EngineRequest::SubscribeTerminal(..) | EngineRequest::ResizePty(..) => false,
+
+        // Read-only git. `create_agent_branch_preflight` is a `branch_exists`
+        // probe answering "fresh or existing branch?"; it writes nothing.
+        EngineRequest::CreateAgentBranchPlan(..) => false,
+
+        // Writes that land somewhere the spine does not project. The changed-files
+        // revision counter and the last-seen version are SQLite rows that no
+        // `SpineView` field reads; the raw config save is persist-only by design
+        // (`write_raw_config_on_engine` writes the file and leaves `engine.config`
+        // untouched until an explicit reload). `RefreshChangedFiles` only spawns a
+        // worker (`&self`), and the refreshed lists arrive through the worker-event
+        // drain, which bumps the version itself.
+        EngineRequest::NextChangesRev(..)
+        | EngineRequest::MarkVersionSeen(..)
+        | EngineRequest::ReadRawConfig(..)
+        | EngineRequest::WriteRawConfig(..)
+        | EngineRequest::FirstLoadInputs(..)
+        | EngineRequest::RefreshChangedFiles(..) => false,
+
+        // Broadcast on the status channels only. Statuses are their own transport
+        // (toasts on the web); no spine field carries them.
+        EngineRequest::EmitStatus(..) => false,
+    }
+}
+
 /// The shared engine request/drain loop. Runs on the CALLER's thread (a spawned
 /// std thread for `dux server`, the main thread for the in-process flip) and
 /// owns `engine` for the loop's duration, returning it on exit so the flip can
@@ -1560,8 +1664,23 @@ pub(crate) fn run_engine_loop(
 
         let mut disconnected = false;
         loop {
-            match req_rx.try_recv() {
-                Ok(EngineRequest::SubscribePty(session_id, reply)) => {
+            let req = match req_rx.try_recv() {
+                Ok(req) => req,
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    disconnected = true;
+                    break;
+                }
+            };
+            // Bump #1: every request that can move the spine, decided ONCE for
+            // the whole drain by the exhaustive `request_mutates_spine` (which
+            // covers the arms handled inline below as well as the ones
+            // `handle_request` takes). Decided before `req` is moved; the
+            // fingerprint compare downstream stays the precise emit gate, so an
+            // over-broad `true` only costs a serialize.
+            let mutates = request_mutates_spine(&req);
+            match req {
+                EngineRequest::SubscribePty(session_id, reply) => {
                     handle_subscribe(
                         &mut engine,
                         &mut pending,
@@ -1570,12 +1689,12 @@ pub(crate) fn run_engine_loop(
                         reply,
                     );
                 }
-                Ok(EngineRequest::SpineJson(reply)) => {
+                EngineRequest::SpineJson(reply) => {
                     // Serve the loop-local cache (handled here, not in
                     // `handle_request`, which has no access to it).
                     let _ = reply.send(spine_check.spine_json_cache.clone());
                 }
-                Ok(EngineRequest::Shutdown(reply)) => {
+                EngineRequest::Shutdown(reply) => {
                     // Trip the teardown flag first so any PTY forwarders exit
                     // promptly (symmetry with the flip; harmless here since the
                     // engine drop will also disconnect their channels).
@@ -1606,37 +1725,18 @@ pub(crate) fn run_engine_loop(
                     disconnected = true;
                     break;
                 }
-                Ok(req) => {
-                    // Bump #1: the spine-mutating requests handled here. `ApplyWire`
-                    // is the named loop chokepoint; `CreateTerminal` also mutates the
-                    // spine (it adds a companion terminal to a session's terminal
-                    // list). Detect before the move; the fingerprint compare stays the
-                    // precise emit gate. (Other arms are reads or non-spine writes;
-                    // any genuinely missed mutator is still caught by the backstop.)
-                    let mutates = matches!(
-                        req,
-                        EngineRequest::ApplyWire(..)
-                            | EngineRequest::CreateTerminal(..)
-                            | EngineRequest::CreateProjectTerminal(..)
-                            | EngineRequest::CreateStandaloneTerminal(..)
-                            | EngineRequest::CreateAgentTab(..)
-                    );
+                other => {
                     handle_request(
                         &mut engine,
-                        req,
+                        other,
                         &mut thread_status_tx,
                         &config_reload_tx,
                         &mut config_disk_ahead,
                     );
-                    if mutates {
-                        mutation_version = mutation_version.wrapping_add(1);
-                    }
                 }
-                Err(mpsc::error::TryRecvError::Empty) => break,
-                Err(mpsc::error::TryRecvError::Disconnected) => {
-                    disconnected = true;
-                    break;
-                }
+            }
+            if mutates {
+                mutation_version = mutation_version.wrapping_add(1);
             }
         }
         if disconnected {
@@ -3601,6 +3701,209 @@ mod tests {
         assert!(
             await_start_dir(&handle, dir_b.path().to_string_lossy().as_ref()).await,
             "reconcile must adopt the saved config"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Spine-mutation gate (`request_mutates_spine`)
+    // -----------------------------------------------------------------------
+
+    /// A reply channel whose receiver is dropped immediately. The gate only ever
+    /// inspects the discriminant, so nothing is ever sent on these.
+    fn dead_reply<T>() -> oneshot::Sender<T> {
+        oneshot::channel().0
+    }
+
+    /// Every `EngineRequest` kind paired with the answer `request_mutates_spine`
+    /// owes it. Building the values needs only channels, so this stays a pure
+    /// unit test: no engine, no PTY, no I/O.
+    ///
+    /// This list is NOT what makes the gate exhaustive (the wildcard-free `match`
+    /// in `request_mutates_spine` is, and adding a variant breaks the build until
+    /// somebody answers for it). What it pins is the ANSWERS: a silent revert to
+    /// the old five-name `matches!` would flip the mutators below back to `false`
+    /// and fail here.
+    fn request_kind_answers() -> Vec<(&'static str, EngineRequest, bool)> {
+        vec![
+            (
+                "ApplyWire",
+                EngineRequest::ApplyWire(
+                    WireCommand::SetChangesPaneVisible { visible: true },
+                    dead_reply(),
+                    StatusScope::All,
+                ),
+                true,
+            ),
+            (
+                "EmitStatus",
+                EngineRequest::EmitStatus(WireStatus::new("info", "hello")),
+                false,
+            ),
+            (
+                "SubscribePty",
+                EngineRequest::SubscribePty("s1".into(), dead_reply()),
+                true,
+            ),
+            (
+                "WritePty",
+                EngineRequest::WritePty("s1".into(), b"hello".to_vec()),
+                true,
+            ),
+            (
+                "ResizePty",
+                EngineRequest::ResizePty("s1".into(), 24, 80),
+                false,
+            ),
+            ("NoteViewed", EngineRequest::NoteViewed("s1".into()), true),
+            (
+                "SubscribeTerminal",
+                EngineRequest::SubscribeTerminal("t1".into(), dead_reply()),
+                false,
+            ),
+            (
+                "CreateTerminal",
+                EngineRequest::CreateTerminal("s1".into(), dead_reply()),
+                true,
+            ),
+            (
+                "CreateProjectTerminal",
+                EngineRequest::CreateProjectTerminal("p1".into(), dead_reply()),
+                true,
+            ),
+            (
+                "CreateStandaloneTerminal",
+                EngineRequest::CreateStandaloneTerminal(dead_reply()),
+                true,
+            ),
+            (
+                "TerminalOwnerOf",
+                EngineRequest::TerminalOwnerOf("t1".into(), dead_reply()),
+                false,
+            ),
+            (
+                "CreateAgentTab",
+                EngineRequest::CreateAgentTab("s1".into(), None, dead_reply()),
+                true,
+            ),
+            (
+                "TabSession",
+                EngineRequest::TabSession("t1".into(), dead_reply()),
+                false,
+            ),
+            (
+                "CreateAgentBranchPlan",
+                EngineRequest::CreateAgentBranchPlan("p1".into(), "name".into(), dead_reply()),
+                false,
+            ),
+            (
+                "SessionWorktree",
+                EngineRequest::SessionWorktree("s1".into(), dead_reply()),
+                false,
+            ),
+            (
+                "ProjectPath",
+                EngineRequest::ProjectPath("p1".into(), dead_reply()),
+                false,
+            ),
+            (
+                "ResourceTargets",
+                EngineRequest::ResourceTargets(dead_reply()),
+                false,
+            ),
+            ("Bootstrap", EngineRequest::Bootstrap(dead_reply()), false),
+            ("Spine", EngineRequest::Spine(dead_reply()), false),
+            ("SpineJson", EngineRequest::SpineJson(dead_reply()), false),
+            (
+                "Session",
+                EngineRequest::Session("s1".into(), dead_reply()),
+                false,
+            ),
+            (
+                "CreatedSessionForOp",
+                EngineRequest::CreatedSessionForOp("op1".into(), dead_reply()),
+                false,
+            ),
+            (
+                "NextChangesRev",
+                EngineRequest::NextChangesRev("s1".into(), dead_reply()),
+                false,
+            ),
+            (
+                "EditorDefault",
+                EngineRequest::EditorDefault(dead_reply()),
+                false,
+            ),
+            (
+                "BrowseStartDir",
+                EngineRequest::BrowseStartDir(dead_reply()),
+                false,
+            ),
+            (
+                "RefreshChangedFiles",
+                EngineRequest::RefreshChangedFiles("/tmp/wt".into()),
+                false,
+            ),
+            (
+                "ProjectWorktreeInputs",
+                EngineRequest::ProjectWorktreeInputs("p1".into(), dead_reply()),
+                false,
+            ),
+            (
+                "SessionStartupLogContext",
+                EngineRequest::SessionStartupLogContext("s1".into(), dead_reply()),
+                false,
+            ),
+            (
+                "ProjectStartupLogContext",
+                EngineRequest::ProjectStartupLogContext("p1".into(), dead_reply()),
+                false,
+            ),
+            (
+                "ReadRawConfig",
+                EngineRequest::ReadRawConfig(dead_reply()),
+                false,
+            ),
+            (
+                "WriteRawConfig",
+                EngineRequest::WriteRawConfig("x = 1".into(), dead_reply()),
+                false,
+            ),
+            (
+                "FirstLoadInputs",
+                EngineRequest::FirstLoadInputs(dead_reply()),
+                false,
+            ),
+            (
+                "MarkVersionSeen",
+                EngineRequest::MarkVersionSeen("1.2.3".into(), dead_reply()),
+                false,
+            ),
+            ("Shutdown", EngineRequest::Shutdown(dead_reply()), true),
+        ]
+    }
+
+    #[test]
+    fn spine_gate_answers_every_request_kind_as_documented() {
+        for (name, req, expected) in request_kind_answers() {
+            assert_eq!(
+                request_mutates_spine(&req),
+                expected,
+                "request_mutates_spine({name}) must answer {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn spine_gate_covers_every_request_kind() {
+        // A variant added to `EngineRequest` without a row above would leave this
+        // count behind. The exhaustive `match` is what forces an ANSWER; this is
+        // what forces the answer to be EXERCISED, so a new kind cannot be waved
+        // through with a copied-from-its-neighbour `false` that nothing reads.
+        assert_eq!(
+            request_kind_answers().len(),
+            34,
+            "every EngineRequest kind needs a row in request_kind_answers; \
+             update the count deliberately when adding one"
         );
     }
 }
