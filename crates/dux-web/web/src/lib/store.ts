@@ -534,6 +534,23 @@ export interface DuxState {
   // A resolve is in flight, so the dialog's Create button shows it is working
   // and cannot be pressed twice.
   createAgentPrResolving: boolean
+  // A field-level refusal shown under the reference input, or null. Used for
+  // the refusals dux can make WITHOUT asking the server: today that is a bare
+  // number with no project chosen, which names no repository, so there is
+  // nothing for a resolve to look for.
+  createAgentPrError: string | null
+  // The generation of the ONE resolve this dialog is waiting for, or null when
+  // it is waiting for none.
+  //
+  // A resolve is a git call per project on the server, so it can easily still
+  // be out when the user has cancelled the dialog, retargeted it at a project,
+  // or submitted a different reference. Nothing can recall a reply already in
+  // flight, so the only safe rule is that a reply acts when its generation is
+  // still the current one. Checking merely that SOME pull-request dialog is
+  // open does not catch it: the open one may be a different question, and
+  // acting would create an agent from the reference the user replaced and
+  // close the dialog they are looking at.
+  createAgentPrRequestId: number | null
   sidebarWidth: string
   // Optimistic override for the Changes pane's visibility (desktop). `null`
   // follows the persisted config (`bootstrap.show_changes_pane`); the palette and
@@ -709,6 +726,8 @@ let state: DuxState = {
   newAgentPickerOnlyIds: null,
   pendingPrReference: null,
   createAgentPrResolving: false,
+  createAgentPrError: null,
+  createAgentPrRequestId: null,
   sidebarWidth: loadSidebarWidth(),
   changesPaneOverride: null,
   editorTarget: null,
@@ -3681,6 +3700,10 @@ function openNameDialog(target: CreateAgentTarget): void {
     createAgentPrInput:
       target.kind === "pr" ? (state.pendingPrReference ?? "") : "",
     createAgentPrResolving: false,
+    createAgentPrError: null,
+    // Retargeting the dialog retires whatever resolve was out for the previous
+    // one: its answer is about a question this dialog is no longer asking.
+    createAgentPrRequestId: null,
     pendingPrReference: null,
   })
   if (randomize) requestAgentName()
@@ -3695,6 +3718,10 @@ export function closeCreateAgent(): void {
     createAgentNamePending: false,
     createAgentPrInput: "",
     createAgentPrResolving: false,
+    createAgentPrError: null,
+    // Closing retires the resolve. The reply cannot be recalled, so it has to
+    // land on nothing when it arrives.
+    createAgentPrRequestId: null,
   })
 }
 
@@ -3708,7 +3735,8 @@ export function setPendingPrReference(reference: string | null): void {
 // Update the PR-reference field. Free text — unlike the agent name, this is NOT
 // sanitized (a PR URL contains slashes, colons, etc.); the server parses it.
 export function setCreateAgentPrInput(raw: string): void {
-  setState({ createAgentPrInput: raw })
+  // Editing the field retires its refusal: the user is answering it.
+  setState({ createAgentPrInput: raw, createAgentPrError: null })
 }
 
 // Update the input as the user types, sanitizing live (space -> dash, drop
@@ -3883,6 +3911,26 @@ export function createAgentFromPr(projectId: string, pr: string, name: string): 
     .catch((e) => toastCreateError(e, "Could not create the agent from the PR."))
 }
 
+// Text that names a pull request number and nothing else, with or without the
+// `#`. It names NO repository, so with no project chosen there is nothing for a
+// resolve to look for and the server would only refuse it. The refusal belongs
+// here, in the field, next to the action that fixes it.
+//
+// This is deliberately the ONLY shape refused in the browser. The full
+// reference grammar lives in Rust (`dux_core::pr_reference`) and reimplementing
+// it here would be two grammars drifting apart; every other refusal comes back
+// from the server, which stays the second line of defence for this one too.
+export function isBareNumberReference(raw: string): boolean {
+  return /^#?\d+$/.test(raw.trim())
+}
+
+const BARE_NUMBER_REFUSAL =
+  "A pull request number on its own does not say which repository it is in. Paste a link, type owner/repo#123, or choose an existing project below."
+
+// Generations for the reference-first resolve. Module-level rather than in
+// state because it must keep counting across a dialog that opens and closes.
+let prResolveGeneration = 0
+
 // The reference-first submit: resolve the typed reference to a project, then
 // branch on the answer. Three shapes, matching the terminal UI exactly.
 //
@@ -3890,14 +3938,30 @@ export function createAgentFromPr(projectId: string, pr: string, name: string): 
 // address is edited, when git's rewrite configuration changes, and when a
 // project's path moves, and nothing the browser can see would say so.
 function submitPrReferenceFirst(reference: string, name: string): void {
-  setState({ createAgentPrResolving: true })
+  if (isBareNumberReference(reference)) {
+    // Refused before anything is sent, per the design: no project is chosen,
+    // so this names nothing dux could look for.
+    setState({ createAgentPrError: BARE_NUMBER_REFUSAL, createAgentPrResolving: false })
+    return
+  }
+  // Stamp this submit. A resubmit bumps the generation, which is what
+  // supersedes the reply already out.
+  const generation = ++prResolveGeneration
+  setState({
+    createAgentPrResolving: true,
+    createAgentPrError: null,
+    createAgentPrRequestId: generation,
+  })
   sessionsApi
     .resolvePullRequest(reference)
     .then((resolved) => {
-      // The dialog may have been closed (or retargeted) while the request was
-      // out; a late answer must not act on a screen the user has left.
-      if (state.createAgentTarget?.kind !== "pr") return
-      setState({ createAgentPrResolving: false })
+      // The generation guard. A reply that is not the one this dialog is
+      // waiting for belongs to a question the user has already replaced (they
+      // cancelled, retargeted at a project, or submitted a different
+      // reference), and acting on it would create an agent from the old
+      // reference and close the dialog showing the new one.
+      if (state.createAgentPrRequestId !== generation) return
+      setState({ createAgentPrResolving: false, createAgentPrRequestId: null })
       const repository = resolved.repository ?? reference
       if (resolved.projects.length === 1) {
         const projectId = resolved.projects[0].id
@@ -3907,9 +3971,15 @@ function submitPrReferenceFirst(reference: string, name: string): void {
         return
       }
       if (resolved.projects.length === 0) {
-        // dux does not clone, and this wording must not imply it might.
+        // What dux may claim depends on whether the server managed to look at
+        // everything. With a project it could not inspect, "no project is a
+        // checkout of this" is a certainty dux does not have, and the one
+        // project that mattered may be exactly the unreadable one. dux does not
+        // clone, and neither wording may imply it might.
         toast.error(
-          `No project in dux is a checkout of ${repository}. Choose a project that already has it, or add one from a directory on disk.`,
+          resolved.uninspected_summary
+            ? `No project dux could check is a checkout of ${repository}, and dux could not check every project (${resolved.uninspected_summary}). Choose a project that already has it, or add one from a directory on disk.`
+            : `No project in dux is a checkout of ${repository}. Choose a project that already has it, or add one from a directory on disk.`,
         )
       } else {
         toast.info(
@@ -3928,7 +3998,11 @@ function submitPrReferenceFirst(reference: string, name: string): void {
       )
     })
     .catch((e) => {
-      setState({ createAgentPrResolving: false })
+      // The rejection path needs the same guard: without it a failed stale
+      // request clears a newer submit's spinner and shows its error over a
+      // dialog asking something else entirely.
+      if (state.createAgentPrRequestId !== generation) return
+      setState({ createAgentPrResolving: false, createAgentPrRequestId: null })
       toast.error(
         e instanceof Error
           ? e.message

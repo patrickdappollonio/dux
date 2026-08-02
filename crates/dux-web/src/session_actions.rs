@@ -874,9 +874,17 @@ struct PullRequestProjectMatch {
     name: String,
 }
 
-/// The answer: what the reference turned out to name, and which projects have
-/// it. The client branches on `projects.len()`, exactly as the terminal UI
-/// does: one proceeds, several ask, none reports and offers the picker.
+/// The answer: what the reference turned out to name, which projects have it,
+/// and whether the answer is complete. The client branches on `projects.len()`,
+/// exactly as the terminal UI does: one proceeds, several ask, none reports and
+/// offers the picker.
+///
+/// `uninspected` is what stops the "none" branch from claiming more than dux
+/// knows. A project whose directory is gone, whose address git could not read,
+/// or whose host `gh` is not signed in to was never compared, so it is not a
+/// non-match: it is an unknown. Without this the client says "no project in dux
+/// is a checkout of that repository" when the truth may be "the only project
+/// that could have been was unreadable".
 #[derive(Serialize)]
 struct ResolvePullRequestReply {
     /// `host/owner/repo`, or `owner/repo` when the reference named no host.
@@ -885,6 +893,12 @@ struct ResolvePullRequestReply {
     /// The pull request number, when the reference carried one.
     number: Option<u64>,
     projects: Vec<PullRequestProjectMatch>,
+    /// How many projects dux could not inspect at all.
+    uninspected_count: usize,
+    /// A clause naming what could not be checked, already grouped by reason so
+    /// the two surfaces word it identically. `null` when every project was
+    /// inspected and "none of them" really means none of them.
+    uninspected_summary: Option<String>,
 }
 
 /// Read a typed pull-request reference and match it against every project's
@@ -948,10 +962,13 @@ async fn resolve_pull_request_reference(
     })
     .await
     {
-        Ok(matches) => Json(ResolvePullRequestReply {
+        Ok(resolution) => Json(ResolvePullRequestReply {
             repository,
             number,
-            projects: matches
+            uninspected_count: resolution.uninspected.len(),
+            uninspected_summary: resolution.uninspected_summary(),
+            projects: resolution
+                .matches
                 .into_iter()
                 .map(|project| PullRequestProjectMatch {
                     id: project.id,

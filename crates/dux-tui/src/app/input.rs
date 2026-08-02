@@ -3787,6 +3787,10 @@ impl App {
                 ModalKeyStep::Close => {
                     self.prompt = PromptState::None;
                     self.pending_pr_reference = None;
+                    // Closing the modal retires the resolution it was waiting
+                    // for. Nothing can recall a reply already in flight, so it
+                    // has to land on nothing when it arrives.
+                    self.invalidate_pull_request_resolution();
                 }
                 ModalKeyStep::Confirm => {
                     if field_focused {
@@ -6446,6 +6450,8 @@ impl App {
             _ => String::new(),
         };
         self.pending_pr_reference = if typed.is_empty() { None } else { Some(typed) };
+        // Stepping out to the picker supersedes any resolution still out.
+        self.invalidate_pull_request_resolution();
         self.open_project_chooser(ProjectChooserIntent::FromPr)
     }
 
@@ -23141,6 +23147,16 @@ cyan = "#00ffff"
         }
     }
 
+    /// A resolution answer carrying `matched` and nothing uninspected.
+    fn resolved(
+        matched: Vec<dux_core::model::Project>,
+    ) -> dux_core::pr_reference::ReferenceResolution {
+        dux_core::pr_reference::ReferenceResolution {
+            matches: matched,
+            uninspected: Vec::new(),
+        }
+    }
+
     #[test]
     fn one_matching_project_goes_straight_to_the_lookup() {
         let mut app = test_app(default_bindings());
@@ -23148,13 +23164,74 @@ cyan = "#00ffff"
         app.apply_pull_request_reference_resolution(
             "acme/widget#7".to_string(),
             "acme/widget".to_string(),
-            vec![project],
+            Ok(resolved(vec![project.clone()])),
         )
         .expect("resolve");
         assert!(
             matches!(app.prompt, PromptState::None),
-            "one match proceeds to the existing lookup with no further question, got {:?}",
+            "one match proceeds with no further question, got {:?}",
             app.prompt
+        );
+        // The prompt going away proves nothing on its own: a cancel does that
+        // too. What matters is that the lookup was handed THIS project and the
+        // reference the user actually typed.
+        assert_eq!(
+            app.dispatched_pr_lookups,
+            vec![(project.id.clone(), "acme/widget#7".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_resolution_that_failed_says_so_rather_than_reporting_no_project() {
+        let mut app = test_app(default_bindings());
+        app.apply_pull_request_reference_resolution(
+            "acme/widget#7".to_string(),
+            "acme/widget".to_string(),
+            Err("worker panicked: boom".to_string()),
+        )
+        .expect("resolve");
+
+        let status = app.status.text();
+        assert!(
+            status.contains("could not work out"),
+            "a worker that fell over must be reported as a failure: {status}"
+        );
+        assert!(
+            !status.contains("No project"),
+            "dux never found out whether a project has it, so it must not say none does: {status}"
+        );
+        assert!(app.dispatched_pr_lookups.is_empty());
+    }
+
+    #[test]
+    fn an_incomplete_answer_does_not_claim_there_is_no_checkout() {
+        let mut app = test_app(default_bindings());
+        app.apply_pull_request_reference_resolution(
+            "acme/widget#7".to_string(),
+            "acme/widget".to_string(),
+            Ok(dux_core::pr_reference::ReferenceResolution {
+                matches: Vec::new(),
+                uninspected: vec![dux_core::pr_reference::UninspectedProject {
+                    name: "mirror".to_string(),
+                    reason: dux_core::pr_reference::Uninspectable::HostNotAllowed,
+                }],
+            }),
+        )
+        .expect("resolve");
+
+        let status = app.status.text();
+        assert!(
+            status.contains("could not check every project"),
+            "the one project that mattered may be exactly the one dux could not read: {status}"
+        );
+        assert!(
+            status.contains("host dux may not ask about"),
+            "and it must say why: {status}"
+        );
+        let lowered = status.to_ascii_lowercase();
+        assert!(
+            !lowered.contains("clone") && !lowered.contains("download"),
+            "{status}"
         );
     }
 
@@ -23170,7 +23247,7 @@ cyan = "#00ffff"
         app.apply_pull_request_reference_resolution(
             "acme/widget#7".to_string(),
             "acme/widget".to_string(),
-            vec![first.clone(), second.clone()],
+            Ok(resolved(vec![first.clone(), second.clone()])),
         )
         .expect("resolve");
 
@@ -23197,7 +23274,7 @@ cyan = "#00ffff"
         app.apply_pull_request_reference_resolution(
             "https://github.com/acme/unknown/pull/3".to_string(),
             "github.com/acme/unknown".to_string(),
-            Vec::new(),
+            Ok(resolved(Vec::new())),
         )
         .expect("resolve");
 
@@ -23231,7 +23308,7 @@ cyan = "#00ffff"
         app.apply_pull_request_reference_resolution(
             "acme/widget#7".to_string(),
             "acme/widget".to_string(),
-            Vec::new(),
+            Ok(resolved(Vec::new())),
         )
         .expect("resolve");
         assert_eq!(app.pending_pr_reference.as_deref(), Some("acme/widget#7"));
@@ -23242,7 +23319,159 @@ cyan = "#00ffff"
             "the reference is consumed by the pick rather than left to be inherited"
         );
         assert!(matches!(app.prompt, PromptState::None));
-        let _ = project;
+        // The pick has to COMPLETE the reference: the project the user chose,
+        // and the text they typed, handed to the lookup together.
+        assert_eq!(
+            app.dispatched_pr_lookups,
+            vec![(project.id.clone(), "acme/widget#7".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_typed_host_the_policy_does_not_allow_is_refused_before_any_project_is_asked() {
+        let mut app = test_app(default_bindings());
+        app.engine.github_integration_enabled = true;
+        app.engine.gh_status = dux_core::model::GhStatus::Available;
+        app.engine
+            .set_github_host_policy(dux_core::gh::GithubHostPolicy::Hosts(
+                ["github.com".to_string()].into_iter().collect(),
+            ));
+        reference_first_modal(&mut app, "https://gitlab.com/acme/widget/pull/1");
+        app.confirm_pull_request_input().expect("confirm");
+
+        let status = app.status.text();
+        assert!(
+            status.contains("gitlab.com"),
+            "the real problem is the host, and the first message must say so: {status}"
+        );
+        assert!(
+            status.contains("gh auth login"),
+            "and point at the fix: {status}"
+        );
+        assert!(
+            !status.contains("No project"),
+            "sending the user to the project picker first buries the real error: {status}"
+        );
+        assert!(
+            matches!(app.prompt, PromptState::PullRequestInput { .. }),
+            "the modal stays open so the reference can be corrected in place, got {:?}",
+            app.prompt
+        );
+        assert!(
+            app.pending_pr_reference_op.is_none(),
+            "no worker was started"
+        );
+    }
+
+    #[test]
+    fn a_resolution_the_user_walked_away_from_lands_on_nothing() {
+        // Submit a reference, cancel while it is still out, open a new modal
+        // for a different one, and only then let the first answer arrive.
+        // Nothing can recall a reply already in flight, so the only defence is
+        // that it no longer matches the generation this screen is waiting for.
+        let mut app = test_app(default_bindings());
+        app.engine.github_integration_enabled = true;
+        app.engine.gh_status = dux_core::model::GhStatus::Available;
+        let project = app.engine.projects[0].clone();
+
+        reference_first_modal(&mut app, "acme/widget#1");
+        app.confirm_pull_request_input().expect("submit the first");
+        let stale_op = app
+            .pending_pr_reference_op
+            .clone()
+            .expect("the first submit stamps a generation");
+
+        // Cancel, then open a new dialog for a different reference.
+        app.handle_key(key(KeyCode::Esc)).expect("cancel");
+        assert!(matches!(app.prompt, PromptState::None));
+        app.open_new_agent_from_pr_prompt().expect("reopen");
+        reference_first_modal(&mut app, "acme/gadget#2");
+
+        // Now the first resolution finally answers, with a project it matched.
+        // Queued on the real worker channel and drained by the real loop, so
+        // the guard is exercised where it actually sits.
+        app.engine
+            .worker_tx
+            .send(WorkerEvent::PullRequestReferenceResolved {
+                raw_input: "acme/widget#1".to_string(),
+                repository: "acme/widget".to_string(),
+                result: Ok(resolved(vec![project])),
+                status_op_id: Some(stale_op),
+            })
+            .expect("queue the late reply");
+        app.drain_events();
+
+        assert!(
+            app.dispatched_pr_lookups.is_empty(),
+            "a superseded answer must not create anything: {:?}",
+            app.dispatched_pr_lookups
+        );
+        assert!(
+            matches!(app.prompt, PromptState::PullRequestInput { .. }),
+            "and it must not close the dialog the user is now looking at, got {:?}",
+            app.prompt
+        );
+        match &app.prompt {
+            PromptState::PullRequestInput { input, .. } => {
+                assert_eq!(input.text, "acme/gadget#2", "nor replace what they typed")
+            }
+            other => panic!("expected the PR modal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_current_resolution_is_the_one_that_acts() {
+        // The mirror image of the test above: the guard must not be so strict
+        // that the answer the user IS waiting for is thrown away too. The
+        // generation is stamped by hand rather than by a real submit, because a
+        // real submit also spawns the real worker, whose own reply would race
+        // this one down the same channel.
+        let mut app = test_app(default_bindings());
+        let project = app.engine.projects[0].clone();
+        app.pending_pr_reference_op = Some("generation-1".to_string());
+
+        app.engine
+            .worker_tx
+            .send(WorkerEvent::PullRequestReferenceResolved {
+                raw_input: "acme/widget#1".to_string(),
+                repository: "acme/widget".to_string(),
+                result: Ok(resolved(vec![project.clone()])),
+                status_op_id: Some("generation-1".to_string()),
+            })
+            .expect("queue the reply");
+        app.drain_events();
+
+        assert_eq!(
+            app.dispatched_pr_lookups,
+            vec![(project.id.clone(), "acme/widget#1".to_string())]
+        );
+        assert!(
+            app.pending_pr_reference_op.is_none(),
+            "and the generation is spent, so a duplicate reply cannot act twice"
+        );
+    }
+
+    #[test]
+    fn a_reply_carrying_no_generation_at_all_acts_on_nothing() {
+        let mut app = test_app(default_bindings());
+        let project = app.engine.projects[0].clone();
+        app.pending_pr_reference_op = None;
+
+        app.engine
+            .worker_tx
+            .send(WorkerEvent::PullRequestReferenceResolved {
+                raw_input: "acme/widget#1".to_string(),
+                repository: "acme/widget".to_string(),
+                result: Ok(resolved(vec![project])),
+                status_op_id: None,
+            })
+            .expect("queue the reply");
+        app.drain_events();
+
+        assert!(
+            app.dispatched_pr_lookups.is_empty(),
+            "an unstamped reply matches no generation, so it matches nothing"
+        );
     }
 
     #[test]

@@ -454,6 +454,7 @@ impl App {
             );
             return Ok(());
         }
+        self.invalidate_pull_request_resolution();
         self.input_target = InputTarget::None;
         self.fullscreen_overlay = FullscreenOverlay::None;
         self.pending_pr_reference = None;
@@ -492,6 +493,9 @@ impl App {
             ));
             return Ok(());
         }
+        // Retargeting the modal at a project supersedes any resolution still
+        // out: its answer is about a question this screen is no longer asking.
+        self.invalidate_pull_request_resolution();
         self.input_target = InputTarget::None;
         self.fullscreen_overlay = FullscreenOverlay::None;
         let mut input = TextInput::new();
@@ -531,11 +535,32 @@ impl App {
             );
             return Ok(());
         }
+        let policy = self.engine.github_host_policy();
+        // The typed host is gated BEFORE any per-project git work, exactly as
+        // the web gates it. Without this a reference on a host `gh` is not
+        // signed in to matched nothing (every project is on some other host),
+        // so the user was told no project in dux had that repository, sent to
+        // the picker, made to choose one, and only then shown the real
+        // authentication error. The first message dux shows should be the true
+        // one.
+        if let Some(host) = reference.host.as_deref()
+            && !policy.allows(host)
+        {
+            self.set_error(format!(
+                "dux cannot look up pull requests on {host}. Sign in to that host with \
+                 `gh auth login --hostname {host}`, or paste a reference from a host you \
+                 are already signed in to."
+            ));
+            return Ok(());
+        }
         let Some(repository) = reference.repository_label() else {
             self.set_error("That reference does not name a repository.");
             return Ok(());
         };
 
+        // A resubmit supersedes whatever was already out: the old reply must
+        // not be allowed to act on this screen.
+        self.invalidate_pull_request_resolution();
         self.prompt = PromptState::None;
         let op =
             dux_core::engine::status_op(format!("Looking for the project for {repository}..."))
@@ -547,10 +572,14 @@ impl App {
         let pending = op.pending_status();
         let op_id = op.id().to_string();
         self.pending_pr_lookup_ops.insert(op_id.clone(), op);
+        // The op id IS the generation stamp. It is already unique per
+        // operation and already rides through the worker and back, so there is
+        // nothing to invent: a reply whose id is no longer the current one
+        // belongs to a screen the user has left.
+        self.pending_pr_reference_op = Some(op_id.clone());
         self.apply_reaction(dux_core::engine::EventReaction::Status(pending));
 
         let worker_tx = self.engine.worker_tx.clone();
-        let policy = self.engine.github_host_policy();
         let projects = self.engine.projects.clone();
         thread::spawn(move || {
             use std::panic::AssertUnwindSafe;
@@ -572,13 +601,15 @@ impl App {
                 dux_core::logger::error(&format!(
                     "pull-request-reference resolution worker panicked: {reason}"
                 ));
-                // A panic must still complete the event, or the busy strands and
-                // the modal never comes back. An empty match set lands on the
-                // "no project" branch, which offers the picker.
+                // A panic must still complete the event, or the busy strands
+                // and the modal never comes back. It is reported as a FAILURE,
+                // not as an empty match set: dux never found out whether any
+                // project is a checkout of that repository, and saying it did
+                // would be a lie the user cannot see through.
                 let _ = tx_panic.send(WorkerEvent::PullRequestReferenceResolved {
                     raw_input: raw_panic,
                     repository: repository_panic,
-                    matches: Vec::new(),
+                    result: Err(reason),
                     status_op_id: Some(op_id_panic),
                 });
             }
@@ -586,26 +617,68 @@ impl App {
         Ok(())
     }
 
+    /// Forget the resolution this screen was waiting for, so its reply (which
+    /// may already be in flight and cannot be recalled) lands on nothing, and
+    /// dismiss its busy rather than leaving a spinner over a screen that is no
+    /// longer waiting for anything.
+    ///
+    /// Called on every close, retarget and resubmit. An abort mechanism would
+    /// be a fine addition on top; it could never replace this, because a reply
+    /// already on the channel still arrives.
+    pub(crate) fn invalidate_pull_request_resolution(&mut self) {
+        let Some(op_id) = self.pending_pr_reference_op.take() else {
+            return;
+        };
+        if let Some(op) = self.pending_pr_lookup_ops.remove(&op_id) {
+            self.apply_reaction(op.resolve(&PrLookupFinalOutcome::HandedOff).into_reaction());
+        }
+    }
+
     /// What the resolution worker's answer means on screen. Three shapes, and
-    /// every one of them keeps the reference the user typed.
+    /// every one of them keeps the reference the user typed. A worker that fell
+    /// over is a fourth, and it is reported as a failure rather than folded
+    /// into "no project".
     pub(crate) fn apply_pull_request_reference_resolution(
         &mut self,
         raw_input: String,
         repository: String,
-        matches: Vec<Project>,
+        result: Result<dux_core::pr_reference::ReferenceResolution, String>,
     ) -> Result<()> {
+        let resolution = match result {
+            Ok(resolution) => resolution,
+            Err(reason) => {
+                self.set_error(format!(
+                    "dux could not work out which project {repository} is open in: {reason}. \
+                     Try again, or choose an existing project."
+                ));
+                return Ok(());
+            }
+        };
+        let matches = &resolution.matches;
         match matches.len() {
             1 => {
-                let project = matches.into_iter().next().expect("one match");
+                let project = matches[0].clone();
                 self.dispatch_pull_request_lookup(project, raw_input)
             }
             0 => {
-                // dux does not clone, and this wording must not imply it might.
                 self.pending_pr_reference = Some(raw_input);
-                self.set_warning(format!(
-                    "No project in dux is a checkout of {repository}. Choose a project that \
-                     already has it, or add one from a directory on disk."
-                ));
+                // What dux may claim depends on whether it managed to look at
+                // everything. With a project it could not inspect, "no project
+                // is a checkout of this" is a certainty dux does not have, and
+                // the one project that mattered may be exactly the unreadable
+                // one. dux does not clone, and neither wording may imply it
+                // might.
+                match resolution.uninspected_summary() {
+                    None => self.set_warning(format!(
+                        "No project in dux is a checkout of {repository}. Choose a project that \
+                         already has it, or add one from a directory on disk."
+                    )),
+                    Some(summary) => self.set_warning(format!(
+                        "No project dux could check is a checkout of {repository}, and dux \
+                         could not check every project ({summary}). Choose a project that \
+                         already has it, or add one from a directory on disk."
+                    )),
+                }
                 self.open_project_chooser_over(ProjectChooserIntent::FromPrReference, None)
             }
             _ => {
@@ -626,6 +699,9 @@ impl App {
         project: Project,
         raw_input: String,
     ) -> Result<()> {
+        #[cfg(test)]
+        self.dispatched_pr_lookups
+            .push((project.id.clone(), raw_input.clone()));
         self.prompt = PromptState::None;
         // Mint a HandlerStatusOp keyed by an opaque id. Its busy shows now; both
         // terminal outcomes resolve to a CLEAR in `drain_events` when the
@@ -3924,6 +4000,8 @@ mod tests {
             pending_worktree_ops: std::collections::HashMap::new(),
             pending_pr_lookup_ops: std::collections::HashMap::new(),
             pending_pr_reference: None,
+            pending_pr_reference_op: None,
+            dispatched_pr_lookups: Vec::new(),
             pending_delete_ops: std::collections::HashMap::new(),
             pending_reconnect_ops: std::collections::HashMap::new(),
             pending_checkout_inspect_ops: std::collections::HashMap::new(),

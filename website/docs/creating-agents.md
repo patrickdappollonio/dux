@@ -159,6 +159,12 @@ Three things can happen:
   a project takes a directory that already exists; if the repository is not on
   this machine yet, clone it yourself and add it as a project first.
 
+Some projects cannot be compared at all: the directory is gone, git cannot read
+an `origin`, or the address is on a host `gh` is not signed in to. Those are not
+answers, they are unknowns, so dux says so rather than telling you no project has
+the repository. If the message mentions projects it could not check, one of them
+may well be the checkout you were after.
+
 If you would rather start from a project, there is a secondary action under the
 field, "choose an existing project", that opens the project selector and puts the dialog back
 into project-first mode. Anything you have already typed comes with you. Opening
@@ -199,6 +205,11 @@ A number on its own (`#123` or `123`) is the one form that needs a project
 already chosen, because by itself it does not say which repository it is in. With
 no project, dux refuses it and points you at the "choose an existing project"
 action; with a project chosen it behaves exactly as it always has.
+
+An address with a scheme is read by the same rules a browser uses, so
+`https://github.com/acme/widget/../gadget` names `acme/gadget`, exactly as it
+would if you pasted it into the address bar, and percent escapes are decoded.
+A scheme dux does not speak is refused rather than guessed at.
 
 This leniency applies only to what **you** type. A project's own `origin` address
 is read from git, and dux reads it by git's rules alone, where a trailing path is

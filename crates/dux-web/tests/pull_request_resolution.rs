@@ -266,3 +266,103 @@ async fn a_host_dux_may_not_ask_about_is_refused_by_name() {
     assert_eq!(status, 400, "{body}");
     assert!(body.contains("gitlab.com"), "{body}");
 }
+
+#[tokio::test]
+async fn a_project_it_could_not_inspect_is_reported_rather_than_counted_as_a_non_match() {
+    // The only project is on a host `gh` is not signed in to, so dux never
+    // compared it against anything. An empty match list here does NOT mean no
+    // project is a checkout of `acme/widget`, and the reply has to say so or
+    // the client will tell the user something dux never found out.
+    let (addr, _tmp) = boot(
+        &[("p1", "mirror", "git@gitlab.com:acme/widget.git")],
+        &["github.com"],
+    )
+    .await;
+
+    let (status, body) = resolve(addr, "acme/widget#5").await;
+    assert_eq!(status, 200, "{body}");
+    assert!(matched_names(&body).is_empty());
+    let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(value["uninspected_count"], 1, "{body}");
+    assert_eq!(
+        value["uninspected_summary"], "1 is on a host dux may not ask about",
+        "and it must say WHY, so the message can name the gap: {body}"
+    );
+}
+
+#[tokio::test]
+async fn a_complete_answer_reports_nothing_uninspected() {
+    let (addr, _tmp) = boot(
+        &[("p1", "widget", "git@github.com:acme/widget.git")],
+        &["github.com"],
+    )
+    .await;
+
+    let (status, body) = resolve(addr, "https://github.com/acme/unknown/pull/3").await;
+    assert_eq!(status, 200, "{body}");
+    let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(value["uninspected_count"], 0, "{body}");
+    assert!(
+        value["uninspected_summary"].is_null(),
+        "every project was inspected, so \"none of them\" really means none: {body}"
+    );
+}
+
+#[tokio::test]
+async fn the_same_repository_on_two_allowed_hosts_is_told_apart_by_the_host_written_down() {
+    let (addr, _tmp) = boot(
+        &[
+            (
+                "p1",
+                "widget-company",
+                "git@git.company.example:acme/widget.git",
+            ),
+            ("p2", "widget-github", "git@github.com:acme/widget.git"),
+        ],
+        &["github.com", "git.company.example"],
+    )
+    .await;
+
+    let (status, body) = resolve(addr, "acme/widget#4").await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        matched_names(&body),
+        vec!["widget-company", "widget-github"],
+        "owner/repo#123 names no host, so both are candidates and the user picks"
+    );
+
+    let (status, body) = resolve(addr, "https://github.com/acme/widget/pull/4").await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        matched_names(&body),
+        vec!["widget-github"],
+        "a host that was written down is a host that must be honoured"
+    );
+
+    let (status, body) = resolve(addr, "https://git.company.example/acme/widget/pull/4").await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(matched_names(&body), vec!["widget-company"]);
+}
+
+/// The typed side must read a URL the way a browser reads it, all the way
+/// through the server. Hand-splitting answered `acme/widget` here, which is a
+/// repository this workspace really has, so dux would have proceeded confidently
+/// against the wrong one.
+#[tokio::test]
+async fn a_dot_dot_in_a_pasted_link_resolves_to_the_repository_a_browser_would_open() {
+    let (addr, _tmp) = boot(
+        &[
+            ("p1", "widget", "git@github.com:acme/widget.git"),
+            ("p2", "gadget", "git@github.com:acme/gadget.git"),
+        ],
+        &["github.com"],
+    )
+    .await;
+
+    let (status, body) = resolve(addr, "https://github.com/acme/widget/../gadget/pull/9").await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(matched_names(&body), vec!["gadget"]);
+    let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(value["number"], 9);
+    assert_eq!(value["repository"], "github.com/acme/gadget");
+}

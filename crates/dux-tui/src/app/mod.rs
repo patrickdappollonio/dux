@@ -372,6 +372,33 @@ pub struct App {
     /// cleared whenever the chooser is abandoned so a later, unrelated pick
     /// cannot inherit it.
     pub(crate) pending_pr_reference: Option<String>,
+    /// The id of the ONE reference resolution whose answer this screen is still
+    /// waiting for, or `None` when it is waiting for none.
+    ///
+    /// This is the generation guard, and it is not optional. A resolution is a
+    /// git call per project, so it can easily still be out when the user has
+    /// cancelled the modal, retargeted it at a project, or submitted a
+    /// different reference. Nothing can recall a reply that is already in
+    /// flight, so the ONLY safe rule is that a reply acts on state when its id
+    /// is still the current one and is discarded otherwise. Checking merely
+    /// that some pull-request modal is open is not enough: the modal that is
+    /// open may be a different one, asking about a different reference.
+    ///
+    /// Stamped by [`App::dispatch_pull_request_reference`], and dropped by
+    /// [`App::invalidate_pull_request_resolution`] on every close, retarget and
+    /// resubmit.
+    pub(crate) pending_pr_reference_op: Option<String>,
+    /// Every `(project id, reference)` this screen has handed to the pull
+    /// request lookup, in order.
+    ///
+    /// A test seam, and it exists because the interesting assertions were
+    /// otherwise unwritable: `dispatch_pull_request_lookup` clears the prompt
+    /// and spawns a worker, so a test could only observe that the prompt went
+    /// away, which a cancel does too. What matters is WHICH project and WHICH
+    /// reference were dispatched, and this is the only place that is visible
+    /// without a live `gh`.
+    #[cfg(test)]
+    pub(crate) dispatched_pr_lookups: Vec<(String, String)>,
     /// In-flight async worktree-deletion status ops (the "Removing worktree for
     /// agent …" busy). When `begin_delete_session` takes the async path the TUI
     /// mints a [`dux_core::engine::HandlerStatusOp`] (its own opaque id), shows
@@ -2833,6 +2860,9 @@ impl App {
             pending_worktree_ops: HashMap::new(),
             pending_pr_lookup_ops: HashMap::new(),
             pending_pr_reference: None,
+            pending_pr_reference_op: None,
+            #[cfg(test)]
+            dispatched_pr_lookups: Vec::new(),
             pending_delete_ops: HashMap::new(),
             pending_reconnect_ops: HashMap::new(),
             pending_checkout_inspect_ops: HashMap::new(),

@@ -166,6 +166,14 @@ export interface ResolvedPullRequestReference {
   repository: string | null
   number: number | null
   projects: { id: string; name: string }[]
+  // How many projects the server could not inspect at all (directory gone,
+  // address unreadable, host `gh` is not signed in to), and a clause naming
+  // them. These are NOT non-matches: they are unknowns, and without them an
+  // empty `projects` would be reported as "no project is a checkout of that
+  // repository" when the only project that mattered may be exactly the one that
+  // could not be read.
+  uninspected_count: number
+  uninspected_summary: string | null
 }
 
 export const sessionsApi = {

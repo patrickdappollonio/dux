@@ -18,7 +18,17 @@ function makeSpine(projects: { id: string; name: string }[]): Spine {
 
 let spineBody: Spine = makeSpine([])
 // What `POST /api/v1/pull-requests/resolve` answers, and whether it refuses.
-let resolveReply: unknown = { repository: null, number: null, projects: [] }
+let resolveReply: unknown = {
+  repository: null,
+  number: null,
+  projects: [],
+  uninspected_count: 0,
+  uninspected_summary: null,
+}
+// When set, `POST .../resolve` does NOT answer until the returned resolver is
+// called. That is what makes a late reply testable: the browser gets to cancel
+// and reopen while the request is genuinely still out.
+let deferResolve: ((value: unknown) => void) | null = null
 let resolveStatus = 200
 let resolveMessage = ""
 const posted: { url: string; body: unknown }[] = []
@@ -29,6 +39,19 @@ const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
     posted.push({ url: u, body: JSON.parse(String(init.body ?? "null")) })
   }
   if (u.includes("/api/v1/pull-requests/resolve")) {
+    if (deferResolve) {
+      const gate = new Promise<unknown>((done) => {
+        deferResolve = done
+      })
+      const body = await gate
+      return {
+        ok: true,
+        status: 200,
+        json: async () => body,
+        text: async () => JSON.stringify(body),
+        headers: { get: () => "application/json" },
+      } as unknown as Response
+    }
     return {
       ok: resolveStatus === 200,
       status: resolveStatus,
@@ -93,7 +116,14 @@ beforeEach(() => {
     { id: "p1", name: "widget" },
     { id: "p2", name: "widget-review" },
   ])
-  resolveReply = { repository: null, number: null, projects: [] }
+  resolveReply = {
+    repository: null,
+    number: null,
+    projects: [],
+    uninspected_count: 0,
+    uninspected_summary: null,
+  }
+  deferResolve = null
   resolveStatus = 200
   resolveMessage = ""
   posted.length = 0
@@ -145,6 +175,8 @@ describe("the reference-first from-PR flow", () => {
       repository: "github.com/acme/widget",
       number: 17,
       projects: [{ id: "p1", name: "widget" }],
+      uninspected_count: 0,
+      uninspected_summary: null,
     }
     mod.openCreateAgentFromPr(null)
     mod.setCreateAgentPrInput("https://github.com/acme/widget/pull/17")
@@ -170,6 +202,8 @@ describe("the reference-first from-PR flow", () => {
       repository: "github.com/acme/unknown",
       number: 3,
       projects: [],
+      uninspected_count: 0,
+      uninspected_summary: null,
     }
     mod.openCreateAgentFromPr(null)
     mod.setCreateAgentPrInput("https://github.com/acme/unknown/pull/3")
@@ -202,6 +236,8 @@ describe("the reference-first from-PR flow", () => {
         { id: "p1", name: "widget" },
         { id: "p2", name: "widget-review" },
       ],
+      uninspected_count: 0,
+      uninspected_summary: null,
     }
     mod.openCreateAgentFromPr(null)
     mod.setCreateAgentPrInput("acme/widget#8")
@@ -225,6 +261,8 @@ describe("the reference-first from-PR flow", () => {
         { id: "p1", name: "widget" },
         { id: "p2", name: "widget-review" },
       ],
+      uninspected_count: 0,
+      uninspected_summary: null,
     }
     mod.openCreateAgentFromPr(null)
     mod.setCreateAgentPrInput("acme/widget#8")
@@ -249,7 +287,13 @@ describe("the reference-first from-PR flow", () => {
 
   it("drops the parked reference when the picker is dismissed without a pick", async () => {
     const mod = await loadStore()
-    resolveReply = { repository: "acme/widget", number: 8, projects: [] }
+    resolveReply = {
+      repository: "acme/widget",
+      number: 8,
+      projects: [],
+      uninspected_count: 0,
+      uninspected_summary: null,
+    }
     mod.openCreateAgentFromPr(null)
     mod.setCreateAgentPrInput("acme/widget#8")
     mod.submitNameDialog("")
@@ -265,24 +309,138 @@ describe("the reference-first from-PR flow", () => {
     expect(mod.getSnapshot().createAgentPrInput).toBe("")
   })
 
-  it("surfaces the server's refusal of a bare number and creates nothing", async () => {
+  it("refuses a bare number in the field and sends nothing at all", async () => {
     const mod = await loadStore()
-    resolveStatus = 400
-    resolveMessage =
-      "A pull request number on its own does not say which repository it is in. Paste a link, type owner/repo#123, or choose an existing project first."
+    // The server would refuse this too, and does (see the Rust end-to-end
+    // test). The point of this one is that the trip is never made: a number
+    // with no project names no repository, so there is nothing to ask about.
+    for (const typed of ["123", "#123", "  42 "]) {
+      mod.openCreateAgentFromPr(null)
+      mod.setCreateAgentPrInput(typed)
+      mod.submitNameDialog("")
+
+      expect(
+        posted.some((p) => p.url.includes("/pull-requests/resolve")),
+        `${typed} must be refused before any request is sent`,
+      ).toBe(false)
+      expect(createBodies()).toEqual([])
+      expect(toasts).toEqual([])
+      const error = mod.getSnapshot().createAgentPrError
+      expect(error).toContain("does not say which repository")
+      // And it must point at the way out, which is the action right below it.
+      expect(error).toContain("choose an existing project")
+      // The dialog stays open so the reference can be corrected in place.
+      expect(mod.getSnapshot().createAgentTarget).not.toBeNull()
+      expect(mod.getSnapshot().createAgentPrResolving).toBe(false)
+      mod.closeCreateAgent()
+    }
+  })
+
+  it("clears the field refusal as soon as the reference is edited", async () => {
+    const mod = await loadStore()
     mod.openCreateAgentFromPr(null)
     mod.setCreateAgentPrInput("123")
+    mod.submitNameDialog("")
+    expect(mod.getSnapshot().createAgentPrError).not.toBeNull()
+    mod.setCreateAgentPrInput("acme/widget#123")
+    expect(mod.getSnapshot().createAgentPrError).toBeNull()
+  })
+
+  it("does not claim there is no checkout when it could not check everything", async () => {
+    const mod = await loadStore()
+    resolveReply = {
+      repository: "github.com/acme/widget",
+      number: 3,
+      projects: [],
+      uninspected_count: 1,
+      uninspected_summary: "1 has an address dux could not read",
+    }
+    mod.openCreateAgentFromPr(null)
+    mod.setCreateAgentPrInput("https://github.com/acme/widget/pull/3")
     mod.submitNameDialog("")
 
     await vi.waitFor(() => {
       expect(toasts.length).toBeGreaterThan(0)
     })
-    expect(toasts[0].tone).toBe("error")
-    expect(toasts[0].message).toContain("does not say which repository")
-    expect(createBodies()).toEqual([])
-    // The dialog stays open so the reference can be corrected in place.
-    expect(mod.getSnapshot().createAgentTarget).not.toBeNull()
-    expect(mod.getSnapshot().createAgentPrResolving).toBe(false)
+    const said = toasts.map((t) => t.message).join(" ")
+    expect(said).toContain("could not check every project")
+    expect(said).toContain("address dux could not read")
+    expect(said.toLowerCase()).not.toContain("clone")
+  })
+
+  it("a resolution the user walked away from acts on nothing", async () => {
+    // Submit reference A, cancel while it is still out, open a new dialog for
+    // reference B, and only then let A answer. Nothing can recall a reply
+    // already in flight, so the only defence is the generation stamp.
+    const mod = await loadStore()
+    deferResolve = () => {}
+    mod.openCreateAgentFromPr(null)
+    mod.setCreateAgentPrInput("acme/widget#1")
+    mod.submitNameDialog("")
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().createAgentPrRequestId).not.toBeNull()
+    })
+    await vi.waitFor(() => {
+      expect(typeof deferResolve).toBe("function")
+    })
+    const releaseA = deferResolve as (value: unknown) => void
+
+    // Cancel, then open a fresh dialog asking about something else.
+    mod.closeCreateAgent()
+    expect(mod.getSnapshot().createAgentPrRequestId).toBeNull()
+    mod.openCreateAgentFromPr(null)
+    mod.setCreateAgentPrInput("acme/gadget#2")
+
+    // Now A finally answers, naming a project it matched.
+    releaseA({
+      repository: "acme/widget",
+      number: 1,
+      projects: [{ id: "p1", name: "widget" }],
+      uninspected_count: 0,
+      uninspected_summary: null,
+    })
+    await new Promise((r) => setTimeout(r, 0))
+
+    expect(createBodies(), "a superseded answer must create nothing").toEqual([])
+    expect(
+      mod.getSnapshot().createAgentTarget,
+      "and must not close the dialog the user is now looking at",
+    ).not.toBeNull()
+    expect(
+      mod.getSnapshot().createAgentPrInput,
+      "nor replace what they typed",
+    ).toBe("acme/gadget#2")
+    expect(mod.getSnapshot().newAgentPickerOpen).toBe(false)
+  })
+
+  it("a stale rejection does not clear or overwrite a newer request", async () => {
+    const mod = await loadStore()
+    deferResolve = () => {}
+    mod.openCreateAgentFromPr(null)
+    mod.setCreateAgentPrInput("acme/widget#1")
+    mod.submitNameDialog("")
+    await vi.waitFor(() => {
+      expect(typeof deferResolve).toBe("function")
+    })
+    const releaseA = deferResolve as (value: unknown) => void
+
+    mod.closeCreateAgent()
+    mod.openCreateAgentFromPr(null)
+    mod.setCreateAgentPrInput("acme/gadget#2")
+    mod.submitNameDialog("")
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().createAgentPrRequestId).not.toBeNull()
+    })
+
+    // A's reply arrives as a body the client cannot use, taking the catch path.
+    releaseA(undefined)
+    await new Promise((r) => setTimeout(r, 0))
+
+    expect(toasts, "a stale failure must not be shown").toEqual([])
+    expect(
+      mod.getSnapshot().createAgentPrResolving,
+      "nor clear the newer request's spinner",
+    ).toBe(true)
   })
 
   it("the project-first shape still creates directly, resolving nothing", async () => {

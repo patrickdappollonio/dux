@@ -45,6 +45,7 @@ export function CreateAgentDialog() {
     createAgentNamePending,
     createAgentPrInput,
     createAgentPrResolving,
+    createAgentPrError,
     spine,
   } = useDux()
   // Deliberately skips useVanishedTargetGuard: this target carries its own
@@ -134,8 +135,23 @@ export function CreateAgentDialog() {
                 : "PR URL, #123, or 123"
             }
             aria-label="GitHub pull request"
+            aria-invalid={createAgentPrError !== null}
+            aria-describedby={
+              createAgentPrError ? "create-agent-pr-error" : undefined
+            }
             autoFocus
           />
+        )}
+        {isPr && createAgentPrError && (
+          // A refusal dux made without asking the server, shown in the field
+          // rather than as a toast: the thing that fixes it is right below.
+          <p
+            id="create-agent-pr-error"
+            role="alert"
+            className="text-destructive text-sm"
+          >
+            {createAgentPrError}
+          </p>
         )}
         {resolvesProject && (
           <div className="flex justify-start">

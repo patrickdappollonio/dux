@@ -443,11 +443,16 @@ pub enum WorkerEvent {
     /// when the answer changed (see
     /// [`crate::pr_reference::resolve_reference_projects`]).
     ///
-    /// `matches` has three interesting shapes and the surface branches on all
-    /// three: exactly one project proceeds to the lookup, several mean the
+    /// The match list has three interesting shapes and the surface branches on
+    /// all three: exactly one project proceeds to the lookup, several mean the
     /// repository is checked out twice and the user picks, and none means dux
-    /// has no project for `repository` and can only offer the project picker,
+    /// found no project for `repository` and can only offer the project picker,
     /// because dux does not clone.
+    ///
+    /// `result` is a `Result` because a worker that fell over is not the same
+    /// answer as an empty match list. Reporting a panic as "no project is a
+    /// checkout of that repository" states, in dux's own voice, something dux
+    /// never found out.
     PullRequestReferenceResolved {
         /// The text the user typed, carried through so the chosen project can
         /// be handed straight to the existing lookup.
@@ -455,7 +460,9 @@ pub enum WorkerEvent {
         /// How to name the repository in a message, from
         /// [`crate::pr_reference::TypedReference::repository_label`].
         repository: String,
-        matches: Vec<Project>,
+        /// The matches AND what could not be inspected, or why the attempt
+        /// failed outright.
+        result: Result<crate::pr_reference::ReferenceResolution, String>,
         status_op_id: Option<String>,
     },
     PullRequestResolved {
