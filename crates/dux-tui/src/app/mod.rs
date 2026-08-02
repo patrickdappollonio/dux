@@ -5395,12 +5395,19 @@ mod tests {
         s.branch_name = "main".into();
         s.initial_branch = "main".into();
         let lines = agent_info_lines(&s, None);
+        // Both checks below are shaped so they would pass on an EMPTY list, so
+        // pin that there is something to check first. Without this the test
+        // passes while reporting nothing at all.
+        assert!(
+            !lines.is_empty(),
+            "there must be lines to inspect, or the checks below prove nothing"
+        );
         assert!(
             !lines
                 .iter()
                 .any(|(l, _)| l.to_lowercase().contains("changed since creation"))
         );
-        // With no drift, every line is Neutral — no Warning tone anywhere.
+        // With no drift, every line is Neutral, no Warning tone anywhere.
         assert!(
             lines
                 .iter()
