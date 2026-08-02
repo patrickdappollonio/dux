@@ -146,6 +146,40 @@ function toPhrase(saved: SavedFile[], ctx: DropContext): string {
   return where === "" ? "" : ` to ${where}`
 }
 
+/// The stranded files that share a reason, grouped, in the order the reasons
+/// were first hit (which is the order the files were dropped).
+///
+/// Grouped rather than one clause per file, for the same reason
+/// `folderBreakdown` groups by folder: five files stranded by one reconnect
+/// should read as one clause, not five. And grouped rather than reduced to the
+/// FIRST reason, which is what discarded the later ones: the uploads are
+/// sequential, so a reconnect stranding one file and a take-over stranding the
+/// next is an ordinary drop, not a corner case.
+function strandedByReason(
+  notSent: (SavedFile & { reason: string })[],
+): { reason: string; files: SavedFile[] }[] {
+  const groups: { reason: string; files: SavedFile[] }[] = []
+  for (const n of notSent) {
+    const group = groups.find((g) => g.reason === n.reason)
+    if (group) group.files.push(n)
+    else groups.push({ reason: n.reason, files: [n] })
+  }
+  return groups
+}
+
+/// Stranded files named with their full paths, because this is the rung where
+/// the user has to go and find them by hand. Capped, with the remainder counted
+/// rather than dropped silently.
+function strandedList(files: SavedFile[]): string {
+  const named = files
+    .slice(0, MAX_NAMED_FILES)
+    .map((f) => `${f.savedName} (${f.path})`)
+    .join(", ")
+  return files.length > MAX_NAMED_FILES
+    ? `${named} and ${files.length - MAX_NAMED_FILES} more`
+    : named
+}
+
 function reasonList(items: { requestedName: string; reason: string }[]): string {
   if (items.length > MAX_NAMED_FILES) {
     return `${items.length} files were refused; the first was ${items[0].requestedName} (${items[0].reason}).`
@@ -223,22 +257,26 @@ export function dropToastFor(
   // a name they were never told and a folder they were told wrongly are worse
   // here than on any other rung.
   if (notSent.length > 0) {
-    const stranded = notSent
-      .map((n) => `${n.savedName} (${n.path})`)
-      .slice(0, MAX_NAMED_FILES)
-      .join(", ")
-    const overflow =
-      notSent.length > MAX_NAMED_FILES
-        ? ` and ${notSent.length - MAX_NAMED_FILES} more`
-        : ""
-    const why = notSent[0].reason
+    const groups = strandedByReason(notSent)
     const alsoRefused =
       refused.length > 0 ? ` ${reasonList(refused)} was not saved at all.` : ""
+    // One reason for all of them is the ordinary case and reads plainly. It is
+    // ALSO the only case where a single "not sent: <why>" clause is true, which
+    // is what the previous version said unconditionally, taking the first
+    // stranded file's reason and applying it to every one of them.
+    const head =
+      groups.length === 1
+        ? `Saved${toPhrase(savedFiles, ctx)}, but the path was not sent: ${groups[0].reason}. ` +
+          `The file is at ${strandedList(groups[0].files)}.`
+        : `Saved${toPhrase(savedFiles, ctx)}, but ${notSent.length} paths were not sent: ` +
+          `${groups
+            .map((g) => `${strandedList(g.files)} because ${g.reason}`)
+            .join("; ")}.`
     return {
       tone: "warning",
       message:
-        `Saved${toPhrase(savedFiles, ctx)}, but the path was not sent: ${why}. ` +
-        `The file is at ${stranded}${overflow}.${alsoRefused}` +
+        head +
+        alsoRefused +
         renameNote(savedFiles, ctx) +
         folderBreakdown(savedFiles, ctx),
     }

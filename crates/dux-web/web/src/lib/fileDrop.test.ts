@@ -310,3 +310,83 @@ describe("a drop whose files did not all end the same way", () => {
     )
   })
 })
+
+describe("stranded files whose reasons differ", () => {
+  // The uploads are sequential, so the reasons genuinely differ within one
+  // drop: a reconnect strands the first file ("the connection dropped"), and
+  // another device taking over strands a later one ("another device took over
+  // input"). The rung took notSent[0].reason and applied it to all of them, so
+  // the second file's reason was discarded and the message said the connection
+  // had dropped when it had not. Recorded before the fix, for the two files
+  // below: "Saved, but the path was not sent: the connection dropped. The file
+  // is at a.png (/home/p/code/app/a.png), b.png (/home/p/code/app/b.png)."
+  const dropped = "the connection dropped"
+  const takeover = "another device took over input"
+
+  it("names each reason, not just the first", () => {
+    const t = dropToastFor(
+      [
+        notSent("a.png", "a.png", "~/code/app", dropped),
+        notSent("b.png", "b.png", "~/code/app", takeover),
+      ],
+      terminal,
+    )
+    expect(t.tone).toBe("warning")
+    expect(t.message).toContain(dropped)
+    expect(t.message).toContain(takeover)
+    // And each file is attached to the reason that actually applies to it.
+    expect(t.message).toContain(
+      "a.png (/home/p/code/app/a.png) because the connection dropped",
+    )
+    expect(t.message).toContain(
+      "b.png (/home/p/code/app/b.png) because another device took over input",
+    )
+  })
+
+  it("groups files that share a reason instead of repeating it", () => {
+    const t = dropToastFor(
+      [
+        notSent("a.png", "a.png", "~/code/app", dropped),
+        notSent("b.png", "b.png", "~/code/app", takeover),
+        notSent("c.png", "c.png", "~/code/app", dropped),
+      ],
+      terminal,
+    )
+    expect(t.message).toContain(
+      "a.png (/home/p/code/app/a.png), c.png (/home/p/code/app/c.png) because the connection dropped",
+    )
+    expect(t.message.match(/the connection dropped/g)).toHaveLength(1)
+  })
+
+  it("still reads plainly when every stranded file has the same reason", () => {
+    // The common case must not be dressed up as a list of one.
+    const t = dropToastFor(
+      [
+        notSent("a.png", "a.png", "~/code/app", dropped),
+        notSent("b.png", "b.png", "~/code/app", dropped),
+      ],
+      terminal,
+    )
+    expect(t.message).toContain(`but the path was not sent: ${dropped}.`)
+    expect(t.message).not.toContain("because")
+  })
+
+  it("keeps every reason even when one of them has more files than it will name", () => {
+    // The overflow must not become the discard this fix exists to remove: a
+    // reason with too many files to name still says how many more there are,
+    // and still says its reason.
+    const many = Array.from({ length: MAX_NAMED_FILES + 2 }, (_, i) =>
+      notSent(`f${i}.png`, `f${i}.png`, "~/code/app", dropped),
+    )
+    const t = dropToastFor(
+      [...many, notSent("z.png", "z.png", "~/code/app", takeover)],
+      terminal,
+    )
+    expect(t.message).toContain(dropped)
+    expect(t.message).toContain(takeover)
+    expect(t.message).toContain("and 2 more")
+    expect(t.message).toContain(
+      "z.png (/home/p/code/app/z.png) because another device took over input",
+    )
+  })
+})
