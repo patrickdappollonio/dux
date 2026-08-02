@@ -1,11 +1,13 @@
 //! Companion-terminal lifecycle on the headless `Engine`. Companion terminals are
 //! plain PTYs distinct from agent providers: they have no launch/resume flow and
 //! no provider semantics; they simply run the configured terminal command. A
-//! terminal is owned by either an agent session (spawned in that agent's
-//! worktree) or a project (a "project terminal", spawned at the project's repo
-//! root with no agent attached). The TUI spawns session-owned terminals via
-//! `App::spawn_companion_terminal_for_session`; this mirrors that flow for
-//! headless callers (the web server) and adds the project-owned flavor.
+//! terminal is owned by an agent session (spawned in that agent's worktree), a
+//! project (a "project terminal", spawned at the project's repo root with no
+//! agent attached), or nothing at all (a "standalone terminal", spawned in the
+//! user's home directory with neither). The TUI spawns session-owned terminals
+//! via `App::spawn_companion_terminal_for_session`; this mirrors that flow for
+//! headless callers (the web server) and adds the project-owned and standalone
+//! flavors.
 
 use std::path::Path;
 
@@ -95,7 +97,32 @@ impl Engine {
         )
     }
 
-    /// Shared spawn for both owners: run the configured terminal command at
+    /// Spawn a new standalone terminal in the user's home directory and register
+    /// it in `companion_terminals`. Returns the generated `(terminal_id, label)`.
+    ///
+    /// A standalone terminal belongs to nothing: no agent, no project. So it
+    /// takes its directory from [`crate::home_path::standalone_terminal_dir`]
+    /// (the home directory, or `/` when that cannot be resolved) rather than
+    /// from an owner's path, and it gets the GLOBAL environment with no project
+    /// overlay, because there is no project to overlay it with. The two owned
+    /// kinds above merge `config.env` with their project's `env`; this one has
+    /// only the global half, and that is the whole difference.
+    ///
+    /// Like a project terminal it deliberately does NOT run any
+    /// `startup_command`: that is worktree provisioning for new agents, not a
+    /// shell rc, and a standalone terminal has no project to take one from.
+    pub fn create_standalone_terminal(&mut self, rows: u16, cols: u16) -> Result<(String, String)> {
+        let dir = crate::home_path::standalone_terminal_dir();
+        // The global half only. `resolve_agent_env` merges a project's env over
+        // the global one; passing an empty map is exactly "there is no project".
+        let env =
+            crate::config::resolve_agent_env(&self.config.env, &std::collections::BTreeMap::new())
+                .unwrap_or_default();
+
+        self.spawn_terminal(TerminalOwner::Standalone, &dir, &env, rows, cols)
+    }
+
+    /// Shared spawn for every owner: run the configured terminal command at
     /// `cwd` with `env` and register the PTY under a fresh `term-N` id.
     fn spawn_terminal(
         &mut self,
@@ -336,6 +363,88 @@ mod tests {
         assert_eq!(terminal.owner, TerminalOwner::Project("p1".to_string()));
         assert_eq!(terminal.label, "Terminal 1");
         assert!(terminal.foreground_cmd.is_none());
+    }
+
+    #[test]
+    fn create_standalone_terminal_opens_in_the_home_directory_owning_nothing() {
+        // The journey: the user asks for a terminal that belongs to nothing. It
+        // opens in their home directory, carries the standalone owner, and needs
+        // no project and no agent to exist first.
+        let (mut engine, _tmp) = test_engine();
+        engine.config.terminal.command = "cat".to_string();
+        engine.config.terminal.args = vec![];
+
+        let (terminal_id, label) = engine
+            .create_standalone_terminal(24, 80)
+            .expect("create standalone terminal");
+
+        assert_eq!(terminal_id, "term-1");
+        assert_eq!(label, "Terminal 1");
+
+        let terminal = engine
+            .companion_terminals
+            .get(&terminal_id)
+            .expect("terminal registered");
+        assert_eq!(terminal.owner, crate::model::TerminalOwner::Standalone);
+        assert_eq!(
+            terminal.client.spawn_dir(),
+            crate::home_path::standalone_terminal_dir(),
+            "a standalone terminal opens where the home-directory rule says"
+        );
+    }
+
+    #[test]
+    fn a_standalone_terminal_gets_the_global_env_and_no_project_overlay() {
+        // Two projects exist, each with its own env. A standalone terminal
+        // belongs to neither, so it must see the global env and nothing else.
+        let (mut engine, _tmp) = test_engine();
+        engine.config.terminal.command = "cat".to_string();
+        engine.config.terminal.args = vec![];
+        engine
+            .config
+            .env
+            .insert("DUX_GLOBAL".to_string(), "global".to_string());
+        let mut p = sample_project("p1", "/tmp/p1");
+        p.env
+            .insert("DUX_PROJECT".to_string(), "project".to_string());
+        engine.projects.push(p);
+
+        // Measured rather than reasoned about: the shell itself reports what it
+        // was handed, so this asserts the environment the CHILD really got and
+        // not the argument the call site assembled.
+        engine.config.terminal.command = "sh".to_string();
+        engine.config.terminal.args = vec![
+            "-c".to_string(),
+            "echo \"global=[$DUX_GLOBAL] project=[$DUX_PROJECT]\"".to_string(),
+        ];
+
+        let (id, _) = engine
+            .create_standalone_terminal(24, 80)
+            .expect("create standalone terminal");
+
+        let output = read_until(&engine.companion_terminals[&id].client, "global=");
+        assert!(
+            output.contains("global=[global]"),
+            "the global env reaches a standalone terminal; saw: {output}"
+        );
+        assert!(
+            output.contains("project=[]"),
+            "no project's env overlays a terminal that belongs to no project; saw: {output}"
+        );
+    }
+
+    /// Poll a PTY's visible text until `needle` appears, bounded. Terminal output
+    /// arrives on the reader thread, so the alternative to polling is asserting
+    /// against a buffer that may simply not have been filled yet.
+    fn read_until(client: &crate::pty::PtyClient, needle: &str) -> String {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let text = client.visible_text_excerpt(usize::MAX);
+            if text.contains(needle) || std::time::Instant::now() >= deadline {
+                return text;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
     }
 
     #[test]

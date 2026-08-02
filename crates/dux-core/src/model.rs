@@ -216,13 +216,16 @@ pub struct ChangedFile {
 }
 
 /// Who a companion terminal belongs to. A terminal is owned by exactly one
-/// owner: an agent session (spawned in that agent's worktree) or a project
+/// owner: an agent session (spawned in that agent's worktree), a project
 /// (a "project terminal", spawned at the project's repo root with no agent
-/// attached). Ownership never changes after spawn.
+/// attached), or nothing at all (a "standalone terminal", spawned in the user's
+/// home directory, belonging to no project and no agent). Ownership never
+/// changes after spawn.
 ///
 /// Deliberately no bare-id accessor: every consumer must `match` so the
-/// `Project` variant can never be silently ignored by code written for the
-/// session-owned shape.
+/// `Project` and `Standalone` variants can never be silently ignored by code
+/// written for the session-owned shape. `Standalone` in particular carries NO
+/// id, so any code reaching for one has to say what it does without.
 ///
 /// **A comment is not a guard, so the decisions live on the type.** Every
 /// question code asks about ownership is answered by a method here whose body is
@@ -246,19 +249,28 @@ pub enum TerminalOwner {
     Session(String),
     /// Owned by a project; the payload is the project id.
     Project(String),
+    /// Owned by nothing at all: a standalone terminal, opened in the user's home
+    /// directory with no project and no agent behind it. There is no payload
+    /// because there is no owner to name; the row identifies it by the directory
+    /// it is in ([`crate::viewmodel::TerminalView::cwd_label`]) instead.
+    Standalone,
 }
 
-/// A nested terminal address in the REST/websocket route space: the owner id
-/// baked into the path (`/api/v1/sessions/:id/terminals/...`,
-/// `/ws/projects/:id/terminals/...`). Paired with
-/// [`TerminalOwner::is_at_route`] so a cross-owner attach/delete can only ever
-/// be decided by an exhaustive match over BOTH the owner and the address.
+/// A terminal address in the REST/websocket route space: the owner id baked into
+/// the path (`/api/v1/sessions/:id/terminals/...`,
+/// `/ws/projects/:id/terminals/...`), or the un-nested standalone address
+/// (`/api/v1/terminals/...`, `/ws/terminals/...`) which names no owner because a
+/// standalone terminal has none. Paired with [`TerminalOwner::is_at_route`] so a
+/// cross-owner attach/delete can only ever be decided by an exhaustive match
+/// over BOTH the owner and the address.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TerminalRoute<'a> {
     /// The session-nested address; the payload is the `:id` from the path.
     Session(&'a str),
     /// The project-nested address; the payload is the `:id` from the path.
     Project(&'a str),
+    /// The un-nested address, which carries no owner id at all.
+    Standalone,
 }
 
 /// A borrowed view of a [`TerminalOwner`], for consumers that only need to name
@@ -268,6 +280,7 @@ pub enum TerminalRoute<'a> {
 pub enum TerminalOwnerRef<'a> {
     Session(&'a str),
     Project(&'a str),
+    Standalone,
 }
 
 impl TerminalOwner {
@@ -282,18 +295,31 @@ impl TerminalOwner {
         match (self, route) {
             (Self::Session(owner), TerminalRoute::Session(id)) => owner == id,
             (Self::Project(owner), TerminalRoute::Project(id)) => owner == id,
-            (Self::Session(_), TerminalRoute::Project(_))
-            | (Self::Project(_), TerminalRoute::Session(_)) => false,
+            // A standalone terminal lives at the un-nested address and nowhere
+            // else, and no owned terminal is reachable there: the un-nested
+            // address names no owner, so serving an owned terminal from it would
+            // be a way around the cross-owner rejections above.
+            (Self::Standalone, TerminalRoute::Standalone) => true,
+            (Self::Session(_), TerminalRoute::Project(_) | TerminalRoute::Standalone)
+            | (Self::Project(_), TerminalRoute::Session(_) | TerminalRoute::Standalone)
+            | (Self::Standalone, TerminalRoute::Session(_) | TerminalRoute::Project(_)) => false,
         }
     }
 
     /// Teardown: does deleting the agent session `session_id` close this
     /// terminal? Deleting an agent tears down the terminals spawned in its
     /// worktree; a project terminal is untouched by it.
+    ///
+    /// A STANDALONE terminal answers `false`, and the omission is deliberate
+    /// rather than an oversight to be tidied up later. It belongs to no agent,
+    /// so deleting an agent has nothing to do with it: it opened in the user's
+    /// home directory and it ends when the user closes it or dux shuts down.
+    /// Nothing closes it automatically. The same note sits on
+    /// [`Self::closed_by_project_removal`].
     pub fn closed_by_session_delete(&self, session_id: &str) -> bool {
         match self {
             Self::Session(owner) => owner == session_id,
-            Self::Project(_) => false,
+            Self::Project(_) | Self::Standalone => false,
         }
     }
 
@@ -302,10 +328,16 @@ impl TerminalOwner {
     /// SESSION-owned terminal answers `false` here on purpose: the project
     /// removal deletes that project's agents, and each agent's own delete is
     /// what closes its terminals, so answering `true` would close them twice.
+    ///
+    /// A STANDALONE terminal answers `false`, and the omission is deliberate
+    /// rather than an oversight to be tidied up later. It belongs to no project,
+    /// so removing a project has nothing to do with it: it ends when the user
+    /// closes it or dux shuts down. Nothing closes it automatically. The same
+    /// note sits on [`Self::closed_by_session_delete`].
     pub fn closed_by_project_removal(&self, project_id: &str) -> bool {
         match self {
             Self::Project(owner) => owner == project_id,
-            Self::Session(_) => false,
+            Self::Session(_) | Self::Standalone => false,
         }
     }
 
@@ -316,6 +348,7 @@ impl TerminalOwner {
         match self {
             Self::Session(id) => TerminalOwnerRef::Session(id),
             Self::Project(id) => TerminalOwnerRef::Project(id),
+            Self::Standalone => TerminalOwnerRef::Standalone,
         }
     }
 }
@@ -355,6 +388,29 @@ mod terminal_owner_tests {
     }
 
     #[test]
+    fn standalone_terminal_is_only_at_the_un_nested_route() {
+        let owner = TerminalOwner::Standalone;
+        assert!(owner.is_at_route(TerminalRoute::Standalone));
+        assert!(!owner.is_at_route(TerminalRoute::Session("s1")));
+        assert!(!owner.is_at_route(TerminalRoute::Project("p1")));
+    }
+
+    #[test]
+    fn an_owned_terminal_is_never_at_the_un_nested_route() {
+        assert!(!TerminalOwner::Session("s1".to_string()).is_at_route(TerminalRoute::Standalone));
+        assert!(!TerminalOwner::Project("p1".to_string()).is_at_route(TerminalRoute::Standalone));
+    }
+
+    #[test]
+    fn nothing_closes_a_standalone_terminal() {
+        // The user closes it, or dux shuts down. Deleting an agent and removing
+        // a project both close their OWN terminals and leave this one alone.
+        let owner = TerminalOwner::Standalone;
+        assert!(!owner.closed_by_session_delete("s1"));
+        assert!(!owner.closed_by_project_removal("p1"));
+    }
+
+    #[test]
     fn as_ref_borrows_the_owner_id() {
         assert_eq!(
             TerminalOwner::Session("s1".to_string()).as_ref(),
@@ -363,6 +419,10 @@ mod terminal_owner_tests {
         assert_eq!(
             TerminalOwner::Project("p1".to_string()).as_ref(),
             TerminalOwnerRef::Project("p1")
+        );
+        assert_eq!(
+            TerminalOwner::Standalone.as_ref(),
+            TerminalOwnerRef::Standalone
         );
     }
 }
