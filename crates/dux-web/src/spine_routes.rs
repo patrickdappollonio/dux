@@ -32,9 +32,11 @@
 //! every response that can carry one: these three reads and the idempotent 200
 //! replay. The session-create 201 is deliberately NOT in that list, because a
 //! session that has just been created owns no terminals, so it has no entry to
-//! assert against; what the 201 pins instead is its own key set and that the
-//! array is present and empty rather than missing. Its entry shape is the
-//! replay's, because both answer with the same type. Add or remove a field and those
+//! assert against; what the 201 pins instead is that the array is present and
+//! empty rather than missing. Note the 201 has TWO shapes, this full view and a
+//! minimal id-only fallback for when the view is unavailable, so its terminal
+//! entry shape follows the replay's only on the full branch, which is the one
+//! the test exercises. Add or remove a field and those
 //! fail, which is the point: the previous tests checked only ids and lengths, so
 //! `owner` appearing was invisible to the suite.
 //!
