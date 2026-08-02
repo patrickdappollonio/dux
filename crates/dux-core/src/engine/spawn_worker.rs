@@ -381,7 +381,12 @@ impl Engine {
     /// intervals measured in seconds (2s, 10s, and the configurable PR-sync
     /// interval — 180s default, up to 21600s, 0 = disabled) the overhead is
     /// negligible and not worth optimising.
-    pub fn spawn_loop_worker<F>(&self, spec: LoopWorkerSpec, mut body: F)
+    ///
+    /// Returns whether the thread actually started. Most callers ignore it (a
+    /// watcher that cannot start is logged and that is all dux can do), but a
+    /// caller holding a single-instance slot for the loop must release it, or
+    /// the loop can never be started again.
+    pub fn spawn_loop_worker<F>(&self, spec: LoopWorkerSpec, mut body: F) -> bool
     where
         F: FnMut(&Sender<WorkerEvent>) -> LoopControl + Send + 'static,
     {
@@ -417,6 +422,8 @@ impl Engine {
             crate::logger::error(&format!(
                 "spawn_loop_worker[{label_for_thread}] failed to spawn thread: {err}",
             ));
+            return false;
         }
+        true
     }
 }

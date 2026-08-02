@@ -156,7 +156,7 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
         pr_statuses: HashMap::new(),
         branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
         pr_sync_sessions: Arc::new(Mutex::new(Vec::new())),
-        pr_sync_enabled: Arc::new(AtomicBool::new(false)),
+        pr_sync: Arc::new(Default::default()),
         pr_poll_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         pr_backoff: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         refs_watcher: None,

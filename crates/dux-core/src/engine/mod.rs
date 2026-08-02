@@ -8,6 +8,7 @@ pub mod config_saver;
 mod events;
 mod in_flight;
 mod lifecycle;
+mod pr_sync_control;
 mod resume_fallback;
 mod spawn_worker;
 pub mod status_op;
@@ -32,6 +33,7 @@ pub use lifecycle::{
     DeferredWorktreeRemoval, GroupWorktreeRemoval, PrunedPty, PrunedPtyKind, ShutdownReport,
     TerminatingPty, clean_exit_closes_tab_row, format_shutdown_result, format_shutdown_start,
 };
+pub use pr_sync_control::PrSyncControl;
 pub use resume_fallback::ResumeFallbackOutcome;
 pub use spawn_worker::{
     BackgroundSpawn, BackgroundWorkerSpec, CommandWorkerSpec, LoopControl, LoopWorkerSpec,
@@ -181,7 +183,10 @@ pub struct Engine {
     pub pr_statuses: HashMap<String, PrInfo>,
     pub branch_sync_sessions: Arc<Mutex<Vec<BranchSyncEntry>>>,
     pub pr_sync_sessions: Arc<Mutex<Vec<PrSyncEntry>>>,
-    pub pr_sync_enabled: Arc<AtomicBool>,
+    /// Arm state and single-instance guard for pull-request background work.
+    /// See [`PrSyncControl`]: a bare `AtomicBool` could not keep the poller
+    /// single-instance across a fast off-then-on.
+    pub pr_sync: Arc<PrSyncControl>,
     /// Seconds between blind PR-sync safety polls, shared with the loop thread so
     /// a config reload can retune it live. `0` disables the blind poll (updates
     /// then come only from the refs watcher and foreground focus). Seeded from
@@ -1836,22 +1841,33 @@ impl Engine {
 
     // -- GitHub PR integration workers --
 
+    /// Arm pull-request work and start its poller, at most once.
+    ///
+    /// The poller is EXPLICITLY single-instance: [`PrSyncControl::arm`] claims a
+    /// slot and this returns without spawning when one is already live. Without
+    /// that, every off-to-on transition created another permanent poller, because
+    /// the old one reads its kill switch only once per [`PR_SYNC_SLICE_SECS`] and
+    /// a fast off-then-on lands inside that window.
     pub fn spawn_pr_sync_worker(&self) {
         let sessions = Arc::clone(&self.pr_sync_sessions);
-        let enabled = Arc::clone(&self.pr_sync_enabled);
+        let control = Arc::clone(&self.pr_sync);
         let interval_secs = Arc::clone(&self.pr_poll_interval_secs);
         // Seed the shared interval from config so the first iteration honors it,
-        // and signal the worker is running BEFORE spawning so the kill switch
-        // observes the live state on the first iteration.
+        // and arm BEFORE spawning so the kill switch observes the live state on
+        // the first iteration.
         interval_secs.store(
             u64::from(crate::config::normalized_pr_poll_interval(
                 self.config.ui.pr_poll_interval_seconds,
             )),
             Ordering::Relaxed,
         );
-        enabled.store(true, Ordering::Relaxed);
+        if !control.arm() {
+            // A poller is already live and has just been told to keep going.
+            return;
+        }
+        let control_for_loop = Arc::clone(&control);
         let backoff = Arc::clone(&self.pr_backoff);
-        self.spawn_loop_worker(
+        let spawned = self.spawn_loop_worker(
             LoopWorkerSpec {
                 label: "pr-sync".into(),
             },
@@ -1867,7 +1883,10 @@ impl Engine {
                     let slice = PR_SYNC_SLICE_SECS.min(nap - slept);
                     thread::sleep(Duration::from_secs(slice));
                     slept += slice;
-                    if !enabled.load(Ordering::Relaxed) {
+                    if !control_for_loop.poller_should_continue() {
+                        // Releases the slot in the same critical section, so a
+                        // later enable gets a replacement and a simultaneous
+                        // one keeps this loop alive instead.
                         return LoopControl::Break;
                     }
                     if interval_secs.load(Ordering::Relaxed) != secs {
@@ -1885,11 +1904,19 @@ impl Engine {
                 let (results, signals) = crate::gh::run_pr_sync(&sessions, &snapshot);
                 Self::apply_pr_backoff(&backoff, &signals, tx);
                 if !results.is_empty() && tx.send(WorkerEvent::PrStatusReady(results)).is_err() {
+                    // Receiver dropped (shutdown). Release the slot anyway, so a
+                    // surface flip that reuses the engine can start a fresh one.
+                    control_for_loop.poller_stopped();
                     return LoopControl::Break;
                 }
                 LoopControl::Continue
             },
         );
+        if !spawned {
+            // The thread never started, so nothing will ever release the slot
+            // and pull-request polling would be dead for the process lifetime.
+            control.poller_stopped();
+        }
     }
 
     /// Update the shared per-host PR-check backoff from a sync's per-host signals
@@ -1991,7 +2018,17 @@ impl Engine {
         }
     }
 
+    /// Stop pull-request background work: clear the arm flag so the live poller
+    /// ends its loop on its next slice. Called on an explicit disable and on a
+    /// DECISIVE `gh` answer that no host works, so work armed from an older,
+    /// better answer cannot keep running while the interface says GitHub is
+    /// unavailable.
+    pub fn disarm_pr_sync(&self) {
+        self.pr_sync.disarm();
+    }
+
     pub fn spawn_initial_pr_refresh(&mut self) {
+        self.pr_sync.note_refresh();
         let sessions = Arc::clone(&self.pr_sync_sessions);
         let backoff = Arc::clone(&self.pr_backoff);
         self.spawn_background_worker(
@@ -4280,6 +4317,7 @@ mod tests {
 
     // ── gh host probe ──────────────────────────────────────────────────────
 
+    use super::test_support::settle_gh_probe;
     use crate::gh::probe_test_support::{stand_in_gh, stand_in_gh_serving};
     use crate::gh::{GhProbe, GithubHostPolicy};
 
@@ -4289,25 +4327,6 @@ mod tests {
 
     fn hosts(names: &[&str]) -> GithubHostPolicy {
         GithubHostPolicy::Hosts(names.iter().map(|n| n.to_string()).collect())
-    }
-
-    /// Pump worker events until the host probe's result has been applied.
-    fn settle_gh_probe(engine: &mut Engine) {
-        let deadline = Instant::now() + std::time::Duration::from_secs(20);
-        while Instant::now() < deadline {
-            let Ok(event) = engine
-                .worker_rx
-                .recv_timeout(std::time::Duration::from_millis(500))
-            else {
-                continue;
-            };
-            let is_probe = matches!(event, WorkerEvent::GhStatusChecked { .. });
-            engine.process_worker_event(event);
-            if is_probe {
-                return;
-            }
-        }
-        panic!("host probe never reported");
     }
 
     #[test]

@@ -2063,6 +2063,9 @@ impl Engine {
                 if generation != self.gh_probe.generation {
                     return EventReaction::Nothing;
                 }
+                // A probe that DECIDED may tear armed work down; a transient one
+                // may not, because it decided nothing.
+                let decisive = !matches!(outcome, crate::gh::GhProbe::Transient(_));
                 let status = match outcome {
                     crate::gh::GhProbe::NotInstalled => {
                         // Deny all rather than preserving the last known set:
@@ -2101,6 +2104,11 @@ impl Engine {
                         "[gh-integration] gh CLI is available; host policy: {:?}",
                         self.gh_probe.policy,
                     ));
+                    // This completion is the ONE place pull-request work is
+                    // armed. Every off-to-on site launches the probe and stops
+                    // there, so an enable produces exactly one refresh, and
+                    // `spawn_pr_sync_worker` is single-instance so it produces
+                    // at most one poller however often this runs.
                     self.update_pr_sync_sessions();
                     self.spawn_refs_watcher();
                     self.spawn_pr_sync_worker();
@@ -2110,6 +2118,15 @@ impl Engine {
                         "[gh-integration] gh status: {:?}, integration enabled: {}",
                         status, self.github_integration_enabled,
                     ));
+                    if decisive {
+                        // `gh` answered, and the answer is that nothing works
+                        // here (or the integration is off). Work armed from an
+                        // older, better answer must not keep polling while the
+                        // interface says GitHub is unavailable. A TRANSIENT
+                        // result never reaches this: it decided nothing, so the
+                        // last known good state stands.
+                        self.disarm_pr_sync();
+                    }
                 }
                 EventReaction::Nothing
             }
