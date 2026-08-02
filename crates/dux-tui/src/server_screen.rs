@@ -811,6 +811,12 @@ mod tests {
         // The exit hints moved to the footer — the header must not carry them.
         let lines = header_lines(&one("http://127.0.0.1:8080"), None, 0);
         let text = plain_text(&lines);
+        // Pin the header the function DID build: an empty header carries no
+        // exit hints either, and would pass every check below saying nothing.
+        assert!(
+            text.contains("dux server running") && text.contains("http://127.0.0.1:8080"),
+            "the header still renders its heading and URL: {text}"
+        );
         assert!(!text.contains("return to dux"));
         assert!(!text.contains("quit dux entirely"));
         assert!(!lines.iter().flatten().any(|(_, role)| *role == Role::Key));

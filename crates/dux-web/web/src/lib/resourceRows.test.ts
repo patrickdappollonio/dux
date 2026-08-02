@@ -251,6 +251,9 @@ describe("taskManagerRows", () => {
       totalStat,
     ]
     const rows = taskManagerRows(sessions, stats, [], [])
+    // The spine-backed row must still be there: a row builder that returned
+    // nothing would drop the ghost too, and say nothing about the spine.
+    expect(rows.some((r) => r.key === "tab:s1")).toBe(true)
     expect(rows.some((r) => r.key === "tab:ghost")).toBe(false)
   })
 
@@ -390,9 +393,11 @@ describe("taskManagerRows", () => {
   })
 
   it("reports_nothing_running_only_when_no_agents_or_terminals", () => {
-    expect(taskManagerRows([], [duxStat, totalStat], [], []).some((r) => r.stoppable)).toBe(
-      false,
-    )
+    const empty = taskManagerRows([], [duxStat, totalStat], [], [])
+    // The dux and total rows are always built, so "nothing is stoppable" is a
+    // claim about a populated table, not about an empty one.
+    expect(empty.length).toBeGreaterThan(0)
+    expect(empty.some((r) => r.stoppable)).toBe(false)
     const sessions = [session({ id: "s1" })]
     expect(
       taskManagerRows(sessions, [duxStat, totalStat], [], []).some((r) => r.stoppable),

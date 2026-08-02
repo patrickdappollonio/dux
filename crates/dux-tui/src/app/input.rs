@@ -15135,6 +15135,12 @@ not_a_real_action = ["x"]
 
         assert_eq!(center_hints.first().map(|hint| hint.1), Some("PR"));
         assert_eq!(center_hints.first().map(|hint| hint.0.as_str()), Some("p"));
+        // The left pane still has its own hints; "no PR row" must be a claim
+        // about a real hint bar, not about an empty one.
+        assert!(
+            !left_hints.is_empty(),
+            "the left-session hint bar renders its own hints"
+        );
         assert!(!left_hints.iter().any(|(_, desc)| *desc == "PR"));
     }
 
@@ -15143,6 +15149,12 @@ not_a_real_action = ["x"]
         let app = test_app(default_bindings());
         let center_hints = app.footer_hints_for(crate::keybindings::HintContext::Center);
 
+        // Without a PR the center bar still carries its base hints; an empty
+        // bar would satisfy the absence check while proving nothing.
+        assert!(
+            !center_hints.is_empty(),
+            "the center hint bar renders its base hints"
+        );
         assert!(!center_hints.iter().any(|(_, desc)| *desc == "PR"));
     }
 

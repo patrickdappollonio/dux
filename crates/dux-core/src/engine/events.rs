@@ -4219,7 +4219,17 @@ mod tests {
         };
         engine.process_project_persistence_completed(action, Ok(()), None);
 
-        assert!(engine.projects.iter().all(|p| p.id != "p1"));
+        // Pin the surviving project by name: "p1 is absent" alone is also true
+        // of a delete that wiped every project.
+        assert_eq!(
+            engine
+                .projects
+                .iter()
+                .map(|p| p.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["p2"],
+            "only the deleted project is gone",
+        );
         assert!(
             !engine.companion_terminals.contains_key(&t1),
             "deleting a project must close its project terminals"
