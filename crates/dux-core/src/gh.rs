@@ -1162,14 +1162,14 @@ pub fn parse_pull_request_lookup(
 ) -> Result<PullRequestLookup, String> {
     let reference = crate::pr_reference::parse_typed_reference(raw_input)?;
 
-    if let Some(host) = reference.host.as_deref() {
-        if !policy.allows(host) {
-            return Err(format!(
-                "dux cannot look up pull requests on {host}. Sign in to that host with \
-                 `gh auth login --hostname {host}`, or paste a reference from a host you \
-                 are already signed in to."
-            ));
-        }
+    if let Some(host) = reference.host.as_deref()
+        && !policy.allows(host)
+    {
+        return Err(format!(
+            "dux cannot look up pull requests on {host}. Sign in to that host with \
+             `gh auth login --hostname {host}`, or paste a reference from a host you \
+             are already signed in to."
+        ));
     }
 
     if reference.owner_repo.is_some() && !reference.matches(selected_host, selected_owner_repo) {

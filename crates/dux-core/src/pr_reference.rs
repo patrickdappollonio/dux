@@ -181,20 +181,21 @@ pub fn parse_typed_reference(raw: &str) -> Result<TypedReference, String> {
     // one exception: `pull/<n>` is the route that carries the number, and
     // `/files`, `/commits/<sha>` and the rest hang off it harmlessly.
     let mut number = None;
-    if segments.len() >= 4 && (segments[2] == "pull" || segments[2] == "pulls") {
-        if let Ok(parsed) = segments[3].parse::<u64>() {
-            number = Some(parsed);
-        }
+    if segments.len() >= 4
+        && (segments[2] == "pull" || segments[2] == "pulls")
+        && let Ok(parsed) = segments[3].parse::<u64>()
+    {
+        number = Some(parsed);
     }
     // A fragment of nothing but digits is the `owner/repo#123` spelling. A
     // fragment on a pull URL (`#discussion_r1`, `#issuecomment-4`) is not, and
     // a number already read from the path wins over one either way.
-    if number.is_none() {
-        if let Some(fragment) = fragment {
-            if !fragment.is_empty() && fragment.chars().all(|c| c.is_ascii_digit()) {
-                number = Some(parse_number(fragment)?);
-            }
-        }
+    if number.is_none()
+        && let Some(fragment) = fragment
+        && !fragment.is_empty()
+        && fragment.chars().all(|c| c.is_ascii_digit())
+    {
+        number = Some(parse_number(fragment)?);
     }
 
     Ok(TypedReference {
@@ -240,10 +241,10 @@ fn strip_scheme(input: &str) -> (&str, Scheme) {
 /// precedes any slash.
 fn split_scp_like(input: &str) -> Option<(&str, &str)> {
     let colon = input.find(':')?;
-    if let Some(slash) = input.find('/') {
-        if slash < colon {
-            return None;
-        }
+    if let Some(slash) = input.find('/')
+        && slash < colon
+    {
+        return None;
     }
     let (authority, path) = input.split_at(colon);
     Some((authority, &path[1..]))
@@ -303,11 +304,59 @@ fn is_repository_component(part: &str) -> bool {
 }
 
 fn strip_dot_git(value: &str) -> &str {
-    if value.len() > 4 && value[value.len() - 4..].eq_ignore_ascii_case(".git") {
-        &value[..value.len() - 4]
+    let len = value.len();
+    // The boundary check is not decoration. A repository name can hold
+    // multi-byte characters, and slicing four bytes off the end of one panics
+    // before the comparison it was going to feed.
+    if len > 4 && value.is_char_boundary(len - 4) && value[len - 4..].eq_ignore_ascii_case(".git") {
+        &value[..len - 4]
     } else {
         value
     }
+}
+
+/// Which of `projects` are checkouts of the repository `reference` names.
+///
+/// This is ONE `git` call per project, on an explicit user action, so it
+/// belongs on a worker like every other git call and never on the interface
+/// thread.
+///
+/// **There is no cache, deliberately.** The answer changes when an address is
+/// edited, when git's rewrite configuration changes, when a project's path
+/// moves under the same id, and when an unreadable address is repaired. None of
+/// those are things dux watches, so a cached answer would go wrong quietly. It
+/// is recomputed per operation, over the live project list.
+///
+/// Matching uses git's EFFECTIVE address, the rewritten one, which is what
+/// [`crate::git::remote_github_repo`] already returns. That is the correct
+/// anchor: it is the address git would really contact.
+///
+/// A project whose path is missing is skipped rather than probed, and so is one
+/// whose address git cannot read or whose host the policy does not allow. Each
+/// of those means "not a checkout of this repository as far as dux can tell",
+/// which is the same answer as not matching.
+pub fn resolve_reference_projects(
+    reference: &TypedReference,
+    projects: &[crate::model::Project],
+    policy: &crate::gh::GithubHostPolicy,
+) -> Vec<crate::model::Project> {
+    if reference.owner_repo.is_none() {
+        // A bare number names no repository, so there is nothing to resolve. The
+        // caller refuses it with an explanation rather than searching for a
+        // repository nobody named.
+        return Vec::new();
+    }
+    projects
+        .iter()
+        .filter(|project| !project.path_missing)
+        .filter(|project| {
+            match crate::git::remote_github_repo(std::path::Path::new(&project.path), policy) {
+                Some(remote) => reference.matches(&remote.host, &remote.owner_repo),
+                None => false,
+            }
+        })
+        .cloned()
+        .collect()
 }
 
 #[cfg(test)]
@@ -590,5 +639,272 @@ mod tests {
             Some("example/application")
         );
         assert_eq!(parsed("#1").repository_label(), None);
+    }
+}
+
+/// Resolution over real git repositories, written as the journeys a person
+/// actually takes. Every project here is a real repository on disk with a real
+/// `origin`, and the address is read by the same production call the surfaces
+/// make, so the rewrite git applies in production applies here too.
+#[cfg(test)]
+mod resolution_tests {
+    use super::*;
+    use crate::gh::GithubHostPolicy;
+    use crate::model::{Project, ProjectBranchStatus, ProviderKind};
+    use std::path::Path;
+
+    /// A host set naming both hosts these journeys use, standing in for what
+    /// `gh auth status` reported.
+    fn policy() -> GithubHostPolicy {
+        GithubHostPolicy::Hosts(
+            ["github.com".to_string(), "git.company.example".to_string()]
+                .into_iter()
+                .collect(),
+        )
+    }
+
+    /// A real repository whose `origin` is `address`, wrapped as a project.
+    ///
+    /// The `git init` and `git remote add` run through the isolated command
+    /// helper, so no developer's configuration decides what gets written. What
+    /// READS the address afterwards is production code, which inherits the test
+    /// process's environment on purpose: an `insteadOf` rewrite is meant to
+    /// apply, because the rewritten address is the one git would really
+    /// contact, and it is what a reference should be compared against.
+    fn project_with_origin(name: &str, address: &str) -> (tempfile::TempDir, Project) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().to_path_buf();
+        for args in [
+            vec!["init", "-b", "main"],
+            vec!["remote", "add", "origin", address],
+        ] {
+            let out = crate::git::test_support::git_command()
+                .args(&args)
+                .current_dir(&path)
+                .output()
+                .expect("git");
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        let project = Project {
+            id: format!("id-{name}"),
+            name: name.to_string(),
+            path: path.to_string_lossy().to_string(),
+            explicit_default_provider: None,
+            default_provider: ProviderKind::new("claude"),
+            leading_branch: None,
+            auto_reopen_agents: None,
+            startup_command: None,
+            env: Default::default(),
+            current_branch: "main".to_string(),
+            branch_status: ProjectBranchStatus::Unknown,
+            path_missing: false,
+            created_at: None,
+        };
+        (dir, project)
+    }
+
+    fn names(matched: &[Project]) -> Vec<&str> {
+        matched.iter().map(|p| p.name.as_str()).collect()
+    }
+
+    #[test]
+    fn a_pasted_pull_request_link_finds_the_project_that_repository_is_open_in() {
+        let (_a, widget) = project_with_origin("widget", "git@github.com:acme/widget.git");
+        let (_b, other) = project_with_origin("other", "git@github.com:acme/gadget.git");
+        let projects = vec![widget, other];
+
+        let reference = parse_typed_reference("https://github.com/acme/widget/pull/17").unwrap();
+        let matched = resolve_reference_projects(&reference, &projects, &policy());
+        assert_eq!(names(&matched), vec!["widget"]);
+        assert_eq!(reference.number, Some(17));
+    }
+
+    #[test]
+    fn a_browser_url_with_issues_on_the_end_still_finds_the_project() {
+        let (_a, widget) = project_with_origin("widget", "git@github.com:acme/widget.git");
+        let projects = vec![widget];
+
+        let reference = parse_typed_reference("https://github.com/acme/widget/issues").unwrap();
+        assert_eq!(
+            names(&resolve_reference_projects(
+                &reference,
+                &projects,
+                &policy()
+            )),
+            vec!["widget"],
+            "a trailing browser route must not change which repository is named"
+        );
+    }
+
+    #[test]
+    fn a_repository_dux_does_not_have_matches_nothing_and_can_be_named() {
+        let (_a, widget) = project_with_origin("widget", "git@github.com:acme/widget.git");
+        let projects = vec![widget];
+
+        let reference = parse_typed_reference("https://github.com/acme/unknown/pull/3").unwrap();
+        assert!(resolve_reference_projects(&reference, &projects, &policy()).is_empty());
+        assert_eq!(
+            reference.repository_label().as_deref(),
+            Some("github.com/acme/unknown"),
+            "the message has to be able to say WHICH repository dux has no project for"
+        );
+    }
+
+    #[test]
+    fn the_same_repository_checked_out_twice_returns_both_so_the_user_can_pick() {
+        let (_a, first) = project_with_origin("widget", "git@github.com:acme/widget.git");
+        let (_b, second) = project_with_origin("widget-review", "git@github.com:acme/widget.git");
+        let projects = vec![first, second];
+
+        let reference = parse_typed_reference("acme/widget#8").unwrap();
+        let matched = resolve_reference_projects(&reference, &projects, &policy());
+        assert_eq!(names(&matched), vec!["widget", "widget-review"]);
+    }
+
+    #[test]
+    fn owner_repo_hash_number_resolves_to_the_company_server_rather_than_github() {
+        // The whole reason `owner/repo#123` must not assume a host: this user's
+        // only checkout of acme/widget is on their company server.
+        let (_a, company) =
+            project_with_origin("widget", "git@git.company.example:acme/widget.git");
+        let (_b, elsewhere) = project_with_origin("gadget", "git@github.com:acme/gadget.git");
+        let projects = vec![company, elsewhere];
+
+        let reference = parse_typed_reference("acme/widget#123").unwrap();
+        assert_eq!(reference.host, None);
+        let matched = resolve_reference_projects(&reference, &projects, &policy());
+        assert_eq!(names(&matched), vec!["widget"]);
+    }
+
+    #[test]
+    fn a_reference_naming_github_does_not_reach_a_company_checkout() {
+        let (_a, company) =
+            project_with_origin("widget", "git@git.company.example:acme/widget.git");
+        let projects = vec![company];
+
+        let reference = parse_typed_reference("https://github.com/acme/widget/pull/1").unwrap();
+        assert!(
+            resolve_reference_projects(&reference, &projects, &policy()).is_empty(),
+            "a host that was written down is a host that must be honoured"
+        );
+    }
+
+    #[test]
+    fn a_bare_number_resolves_to_nothing_because_it_names_nothing() {
+        let (_a, widget) = project_with_origin("widget", "git@github.com:acme/widget.git");
+        let projects = vec![widget];
+
+        let reference = parse_typed_reference("#123").unwrap();
+        assert!(reference.owner_repo.is_none());
+        assert!(
+            resolve_reference_projects(&reference, &projects, &policy()).is_empty(),
+            "a bare number must be refused with an explanation, never resolved by guessing"
+        );
+    }
+
+    #[test]
+    fn case_and_a_dot_git_suffix_do_not_stop_a_project_being_found() {
+        let (_a, widget) = project_with_origin("widget", "git@GitHub.com:Acme/Widget.git");
+        let projects = vec![widget];
+
+        let reference = parse_typed_reference("https://github.com/acme/widget.git/pull/2").unwrap();
+        assert_eq!(
+            names(&resolve_reference_projects(
+                &reference,
+                &projects,
+                &policy()
+            )),
+            vec!["widget"]
+        );
+    }
+
+    #[test]
+    fn a_project_on_a_host_the_policy_does_not_allow_is_not_a_match() {
+        let (_a, gitlab) = project_with_origin("mirror", "git@gitlab.com:acme/widget.git");
+        let projects = vec![gitlab];
+
+        let reference = parse_typed_reference("acme/widget#5").unwrap();
+        assert!(
+            resolve_reference_projects(&reference, &projects, &policy()).is_empty(),
+            "dux may not name a host gh cannot serve, so such a project cannot be the answer"
+        );
+    }
+
+    #[test]
+    fn a_project_whose_path_is_gone_is_skipped_rather_than_probed() {
+        let (dir, mut widget) = project_with_origin("widget", "git@github.com:acme/widget.git");
+        widget.path_missing = true;
+        let projects = vec![widget];
+
+        let reference = parse_typed_reference("acme/widget#1").unwrap();
+        assert!(resolve_reference_projects(&reference, &projects, &policy()).is_empty());
+        drop(dir);
+    }
+
+    #[test]
+    fn editing_a_projects_address_changes_the_answer_with_nothing_to_invalidate() {
+        // The reason there is no cache. Nothing here resets anything: the second
+        // call simply reads git again, which is the only way an edited address,
+        // a changed rewrite rule or a repaired remote can ever be noticed.
+        let (dir, widget) = project_with_origin("widget", "git@github.com:acme/gadget.git");
+        let projects = vec![widget];
+        let reference = parse_typed_reference("acme/widget#1").unwrap();
+        assert!(resolve_reference_projects(&reference, &projects, &policy()).is_empty());
+
+        let out = crate::git::test_support::git_command()
+            .args([
+                "remote",
+                "set-url",
+                "origin",
+                "git@github.com:acme/widget.git",
+            ])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+
+        assert_eq!(
+            names(&resolve_reference_projects(
+                &reference,
+                &projects,
+                &policy()
+            )),
+            vec!["widget"]
+        );
+    }
+
+    #[test]
+    fn a_project_with_no_origin_at_all_is_simply_not_a_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = crate::git::test_support::git_command()
+            .args(["init", "-b", "main"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        let (_a, widget) = project_with_origin("widget", "git@github.com:acme/widget.git");
+        let bare = Project {
+            path: dir.path().to_string_lossy().to_string(),
+            name: "no-origin".to_string(),
+            ..widget.clone()
+        };
+        let projects = vec![bare, widget];
+
+        let reference = parse_typed_reference("acme/widget#1").unwrap();
+        assert_eq!(
+            names(&resolve_reference_projects(
+                &reference,
+                &projects,
+                &policy()
+            )),
+            vec!["widget"]
+        );
+        // And the unreadable one is genuinely unreadable, rather than passing by
+        // accident because the loop never reached it.
+        assert!(crate::git::remote_github_repo(Path::new(&projects[0].path), &policy()).is_none());
     }
 }
