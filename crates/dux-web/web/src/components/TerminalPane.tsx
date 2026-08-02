@@ -12,6 +12,14 @@ import {
   composeSendTooLarge,
   composeSendWrites,
 } from "@/lib/composebar"
+import {
+  type DropContext,
+  type DropOutcome,
+  dropToastFor,
+  pastePayload,
+} from "@/lib/fileDrop"
+import { FileDropApiError, uploadDroppedFile } from "@/lib/fileDropApi"
+import { showFinalToast } from "@/lib/finalToast"
 import { MacroPopover } from "@/components/MacroPopover"
 import { Button } from "@/components/ui/button"
 import {
@@ -224,6 +232,12 @@ export function TerminalPane(props: TerminalPaneProps) {
   // they send stdin to the same socket xterm's `onData` does.
   const ptyRef = useRef<PtySocket | null>(null)
   const isMobile = useIsMobile()
+
+  // Drag-and-drop of a file onto the pane. `dragDepth` counts enter/leave pairs
+  // because dragging across a child element fires a `dragleave` for the parent;
+  // a plain boolean would flicker the overlay off over every internal boundary.
+  const [dragActive, setDragActive] = useState(false)
+  const dragDepthRef = useRef(0)
 
   // Sticky (one-shot latched) soft-keyboard modifiers for the mobile accessory
   // bar. The state drives the latch's visual highlight; the ref mirrors it so
@@ -1481,6 +1495,103 @@ export function TerminalPane(props: TerminalPaneProps) {
     if (term && isOwnerRef.current) pasteIntoTerm(term, focusTypingSurface)
   }
 
+  // Save each dropped file, then paste its path.
+  //
+  // Sequential on purpose. The list of outcomes is in DROPPED order, and that is
+  // also the order the paths are pasted, which must not become whichever order
+  // the uploads happen to finish in. One toast reports the whole drop at the
+  // end, so a handful of files does not bury the screen.
+  async function handleDroppedFiles(files: File[]) {
+    if (files.length === 0) return
+    const outcomes: DropOutcome[] = []
+    let folderLabel = ""
+
+    for (const file of files) {
+      let saved
+      try {
+        saved = await uploadDroppedFile(file, {
+          pty: id,
+          // The TERMINAL SOCKET's id, not the events-socket one the other API
+          // modules stamp in a header (the server refuses a PTY id there).
+          conn: myConnIdRef.current,
+        })
+      } catch (e) {
+        outcomes.push({
+          kind: "refused",
+          requestedName: file.name,
+          reason:
+            e instanceof FileDropApiError ? e.message : "the upload failed",
+        })
+        continue
+      }
+      folderLabel = saved.folder_label
+
+      // Both checks happen IMMEDIATELY BEFORE this paste, not once at the start
+      // of the drop: ownership can move and the socket can close between two
+      // files. A write to a closed socket is dropped silently, so without the
+      // second check a file would be reported as pasted with nothing sent.
+      const term = termRef.current
+      if (!isOwnerRef.current) {
+        outcomes.push({
+          kind: "saved-not-sent",
+          requestedName: saved.requested_name,
+          savedName: saved.saved_name,
+          path: saved.path,
+          reason: "another device took over input",
+        })
+        continue
+      }
+      if (!term || !(ptyRef.current?.isOpen ?? false)) {
+        outcomes.push({
+          kind: "saved-not-sent",
+          requestedName: saved.requested_name,
+          savedName: saved.saved_name,
+          path: saved.path,
+          reason: "the connection dropped",
+        })
+        continue
+      }
+
+      // xterm's own paste, which applies bracketed paste (DECSET 2004) when the
+      // running program asked for it and sends plain text when it did not.
+      // Building the bracket markers by hand here would be a second
+      // implementation of something that already works.
+      //
+      // This deliberately differs from the compose bar, which refuses bracketed
+      // paste. That rule exists because compose text has to keep a soft line
+      // break and a submitting Enter distinct on the wire. A dropped path
+      // contains neither, so the reason does not apply here.
+      term.paste(pastePayload(saved.path))
+      outcomes.push({
+        kind: "pasted",
+        requestedName: saved.requested_name,
+        savedName: saved.saved_name,
+        path: saved.path,
+      })
+    }
+
+    const ctx: DropContext = {
+      kind: props.kind === "agent" ? "agent" : "terminal",
+      folderLabel,
+    }
+    const report = dropToastFor(outcomes, ctx)
+    // Through the SHARED final-toast raiser, so the user's configured dismiss
+    // window applies. A bare sonner call would silently use the library default.
+    showFinalToast(report.tone, report.message, {
+      id: "file-drop",
+      statusClearSeconds: bootstrap?.status_clear_seconds,
+    })
+  }
+
+  // A drag from a non-owner, or on a phone (where there is no drag), is left
+  // entirely alone: no overlay and no preventDefault, so the browser does
+  // whatever it would normally do.
+  function dragCarriesFiles(e: React.DragEvent): boolean {
+    return (
+      isOwner && !isMobile && Array.from(e.dataTransfer.types).includes("Files")
+    )
+  }
+
   // Where typing focus belongs right now: the compose textarea while the
   // mobile compose bar is up (so the soft keyboard keeps typing into the
   // buffer), xterm's hidden textarea otherwise. Every handler that used to
@@ -1712,7 +1823,54 @@ export function TerminalPane(props: TerminalPaneProps) {
           ? "group relative min-h-0 w-full flex-1 overflow-hidden bg-background"
           : "group relative h-full w-full overflow-hidden bg-background"
       }
+      onDragEnter={(e) => {
+        if (!dragCarriesFiles(e)) return
+        e.preventDefault()
+        dragDepthRef.current += 1
+        setDragActive(true)
+      }}
+      onDragOver={(e) => {
+        if (!dragCarriesFiles(e)) return
+        // Without preventDefault on dragover the browser refuses the drop and
+        // navigates to the file instead, which loses the whole page.
+        e.preventDefault()
+        e.dataTransfer.dropEffect = "copy"
+      }}
+      onDragLeave={(e) => {
+        if (!dragCarriesFiles(e)) return
+        dragDepthRef.current = Math.max(0, dragDepthRef.current - 1)
+        if (dragDepthRef.current === 0) setDragActive(false)
+      }}
+      onDrop={(e) => {
+        if (!dragCarriesFiles(e)) return
+        e.preventDefault()
+        dragDepthRef.current = 0
+        setDragActive(false)
+        void handleDroppedFiles(Array.from(e.dataTransfer.files))
+      }}
     >
+      {/* The drop target. Shown only while a file is actually over the pane and
+          only to whoever holds input, because a viewer cannot paste the path
+          afterwards. It names what will happen and where the file will land;
+          the terminal's real folder is discovered server-side at upload time, so
+          the promise here is deliberately about WHICH folder rather than its
+          path. Pointer-events-none so it cannot swallow the drop it is
+          advertising. */}
+      {dragActive ? (
+        <div
+          data-testid="file-drop-overlay"
+          className="pointer-events-none absolute inset-2 z-20 flex flex-col items-center justify-center gap-1 rounded-lg border-2 border-dashed border-primary bg-background/90 p-4 text-center"
+        >
+          <p className="text-sm font-medium text-foreground">
+            Drop to save the file and paste its path
+          </p>
+          <p className="text-xs text-muted-foreground">
+            {props.kind === "agent"
+              ? "It lands in this agent's worktree root, where git can see it."
+              : "It lands in the folder this terminal is currently in."}
+          </p>
+        </div>
+      ) : null}
       {/* Padding lives on the host, NOT the measured element below — see the
           hostRef comment: border-box computed heights include padding, and
           FitAddon would mint a phantom row/column from it. A mouse/pen right-click

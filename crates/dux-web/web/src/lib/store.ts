@@ -36,6 +36,7 @@ import {
   fetchBootstrap,
 } from "./bootstrapApi"
 import { firstLoadApi } from "./firstLoadApi"
+import { type FinalTone, showFinalToast } from "./finalToast"
 import { statusToastDuration } from "./statusToast"
 import { attentionCount, formatTabTitle } from "./attention"
 import { applyAttentionFavicon } from "./favicon"
@@ -1595,10 +1596,17 @@ function showStatusToast(
       }, duration),
     )
   }
-  if (tone === "error") toast.error(message, opts)
-  else if (tone === "warning") toast.warning(message, opts)
-  else if (tone === "busy") toast.loading(message, opts)
-  else toast.success(message, opts) // info/success
+  if (tone === "busy") {
+    toast.loading(message, opts)
+    return
+  }
+  // Every other tone goes through the ONE shared final-toast raiser, so a
+  // client-originated toast (the file-drop report) and an engine status can
+  // never disagree about the configured dismiss window.
+  showFinalToast(tone as FinalTone, message, {
+    id,
+    statusClearSeconds: state.bootstrap?.status_clear_seconds,
+  })
 }
 
 // Boot: connect the events socket and fetch the initial workspace data. No
