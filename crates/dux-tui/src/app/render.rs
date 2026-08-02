@@ -1423,6 +1423,13 @@ impl App {
                         .find(|p| &p.id == pid)
                         .map(|p| p.name.clone())
                         .unwrap_or_else(|| pid.clone()),
+                    // No owner to name, so the row names the DIRECTORY instead,
+                    // with the home directory collapsed to `~`. Truthful, useful,
+                    // ellipsizes cleanly as the left element on that line must,
+                    // and gives the sidebar search something to match.
+                    TerminalOwner::Standalone => {
+                        dux_core::home_path::shorten_home(t.client.spawn_dir())
+                    }
                 };
                 // Idle (foreground normalizes to nothing) -> None -> "Terminal".
                 // Running -> the collision-resolved title, disambiguated against
@@ -10080,6 +10087,65 @@ mod tests {
             );
         }
         app
+    }
+
+    /// The journey: a standalone terminal appears in the sidebar, and because it
+    /// has no owner to name, its second line names the DIRECTORY it opened in,
+    /// with the home directory collapsed to `~`. Rendered rather than reasoned
+    /// about: this reads the row out of the frame buffer.
+    #[test]
+    fn a_standalone_terminal_row_names_its_directory_with_a_tilde() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        // A real directory under `$HOME`, so the `~` collapse has something to
+        // collapse; skipped where no home resolves, which is not this feature's
+        // problem to assert here (`home_path` owns that case).
+        let Some(home) = home::home_dir() else {
+            return;
+        };
+        let client = PtyClient::spawn(
+            "/bin/sh",
+            &["-c".to_string(), "sleep 30".to_string()],
+            &home,
+            24,
+            80,
+            100,
+        )
+        .expect("spawn pty");
+        app.engine.companion_terminals.insert(
+            "term-1".to_string(),
+            CompanionTerminal {
+                owner: dux_core::model::TerminalOwner::Standalone,
+                label: "Terminal 1".to_string(),
+                foreground_cmd: None,
+                client,
+                sort_order: 1,
+                created_at: chrono::Utc::now(),
+            },
+        );
+        app.focus = FocusPane::Left;
+        app.left_section = LeftSection::Terminals;
+        app.terminal_pane_height_pct = 50;
+
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(
+            rendered.contains("↳ ~ "),
+            "the standalone row's second line must name its directory as `~`; got:\n{rendered}"
+        );
     }
 
     #[test]

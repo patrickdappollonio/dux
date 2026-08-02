@@ -3631,6 +3631,7 @@ impl App {
             "new-terminal-for-project" => {
                 self.open_project_chooser(ProjectChooserIntent::ProjectTerminal)
             }
+            "new-standalone-terminal" => self.show_standalone_terminal(),
             "add-project" => self.open_project_browser(),
             "copy-path" => self.copy_selected_path(),
             "open-worktree" => self.open_selected_worktree_in_default_editor(),
@@ -4756,7 +4757,10 @@ impl App {
             // kind has to say whether it counts toward an agent's row.
             .filter(|t| match t.owner.as_ref() {
                 TerminalOwnerRef::Session(sid) => sid == session_id,
-                TerminalOwnerRef::Project(_) => false,
+                // Neither a project terminal nor a standalone terminal counts
+                // toward an agent's row: the first belongs to a project, the
+                // second to nothing at all.
+                TerminalOwnerRef::Project(_) | TerminalOwnerRef::Standalone => false,
             })
             .count()
     }

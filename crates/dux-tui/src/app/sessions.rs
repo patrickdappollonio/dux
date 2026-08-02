@@ -1190,6 +1190,36 @@ impl App {
         Ok(())
     }
 
+    /// Palette command (`new-standalone-terminal`): always spawns a new
+    /// standalone terminal in the user's home directory.
+    ///
+    /// A standalone terminal belongs to nothing, so unlike the other two this
+    /// needs nothing selected and nothing to exist: no agent, no project, not
+    /// even a project on disk. It also runs no `startup_command`, for the same
+    /// reason a project terminal does not.
+    pub(crate) fn show_standalone_terminal(&mut self) -> Result<()> {
+        // Shared core creator (see `show_companion_terminal`): single-sources the
+        // id, the "Terminal N" label, and the deterministic `sort_order`.
+        let (rows, cols) = self.pty_size_for_launch();
+        let terminal_id = match self.engine.create_standalone_terminal(rows, cols) {
+            Ok((id, _label)) => id,
+            Err(e) => {
+                self.set_error(format!("Could not launch standalone terminal: {e:#}"));
+                return Ok(());
+            }
+        };
+        let where_it_is =
+            dux_core::home_path::shorten_home(&dux_core::home_path::standalone_terminal_dir());
+        self.active_terminal_id = Some(terminal_id);
+        self.terminal_return_to_list = true;
+        self.show_companion_terminal_surface();
+        self.input_target = InputTarget::Terminal;
+        self.set_info(format!(
+            "Launched a standalone terminal in {where_it_is}. It belongs to no project and no agent, so nothing closes it but you."
+        ));
+        Ok(())
+    }
+
     /// Opens the first existing companion terminal for the SELECTED AGENT, or
     /// spawns a new one if none exists. Agent-scoped only: project terminals are
     /// reached through the explicit `new-terminal-for-project` command (via the
@@ -1253,6 +1283,9 @@ impl App {
                 };
                 return self.show_project_terminal(&project);
             }
+            // A standalone terminal's sibling is another standalone terminal.
+            // There is no owner to resolve first, and none to have gone missing.
+            TerminalOwner::Standalone => return self.show_standalone_terminal(),
         };
 
         let Some(session) = self
@@ -1322,8 +1355,9 @@ impl App {
                 |item| matches!(item, LeftItem::Session(idx) if self.engine.sessions.get(*idx).map(|s| s.id.as_str()) == Some(session_id.as_str())),
             ),
             // The flat agent list has no project rows, so a project terminal has no
-            // left-pane row to move the cursor onto.
-            TerminalOwner::Project(_) => None,
+            // left-pane row to move the cursor onto. A standalone terminal has no
+            // owner at all, so it has none either.
+            TerminalOwner::Project(_) | TerminalOwner::Standalone => None,
         };
         if let Some(pos) = pos {
             self.selected_left = pos;
@@ -3236,6 +3270,12 @@ impl App {
                         .unwrap_or_else(|| project_id.clone());
                     format!("at the repo root of project \"{project_name}\"")
                 }
+                // No owner to name, so the kill overlay says where it is instead,
+                // which is the same thing its sidebar row says.
+                TerminalOwner::Standalone => format!(
+                    "standalone, in {}",
+                    dux_core::home_path::shorten_home(terminal.client.spawn_dir())
+                ),
             };
             // Normalize the foreground through the shared core rule (trim + strip
             // "TERM "/"term "; None when blank), so the kill overlay, the sidebar,

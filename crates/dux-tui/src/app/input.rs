@@ -17483,6 +17483,123 @@ cyan = "#00ffff"
         );
     }
 
+    /// The journey: the user runs `new-standalone-terminal` from the palette with
+    /// nothing selected and no project in sight. A terminal opens, owned by
+    /// nothing, and it becomes the surface they are typing into.
+    #[test]
+    fn new_standalone_terminal_command_opens_a_terminal_owned_by_nothing() {
+        let mut app = test_app(default_bindings());
+        // Nothing selected, and the command still works: that is the whole point
+        // of the kind (the agent and project commands both refuse here).
+        app.engine.sessions.clear();
+        app.engine.projects.clear();
+
+        app.execute_command("new-standalone-terminal".to_string())
+            .expect("should spawn a standalone terminal");
+
+        assert_eq!(app.engine.companion_terminals.len(), 1);
+        let terminal = app.engine.companion_terminals.values().next().unwrap();
+        assert_eq!(terminal.owner, dux_core::model::TerminalOwner::Standalone);
+        assert!(app.active_terminal_id.is_some());
+        assert_eq!(app.input_target, InputTarget::Terminal);
+    }
+
+    /// A standalone terminal is an ordinary sidebar element: it sorts with the
+    /// others under every sort mode, including the manual drag order, rather
+    /// than being pinned somewhere or dropped.
+    #[test]
+    fn a_standalone_terminal_sorts_with_the_others_under_every_sort_mode() {
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        app.engine.config.terminal.command = "cat".to_string();
+        app.engine.config.terminal.args = vec![];
+
+        let (session_tid, _) = app
+            .engine
+            .create_companion_terminal(&session_id, 24, 80)
+            .expect("session terminal");
+        let (standalone_tid, _) = app
+            .engine
+            .create_standalone_terminal(24, 80)
+            .expect("standalone terminal");
+        // A distinctive foreground so the two name-sort modes have something to
+        // order by, and the standalone one sorts LAST by name so the ascending
+        // and descending cases are genuinely different.
+        app.engine
+            .companion_terminals
+            .get_mut(&standalone_tid)
+            .unwrap()
+            .foreground_cmd = Some("zsh".to_string());
+        app.engine
+            .companion_terminals
+            .get_mut(&session_tid)
+            .unwrap()
+            .foreground_cmd = Some("ash".to_string());
+
+        for mode in [
+            "manual",
+            "created",
+            "updated",
+            "name",
+            "name_desc",
+            "active",
+        ] {
+            app.engine.config.ui.agent_sort = mode.to_string();
+            let ids: Vec<&str> = app
+                .terminal_items()
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect();
+            assert!(
+                ids.contains(&standalone_tid.as_str()) && ids.contains(&session_tid.as_str()),
+                "both terminals must be listed under sort mode {mode}; got {ids:?}"
+            );
+        }
+
+        // Manual is the drag order, so it is the spawn order verbatim.
+        app.engine.config.ui.agent_sort = "manual".to_string();
+        assert_eq!(
+            app.terminal_items()
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>(),
+            vec![session_tid.as_str(), standalone_tid.as_str()],
+        );
+        // Name ascending puts "ash" before "zsh"; descending flips it, which is
+        // only meaningful because the standalone row takes part in the compare.
+        app.engine.config.ui.agent_sort = "name_desc".to_string();
+        assert_eq!(
+            app.terminal_items()
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>(),
+            vec![standalone_tid.as_str(), session_tid.as_str()],
+        );
+    }
+
+    /// The sidebar search matches a standalone terminal on the thing its row
+    /// actually says: the `~`-shortened directory, which stands in for the owner
+    /// label it does not have.
+    #[test]
+    fn sidebar_search_matches_a_standalone_terminal_by_its_directory() {
+        let dir = dux_core::home_path::standalone_terminal_dir();
+        let label = dux_core::home_path::shorten_home(&dir);
+        assert!(
+            dux_core::agent_search::matches_terminal("Terminal 1", None, &label, "", &label),
+            "the directory label must be searchable; label was {label:?}"
+        );
+        assert!(
+            !dux_core::agent_search::matches_terminal(
+                "Terminal 1",
+                None,
+                &label,
+                "",
+                "definitely-not-in-any-path"
+            ),
+            "an unrelated query must not match"
+        );
+    }
+
     #[test]
     fn mouse_click_discard_dialog_button_discards_changes() {
         let mut app = test_app(default_bindings());
