@@ -2255,10 +2255,12 @@ fn strip_git_record_terminator(text: &str) -> &str {
 
 /// Extracts `"owner/repo"` from a GitHub remote URL.
 ///
-/// Supports the scp-like SSH shorthand (`[user@]github.com:owner/repo.git`),
-/// scheme-qualified URLs (`ssh://`, `git://`, `git+ssh://`, `ssh+git://`,
-/// `http://`, `https://`, with optional credentials and port), and the bare
-/// `github.com/owner/repo` form.
+/// Supports the two spellings git has for a remote that leaves the machine:
+/// the scp-like SSH shorthand (`[user@]github.com:owner/repo.git`, whose colon
+/// must precede any slash) and scheme-qualified URLs (`ssh://`, `git://`,
+/// `git+ssh://`, `ssh+git://`, `http://`, `https://`, with optional credentials
+/// and port). A value with neither is a relative local path to git, not an
+/// address, so `github.com/owner/repo` is refused.
 #[cfg(test)]
 fn parse_github_owner_repo(url: &str) -> Option<String> {
     parse_github_remote(url).map(|remote| remote.owner_repo)
@@ -2432,24 +2434,31 @@ fn parse_github_remote(url: &str) -> Option<GitHubRemote> {
         return owner_repo_from_path(&path).map(|owner_repo| GitHubRemote { host, owner_repo });
     }
 
-    // 3. The bare `github.com/owner/repo` form, which has no scheme and so is
-    //    not a URL either. Userinfo is NOT stripped here: without a scheme
-    //    there is no authority for it to belong to, `user@github.com/o/r` is
-    //    not valid git syntax in any spelling, and accepting it would mean
-    //    answering confidently for a remote git cannot use.
-    if url.contains("://") {
-        return None;
-    }
-    let (authority, path) = url.split_once('/')?;
-    if authority.contains('@') {
-        return None;
-    }
-    let host = authority.to_ascii_lowercase();
-    if !is_github_host(&host) {
-        return None;
-    }
-    owner_repo_from_path(strip_boundary_slashes(path))
-        .map(|owner_repo| GitHubRemote { host, owner_repo })
+    // 3. There is no third form. Git's grammar for a remote that leaves the
+    //    machine is a scheme-qualified URL or the scp-like `[user@]host:path`,
+    //    and the scp-like one REQUIRES its colon before any slash. A value with
+    //    neither a scheme nor such a colon is a RELATIVE LOCAL PATH.
+    //
+    //    There used to be a branch here accepting the bare `github.com/owner/
+    //    repo` spelling, and it was the oldest line in this function. It was
+    //    wrong: git reads that as a directory. MEASURED, git 2.55.0, isolated
+    //    `HOME`, `GIT_CONFIG_NOSYSTEM=1`, a stub `GIT_SSH_COMMAND` printing its
+    //    argv, and a `.invalid` host so nothing could leave the machine. With
+    //    the remote set to `nonexistent-host.invalid/o/r`, `GIT_TRACE=1 git
+    //    ls-remote` runs `git-upload-pack 'nonexistent-host.invalid/o/r'`
+    //    LOCALLY and fails with "does not appear to be a git repository"; the
+    //    stub ssh is never called and no name is ever resolved. Create the
+    //    directory `nonexistent-host.invalid/o/r` as a bare repo and the same
+    //    command succeeds against it. The scp-like spelling of the same words,
+    //    `nonexistent-host.invalid:o/r`, instead reaches ssh as
+    //    `nonexistent-host.invalid git-upload-pack 'o/r'`.
+    //
+    //    So accepting the bare form meant reporting a folder on disk as a
+    //    GitHub repository and then asking GitHub about it. Removing the branch
+    //    also removes the last asymmetry in this function: it was the one place
+    //    that applied the web family's rules to something git does not run over
+    //    a web transport.
+    None
 }
 
 /// Whether a remote URL can be read literally, which is the only way it can be
@@ -4445,7 +4454,7 @@ mod tests {
         for url in [
             "https://github.com/octocat/Hello-World/tree/main",
             "http://github.com/octocat/Hello-World/tree/main",
-            "github.com/octocat/Hello-World/tree/main",
+            "github.com:octocat/Hello-World/tree/main",
             "ssh://github.com/octocat/Hello-World/tree/main",
             "git@github.com:octocat/Hello-World/tree/main",
         ] {
@@ -4466,7 +4475,7 @@ mod tests {
             "ssh://git\rhub.com/octocat/Hello-World",
             "https://git\nhub.com/octocat/Hello-World",
             "git@git\nhub.com:octocat/Hello-World",
-            "git\nhub.com/octocat/Hello-World",
+            "git\nhub.com:octocat/Hello-World",
             "ssh://github.com/octocat/Hello\u{7f}World",
         ] {
             assert_eq!(parse_github_remote(url), None, "{url:?}");
@@ -4486,7 +4495,7 @@ mod tests {
             "\tssh://github.com/octocat/Hello-World",
             "ssh://github.com/octocat/Hello-World\t",
             " git@github.com:octocat/Hello-World.git",
-            "github.com/octocat/Hello-World ",
+            "github.com:octocat/Hello-World ",
             "",
             " ",
         ] {
@@ -4569,7 +4578,6 @@ mod tests {
             r"ssh://github.com/octocat\Hello-World",
             r"git@github.com:octocat\Hello-World.git",
             r"github.com:octocat\Hello-World",
-            r"github.com/octocat\Hello-World",
             r"C:\repo",
         ] {
             assert_eq!(parse_github_remote(url), None, "{url}");
@@ -4686,7 +4694,6 @@ mod tests {
             "ssh://github.com/octocat/.",
             "github.com:octocat/..",
             "github.com:../Hello-World",
-            "github.com/octocat/..",
             "ssh://github.com/octocat/...git",
         ] {
             assert_eq!(parse_github_remote(url), None, "{url}");
@@ -4925,10 +4932,16 @@ mod tests {
             "ssh://git@GitHub.com/o/r",
             "git@GitHub.com:o/r.git",
             "https://GitHub.COM/o/r.git",
-            "GitHub.com/o/r",
         ] {
             assert_eq!(parse_github_remote(url), github("o/r"), "{url}");
         }
+        // `GitHub.com/o/r` used to be the fifth row of that accept list, as the
+        // bare family's host-case coverage. Host case is not what is wrong with
+        // it: git reads a value with no scheme and no colon as a relative LOCAL
+        // PATH, so accepting it in any case meant asking GitHub about a
+        // directory. See `parse_github_remote_refuses_a_bare_host_and_path` for
+        // the measurement.
+        assert_eq!(parse_github_remote("GitHub.com/o/r"), None);
     }
 
     /// `<transport>::<address>` is git's EXPLICIT remote-helper syntax, which
@@ -5009,7 +5022,7 @@ mod tests {
                 owner_repo: owner_repo.to_string(),
             })
         };
-        let cases: [(&str, Option<GitHubRemote>); 32] = [
+        let cases: [(&str, Option<GitHubRemote>); 34] = [
             // Git matches a scheme case sensitively and reads
             // `<transport>::<address>` as an explicit remote helper, so neither
             // of these names a GitHub repository git could reach.
@@ -5029,7 +5042,13 @@ mod tests {
             // authority is spelled against a host that does not resolve.
             ("https://user:p%40ss@github.com/o/r.git", github("o/r")),
             ("https://user%2Fx@github.com/o/r.git", github("o/r")),
-            ("github.com/o/r", github("o/r")),
+            // No scheme and no colon before the first slash is not an address:
+            // git reads it as a relative local path, so none of these name a
+            // repository on github.com. This row used to read
+            // `("github.com/o/r", github("o/r"))`.
+            ("github.com/o/r", None),
+            ("github.com/o/r/x", None),
+            ("GitHub.com/o/r", None),
             (r"C:\repo", None),
             ("ssh://github.com/o/r/extra", None),
             ("github.com:o/r/extra", None),
@@ -5182,20 +5201,57 @@ mod tests {
         assert_eq!(parse_github_remote("../sibling/repo"), None);
     }
 
-    /// A `github.com/owner/repo` shorthand with a `user@` in front is not git
-    /// syntax in any spelling: there is no scheme, so there is no authority for
-    /// the credentials to belong to. Accepting it meant silently discarding the
-    /// prefix and answering as if the remote had been well formed.
+    /// `github.com/owner/repo`, with no scheme and no colon, is not a network
+    /// address at all. Git's grammar offers exactly two remote spellings that
+    /// leave the machine: a scheme-qualified URL, and the scp-like
+    /// `[user@]host:path`, which REQUIRES the colon to come before any slash.
+    /// A value with neither is a RELATIVE LOCAL PATH, and git reads it as one.
+    ///
+    /// MEASURED, git 2.55.0, isolated `HOME`, `GIT_CONFIG_NOSYSTEM=1`, a stub
+    /// `GIT_SSH_COMMAND` that prints its argv, and a `.invalid` host so nothing
+    /// can leave the machine:
+    ///
+    /// ```text
+    /// $ git remote add bare nonexistent-host.invalid/o/r
+    /// $ GIT_TRACE=1 git ls-remote bare
+    /// trace: run_command: git-upload-pack 'nonexistent-host.invalid/o/r'
+    /// trace: built-in: git upload-pack nonexistent-host.invalid/o/r
+    /// fatal: 'nonexistent-host.invalid/o/r' does not appear to be a git repository
+    /// $ mkdir -p nonexistent-host.invalid/o && git init --bare nonexistent-host.invalid/o/r
+    /// $ git ls-remote bare; echo $?
+    /// 0
+    /// ```
+    ///
+    /// The stub ssh is never called, no name is ever resolved, and once the
+    /// DIRECTORY exists git reads it happily as a local repository. Contrast
+    /// the scp-like spelling of the same words, which does go over the network:
+    ///
+    /// ```text
+    /// $ git remote add scp nonexistent-host.invalid:o/r
+    /// $ git ls-remote scp
+    /// STUB_SSH_ARGV: nonexistent-host.invalid git-upload-pack 'o/r'
+    /// ```
+    ///
+    /// So a remote written the bare way points at a folder on disk. dux used to
+    /// answer host `github.com`, repository `o/r` for it and go and ask GitHub
+    /// about a directory. It is refused instead, whatever the case of the host
+    /// and with or without a `user@` in front (which is not git syntax in any
+    /// spelling either: with no scheme there is no authority for credentials to
+    /// belong to).
     #[test]
-    fn parse_github_bare_form_rejects_userinfo() {
-        assert_eq!(
-            parse_github_remote("user@github.com/octocat/Hello-World"),
-            None
-        );
-        assert_eq!(
-            parse_github_remote("user:token@github.com/octocat/Hello-World"),
-            None,
-        );
+    fn parse_github_remote_refuses_a_bare_host_and_path() {
+        for url in [
+            "github.com/octocat/Hello-World",
+            "github.com/octocat/Hello-World.git",
+            "GitHub.com/octocat/Hello-World",
+            "github.com/o/r",
+            "github.com/o/r/x",
+            "user@github.com/octocat/Hello-World",
+            "user:token@github.com/octocat/Hello-World",
+            "gitlab.com/o/r",
+        ] {
+            assert_eq!(parse_github_remote(url), None, "{url}");
+        }
     }
 
     /// The scp-like spelling's user part is optional: git treats `host:path` as
@@ -5317,7 +5373,6 @@ mod tests {
             "ssh://GITHUB.COM/octocat/Hello-World.git",
             "ssh://git@GitHub.com/octocat/Hello-World.git",
             "https://GitHub.COM/octocat/Hello-World.git",
-            "GitHub.com/octocat/Hello-World",
         ] {
             assert_eq!(
                 parse_github_remote(url),
@@ -5328,6 +5383,13 @@ mod tests {
                 "{url}",
             );
         }
+        // The bare `GitHub.com/octocat/Hello-World` spelling was the sixth row
+        // here and is now a refusal, for a reason that has nothing to do with
+        // case: git reads a value with no scheme and no colon before the first
+        // slash as a relative LOCAL PATH, so accepting it meant asking GitHub
+        // about a directory on disk. See
+        // `parse_github_remote_refuses_a_bare_host_and_path`.
+        assert_eq!(parse_github_remote("GitHub.com/octocat/Hello-World"), None);
     }
 
     /// `github.com:octocat/…` parses "successfully" as a URL whose scheme is
