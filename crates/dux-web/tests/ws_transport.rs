@@ -1533,7 +1533,10 @@ async fn thin_reads_pin_the_exact_terminal_key_set() {
 }
 
 /// `POST /api/v1/sessions` and its idempotent replay serve the same nested shape
-/// as the per-session read, terminal entries included.
+/// as the per-session read, terminal entries included. The replay always does;
+/// the create does so only when the session view is available, falling back to a
+/// minimal id-only body when it is not, which is why this test asserts it took
+/// the full branch before pinning anything there.
 ///
 /// The replay is taken AFTER the new session has acquired a terminal, which is
 /// the only way to see a terminal entry on that path at all: a session is created

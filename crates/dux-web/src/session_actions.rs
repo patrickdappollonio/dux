@@ -25,12 +25,15 @@
 //! - `POST   /api/v1/sessions/reorder`             — persist order (literal
 //!   segment, registered so it does not collide with `:id`).
 //!
-//! The create's `201` body and its idempotent `200` replay both serve
+//! The idempotent `200` replay always serves
 //! [`crate::spine_routes::SessionWithTerminals`], the same nested shape as
-//! `GET /api/v1/sessions/:id`, so a create and a later read of that session agree
-//! field for field. A nested terminal entry carries a tagged `owner` field, which
+//! `GET /api/v1/sessions/:id`, so a replay and a later read of that session agree
+//! field for field. The create's `201` serves that shape too WHENEVER THE VIEW IS
+//! AVAILABLE, and falls back to a minimal id-only body when it is not, so the
+//! agreement holds on that branch and not unconditionally. A nested terminal
+//! entry carries a tagged `owner` field, which
 //! is additive and documented in `spine_routes`'s module docs; the exact key set
-//! of both bodies is pinned by
+//! of the replay body, and of the create body on its full branch, is pinned by
 //! `session_create_and_its_replay_pin_the_same_terminal_key_set` in
 //! `tests/ws_transport.rs`.
 
