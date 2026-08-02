@@ -17502,6 +17502,14 @@ cyan = "#00ffff"
         assert_eq!(terminal.owner, dux_core::model::TerminalOwner::Standalone);
         assert!(app.active_terminal_id.is_some());
         assert_eq!(app.input_target, InputTarget::Terminal);
+        // The lifetime it promises has to be the one dux keeps: shutdown closes
+        // every terminal, so a message saying nothing but the user closes it
+        // would be wrong on the one event that always happens.
+        assert!(
+            app.status.text().contains("dux shuts down"),
+            "the status must name every way the terminal ends; got {:?}",
+            app.status.text()
+        );
     }
 
     /// A standalone terminal is an ordinary sidebar element: it sorts with the

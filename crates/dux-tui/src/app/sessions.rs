@@ -1214,8 +1214,13 @@ impl App {
         self.terminal_return_to_list = true;
         self.show_companion_terminal_surface();
         self.input_target = InputTarget::Terminal;
+        // The lifetime, stated truthfully: dux's own shutdown closes every
+        // terminal, so "nothing closes it but you" was an overstatement. What is
+        // actually special about this kind is that no OTHER event does: removing
+        // a project or deleting an agent closes their terminals and leaves this
+        // one alone.
         self.set_info(format!(
-            "Launched a standalone terminal in {where_it_is}. It belongs to no project and no agent, so nothing closes it but you."
+            "Launched a standalone terminal in {where_it_is}. It belongs to no project and no agent, so it keeps running until it exits, you close it, or dux shuts down."
         ));
         Ok(())
     }
