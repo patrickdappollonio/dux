@@ -156,9 +156,30 @@ async function request<T>(
   }
 }
 
+// What the server made of a typed pull-request reference: the repository it
+// names, the number it carried, and every project that is a checkout of that
+// repository. `projects.length` is what the caller branches on, exactly as the
+// terminal UI does: one proceeds, several ask, none reports and offers the
+// picker. `repository` is `host/owner/repo`, or `owner/repo` when the reference
+// named no host (which dux must NOT fill in as github.com).
+export interface ResolvedPullRequestReference {
+  repository: string | null
+  number: number | null
+  projects: { id: string; name: string }[]
+}
+
 export const sessionsApi = {
   create: (body: CreateSessionBody) =>
     request<SessionView>("POST", "/api/v1/sessions", body),
+  // Ask which project a typed pull-request reference belongs to. A read: it
+  // starts nothing, so a refusal (unreadable text, a bare number, a host dux
+  // may not ask about) comes back as a 400 with the reason rather than a toast.
+  resolvePullRequest: (reference: string) =>
+    request<ResolvedPullRequestReference>(
+      "POST",
+      "/api/v1/pull-requests/resolve",
+      { reference },
+    ),
   remove: (id: string, deleteWorktree: boolean) =>
     request<void>(
       "DELETE",

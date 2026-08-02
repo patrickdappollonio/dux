@@ -152,7 +152,11 @@ export interface FirstLoadDialogState {
 export type CreateAgentTarget =
   | { kind: "new"; projectId: string }
   | { kind: "fork"; sessionId: string }
-  | { kind: "pr"; projectId: string }
+  // `projectId: null` is the REFERENCE-FIRST shape: opened from the global
+  // command, no project is chosen and none is asked for. dux works out which
+  // project the reference belongs to on submit. `Some` is the project-first
+  // shape, opened from a project's own menu, which behaves exactly as before.
+  | { kind: "pr"; projectId: string | null }
 
 // The file pending discard-confirmation, or null. `untracked` drives the
 // dialog's warning copy (a tracked file is restored from HEAD; an untracked
@@ -519,6 +523,17 @@ export interface DuxState {
   // an agent from a PR), or "from_worktree" (pick a project to adopt an existing
   // worktree). The split button's ⋯ menu sets this; a bare open defaults to "new".
   newAgentPickerIntent: "new" | "from_pr" | "from_worktree"
+  // When set, the picker lists ONLY these project ids. Used when a pull-request
+  // reference matched several projects (one repository checked out twice):
+  // showing every project there would bury the two that actually have it.
+  newAgentPickerOnlyIds: string[] | null
+  // A pull-request reference the user has already typed, held across a trip
+  // through the picker so the project they choose completes it rather than
+  // reopening an empty field.
+  pendingPrReference: string | null
+  // A resolve is in flight, so the dialog's Create button shows it is working
+  // and cannot be pressed twice.
+  createAgentPrResolving: boolean
   sidebarWidth: string
   // Optimistic override for the Changes pane's visibility (desktop). `null`
   // follows the persisted config (`bootstrap.show_changes_pane`); the palette and
@@ -691,6 +706,9 @@ let state: DuxState = {
   agentSearch: "",
   newAgentPickerOpen: false,
   newAgentPickerIntent: "new",
+  newAgentPickerOnlyIds: null,
+  pendingPrReference: null,
+  createAgentPrResolving: false,
   sidebarWidth: loadSidebarWidth(),
   changesPaneOverride: null,
   editorTarget: null,
@@ -3600,11 +3618,13 @@ export function openForkAgent(sessionId: string): void {
   openNameDialog({ kind: "fork", sessionId })
 }
 
-// Open the name dialog in "from PR" mode for a project. Reuses the new-agent
-// name UX (sanitized input, pet-name checkbox, generated-name plumbing) and adds
-// a PR-reference field; on submit it dispatches `create_agent_from_pr`. Mirrors
-// the TUI's `new-agent-from-pr` flow, which resolves the PR then names the agent.
-export function openCreateAgentFromPr(projectId: string): void {
+// Open the name dialog in "from PR" mode.
+//
+// `projectId` is the project-first shape, opened from a project's own menu, and
+// behaves exactly as it always did. `null` is the reference-first shape, opened
+// from the global command: no project is chosen and none is asked for, and the
+// reference decides which project the agent lands in.
+export function openCreateAgentFromPr(projectId: string | null): void {
   openNameDialog({ kind: "pr", projectId })
 }
 
@@ -3656,7 +3676,12 @@ function openNameDialog(target: CreateAgentTarget): void {
       state.bootstrap?.copy_uncommitted_changes_by_default ?? true,
     createAgentGeneratedName: null,
     createAgentNamePending: randomize,
-    createAgentPrInput: "",
+    // A reference typed before a trip through the project picker travels back
+    // into the field, so choosing a project never costs the user their text.
+    createAgentPrInput:
+      target.kind === "pr" ? (state.pendingPrReference ?? "") : "",
+    createAgentPrResolving: false,
+    pendingPrReference: null,
   })
   if (randomize) requestAgentName()
 }
@@ -3669,7 +3694,15 @@ export function closeCreateAgent(): void {
     createAgentGeneratedName: null,
     createAgentNamePending: false,
     createAgentPrInput: "",
+    createAgentPrResolving: false,
   })
+}
+
+// Park a typed pull-request reference so the next PR dialog opens with it
+// already in the field. Used by the secondary "or choose an existing project"
+// action and by the resolution branches that hand over to the picker.
+export function setPendingPrReference(reference: string | null): void {
+  setState({ pendingPrReference: reference })
 }
 
 // Update the PR-reference field. Free text — unlike the agent name, this is NOT
@@ -3805,12 +3838,30 @@ export function setAgentSearch(query: string): void {
 
 export function openNewAgentPicker(
   intent: DuxState["newAgentPickerIntent"] = "new",
+  onlyIds: string[] | null = null,
 ): void {
-  setState({ newAgentPickerOpen: true, newAgentPickerIntent: intent })
+  setState({
+    newAgentPickerOpen: true,
+    newAgentPickerIntent: intent,
+    newAgentPickerOnlyIds: onlyIds,
+  })
 }
 
 export function closeNewAgentPicker(): void {
-  setState({ newAgentPickerOpen: false })
+  setState({ newAgentPickerOpen: false, newAgentPickerOnlyIds: null })
+}
+
+// Dismiss the picker WITHOUT picking anything. Distinct from
+// `closeNewAgentPicker`, which a project row calls on its way to opening that
+// project's dialog: a parked pull-request reference has to survive that hop and
+// must NOT survive this one, or the next from-PR dialog would open prefilled
+// with text the user walked away from.
+export function dismissNewAgentPicker(): void {
+  setState({
+    newAgentPickerOpen: false,
+    newAgentPickerOnlyIds: null,
+    pendingPrReference: null,
+  })
 }
 
 // Ask the server to fork an existing session into a fresh branched worktree.
@@ -3832,6 +3883,60 @@ export function createAgentFromPr(projectId: string, pr: string, name: string): 
     .catch((e) => toastCreateError(e, "Could not create the agent from the PR."))
 }
 
+// The reference-first submit: resolve the typed reference to a project, then
+// branch on the answer. Three shapes, matching the terminal UI exactly.
+//
+// The resolve runs per submit and is never cached: the answer changes when an
+// address is edited, when git's rewrite configuration changes, and when a
+// project's path moves, and nothing the browser can see would say so.
+function submitPrReferenceFirst(reference: string, name: string): void {
+  setState({ createAgentPrResolving: true })
+  sessionsApi
+    .resolvePullRequest(reference)
+    .then((resolved) => {
+      // The dialog may have been closed (or retargeted) while the request was
+      // out; a late answer must not act on a screen the user has left.
+      if (state.createAgentTarget?.kind !== "pr") return
+      setState({ createAgentPrResolving: false })
+      const repository = resolved.repository ?? reference
+      if (resolved.projects.length === 1) {
+        const projectId = resolved.projects[0].id
+        armCreateFocus(projectId)
+        createAgentFromPr(projectId, reference, name)
+        closeCreateAgent()
+        return
+      }
+      if (resolved.projects.length === 0) {
+        // dux does not clone, and this wording must not imply it might.
+        toast.error(
+          `No project in dux is a checkout of ${repository}. Choose a project that already has it, or add one from a directory on disk.`,
+        )
+      } else {
+        toast.info(
+          `${resolved.projects.length} projects are checkouts of ${repository}. Choose which one this agent belongs in.`,
+        )
+      }
+      // Either way the picker is offered, over just the matches when there are
+      // any. The reference rides across so the project they pick completes it.
+      setState({ pendingPrReference: reference })
+      closeCreateAgent()
+      openNewAgentPicker(
+        "from_pr",
+        resolved.projects.length > 0
+          ? resolved.projects.map((p) => p.id)
+          : null,
+      )
+    })
+    .catch((e) => {
+      setState({ createAgentPrResolving: false })
+      toast.error(
+        e instanceof Error
+          ? e.message
+          : "Could not work out which project that pull request is in.",
+      )
+    })
+}
+
 // Submit the name dialog: dispatch create, fork, or create-from-PR based on the
 // current target, then close. Mirrors the TUI, where the same name prompt drives
 // these flows.
@@ -3851,6 +3956,11 @@ export function submitNameDialog(name: string): void {
     )?.project_id
     if (projectId) armCreateFocus(projectId)
     forkAgent(target.sessionId, name)
+  } else if (target.projectId === null) {
+    // Reference-first: dux has to work out the project before anything is
+    // created, so the dialog stays open until the answer arrives.
+    submitPrReferenceFirst(state.createAgentPrInput.trim(), name)
+    return
   } else {
     armCreateFocus(target.projectId)
     createAgentFromPr(target.projectId, state.createAgentPrInput.trim(), name)
