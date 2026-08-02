@@ -1,5 +1,6 @@
 import { assertNever } from "@/lib/assertNever"
 import {
+  ownerKey,
   sameOwner,
   sameWireOwner,
   type TerminalOwnerRef,
@@ -26,11 +27,36 @@ export function ownerHasTerminal(
   return terminals.some((t) => t.id === terminalId && sameOwner(t.owner, owner))
 }
 
-// Terminals bucketed by owner, for the surfaces that walk sessions and projects
-// and need each one's terminals in hand (the task manager's rows, the project
-// info counts). Each bucket keeps the input order, which is the global
-// `sort_order` base, so a bucket is the same sequence the nested collections
-// used to carry.
+// Terminals grouped by `ownerKey`, keeping input order inside each group. This
+// is the TOTAL grouping: `ownerKey` answers for every owner, so no terminal can
+// fall out of the result whatever it belongs to. Use it wherever every terminal
+// must be accounted for (the Task Manager's rows); the two-bucket
+// `groupTerminalsByOwner` below answers a narrower question.
+export function groupTerminalsByOwnerKey(
+  terminals: readonly TerminalView[],
+): Map<string, TerminalView[]> {
+  const groups = new Map<string, TerminalView[]>()
+  for (const t of terminals) {
+    const key = ownerKey(t.owner)
+    const group = groups.get(key)
+    if (group) group.push(t)
+    else groups.set(key, [t])
+  }
+  return groups
+}
+
+// Terminals bucketed into the two owners a PROJECT can reach: its own project
+// terminals, and the terminals of the sessions it owns. Each bucket keeps the
+// input order, which is the global `sort_order` base, so a bucket is the same
+// sequence the nested collections used to carry.
+//
+// LOSSY ON PURPOSE, and its one caller is `projectLiveCounts`, where the entire
+// question is how many terminals a given project reaches, directly or through
+// one of its agents. A terminal owned by anything that is neither reaches no
+// project, so leaving it out of both buckets is the right answer there rather
+// than an omission. Anything that must ACCOUNT for every terminal uses
+// `groupTerminalsByOwnerKey` above, and anything whose behaviour depends on the
+// owner uses `matchOwner`/`matchWireOwner` so a new kind is a compile error.
 export interface TerminalsByOwner {
   bySession: Map<string, TerminalView[]>
   byProject: Map<string, TerminalView[]>

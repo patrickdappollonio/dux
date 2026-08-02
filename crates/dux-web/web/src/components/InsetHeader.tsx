@@ -3,7 +3,9 @@ import { Fragment } from "react"
 import { AppMenu } from "@/components/AppMenu"
 import { branchDrift } from "@/lib/agentTabs"
 import { useDux } from "@/lib/store"
-import { groupTerminalsByOwner, terminalTitle } from "@/lib/terminals"
+import { matchOwner } from "@/lib/terminalOwner"
+import { terminalsForOwner, terminalTitle } from "@/lib/terminals"
+import type { SessionView, TerminalView } from "@/lib/types"
 
 // One `key: value` crumb in the header details row. `muted`, when present, is
 // appended as a dimmed trailing clause on the same crumb (used to surface the
@@ -21,42 +23,70 @@ interface HeaderDetail {
 // eager Monaco import cannot initialize under vitest (see `TerminalArea`).
 export function InsetHeader() {
   const { spine, selectedSessionId, selectedTarget } = useDux()
-  const session = spine?.sessions.find((s) => s.id === selectedSessionId)
-  const project = session
-    ? spine?.projects.find((p) => p.id === session.project_id)
-    : undefined
-  // When a companion terminal is focused, surface it as a third crumb. The crumb
-  // text is the foreground command when one is running (disambiguated with the
-  // terminal's number if a sibling runs the same app), otherwise the stable
-  // "Terminal N" label.
-  // Terminals arrive flat and owner-tagged; bucket them so each crumb still
-  // reads its owner's own terminals (which is what the counts below mean).
-  const { bySession, byProject } = groupTerminalsByOwner(spine?.terminals ?? [])
-  const sessionTerminals = session ? (bySession.get(session.id) ?? []) : []
-  const terminal =
-    selectedTarget?.kind === "terminal"
-      ? sessionTerminals.find((t) => t.id === selectedTarget.terminalId)
-      : undefined
-  const terminalLabel =
-    terminal && session ? terminalTitle(terminal, sessionTerminals) : undefined
+  const allTerminals = spine?.terminals ?? []
+  const focusedTerminal =
+    selectedTarget?.kind === "terminal" ? selectedTarget : undefined
 
-  // A focused PROJECT terminal has no session: resolve its owning project and
-  // terminal directly so the bar shows `project › terminal` crumbs instead of
-  // rendering completely blank.
-  const projectTerminalOwner =
-    selectedTarget?.kind === "terminal" && selectedTarget.owner.kind === "project"
-      ? selectedTarget.owner
-      : undefined
-  const ownerProject = projectTerminalOwner
-    ? spine?.projects.find((p) => p.id === projectTerminalOwner.projectId)
-    : undefined
-  const ownerProjectTerminals = ownerProject
-    ? (byProject.get(ownerProject.id) ?? [])
-    : []
-  const projectTerminal =
-    ownerProject && selectedTarget?.kind === "terminal"
-      ? ownerProjectTerminals.find((t) => t.id === selectedTarget.terminalId)
-      : undefined
+  // The crumbs describing one AGENT: name, provider, project, branch. Shared by
+  // an agent selection and by a session-owned terminal, which shows its agent's
+  // crumbs and then its own.
+  const agentCrumbs = (
+    agent: SessionView,
+    provider?: string,
+  ): HeaderDetail[] => {
+    const crumbs: HeaderDetail[] = [
+      { key: "agent", value: agent.title || agent.branch_name },
+      { key: "provider", value: provider ?? agent.provider },
+    ]
+    const owningProject = spine?.projects.find((p) => p.id === agent.project_id)
+    if (owningProject?.name) {
+      crumbs.push({ key: "project", value: owningProject.name })
+    }
+    // Branch crumb. When the current branch has drifted from the immutable
+    // `initial_branch` the agent was created on, append a muted "originally
+    // <initial>" clause so the original branch stays visible (the web has room;
+    // the TUI shows a compact form only). Guarded on `initial_branch` being
+    // present so an older server that omits the field never renders "originally
+    // undefined".
+    const drift = branchDrift(agent)
+    crumbs.push({
+      key: "branch",
+      value: agent.branch_name,
+      muted: drift.drifted ? `originally ${drift.initial}` : undefined,
+    })
+    return crumbs
+  }
+
+  // A focused terminal's breadcrumb is chosen by an EXHAUSTIVE match on its
+  // OWNER, because the bar's whole job here is to name the thing the terminal
+  // belongs to. A two-bucket lookup keeps compiling when a new kind of owner
+  // arrives and hands it an empty header, which is a blank bar rather than an
+  // error. Each arm answers with the owner's own crumbs plus that owner's
+  // terminals: the set `terminalTitle` disambiguates against, and the set the
+  // `terminals` count counts.
+  const ownerContext: { crumbs: HeaderDetail[]; siblings: TerminalView[] } | null =
+    focusedTerminal
+      ? matchOwner(focusedTerminal.owner, {
+          session: (owner) => {
+            const agent = spine?.sessions.find((s) => s.id === owner.sessionId)
+            return {
+              crumbs: agent ? agentCrumbs(agent) : [],
+              siblings: terminalsForOwner(allTerminals, owner),
+            }
+          },
+          project: (owner) => {
+            const owningProject = spine?.projects.find(
+              (p) => p.id === owner.projectId,
+            )
+            return {
+              crumbs: owningProject
+                ? [{ key: "project", value: owningProject.name }]
+                : [],
+              siblings: terminalsForOwner(allTerminals, owner),
+            }
+          },
+        })
+      : null
 
   // The header details, mirroring the TUI: a flat `key: value` list joined by a
   // single separator. `terminal` only appears when a companion terminal is the
@@ -64,48 +94,41 @@ export function InsetHeader() {
   // When an agent tab is focused, the provider crumb reflects the FOCUSED TAB
   // (an extra tab can run a different provider than the session-slot tab), not
   // the session-slot tab's own provider.
+  const session = spine?.sessions.find((s) => s.id === selectedSessionId)
   const focusedTabProvider =
     selectedTarget?.kind === "agent"
       ? session?.tabs.find((t) => t.id === selectedTarget.tabId)?.provider
       : undefined
 
   const details: HeaderDetail[] = []
-  if (session) {
-    details.push({ key: "agent", value: session.title || session.branch_name })
-    details.push({
-      key: "provider",
-      value: focusedTabProvider ?? session.provider,
-    })
-    if (project?.name) details.push({ key: "project", value: project.name })
-    // Branch crumb. When the current branch has drifted from the immutable
-    // `initial_branch` the agent was created on, append a muted "originally
-    // <initial>" clause so the original branch stays visible (the web has room;
-    // the TUI shows a compact form only). Guarded on `initial_branch` being
-    // present so an older server that omits the field never renders "originally
-    // undefined".
-    const drift = branchDrift(session)
-    details.push({
-      key: "branch",
-      value: session.branch_name,
-      muted: drift.drifted ? `originally ${drift.initial}` : undefined,
-    })
-    if (terminalLabel) details.push({ key: "terminal", value: terminalLabel })
-    if (sessionTerminals.length > 0) {
-      details.push({ key: "terminals", value: String(sessionTerminals.length) })
-    }
-  } else if (ownerProject) {
-    details.push({ key: "project", value: ownerProject.name })
-    if (projectTerminal) {
+  if (ownerContext && focusedTerminal) {
+    details.push(...ownerContext.crumbs)
+    // The crumb text is the foreground command when one is running
+    // (disambiguated with the terminal's number if a sibling runs the same app),
+    // otherwise the stable "Terminal N" label.
+    const terminal = ownerContext.siblings.find(
+      (t) => t.id === focusedTerminal.terminalId,
+    )
+    if (terminal) {
       details.push({
         key: "terminal",
-        value: terminalTitle(projectTerminal, ownerProjectTerminals),
+        value: terminalTitle(terminal, ownerContext.siblings),
       })
     }
-    if (ownerProjectTerminals.length > 0) {
+    if (ownerContext.siblings.length > 0) {
       details.push({
         key: "terminals",
-        value: String(ownerProjectTerminals.length),
+        value: String(ownerContext.siblings.length),
       })
+    }
+  } else if (session) {
+    details.push(...agentCrumbs(session, focusedTabProvider))
+    const sessionTerminals = terminalsForOwner(allTerminals, {
+      kind: "session",
+      sessionId: session.id,
+    })
+    if (sessionTerminals.length > 0) {
+      details.push({ key: "terminals", value: String(sessionTerminals.length) })
     }
   }
 

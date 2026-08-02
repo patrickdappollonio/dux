@@ -19,7 +19,8 @@
 
 import { formatBytes, formatCpu } from "./formatStats"
 import type { ResourceStatsView } from "./resourcesApi"
-import { groupTerminalsByOwner, terminalTitle } from "./terminals"
+import { matchWireOwner, ownerKey } from "./terminalOwner"
+import { groupTerminalsByOwnerKey, terminalTitle } from "./terminals"
 import type { ProjectView, SessionView, TerminalView } from "./types"
 
 export type TaskRowKind = "dux" | "agent" | "terminal" | "total"
@@ -67,11 +68,11 @@ export function taskManagerRows(
   projects: readonly ProjectView[],
   terminals: readonly TerminalView[],
 ): TaskRow[] {
-  // Terminals arrive as one flat, owner-tagged collection; bucket them by owner
-  // so the loops below still walk each session's and each project's own
-  // terminals, in the same order the nested collections used to carry.
-  const { bySession: terminalsBySession, byProject: terminalsByProject } =
-    groupTerminalsByOwner(terminals)
+  // Terminals arrive as one flat, owner-tagged collection. Group them by owner
+  // KEY, which is a total function of the owner, so no terminal can fall out of
+  // the grouping; the walks below then emit each group where its owner sits, in
+  // the same order the nested collections used to carry.
+  const terminalGroups = groupTerminalsByOwnerKey(terminals)
   // Index the sampled rows by the id core stamped on them.
   const byId = new Map<string, ResourceStatsView>()
   for (const s of stats) {
@@ -79,6 +80,64 @@ export function taskManagerRows(
   }
 
   const rows: TaskRow[] = []
+
+  const sessionLabels = new Map(
+    sessions.map((s) => [s.id, s.title ?? s.branch_name] as const),
+  )
+  const projectNames = new Map(projects.map((p) => [p.id, p.name] as const))
+
+  // One terminal's row. What it says about its owner is decided by an EXHAUSTIVE
+  // match on that owner, so a new owner kind is a compile error right here, at
+  // the site that chooses the row's secondary text and which stop action it
+  // carries. It is deliberately not `ownerSessionId`/`ownerProjectId`: those
+  // collapse an unknown owner into a pair of nulls and keep compiling, which is
+  // how a row ends up rendered with no identity and no way to act on it.
+  const terminalRow = (
+    terminal: TerminalView,
+    group: readonly TerminalView[],
+  ): TaskRow => {
+    const owner = matchWireOwner<{
+      detail: string | null
+      sessionId: string | null
+      projectId: string | null
+    }>(terminal.owner, {
+      session: (o) => ({
+        detail: sessionLabels.get(o.session_id) ?? null,
+        sessionId: o.session_id,
+        projectId: null,
+      }),
+      project: (o) => ({
+        detail: projectNames.get(o.project_id) ?? null,
+        sessionId: null,
+        projectId: o.project_id,
+      }),
+    })
+    const title = terminalTitle(terminal, group)
+    return {
+      key: `term:${terminal.id}`,
+      kind: "terminal",
+      name: title,
+      detail: owner.detail,
+      nested: false,
+      stoppable: true,
+      stopLabel: `Stop ${title}`,
+      sessionId: owner.sessionId,
+      projectId: owner.projectId,
+      targetId: terminal.id,
+      stats: byId.get(terminal.id) ?? null,
+    }
+  }
+
+  // Emit one owner's terminals, once. Groups are drained as they are emitted so
+  // the sweep at the end can pick up anything the session and project walks
+  // never reached.
+  const emitted = new Set<string>()
+  const emitTerminalGroup = (key: string) => {
+    const group = terminalGroups.get(key)
+    if (!group || emitted.has(key)) return
+    emitted.add(key)
+    for (const terminal of group) rows.push(terminalRow(terminal, group))
+  }
 
   const dux = stats.find((s) => s.kind === "dux") ?? null
   rows.push({
@@ -144,27 +203,11 @@ export function taskManagerRows(
 
     // Companion terminals are independent of the owning session's status:
     // detaching an agent DELIBERATELY leaves its terminals running (a live
-    // PTY the user may still want to reach or stop), so this loop must never
-    // sit inside the `status === "active"` gate above. Every terminal in the
+    // PTY the user may still want to reach or stop), so this must never sit
+    // inside the `status === "active"` gate above. Every terminal in the
     // spine is a live PTY (terminals are never persisted dormant), so
     // existence always means running, regardless of the agent's own status.
-    const sessionTerminals = terminalsBySession.get(session.id) ?? []
-    for (const terminal of sessionTerminals) {
-      const title = terminalTitle(terminal, sessionTerminals)
-      rows.push({
-        key: `term:${terminal.id}`,
-        kind: "terminal",
-        name: title,
-        detail: sessionLabel,
-        nested: false,
-        stoppable: true,
-        stopLabel: `Stop ${title}`,
-        sessionId: session.id,
-        projectId: null,
-        targetId: terminal.id,
-        stats: byId.get(terminal.id) ?? null,
-      })
-    }
+    emitTerminalGroup(ownerKey({ kind: "session", session_id: session.id }))
   }
 
   // Project terminals: live shells at a project's repo root with no agent
@@ -172,24 +215,17 @@ export function taskManagerRows(
   // session), and their stats join by terminal id exactly like session
   // terminals; the resource monitor samples the whole terminal map.
   for (const project of projects) {
-    const projectTerminals = terminalsByProject.get(project.id) ?? []
-    for (const terminal of projectTerminals) {
-      const title = terminalTitle(terminal, projectTerminals)
-      rows.push({
-        key: `term:${terminal.id}`,
-        kind: "terminal",
-        name: title,
-        detail: project.name,
-        nested: false,
-        stoppable: true,
-        stopLabel: `Stop ${title}`,
-        sessionId: null,
-        projectId: project.id,
-        targetId: terminal.id,
-        stats: byId.get(terminal.id) ?? null,
-      })
-    }
+    emitTerminalGroup(ownerKey({ kind: "project", project_id: project.id }))
   }
+
+  // Anything the two walks never reached: a terminal whose owner id resolves to
+  // nothing in this spine, or one belonging to a kind of owner these walks have
+  // no section for. It is emitted here rather than dropped, because the Task
+  // Manager's "Stop all" confirmation counts EVERY terminal in the flat
+  // collection: a terminal with no row would leave the rows and that count
+  // disagreeing about what is going to be stopped, and would take away the only
+  // control the user has for stopping it.
+  for (const key of terminalGroups.keys()) emitTerminalGroup(key)
 
   const total = stats.find((s) => s.kind === "total") ?? null
   rows.push({

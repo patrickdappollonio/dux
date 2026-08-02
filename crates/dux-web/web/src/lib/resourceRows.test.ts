@@ -252,6 +252,38 @@ describe("taskManagerRows", () => {
     ])
   })
 
+  // The Task Manager's bulk confirmation counts EVERY terminal in the flat
+  // collection, so a terminal the row walk fails to place would make the rows
+  // and the count disagree about what "Stop all" is about to stop. Rows are
+  // therefore emitted from the flat list itself: a terminal whose owner the walk
+  // over sessions and projects never reaches is emitted at the END, still
+  // stoppable, rather than dropped.
+  it("emits_a_row_for_every_terminal_even_when_its_owner_is_not_walked", () => {
+    const sessions = [session({ id: "s1", tabs: [tab({ id: "s1" })] })]
+    const terminals = [
+      terminal({ id: "term-known", owner: { kind: "session", session_id: "s1" } }),
+      // An owner the walk never visits (here a session missing from the spine's
+      // own list, which stands in for any owner this walk has no section for).
+      terminal({ id: "term-orphan", owner: { kind: "session", session_id: "gone" } }),
+    ]
+    const rows = taskManagerRows(sessions, [duxStat, totalStat], [], terminals)
+    expect(rows.map((r) => r.key)).toEqual([
+      "dux",
+      "tab:s1",
+      "term:term-known",
+      "term:term-orphan",
+      "total",
+    ])
+    const orphan = rows.find((r) => r.key === "term:term-orphan")
+    expect(orphan?.stoppable).toBe(true)
+    expect(orphan?.targetId).toBe("term-orphan")
+    // The count of terminal rows always equals the count of terminals, which is
+    // the number the "Stop all" confirmation puts in front of the user.
+    expect(rows.filter((r) => r.kind === "terminal")).toHaveLength(
+      terminals.length,
+    )
+  })
+
   it("keeps_row_order_stable_regardless_of_stat_values", () => {
     // R7: rows must never sort by a stat, or they would reorder under the
     // cursor on every poll.

@@ -68,7 +68,9 @@ export function TerminalArea() {
   // Resolve the owning session + (for an agent) the focused tab so we can render
   // the tab strip and gate the dormant card. A project terminal has NO owning
   // session; every session-scoped branch below is agent-only or tolerates
-  // `undefined`.
+  // `undefined`. The lossy `ownerSessionId` is right here because that IS the
+  // whole question: a terminal owned by anything other than a session has no tab
+  // strip and no dormant card, whichever kind of owner it turns out to be.
   const ownerSessionId =
     selectedTarget.kind === "agent"
       ? selectedTarget.sessionId

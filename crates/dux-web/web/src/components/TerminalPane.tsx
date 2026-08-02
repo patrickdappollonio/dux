@@ -59,7 +59,7 @@ import {
   tabPtyUrl,
   terminalSocketUrl,
 } from "@/lib/ptySocket"
-import { ownerProjectId, ownerSessionId } from "@/lib/terminalOwner"
+import { matchOwner, ownerProjectId, ownerSessionId } from "@/lib/terminalOwner"
 import { terminalsForOwner } from "@/lib/terminals"
 import {
   isForeground,
@@ -186,7 +186,11 @@ export function TerminalPane(props: TerminalPaneProps) {
   const { kind, id } = props
   // The owning session id, when there is one: the agent's own session, or a
   // session-owned terminal's parent. A PROJECT terminal has none (null); every
-  // session-scoped branch below must tolerate that.
+  // session-scoped branch below must tolerate that. These two are LOSSY on
+  // purpose and are used only to look an owner record up by id; anything that
+  // has to SAY something about the owner (the notification title below) matches
+  // on it exhaustively instead, because a pair of nulls is indistinguishable
+  // from an owner nothing here understands.
   const sessionId =
     props.kind === "agent" ? props.sessionId : ownerSessionId(props.owner)
   const projectId =
@@ -346,9 +350,21 @@ export function TerminalPane(props: TerminalPaneProps) {
   // Title for a bridged desktop notification: the agent's name (or its branch),
   // or the owning project's name for a project terminal, read lazily in the OSC
   // handler so a rename never recreates the terminal.
+  //
+  // A TERMINAL is named after its OWNER through an exhaustive match, not off the
+  // nullable `projectId`/`sessionId` pair above: those collapse an unrecognized
+  // owner into two nulls, and this expression then called the terminal "Agent",
+  // which is both wrong and unfixable from here. The fallback inside each arm
+  // covers an owner id the spine no longer carries, which is a lookup miss, not
+  // an unhandled kind.
   const notifyTitle =
-    projectId !== null
-      ? project?.name || "Terminal"
+    props.kind === "terminal"
+      ? matchOwner(props.owner, {
+          // A session-owned terminal is named after its AGENT, exactly as
+          // before; the generic fallback stays "Agent" for the same reason.
+          session: () => session?.title || session?.branch_name || "Agent",
+          project: () => project?.name || "Terminal",
+        })
       : session?.title || session?.branch_name || "Agent"
   const notifyTitleRef = useRef(notifyTitle)
   useEffect(() => {

@@ -42,11 +42,69 @@ export function ownerRefFromWire(owner: TerminalOwnerWire): TerminalOwnerRef {
   }
 }
 
+// A handler per owner variant, mapped over the union's `kind`. This is the
+// second half of the guarantee, and it exists because a `switch` inside a HELPER
+// only protects the helper: `ownerSessionId` below is exhaustive, yet a caller
+// that reduces an owner to that nullable id keeps compiling the day a new
+// variant starts answering null, and quietly does the wrong thing with it. So a
+// consumer whose BEHAVIOUR depends on the owner takes one of these instead. The
+// object literal it writes is missing a key the moment a variant is added, which
+// is a compile error at the CONSUMER, where the decision actually lives.
+//
+// Use `matchOwner`/`matchWireOwner` wherever the owner selects what is rendered,
+// where a row is emitted, or what something is called. Use `ownerSessionId` and
+// the two-bucket grouping only where "is it a session or not" really is the
+// whole question, and say so at the call site.
+export type OwnerMatch<T> = {
+  [K in TerminalOwnerRef["kind"]]: (
+    owner: Extract<TerminalOwnerRef, { kind: K }>,
+  ) => T
+}
+
+export function matchOwner<T>(owner: TerminalOwnerRef, on: OwnerMatch<T>): T {
+  switch (owner.kind) {
+    case "session":
+      return on.session(owner)
+    case "project":
+      return on.project(owner)
+    default:
+      return assertNever(owner)
+  }
+}
+
+// The wire spelling of the same matcher, for consumers holding a
+// `TerminalView.owner` straight off the spine that never need the client
+// spelling.
+export type WireOwnerMatch<T> = {
+  [K in TerminalOwnerWire["kind"]]: (
+    owner: Extract<TerminalOwnerWire, { kind: K }>,
+  ) => T
+}
+
+export function matchWireOwner<T>(
+  owner: TerminalOwnerWire,
+  on: WireOwnerMatch<T>,
+): T {
+  switch (owner.kind) {
+    case "session":
+      return on.session(owner)
+    case "project":
+      return on.project(owner)
+    default:
+      return assertNever(owner)
+  }
+}
+
 // The owning SESSION's id, or null when this terminal belongs to something that
 // is not a session. Session-scoped UI (the changes pane, the agent breadcrumb,
 // the session PTY route) hangs off this, and every one of those surfaces already
 // tolerates null, which is what makes null the right answer for a non-session
 // owner rather than a special case at each call site.
+//
+// LOSSY ON PURPOSE. It collapses every non-session owner into one answer, so it
+// can only be used where "is it a session or not" is the ENTIRE decision, and
+// each such use must say so. Anything that has to SAY something about the owner
+// (name it, place its row, choose its screen) uses `matchOwner` above instead.
 export function ownerSessionId(owner: TerminalOwnerRef): string | null {
   switch (owner.kind) {
     case "session":
@@ -59,7 +117,7 @@ export function ownerSessionId(owner: TerminalOwnerRef): string | null {
 }
 
 // The owning PROJECT's id, or null when this terminal belongs to something that
-// is not a project.
+// is not a project. Lossy on purpose, on the same terms as `ownerSessionId`.
 export function ownerProjectId(owner: TerminalOwnerRef): string | null {
   switch (owner.kind) {
     case "session":

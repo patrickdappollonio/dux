@@ -1,5 +1,5 @@
 import { ChevronLeft, Ellipsis, GitPullRequest, Settings } from "lucide-react"
-import { Suspense, useState } from "react"
+import { Suspense, useState, type ReactElement } from "react"
 
 import { AddProjectSplitButton } from "@/components/AddProjectSplitButton"
 import { AgentNotFound } from "@/components/AgentNotFound"
@@ -30,6 +30,7 @@ import {
 } from "@/lib/store"
 import { prIconClass, prIconHoverClass, prStateLabel } from "@/lib/pr"
 import type { TerminalOwnerRef } from "@/lib/store"
+import { matchOwner } from "@/lib/terminalOwner"
 import { terminalsForOwner, terminalTitle } from "@/lib/terminals"
 import { cn } from "@/lib/utils"
 
@@ -93,6 +94,61 @@ function HomeScreen() {
   )
 }
 
+// The spoke for a PROJECT-owned terminal: a project-name crumb over the shared
+// terminal. It has no agent, so it borrows none of the agent screen's chrome
+// (no changes chip, no agent actions menu).
+function ProjectTerminalScreen({
+  owner,
+  terminalId,
+}: {
+  owner: Extract<TerminalOwnerRef, { kind: "project" }>
+  terminalId: string
+}) {
+  const { spine } = useDux()
+  const project = spine?.projects.find((p) => p.id === owner.projectId)
+  if (!project) return <HomeScreen />
+  // This project's own terminals, selected out of the flat collection by owner,
+  // so the crumb still disambiguates against its true siblings.
+  const projectTerminals = terminalsForOwner(spine?.terminals ?? [], owner)
+  const terminal = projectTerminals.find((t) => t.id === terminalId)
+  return (
+    <div className="flex h-full min-h-0 flex-col overflow-hidden">
+      <header className="flex h-11 shrink-0 items-center gap-2 border-b px-3">
+        {/* Up to the hub, by name. A relative history step would walk out
+            of the app whenever this screen is the entry the browser opened
+            on, which a deep link makes routine. */}
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-10 shrink-0"
+          aria-label="Back"
+          onClick={() => navigateUp()}
+        >
+          <ChevronLeft />
+        </Button>
+        <div className="flex min-w-0 flex-1 items-baseline gap-1.5 text-sm">
+          <span className="truncate font-semibold">{project.name}</span>
+          <span className="truncate text-muted-foreground">
+            {terminal ? terminalTitle(terminal, projectTerminals) : "Terminal"}
+          </span>
+        </div>
+      </header>
+      <div className="min-h-0 flex-1">
+        <ChunkBoundary>
+          <Suspense fallback={null}>
+            <LazyTerminalPane
+              key={terminalId}
+              kind="terminal"
+              id={terminalId}
+              owner={owner}
+            />
+          </Suspense>
+        </ChunkBoundary>
+      </div>
+    </div>
+  )
+}
+
 // The focused-terminal spoke: a slim top bar over the full-screen shared terminal.
 function TerminalScreen() {
   const {
@@ -110,56 +166,27 @@ function TerminalScreen() {
       ? changes.staged.length + changes.unstaged.length
       : 0
 
-  if (
-    selectedTarget?.kind === "terminal" &&
-    selectedTarget.owner.kind === "project"
-  ) {
-    const owner = selectedTarget.owner
-    const project = spine?.projects.find((p) => p.id === owner.projectId)
-    if (!project) return <HomeScreen />
-    // This project's own terminals, selected out of the flat collection by
-    // owner, so the crumb still disambiguates against its true siblings.
-    const projectTerminals = terminalsForOwner(spine?.terminals ?? [], owner)
-    const terminal = projectTerminals.find(
-      (t) => t.id === selectedTarget.terminalId,
-    )
-    return (
-      <div className="flex h-full min-h-0 flex-col overflow-hidden">
-        <header className="flex h-11 shrink-0 items-center gap-2 border-b px-3">
-          {/* Up to the hub, by name. A relative history step would walk out
-              of the app whenever this screen is the entry the browser opened
-              on, which a deep link makes routine. */}
-          <Button
-            variant="ghost"
-            size="icon"
-            className="size-10 shrink-0"
-            aria-label="Back"
-            onClick={() => navigateUp()}
-          >
-            <ChevronLeft />
-          </Button>
-          <div className="flex min-w-0 flex-1 items-baseline gap-1.5 text-sm">
-            <span className="truncate font-semibold">{project.name}</span>
-            <span className="truncate text-muted-foreground">
-              {terminal ? terminalTitle(terminal, projectTerminals) : "Terminal"}
-            </span>
-          </div>
-        </header>
-        <div className="min-h-0 flex-1">
-          <ChunkBoundary>
-            <Suspense fallback={null}>
-              <LazyTerminalPane
-                key={selectedTarget.terminalId}
-                kind="terminal"
-                id={selectedTarget.terminalId}
-                owner={owner}
-              />
-            </Suspense>
-          </ChunkBoundary>
-        </div>
-      </div>
-    )
-  }
+  // Which screen a focused TERMINAL gets is decided by an EXHAUSTIVE match on
+  // its OWNER. The two-way `owner.kind === "project"` test this replaces kept
+  // compiling for any other kind of owner and fell through to the agent screen
+  // below, which requires a session and therefore renders the HUB: the user taps
+  // a terminal and lands on the home screen, with no error anywhere.
+  const ownerScreen =
+    selectedTarget?.kind === "terminal"
+      ? matchOwner<ReactElement | null>(selectedTarget.owner, {
+          // A session-owned terminal has no screen of its own: it renders INSIDE
+          // the agent screen below, sharing that agent's header, changes chip and
+          // actions menu. `null` is that answer, not an unhandled case.
+          session: () => null,
+          project: (owner) => (
+            <ProjectTerminalScreen
+              owner={owner}
+              terminalId={selectedTarget.terminalId}
+            />
+          ),
+        })
+      : null
+  if (ownerScreen) return ownerScreen
 
   if (!selectedTarget || !session) {
     return <HomeScreen />

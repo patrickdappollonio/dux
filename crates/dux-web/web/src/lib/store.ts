@@ -1295,6 +1295,10 @@ function pruneSelectionIfGone(spine: Spine, previous: SessionView[]): void {
     // already does, and both rewrite the current entry rather than stepping
     // history. Ejecting a companion terminal all the way to home threw away a
     // position that still existed.
+    //
+    // The lossy `ownerSessionId` is right here because "is there an agent above
+    // this terminal" IS the whole decision: an owner that is not a session has
+    // nothing above it, and home is already the answer for that.
     const ownerSession = ownerSessionId(owner)
     const fallback =
       ownerSession !== null && spine.sessions.some((s) => s.id === ownerSession)
@@ -1871,8 +1875,10 @@ function resolveRouteTarget(
   applyDeepLinkSelection(session, spine.terminals, target, "replace", changes)
 }
 
-// The session a route target belongs to, or null for a project terminal (which
-// belongs to a project instead).
+// The session a route target belongs to, or null for a terminal owned by
+// something that is not a session. The lossy `ownerSessionId` is right here
+// because every caller only asks whether there is session-scoped state to
+// resolve; a non-session owner has none, whichever kind it is.
 function targetSessionId(target: SelectedTarget): string | null {
   if (target.kind === "agent") return target.sessionId
   return ownerSessionId(target.owner)
@@ -2149,6 +2155,9 @@ function restoreReconnectDeepLink(spine: Spine): void {
     reconnectDeepLink = null
     return
   }
+  // Lossy on purpose: below, the only question asked of this is whether there is
+  // a session to restore alongside the target, which a non-session owner never
+  // has.
   const armedSessionId =
     armedTarget.kind === "agent"
       ? armedTarget.sessionId
@@ -2374,6 +2383,9 @@ export function selectTerminal(
   opts?: { urlMode?: "replace"; changes?: boolean },
 ): void {
   const prev = state.selectedSessionId
+  // Lossy on purpose: `selectedSessionId` exists to scope session-only UI, so
+  // "is this owner a session" is the entire question. Any other owner leaves it
+  // null, which is exactly the state a project terminal already puts it in.
   const sessionId = ownerSessionId(owner)
   setState({
     selectedTarget: { kind: "terminal", terminalId, owner },
