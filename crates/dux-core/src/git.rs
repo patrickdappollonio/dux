@@ -2161,6 +2161,26 @@ pub(crate) mod test_support {
     /// "fix" production by isolating it from the user's configuration.
     pub(crate) fn git_command() -> std::process::Command {
         let mut command = std::process::Command::new("git");
+        isolate_git_config(&mut command);
+        command
+    }
+
+    /// Applies the isolation to an already-built command, which is what makes
+    /// it testable: the removals below have to come AFTER anything that sets
+    /// the variables, exactly as they do for a variable the test process
+    /// inherited.
+    ///
+    /// Git reads configuration from FILES and, separately, from the
+    /// ENVIRONMENT. Pointing the file lookups at `/dev/null` says nothing about
+    /// the environment channel, and the environment channel carries the same
+    /// hazard: `GIT_CONFIG_COUNT=1` with `GIT_CONFIG_KEY_0`/`GIT_CONFIG_VALUE_0`
+    /// installs an `url.*.insteadOf` rewrite just as a global config file
+    /// would, and `GIT_CONFIG_PARAMETERS` (git's own transport for `git -c`) is
+    /// a second, independent channel that a zero count does NOT neutralise.
+    /// Both were measured, not assumed. Both are removed: with no
+    /// `GIT_CONFIG_COUNT` git reads no numbered pair at all, so a stray
+    /// `GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` needs no enumerating.
+    pub(crate) fn isolate_git_config(command: &mut std::process::Command) {
         command
             // Refuses `/etc/gitconfig` on every git version.
             .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -2168,8 +2188,9 @@ pub(crate) mod test_support {
             // `$XDG_CONFIG_HOME` lookups, which is what makes the global file
             // unreachable rather than merely relocated.
             .env("GIT_CONFIG_SYSTEM", "/dev/null")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null");
-        command
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env_remove("GIT_CONFIG_COUNT")
+            .env_remove("GIT_CONFIG_PARAMETERS");
     }
 }
 
@@ -2216,13 +2237,20 @@ pub(crate) fn github_remote_from_git_output(stdout: &[u8]) -> Option<GitHubRemot
     parse_github_remote(strip_git_record_terminator(text))
 }
 
-/// Removes exactly one trailing `\n`, and the `\r` immediately before it if
-/// there is one. Nothing else.
+/// Removes exactly one trailing `\n`. Nothing else, and in particular not a
+/// carriage return in front of it.
+///
+/// This project targets macOS and Linux only and assumes Unix throughout, so
+/// git never terminates an output record with CRLF here and there is no CRLF
+/// case to preserve. What a trailing `\r\n` really means on these platforms is
+/// a remote whose own value ends in a carriage return, with git having appended
+/// only the `\n`: an `url.*.insteadOf` replacement ending in one produces
+/// exactly that, and the bytes were measured rather than assumed. Taking the
+/// `\r` off as well would DELETE a byte of the remote and answer confidently
+/// for an address nobody wrote. Left in place it is simply another control
+/// character, which the parser already refuses.
 fn strip_git_record_terminator(text: &str) -> &str {
-    match text.strip_suffix('\n') {
-        Some(rest) => rest.strip_suffix('\r').unwrap_or(rest),
-        None => text,
-    }
+    text.strip_suffix('\n').unwrap_or(text)
 }
 
 /// Extracts `"owner/repo"` from a GitHub remote URL.
@@ -2319,10 +2347,9 @@ fn parse_github_remote(url: &str) -> Option<GitHubRemote> {
         // decoding instead erased DECODED separators at those boundaries, so
         // `/%2Fo/r` (three components, the first empty) answered `o/r`.
         let raw_path = strip_boundary_slashes(raw_path);
-        // Git percent-decodes the path of a URL, so `%2E` really is a dot. The
-        // decoding can introduce a separator, so segments are counted after it,
-        // and no decoded slash is trimmed away first.
-        let path = percent_decode_str(raw_path).decode_utf8().ok()?;
+        // Git percent-decodes the path of a URL, so `%2E` really is a dot. A
+        // decoded SLASH is refused outright rather than counted as a separator.
+        let path = decode_remote_path(raw_path)?;
         return owner_repo_from_path(&path).map(|owner_repo| GitHubRemote { host, owner_repo });
     }
 
@@ -2451,6 +2478,42 @@ fn strip_remote_userinfo(authority: &str) -> &str {
 fn strip_boundary_slashes(path: &str) -> &str {
     let path = path.strip_prefix('/').unwrap_or(path);
     path.strip_suffix('/').unwrap_or(path)
+}
+
+/// Percent-decodes a remote's path one raw segment at a time, refusing the
+/// whole path if any segment decodes to something containing a slash.
+///
+/// Git percent-decodes a URL's path, so the decoding has to happen; what must
+/// not happen is a decoded slash being read as a separator. A GitHub owner name
+/// and a repository name can never contain one, so a decoded slash always means
+/// the address names something other than what it appears to name.
+/// `https://github.com/octocat%2FHello-World.git` is a single path segment, and
+/// the real service was asked: `git ls-remote` for that address answers "Not
+/// Found", while `octocat/Hello-World` exists. Answering `octocat/Hello-World`
+/// for it sent `gh` after a repository the remote does not address. The
+/// position of the encoded slash makes no difference and neither does the
+/// scheme, so it is refused everywhere.
+///
+/// A slash is the only decoded character that can restructure the path this
+/// way. A decoded dot is legitimate inside a repository name and stays working
+/// (`%2Egit` is still a `.git` suffix); `.` and `..` as whole components are
+/// refused by [`remote_component_is_usable`], as are decoded control characters
+/// and whitespace. A raw backslash is refused by [`remote_input_is_literal`],
+/// but for a reason a percent-encoded one does not share: the `url` crate reads
+/// a RAW backslash as a path separator under http(s) and so disagrees with the
+/// raw-path scan about where a component begins. An encoded one is invisible to
+/// that crate and is not a separator to git either, so it changes no structure
+/// and is left to the component checks.
+fn decode_remote_path(raw_path: &str) -> Option<String> {
+    let mut decoded: Vec<String> = Vec::new();
+    for segment in raw_path.split('/') {
+        let segment = percent_decode_str(segment).decode_utf8().ok()?;
+        if segment.contains('/') {
+            return None;
+        }
+        decoded.push(segment.into_owned());
+    }
+    Some(decoded.join("/"))
 }
 
 /// Takes `owner/repo` from a remote's path, which its caller has already
@@ -4312,9 +4375,10 @@ mod tests {
     }
 
     /// The one place trimming is legitimate is the process boundary, and only
-    /// for what git actually appends: a single output record terminator, one
-    /// `\n` with an optional preceding `\r`. Anything else in git's output is
-    /// part of the remote and must reach the parser intact.
+    /// for what git actually appends: a single output record terminator, which
+    /// on this project's platforms (macOS and Linux, Unix throughout) is
+    /// exactly one `\n` and nothing else. Anything else in git's output is part
+    /// of the remote and must reach the parser intact.
     #[test]
     fn github_remote_from_git_output_removes_only_the_record_terminator() {
         let expected = Some(GitHubRemote {
@@ -4323,7 +4387,6 @@ mod tests {
         });
         for stdout in [
             "ssh://github.com/octocat/Hello-World.git\n",
-            "ssh://github.com/octocat/Hello-World.git\r\n",
             // git's output is read the same way when the terminator is absent.
             "ssh://github.com/octocat/Hello-World.git",
         ] {
@@ -4341,6 +4404,19 @@ mod tests {
             // Only ONE terminator comes off; the rest is a control character.
             "ssh://github.com/octocat/Hello-World.git\n\n",
             "ssh://github.com/octocat/Hello-World.git\r\r\n",
+            // A carriage return before the terminator is DATA, not part of the
+            // terminator. This used to be pinned the other way round, as a
+            // remote resolving to `octocat/Hello-World`, and it passed for an
+            // ambiguous reason: it read the `\r\n` as a CRLF line ending, which
+            // git does not write on macOS or Linux and which this project has
+            // no platform to receive. What really produces this output is a
+            // remote whose own path ends in a carriage return (an
+            // `url.*.insteadOf` replacement ending in one is enough), where git
+            // appended only the `\n`. Stripping the `\r` too would delete a
+            // byte of the remote and answer for an address nobody wrote, so
+            // exactly one `\n` comes off and the surviving control character is
+            // refused like any other.
+            "ssh://github.com/octocat/Hello-World.git\r\n",
         ] {
             assert_eq!(
                 github_remote_from_git_output(stdout.as_bytes()),
@@ -4380,23 +4456,24 @@ mod tests {
         }
     }
 
-    /// Separators are counted after decoding, which was true in the middle of
-    /// the path and false at its boundaries: the ONE syntactic leading slash was
-    /// removed by trimming every slash, so a decoded one at the front was erased
-    /// along with it and `/%2Fo/r` answered `o/r`. The syntactic slashes now come
-    /// off BEFORE decoding, exactly one at each end, and no decoded slash is
-    /// trimmed afterwards.
+    /// A decoded slash is refused wherever it appears, and the boundaries are
+    /// the place that took two goes to get right: the ONE syntactic leading
+    /// slash used to be removed by trimming EVERY slash, which erased a decoded
+    /// one sitting next to it, so `/%2Fo/r` answered `o/r`. The syntactic
+    /// slashes now come off BEFORE decoding, exactly one at each end, and each
+    /// remaining raw segment is decoded on its own, so a decoded slash cannot
+    /// be trimmed away and cannot pass as a separator either.
     #[test]
-    fn parse_github_remote_counts_decoded_separators_at_the_path_boundaries() {
+    fn parse_github_remote_refuses_decoded_separators_at_the_path_boundaries() {
         for url in [
-            // A decoded leading separator leaves an empty first component.
+            // A decoded leading separator is not the syntactic one.
             "ssh://github.com/%2Foctocat/Hello-World",
             "https://github.com/%2Foctocat/Hello-World",
-            // A decoded trailing separator leaves an empty last component; it
-            // is not the trailing raw slash the parser tolerates.
+            // A decoded trailing separator is not the trailing raw slash the
+            // parser tolerates.
             "ssh://github.com/octocat/Hello-World%2F",
             "https://github.com/octocat/Hello-World.git%2F",
-            // Already handled, kept pinned: a decoded separator in the middle.
+            // And one in the middle, which used to be read as a separator.
             "ssh://github.com/octocat/Hello-World%2Fextra",
             // An empty component is an empty component however it arrives.
             "ssh://github.com/octocat/Hello-World//",
@@ -4758,7 +4835,7 @@ mod tests {
     /// now refused, because the second slash leaves an empty component and an
     /// empty component is not a repository. That is the same rule that stops a
     /// decoded `%2F` at the boundary from impersonating the syntactic slash; see
-    /// `parse_github_remote_counts_decoded_separators_at_the_path_boundaries`.
+    /// `parse_github_remote_refuses_decoded_separators_at_the_path_boundaries`.
     #[test]
     fn parse_github_remote_trims_one_trailing_slash() {
         for url in [
@@ -4778,7 +4855,9 @@ mod tests {
     }
 
     /// git percent-decodes the path of a real URL, so dux must too: the remote
-    /// below addresses `/octocat/Hello-World.git`.
+    /// below addresses `/octocat/Hello-World.git`. A decoded DOT is legitimate
+    /// inside a repository name and keeps working; a decoded SLASH never is,
+    /// and is refused wherever it appears.
     #[test]
     fn parse_github_url_decodes_percent_escapes() {
         assert_eq!(
@@ -4788,18 +4867,32 @@ mod tests {
                 owner_repo: "octocat/Hello-World".to_string(),
             }),
         );
-        // Decoding can introduce a separator, which changes the segment count
-        // and therefore the answer. It must be counted after decoding.
+        // A decoded separator is refused rather than counted. This one was
+        // already refused, by the segment count.
         assert_eq!(
             parse_github_remote("ssh://github.com/octocat/Hello-World%2Fextra"),
             None,
         );
+        // And this one was pinned the other way round, as `octocat/Hello-World`,
+        // which encoded the wrong assumption: that a decoded slash in the
+        // MIDDLE of a path is a separator dux may act on. It is not. The real
+        // service was asked, and `git ls-remote` for this address answers "Not
+        // Found" while `octocat/Hello-World` exists, so the accepted answer
+        // named a repository this remote does not address. Neither a GitHub
+        // owner nor a repository name can contain a slash, so a decoded one
+        // always means the address names something other than what it appears
+        // to name, in every scheme and at every position.
         assert_eq!(
             parse_github_remote("https://github.com/octocat%2FHello-World"),
-            Some(GitHubRemote {
-                host: "github.com".to_string(),
-                owner_repo: "octocat/Hello-World".to_string(),
-            }),
+            None,
+        );
+        assert_eq!(
+            parse_github_remote("https://github.com/octocat%2FHello-World.git"),
+            None,
+        );
+        assert_eq!(
+            parse_github_remote("ssh://github.com/octocat%2FHello-World.git"),
+            None,
         );
     }
 

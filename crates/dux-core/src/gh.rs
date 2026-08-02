@@ -171,7 +171,7 @@ impl Planned {
 /// | MERGED/CLOSED  | yes            | head-ref discovery (catches a follow-up PR)|
 /// | MERGED/CLOSED  | no             | **zero calls** — reconstruct from SQLite  |
 fn run_entries(entries: &[PrSyncEntry], backoff: &BackoffSnapshot) -> PrSyncOutcome {
-    let (mut results, planned) = plan_entries(entries);
+    let (mut results, planned) = plan_entries(entries, &live_remote_resolver);
 
     // Group by host; for each host either skip it (already backed off — keep
     // last-known PRs, no gh call, no signal) or chunk its sessions by alias
@@ -233,20 +233,41 @@ fn run_entries(entries: &[PrSyncEntry], backoff: &BackoffSnapshot) -> PrSyncOutc
     (results, signals)
 }
 
+/// The remote resolver production uses: the real one, reading the worktree's
+/// `origin` through git, with the user's own configuration applied. That is
+/// correct here, because the rewritten URL is the one git would really contact.
+fn live_remote_resolver(worktree_path: &Path) -> Option<git::GitHubRemote> {
+    git::remote_github_repo(worktree_path)
+}
+
 /// The planning half of [`run_entries`], split out so it can be exercised on
 /// its own: it resolves each entry's repository and decides what would be
 /// asked, and it makes no network call and spawns no `gh` process.
 ///
 /// Returns the results that are already settled (an unresolvable entry, or one
 /// reconstructed from SQLite) alongside the lookups still to be run.
-fn plan_entries(entries: &[PrSyncEntry]) -> (Vec<(String, Option<PrInfo>)>, Vec<Planned>) {
+///
+/// The remote resolver is a parameter so the planning can be exercised without
+/// git. In production it is always [`live_remote_resolver`], which is the real
+/// thing and shells out; a test supplies the answer directly. This is what stops
+/// a planning test from being decided by the DEVELOPER's git configuration: the
+/// resolver shells out with no isolation (deliberately, since dux wants
+/// `url.*.insteadOf` applied for real), so an inherited rewrite used to reach
+/// straight into these tests. It was measured, not supposed: with a rewrite
+/// mapping the fixture's GitLab address onto github.com the negative test
+/// FAILED, and with one mapping github.com onto gitlab.com the positive test
+/// failed, so neither was testing the remote spelling it named.
+fn plan_entries(
+    entries: &[PrSyncEntry],
+    resolve_remote: &dyn Fn(&Path) -> Option<git::GitHubRemote>,
+) -> (Vec<(String, Option<PrInfo>)>, Vec<Planned>) {
     let mut results: Vec<(String, Option<PrInfo>)> = Vec::new();
     let mut planned: Vec<Planned> = Vec::new();
 
     for entry in entries {
         // Resolve (host, owner_repo): live remote first, else the known PR's repo
         // (works even after the branch/remote is gone).
-        let remote = git::remote_github_repo(Path::new(&entry.worktree_path));
+        let remote = resolve_remote(Path::new(&entry.worktree_path));
         let (host, owner_repo) = if let Some(remote) = remote {
             (remote.host, remote.owner_repo)
         } else if let Some(known) = &entry.known_pr {
@@ -1617,6 +1638,66 @@ mod tests {
         );
     }
 
+    /// Configuration reaches git through the ENVIRONMENT as well as through
+    /// files, and the file variables say nothing about it. `GIT_CONFIG_COUNT`
+    /// with its numbered key and value installs an `insteadOf` rewrite just as
+    /// a global config file would, and `GIT_CONFIG_PARAMETERS` is a second,
+    /// independent channel that a zero count does not touch. Each is shown
+    /// rewriting first, so the assertion that follows cannot be vacuous, and
+    /// then shown neutralised. The variables are set on the command BEFORE the
+    /// isolation is applied, which is what an inherited variable looks like
+    /// from git's side.
+    #[test]
+    fn git_fixtures_are_isolated_from_configuration_passed_through_the_environment() {
+        let dir = ssh_origin_repo("ssh://git@github.com/octocat/Hello-World.git");
+        let get_url = [
+            "-C",
+            dir.path().to_str().unwrap(),
+            "remote",
+            "get-url",
+            "origin",
+        ];
+        let channels: [Vec<(&str, &str)>; 2] = [
+            vec![
+                ("GIT_CONFIG_COUNT", "1"),
+                ("GIT_CONFIG_KEY_0", "url.ssh://git@evil.example/.insteadOf"),
+                ("GIT_CONFIG_VALUE_0", "ssh://git@github.com/"),
+            ],
+            vec![(
+                "GIT_CONFIG_PARAMETERS",
+                "'url.ssh://git@evil.example/.insteadOf=ssh://git@github.com/'",
+            )],
+        ];
+        for channel in channels {
+            // The demonstration half is isolated FIRST and given the hostile
+            // channel afterwards, so it shows this channel rewriting and not
+            // whatever the developer happens to have inherited. (Without that,
+            // an inherited rewrite of its own competes with it and this test
+            // fails for a reason that belongs to nobody's code, which is the
+            // exact defect it exists to close.)
+            let mut demonstration = std::process::Command::new("git");
+            demonstration.args(get_url);
+            crate::git::test_support::isolate_git_config(&mut demonstration);
+            demonstration.envs(channel.iter().copied());
+            let rewritten = demonstration.output().unwrap();
+            assert_eq!(
+                String::from_utf8_lossy(&rewritten.stdout).trim(),
+                "ssh://git@evil.example/octocat/Hello-World.git",
+                "{channel:?} must really rewrite, or the assertion below proves nothing",
+            );
+
+            let mut isolated = std::process::Command::new("git");
+            isolated.args(get_url).envs(channel.iter().copied());
+            crate::git::test_support::isolate_git_config(&mut isolated);
+            let out = isolated.output().unwrap();
+            assert_eq!(
+                String::from_utf8_lossy(&out.stdout).trim(),
+                "ssh://git@github.com/octocat/Hello-World.git",
+                "{channel:?} must not reach an isolated command",
+            );
+        }
+    }
+
     /// The `origin` remote of a fixture repository, resolved the way production
     /// resolves it but with the git half isolated from the developer's
     /// configuration.
@@ -1656,6 +1737,18 @@ mod tests {
         assert_eq!(lookup.number, 7);
     }
 
+    /// An entry whose worktree path is irrelevant, because these tests supply
+    /// the resolved remote themselves.
+    fn planning_entry() -> PrSyncEntry {
+        PrSyncEntry {
+            session_id: "s0".to_string(),
+            branch_name: "feat/x".to_string(),
+            worktree_path: "/nonexistent/worktree".to_string(),
+            known_pr: None,
+            agent_exited: false,
+        }
+    }
+
     /// The silent bug lives in the `known_pr: None` branch: an agent that has
     /// never had a pull request recorded has no stored host to fall back on, so
     /// a remote the parser did not understand was written down as an empty
@@ -1665,18 +1758,26 @@ mod tests {
     /// This asserts the PLAN rather than the run, which is what makes it
     /// honest: it names the exact host, owner and repo the poller would query,
     /// and it cannot spawn `gh` under any outcome, passing or failing.
+    ///
+    /// The remote is INJECTED rather than read out of a fixture repository.
+    /// This test used to build one and let planning shell out through
+    /// `git remote get-url`, with no isolation, so the developer's own
+    /// `url.*.insteadOf` decided the outcome: an inherited rewrite mapping
+    /// github.com onto gitlab.com made it fail. What it is actually about is
+    /// the planning logic, and that is now all it touches. The spellings a
+    /// remote can arrive in are covered by the parser's own tests in `git.rs`
+    /// and by `pull_request_lookup_resolves_an_ssh_scheme_origin_remote`, which
+    /// runs git through the isolating helper.
     #[test]
-    fn plan_entries_resolves_an_ssh_scheme_remote_for_a_session_with_no_known_pr() {
-        let dir = ssh_origin_repo("ssh://git@github.com:2222/octocat/Hello-World.git");
-        let entry = PrSyncEntry {
-            session_id: "s0".to_string(),
-            branch_name: "feat/x".to_string(),
-            worktree_path: dir.path().to_string_lossy().to_string(),
-            known_pr: None,
-            agent_exited: false,
-        };
+    fn plan_entries_queries_a_resolved_remote_for_a_session_with_no_known_pr() {
+        let entry = planning_entry();
 
-        let (results, planned) = plan_entries(std::slice::from_ref(&entry));
+        let (results, planned) = plan_entries(std::slice::from_ref(&entry), &|_| {
+            Some(git::GitHubRemote {
+                host: "github.com".to_string(),
+                owner_repo: "octocat/Hello-World".to_string(),
+            })
+        });
 
         assert!(
             results.is_empty(),
@@ -1693,18 +1794,18 @@ mod tests {
     /// The counterpart, so the assertion above is not vacuous: with nothing to
     /// resolve and nothing stored, the entry really does record an empty result
     /// and is never queried.
+    ///
+    /// The unresolvable remote is injected for the same reason as above. This
+    /// test used to build a GitLab fixture repository and let planning read it
+    /// through an unisolated `git remote get-url`, so an inherited rewrite
+    /// pointing that address at github.com made it fail outright, and one
+    /// pointing it at some other non-GitHub host let it pass while testing
+    /// nothing about the spelling it named.
     #[test]
     fn plan_entries_records_nothing_for_an_unresolvable_remote_with_no_known_pr() {
-        let dir = ssh_origin_repo("ssh://git@gitlab.com/owner/repo.git");
-        let entry = PrSyncEntry {
-            session_id: "s0".to_string(),
-            branch_name: "feat/x".to_string(),
-            worktree_path: dir.path().to_string_lossy().to_string(),
-            known_pr: None,
-            agent_exited: false,
-        };
+        let entry = planning_entry();
 
-        let (results, planned) = plan_entries(std::slice::from_ref(&entry));
+        let (results, planned) = plan_entries(std::slice::from_ref(&entry), &|_| None);
 
         assert!(planned.is_empty(), "a non-GitHub remote is never queried");
         assert_eq!(results.len(), 1);
@@ -1718,12 +1819,7 @@ mod tests {
     /// is lowercased at the planning boundary whatever its source.
     #[test]
     fn plan_entries_lowercases_a_host_taken_from_a_stored_pull_request() {
-        // No remote at all, so planning must fall back to the stored PR.
-        let dir = tempfile::tempdir().unwrap();
         let entry = PrSyncEntry {
-            session_id: "s0".to_string(),
-            branch_name: "feat/x".to_string(),
-            worktree_path: dir.path().to_string_lossy().to_string(),
             known_pr: Some(StoredPr {
                 session_id: "s0".to_string(),
                 pr_number: 7,
@@ -1733,10 +1829,11 @@ mod tests {
                 title: "t".to_string(),
                 url: "https://github.com/octocat/Hello-World/pull/7".to_string(),
             }),
-            agent_exited: false,
+            ..planning_entry()
         };
 
-        let (_, planned) = plan_entries(std::slice::from_ref(&entry));
+        // No remote at all, so planning must fall back to the stored PR.
+        let (_, planned) = plan_entries(std::slice::from_ref(&entry), &|_| None);
 
         assert_eq!(planned.len(), 1);
         assert_eq!(planned[0].host, "github.com");
