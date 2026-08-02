@@ -134,12 +134,16 @@ impl App {
         // which rebuilt only on a row close).
         let mut rebuild_needed = false;
         for pty in pruned.iter().filter(|p| p.kind == PrunedPtyKind::Agent) {
-            let Some(TerminalOwner::Session(session_id)) = &pty.owner else {
-                // An orphan tab with no owning session: nothing to surface.
-                continue;
+            // Exhaustive over the owner kinds so a future one has to say whether
+            // it surfaces a tab-exit message here, rather than falling into the
+            // orphan branch unnoticed.
+            let session_id = match pty.owner.as_ref().map(TerminalOwner::as_ref) {
+                Some(TerminalOwnerRef::Session(sid)) => sid,
+                // A project-owned or orphan tab has no session to surface on.
+                Some(TerminalOwnerRef::Project(_)) | None => continue,
             };
             let is_main = pty.id == *session_id;
-            let was_focused_tab = selected_before.as_deref() == Some(session_id.as_str())
+            let was_focused_tab = selected_before.as_deref() == Some(session_id)
                 && focused_tab_before.as_deref() == Some(pty.id.as_str());
             // The provider descriptor for the "Tab (provider) exited" copy, only
             // for an extra tab (the session-slot tab shows the workspace exit
@@ -156,7 +160,7 @@ impl App {
                     let target = self
                         .engine
                         .first_live_tab(session_id)
-                        .unwrap_or_else(|| session_id.clone());
+                        .unwrap_or_else(|| session_id.to_string());
                     self.set_focused_tab(session_id, &target);
                     if self.session_surface == SessionSurface::Agent {
                         // The surface under the user just vanished: drop
@@ -215,7 +219,13 @@ impl App {
                 && let Some(pty) = pruned.iter().find(|p| {
                     p.kind == PrunedPtyKind::Agent
                         && p.id == current_id
-                        && matches!(&p.owner, Some(TerminalOwner::Session(sid)) if *sid == current_id)
+                        // Exhaustive: a project-owned or orphan prune is not this
+                        // agent's own exit, and a future owner kind must say so
+                        // here rather than being read as one.
+                        && match p.owner.as_ref().map(TerminalOwner::as_ref) {
+                            Some(TerminalOwnerRef::Session(sid)) => sid == current_id,
+                            Some(TerminalOwnerRef::Project(_)) | None => false,
+                        }
                 })
                 // Don't bounce out of the pane if a live extra tab is focused:
                 // the session-slot provider exited, but the user is driving an
@@ -232,8 +242,11 @@ impl App {
                         && let Some(current) = self.selected_session()
                     {
                         let branch = current.branch_name.clone();
-                        let provider =
-                            self.engine.running_provider_for(current).as_str().to_string();
+                        let provider = self
+                            .engine
+                            .running_provider_for(current)
+                            .as_str()
+                            .to_string();
                         logger::error(&format!(
                             "Agent CLI process for agent \"{branch}\" ({provider}) exited. Full captured output:\n{}",
                             pty.output_excerpt

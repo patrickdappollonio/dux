@@ -18,6 +18,19 @@ use crate::worker::{ResourceKind, ResourceStats};
 pub struct SpineView {
     pub projects: Vec<ProjectView>,
     pub sessions: Vec<SessionView>,
+    /// EVERY companion terminal, of every owner, as ONE flat collection ordered
+    /// by the manual `sort_order` (the base order each surface applies the
+    /// active sort mode on top of).
+    ///
+    /// Terminals used to reach the client only by being nested inside the
+    /// session or the project that owns them, with no owner on the terminal at
+    /// all, and the client walked both collections to rebuild exactly this list
+    /// because the sidebar shows terminals flat. The flat, owner-bearing shape
+    /// is what the client actually wants, and it is the shape a new owner kind
+    /// cannot silently be left out of: there is ONE projection rather than two,
+    /// and each terminal carries a tagged [`TerminalOwnerView`] the client must
+    /// switch on exhaustively.
+    pub terminals: Vec<TerminalView>,
     /// Core-computed sidebar grouping (projects + sessions, with orphaned
     /// sessions surfaced) so both surfaces render an identical tree without
     /// re-deriving grouping at the interface.
@@ -323,10 +336,6 @@ pub struct ProjectView {
     /// Empty when no store row exists yet (a freshly constructed project that
     /// has not been persisted). Surfaced so a client can show an "added" date.
     pub created_at: String,
-    /// Project terminals open at this project's repo root (owned by the project,
-    /// with no agent attached), sorted by `id` for stability. Session-owned
-    /// companion terminals live on `SessionView::terminals` instead.
-    pub terminals: Vec<TerminalView>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -348,8 +357,6 @@ pub struct SessionView {
     pub auto_reopen_enabled: bool,
     /// Associated GitHub pull request, if one is tracked for this session.
     pub pr: Option<PrView>,
-    /// Companion terminals open for this session, sorted by `id` for stability.
-    pub terminals: Vec<TerminalView>,
     /// Provider tabs for this session, **Main first** (`tabs[0]`, `id ==
     /// session id`) then extra tabs in creation order. Always non-empty. The
     /// client shows the tab strip only when `tabs.len() >= 2`; with one tab the
@@ -395,9 +402,44 @@ pub struct SessionView {
     pub last_focused_tab: Option<String>,
 }
 
+/// The serialized owner of a terminal: a TAGGED union, one variant per
+/// [`crate::model::TerminalOwner`] variant, carrying the owner's id. This is the
+/// wire counterpart of the owner methods on `TerminalOwner`: because the client
+/// receives the tag, it can switch on it exhaustively (see
+/// `crates/dux-web/web/src/lib/terminalOwner.ts`, whose switches end in
+/// `assertNever`) instead of inferring ownership from which collection a
+/// terminal happened to be nested in.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TerminalOwnerView {
+    /// A companion terminal spawned in an agent's worktree.
+    Session { session_id: String },
+    /// A project terminal spawned at a project's repo root, with no agent.
+    Project { project_id: String },
+}
+
+impl crate::model::TerminalOwner {
+    /// Presentation: project the owner onto the wire. Exhaustive, so a new owner
+    /// kind cannot reach the browser as an untagged or missing owner.
+    pub fn to_view(&self) -> TerminalOwnerView {
+        match self.as_ref() {
+            crate::model::TerminalOwnerRef::Session(id) => TerminalOwnerView::Session {
+                session_id: id.to_string(),
+            },
+            crate::model::TerminalOwnerRef::Project(id) => TerminalOwnerView::Project {
+                project_id: id.to_string(),
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct TerminalView {
     pub id: String,
+    /// Who this terminal belongs to, tagged. Every terminal carries its own
+    /// owner now that they arrive as one flat collection rather than nested
+    /// under the session or project that owns them.
+    pub owner: TerminalOwnerView,
     pub label: String,
     /// Whether the terminal's PTY has emitted any output yet.
     pub has_output: bool,
@@ -572,7 +614,7 @@ impl ResourceStatsView {
 }
 
 impl ProjectView {
-    fn from_project(p: &Project, terminals: Vec<TerminalView>) -> Self {
+    fn from_project(p: &Project) -> Self {
         Self {
             id: p.id.clone(),
             name: p.name.clone(),
@@ -595,7 +637,6 @@ impl ProjectView {
             path_missing: p.path_missing,
             leading_branch: p.leading_branch.clone(),
             created_at: p.created_at.map(|dt| dt.to_rfc3339()).unwrap_or_default(),
-            terminals,
         }
     }
 }
@@ -605,7 +646,6 @@ impl SessionView {
     fn from_session(
         s: &AgentSession,
         pr: Option<&PrInfo>,
-        terminals: Vec<TerminalView>,
         tabs: Vec<AgentTabView>,
         has_output: bool,
         working: bool,
@@ -624,7 +664,6 @@ impl SessionView {
             status: s.status.as_str().to_string(),
             auto_reopen_enabled: s.auto_reopen_enabled,
             pr: pr.map(PrView::from_pr),
-            terminals,
             tabs,
             has_output,
             working,
@@ -685,7 +724,7 @@ impl Engine {
             projects: self
                 .projects
                 .iter()
-                .map(|p| ProjectView::from_project(p, self.project_terminal_views(&p.id)))
+                .map(ProjectView::from_project)
                 .collect(),
             sessions: self
                 .sessions
@@ -698,6 +737,7 @@ impl Engine {
                     self.project_session(s, support)
                 })
                 .collect(),
+            terminals: self.terminal_views(),
             sidebar: crate::sidebar::build_sidebar(
                 &self.projects,
                 &self.sessions,
@@ -713,6 +753,7 @@ impl Engine {
     fn terminal_view(&self, id: &str, t: &crate::model::CompanionTerminal) -> TerminalView {
         TerminalView {
             id: id.to_string(),
+            owner: t.owner.to_view(),
             label: t.label.clone(),
             has_output: t.client.has_output(),
             // A terminal is Working when it is streaming output OR a foreground app
@@ -737,16 +778,18 @@ impl Engine {
         }
     }
 
-    /// The project-owned terminals of `project_id` as [`TerminalView`]s, ordered
-    /// by their manual `sort_order` (the base order; each surface applies the
-    /// active sort mode on top in Phase 4b).
-    fn project_terminal_views(&self, project_id: &str) -> Vec<TerminalView> {
+    /// EVERY companion terminal as one flat, owner-bearing [`TerminalView`] list,
+    /// ordered by the manual `sort_order`. The single terminal projection: there
+    /// is no per-owner variant to forget to extend.
+    ///
+    /// The order is the same global `sort_order` ascending the two nested
+    /// projections produced within their own groups, and both surfaces re-apply
+    /// the active sort mode over this base, so flattening changes nothing the
+    /// user sees.
+    fn terminal_views(&self) -> Vec<TerminalView> {
         let mut terminals: Vec<TerminalView> = self
             .companion_terminals
             .iter()
-            .filter(
-                |(_, t)| matches!(&t.owner, crate::model::TerminalOwner::Project(pid) if pid == project_id),
-            )
             .map(|(id, t)| self.terminal_view(id, t))
             .collect();
         terminals.sort_by_key(|a| a.sort_order);
@@ -759,31 +802,25 @@ impl Engine {
     pub fn project_ids_with_terminals(&self) -> std::collections::HashSet<String> {
         self.companion_terminals
             .values()
-            .filter_map(|t| match &t.owner {
-                crate::model::TerminalOwner::Project(pid) => Some(pid.clone()),
-                crate::model::TerminalOwner::Session(_) => None,
+            .filter_map(|t| match t.owner.as_ref() {
+                crate::model::TerminalOwnerRef::Project(pid) => Some(pid.to_string()),
+                crate::model::TerminalOwnerRef::Session(_) => None,
             })
             .collect()
     }
 
-    /// Project a single session into its [`SessionView`], looking up its companion
-    /// terminals, PR status, output, and streaming flag exactly as [`Engine::spine`]
-    /// does. Factored out so the per-session REST read (`GET /api/v1/sessions/:id`)
+    /// Project a single session into its [`SessionView`], looking up its PR
+    /// status, output, and streaming flag exactly as [`Engine::spine`] does.
+    /// Factored out so the per-session REST read (`GET /api/v1/sessions/:id`)
     /// can project ONLY the requested session instead of building the whole spine.
+    ///
+    /// A session no longer carries its terminals: they live in the spine's one
+    /// flat [`SpineView::terminals`] collection, each tagged with its owner.
     fn project_session(
         &self,
         s: &AgentSession,
         support_tabs: &[&crate::model::AgentTab],
     ) -> SessionView {
-        let mut terminals: Vec<TerminalView> = self
-            .companion_terminals
-            .iter()
-            .filter(
-                |(_, t)| matches!(&t.owner, crate::model::TerminalOwner::Session(sid) if *sid == s.id),
-            )
-            .map(|(id, t)| self.terminal_view(id, t))
-            .collect();
-        terminals.sort_by_key(|a| a.sort_order);
         // The sidebar-facing status reflects ANY live tab: the agent is "active"
         // when any of its tabs (session-slot or extra) has a live PTY. (The
         // persisted `desired_running` auto-reopen intent stays agent-level and is
@@ -829,7 +866,6 @@ impl Engine {
         SessionView::from_session(
             s,
             self.pr_statuses.get(&s.id),
-            terminals,
             tabs,
             has_output,
             working,
@@ -1213,7 +1249,8 @@ mod tests {
             .expect("term 3");
 
         // Base order is creation order (ascending sort_order stamped at spawn).
-        let order: Vec<String> = engine.spine().sessions[0]
+        let order: Vec<String> = engine
+            .spine()
             .terminals
             .iter()
             .map(|t| t.id.clone())
@@ -1227,7 +1264,8 @@ mod tests {
             })
             .expect("reorder");
 
-        let reordered: Vec<String> = engine.spine().sessions[0]
+        let reordered: Vec<String> = engine
+            .spine()
             .terminals
             .iter()
             .map(|t| t.id.clone())
@@ -1245,7 +1283,7 @@ mod tests {
             .expect("term");
 
         // No activity yet: updated_at falls back to created_at exactly.
-        let view = engine.spine().sessions[0].terminals[0].clone();
+        let view = engine.spine().terminals[0].clone();
         assert_eq!(view.id, tid);
         assert_eq!(
             view.updated_at, view.created_at,
@@ -1255,7 +1293,7 @@ mod tests {
         // Stamp fresh activity: updated_at now tracks the activity, at or after
         // the spawn time.
         engine.pty_activity.insert(tid.clone(), Instant::now());
-        let after = engine.spine().sessions[0].terminals[0].clone();
+        let after = engine.spine().terminals[0].clone();
         assert_ne!(
             after.updated_at, after.created_at,
             "fresh PTY activity moves updated_at off created_at"
@@ -1381,8 +1419,14 @@ mod tests {
             .expect("create companion terminal");
 
         let vm = engine.spine();
-        let terminals = &vm.sessions[0].terminals;
+        let terminals = &vm.terminals;
         assert_eq!(terminals.len(), 1);
+        assert_eq!(
+            terminals[0].owner,
+            TerminalOwnerView::Session {
+                session_id: "s1".to_string()
+            }
+        );
         assert_eq!(terminals[0].id, terminal_id);
         assert_eq!(terminals[0].label, label);
         // A freshly-created terminal has no foreground command yet.
@@ -1390,7 +1434,7 @@ mod tests {
     }
 
     #[test]
-    fn spine_projects_project_terminals_onto_project_view_not_sessions() {
+    fn spine_tags_a_project_terminal_with_its_project_owner() {
         let (mut engine, _tmp) = test_engine();
 
         let repo = tempfile::tempdir().expect("project dir");
@@ -1408,15 +1452,73 @@ mod tests {
             .expect("create project terminal");
 
         let vm = engine.spine();
-        // The project carries the terminal...
-        let project_terminals = &vm.projects[0].terminals;
-        assert_eq!(project_terminals.len(), 1);
-        assert_eq!(project_terminals[0].id, terminal_id);
-        assert_eq!(project_terminals[0].label, label);
-        // ...and the session does NOT (the owner filter must not mix up).
-        assert!(
-            vm.sessions[0].terminals.is_empty(),
-            "a project terminal must never be projected onto a session"
+        // The one flat collection carries it, tagged with the PROJECT owner. It
+        // is the tag, not which collection it arrived in, that says who owns it.
+        assert_eq!(vm.terminals.len(), 1);
+        assert_eq!(vm.terminals[0].id, terminal_id);
+        assert_eq!(vm.terminals[0].label, label);
+        assert_eq!(
+            vm.terminals[0].owner,
+            TerminalOwnerView::Project {
+                project_id: "p1".to_string()
+            },
+            "a project terminal must never be tagged onto a session"
+        );
+    }
+
+    /// The test that catches the silent-omission class of bug this shape exists
+    /// to remove: EVERY terminal of EVERY owner kind reaches the client, in one
+    /// collection, each carrying its own owner, in `sort_order` order.
+    #[test]
+    fn spine_terminals_carry_every_terminal_of_every_owner_kind() {
+        let (mut engine, _worktree) = engine_with_spawnable_terminals();
+
+        let (session_terminal, _) = engine
+            .create_companion_terminal("s1", 24, 80)
+            .expect("session terminal");
+        let (project_terminal, _) = engine
+            .create_project_terminal("p1", 24, 80)
+            .expect("project terminal");
+
+        let vm = engine.spine();
+        let ids: Vec<&str> = vm.terminals.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![session_terminal.as_str(), project_terminal.as_str()],
+            "both owner kinds appear, in spawn (sort_order) order"
+        );
+        let owners: Vec<&TerminalOwnerView> = vm.terminals.iter().map(|t| &t.owner).collect();
+        assert_eq!(
+            owners,
+            vec![
+                &TerminalOwnerView::Session {
+                    session_id: "s1".to_string()
+                },
+                &TerminalOwnerView::Project {
+                    project_id: "p1".to_string()
+                },
+            ]
+        );
+    }
+
+    /// The owner is a TAGGED union on the wire, so the client can switch on it.
+    #[test]
+    fn terminal_owner_serializes_with_a_kind_tag() {
+        let session = serde_json::to_value(TerminalOwnerView::Session {
+            session_id: "s1".to_string(),
+        })
+        .expect("serialize");
+        assert_eq!(
+            session,
+            serde_json::json!({ "kind": "session", "session_id": "s1" })
+        );
+        let project = serde_json::to_value(TerminalOwnerView::Project {
+            project_id: "p1".to_string(),
+        })
+        .expect("serialize");
+        assert_eq!(
+            project,
+            serde_json::json!({ "kind": "project", "project_id": "p1" })
         );
     }
 
@@ -1449,7 +1551,7 @@ mod tests {
 
         let vm = engine.spine();
         assert_eq!(
-            vm.sessions[0].terminals[0].foreground_cmd.as_deref(),
+            vm.terminals[0].foreground_cmd.as_deref(),
             Some("npm"),
             "a Some foreground_cmd must project verbatim"
         );
@@ -1463,7 +1565,7 @@ mod tests {
 
         let vm = engine.spine();
         assert_eq!(
-            vm.sessions[0].terminals[0].foreground_cmd, None,
+            vm.terminals[0].foreground_cmd, None,
             "a None foreground_cmd must project as null"
         );
     }

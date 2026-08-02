@@ -19,8 +19,8 @@
 
 import { formatBytes, formatCpu } from "./formatStats"
 import type { ResourceStatsView } from "./resourcesApi"
-import { terminalTitle } from "./terminals"
-import type { ProjectView, SessionView } from "./types"
+import { groupTerminalsByOwner, terminalTitle } from "./terminals"
+import type { ProjectView, SessionView, TerminalView } from "./types"
 
 export type TaskRowKind = "dux" | "agent" | "terminal" | "total"
 
@@ -65,7 +65,13 @@ export function taskManagerRows(
   sessions: readonly SessionView[],
   stats: readonly ResourceStatsView[],
   projects: readonly ProjectView[],
+  terminals: readonly TerminalView[],
 ): TaskRow[] {
+  // Terminals arrive as one flat, owner-tagged collection; bucket them by owner
+  // so the loops below still walk each session's and each project's own
+  // terminals, in the same order the nested collections used to carry.
+  const { bySession: terminalsBySession, byProject: terminalsByProject } =
+    groupTerminalsByOwner(terminals)
   // Index the sampled rows by the id core stamped on them.
   const byId = new Map<string, ResourceStatsView>()
   for (const s of stats) {
@@ -142,8 +148,9 @@ export function taskManagerRows(
     // sit inside the `status === "active"` gate above. Every terminal in the
     // spine is a live PTY (terminals are never persisted dormant), so
     // existence always means running, regardless of the agent's own status.
-    for (const terminal of session.terminals) {
-      const title = terminalTitle(terminal, session.terminals)
+    const sessionTerminals = terminalsBySession.get(session.id) ?? []
+    for (const terminal of sessionTerminals) {
+      const title = terminalTitle(terminal, sessionTerminals)
       rows.push({
         key: `term:${terminal.id}`,
         kind: "terminal",
@@ -165,8 +172,9 @@ export function taskManagerRows(
   // session), and their stats join by terminal id exactly like session
   // terminals; the resource monitor samples the whole terminal map.
   for (const project of projects) {
-    for (const terminal of project.terminals) {
-      const title = terminalTitle(terminal, project.terminals)
+    const projectTerminals = terminalsByProject.get(project.id) ?? []
+    for (const terminal of projectTerminals) {
+      const title = terminalTitle(terminal, projectTerminals)
       rows.push({
         key: `term:${terminal.id}`,
         kind: "terminal",

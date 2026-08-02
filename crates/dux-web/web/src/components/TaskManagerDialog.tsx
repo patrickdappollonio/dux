@@ -118,9 +118,10 @@ function TaskManagerBody() {
 
   const sessions = useMemo(() => spine?.sessions ?? [], [spine])
   const projects = useMemo(() => spine?.projects ?? [], [spine])
+  const terminals = useMemo(() => spine?.terminals ?? [], [spine])
   const rows = useMemo(
-    () => taskManagerRows(sessions, stats, projects),
-    [sessions, stats, projects],
+    () => taskManagerRows(sessions, stats, projects, terminals),
+    [sessions, stats, projects, terminals],
   )
   const empty = nothingRunning(rows)
   const stale = now !== null && statsAreStale(now, lastSuccessAt)
@@ -669,11 +670,9 @@ function ConfirmStopAllDialog({ open }: { open: boolean }) {
   const { spine } = useDux()
   const sessions = spine?.sessions ?? []
   const agents = sessions.filter((s) => s.status === "active").length
-  // Count terminals across BOTH owners: session terminals plus project
-  // terminals, matching exactly what `stopAllRunning` will stop.
-  const terminals =
-    sessions.reduce((n, s) => n + s.terminals.length, 0) +
-    (spine?.projects ?? []).reduce((n, p) => n + p.terminals.length, 0)
+  // Every terminal of every owner, which is exactly what `stopAllRunning` will
+  // stop: one flat collection, so the count cannot miss an owner kind.
+  const terminals = spine?.terminals.length ?? 0
 
   function handleConfirm() {
     stopAllRunning()

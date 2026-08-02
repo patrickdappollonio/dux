@@ -3,7 +3,7 @@ import { Fragment } from "react"
 import { AppMenu } from "@/components/AppMenu"
 import { branchDrift } from "@/lib/agentTabs"
 import { useDux } from "@/lib/store"
-import { terminalTitle } from "@/lib/terminals"
+import { groupTerminalsByOwner, terminalTitle } from "@/lib/terminals"
 
 // One `key: value` crumb in the header details row. `muted`, when present, is
 // appended as a dimmed trailing clause on the same crumb (used to surface the
@@ -29,14 +29,16 @@ export function InsetHeader() {
   // text is the foreground command when one is running (disambiguated with the
   // terminal's number if a sibling runs the same app), otherwise the stable
   // "Terminal N" label.
+  // Terminals arrive flat and owner-tagged; bucket them so each crumb still
+  // reads its owner's own terminals (which is what the counts below mean).
+  const { bySession, byProject } = groupTerminalsByOwner(spine?.terminals ?? [])
+  const sessionTerminals = session ? (bySession.get(session.id) ?? []) : []
   const terminal =
     selectedTarget?.kind === "terminal"
-      ? session?.terminals.find((t) => t.id === selectedTarget.terminalId)
+      ? sessionTerminals.find((t) => t.id === selectedTarget.terminalId)
       : undefined
   const terminalLabel =
-    terminal && session
-      ? terminalTitle(terminal, session.terminals)
-      : undefined
+    terminal && session ? terminalTitle(terminal, sessionTerminals) : undefined
 
   // A focused PROJECT terminal has no session: resolve its owning project and
   // terminal directly so the bar shows `project › terminal` crumbs instead of
@@ -48,9 +50,12 @@ export function InsetHeader() {
   const ownerProject = projectTerminalOwner
     ? spine?.projects.find((p) => p.id === projectTerminalOwner.projectId)
     : undefined
+  const ownerProjectTerminals = ownerProject
+    ? (byProject.get(ownerProject.id) ?? [])
+    : []
   const projectTerminal =
     ownerProject && selectedTarget?.kind === "terminal"
-      ? ownerProject.terminals.find((t) => t.id === selectedTarget.terminalId)
+      ? ownerProjectTerminals.find((t) => t.id === selectedTarget.terminalId)
       : undefined
 
   // The header details, mirroring the TUI: a flat `key: value` list joined by a
@@ -85,21 +90,21 @@ export function InsetHeader() {
       muted: drift.drifted ? `originally ${drift.initial}` : undefined,
     })
     if (terminalLabel) details.push({ key: "terminal", value: terminalLabel })
-    if (session.terminals.length > 0) {
-      details.push({ key: "terminals", value: String(session.terminals.length) })
+    if (sessionTerminals.length > 0) {
+      details.push({ key: "terminals", value: String(sessionTerminals.length) })
     }
   } else if (ownerProject) {
     details.push({ key: "project", value: ownerProject.name })
     if (projectTerminal) {
       details.push({
         key: "terminal",
-        value: terminalTitle(projectTerminal, ownerProject.terminals),
+        value: terminalTitle(projectTerminal, ownerProjectTerminals),
       })
     }
-    if (ownerProject.terminals.length > 0) {
+    if (ownerProjectTerminals.length > 0) {
       details.push({
         key: "terminals",
-        value: String(ownerProject.terminals.length),
+        value: String(ownerProjectTerminals.length),
       })
     }
   }

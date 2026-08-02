@@ -1,4 +1,80 @@
+import { assertNever } from "@/lib/assertNever"
+import {
+  sameOwner,
+  sameWireOwner,
+  type TerminalOwnerRef,
+} from "@/lib/terminalOwner"
 import type { TerminalView } from "@/lib/types"
+
+// Every terminal owned by `owner`, in the order the flat collection carries them
+// (the global `sort_order` base). This is what nesting used to give for free.
+export function terminalsForOwner(
+  terminals: readonly TerminalView[],
+  owner: TerminalOwnerRef,
+): TerminalView[] {
+  return terminals.filter((t) => sameOwner(t.owner, owner))
+}
+
+// Whether `owner` owns a terminal with `terminalId`. This is the membership test
+// the router and the deep-link restores run: a terminal must still exist UNDER
+// the owner its address names, so merely existing is not enough.
+export function ownerHasTerminal(
+  terminals: readonly TerminalView[],
+  owner: TerminalOwnerRef,
+  terminalId: string,
+): boolean {
+  return terminals.some((t) => t.id === terminalId && sameOwner(t.owner, owner))
+}
+
+// Terminals bucketed by owner, for the surfaces that walk sessions and projects
+// and need each one's terminals in hand (the task manager's rows, the project
+// info counts). Each bucket keeps the input order, which is the global
+// `sort_order` base, so a bucket is the same sequence the nested collections
+// used to carry.
+export interface TerminalsByOwner {
+  bySession: Map<string, TerminalView[]>
+  byProject: Map<string, TerminalView[]>
+}
+
+export function groupTerminalsByOwner(
+  terminals: readonly TerminalView[],
+): TerminalsByOwner {
+  const bySession = new Map<string, TerminalView[]>()
+  const byProject = new Map<string, TerminalView[]>()
+  const push = (
+    map: Map<string, TerminalView[]>,
+    key: string,
+    t: TerminalView,
+  ) => {
+    const group = map.get(key)
+    if (group) group.push(t)
+    else map.set(key, [t])
+  }
+  for (const t of terminals) {
+    const owner = t.owner
+    switch (owner.kind) {
+      case "session":
+        push(bySession, owner.session_id, t)
+        break
+      case "project":
+        push(byProject, owner.project_id, t)
+        break
+      default:
+        return assertNever(owner)
+    }
+  }
+  return { bySession, byProject }
+}
+
+// The terminals sharing `t`'s owner, INCLUDING `t`. `terminalTitle` uses this to
+// disambiguate two same-owner terminals running the same app; it used to be
+// simply the array `t` was nested in.
+export function terminalSiblings(
+  terminals: readonly TerminalView[],
+  t: TerminalView,
+): TerminalView[] {
+  return terminals.filter((other) => sameWireOwner(other.owner, t.owner))
+}
 
 // The terminal's NORMALIZED foreground command, or null when the shell itself is
 // in the foreground (idle). TWIN of the core-owned

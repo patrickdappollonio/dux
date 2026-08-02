@@ -87,7 +87,6 @@ function makeSession(over: Partial<SessionView> & { id: string }): SessionView {
     worktree_path: `/tmp/${over.id}`,
     status: "active",
     auto_reopen_enabled: false,
-    terminals: [],
     tabs: [],
     has_output: false,
     working: false,
@@ -101,6 +100,7 @@ function makeSession(over: Partial<SessionView> & { id: string }): SessionView {
 
 function makeTerminal(over: Partial<TerminalView> & { id: string }): TerminalView {
   return {
+    owner: { kind: "session", session_id: "zeta" },
     label: over.id,
     has_output: false,
     working: false,
@@ -119,24 +119,23 @@ function makeTerminal(over: Partial<TerminalView> & { id: string }): TerminalVie
 function makeState(sort: string): DuxState {
   return {
     spine: {
-      projects: [{ id: "p1", name: "Repo", terminals: [] }],
-      sessions: [
-        makeSession({
-          id: "zeta",
-          title: "Zeta",
-          terminals: [
-            makeTerminal({
-              id: "t-z",
-              label: "zsh",
-              sort_order: 1,
-              // A running foreground command so the row DISPLAYS "zsh" (an
-              // idle terminal reads a plain "Terminal"); the highlight test
-              // needs the displayed string to be the matched one.
-              foreground_cmd: "zsh",
-            }),
-            makeTerminal({ id: "t-a", label: "bash", sort_order: 2 }),
-          ],
+      projects: [{ id: "p1", name: "Repo" }],
+      // Both terminals are owned by the Zeta agent, in one flat, owner-tagged
+      // collection ordered by `sort_order`.
+      terminals: [
+        makeTerminal({
+          id: "t-z",
+          label: "zsh",
+          sort_order: 1,
+          // A running foreground command so the row DISPLAYS "zsh" (an
+          // idle terminal reads a plain "Terminal"); the highlight test
+          // needs the displayed string to be the matched one.
+          foreground_cmd: "zsh",
         }),
+        makeTerminal({ id: "t-a", label: "bash", sort_order: 2 }),
+      ],
+      sessions: [
+        makeSession({ id: "zeta", title: "Zeta" }),
         makeSession({ id: "gone", title: "Gone", status: "exited" }),
         // A branch that diverges from the title so line two renders it (the
         // branch-hit highlight test needs a visible branch).

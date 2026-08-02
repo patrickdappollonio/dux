@@ -32,11 +32,12 @@ function makeBootstrap(): Bootstrap {
 // deleteTerminal can resolve its owner.
 let spineBody: unknown = {
   projects: [{ id: "p1", name: "Repo" }],
-  sessions: [
+  sessions: [{ id: "s1", project_id: "p1" }],
+  terminals: [
     {
-      id: "s1",
-      project_id: "p1",
-      terminals: [{ id: "t1", label: "Terminal 1" }],
+      id: "t1",
+      label: "Terminal 1",
+      owner: { kind: "session", session_id: "s1" },
     },
   ],
   sidebar: { groups: [] },
@@ -124,11 +125,12 @@ beforeEach(() => {
   reorderFail = false
   spineBody = {
     projects: [{ id: "p1", name: "Repo" }],
-    sessions: [
+    sessions: [{ id: "s1", project_id: "p1" }],
+    terminals: [
       {
-        id: "s1",
-        project_id: "p1",
-        terminals: [{ id: "t1", label: "Terminal 1" }],
+        id: "t1",
+        label: "Terminal 1",
+        owner: { kind: "session", session_id: "s1" },
       },
     ],
     sidebar: { groups: [] },
@@ -224,10 +226,15 @@ describe("store companion-terminal lifecycle", () => {
     // The trap this guards (T1): a session-only owner scan resolved nothing for
     // a project terminal and silently returned: Close did nothing, no toast.
     spineBody = {
-      projects: [
-        { id: "p1", name: "Repo", terminals: [{ id: "pt1", label: "Terminal 1" }] },
-      ],
+      projects: [{ id: "p1", name: "Repo" }],
       sessions: [],
+      terminals: [
+        {
+          id: "pt1",
+          label: "Terminal 1",
+          owner: { kind: "project", project_id: "p1" },
+        },
+      ],
       sidebar: { groups: [] },
     }
     const mod = await loadStore()
@@ -244,14 +251,18 @@ describe("store companion-terminal lifecycle", () => {
     // The trap this guards (T4): the panic button iterated only sessions'
     // terminals, so a hung project terminal survived "Stop all".
     spineBody = {
-      projects: [
-        { id: "p1", name: "Repo", terminals: [{ id: "pt1", label: "Terminal 1" }] },
-      ],
-      sessions: [
+      projects: [{ id: "p1", name: "Repo" }],
+      sessions: [{ id: "s1", project_id: "p1" }],
+      terminals: [
         {
-          id: "s1",
-          project_id: "p1",
-          terminals: [{ id: "t1", label: "Terminal 1" }],
+          id: "t1",
+          label: "Terminal 1",
+          owner: { kind: "session", session_id: "s1" },
+        },
+        {
+          id: "pt1",
+          label: "Terminal 1",
+          owner: { kind: "project", project_id: "p1" },
         },
       ],
       sidebar: { groups: [] },
@@ -298,14 +309,19 @@ describe("store terminal reorder overlay", () => {
     // overlay when that matches what we optimistically applied.
     spineBody = {
       projects: [{ id: "p1", name: "Repo" }],
-      sessions: [
+      sessions: [{ id: "s1", project_id: "p1" }],
+      terminals: [
         {
-          id: "s1",
-          project_id: "p1",
-          terminals: [
-            { id: "t1", label: "Terminal 1", sort_order: 1 },
-            { id: "t2", label: "Terminal 2", sort_order: 0 },
-          ],
+          id: "t2",
+          label: "Terminal 2",
+          sort_order: 0,
+          owner: { kind: "session", session_id: "s1" },
+        },
+        {
+          id: "t1",
+          label: "Terminal 1",
+          sort_order: 1,
+          owner: { kind: "session", session_id: "s1" },
         },
       ],
       sidebar: { groups: [] },
@@ -323,21 +339,26 @@ describe("store terminal reorder overlay", () => {
     // Spine still reflects the OLD order (t1 before t2): overlay must persist.
     spineBody = {
       projects: [{ id: "p1", name: "Repo" }],
-      sessions: [
+      sessions: [{ id: "s1", project_id: "p1" }],
+      terminals: [
         {
-          id: "s1",
-          project_id: "p1",
-          terminals: [
-            { id: "t1", label: "Terminal 1", sort_order: 0 },
-            { id: "t2", label: "Terminal 2", sort_order: 1 },
-          ],
+          id: "t1",
+          label: "Terminal 1",
+          sort_order: 0,
+          owner: { kind: "session", session_id: "s1" },
+        },
+        {
+          id: "t2",
+          label: "Terminal 2",
+          sort_order: 1,
+          owner: { kind: "session", session_id: "s1" },
         },
       ],
       sidebar: { groups: [] },
     }
     mod.eventsSocket.onEvent({ event: "sessions.changed" })
     await vi.waitFor(() => {
-      expect(mod.getSnapshot().spine?.sessions[0].terminals).toHaveLength(2)
+      expect(mod.getSnapshot().spine?.terminals).toHaveLength(2)
     })
     expect(mod.getSnapshot().pendingTerminalOrder).toEqual(["t2", "t1"])
   })

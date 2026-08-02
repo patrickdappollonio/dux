@@ -18,11 +18,20 @@ function tab(over: Partial<AgentTabView> & { id: string }): AgentTabView {
 
 function terminal(over: Partial<TerminalView> & { id: string }): TerminalView {
   return {
+    owner: { kind: "session", session_id: "s1" },
     label: "term",
     has_output: false,
     foreground_cmd: null,
     ...over,
-  }
+  } as TerminalView
+}
+
+// A project-owned terminal, the same builder with the owner flipped.
+function projectTerminal(
+  over: Partial<TerminalView> & { id: string; projectId: string },
+): TerminalView {
+  const { projectId, ...rest } = over
+  return terminal({ ...rest, owner: { kind: "project", project_id: projectId } })
 }
 
 function session(over: Partial<SessionView> & { id: string }): SessionView {
@@ -36,7 +45,6 @@ function session(over: Partial<SessionView> & { id: string }): SessionView {
     worktree_path: "/wt",
     status: "active",
     auto_reopen_enabled: false,
-    terminals: [],
     tabs: [tab({ id: over.id })],
     has_output: false,
     working: false,
@@ -73,7 +81,6 @@ const totalStat = stat({ id: null, kind: "total", label: "TOTAL" })
 function project(over: Partial<ProjectView> & { id: string }): ProjectView {
   return {
     name: over.id,
-    terminals: [],
     ...over,
   } as unknown as ProjectView
 }
@@ -83,12 +90,9 @@ describe("taskManagerRows", () => {
     // The trap this guards (T5): project terminals never appeared in the Task
     // Manager at all, even though the server samples them (the resource
     // monitor iterates the whole terminal map).
-    const projects = [
-      project({
-        id: "p1",
-        name: "Repo",
-        terminals: [terminal({ id: "pt-1", label: "Terminal 2" })],
-      }),
+    const projects = [project({ id: "p1", name: "Repo" })]
+    const terminals = [
+      projectTerminal({ id: "pt-1", projectId: "p1", label: "Terminal 2" }),
     ]
     const stats = [
       duxStat,
@@ -102,7 +106,7 @@ describe("taskManagerRows", () => {
       }),
       totalStat,
     ]
-    const rows = taskManagerRows([], stats, projects)
+    const rows = taskManagerRows([], stats, projects, terminals)
     const row = rows.find((r) => r.key === "term:pt-1")
     expect(row).toBeDefined()
     expect(row?.kind).toBe("terminal")
@@ -119,10 +123,9 @@ describe("taskManagerRows", () => {
   it("a_lone_project_terminal_means_something_is_running", () => {
     // The trap this guards (T6): with only a project terminal live the dialog
     // said "Nothing is running." and auto-closed.
-    const projects = [
-      project({ id: "p1", terminals: [terminal({ id: "pt-1" })] }),
-    ]
-    const rows = taskManagerRows([], [duxStat, totalStat], projects)
+    const projects = [project({ id: "p1" })]
+    const terminals = [projectTerminal({ id: "pt-1", projectId: "p1" })]
+    const rows = taskManagerRows([], [duxStat, totalStat], projects, terminals)
     expect(rows.some((r) => r.stoppable)).toBe(true)
   })
 
@@ -141,7 +144,7 @@ describe("taskManagerRows", () => {
       totalStat,
     ]
 
-    const rows = taskManagerRows(sessions, stats, [])
+    const rows = taskManagerRows(sessions, stats, [], [])
     const agent = rows.find((r) => r.key === "tab:s1")
     expect(agent?.stats?.cpu_percent).toBe(3.4)
     expect(agent?.stats?.process_count).toBe(7)
@@ -161,7 +164,7 @@ describe("taskManagerRows", () => {
       totalStat,
     ]
 
-    const rows = taskManagerRows(sessions, stats, [])
+    const rows = taskManagerRows(sessions, stats, [], [])
     expect(rows.find((r) => r.key === "tab:s1")?.stats?.cpu_percent).toBe(1)
     expect(rows.find((r) => r.key === "tab:s2")?.stats?.cpu_percent).toBe(9)
   })
@@ -176,7 +179,7 @@ describe("taskManagerRows", () => {
         tabs: [tab({ id: "s1" }), tab({ id: "t2", has_live_process: false })],
       }),
     ]
-    const rows = taskManagerRows(sessions, [duxStat, totalStat], [])
+    const rows = taskManagerRows(sessions, [duxStat, totalStat], [], [])
     const dormant = rows.find((r) => r.key === "tab:t2")
     expect(dormant).toBeDefined()
     expect(dormant?.stats).toBeNull()
@@ -193,7 +196,7 @@ describe("taskManagerRows", () => {
       stat({ id: "ghost", label: "Agent (claude): ghost" }),
       totalStat,
     ]
-    const rows = taskManagerRows(sessions, stats, [])
+    const rows = taskManagerRows(sessions, stats, [], [])
     expect(rows.some((r) => r.key === "tab:ghost")).toBe(false)
   })
 
@@ -203,13 +206,13 @@ describe("taskManagerRows", () => {
       duxStat,
       stat({ id: "s1", label: "Agent (claude): s1" }),
       totalStat,
-    ], [])
+    ], [], [])
     expect(rows[0].kind).toBe("dux")
     expect(rows[rows.length - 1].kind).toBe("total")
   })
 
   it("dux_and_total_render_even_with_no_runtimes", () => {
-    const rows = taskManagerRows([], [duxStat, totalStat], [])
+    const rows = taskManagerRows([], [duxStat, totalStat], [], [])
     expect(rows.map((r) => r.kind)).toEqual(["dux", "total"])
   })
 
@@ -227,7 +230,7 @@ describe("taskManagerRows", () => {
         ],
       }),
     ]
-    const rows = taskManagerRows(sessions, [duxStat, totalStat], [])
+    const rows = taskManagerRows(sessions, [duxStat, totalStat], [], [])
     const keys = rows.map((r) => r.key)
     expect(keys).toEqual(["dux", "tab:s1", "tab:t2", "tab:t3", "total"])
     // The session-slot tab is the group's lead row; extra tabs are nested.
@@ -237,13 +240,10 @@ describe("taskManagerRows", () => {
 
   it("orders_terminals_after_their_agents_tabs", () => {
     const sessions = [
-      session({
-        id: "s1",
-        tabs: [tab({ id: "s1" })],
-        terminals: [terminal({ id: "term-1", label: "dev server" })],
-      }),
+      session({ id: "s1", tabs: [tab({ id: "s1" })] }),
     ]
-    const rows = taskManagerRows(sessions, [duxStat, totalStat], [])
+    const terminals = [terminal({ id: "term-1", label: "dev server" })]
+    const rows = taskManagerRows(sessions, [duxStat, totalStat], [], terminals)
     expect(rows.map((r) => r.key)).toEqual([
       "dux",
       "tab:s1",
@@ -270,8 +270,8 @@ describe("taskManagerRows", () => {
       stat({ id: "t2", cpu_percent: 0.1 }),
       totalStat,
     ]
-    expect(taskManagerRows(sessions, hot, []).map((r) => r.key)).toEqual(
-      taskManagerRows(sessions, cold, []).map((r) => r.key),
+    expect(taskManagerRows(sessions, hot, [], []).map((r) => r.key)).toEqual(
+      taskManagerRows(sessions, cold, [], []).map((r) => r.key),
     )
   })
 
@@ -279,17 +279,17 @@ describe("taskManagerRows", () => {
     const sessions = [
       session({ id: "s1", tabs: [tab({ id: "s1" }), tab({ id: "t2", order: 1 })] }),
     ]
-    const rows = taskManagerRows(sessions, [duxStat, totalStat], [])
+    const rows = taskManagerRows(sessions, [duxStat, totalStat], [], [])
     expect(rows.find((r) => r.key === "tab:t2")?.sessionId).toBe("s1")
   })
 
   it("reports_nothing_running_only_when_no_agents_or_terminals", () => {
-    expect(taskManagerRows([], [duxStat, totalStat], []).some((r) => r.stoppable)).toBe(
+    expect(taskManagerRows([], [duxStat, totalStat], [], []).some((r) => r.stoppable)).toBe(
       false,
     )
     const sessions = [session({ id: "s1" })]
     expect(
-      taskManagerRows(sessions, [duxStat, totalStat], []).some((r) => r.stoppable),
+      taskManagerRows(sessions, [duxStat, totalStat], [], []).some((r) => r.stoppable),
     ).toBe(true)
   })
 
@@ -303,7 +303,7 @@ describe("taskManagerRows", () => {
         tabs: [tab({ id: "s1", has_live_process: false })],
       }),
     ]
-    const rows = taskManagerRows(sessions, [duxStat, totalStat], [])
+    const rows = taskManagerRows(sessions, [duxStat, totalStat], [], [])
     expect(rows.map((r) => r.kind)).toEqual(["dux", "total"])
   })
 
@@ -317,10 +317,10 @@ describe("taskManagerRows", () => {
         id: "s1",
         status: "detached",
         tabs: [tab({ id: "s1", has_live_process: false })],
-        terminals: [terminal({ id: "term-1", label: "dev server" })],
       }),
     ]
-    const rows = taskManagerRows(sessions, [duxStat, totalStat], [])
+    const terminals = [terminal({ id: "term-1", label: "dev server" })]
+    const rows = taskManagerRows(sessions, [duxStat, totalStat], [], terminals)
     expect(rows.map((r) => r.kind)).toEqual(["dux", "terminal", "total"])
     const term = rows.find((r) => r.key === "term:term-1")
     expect(term?.stoppable).toBe(true)
@@ -341,7 +341,7 @@ describe("taskManagerRows", () => {
         ],
       }),
     ]
-    const rows = taskManagerRows(sessions, [duxStat, totalStat], [])
+    const rows = taskManagerRows(sessions, [duxStat, totalStat], [], [])
     const t2 = rows.find((r) => r.key === "tab:t2")
     const t3 = rows.find((r) => r.key === "tab:t3")
     expect(t2?.stopLabel).toBeTruthy()
@@ -356,18 +356,15 @@ describe("taskManagerSummary", () => {
   it("is_null_when_nothing_is_running", () => {
     // Nothing to stop, so nothing to total: the footer's summary disappears
     // along with "Stop all…" in this state.
-    const rows = taskManagerRows([], [duxStat, totalStat], [])
+    const rows = taskManagerRows([], [duxStat, totalStat], [], [])
     expect(taskManagerSummary(rows)).toBeNull()
   })
 
   it("counts_running_rows_and_reads_the_total_straight_off_the_total_row", () => {
     const sessions = [
-      session({
-        id: "s1",
-        title: "fix-auth",
-        terminals: [terminal({ id: "term-1", label: "dev server" })],
-      }),
+      session({ id: "s1", title: "fix-auth" }),
     ]
+    const terminals = [terminal({ id: "term-1", label: "dev server" })]
     const rows = taskManagerRows(sessions, [
       duxStat,
       stat({ id: "s1", cpu_percent: 3.4 }),
@@ -379,7 +376,7 @@ describe("taskManagerSummary", () => {
         cpu_percent: 65.6,
         rss_bytes: 1_400_000_000,
       }),
-    ], [])
+    ], [], terminals)
     // Two stoppable rows: the agent tab and its terminal.
     expect(taskManagerSummary(rows)).toBe("2 running · 14 processes · 65.6% CPU · 1.3 GiB")
   })
@@ -388,7 +385,7 @@ describe("taskManagerSummary", () => {
     // Before the first poll response, the TOTAL row has no stats: the summary
     // still reports what is running from the spine, without inventing numbers.
     const sessions = [session({ id: "s1" })]
-    const rows = taskManagerRows(sessions, [], [])
+    const rows = taskManagerRows(sessions, [], [], [])
     expect(taskManagerSummary(rows)).toBe("1 running")
   })
 })

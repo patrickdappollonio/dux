@@ -105,7 +105,6 @@ function makeSessionSpine(tabCount: number): DuxState["spine"] {
         worktree_path: "/tmp/p1",
         status: "active",
         auto_reopen_enabled: false,
-        terminals: [],
         tabs,
         has_output: false,
         working: false,
@@ -201,17 +200,18 @@ describe("MobileShell project terminals", () => {
           default_provider: "claude",
           current_branch: "main",
           branch_status: "leading",
-          terminals: [
-            {
-              id: "pt-1",
-              label: "Terminal 2",
-              has_output: true,
-              foreground_cmd: null,
-            },
-          ],
         },
       ],
       sessions: [],
+      terminals: [
+        {
+          id: "pt-1",
+          owner: { kind: "project", project_id: "p1" },
+          label: "Terminal 2",
+          has_output: true,
+          foreground_cmd: null,
+        },
+      ],
       sidebar: {
         groups: [{ project_id: "p1", name: "Repo", orphaned: false, session_ids: [] }],
         agentless_start: null,
@@ -340,10 +340,16 @@ describe("MobileShell up navigation never steps history", () => {
             name: "Repo",
             path: "/tmp/p1",
             default_provider: "claude",
-            terminals: [{ id: "pt-1", label: "Terminal 2" }],
           },
         ],
         sessions: [],
+        terminals: [
+          {
+            id: "pt-1",
+            owner: { kind: "project", project_id: "p1" },
+            label: "Terminal 2",
+          },
+        ],
         sidebar: { groups: [], agentless_start: null },
       },
       selectedTarget: {

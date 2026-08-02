@@ -38,16 +38,16 @@ describe("fetchSpine", () => {
     // `last_focused_tab: null`.
     expect(result).toEqual({
       ...body,
-      // A project that omits `terminals` (an older server) is coerced to `[]`.
-      projects: [{ id: "p1", terminals: [] }],
+      // A body that omits the flat top-level `terminals` collection (an older
+      // server, which nested them instead) is coerced to `[]`.
+      terminals: [],
       sessions: [
         {
           id: "s1",
           project_id: "p1",
           tabs: [],
-          // A session that omits `terminals`/`typing` (an older server) is coerced
-          // to `terminals: []` and `typing: false`.
-          terminals: [],
+          // A session that omits `typing` (an older server) is coerced to
+          // `typing: false`.
           typing: false,
           initial_branch: "",
           source_branch: "",

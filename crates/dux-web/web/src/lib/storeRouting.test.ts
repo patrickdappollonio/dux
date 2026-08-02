@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import type { Spine } from "./spineApi"
+import { ownerKey } from "./terminalOwner"
 
 // Routing: the URL is the source of truth for where the app is. The screen is
 // DERIVED from the hash (no target = home, a target = terminal, a `/changes`
@@ -97,7 +98,6 @@ function makeSpine(
       id: p.id,
       name: p.id,
       path: `/tmp/${p.id}`,
-      terminals: (p.terminals ?? []).map((id) => ({ id, label: id })),
     })) as unknown as Spine["projects"],
     sessions: sessions.map((s) => ({
       id: s.id,
@@ -109,9 +109,26 @@ function makeSpine(
       updated_at: "2026-01-01T00:00:00Z",
       working: s.working ?? false,
       needs_attention: false,
-      terminals: (s.terminals ?? []).map((id) => ({ id, label: id })),
       tabs: [{ id: s.id }, ...(s.tabs ?? []).map((id) => ({ id }))],
     })) as unknown as Spine["sessions"],
+    // Every terminal, of every owner, in one flat owner-tagged collection: the
+    // sessions' terminals in session order, then the projects' in project order.
+    terminals: [
+      ...sessions.flatMap((s) =>
+        (s.terminals ?? []).map((id) => ({
+          id,
+          label: id,
+          owner: { kind: "session", session_id: s.id },
+        })),
+      ),
+      ...projects.flatMap((p) =>
+        (p.terminals ?? []).map((id) => ({
+          id,
+          label: id,
+          owner: { kind: "project", project_id: p.id },
+        })),
+      ),
+    ] as unknown as Spine["terminals"],
     sidebar: { groups: [], agentless_start: null },
   }
 }
@@ -275,28 +292,16 @@ async function pushSpine(
   mod.eventsSocket.onEvent({ event: "sessions.changed" })
   // Wait on the ids, not just the session count: a push that only closes a
   // project terminal or one tab leaves the count untouched, and a count-only
-  // wait would return before the apply had run.
-  const want = JSON.stringify({
-    sessions: sessions.map((s) => [
-      s.id,
-      [s.id, ...(s.tabs ?? [])],
-      s.terminals ?? [],
-    ]),
-    terminals: projects.map((p) => [p.id, p.terminals ?? []]),
-  })
+  // wait would return before the apply had run. Terminals are one flat,
+  // owner-tagged collection now, so their identity here is id + owner.
+  const shape = (spine: Spine | null) =>
+    JSON.stringify({
+      sessions: spine?.sessions.map((s) => [s.id, s.tabs.map((t) => t.id)]) ?? [],
+      terminals: spine?.terminals.map((t) => [t.id, ownerKey(t.owner)]) ?? [],
+    })
+  const want = shape(spineBody)
   await vi.waitFor(() => {
-    const spine = mod.getSnapshot().spine
-    expect(
-      JSON.stringify({
-        sessions:
-          spine?.sessions.map((s) => [
-            s.id,
-            s.tabs.map((t) => t.id),
-            s.terminals.map((t) => t.id),
-          ]) ?? [],
-        terminals: spine?.projects.map((p) => [p.id, p.terminals.map((t) => t.id)]) ?? [],
-      }),
-    ).toBe(want)
+    expect(shape(mod.getSnapshot().spine)).toBe(want)
   })
 }
 

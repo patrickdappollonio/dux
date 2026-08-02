@@ -150,7 +150,6 @@ function makeState(offline = false, conn: ConnState = "open"): DuxState {
           worktree_path: "/tmp/p1",
           status: "active",
           auto_reopen_enabled: false,
-          terminals: [{ id: "t1", has_output: false }],
           tabs: [
             {
               id: "s1",
@@ -163,6 +162,13 @@ function makeState(offline = false, conn: ConnState = "open"): DuxState {
           ],
           has_output: false,
           working: false,
+        },
+      ],
+      terminals: [
+        {
+          id: "t1",
+          owner: { kind: "session", session_id: "s1" },
+          has_output: false,
         },
       ],
       sidebar: { groups: [], agentless_start: null },
@@ -348,21 +354,17 @@ describe("TerminalPane project-terminal owner resolution", () => {
     return {
       ...base,
       spine: {
-        projects: [
+        projects: [{ id: "p1", name: "Repo" }],
+        sessions: [],
+        terminals: [
           {
-            id: "p1",
-            name: "Repo",
-            terminals: [
-              {
-                id: "pt-1",
-                label: "Terminal 2",
-                has_output: hasOutput,
-                foreground_cmd: null,
-              },
-            ],
+            id: "pt-1",
+            owner: { kind: "project", project_id: "p1" },
+            label: "Terminal 2",
+            has_output: hasOutput,
+            foreground_cmd: null,
           },
         ],
-        sessions: [],
         sidebar: { groups: [], agentless_start: null },
       },
     } as unknown as DuxState

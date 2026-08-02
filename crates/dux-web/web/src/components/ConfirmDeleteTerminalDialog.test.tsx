@@ -36,31 +36,36 @@ const { ConfirmDeleteTerminalDialog } = await import(
 function term(overrides: Partial<TerminalView>): TerminalView {
   return {
     id: "term-1",
+    owner: { kind: "session", session_id: "s1" },
     label: "Terminal 1",
     has_output: true,
     foreground_cmd: null,
     ...overrides,
-  }
+  } as TerminalView
 }
 
 function seed(terminal: TerminalView) {
   mockState = {
     deleteTerminalTarget: terminal.id,
     spine: {
-      sessions: [{ id: "s1", terminals: [terminal] }],
-      projects: [{ id: "p1", terminals: [] }],
+      sessions: [{ id: "s1" }],
+      projects: [{ id: "p1" }],
+      terminals: [terminal],
     },
   } as unknown as DuxState
 }
 
-// Seed a PROJECT-owned terminal: it lives on a project's terminal list, and no
-// session carries it.
+// Seed a PROJECT-owned terminal: it carries a project owner, and no session
+// owns it.
 function seedProjectTerminal(terminal: TerminalView) {
   mockState = {
     deleteTerminalTarget: terminal.id,
     spine: {
-      sessions: [{ id: "s1", terminals: [] }],
-      projects: [{ id: "p1", terminals: [terminal] }],
+      sessions: [{ id: "s1" }],
+      projects: [{ id: "p1" }],
+      terminals: [
+        { ...terminal, owner: { kind: "project", project_id: "p1" } },
+      ],
     },
   } as unknown as DuxState
 }

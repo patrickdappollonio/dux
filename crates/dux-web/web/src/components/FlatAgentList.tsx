@@ -884,6 +884,9 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
 
   const rawSessions = spine?.sessions ?? []
   const rawProjects = spine?.projects ?? []
+  // Every terminal, of every owner, straight off the spine. It arrives flat and
+  // owner-tagged, so there is nothing to stitch together here.
+  const rawTerminals = spine?.terminals ?? []
   // partitionProjects still supplies the per-session project name, the project
   // terminals, and the project id sets. Ordering, however, is now a single GLOBAL
   // flat list (agents are independent of project grouping).
@@ -929,6 +932,7 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
   // `sort_order` base (the terminal twin of `spine.sessions` already being in
   // global order for agents).
   const assembledTerminals = assembleFlatTerminals(
+    rawTerminals,
     coreSessions,
     orderedProjects,
     projectName,

@@ -126,7 +126,6 @@ function makeSessionSpine(tabCount: number): DuxState["spine"] {
         worktree_path: "/tmp/p1",
         status: "active",
         auto_reopen_enabled: false,
-        terminals: [],
         tabs,
         has_output: false,
         working: false,
@@ -281,7 +280,6 @@ describe("AppSidebar flat Terminals section", () => {
           default_provider: "claude",
           current_branch: "main",
           branch_status: "leading",
-          terminals: [],
         },
       ],
       sessions: [
@@ -298,16 +296,17 @@ describe("AppSidebar flat Terminals section", () => {
           has_output: false,
           working: false,
           typing: false,
-          terminals: [
-            {
-              id: "ct-1",
-              label: "Terminal 1",
-              has_output: true,
-              working: false,
-              typing: true,
-              foreground_cmd: "vim",
-            },
-          ],
+        },
+      ],
+      terminals: [
+        {
+          id: "ct-1",
+          owner: { kind: "session", session_id: "s1" },
+          label: "Terminal 1",
+          has_output: true,
+          working: false,
+          typing: true,
+          foreground_cmd: "vim",
         },
       ],
       sidebar: {
@@ -359,17 +358,18 @@ describe("AppSidebar project terminals", () => {
           default_provider: "claude",
           current_branch: "main",
           branch_status: "leading",
-          terminals: [
-            {
-              id: "pt-1",
-              label: "Terminal 2",
-              has_output: true,
-              foreground_cmd: null,
-            },
-          ],
         },
       ],
       sessions: [],
+      terminals: [
+        {
+          id: "pt-1",
+          owner: { kind: "project", project_id: "p1" },
+          label: "Terminal 2",
+          has_output: true,
+          foreground_cmd: null,
+        },
+      ],
       sidebar: {
         groups: [{ project_id: "p1", name: "Repo", orphaned: false, session_ids: [] }],
         agentless_start: null,
@@ -442,7 +442,6 @@ describe("AppSidebar project terminals", () => {
             worktree_path: "/tmp/x",
             status: "active",
             auto_reopen_enabled: false,
-            terminals: [],
             tabs: [
               {
                 id: "s1",

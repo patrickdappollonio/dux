@@ -9,10 +9,13 @@
 // section needs: assembling that flat list with each terminal's owner label, and
 // deriving a terminal's state word from its working/typing flags.
 
+import { assertNever } from "@/lib/assertNever"
 import type { FlatSortKey, StateWord } from "@/lib/flatList"
-// Type-only import: erased at compile time, so this does not create a runtime
-// import cycle with the store (which imports many lib modules).
-import type { TerminalOwnerRef } from "@/lib/store"
+import {
+  ownerKey,
+  ownerRefFromWire,
+  type TerminalOwnerRef,
+} from "@/lib/terminalOwner"
 import type { ProjectView, SessionView, TerminalView } from "@/lib/types"
 
 // One entry in the flat Terminals section: the terminal, its owner reference (so
@@ -28,47 +31,79 @@ export interface FlatTerminal {
   siblings: readonly TerminalView[]
 }
 
-// Assemble every terminal into one flat list in stable spine order: each session's
-// companion terminals (in session order) first, then each project's terminals (in
-// the given project display order). A companion terminal is labeled `agent@project`
-// (the agent's display name -- title, or branch name when untitled -- at its
-// project); a project terminal with just the project name (it has no agent).
-// `projects` must already be in display order; `projectName` resolves a project id
-// to its display name (with the orphan fallback).
+// Decorate the spine's flat `terminals` collection with everything the row needs
+// that the terminal itself does not carry: its owner reference, the owner's
+// display label, the project tag, and its sibling set.
+//
+// `terminals` arrives flat and owner-tagged, so this walks it ONCE and switches
+// on each terminal's own owner. It used to walk `sessions[].terminals` and then
+// `projects[].terminals`, which meant ownership was inferred from which loop a
+// terminal turned up in and a new kind of owner would simply have had no loop.
+// `sessions` and `projects` are now only lookup tables for the labels, so the
+// output order is the order of `terminals` (the caller re-sorts into the global
+// `sort_order` base either way).
+//
+// A companion terminal is labeled `agent@project` (the agent's display name --
+// title, or branch name when untitled -- at its project); a project terminal
+// carries just the project name (it has no agent). An owner id that resolves to
+// nothing falls back to the id itself, matching the TUI's sidebar: the spine is
+// self-consistent so this should not happen, but showing the row with a truthful
+// id beats dropping it, which is the silent omission this shape exists to end.
 export function assembleFlatTerminals(
+  terminals: readonly TerminalView[],
   sessions: readonly SessionView[],
   projects: readonly ProjectView[],
   projectName: (id: string) => string,
 ): FlatTerminal[] {
-  const out: FlatTerminal[] = []
-  for (const session of sessions) {
-    const agentName = session.title || session.branch_name
-    const proj = projectName(session.project_id)
-    const ownerLabel = `${agentName}@${proj}`
-    // Defensive `?? []`: the spine normalizes `terminals` at ingestion, but this
-    // helper is also fed directly in tests and stays total if a caller omits it.
-    const terminals = session.terminals ?? []
-    for (const terminal of terminals) {
-      out.push({
-        terminal,
-        owner: { kind: "session", sessionId: session.id },
-        ownerLabel,
-        projectName: proj,
-        siblings: terminals,
-      })
-    }
+  const sessionsById = new Map(sessions.map((s) => [s.id, s]))
+  const projectsById = new Map(projects.map((p) => [p.id, p]))
+  // Siblings are the terminals sharing an owner. Nesting used to give this for
+  // free (the array a terminal sat in WAS its sibling set); with one flat list
+  // it is a grouping pass, keyed so a session and a project with the same id can
+  // never merge.
+  const byOwner = new Map<string, TerminalView[]>()
+  for (const terminal of terminals) {
+    const key = ownerKey(terminal.owner)
+    const group = byOwner.get(key)
+    if (group) group.push(terminal)
+    else byOwner.set(key, [terminal])
   }
-  for (const project of projects) {
-    const projectTerminals = project.terminals ?? []
-    for (const terminal of projectTerminals) {
-      out.push({
-        terminal,
-        owner: { kind: "project", projectId: project.id },
-        ownerLabel: projectName(project.id),
-        projectName: projectName(project.id),
-        siblings: projectTerminals,
-      })
+
+  const out: FlatTerminal[] = []
+  for (const terminal of terminals) {
+    const wire = terminal.owner
+    const siblings = byOwner.get(ownerKey(wire)) ?? [terminal]
+    let ownerLabel: string
+    let proj: string
+    switch (wire.kind) {
+      case "session": {
+        const session = sessionsById.get(wire.session_id)
+        if (session) {
+          proj = projectName(session.project_id)
+          ownerLabel = `${session.title || session.branch_name}@${proj}`
+        } else {
+          proj = ""
+          ownerLabel = wire.session_id
+        }
+        break
+      }
+      case "project": {
+        proj = projectsById.has(wire.project_id)
+          ? projectName(wire.project_id)
+          : wire.project_id
+        ownerLabel = proj
+        break
+      }
+      default:
+        return assertNever(wire)
     }
+    out.push({
+      terminal,
+      owner: ownerRefFromWire(wire),
+      ownerLabel,
+      projectName: proj,
+      siblings,
+    })
   }
   return out
 }

@@ -2,10 +2,11 @@
 // React-free so they're trivially unit-testable. All compute purely from the
 // ViewModel — no wire commands, no git reads.
 
+import { groupTerminalsByOwner } from "./terminals"
 import type { SessionView, TerminalView } from "./types"
 
-// Live agent + terminal counts for a project, derived from the current
-// sessions list plus the project's own terminals. `agents` is the number of
+// Live agent + terminal counts for a project, derived from the current sessions
+// list plus the workspace's flat terminal collection. `agents` is the number of
 // sessions owned by the project; `terminals` is the sum of companion terminals
 // across those sessions PLUS the project's own project terminals.
 export interface ProjectLiveCounts {
@@ -16,14 +17,15 @@ export interface ProjectLiveCounts {
 export function projectLiveCounts(
   projectId: string,
   sessions: SessionView[],
-  projectTerminals: TerminalView[] = [],
+  allTerminals: readonly TerminalView[] = [],
 ): ProjectLiveCounts {
+  const { bySession, byProject } = groupTerminalsByOwner(allTerminals)
   let agents = 0
-  let terminals = projectTerminals.length
+  let terminals = byProject.get(projectId)?.length ?? 0
   for (const session of sessions) {
     if (session.project_id !== projectId) continue
     agents += 1
-    terminals += session.terminals.length
+    terminals += bySession.get(session.id)?.length ?? 0
   }
   return { agents, terminals }
 }

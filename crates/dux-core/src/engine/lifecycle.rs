@@ -375,11 +375,19 @@ impl Engine {
             // This exit detaches the agent only when it was the LAST live tab.
             // An explicit match on the owner: only a session-owned prune can
             // detach an agent (an orphan has no session to mark).
-            let agent_detached = match &owner {
-                Some(TerminalOwner::Session(sid)) => !self.any_tab_active(sid),
-                Some(TerminalOwner::Project(_)) | None => false,
-            };
-            if agent_detached && let Some(TerminalOwner::Session(sid)) = &owner {
+            // Resolve "which session, if any, this exit detaches" ONCE, through an
+            // exhaustive match, and then act on the answer. Re-testing the owner
+            // with a partial pattern below would be a second, silently-extendable
+            // ownership decision for the same question.
+            let detaching_session: Option<String> =
+                match owner.as_ref().map(crate::model::TerminalOwner::as_ref) {
+                    Some(crate::model::TerminalOwnerRef::Session(sid)) => {
+                        (!self.any_tab_active(sid)).then(|| sid.to_string())
+                    }
+                    Some(crate::model::TerminalOwnerRef::Project(_)) | None => None,
+                };
+            let agent_detached = detaching_session.is_some();
+            if let Some(sid) = &detaching_session {
                 // A clean exit of the session-slot tab is the "user quit the
                 // agent" signal that cancels auto-reopen; an extra tab exiting
                 // (or any crash) leaves the auto-reopen intent untouched.
@@ -563,7 +571,7 @@ impl Engine {
         let ids: Vec<String> = self
             .companion_terminals
             .iter()
-            .filter(|(_, t)| matches!(&t.owner, TerminalOwner::Session(sid) if sid == session_id))
+            .filter(|(_, t)| t.owner.closed_by_session_delete(session_id))
             .map(|(id, _)| id.clone())
             .collect();
         for id in ids {
@@ -577,7 +585,7 @@ impl Engine {
         let ids: Vec<String> = self
             .companion_terminals
             .iter()
-            .filter(|(_, t)| matches!(&t.owner, TerminalOwner::Project(pid) if pid == project_id))
+            .filter(|(_, t)| t.owner.closed_by_project_removal(project_id))
             .map(|(id, _)| id.clone())
             .collect();
         for id in ids {

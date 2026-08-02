@@ -579,6 +579,17 @@ pub struct PtyClient {
     writer: PtyWriter,
     terminal: Arc<Mutex<TerminalState>>,
     child: Box<dyn Child + Send + Sync>,
+    /// The directory this PTY's child was spawned in, kept verbatim. It used to
+    /// be handed to the spawn call and forgotten, but this is the type that owns
+    /// the child's process id and the foreground-group probe, so it is the one
+    /// place a "where is this terminal actually working" question can be
+    /// answered from without spreading half the policy across the terminal
+    /// record and the web routes.
+    ///
+    /// This is the SPAWN directory and nothing more: a shell's directory changes
+    /// the moment someone types `cd`, so this is a fallback, not the live
+    /// answer. Nothing here looks up the live one yet.
+    spawn_dir: std::path::PathBuf,
     /// The child's exit status the first time [`PtyClient::try_wait`] observed
     /// it, plus when that reap happened. `Child::try_wait` yields the status
     /// EXACTLY ONCE (the second call sees no zombie and returns `None`), so
@@ -839,6 +850,7 @@ impl PtyClient {
             writer,
             terminal,
             child,
+            spawn_dir: cwd.to_path_buf(),
             reaped: None,
             exited,
             exited_at,
@@ -1484,6 +1496,12 @@ impl PtyClient {
             _ => Ok(()),
         };
         child_res.and(fg_res)
+    }
+
+    /// The directory this PTY's child was spawned in. See the field docs: it is
+    /// the spawn directory, not the live working directory.
+    pub fn spawn_dir(&self) -> &Path {
+        &self.spawn_dir
     }
 
     /// The PTY's foreground process group id (via `tcgetpgrp` on the master), or

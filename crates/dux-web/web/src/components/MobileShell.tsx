@@ -30,7 +30,7 @@ import {
 } from "@/lib/store"
 import { prIconClass, prIconHoverClass, prStateLabel } from "@/lib/pr"
 import type { TerminalOwnerRef } from "@/lib/store"
-import { terminalTitle } from "@/lib/terminals"
+import { terminalsForOwner, terminalTitle } from "@/lib/terminals"
 import { cn } from "@/lib/utils"
 
 // Tapping a session on the hub focuses it, and focusing something IS the
@@ -117,7 +117,10 @@ function TerminalScreen() {
     const owner = selectedTarget.owner
     const project = spine?.projects.find((p) => p.id === owner.projectId)
     if (!project) return <HomeScreen />
-    const terminal = project.terminals.find(
+    // This project's own terminals, selected out of the flat collection by
+    // owner, so the crumb still disambiguates against its true siblings.
+    const projectTerminals = terminalsForOwner(spine?.terminals ?? [], owner)
+    const terminal = projectTerminals.find(
       (t) => t.id === selectedTarget.terminalId,
     )
     return (
@@ -138,7 +141,7 @@ function TerminalScreen() {
           <div className="flex min-w-0 flex-1 items-baseline gap-1.5 text-sm">
             <span className="truncate font-semibold">{project.name}</span>
             <span className="truncate text-muted-foreground">
-              {terminal ? terminalTitle(terminal, project.terminals) : "Terminal"}
+              {terminal ? terminalTitle(terminal, projectTerminals) : "Terminal"}
             </span>
           </div>
         </header>

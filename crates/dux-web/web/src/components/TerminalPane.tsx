@@ -57,9 +57,10 @@ import {
   getActivePtySocket,
   setActivePtySocket,
   tabPtyUrl,
-  projectTerminalPtyUrl,
-  terminalPtyUrl,
+  terminalSocketUrl,
 } from "@/lib/ptySocket"
+import { ownerProjectId, ownerSessionId } from "@/lib/terminalOwner"
+import { terminalsForOwner } from "@/lib/terminals"
 import {
   isForeground,
   isOwnerAfterHandover,
@@ -187,15 +188,9 @@ export function TerminalPane(props: TerminalPaneProps) {
   // session-owned terminal's parent. A PROJECT terminal has none (null); every
   // session-scoped branch below must tolerate that.
   const sessionId =
-    props.kind === "agent"
-      ? props.sessionId
-      : props.owner.kind === "session"
-        ? props.owner.sessionId
-        : null
+    props.kind === "agent" ? props.sessionId : ownerSessionId(props.owner)
   const projectId =
-    props.kind === "terminal" && props.owner.kind === "project"
-      ? props.owner.projectId
-      : null
+    props.kind === "terminal" ? ownerProjectId(props.owner) : null
   // The PTY socket URL for THIS target. For an agent, the session-slot tab
   // (`id === sessionId`) uses the session PTY route and an extra tab its own
   // nested route; a terminal uses its owner's nested route (session- or
@@ -206,9 +201,7 @@ export function TerminalPane(props: TerminalPaneProps) {
       ? props.id === props.sessionId
         ? agentPtyUrl(props.sessionId)
         : tabPtyUrl(props.sessionId, props.id)
-      : props.owner.kind === "session"
-        ? terminalPtyUrl(props.owner.sessionId, props.id)
-        : projectTerminalPtyUrl(props.owner.projectId, props.id)
+      : terminalSocketUrl(props.owner, props.id)
   // The padded, background-painted host. Padding must live HERE — one layer
   // OUTSIDE the element xterm opens into — because FitAddon measures the open
   // target's parent via getComputedStyle().height, which under Tailwind's
@@ -362,8 +355,13 @@ export function TerminalPane(props: TerminalPaneProps) {
     notifyTitleRef.current = notifyTitle
   }, [notifyTitle])
   const isSessionSlotTab = kind === "agent" && id === sessionId
+  // A terminal's siblings: the terminals sharing its owner, selected out of the
+  // spine's flat collection rather than read off whichever parent it used to be
+  // nested under.
   const ownedTerminals =
-    kind === "terminal" ? (project?.terminals ?? session?.terminals) : undefined
+    props.kind === "terminal"
+      ? terminalsForOwner(spine?.terminals ?? [], props.owner)
+      : undefined
   const hasOutput =
     kind === "agent"
       ? (focusedTab?.has_output ?? session?.has_output ?? false)

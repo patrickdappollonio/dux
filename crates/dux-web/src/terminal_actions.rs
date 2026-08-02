@@ -40,7 +40,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use dux_core::model::TerminalOwner;
+use dux_core::model::TerminalRoute;
 use dux_core::wire::WireCommand;
 
 use crate::git_routes::resolve_worktree;
@@ -141,11 +141,12 @@ async fn delete_terminal(
     if let Err(resp) = resolve_worktree(&state, id.clone()).await {
         return resp;
     }
-    // Enforce ownership per variant: an unknown terminal, one owned by a
-    // different session, or a PROJECT terminal (whose id could otherwise collide
-    // with a session id) is a 404, never a cross-owner delete.
+    // Route membership is decided by the owner type's exhaustive
+    // `is_at_route`: an unknown terminal, one owned by a different session, or a
+    // PROJECT terminal (whose id could otherwise collide with a session id) is a
+    // 404, never a cross-owner delete.
     match state.engine.terminal_owner_of(tid.clone()).await {
-        Some(TerminalOwner::Session(owner)) if owner == id => {}
+        Some(owner) if owner.is_at_route(TerminalRoute::Session(&id)) => {}
         _ => return unknown_terminal(),
     }
     dispatch_delete(&state, tid, &headers).await
@@ -164,10 +165,11 @@ async fn delete_project_terminal(
     if state.engine.project_path(id.clone()).await.is_none() {
         return unknown_project();
     }
-    // Enforce ownership per variant: a session-owned terminal is a 404 on the
-    // project route, exactly as a project terminal is on the session route.
+    // Route membership through the same exhaustive `is_at_route`: a session-owned
+    // terminal is a 404 on the project route, exactly as a project terminal is on
+    // the session route.
     match state.engine.terminal_owner_of(tid.clone()).await {
-        Some(TerminalOwner::Project(owner)) if owner == id => {}
+        Some(owner) if owner.is_at_route(TerminalRoute::Project(&id)) => {}
         _ => return unknown_terminal(),
     }
     dispatch_delete(&state, tid, &headers).await

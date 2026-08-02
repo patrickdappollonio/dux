@@ -11,6 +11,7 @@ import type { ProjectView, SessionView, TerminalView } from "@/lib/types"
 
 function term(over: Partial<TerminalView> & { id: string }): TerminalView {
   return {
+    owner: { kind: "session", session_id: "s1" },
     label: "Terminal 1",
     has_output: false,
     working: false,
@@ -48,7 +49,6 @@ function session(
     worktree_path: `/tmp/${over.id}`,
     status: "active",
     auto_reopen_enabled: false,
-    terminals: [],
     tabs: [],
     has_output: false,
     working: false,
@@ -74,7 +74,6 @@ function project(over: Partial<ProjectView> & { id: string }): ProjectView {
     path_missing: false,
     leading_branch: null,
     created_at: "",
-    terminals: [],
     ...over,
   } as ProjectView
 }
@@ -107,19 +106,17 @@ describe("assembleFlatTerminals", () => {
 
   it("lists session terminals first (in session order), then project terminals", () => {
     const sessions = [
-      session({
-        id: "s1",
-        title: "Login flow",
-        project_id: "p1",
-        terminals: [term({ id: "t-s1a" }), term({ id: "t-s1b" })],
-      }),
-      session({ id: "s2", project_id: "p2", terminals: [term({ id: "t-s2" })] }),
+      session({ id: "s1", title: "Login flow", project_id: "p1" }),
+      session({ id: "s2", project_id: "p2" }),
     ]
-    const projects = [
-      project({ id: "p1", terminals: [term({ id: "t-p1" })] }),
-      project({ id: "p2", terminals: [] }),
+    const projects = [project({ id: "p1" }), project({ id: "p2" })]
+    const terminals = [
+      term({ id: "t-s1a", owner: { kind: "session", session_id: "s1" } }),
+      term({ id: "t-s1b", owner: { kind: "session", session_id: "s1" } }),
+      term({ id: "t-s2", owner: { kind: "session", session_id: "s2" } }),
+      term({ id: "t-p1", owner: { kind: "project", project_id: "p1" } }),
     ]
-    const flat = assembleFlatTerminals(sessions, projects, projectName)
+    const flat = assembleFlatTerminals(terminals, sessions, projects, projectName)
     expect(flat.map((f) => f.terminal.id)).toEqual([
       "t-s1a",
       "t-s1b",
@@ -130,20 +127,26 @@ describe("assembleFlatTerminals", () => {
 
   it("labels a session terminal 'agent@project' (branch when the agent is untitled)", () => {
     const sessions = [
-      session({ id: "s1", title: "Login flow", terminals: [term({ id: "a" })] }),
-      session({ id: "s2", title: null, terminals: [term({ id: "b" })] }),
+      session({ id: "s1", title: "Login flow" }),
+      session({ id: "s2", title: null }),
     ]
-    const flat = assembleFlatTerminals(sessions, [], projectName)
+    const terminals = [
+      term({ id: "a", owner: { kind: "session", session_id: "s1" } }),
+      term({ id: "b", owner: { kind: "session", session_id: "s2" } }),
+    ]
+    const flat = assembleFlatTerminals(terminals, sessions, [], projectName)
     expect(flat[0].ownerLabel).toBe("Login flow@Web App")
     // Untitled agent falls back to its branch name, still at its project.
     expect(flat[1].ownerLabel).toBe("s2-branch@Web App")
   })
 
   it("labels a project terminal with the project name and carries owner refs + siblings", () => {
-    const projects = [
-      project({ id: "p1", terminals: [term({ id: "a" }), term({ id: "b" })] }),
+    const projects = [project({ id: "p1" })]
+    const terminals = [
+      term({ id: "a", owner: { kind: "project", project_id: "p1" } }),
+      term({ id: "b", owner: { kind: "project", project_id: "p1" } }),
     ]
-    const flat = assembleFlatTerminals([], projects, projectName)
+    const flat = assembleFlatTerminals(terminals, [], projects, projectName)
     expect(flat[0].ownerLabel).toBe("Web App")
     expect(flat[0].projectName).toBe("Web App")
     expect(flat[0].owner).toEqual({ kind: "project", projectId: "p1" })
@@ -152,14 +155,17 @@ describe("assembleFlatTerminals", () => {
   })
 
   it("carries the session owner ref for a companion terminal", () => {
-    const sessions = [session({ id: "s1", terminals: [term({ id: "a" })] })]
-    const flat = assembleFlatTerminals(sessions, [], projectName)
+    const sessions = [session({ id: "s1" })]
+    const terminals = [
+      term({ id: "a", owner: { kind: "session", session_id: "s1" } }),
+    ]
+    const flat = assembleFlatTerminals(terminals, sessions, [], projectName)
     expect(flat[0].owner).toEqual({ kind: "session", sessionId: "s1" })
     expect(flat[0].projectName).toBe("Web App")
   })
 
   it("returns an empty list when nothing owns a terminal", () => {
-    expect(assembleFlatTerminals([], [], projectName)).toEqual([])
+    expect(assembleFlatTerminals([], [], [], projectName)).toEqual([])
   })
 })
 

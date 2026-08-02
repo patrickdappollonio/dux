@@ -45,7 +45,6 @@ function stateFor(branchName: string, initialBranch: string): DuxState {
           source_branch: "main",
           worktree_path: "/tmp/s1",
           status: "active",
-          terminals: [],
           tabs: [
             {
               id: "s1",
@@ -92,21 +91,17 @@ describe("InsetHeader project terminal crumbs", () => {
         owner: { kind: "project", projectId: "p1" },
       },
       spine: {
-        projects: [
+        projects: [{ id: "p1", name: "Repo" }],
+        sessions: [],
+        terminals: [
           {
-            id: "p1",
-            name: "Repo",
-            terminals: [
-              {
-                id: "pt-1",
-                label: "Terminal 2",
-                has_output: true,
-                foreground_cmd: null,
-              },
-            ],
+            id: "pt-1",
+            owner: { kind: "project", project_id: "p1" },
+            label: "Terminal 2",
+            has_output: true,
+            foreground_cmd: null,
           },
         ],
-        sessions: [],
       },
     } as unknown as DuxState
     render(<InsetHeader />)

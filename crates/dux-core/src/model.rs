@@ -223,12 +223,148 @@ pub struct ChangedFile {
 /// Deliberately no bare-id accessor: every consumer must `match` so the
 /// `Project` variant can never be silently ignored by code written for the
 /// session-owned shape.
+///
+/// **A comment is not a guard, so the decisions live on the type.** Every
+/// question code asks about ownership is answered by a method here whose body is
+/// an EXHAUSTIVE match, never by a `matches!` at the call site. A `matches!`
+/// keeps compiling when a variant is added and silently answers "no" for it,
+/// which is how a whole class of terminal could be left out of the projections,
+/// the routes and the teardown paths with no error anywhere. The three families
+/// of decision are:
+///
+/// - **Route membership** ([`TerminalOwner::is_at_route`]): may this terminal be
+///   reached at a given nested REST/websocket address?
+/// - **Teardown** ([`TerminalOwner::closed_by_session_delete`],
+///   [`TerminalOwner::closed_by_project_removal`]): does removing that owner
+///   close this terminal?
+/// - **Presentation** ([`TerminalOwner::as_ref`] and
+///   [`crate::viewmodel::TerminalOwnerView`]): how is the owner named to the
+///   user, and what does the browser receive?
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TerminalOwner {
     /// Owned by an agent session; the payload is the session id.
     Session(String),
     /// Owned by a project; the payload is the project id.
     Project(String),
+}
+
+/// A nested terminal address in the REST/websocket route space: the owner id
+/// baked into the path (`/api/v1/sessions/:id/terminals/...`,
+/// `/ws/projects/:id/terminals/...`). Paired with
+/// [`TerminalOwner::is_at_route`] so a cross-owner attach/delete can only ever
+/// be decided by an exhaustive match over BOTH the owner and the address.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalRoute<'a> {
+    /// The session-nested address; the payload is the `:id` from the path.
+    Session(&'a str),
+    /// The project-nested address; the payload is the `:id` from the path.
+    Project(&'a str),
+}
+
+/// A borrowed view of a [`TerminalOwner`], for consumers that only need to name
+/// the owner (rendering a row, projecting the wire shape) and must not clone.
+/// Produced by the exhaustive [`TerminalOwner::as_ref`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalOwnerRef<'a> {
+    Session(&'a str),
+    Project(&'a str),
+}
+
+impl TerminalOwner {
+    /// Route membership: is this terminal reachable at `route`? A session-owned
+    /// terminal is a 404 on a project address and vice versa, and an id that
+    /// matches the wrong owner kind never resolves.
+    ///
+    /// The match is over the (owner, address) PAIR with no wildcard arm, so a
+    /// new owner kind fails to compile here and every route that calls this is
+    /// forced through the answer rather than quietly rejecting the new kind.
+    pub fn is_at_route(&self, route: TerminalRoute<'_>) -> bool {
+        match (self, route) {
+            (Self::Session(owner), TerminalRoute::Session(id)) => owner == id,
+            (Self::Project(owner), TerminalRoute::Project(id)) => owner == id,
+            (Self::Session(_), TerminalRoute::Project(_))
+            | (Self::Project(_), TerminalRoute::Session(_)) => false,
+        }
+    }
+
+    /// Teardown: does deleting the agent session `session_id` close this
+    /// terminal? Deleting an agent tears down the terminals spawned in its
+    /// worktree; a project terminal is untouched by it.
+    pub fn closed_by_session_delete(&self, session_id: &str) -> bool {
+        match self {
+            Self::Session(owner) => owner == session_id,
+            Self::Project(_) => false,
+        }
+    }
+
+    /// Teardown: does removing the project `project_id` close this terminal?
+    /// Removing a project closes the terminals opened at its repo root. A
+    /// SESSION-owned terminal answers `false` here on purpose: the project
+    /// removal deletes that project's agents, and each agent's own delete is
+    /// what closes its terminals, so answering `true` would close them twice.
+    pub fn closed_by_project_removal(&self, project_id: &str) -> bool {
+        match self {
+            Self::Project(owner) => owner == project_id,
+            Self::Session(_) => false,
+        }
+    }
+
+    /// Presentation: borrow the owner for naming/projection. Exhaustive, so a
+    /// new kind must decide how it is presented before this compiles.
+    #[allow(clippy::should_implement_trait)]
+    pub fn as_ref(&self) -> TerminalOwnerRef<'_> {
+        match self {
+            Self::Session(id) => TerminalOwnerRef::Session(id),
+            Self::Project(id) => TerminalOwnerRef::Project(id),
+        }
+    }
+}
+
+#[cfg(test)]
+mod terminal_owner_tests {
+    use super::{TerminalOwner, TerminalOwnerRef, TerminalRoute};
+
+    #[test]
+    fn session_terminal_is_only_at_its_own_session_route() {
+        let owner = TerminalOwner::Session("s1".to_string());
+        assert!(owner.is_at_route(TerminalRoute::Session("s1")));
+        assert!(!owner.is_at_route(TerminalRoute::Session("s2")));
+        // A session-owned terminal is never reachable at a project address,
+        // even when the ids happen to collide.
+        assert!(!owner.is_at_route(TerminalRoute::Project("s1")));
+    }
+
+    #[test]
+    fn project_terminal_is_only_at_its_own_project_route() {
+        let owner = TerminalOwner::Project("p1".to_string());
+        assert!(owner.is_at_route(TerminalRoute::Project("p1")));
+        assert!(!owner.is_at_route(TerminalRoute::Project("p2")));
+        assert!(!owner.is_at_route(TerminalRoute::Session("p1")));
+    }
+
+    #[test]
+    fn teardown_only_follows_the_matching_owner() {
+        let session = TerminalOwner::Session("s1".to_string());
+        let project = TerminalOwner::Project("p1".to_string());
+        assert!(session.closed_by_session_delete("s1"));
+        assert!(!session.closed_by_session_delete("s2"));
+        assert!(!session.closed_by_project_removal("p1"));
+        assert!(project.closed_by_project_removal("p1"));
+        assert!(!project.closed_by_project_removal("p2"));
+        assert!(!project.closed_by_session_delete("s1"));
+    }
+
+    #[test]
+    fn as_ref_borrows_the_owner_id() {
+        assert_eq!(
+            TerminalOwner::Session("s1".to_string()).as_ref(),
+            TerminalOwnerRef::Session("s1")
+        );
+        assert_eq!(
+            TerminalOwner::Project("p1".to_string()).as_ref(),
+            TerminalOwnerRef::Project("p1")
+        );
+    }
 }
 
 pub struct CompanionTerminal {

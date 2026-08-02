@@ -19,6 +19,7 @@ function makeSpine(overrides: Partial<Spine> = {}): Spine {
   return {
     projects: [],
     sessions: [],
+    terminals: [],
     sidebar: { groups: [], agentless_start: null },
     ...overrides,
   }
@@ -28,19 +29,22 @@ function session(id: string, projectId: string): Spine["sessions"][number] {
   return {
     id,
     project_id: projectId,
-    terminals: [],
   } as unknown as Spine["sessions"][number]
 }
 
-function project(
-  id: string,
-  terminals: string[] = [],
-): Spine["projects"][number] {
+function project(id: string): Spine["projects"][number] {
   return {
     id,
     name: id,
-    terminals: terminals.map((tid) => ({ id: tid })),
   } as unknown as Spine["projects"][number]
+}
+
+// A project-owned terminal in the spine's flat, owner-tagged collection.
+function projectTerm(id: string, projectId: string): Spine["terminals"][number] {
+  return {
+    id,
+    owner: { kind: "project", project_id: projectId },
+  } as unknown as Spine["terminals"][number]
 }
 
 let spineBody: Spine = makeSpine()
@@ -208,7 +212,10 @@ describe("spine slice", () => {
     const mod = await loadStore()
     await pushSpine(
       mod,
-      makeSpine({ projects: [project("p1", ["pt1"])] }),
+      makeSpine({
+        projects: [project("p1")],
+        terminals: [projectTerm("pt1", "p1")],
+      }),
       "projects.changed",
     )
     mod.selectTerminal("pt1", { kind: "project", projectId: "p1" })
@@ -220,7 +227,10 @@ describe("spine slice", () => {
     // A refresh that still carries the terminal must NOT eject the selection.
     await pushSpine(
       mod,
-      makeSpine({ projects: [project("p1", ["pt1"])] }),
+      makeSpine({
+        projects: [project("p1")],
+        terminals: [projectTerm("pt1", "p1")],
+      }),
       "projects.changed",
     )
     expect(mod.getSnapshot().selectedTarget).toEqual({
@@ -234,7 +244,10 @@ describe("spine slice", () => {
     const mod = await loadStore()
     await pushSpine(
       mod,
-      makeSpine({ projects: [project("p1", ["pt1"])] }),
+      makeSpine({
+        projects: [project("p1")],
+        terminals: [projectTerm("pt1", "p1")],
+      }),
       "projects.changed",
     )
     mod.selectTerminal("pt1", { kind: "project", projectId: "p1" })

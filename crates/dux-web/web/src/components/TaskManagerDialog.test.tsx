@@ -92,7 +92,6 @@ function session(over: Partial<SessionView> & { id: string }): SessionView {
     worktree_path: "/wt",
     status: "active",
     auto_reopen_enabled: false,
-    terminals: [],
     tabs: [tab({ id: over.id })],
     has_output: false,
     working: false,
@@ -104,7 +103,21 @@ function session(over: Partial<SessionView> & { id: string }): SessionView {
 }
 
 function terminal(over: Partial<TerminalView> & { id: string }): TerminalView {
-  return { label: "Terminal 1", has_output: true, foreground_cmd: null, ...over }
+  return {
+    owner: { kind: "session", session_id: "s1" },
+    label: "Terminal 1",
+    has_output: true,
+    foreground_cmd: null,
+    ...over,
+  } as TerminalView
+}
+
+// A project-owned terminal: the same builder with the owner flipped.
+function projectTerminal(
+  over: Partial<TerminalView> & { id: string; projectId: string },
+): TerminalView {
+  const { projectId, ...rest } = over
+  return terminal({ ...rest, owner: { kind: "project", project_id: projectId } })
 }
 
 function stat(over: Partial<ResourceStatsView>): ResourceStatsView {
@@ -150,11 +163,19 @@ const duxStat = stat({
 const totalStat = stat({ kind: "total", label: "TOTAL" })
 
 function seed(over: Partial<DuxState> = {}) {
+  // The spine's collections all default to empty, so a test states only the one
+  // it cares about. Terminals are one flat, owner-tagged collection now.
+  const spine = {
+    sessions: [],
+    projects: [],
+    terminals: [],
+    ...((over.spine ?? {}) as object),
+  }
   mockState = {
     taskManagerOpen: true,
     stopAllOpen: false,
-    spine: { sessions: [] },
     ...over,
+    spine,
   } as unknown as DuxState
 }
 
@@ -218,12 +239,8 @@ describe("TaskManagerDialog", () => {
   it("stop_terminal_confirms_then_deletes", async () => {
     seed({
       spine: {
-        sessions: [
-          session({
-            id: "s1",
-            terminals: [terminal({ id: "term-1", label: "Terminal 1" })],
-          }),
-        ],
+        sessions: [session({ id: "s1" })],
+        terminals: [terminal({ id: "term-1", label: "Terminal 1" })],
       },
     } as Partial<DuxState>)
     render(<TaskManagerDialog />)
@@ -241,12 +258,9 @@ describe("TaskManagerDialog", () => {
     seed({
       spine: {
         sessions: [],
-        projects: [
-          {
-            id: "p1",
-            name: "Repo",
-            terminals: [terminal({ id: "pt-1", label: "Terminal 2" })],
-          },
+        projects: [{ id: "p1", name: "Repo" }],
+        terminals: [
+          projectTerminal({ id: "pt-1", projectId: "p1", label: "Terminal 2" }),
         ],
       },
     } as Partial<DuxState>)
@@ -265,12 +279,9 @@ describe("TaskManagerDialog", () => {
     seed({
       spine: {
         sessions: [],
-        projects: [
-          {
-            id: "p1",
-            name: "Repo",
-            terminals: [terminal({ id: "pt-1", label: "Terminal 2" })],
-          },
+        projects: [{ id: "p1", name: "Repo" }],
+        terminals: [
+          projectTerminal({ id: "pt-1", projectId: "p1", label: "Terminal 2" }),
         ],
       },
     } as Partial<DuxState>)
@@ -287,18 +298,11 @@ describe("TaskManagerDialog", () => {
     seed({
       stopAllOpen: true,
       spine: {
-        sessions: [
-          session({
-            id: "s1",
-            terminals: [terminal({ id: "term-1", label: "Terminal 1" })],
-          }),
-        ],
-        projects: [
-          {
-            id: "p1",
-            name: "Repo",
-            terminals: [terminal({ id: "pt-1", label: "Terminal 2" })],
-          },
+        sessions: [session({ id: "s1" })],
+        projects: [{ id: "p1", name: "Repo" }],
+        terminals: [
+          terminal({ id: "term-1", label: "Terminal 1" }),
+          projectTerminal({ id: "pt-1", projectId: "p1", label: "Terminal 2" }),
         ],
       },
     } as Partial<DuxState>)
@@ -403,9 +407,8 @@ describe("TaskManagerDialog", () => {
     })
     seed({
       spine: {
-        sessions: [
-          session({ id: "s1", terminals: [terminal({ id: "term-1", label: "Terminal 1" })] }),
-        ],
+        sessions: [session({ id: "s1" })],
+        terminals: [terminal({ id: "term-1", label: "Terminal 1" })],
       },
     } as Partial<DuxState>)
     render(<TaskManagerDialog />)
@@ -682,9 +685,8 @@ describe("TaskManagerDialog", () => {
     })
     seed({
       spine: {
-        sessions: [
-          session({ id: "s1", terminals: [terminal({ id: "term-1", label: "Terminal 1" })] }),
-        ],
+        sessions: [session({ id: "s1" })],
+        terminals: [terminal({ id: "term-1", label: "Terminal 1" })],
       },
     } as Partial<DuxState>)
     render(<TaskManagerDialog />)
@@ -718,9 +720,8 @@ describe("TaskManagerDialog", () => {
     })
     seed({
       spine: {
-        sessions: [
-          session({ id: "s1", terminals: [terminal({ id: "term-1", label: "Terminal 1" })] }),
-        ],
+        sessions: [session({ id: "s1" })],
+        terminals: [terminal({ id: "term-1", label: "Terminal 1" })],
       },
     } as Partial<DuxState>)
     render(<TaskManagerDialog />)

@@ -1,17 +1,31 @@
 import { describe, expect, it } from "vitest"
 
 import { formatDisplayDate, projectLiveCounts } from "./projectInfo"
-import type { SessionView } from "./types"
+import type { SessionView, TerminalView } from "./types"
 
-// Minimal fixture: projectLiveCounts only reads project_id and terminals.
+// Minimal fixture: projectLiveCounts only reads project_id off a session.
 function session(
   fields: Partial<SessionView> & { id: string; project_id: string },
 ): SessionView {
   return {
     title: null,
-    terminals: [],
     ...fields,
   } as unknown as SessionView
+}
+
+// Minimal terminal fixture: projectLiveCounts only reads `owner`.
+function sessionTerm(id: string, sessionId: string): TerminalView {
+  return {
+    id,
+    owner: { kind: "session", session_id: sessionId },
+  } as unknown as TerminalView
+}
+
+function projectTerm(id: string, projectId: string): TerminalView {
+  return {
+    id,
+    owner: { kind: "project", project_id: projectId },
+  } as unknown as TerminalView
 }
 
 describe("projectLiveCounts", () => {
@@ -29,23 +43,17 @@ describe("projectLiveCounts", () => {
 
   it("sums companion terminals across the project's sessions", () => {
     const sessions = [
-      session({
-        id: "a",
-        project_id: "p1",
-        terminals: [{ id: "t1" }, { id: "t2" }],
-      } as unknown as SessionView),
-      session({
-        id: "b",
-        project_id: "p1",
-        terminals: [{ id: "t3" }],
-      } as unknown as SessionView),
-      session({
-        id: "c",
-        project_id: "p2",
-        terminals: [{ id: "t4" }],
-      } as unknown as SessionView),
+      session({ id: "a", project_id: "p1" }),
+      session({ id: "b", project_id: "p1" }),
+      session({ id: "c", project_id: "p2" }),
     ]
-    expect(projectLiveCounts("p1", sessions)).toEqual({
+    const terminals = [
+      sessionTerm("t1", "a"),
+      sessionTerm("t2", "a"),
+      sessionTerm("t3", "b"),
+      sessionTerm("t4", "c"),
+    ]
+    expect(projectLiveCounts("p1", sessions, terminals)).toEqual({
       agents: 2,
       terminals: 3,
     })
@@ -54,18 +62,13 @@ describe("projectLiveCounts", () => {
   it("includes the project's own project terminals", () => {
     // The trap this guards (T7): the info dialog summed only the sessions'
     // terminals, so a project terminal never counted.
-    const sessions = [
-      session({
-        id: "a",
-        project_id: "p1",
-        terminals: [{ id: "t1" }],
-      } as unknown as SessionView),
+    const sessions = [session({ id: "a", project_id: "p1" })]
+    const terminals = [
+      sessionTerm("t1", "a"),
+      projectTerm("pt1", "p1"),
+      projectTerm("pt2", "p1"),
     ]
-    const projectTerminals = [
-      { id: "pt1" },
-      { id: "pt2" },
-    ] as unknown as import("./types").TerminalView[]
-    expect(projectLiveCounts("p1", sessions, projectTerminals)).toEqual({
+    expect(projectLiveCounts("p1", sessions, terminals)).toEqual({
       agents: 1,
       terminals: 3,
     })

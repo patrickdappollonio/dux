@@ -28,15 +28,29 @@ function makeSpine(
     projects: projects.map((p) => ({
       id: p.id,
       name: p.id,
-      terminals: (p.terminals ?? []).map((id) => ({ id })),
     })) as unknown as Spine["projects"],
     sessions: sessions.map((s) => ({
       id: s.id,
       project_id: s.project_id,
       status: s.status ?? "active",
-      terminals: (s.terminals ?? []).map((id) => ({ id })),
       tabs: [{ id: s.id }, ...(s.tabs ?? []).map((id) => ({ id }))],
     })) as unknown as Spine["sessions"],
+    // Every terminal, of every owner, in one flat owner-tagged collection: the
+    // sessions' terminals in session order, then the projects' in project order.
+    terminals: [
+      ...sessions.flatMap((s) =>
+        (s.terminals ?? []).map((id) => ({
+          id,
+          owner: { kind: "session", session_id: s.id },
+        })),
+      ),
+      ...projects.flatMap((p) =>
+        (p.terminals ?? []).map((id) => ({
+          id,
+          owner: { kind: "project", project_id: p.id },
+        })),
+      ),
+    ] as unknown as Spine["terminals"],
     sidebar: { groups: [], agentless_start: null },
   }
 }

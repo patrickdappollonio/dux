@@ -1083,11 +1083,11 @@ async fn ws_terminal_pty_upgrade(
     if state.engine.session_worktree(id.clone()).await.is_none() {
         return (StatusCode::NOT_FOUND, "unknown session").into_response();
     }
-    // Enforce that the terminal belongs to THIS session: an unknown terminal,
-    // one owned by a different session, or a project terminal is a 404 (never a
-    // cross-owner attach).
+    // Route membership through the owner type's exhaustive `is_at_route`: an
+    // unknown terminal, one owned by a different session, or a project terminal
+    // is a 404 (never a cross-owner attach).
     match state.engine.terminal_owner_of(tid.clone()).await {
-        Some(dux_core::model::TerminalOwner::Session(owner)) if owner == id => {}
+        Some(owner) if owner.is_at_route(dux_core::model::TerminalRoute::Session(&id)) => {}
         _ => return (StatusCode::NOT_FOUND, "unknown terminal").into_response(),
     }
     let permit = match acquire_ws_permit(
@@ -1155,11 +1155,11 @@ async fn ws_project_terminal_pty_upgrade(
     if state.engine.project_path(id.clone()).await.is_none() {
         return (StatusCode::NOT_FOUND, "unknown project").into_response();
     }
-    // Enforce that the terminal belongs to THIS project: an unknown terminal, a
-    // session-owned terminal, or one owned by a different project is a 404
-    // (never a cross-owner attach).
+    // Route membership through the same exhaustive `is_at_route`: an unknown
+    // terminal, a session-owned terminal, or one owned by a different project is
+    // a 404 (never a cross-owner attach).
     match state.engine.terminal_owner_of(tid.clone()).await {
-        Some(dux_core::model::TerminalOwner::Project(owner)) if owner == id => {}
+        Some(owner) if owner.is_at_route(dux_core::model::TerminalRoute::Project(&id)) => {}
         _ => return (StatusCode::NOT_FOUND, "unknown terminal").into_response(),
     }
     let permit = match acquire_ws_permit(

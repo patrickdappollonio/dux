@@ -49,6 +49,13 @@ import {
 } from "./editorTabs"
 import type { EditorTabsState } from "./editorTabs"
 import { newClientId } from "./uid"
+import { assertNever } from "./assertNever"
+import {
+  ownerRefFromWire,
+  ownerSessionId,
+  type TerminalOwnerRef,
+} from "./terminalOwner"
+import { ownerHasTerminal } from "./terminals"
 import type {
   BranchWarningView,
   InspectKind,
@@ -61,17 +68,16 @@ import type {
   SessionView,
   StartupLogContent,
   StartupLogEntry,
+  TerminalView,
 } from "./types"
 
-// Who a companion terminal belongs to: an agent session (spawned in that
-// agent's worktree) or a project (a "project terminal", spawned at the
-// project's repo root with no agent attached). Mirrors the Rust
-// `TerminalOwner`. Every consumer must branch on `kind`; there is
-// deliberately no bare-id accessor, so the project variant can never be
-// silently ignored by session-shaped code.
-export type TerminalOwnerRef =
-  | { kind: "session"; sessionId: string }
-  | { kind: "project"; projectId: string }
+// Who a companion terminal belongs to. The type now lives in
+// `lib/terminalOwner.ts` alongside the exhaustive switches that consume it, and
+// is re-exported here so the many existing `from "@/lib/store"` imports keep
+// working. Every consumer must switch on `kind` and end that switch in
+// `assertNever`; there is deliberately no bare-id accessor, so no owner kind can
+// be silently ignored by session-shaped code.
+export type { TerminalOwnerRef } from "./terminalOwner"
 
 // The currently-streamed target: either an agent session or a companion
 // terminal. An agent target carries a `sessionId` for session-scoped UI (the
@@ -1217,21 +1223,17 @@ function reconcilePendingAgentOrder(
   return ordersMatch(serverIds, pending) ? null : pending
 }
 
-// Mirror of `reconcilePendingAgentOrder` for the flat Terminals section. Terminals
-// are split across `sessions[].terminals` and `projects[].terminals` in the spine,
-// so the authoritative flat order is EVERY terminal (any owner) sorted by its
-// global `sort_order` (which a reorder restamps to the dragged order). The overlay
-// clears once that server order matches what we optimistically applied.
+// Mirror of `reconcilePendingAgentOrder` for the flat Terminals section. The
+// spine carries EVERY terminal (any owner) in one flat collection, and the
+// authoritative flat order is that collection sorted by the global `sort_order`
+// (which a reorder restamps to the dragged order). The overlay clears once that
+// server order matches what we optimistically applied.
 function reconcilePendingTerminalOrder(
   spine: Spine,
   pending: string[] | null,
 ): string[] | null {
   if (!pending) return null
-  const all = [
-    ...spine.sessions.flatMap((s) => s.terminals),
-    ...spine.projects.flatMap((p) => p.terminals),
-  ]
-  const serverIds = all
+  const serverIds = spine.terminals
     .slice()
     .sort((a, b) => a.sort_order - b.sort_order)
     .map((t) => t.id)
@@ -1277,19 +1279,12 @@ function pruneSelectionIfGone(spine: Spine, previous: SessionView[]): void {
     }
     return
   }
-  // A terminal: it must still exist UNDER its owner. Branch on the owner kind:
-  // a project terminal is scoped to `spine.projects`, never to a session (the
-  // old `?? false` here made every project terminal look vanished and ejected
-  // the user to home on every spine apply).
+  // A terminal: it must still exist UNDER its owner. `ownerHasTerminal` checks
+  // both halves at once (the id is present AND its owner tag matches the address
+  // we are on), so this no longer has to know which collection each owner kind
+  // would have been nested in.
   const owner = target.owner
-  const stillExists =
-    owner.kind === "session"
-      ? (spine.sessions
-          .find((s) => s.id === owner.sessionId)
-          ?.terminals.some((t) => t.id === target.terminalId) ?? false)
-      : (spine.projects
-          .find((p) => p.id === owner.projectId)
-          ?.terminals.some((t) => t.id === target.terminalId) ?? false)
+  const stillExists = ownerHasTerminal(spine.terminals, owner, target.terminalId)
   if (!stillExists) {
     // The other out-of-band path: a terminal whose PTY exited is dropped from
     // the ViewModel while the user may be looking at it. A terminal is not an
@@ -1300,10 +1295,10 @@ function pruneSelectionIfGone(spine: Spine, previous: SessionView[]): void {
     // already does, and both rewrite the current entry rather than stepping
     // history. Ejecting a companion terminal all the way to home threw away a
     // position that still existed.
+    const ownerSession = ownerSessionId(owner)
     const fallback =
-      owner.kind === "session" &&
-      spine.sessions.some((s) => s.id === owner.sessionId)
-        ? owner.sessionId
+      ownerSession !== null && spine.sessions.some((s) => s.id === ownerSession)
+        ? ownerSession
         : null
     selectSessionRoute(fallback, "replace")
   }
@@ -1652,11 +1647,19 @@ function parseSelectionHash(hash: string): SelectedTarget | null {
 function selectionHash(target: SelectedTarget | null): string {
   if (!target) return ""
   if (target.kind === "terminal") {
+    // The URL SHAPE is an owner decision, so it is a switch, not a conditional:
+    // each owner kind has its own grammar and a new one needs its own, which is
+    // a thing to write rather than a thing to fall through into.
     const owner = target.owner
-    if (owner.kind === "project") {
-      return `#/project/${encodeURIComponent(owner.projectId)}/terminal/${encodeURIComponent(target.terminalId)}`
+    const tid = encodeURIComponent(target.terminalId)
+    switch (owner.kind) {
+      case "project":
+        return `#/project/${encodeURIComponent(owner.projectId)}/terminal/${tid}`
+      case "session":
+        return `#/agent/${encodeURIComponent(owner.sessionId)}/terminal/${tid}`
+      default:
+        return assertNever(owner)
     }
-    return `#/agent/${encodeURIComponent(owner.sessionId)}/terminal/${encodeURIComponent(target.terminalId)}`
   }
   const base = `#/agent/${encodeURIComponent(target.sessionId)}`
   return target.tabId === target.sessionId
@@ -1823,20 +1826,28 @@ function resolveRouteTarget(
 ): void {
   let sessionId: string
   if (target.kind === "terminal") {
+    // How a terminal route RESOLVES depends on its owner, so this is a switch:
+    // an owner that is not a session cannot resolve through the session list and
+    // must say what it resolves against instead.
     const owner = target.owner
-    if (owner.kind === "project") {
-      // A project terminal belongs to no session, so it resolves against the
-      // project list on its own.
-      applyProjectTerminalDeepLink(
-        spine,
-        target.terminalId,
-        owner.projectId,
-        "replace",
-        changes,
-      )
-      return
+    switch (owner.kind) {
+      case "project":
+        // A project terminal belongs to no session, so it resolves against the
+        // project list on its own.
+        applyProjectTerminalDeepLink(
+          spine,
+          target.terminalId,
+          owner.projectId,
+          "replace",
+          changes,
+        )
+        return
+      case "session":
+        sessionId = owner.sessionId
+        break
+      default:
+        return assertNever(owner)
     }
-    sessionId = owner.sessionId
   } else {
     sessionId = target.sessionId
   }
@@ -1857,14 +1868,14 @@ function resolveRouteTarget(
   // same SCREEN, so `syncUrl` would replace on its own. It is passed because
   // the intent, "this is a restore, never a new position", should be stated at
   // the call site rather than inferred from what the fallbacks happen to do.
-  applyDeepLinkSelection(session, target, "replace", changes)
+  applyDeepLinkSelection(session, spine.terminals, target, "replace", changes)
 }
 
 // The session a route target belongs to, or null for a project terminal (which
 // belongs to a project instead).
 function targetSessionId(target: SelectedTarget): string | null {
   if (target.kind === "agent") return target.sessionId
-  return target.owner.kind === "session" ? target.owner.sessionId : null
+  return ownerSessionId(target.owner)
 }
 
 // Retire the not-found screen once a spine carries the agent its URL names. The
@@ -1929,6 +1940,7 @@ let pendingDeepLinkChanges = bootRoute.changes
 // target, never after it, so the URL is only ever written from a whole route.
 function applyDeepLinkSelection(
   session: Spine["sessions"][number],
+  terminals: readonly TerminalView[],
   target: SelectedTarget,
   urlMode?: "replace",
   changes?: boolean,
@@ -1938,7 +1950,7 @@ function applyDeepLinkSelection(
     // links restore via `applyProjectTerminalDeepLink` and never reach here.
     if (target.owner.kind !== "session") return
     const owner = target.owner
-    if (session.terminals.some((t) => t.id === target.terminalId)) {
+    if (ownerHasTerminal(terminals, owner, target.terminalId)) {
       selectTerminal(target.terminalId, owner, { urlMode, changes })
       return
     }
@@ -1990,9 +2002,12 @@ function applyProjectTerminalDeepLink(
   urlMode?: "replace",
   changes?: boolean,
 ): void {
-  const project = spine.projects.find((p) => p.id === projectId)
-  if (project?.terminals.some((t) => t.id === terminalId)) {
-    selectTerminal(terminalId, { kind: "project", projectId }, { urlMode, changes })
+  const owner: TerminalOwnerRef = { kind: "project", projectId }
+  if (
+    spine.projects.some((p) => p.id === projectId) &&
+    ownerHasTerminal(spine.terminals, owner, terminalId)
+  ) {
+    selectTerminal(terminalId, owner, { urlMode, changes })
     return
   }
   selectSessionRoute(null, urlMode)
@@ -2120,9 +2135,8 @@ function restoreReconnectDeepLink(spine: Spine): void {
       return
     }
     const exists =
-      spine.projects
-        .find((p) => p.id === owner.projectId)
-        ?.terminals.some((t) => t.id === target.terminalId) ?? false
+      spine.projects.some((p) => p.id === owner.projectId) &&
+      ownerHasTerminal(spine.terminals, owner, target.terminalId)
     if (!exists) return // keep waiting within the TTL (the spine may lag)
     // A replace: this restores the position the browser is ALREADY parked on
     // (the hash still names it, or our own eject rewrote it). Pushing would add
@@ -2138,9 +2152,7 @@ function restoreReconnectDeepLink(spine: Spine): void {
   const armedSessionId =
     armedTarget.kind === "agent"
       ? armedTarget.sessionId
-      : armedTarget.owner.kind === "session"
-        ? armedTarget.owner.sessionId
-        : null
+      : ownerSessionId(armedTarget.owner)
   if (armedSessionId === null) {
     reconnectDeepLink = null
     return
@@ -2181,7 +2193,13 @@ function restoreReconnectDeepLink(spine: Spine): void {
   // A replace, for the same reason as the project-terminal branch above: this is
   // a restore of the position the URL already named, not a move the user made.
   if (sel !== armedSessionId) {
-    applyDeepLinkSelection(session, armed.target, "replace", armed.changes)
+    applyDeepLinkSelection(
+      session,
+      spine.terminals,
+      armed.target,
+      "replace",
+      armed.changes,
+    )
   }
   reconnectDeepLink = null
 }
@@ -2356,7 +2374,7 @@ export function selectTerminal(
   opts?: { urlMode?: "replace"; changes?: boolean },
 ): void {
   const prev = state.selectedSessionId
-  const sessionId = owner.kind === "session" ? owner.sessionId : null
+  const sessionId = ownerSessionId(owner)
   setState({
     selectedTarget: { kind: "terminal", terminalId, owner },
     selectedSessionId: sessionId,
@@ -2424,21 +2442,15 @@ export function closeDeleteTerminal(): void {
   setState({ deleteTerminalTarget: null })
 }
 
-// Resolve a terminal's owner from the spine: a session whose terminal list
-// carries it, else a project whose terminal list carries it, else undefined
-// (already vanished).
+// Resolve a terminal's owner from the spine. The terminal CARRIES its owner now,
+// so this is a lookup by id and a conversion rather than a scan of two nested
+// collections in which "which list did I find it in" was the answer. Undefined
+// when the terminal has already vanished.
 export function findTerminalOwner(
   terminalId: string,
 ): TerminalOwnerRef | undefined {
-  const sessionId = state.spine?.sessions.find((s) =>
-    s.terminals.some((t) => t.id === terminalId),
-  )?.id
-  if (sessionId !== undefined) return { kind: "session", sessionId }
-  const projectId = state.spine?.projects.find((p) =>
-    p.terminals.some((t) => t.id === terminalId),
-  )?.id
-  if (projectId !== undefined) return { kind: "project", projectId }
-  return undefined
+  const terminal = state.spine?.terminals.find((t) => t.id === terminalId)
+  return terminal ? ownerRefFromWire(terminal.owner) : undefined
 }
 
 // Close (delete) a companion terminal via REST (Phase 5). The endpoint is nested
@@ -2448,13 +2460,26 @@ export function findTerminalOwner(
 // terminal is removed from the workspace spine, and if it was the focused target
 // the selection clears via the spine prune in `applySpine` (driven by the
 // `sessions.changed` refetch). A failure surfaces as a toast.
+// The DELETE endpoint for a terminal is nested under its owner, so which URL to
+// call is an owner decision and gets an exhaustive switch of its own.
+function terminalDeleteRequest(
+  owner: TerminalOwnerRef,
+  terminalId: string,
+): Promise<void> {
+  switch (owner.kind) {
+    case "session":
+      return terminalsApi.remove(owner.sessionId, terminalId)
+    case "project":
+      return terminalsApi.removeForProject(owner.projectId, terminalId)
+    default:
+      return assertNever(owner)
+  }
+}
+
 export function deleteTerminal(terminalId: string): void {
   const owner = findTerminalOwner(terminalId)
   if (owner === undefined) return
-  const request =
-    owner.kind === "session"
-      ? terminalsApi.remove(owner.sessionId, terminalId)
-      : terminalsApi.removeForProject(owner.projectId, terminalId)
+  const request = terminalDeleteRequest(owner, terminalId)
   request.catch((e) =>
     toast.error(
       e instanceof Error ? e.message : "Could not close the terminal.",
@@ -4042,13 +4067,11 @@ export function stopAllRunning(): void {
   const sessions = state.spine?.sessions ?? []
   for (const s of sessions) {
     if (s.status === "active") killSessionPty(s.id)
-    for (const t of s.terminals) deleteTerminal(t.id)
   }
-  // Project terminals live on projects, not sessions; the panic button must
-  // reach them too, or a hung project terminal survives "Stop all".
-  for (const p of state.spine?.projects ?? []) {
-    for (const t of p.terminals) deleteTerminal(t.id)
-  }
+  // One flat collection, so every terminal of every owner is reached by one
+  // loop: the panic button cannot miss a whole owner kind the way it once could
+  // have missed project terminals.
+  for (const t of state.spine?.terminals ?? []) deleteTerminal(t.id)
 }
 
 // The Preferences dialog (the app menu's "Preferences…"). Open/close just flip the

@@ -9,6 +9,7 @@ import { PrBanner } from "@/components/PrBanner"
 import { Welcome } from "@/components/Welcome"
 import { isExtraTabDormant, shouldShowTabStrip } from "@/lib/agentTabs"
 import { useDux } from "@/lib/store"
+import { ownerSessionId as terminalOwnerSessionId } from "@/lib/terminalOwner"
 
 // The center pane: the agent's terminal (or a companion terminal's), the tab
 // strip above it, and the PR banner. Split into its own module (rather than
@@ -71,9 +72,7 @@ export function TerminalArea() {
   const ownerSessionId =
     selectedTarget.kind === "agent"
       ? selectedTarget.sessionId
-      : selectedTarget.owner.kind === "session"
-        ? selectedTarget.owner.sessionId
-        : null
+      : terminalOwnerSessionId(selectedTarget.owner)
   const session = spine?.sessions.find((s) => s.id === ownerSessionId)
   const tabs = session?.tabs ?? []
   const focusedTab =

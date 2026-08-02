@@ -23,7 +23,9 @@
 // Reconnect affordance and a manual reconnect resets the budget. `close()` is the
 // deliberate, user-initiated teardown and suppresses the reconnect loop.
 
+import { assertNever } from "./assertNever"
 import { ReconnectingSocket } from "./reconnectingSocket"
+import type { TerminalOwnerRef } from "./terminalOwner"
 
 // The WebSocket close code the server sends on a PTY socket when the provider is
 // not available to attach to — it failed to launch (e.g. the CLI is not on PATH)
@@ -67,6 +69,24 @@ export function projectTerminalPtyUrl(
   return `${wsScheme()}//${location.host}/ws/projects/${encodeURIComponent(
     projectId,
   )}/terminals/${encodeURIComponent(terminalId)}/pty`
+}
+
+// A terminal's PTY socket URL, chosen by its OWNER. Which websocket route a
+// terminal is reachable at is an ownership decision, so it is a switch ending in
+// `assertNever` rather than a two-way conditional at the call site: a new owner
+// kind is reachable at a route of its own, and must say which.
+export function terminalSocketUrl(
+  owner: TerminalOwnerRef,
+  terminalId: string,
+): string {
+  switch (owner.kind) {
+    case "session":
+      return terminalPtyUrl(owner.sessionId, terminalId)
+    case "project":
+      return projectTerminalPtyUrl(owner.projectId, terminalId)
+    default:
+      return assertNever(owner)
+  }
 }
 
 // An extra tab's PTY socket URL, nested under its owning session so the server

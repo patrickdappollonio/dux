@@ -7,6 +7,8 @@
 // I/O rides the dedicated per-PTY sockets (`/ws/sessions/:id/pty` and
 // `/ws/sessions/:id/terminals/:tid/pty`) — see `lib/ptySocket.ts`.
 
+import type { TerminalOwnerWire } from "@/lib/terminalOwner"
+
 export type SessionStatus = "active" | "detached" | "exited"
 
 // A macro's surface restriction, matching the Rust `MacroSurface` serde casing
@@ -42,11 +44,6 @@ export interface ProjectView {
   /** RFC 3339 timestamp of when the project was added, or "" when no store row
    * exists yet. */
   created_at: string
-  /** Project terminals open at this project's repo root (owned by the project,
-   * with no agent attached), sorted by id. Session-owned companion terminals
-   * live on `SessionView.terminals` instead. An older server omits the field;
-   * `fetchSpine` normalizes a missing value to `[]` at ingestion. */
-  terminals: TerminalView[]
 }
 
 export interface PrView {
@@ -85,6 +82,11 @@ export interface AgentTabView {
 
 export interface TerminalView {
   id: string
+  /** Who owns this terminal, tagged. Every terminal carries its own owner now
+   * that they arrive as ONE flat `Spine.terminals` collection rather than nested
+   * inside the session or project that owns them. Switch on it with the helpers
+   * in `lib/terminalOwner.ts`, never with a two-way conditional. */
+  owner: TerminalOwnerWire
   label: string
   has_output: boolean
   /** The terminal emitted PTY output within the last second (hysteresis boolean,
@@ -135,7 +137,6 @@ export interface SessionView {
   status: SessionStatus
   auto_reopen_enabled: boolean
   pr?: PrView
-  terminals: TerminalView[]
   /** The agent's provider tabs in creation order (`tabs[0].id === id`). A session
    * always has at least one tab; the tab strip renders only when there are two or
    * more. See `AgentTabView`. An older server that predates tabs (e.g. after a

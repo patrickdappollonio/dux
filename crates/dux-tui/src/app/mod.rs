@@ -61,7 +61,7 @@ use crate::storage::SessionStore;
 use crate::theme::Theme;
 use dux_core::engine::{Command, Engine};
 pub(crate) use dux_core::model::CompanionTerminal;
-pub(crate) use dux_core::model::TerminalOwner;
+pub(crate) use dux_core::model::{TerminalOwner, TerminalOwnerRef};
 
 use text_input::TextInput;
 
@@ -4627,7 +4627,7 @@ impl App {
     pub(crate) fn clear_companion_terminals_for_session(&mut self, session_id: &str) {
         self.engine
             .companion_terminals
-            .retain(|_, t| !matches!(&t.owner, TerminalOwner::Session(sid) if sid == session_id));
+            .retain(|_, t| !t.owner.closed_by_session_delete(session_id));
         if let Some(ref id) = self.active_terminal_id
             && !self.engine.companion_terminals.contains_key(id)
         {
@@ -4735,7 +4735,13 @@ impl App {
         self.engine
             .companion_terminals
             .values()
-            .filter(|t| matches!(&t.owner, TerminalOwner::Session(sid) if sid == session_id))
+            // Exhaustive rather than a `matches!`: the sidebar row's terminal
+            // count is one of the owner-presentation decisions, so a new owner
+            // kind has to say whether it counts toward an agent's row.
+            .filter(|t| match t.owner.as_ref() {
+                TerminalOwnerRef::Session(sid) => sid == session_id,
+                TerminalOwnerRef::Project(_) => false,
+            })
             .count()
     }
 

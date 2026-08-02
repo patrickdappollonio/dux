@@ -393,31 +393,26 @@ where
     false
 }
 
-/// Whether the spine carries a session whose `terminals` include `terminal_id`.
+/// Whether the spine's ONE flat `terminals` collection carries `terminal_id`
+/// tagged as owned by a session. Terminals no longer arrive nested inside the
+/// session or project that owns them; they arrive flat, each carrying a tagged
+/// owner, so these two helpers now read the tag instead of the nesting.
 fn spine_has_terminal(spine: &serde_json::Value, terminal_id: &str) -> bool {
-    spine["sessions"]
-        .as_array()
-        .map(|sessions| {
-            sessions.iter().any(|s| {
-                s["terminals"]
-                    .as_array()
-                    .map(|ts| ts.iter().any(|t| t["id"].as_str() == Some(terminal_id)))
-                    .unwrap_or(false)
-            })
-        })
-        .unwrap_or(false)
+    spine_terminal_has_owner_kind(spine, terminal_id, "session")
 }
 
-/// Whether the spine carries a project whose `terminals` include `terminal_id`.
+/// Whether the spine's flat `terminals` collection carries `terminal_id` tagged
+/// as owned by a project.
 fn spine_has_project_terminal(spine: &serde_json::Value, terminal_id: &str) -> bool {
-    spine["projects"]
+    spine_terminal_has_owner_kind(spine, terminal_id, "project")
+}
+
+fn spine_terminal_has_owner_kind(spine: &serde_json::Value, terminal_id: &str, kind: &str) -> bool {
+    spine["terminals"]
         .as_array()
-        .map(|projects| {
-            projects.iter().any(|p| {
-                p["terminals"]
-                    .as_array()
-                    .map(|ts| ts.iter().any(|t| t["id"].as_str() == Some(terminal_id)))
-                    .unwrap_or(false)
+        .map(|terminals| {
+            terminals.iter().any(|t| {
+                t["id"].as_str() == Some(terminal_id) && t["owner"]["kind"].as_str() == Some(kind)
             })
         })
         .unwrap_or(false)

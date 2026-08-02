@@ -1723,10 +1723,34 @@ impl StatusEmitter {
 /// fields) into the sessions half instead made a PROJECT-only change spuriously
 /// fire `sessions.changed`. Since the client refetches the whole `/spine` on
 /// either event, the sidebar still re-fetches correctly on whichever side fired.
+///
+/// Terminals ARE included, folded into the half that matches their owner. They
+/// used to ride inside the nested `projects[].terminals` / `sessions[].terminals`
+/// and so moved the corresponding half for free; now that they arrive as one
+/// flat collection, leaving them out of both halves would mean a terminal's
+/// label, foreground command, working flag or drag order changing WITHOUT any
+/// coarse event firing, and no client would ever refetch. Partitioning by owner
+/// keeps exactly the event that fired before firing now: a session-owned
+/// terminal moves the sessions half, a project terminal moves the projects half.
 fn spine_fingerprints(engine: &Engine) -> (String, String) {
-    let spine = engine.spine();
-    let projects = serde_json::to_string(&spine.projects).unwrap_or_else(|_| "[]".to_string());
-    let sessions = serde_json::to_string(&spine.sessions).unwrap_or_else(|_| "[]".to_string());
+    fingerprint_halves(&engine.spine())
+}
+
+/// The pure half of [`spine_fingerprints`]: the projection is already done, so
+/// this is only the split-and-serialize, which is what makes the owner
+/// partitioning testable without spawning a real PTY.
+fn fingerprint_halves(spine: &dux_core::viewmodel::SpineView) -> (String, String) {
+    // Exhaustive over the owner kinds: a new kind must decide which coarse event
+    // its churn belongs to instead of silently signalling nothing.
+    let (session_terminals, project_terminals): (Vec<_>, Vec<_>) =
+        spine.terminals.iter().partition(|t| match &t.owner {
+            dux_core::viewmodel::TerminalOwnerView::Session { .. } => true,
+            dux_core::viewmodel::TerminalOwnerView::Project { .. } => false,
+        });
+    let projects = serde_json::to_string(&(&spine.projects, &project_terminals))
+        .unwrap_or_else(|_| "[]".to_string());
+    let sessions = serde_json::to_string(&(&spine.sessions, &session_terminals))
+        .unwrap_or_else(|_| "[]".to_string());
     (projects, sessions)
 }
 
@@ -2999,6 +3023,114 @@ mod tests {
                 paths.root.to_string_lossy().as_ref(),
             ))
             .unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // Terminals moved out of `sessions[].terminals` / `projects[].terminals`
+    // into one flat, owner-tagged collection. They used to move the coarse
+    // fingerprint of whichever half they were nested in, purely by being nested
+    // there; these pin that the SAME half still moves now that the split is an
+    // explicit partition by owner. Without it a terminal's label, foreground
+    // command, working flag or drag order could change with no coarse event
+    // firing at all, and no client would ever refetch.
+    // -----------------------------------------------------------------------
+
+    fn empty_spine() -> dux_core::viewmodel::SpineView {
+        dux_core::viewmodel::SpineView {
+            projects: Vec::new(),
+            sessions: Vec::new(),
+            terminals: Vec::new(),
+            sidebar: dux_core::sidebar::build_sidebar(
+                &[],
+                &[],
+                &std::collections::HashSet::new(),
+                0,
+            ),
+        }
+    }
+
+    fn sample_terminal_view(
+        id: &str,
+        owner: dux_core::viewmodel::TerminalOwnerView,
+    ) -> dux_core::viewmodel::TerminalView {
+        dux_core::viewmodel::TerminalView {
+            id: id.to_string(),
+            owner,
+            label: "Terminal 1".to_string(),
+            has_output: false,
+            working: false,
+            typing: false,
+            foreground_cmd: None,
+            sort_order: 1,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_session_terminal_moves_only_the_sessions_fingerprint() {
+        let before = empty_spine();
+        let mut after = empty_spine();
+        after.terminals.push(sample_terminal_view(
+            "term-1",
+            dux_core::viewmodel::TerminalOwnerView::Session {
+                session_id: "s1".to_string(),
+            },
+        ));
+
+        let (projects_before, sessions_before) = fingerprint_halves(&before);
+        let (projects_after, sessions_after) = fingerprint_halves(&after);
+        assert_ne!(
+            sessions_before, sessions_after,
+            "a session-owned terminal must still fire sessions.changed"
+        );
+        assert_eq!(
+            projects_before, projects_after,
+            "and must not spuriously fire projects.changed"
+        );
+    }
+
+    #[test]
+    fn a_project_terminal_moves_only_the_projects_fingerprint() {
+        let before = empty_spine();
+        let mut after = empty_spine();
+        after.terminals.push(sample_terminal_view(
+            "term-1",
+            dux_core::viewmodel::TerminalOwnerView::Project {
+                project_id: "p1".to_string(),
+            },
+        ));
+
+        let (projects_before, sessions_before) = fingerprint_halves(&before);
+        let (projects_after, sessions_after) = fingerprint_halves(&after);
+        assert_ne!(
+            projects_before, projects_after,
+            "a project terminal must still fire projects.changed"
+        );
+        assert_eq!(
+            sessions_before, sessions_after,
+            "and must not spuriously fire sessions.changed"
+        );
+    }
+
+    #[test]
+    fn a_terminal_field_change_still_moves_its_owners_fingerprint() {
+        // The subtler half: not just appearing, but CHANGING. A foreground
+        // command arriving on a live terminal has to reach the client.
+        let mut before = empty_spine();
+        before.terminals.push(sample_terminal_view(
+            "term-1",
+            dux_core::viewmodel::TerminalOwnerView::Session {
+                session_id: "s1".to_string(),
+            },
+        ));
+        let mut after = before.clone();
+        after.terminals[0].foreground_cmd = Some("vim".to_string());
+
+        let (projects_before, sessions_before) = fingerprint_halves(&before);
+        let (projects_after, sessions_after) = fingerprint_halves(&after);
+        assert_ne!(sessions_before, sessions_after);
+        assert_eq!(projects_before, projects_after);
     }
 
     #[test]

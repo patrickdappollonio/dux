@@ -1134,7 +1134,7 @@ impl Engine {
         let removed_terminals: Vec<String> = self
             .companion_terminals
             .iter()
-            .filter(|(_, t)| matches!(&t.owner, crate::model::TerminalOwner::Session(sid) if *sid == session.id))
+            .filter(|(_, t)| t.owner.closed_by_session_delete(&session.id))
             .map(|(id, _)| id.clone())
             .collect();
         for terminal_id in &removed_terminals {
@@ -1252,7 +1252,7 @@ impl Engine {
             let removed_terminals: Vec<String> = self
                 .companion_terminals
                 .iter()
-                .filter(|(_, t)| matches!(&t.owner, crate::model::TerminalOwner::Session(sid) if sid == session_id))
+                .filter(|(_, t)| t.owner.closed_by_session_delete(session_id))
                 .map(|(id, _)| id.clone())
                 .collect();
             for terminal_id in &removed_terminals {

@@ -27,6 +27,12 @@ export interface Spine {
   projects: ProjectView[]
   /** Every agent session, in display order. */
   sessions: SessionView[]
+  /** EVERY companion terminal, of every owner, as one flat collection ordered by
+   * the manual `sort_order`. Each entry carries its own tagged `owner`, so the
+   * client no longer rebuilds this list by walking two nested collections and
+   * inferring ownership from which one it was in. An older server that predates
+   * the flat shape omits the field; `fetchSpine` normalizes it to `[]`. */
+  terminals: TerminalView[]
   /** Core-computed sidebar grouping (projects + sessions, orphans surfaced) so
    * both surfaces render an identical tree without re-deriving grouping. */
   sidebar: SidebarModel
@@ -67,15 +73,16 @@ export async function fetchSpine(): Promise<Spine> {
   // `source_branch`, but every downstream consumer treats them as required: `tabs`
   // becomes `[]` and the two branch fields become `""` (falsy, so the
   // "Unknown"/no-drift fallbacks in the info dialog and header still apply).
-  const raw = (await resp.json()) as Omit<Spine, "sessions" | "projects"> & {
-    projects: Array<
-      Omit<ProjectView, "terminals"> & { terminals?: RawTerminal[] }
-    >
+  const raw = (await resp.json()) as Omit<
+    Spine,
+    "sessions" | "projects" | "terminals"
+  > & {
+    projects: ProjectView[]
+    terminals?: RawTerminal[]
     sessions: Array<
       Omit<
         SessionView,
         | "tabs"
-        | "terminals"
         | "initial_branch"
         | "source_branch"
         | "needs_attention"
@@ -83,7 +90,6 @@ export async function fetchSpine(): Promise<Spine> {
         | "last_focused_tab"
       > & {
         tabs?: RawTab[]
-        terminals?: RawTerminal[]
         initial_branch?: string
         source_branch?: string
         needs_attention?: boolean
@@ -94,16 +100,15 @@ export async function fetchSpine(): Promise<Spine> {
   }
   return {
     ...raw,
-    // An older server that predates project terminals omits the field; every
-    // downstream consumer treats it as required, so normalize to `[]` here.
-    projects: raw.projects.map((p) => ({
-      ...p,
-      terminals: (p.terminals ?? []).map(normalizeTerminal),
-    })),
+    // An older server that predates the flat, owner-bearing collection omits the
+    // field; every downstream consumer treats it as required, so normalize to
+    // `[]` here (that server nested its terminals instead, and a client running
+    // against it simply shows none, which is the same thing the pre-existing
+    // `?? []` fallbacks did for a missing nested list).
+    terminals: (raw.terminals ?? []).map(normalizeTerminal),
     sessions: raw.sessions.map((s) => ({
       ...s,
       tabs: (s.tabs ?? []).map(normalizeTab),
-      terminals: (s.terminals ?? []).map(normalizeTerminal),
       initial_branch: s.initial_branch ?? "",
       source_branch: s.source_branch ?? "",
       // An older server that predates attention omits the field; treat missing
