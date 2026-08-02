@@ -770,12 +770,14 @@ fn signal_zero_finds(pid: u32) -> bool {
 /// things that survives), and its state field is `Z`. An unreadable stat is NOT
 /// read as a zombie: that is a different failure, and the signal-0 answer
 /// stands.
+///
+/// Read as BYTES, because a process name is bytes. See [`stat_process_state`].
 #[cfg(target_os = "linux")]
 fn process_is_zombie(pid: u32) -> bool {
-    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+    let Ok(stat) = std::fs::read(format!("/proc/{pid}/stat")) else {
         return false;
     };
-    stat_process_state(&stat) == Some('Z')
+    stat_process_state(&stat) == Some(b'Z')
 }
 
 /// The same question where there is no `/proc`.
@@ -824,14 +826,14 @@ enum ScanEntry {
     Unreadable,
 }
 
-/// Classify one process from its `/proc/<pid>/stat`.
+/// Classify one process from its `/proc/<pid>/stat`, read as BYTES.
 ///
 /// Pure, because a genuinely unreadable stat cannot be built on this machine:
 /// the file is world-readable, and the kernel's own way of hiding a process
 /// (the `hidepid` mount option) removes the whole directory from the listing
 /// instead, which is a different thing entirely.
 #[cfg(target_os = "linux")]
-fn group_scan_step(stat: std::io::Result<String>, pgid: u32) -> ScanEntry {
+fn group_scan_step(stat: std::io::Result<Vec<u8>>, pgid: u32) -> ScanEntry {
     match stat {
         Ok(stat) => match stat_process_group(&stat) {
             Some(found) if found == pgid => ScanEntry::Member,
@@ -885,7 +887,7 @@ fn process_group_members(pgid: u32) -> ProcessGroup {
             if pid == pgid {
                 continue;
             }
-            match group_scan_step(std::fs::read_to_string(format!("/proc/{pid}/stat")), pgid) {
+            match group_scan_step(std::fs::read(format!("/proc/{pid}/stat")), pgid) {
                 ScanEntry::Member => members.push(pid),
                 ScanEntry::NotAMember => {}
                 ScanEntry::Unreadable => complete = false,
@@ -904,25 +906,45 @@ fn process_group_members(pgid: u32) -> ProcessGroup {
     }
 }
 
-/// The process group id out of a `/proc/<pid>/stat` line.
+/// The whitespace-separated fields of a `/proc/<pid>/stat` line that follow the
+/// executable name, as BYTES.
 ///
-/// Parsed from the LAST `)` rather than by splitting on whitespace from the
-/// start, because field two is the executable name in parentheses and it can
-/// contain both spaces and parentheses. After it come state, ppid and then the
-/// process group.
+/// Split at the LAST `)` rather than by splitting on whitespace from the start,
+/// because field two is the executable name in parentheses and it can contain
+/// both spaces and parentheses. After it come state, ppid and then the process
+/// group.
+///
+/// Bytes and not text, because a process name is a filename and a filename is a
+/// byte string: nothing stops it holding bytes that are not valid UTF-8, and
+/// that is an ordinary legal name rather than an attack. Decoding the line as
+/// text made the whole read fail for such a process, which read as "not a
+/// zombie" (so a finished process looked alive and REFUSED the drop) and as
+/// "could not inspect" during a group scan (so one unrelated oddly named
+/// process anywhere on the machine refused an ordinary drop). Everything this
+/// parser actually reads is ASCII; only the name it steps over is not, so the
+/// last `)` is exactly the right place to start.
 #[cfg(target_os = "linux")]
-fn stat_process_group(stat: &str) -> Option<u32> {
-    let after_comm = &stat[stat.rfind(')')? + 1..];
-    after_comm.split_whitespace().nth(2)?.parse().ok()
+fn stat_fields_after_comm(stat: &[u8]) -> Option<impl Iterator<Item = &[u8]>> {
+    let after_comm = &stat[stat.iter().rposition(|&b| b == b')')? + 1..];
+    Some(
+        after_comm
+            .split(|b| b.is_ascii_whitespace())
+            .filter(|field| !field.is_empty()),
+    )
+}
+
+/// The process group id out of a `/proc/<pid>/stat` line.
+#[cfg(target_os = "linux")]
+fn stat_process_group(stat: &[u8]) -> Option<u32> {
+    let field = stat_fields_after_comm(stat)?.nth(2)?;
+    std::str::from_utf8(field).ok()?.parse().ok()
 }
 
 /// The state letter out of a `/proc/<pid>/stat` line: the first field after the
-/// executable name, so `Z` for an exited-but-unreaped process. Parsed from the
-/// last `)` for the same reason as [`stat_process_group`].
+/// executable name, so `Z` for an exited-but-unreaped process.
 #[cfg(target_os = "linux")]
-fn stat_process_state(stat: &str) -> Option<char> {
-    let after_comm = &stat[stat.rfind(')')? + 1..];
-    after_comm.split_whitespace().next()?.chars().next()
+fn stat_process_state(stat: &[u8]) -> Option<u8> {
+    stat_fields_after_comm(stat)?.next()?.first().copied()
 }
 
 impl WorkingDirectory {
@@ -1911,12 +1933,30 @@ mod tests {
         // the kernel's own way of hiding a process (hidepid) removes the whole
         // directory from the listing instead, which is a different thing.
         assert_eq!(
-            group_scan_step(Ok("1 (sh) S 0 4242 0".to_string()), 4242),
+            group_scan_step(Ok(b"1 (sh) S 0 4242 0".to_vec()), 4242),
             ScanEntry::Member
         );
         assert_eq!(
-            group_scan_step(Ok("1 (sh) S 0 7 0".to_string()), 4242),
+            group_scan_step(Ok(b"1 (sh) S 0 7 0".to_vec()), 4242),
             ScanEntry::NotAMember
+        );
+        // A process name is a filename, and a filename is BYTES. An ordinary,
+        // legal name that is not valid UTF-8 must be stepped over like any
+        // other, not read as "could not inspect this process": doing that
+        // marked the whole scan incomplete and refused an ordinary drop.
+        assert_eq!(
+            group_scan_step(Ok(b"1 (sh\xffell) S 0 4242 0".to_vec()), 4242),
+            ScanEntry::Member
+        );
+        assert_eq!(
+            group_scan_step(Ok(b"1 (sh\xffell) S 0 7 0".to_vec()), 4242),
+            ScanEntry::NotAMember
+        );
+        // And a name holding the delimiters themselves still parses, which is
+        // why the LAST `)` is the split point.
+        assert_eq!(
+            group_scan_step(Ok(b"1 (od(d )na\xffme) S 0 4242 0".to_vec()), 4242),
+            ScanEntry::Member
         );
         // Gone between listing /proc and reading its stat: ordinary churn, and a
         // FACT about the world (it is not in the group any more), so it must not
@@ -1939,9 +1979,29 @@ mod tests {
         // Present, readable, and not something this code can parse. Also an
         // inability to look.
         assert_eq!(
-            group_scan_step(Ok("nonsense with no paren".to_string()), 4242),
+            group_scan_step(Ok(b"nonsense with no paren".to_vec()), 4242),
             ScanEntry::Unreadable
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_stat_line_is_parsed_out_of_its_bytes() {
+        // The state letter and the group id are both ASCII; only the name
+        // between them is arbitrary bytes. Pinning the parser directly, because
+        // this is where reading the file as text lost both answers at once.
+        assert_eq!(stat_process_state(b"1 (sh) Z 0 4242 0"), Some(b'Z'));
+        assert_eq!(stat_process_state(b"1 (sh\xffell) Z 0 4242 0"), Some(b'Z'));
+        assert_eq!(stat_process_state(b"1 (sh\xffell) S 0 4242 0"), Some(b'S'));
+        assert_eq!(stat_process_group(b"1 (sh\xffell) Z 0 4242 0"), Some(4242));
+        // A name carrying the delimiter, with and without valid text in it.
+        assert_eq!(stat_process_state(b"1 (od)d) Z 0 7 0"), Some(b'Z'));
+        assert_eq!(stat_process_group(b"1 (od)d\xff) Z 0 7 0"), Some(7));
+        // Nothing to parse is None, never a guess.
+        assert_eq!(stat_process_state(b"no paren here"), None);
+        assert_eq!(stat_process_group(b"no paren here"), None);
+        assert_eq!(stat_process_state(b"1 (sh)"), None);
+        assert_eq!(stat_process_group(b"1 (sh) Z 0"), None);
     }
 
     #[test]
@@ -2136,6 +2196,138 @@ mod tests {
             matches!(&err, DropDirError::Io(e) if e.kind() == std::io::ErrorKind::NotFound),
             "a missing process must surface as NotFound so the chain can continue, got {err:?}"
         );
+    }
+
+    /// A path that runs `/bin/sh` under a name whose bytes are NOT valid UTF-8.
+    ///
+    /// A filename on Linux is a byte string, so this is an ordinary, legal name
+    /// rather than a hostile one. The kernel copies the basename of the path
+    /// handed to `execve` into the process's `comm`, which is what
+    /// `/proc/<pid>/stat` prints between parentheses, so a process started this
+    /// way has a stat line that no text decoder can read. Six bytes, so it
+    /// survives `comm`'s 15-byte limit with the invalid byte still inside.
+    ///
+    /// A SYMLINK rather than a copy: `comm` comes from the path as given and not
+    /// from what it resolves to, and copying an executable makes the exec race
+    /// with any other thread that forked while the copy's write handle was open
+    /// (the kernel reports `ETXTBSY`). Nothing here writes to an executable.
+    #[cfg(target_os = "linux")]
+    fn odd_named_shell(dir: &Path) -> PathBuf {
+        use std::os::unix::ffi::OsStrExt;
+        let path = dir.join(std::ffi::OsStr::from_bytes(b"sh\xffell"));
+        std::os::unix::fs::symlink("/bin/sh", &path).expect("link /bin/sh to an odd name");
+        path
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_finished_process_whose_name_is_not_text_still_reads_as_gone() {
+        // The zombie check read /proc/<pid>/stat as TEXT. A process name is
+        // bytes, so a perfectly legal executable name can make that read fail
+        // outright, and a failed read left the signal-0 answer standing: a
+        // process that had FINISHED classified as alive-but-unreadable, which
+        // refuses the drop.
+        let dir = tmp();
+        let program = odd_named_shell(dir.path());
+        let mut child = std::process::Command::new(&program)
+            .arg("-c")
+            .arg("exit 0")
+            .spawn()
+            .expect("spawn a child whose name is not valid UTF-8");
+        let pid = child.id();
+
+        // The premise, asserted rather than assumed: this stat line really is
+        // unreadable as text, and really does say Z.
+        for _ in 0..2000 {
+            let raw = std::fs::read(format!("/proc/{pid}/stat")).expect("read stat as bytes");
+            if raw[raw.iter().rposition(|&b| b == b')').expect("comm") + 1..].contains(&b'Z') {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(
+            std::fs::read_to_string(format!("/proc/{pid}/stat")).is_err(),
+            "the premise of this test: the process name is not valid text"
+        );
+
+        assert!(
+            process_is_zombie(pid),
+            "an unreadable-as-text stat line still says Z, and the state must be \
+             read out of the bytes"
+        );
+        assert!(
+            !process_can_answer(pid),
+            "a finished process cannot answer for itself, whatever it is called"
+        );
+        assert!(
+            matches!(probe_process_cwd(pid), CwdProbe::Gone),
+            "it must classify as gone so the chain continues instead of refusing"
+        );
+
+        child.wait().expect("reap the child");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_unrelated_process_with_an_odd_name_does_not_refuse_an_ordinary_drop() {
+        // The group scan reads EVERY process on the machine. Reading each stat
+        // as text meant one unrelated process anywhere whose name is not valid
+        // UTF-8 made a read fail, which counted as "could not inspect", which
+        // marked the whole scan INCOMPLETE, which refuses the drop. Somebody
+        // else's oddly named program must not be able to do that.
+        let dir = tmp();
+        let program = odd_named_shell(dir.path());
+        let mut odd = std::process::Command::new(&program)
+            .arg("-c")
+            .arg("echo ready && read _line")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn a live process whose name is not valid UTF-8");
+        let mut odd_out = odd.stdout.take().expect("stdout");
+        let mut buf = [0u8; 6];
+        odd_out.read_exact(&mut buf).expect("read ready marker");
+
+        match process_group_members(4242) {
+            ProcessGroup::Members(_) => {}
+            other => panic!(
+                "a process dux CAN read must not spoil the scan, got {other:?} \
+                 while pid {} is alive",
+                odd.id()
+            ),
+        }
+
+        // And end to end: the foreground job has genuinely ended, so the shell
+        // is the honest answer and the drop must land there.
+        let spawn = tmp();
+        let shell_dir = tmp();
+        let mut shell = park_in(shell_dir.path());
+        let plan = WorkingDirectory {
+            foreground_pid: Some(4242),
+            shell_pid: Some(shell.id()),
+            spawn_dir: spawn.path().to_path_buf(),
+        };
+        let pinned = plan
+            .open_with(
+                |pid| {
+                    if pid == 4242 {
+                        CwdProbe::Gone
+                    } else {
+                        probe_process_cwd(pid)
+                    }
+                },
+                process_group_members,
+            )
+            .expect("an unrelated odd name must not refuse the drop");
+        assert_eq!(
+            std::fs::canonicalize(pinned.path()).unwrap(),
+            std::fs::canonicalize(shell_dir.path()).unwrap()
+        );
+
+        let _ = shell.kill();
+        let _ = shell.wait();
+        let _ = odd.kill();
+        let _ = odd.wait();
     }
 
     /// Start a process that sits in `dir` until it is killed, and wait until it
