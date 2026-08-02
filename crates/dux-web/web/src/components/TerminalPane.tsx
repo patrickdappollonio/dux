@@ -290,6 +290,14 @@ export function TerminalPane(props: TerminalPaneProps) {
   // otherwise capture a stale value. When the preference is off, nothing
   // renders and no focus behavior changes, exactly today's tap-focuses-xterm.
   const composeBarEnabled = isMobile && (bootstrap?.compose_bar ?? true)
+  // Whether dropping a file onto this pane does anything at all. `[server]
+  // file_drop_max_bytes = 0` switches the feature off, so the whole drag
+  // surface goes with it (see `dragCarriesFiles`). Read reactively rather than
+  // through a ref: the drag handlers are rendered props, not mount-effect
+  // closures, so they see the current value. A missing value is an older server
+  // that never sent the field, and before the first bootstrap fetch lands it is
+  // simply not known yet; both fall back to ON, matching the config default.
+  const fileDropEnabled = (bootstrap?.file_drop_max_bytes ?? 1) > 0
   // The ref lags the rendered value by one commit (it is synced in an effect),
   // so an event firing inside that window can see the previous state. Both
   // mismatch directions degrade gracefully: a stale `false` falls through to
@@ -1586,12 +1594,20 @@ export function TerminalPane(props: TerminalPaneProps) {
     })
   }
 
-  // A drag from a non-owner, or on a phone (where there is no drag), is left
-  // entirely alone: no overlay and no preventDefault, so the browser does
-  // whatever it would normally do.
+  // A drag from a non-owner, on a phone (where there is no drag), or while file
+  // drop is switched off is left entirely alone: no overlay and no
+  // preventDefault, so the browser does whatever it would normally do.
+  //
+  // `[server] file_drop_max_bytes = 0` is documented as switching file drop off,
+  // and the server refuses every upload when it is. The server stays the real
+  // enforcement; this gate is what stops a disabled feature ADVERTISING a drop
+  // target, accepting the drop and only then reporting a refusal per file.
   function dragCarriesFiles(e: React.DragEvent): boolean {
     return (
-      isOwner && !isMobile && Array.from(e.dataTransfer.types).includes("Files")
+      fileDropEnabled &&
+      isOwner &&
+      !isMobile &&
+      Array.from(e.dataTransfer.types).includes("Files")
     )
   }
 

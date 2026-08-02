@@ -485,6 +485,42 @@ describe("the drop overlay", () => {
     expect(screen.getByText(/currently in/)).toBeTruthy()
   })
 
+  it("offers nothing at all when file drop is switched off", async () => {
+    // `[server] file_drop_max_bytes = 0` is documented as switching the feature
+    // off, and the server refuses every upload when it is. The browser's gate
+    // checked ownership, whether this is a phone, and what was being dragged,
+    // but never whether the feature existed, so a disabled dux still advertised
+    // a drop target, still accepted the drop, and only then produced a toast
+    // full of the server's refusals. Recorded before the fix: the overlay
+    // rendered and uploadDroppedFile was called once per file.
+    mockState = makeState()
+    mockState.bootstrap!.file_drop_max_bytes = 0
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const pane = screen.getByTestId("terminal-container").closest(".group")!
+    fireEvent.dragEnter(pane, { dataTransfer: fileTransfer([]) })
+    expect(screen.queryByTestId("file-drop-overlay")).toBeNull()
+    await drop([file("shot.png")])
+    expect(uploadDroppedFile).not.toHaveBeenCalled()
+    // And nothing is said about it: a feature that is off has no failure to
+    // report, because nothing was attempted.
+    expect(vi.mocked(toast.error)).not.toHaveBeenCalled()
+    expect(vi.mocked(toast.warning)).not.toHaveBeenCalled()
+  })
+
+  it("offers both the overlay and the upload when file drop is on", async () => {
+    // The other half, so the gate cannot be satisfied by refusing everything.
+    uploadDroppedFile.mockResolvedValue(saved("shot.png"))
+    mockState = makeState()
+    mockState.bootstrap!.file_drop_max_bytes = 1024
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const pane = screen.getByTestId("terminal-container").closest(".group")!
+    fireEvent.dragEnter(pane, { dataTransfer: fileTransfer([]) })
+    expect(screen.getByTestId("file-drop-overlay")).toBeTruthy()
+    fireEvent.dragLeave(pane, { dataTransfer: fileTransfer([]) })
+    await drop([file("shot.png")])
+    expect(uploadDroppedFile).toHaveBeenCalledTimes(1)
+  })
+
   it("never appears for a viewer who does not hold input", async () => {
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     act(() => FakePtySocket.instances.at(-1)!.onConnected("42"))

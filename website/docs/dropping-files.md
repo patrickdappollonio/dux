@@ -131,7 +131,7 @@ restart. See [Server mode overview](/docs/server-mode) for the rest of them.
 
 | Key | Default | What it does |
 |---|---|---|
-| `file_drop_max_bytes` | `104857600` (100 MiB) | Largest single dropped file. A file over it is refused with a message saying so, and nothing is written. Set to `0` to switch file drop off entirely. |
+| `file_drop_max_bytes` | `104857600` (100 MiB) | Largest single dropped file. A file over it is refused with a message saying so, and nothing is written. Set to `0` to switch file drop off entirely: the pane stops offering a drop target, and the server refuses any upload that reaches it anyway. |
 | `file_drop_max_concurrency` | `2` | How many uploads are accepted at once. This bounds how much upload dux holds in memory, not just how much work it does at a time. An upload beyond the limit waits its turn rather than being refused. `0` clamps to `1`. |
 
 The size default is generous on purpose. Screenshots from a high-resolution
