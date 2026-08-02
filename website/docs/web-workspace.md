@@ -165,6 +165,15 @@ sequence, and that write lands on **your** browser's clipboard, not the server's
 governed by the `clipboard_passthrough` capability. That story lives in
 [Terminal capabilities](/docs/terminal-capabilities).
 
+### Drag a file in
+
+Drag a screenshot (or any file) from your desktop onto the terminal and dux
+saves it on the server, then pastes its path into the prompt. It lands in the
+agent's worktree root, or, for a terminal, in the folder that terminal is
+actually in right now. Nothing is ever overwritten, your filename is kept as you
+had it, and only the device holding input can drop. See
+[Dropping files onto an agent](/docs/dropping-files).
+
 ### Shift-Enter for a soft newline
 
 In the browser, **Shift-Enter inserts a newline instead of submitting.** Plain

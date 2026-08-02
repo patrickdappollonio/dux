@@ -140,6 +140,15 @@ your host terminal supports OSC 8) and in the web terminal. For safety the web o
 opens `http` and `https` links, and it opens them in a fresh tab with no way to
 reach back into the app.
 
+## Getting a file to the agent
+
+Capabilities are about what an agent can reach out and do. The other direction,
+getting something from your machine INTO the agent, is covered by file drop in
+the browser: drag a file onto the terminal and dux saves it on the server and
+pastes its path. That is web-only, because a real terminal emulator already
+types a dropped file's path in for you. See
+[Dropping files onto an agent](/docs/dropping-files).
+
 ## The fine print
 
 These are all just bytes in the agent's terminal output, so the same honesty
