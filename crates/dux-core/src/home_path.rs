@@ -8,13 +8,35 @@
 //! keeps ITS OWN files. A terminal opening under `$XDG_CONFIG_HOME` because the
 //! user redirected dux's config would surprise everybody.
 //!
-//! Each question is split into a pure function taking the resolved home and a
-//! thin wrapper that resolves it, so "the home directory cannot be resolved" is
+//! Each question is split into a function TAKING the resolved home and a thin
+//! wrapper that resolves it, so "the home directory cannot be resolved" is
 //! testable without mutating the process environment (which is unsafe in a
 //! threaded test runner, and which the repo's git-isolation work already got
-//! bitten by).
+//! bitten by). The WHERE half also probes the filesystem, because a path is not
+//! yet a directory a shell can start in (see [`dir_is_usable`]); the WRITTEN
+//! half stays pure string work.
 
 use std::path::{Path, PathBuf};
+
+/// Whether `path` is a directory dux could actually start a shell in: it
+/// resolves, it is a directory, and dux may search it.
+///
+/// One `stat` on `path/.` answers all three, using the process's EFFECTIVE
+/// credentials (unlike `access(2)`, which asks about the real ones). Resolving
+/// the trailing `.` component requires SEARCH permission on the directory, so a
+/// `0o000` directory reports `EACCES`; a regular file reports `ENOTDIR`; and
+/// because the walk follows symlinks, a dangling link reports `ENOENT`. The
+/// `is_dir` check is then belt and braces rather than the load-bearing part.
+///
+/// This is a probe, so it is inherently a moment in time: a directory can be
+/// removed between the check and the spawn. It is not a guarantee, it is the
+/// difference between the common unusable-home cases costing the user a
+/// terminal and costing them nothing.
+pub fn dir_is_usable(path: &Path) -> bool {
+    std::fs::metadata(path.join("."))
+        .map(|meta| meta.is_dir())
+        .unwrap_or(false)
+}
 
 /// The directory a standalone terminal opens in, given the resolved home.
 ///
@@ -22,8 +44,24 @@ use std::path::{Path, PathBuf};
 /// passwd entry). That is not a reason to refuse to open a terminal: the user
 /// asked for a shell and a shell can run anywhere, so it falls back to the
 /// filesystem root, which exists on every platform dux supports.
+///
+/// A home that resolves but is NOT USABLE ([`dir_is_usable`]) takes the same
+/// fallback, because it is the same situation from the user's side. The
+/// directory is handed to the spawn as the child's working directory, so a home
+/// that is a regular file, a dangling symlink, or a directory dux may not
+/// search fails the spawn outright and the terminal is never created. That is a
+/// clean failure, and a useless one: the fallback exists so that a shell still
+/// runs somewhere.
+///
+/// Note what this deliberately does NOT do: it chooses a DIRECTORY, it does not
+/// retry a failed spawn. A missing shell or a bad `[terminal] command` is a
+/// configuration problem the user needs to see, and retrying it at `/` would
+/// bury it.
 pub fn standalone_terminal_dir_from(home: Option<PathBuf>) -> PathBuf {
-    home.unwrap_or_else(|| PathBuf::from("/"))
+    match home {
+        Some(home) if dir_is_usable(&home) => home,
+        _ => PathBuf::from("/"),
+    }
 }
 
 /// The directory a standalone terminal opens in. See
@@ -68,10 +106,24 @@ mod tests {
 
     #[test]
     fn a_standalone_terminal_opens_in_the_home_directory() {
-        assert_eq!(
-            standalone_terminal_dir_from(Some(PathBuf::from("/home/ada"))),
-            PathBuf::from("/home/ada")
-        );
+        // A REAL directory, because "the home directory" now means one dux can
+        // actually spawn in (see the unusable cases below).
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().to_path_buf();
+        assert!(dir_is_usable(&home));
+        assert_eq!(standalone_terminal_dir_from(Some(home.clone())), home);
+    }
+
+    #[test]
+    fn the_real_home_is_where_a_standalone_terminal_opens() {
+        // The ordinary case, end to end through the resolver: a real machine's
+        // home is an ordinary directory, so that is where the terminal opens.
+        // Where no home resolves, or it is somehow unusable, the fallback tests
+        // below own the answer and there is nothing to assert here.
+        let Some(home) = home::home_dir().filter(|h| dir_is_usable(h)) else {
+            return;
+        };
+        assert_eq!(standalone_terminal_dir(), home);
     }
 
     #[test]
@@ -79,6 +131,61 @@ mod tests {
         // The user asked for a shell. A shell can run anywhere, so dux opens one
         // at `/` instead of refusing.
         assert_eq!(standalone_terminal_dir_from(None), PathBuf::from("/"));
+    }
+
+    /// A home that RESOLVES is not necessarily a home dux can spawn in, and the
+    /// directory goes straight to the child as its working directory: an
+    /// unusable one fails the spawn, so no terminal is created at all. That
+    /// defeats the point of the fallback, so each unusable shape falls back to
+    /// `/` exactly as an unresolvable home does.
+    #[test]
+    fn a_home_that_is_not_a_directory_falls_back_to_the_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let file = tmp.path().join("home");
+        std::fs::write(&file, b"not a directory").expect("write file");
+        assert!(!dir_is_usable(&file));
+        assert_eq!(
+            standalone_terminal_dir_from(Some(file)),
+            PathBuf::from("/"),
+            "a regular file where home should be is not somewhere a shell can run"
+        );
+    }
+
+    #[test]
+    fn a_dangling_symlink_home_falls_back_to_the_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let link = tmp.path().join("home");
+        std::os::unix::fs::symlink(tmp.path().join("gone"), &link).expect("symlink");
+        // The link itself is right there; what it points at is not, which is why
+        // the check has to RESOLVE symlinks rather than stat the link.
+        assert!(link.symlink_metadata().is_ok());
+        assert!(!dir_is_usable(&link));
+        assert_eq!(standalone_terminal_dir_from(Some(link)), PathBuf::from("/"));
+    }
+
+    #[test]
+    fn a_home_without_search_permission_falls_back_to_the_root() {
+        // Root bypasses the permission bits entirely (CAP_DAC_OVERRIDE), so this
+        // case cannot be built there; skipping beats asserting the opposite of
+        // what an ordinary user sees.
+        if rustix::process::geteuid().is_root() {
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("home");
+        std::fs::create_dir(&dir).expect("create dir");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+        let usable = dir_is_usable(&dir);
+        let fallback = standalone_terminal_dir_from(Some(dir.clone()));
+        // Restored before asserting, so a failing run still leaves a removable
+        // tempdir rather than an undeletable one.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).expect("chmod back");
+        assert!(
+            !usable,
+            "a directory dux cannot search is not one it can spawn in"
+        );
+        assert_eq!(fallback, PathBuf::from("/"));
     }
 
     #[test]
