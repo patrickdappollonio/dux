@@ -171,46 +171,7 @@ impl Planned {
 /// | MERGED/CLOSED  | yes            | head-ref discovery (catches a follow-up PR)|
 /// | MERGED/CLOSED  | no             | **zero calls** — reconstruct from SQLite  |
 fn run_entries(entries: &[PrSyncEntry], backoff: &BackoffSnapshot) -> PrSyncOutcome {
-    let mut results: Vec<(String, Option<PrInfo>)> = Vec::new();
-    let mut planned: Vec<Planned> = Vec::new();
-
-    for entry in entries {
-        // Resolve (host, owner_repo): live remote first, else the known PR's repo
-        // (works even after the branch/remote is gone).
-        let remote = git::remote_github_repo(Path::new(&entry.worktree_path));
-        let (host, owner_repo) = if let Some(remote) = remote {
-            (remote.host, remote.owner_repo)
-        } else if let Some(known) = &entry.known_pr {
-            (known.host.clone(), known.owner_repo.clone())
-        } else {
-            results.push((entry.session_id.clone(), None));
-            continue;
-        };
-
-        // Terminal PR + exited agent: nobody is pushing to that branch anymore,
-        // so reconstruct from SQLite with zero network calls.
-        if stored_pr_is_terminal(entry.known_pr.as_ref()) && entry.agent_exited {
-            let pr = entry.known_pr.as_ref().and_then(reconstruct_from_stored);
-            results.push((entry.session_id.clone(), pr));
-            continue;
-        }
-
-        let Some((owner, repo)) = owner_repo.split_once('/') else {
-            // Malformed owner/repo — nothing we can query; fall back to stored.
-            let pr = entry.known_pr.as_ref().and_then(reconstruct_from_stored);
-            results.push((entry.session_id.clone(), pr));
-            continue;
-        };
-
-        planned.push(Planned::new(
-            entry.session_id.clone(),
-            normalize_github_host(&host).to_string(),
-            owner.to_string(),
-            repo.to_string(),
-            entry.branch_name.clone(),
-            entry.known_pr.clone(),
-        ));
-    }
+    let (mut results, planned) = plan_entries(entries);
 
     // Group by host; for each host either skip it (already backed off — keep
     // last-known PRs, no gh call, no signal) or chunk its sessions by alias
@@ -270,6 +231,57 @@ fn run_entries(entries: &[PrSyncEntry], backoff: &BackoffSnapshot) -> PrSyncOutc
     }
 
     (results, signals)
+}
+
+/// The planning half of [`run_entries`], split out so it can be exercised on
+/// its own: it resolves each entry's repository and decides what would be
+/// asked, and it makes no network call and spawns no `gh` process.
+///
+/// Returns the results that are already settled (an unresolvable entry, or one
+/// reconstructed from SQLite) alongside the lookups still to be run.
+fn plan_entries(entries: &[PrSyncEntry]) -> (Vec<(String, Option<PrInfo>)>, Vec<Planned>) {
+    let mut results: Vec<(String, Option<PrInfo>)> = Vec::new();
+    let mut planned: Vec<Planned> = Vec::new();
+
+    for entry in entries {
+        // Resolve (host, owner_repo): live remote first, else the known PR's repo
+        // (works even after the branch/remote is gone).
+        let remote = git::remote_github_repo(Path::new(&entry.worktree_path));
+        let (host, owner_repo) = if let Some(remote) = remote {
+            (remote.host, remote.owner_repo)
+        } else if let Some(known) = &entry.known_pr {
+            (known.host.clone(), known.owner_repo.clone())
+        } else {
+            results.push((entry.session_id.clone(), None));
+            continue;
+        };
+
+        // Terminal PR + exited agent: nobody is pushing to that branch anymore,
+        // so reconstruct from SQLite with zero network calls.
+        if stored_pr_is_terminal(entry.known_pr.as_ref()) && entry.agent_exited {
+            let pr = entry.known_pr.as_ref().and_then(reconstruct_from_stored);
+            results.push((entry.session_id.clone(), pr));
+            continue;
+        }
+
+        let Some((owner, repo)) = owner_repo.split_once('/') else {
+            // Malformed owner/repo — nothing we can query; fall back to stored.
+            let pr = entry.known_pr.as_ref().and_then(reconstruct_from_stored);
+            results.push((entry.session_id.clone(), pr));
+            continue;
+        };
+
+        planned.push(Planned::new(
+            entry.session_id.clone(),
+            normalize_github_host(&host).to_string(),
+            owner.to_string(),
+            repo.to_string(),
+            entry.branch_name.clone(),
+            entry.known_pr.clone(),
+        ));
+    }
+
+    (results, planned)
 }
 
 /// Keep the snapshot with the fewer remaining points (the more urgent backoff
@@ -1559,40 +1571,59 @@ mod tests {
         assert_eq!(lookup.number, 7);
     }
 
+    /// The silent bug lives in the `known_pr: None` branch: an agent that has
+    /// never had a pull request recorded has no stored host to fall back on, so
+    /// a remote the parser did not understand was written down as an empty
+    /// result and the session was skipped, every cycle, with nothing saying
+    /// why.
+    ///
+    /// This asserts the PLAN rather than the run, which is what makes it
+    /// honest: it names the exact host, owner and repo the poller would query,
+    /// and it cannot spawn `gh` under any outcome, passing or failing.
     #[test]
-    fn run_entries_resolves_an_ssh_scheme_remote_rather_than_recording_nothing() {
-        // The poller resolves each agent's remote the same way, and when that
-        // yielded nothing it recorded an empty result and moved on, so no PR
-        // banner ever appeared and nothing said why.
-        //
-        // The resolution is pinned without any network call: the host the
-        // ssh:// remote names is backed off, while the stored PR names a
-        // different host. Only a resolved remote puts the entry on the
-        // backed-off host, which keeps the stored PR, makes no `gh` call, and
-        // therefore emits no host signal.
-        let dir = ssh_origin_repo("ssh://git@github.com/octocat/Hello-World.git");
-        let mut known = stored(42, "OPEN");
-        known.host = "github.example.com".to_string();
+    fn plan_entries_resolves_an_ssh_scheme_remote_for_a_session_with_no_known_pr() {
+        let dir = ssh_origin_repo("ssh://git@github.com:2222/octocat/Hello-World.git");
         let entry = PrSyncEntry {
             session_id: "s0".to_string(),
             branch_name: "feat/x".to_string(),
             worktree_path: dir.path().to_string_lossy().to_string(),
-            known_pr: Some(known),
+            known_pr: None,
             agent_exited: false,
         };
-        let mut backoff = BackoffSnapshot::new();
-        backoff.insert(
-            "github.com".to_string(),
-            Instant::now() + Duration::from_secs(600),
-        );
 
-        let (results, signals) = run_entries(std::slice::from_ref(&entry), &backoff);
+        let (results, planned) = plan_entries(std::slice::from_ref(&entry));
+
         assert!(
-            signals.is_empty(),
-            "the remote's host is backed off, so the entry must be planned against it with no gh call"
+            results.is_empty(),
+            "a resolvable remote must be queried, not recorded as an empty result"
         );
+        assert_eq!(planned.len(), 1);
+        assert_eq!(planned[0].session_id, "s0");
+        assert_eq!(planned[0].host, "github.com");
+        assert_eq!(planned[0].owner, "octocat");
+        assert_eq!(planned[0].repo, "Hello-World");
+        assert_eq!(planned[0].branch, "feat/x");
+    }
+
+    /// The counterpart, so the assertion above is not vacuous: with nothing to
+    /// resolve and nothing stored, the entry really does record an empty result
+    /// and is never queried.
+    #[test]
+    fn plan_entries_records_nothing_for_an_unresolvable_remote_with_no_known_pr() {
+        let dir = ssh_origin_repo("ssh://git@gitlab.com/owner/repo.git");
+        let entry = PrSyncEntry {
+            session_id: "s0".to_string(),
+            branch_name: "feat/x".to_string(),
+            worktree_path: dir.path().to_string_lossy().to_string(),
+            known_pr: None,
+            agent_exited: false,
+        };
+
+        let (results, planned) = plan_entries(std::slice::from_ref(&entry));
+
+        assert!(planned.is_empty(), "a non-GitHub remote is never queried");
         assert_eq!(results.len(), 1);
-        let pr = results[0].1.as_ref().expect("last-known PR preserved");
-        assert_eq!(pr.number, 42);
+        assert_eq!(results[0].0, "s0");
+        assert!(results[0].1.is_none());
     }
 }
