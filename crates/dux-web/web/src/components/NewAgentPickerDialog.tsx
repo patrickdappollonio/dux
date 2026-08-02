@@ -18,6 +18,7 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area"
 import {
   closeNewAgentPicker,
+  dismissNewAgentPicker,
   openAddProject,
   openAttachWorktree,
   openCreateAgent,
@@ -42,7 +43,7 @@ export function NewAgentPickerDialog() {
     <Dialog
       open={newAgentPickerOpen}
       onOpenChange={(open) => {
-        if (!open) closeNewAgentPicker()
+        if (!open) dismissNewAgentPicker()
       }}
     >
       <DialogContent className="gap-0 overflow-hidden p-0 sm:max-w-lg">
@@ -75,11 +76,19 @@ const INTENT_COPY = {
 } as const
 
 function PickerBody() {
-  const { spine, newAgentPickerIntent } = useDux()
+  const { spine, newAgentPickerIntent, newAgentPickerOnlyIds } = useDux()
   // Default to "new" so a missing value (older state, a test that only sets
   // newAgentPickerOpen) still renders the standard create flow.
   const intent = newAgentPickerIntent ?? "new"
-  const projects = useMemo(() => spine?.projects ?? [], [spine])
+  // Narrowed to a candidate set when a pull-request reference matched several
+  // projects: showing every project there would bury the two that are actually
+  // checkouts of that repository.
+  const projects = useMemo(() => {
+    const all = spine?.projects ?? []
+    if (!newAgentPickerOnlyIds) return all
+    const only = new Set(newAgentPickerOnlyIds)
+    return all.filter((project) => only.has(project.id))
+  }, [spine, newAgentPickerOnlyIds])
   const sessions = useMemo(() => spine?.sessions ?? [], [spine])
 
   const [query, setQuery] = useState("")

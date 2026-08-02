@@ -152,7 +152,11 @@ export interface FirstLoadDialogState {
 export type CreateAgentTarget =
   | { kind: "new"; projectId: string }
   | { kind: "fork"; sessionId: string }
-  | { kind: "pr"; projectId: string }
+  // `projectId: null` is the REFERENCE-FIRST shape: opened from the global
+  // command, no project is chosen and none is asked for. dux works out which
+  // project the reference belongs to on submit. `Some` is the project-first
+  // shape, opened from a project's own menu, which behaves exactly as before.
+  | { kind: "pr"; projectId: string | null }
 
 // The file pending discard-confirmation, or null. `untracked` drives the
 // dialog's warning copy (a tracked file is restored from HEAD; an untracked
@@ -519,6 +523,34 @@ export interface DuxState {
   // an agent from a PR), or "from_worktree" (pick a project to adopt an existing
   // worktree). The split button's ⋯ menu sets this; a bare open defaults to "new".
   newAgentPickerIntent: "new" | "from_pr" | "from_worktree"
+  // When set, the picker lists ONLY these project ids. Used when a pull-request
+  // reference matched several projects (one repository checked out twice):
+  // showing every project there would bury the two that actually have it.
+  newAgentPickerOnlyIds: string[] | null
+  // A pull-request reference the user has already typed, held across a trip
+  // through the picker so the project they choose completes it rather than
+  // reopening an empty field.
+  pendingPrReference: string | null
+  // A resolve is in flight, so the dialog's Create button shows it is working
+  // and cannot be pressed twice.
+  createAgentPrResolving: boolean
+  // A field-level refusal shown under the reference input, or null. Used for
+  // the refusals dux can make WITHOUT asking the server: today that is a bare
+  // number with no project chosen, which names no repository, so there is
+  // nothing for a resolve to look for.
+  createAgentPrError: string | null
+  // The generation of the ONE resolve this dialog is waiting for, or null when
+  // it is waiting for none.
+  //
+  // A resolve is a git call per project on the server, so it can easily still
+  // be out when the user has cancelled the dialog, retargeted it at a project,
+  // or submitted a different reference. Nothing can recall a reply already in
+  // flight, so the only safe rule is that a reply acts when its generation is
+  // still the current one. Checking merely that SOME pull-request dialog is
+  // open does not catch it: the open one may be a different question, and
+  // acting would create an agent from the reference the user replaced and
+  // close the dialog they are looking at.
+  createAgentPrRequestId: number | null
   sidebarWidth: string
   // Optimistic override for the Changes pane's visibility (desktop). `null`
   // follows the persisted config (`bootstrap.show_changes_pane`); the palette and
@@ -691,6 +723,11 @@ let state: DuxState = {
   agentSearch: "",
   newAgentPickerOpen: false,
   newAgentPickerIntent: "new",
+  newAgentPickerOnlyIds: null,
+  pendingPrReference: null,
+  createAgentPrResolving: false,
+  createAgentPrError: null,
+  createAgentPrRequestId: null,
   sidebarWidth: loadSidebarWidth(),
   changesPaneOverride: null,
   editorTarget: null,
@@ -3683,11 +3720,13 @@ export function openForkAgent(sessionId: string): void {
   openNameDialog({ kind: "fork", sessionId })
 }
 
-// Open the name dialog in "from PR" mode for a project. Reuses the new-agent
-// name UX (sanitized input, pet-name checkbox, generated-name plumbing) and adds
-// a PR-reference field; on submit it dispatches `create_agent_from_pr`. Mirrors
-// the TUI's `new-agent-from-pr` flow, which resolves the PR then names the agent.
-export function openCreateAgentFromPr(projectId: string): void {
+// Open the name dialog in "from PR" mode.
+//
+// `projectId` is the project-first shape, opened from a project's own menu, and
+// behaves exactly as it always did. `null` is the reference-first shape, opened
+// from the global command: no project is chosen and none is asked for, and the
+// reference decides which project the agent lands in.
+export function openCreateAgentFromPr(projectId: string | null): void {
   openNameDialog({ kind: "pr", projectId })
 }
 
@@ -3715,6 +3754,9 @@ function requestAgentName(): void {
           createAgentDraft: res.name,
           createAgentGeneratedName: res.name,
           createAgentNamePending: false,
+          // This fill replaces the name too, so it retires an in-flight
+          // resolve for the same reason typing one does.
+          ...retireInFlightPrResolve(),
         })
       }
     })
@@ -3739,7 +3781,16 @@ function openNameDialog(target: CreateAgentTarget): void {
       state.bootstrap?.copy_uncommitted_changes_by_default ?? true,
     createAgentGeneratedName: null,
     createAgentNamePending: randomize,
-    createAgentPrInput: "",
+    // A reference typed before a trip through the project picker travels back
+    // into the field, so choosing a project never costs the user their text.
+    createAgentPrInput:
+      target.kind === "pr" ? (state.pendingPrReference ?? "") : "",
+    createAgentPrResolving: false,
+    createAgentPrError: null,
+    // Retargeting the dialog retires whatever resolve was out for the previous
+    // one: its answer is about a question this dialog is no longer asking.
+    createAgentPrRequestId: null,
+    pendingPrReference: null,
   })
   if (randomize) requestAgentName()
 }
@@ -3752,13 +3803,44 @@ export function closeCreateAgent(): void {
     createAgentGeneratedName: null,
     createAgentNamePending: false,
     createAgentPrInput: "",
+    createAgentPrResolving: false,
+    createAgentPrError: null,
+    // Closing retires the resolve. The reply cannot be recalled, so it has to
+    // land on nothing when it arrives.
+    createAgentPrRequestId: null,
   })
+}
+
+// Park a typed pull-request reference so the next PR dialog opens with it
+// already in the field. Used by the secondary "or choose an existing project"
+// action and by the resolution branches that hand over to the picker.
+export function setPendingPrReference(reference: string | null): void {
+  setState({ pendingPrReference: reference })
+}
+
+// Editing either field of the reference-first dialog retires whatever resolve
+// is out for it, exactly as cancelling, retargeting and resubmitting already
+// do. The reply carries the reference and the name AS THEY WERE AT SUBMIT, so
+// letting it land after an edit creates the agent from text the user has
+// already replaced and then closes the dialog on them. Nothing can recall a
+// request in flight, so the reply has to arrive on a generation nobody is
+// waiting for. Returns the patch to fold into the caller's own write, and
+// nothing at all when no resolve is out, so an ordinary keystroke writes
+// exactly what it used to.
+function retireInFlightPrResolve(): Partial<DuxState> {
+  if (state.createAgentPrRequestId === null) return {}
+  return { createAgentPrRequestId: null, createAgentPrResolving: false }
 }
 
 // Update the PR-reference field. Free text — unlike the agent name, this is NOT
 // sanitized (a PR URL contains slashes, colons, etc.); the server parses it.
 export function setCreateAgentPrInput(raw: string): void {
-  setState({ createAgentPrInput: raw })
+  // Editing the field retires its refusal: the user is answering it.
+  setState({
+    createAgentPrInput: raw,
+    createAgentPrError: null,
+    ...retireInFlightPrResolve(),
+  })
 }
 
 // Update the input as the user types, sanitizing live (space -> dash, drop
@@ -3768,7 +3850,11 @@ export function setCreateAgentDraft(raw: string): void {
   const draft = sanitizeAgentName(raw)
   const generated =
     draft === state.createAgentGeneratedName ? state.createAgentGeneratedName : null
-  setState({ createAgentDraft: draft, createAgentGeneratedName: generated })
+  setState({
+    createAgentDraft: draft,
+    createAgentGeneratedName: generated,
+    ...retireInFlightPrResolve(),
+  })
 }
 
 // Toggle the "Copy uncommitted changes from the project checkout" checkbox.
@@ -3782,7 +3868,11 @@ export function toggleCreateAgentCopyChanges(): void {
 //          keep the user's edits. Either way, forget the generated name.
 export function toggleCreateAgentRandomize(): void {
   if (!state.createAgentRandomize) {
-    setState({ createAgentRandomize: true, createAgentNamePending: true })
+    setState({
+      createAgentRandomize: true,
+      createAgentNamePending: true,
+      ...retireInFlightPrResolve(),
+    })
     requestAgentName()
   } else {
     const keepText = state.createAgentDraft !== state.createAgentGeneratedName
@@ -3793,6 +3883,7 @@ export function toggleCreateAgentRandomize(): void {
       // Unchecking abandons any in-flight request; its reply is ignored by
       // `onAgentName` (randomize is false by then), so stop the spinner now.
       createAgentNamePending: false,
+      ...retireInFlightPrResolve(),
     })
   }
 }
@@ -3888,12 +3979,30 @@ export function setAgentSearch(query: string): void {
 
 export function openNewAgentPicker(
   intent: DuxState["newAgentPickerIntent"] = "new",
+  onlyIds: string[] | null = null,
 ): void {
-  setState({ newAgentPickerOpen: true, newAgentPickerIntent: intent })
+  setState({
+    newAgentPickerOpen: true,
+    newAgentPickerIntent: intent,
+    newAgentPickerOnlyIds: onlyIds,
+  })
 }
 
 export function closeNewAgentPicker(): void {
-  setState({ newAgentPickerOpen: false })
+  setState({ newAgentPickerOpen: false, newAgentPickerOnlyIds: null })
+}
+
+// Dismiss the picker WITHOUT picking anything. Distinct from
+// `closeNewAgentPicker`, which a project row calls on its way to opening that
+// project's dialog: a parked pull-request reference has to survive that hop and
+// must NOT survive this one, or the next from-PR dialog would open prefilled
+// with text the user walked away from.
+export function dismissNewAgentPicker(): void {
+  setState({
+    newAgentPickerOpen: false,
+    newAgentPickerOnlyIds: null,
+    pendingPrReference: null,
+  })
 }
 
 // Ask the server to fork an existing session into a fresh branched worktree.
@@ -3915,6 +4024,107 @@ export function createAgentFromPr(projectId: string, pr: string, name: string): 
     .catch((e) => toastCreateError(e, "Could not create the agent from the PR."))
 }
 
+// Text that names a pull request number and nothing else, with or without the
+// `#`. It names NO repository, so with no project chosen there is nothing for a
+// resolve to look for and the server would only refuse it. The refusal belongs
+// here, in the field, next to the action that fixes it.
+//
+// This is deliberately the ONLY shape refused in the browser. The full
+// reference grammar lives in Rust (`dux_core::pr_reference`) and reimplementing
+// it here would be two grammars drifting apart; every other refusal comes back
+// from the server, which stays the second line of defence for this one too.
+export function isBareNumberReference(raw: string): boolean {
+  return /^#?\d+$/.test(raw.trim())
+}
+
+const BARE_NUMBER_REFUSAL =
+  "A pull request number on its own does not say which repository it is in. Paste a link, type owner/repo#123, or choose an existing project below."
+
+// Generations for the reference-first resolve. Module-level rather than in
+// state because it must keep counting across a dialog that opens and closes.
+let prResolveGeneration = 0
+
+// The reference-first submit: resolve the typed reference to a project, then
+// branch on the answer. Three shapes, matching the terminal UI exactly.
+//
+// The resolve runs per submit and is never cached: the answer changes when an
+// address is edited, when git's rewrite configuration changes, and when a
+// project's path moves, and nothing the browser can see would say so.
+function submitPrReferenceFirst(reference: string, name: string): void {
+  if (isBareNumberReference(reference)) {
+    // Refused before anything is sent, per the design: no project is chosen,
+    // so this names nothing dux could look for.
+    setState({ createAgentPrError: BARE_NUMBER_REFUSAL, createAgentPrResolving: false })
+    return
+  }
+  // Stamp this submit. A resubmit bumps the generation, which is what
+  // supersedes the reply already out.
+  const generation = ++prResolveGeneration
+  setState({
+    createAgentPrResolving: true,
+    createAgentPrError: null,
+    createAgentPrRequestId: generation,
+  })
+  sessionsApi
+    .resolvePullRequest(reference)
+    .then((resolved) => {
+      // The generation guard. A reply that is not the one this dialog is
+      // waiting for belongs to a question the user has already replaced (they
+      // cancelled, retargeted at a project, submitted a different reference,
+      // or EDITED either field, since `reference` and `name` here are the
+      // values as they were at submit), and acting on it would create an agent
+      // from the old reference and close the dialog showing the new one.
+      if (state.createAgentPrRequestId !== generation) return
+      setState({ createAgentPrResolving: false, createAgentPrRequestId: null })
+      const repository = resolved.repository ?? reference
+      if (resolved.projects.length === 1) {
+        const projectId = resolved.projects[0].id
+        armCreateFocus(projectId)
+        createAgentFromPr(projectId, reference, name)
+        closeCreateAgent()
+        return
+      }
+      if (resolved.projects.length === 0) {
+        // What dux may claim depends on whether the server managed to look at
+        // everything. With a project it could not inspect, "no project is a
+        // checkout of this" is a certainty dux does not have, and the one
+        // project that mattered may be exactly the unreadable one. dux does not
+        // clone, and neither wording may imply it might.
+        toast.error(
+          resolved.uninspected_summary
+            ? `No project dux could check is a checkout of ${repository}, and dux could not check every project (${resolved.uninspected_summary}). Choose a project that already has it, or add one from a directory on disk.`
+            : `No project in dux is a checkout of ${repository}. Choose a project that already has it, or add one from a directory on disk.`,
+        )
+      } else {
+        toast.info(
+          `${resolved.projects.length} projects are checkouts of ${repository}. Choose which one this agent belongs in.`,
+        )
+      }
+      // Either way the picker is offered, over just the matches when there are
+      // any. The reference rides across so the project they pick completes it.
+      setState({ pendingPrReference: reference })
+      closeCreateAgent()
+      openNewAgentPicker(
+        "from_pr",
+        resolved.projects.length > 0
+          ? resolved.projects.map((p) => p.id)
+          : null,
+      )
+    })
+    .catch((e) => {
+      // The rejection path needs the same guard: without it a failed stale
+      // request clears a newer submit's spinner and shows its error over a
+      // dialog asking something else entirely.
+      if (state.createAgentPrRequestId !== generation) return
+      setState({ createAgentPrResolving: false, createAgentPrRequestId: null })
+      toast.error(
+        e instanceof Error
+          ? e.message
+          : "Could not work out which project that pull request is in.",
+      )
+    })
+}
+
 // Submit the name dialog: dispatch create, fork, or create-from-PR based on the
 // current target, then close. Mirrors the TUI, where the same name prompt drives
 // these flows.
@@ -3934,6 +4144,11 @@ export function submitNameDialog(name: string): void {
     )?.project_id
     if (projectId) armCreateFocus(projectId)
     forkAgent(target.sessionId, name)
+  } else if (target.projectId === null) {
+    // Reference-first: dux has to work out the project before anything is
+    // created, so the dialog stays open until the answer arrives.
+    submitPrReferenceFirst(state.createAgentPrInput.trim(), name)
+    return
   } else {
     armCreateFocus(target.projectId)
     createAgentFromPr(target.projectId, state.createAgentPrInput.trim(), name)

@@ -545,7 +545,8 @@ mod tests {
             (
                 "PullRequestInput",
                 PromptState::PullRequestInput {
-                    project,
+                    focus: crate::app::PullRequestInputFocus::Input,
+                    project: Some(project),
                     input: TextInput::with_text("half-typed-name".to_string()),
                 },
             ),

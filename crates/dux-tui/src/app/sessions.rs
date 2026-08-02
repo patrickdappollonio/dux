@@ -239,7 +239,22 @@ impl App {
     /// modal. The gh availability gate for the PR intent is enforced by the
     /// caller (`open_new_agent_from_pr_prompt`) before we get here.
     pub(crate) fn open_project_chooser(&mut self, intent: ProjectChooserIntent) -> Result<()> {
-        let entries = self.build_project_chooser_entries();
+        self.open_project_chooser_over(intent, None)
+    }
+
+    /// [`Self::open_project_chooser`] optionally narrowed to a set of project
+    /// ids. `Some` is used when a pull-request reference matched SEVERAL
+    /// projects: showing every project there would bury the two that are
+    /// actually checkouts of that repository.
+    pub(crate) fn open_project_chooser_over(
+        &mut self,
+        intent: ProjectChooserIntent,
+        only: Option<&[String]>,
+    ) -> Result<()> {
+        let mut entries = self.build_project_chooser_entries();
+        if let Some(only) = only {
+            entries.retain(|entry| only.iter().any(|id| id == &entry.id));
+        }
         if entries.is_empty() {
             self.set_error("No projects yet. Add one first.");
             return Ok(());
@@ -286,7 +301,23 @@ impl App {
         };
         match intent {
             ProjectChooserIntent::NewAgent => self.begin_new_agent_for_project(project),
-            ProjectChooserIntent::FromPr => self.begin_pr_agent_for_project(project),
+            ProjectChooserIntent::FromPr => {
+                // Whatever the user had typed before stepping out to choose a
+                // project travels back into the field, so the round trip never
+                // costs them their reference.
+                let seed = self.pending_pr_reference.take().unwrap_or_default();
+                self.begin_pr_agent_for_project_with(project, seed)
+            }
+            ProjectChooserIntent::FromPrReference => {
+                // The reference is already typed, so this pick completes it
+                // rather than reopening an empty field. If it somehow went
+                // missing, fall back to the project-first field instead of
+                // silently doing nothing.
+                match self.pending_pr_reference.take() {
+                    Some(raw_input) => self.dispatch_pull_request_lookup(project, raw_input),
+                    None => self.begin_pr_agent_for_project(project),
+                }
+            }
             ProjectChooserIntent::FromWorktree => self.begin_worktree_agent_for_project(project),
             ProjectChooserIntent::Manage => {
                 self.project_chooser_context = Some(project.id.clone());
@@ -412,8 +443,10 @@ impl App {
         })
     }
 
-    /// `new-agent-from-pr`: fail fast if gh integration is unavailable, otherwise
-    /// open the project chooser. The chosen project then opens the PR input.
+    /// `new-agent-from-pr`: fail fast if gh integration is unavailable, then open
+    /// the reference field with NO project chosen and none asked for. dux works
+    /// out which project the reference belongs to; the secondary action inside
+    /// the modal is the way back to today's project-first flow.
     pub(crate) fn open_new_agent_from_pr_prompt(&mut self) -> Result<()> {
         if !self.github_pr_agent_command_available() {
             self.set_error(
@@ -421,12 +454,37 @@ impl App {
             );
             return Ok(());
         }
-        self.open_project_chooser(ProjectChooserIntent::FromPr)
+        self.invalidate_pull_request_resolution();
+        self.input_target = InputTarget::None;
+        self.fullscreen_overlay = FullscreenOverlay::None;
+        self.pending_pr_reference = None;
+        self.prompt = PromptState::PullRequestInput {
+            project: None,
+            input: TextInput::new(),
+            focus: PullRequestInputFocus::Input,
+        };
+        self.set_info(
+            "Paste a pull request link, or type owner/repo#123. dux finds the project it belongs to.",
+        );
+        Ok(())
     }
 
-    /// Per-project body for `FromPr`: opens the PR-number/URL input for the
-    /// chosen project. Shared by the chooser and any direct selection path.
+    /// Per-project body for `FromPr`: opens the PR-number/URL input for a
+    /// project that has ALREADY been chosen, which is the project-first flow
+    /// unchanged. Reached from the project chooser and from the secondary
+    /// action inside the reference-first modal.
     pub(crate) fn begin_pr_agent_for_project(&mut self, project: Project) -> Result<()> {
+        self.begin_pr_agent_for_project_with(project, String::new())
+    }
+
+    /// [`Self::begin_pr_agent_for_project`] seeding the field with text the user
+    /// has already typed, so stepping out to the project picker and back never
+    /// throws their reference away.
+    pub(crate) fn begin_pr_agent_for_project_with(
+        &mut self,
+        project: Project,
+        seed: String,
+    ) -> Result<()> {
         if project.path_missing {
             self.prompt = PromptState::None;
             self.set_warning(format!(
@@ -435,14 +493,205 @@ impl App {
             ));
             return Ok(());
         }
+        // Retargeting the modal at a project supersedes any resolution still
+        // out: its answer is about a question this screen is no longer asking.
+        self.invalidate_pull_request_resolution();
         self.input_target = InputTarget::None;
         self.fullscreen_overlay = FullscreenOverlay::None;
+        let mut input = TextInput::new();
+        if !seed.is_empty() {
+            input.set_text(seed);
+        }
         self.prompt = PromptState::PullRequestInput {
-            project,
-            input: TextInput::new(),
+            project: Some(project),
+            input,
+            focus: PullRequestInputFocus::Input,
         };
         self.set_info("Paste a GitHub PR URL or enter a PR number for the chosen project.");
         Ok(())
+    }
+
+    /// Confirm on the reference field with NO project chosen: parse what was
+    /// typed, then resolve it against every project's configured address.
+    ///
+    /// Parsing happens HERE, inline, because it is pure and instant and its
+    /// refusals are the ones the user most needs immediately: a bare number
+    /// names no repository at all, so it is refused with a pointer at the
+    /// secondary action rather than sent off to a worker that could only come
+    /// back empty-handed. Only a reference that really names a repository is
+    /// worth a git call per project, and that goes on a worker.
+    pub(crate) fn dispatch_pull_request_reference(&mut self, raw_input: String) -> Result<()> {
+        let reference = match dux_core::pr_reference::parse_typed_reference(&raw_input) {
+            Ok(reference) => reference,
+            Err(message) => {
+                self.set_error(message);
+                return Ok(());
+            }
+        };
+        if reference.owner_repo.is_none() {
+            self.set_error(
+                "A pull request number on its own does not say which repository it is in. \
+                 Paste a link, type owner/repo#123, or choose an existing project first.",
+            );
+            return Ok(());
+        }
+        let policy = self.engine.github_host_policy();
+        // The typed host is gated BEFORE any per-project git work, exactly as
+        // the web gates it. Without this a reference on a host `gh` is not
+        // signed in to matched nothing (every project is on some other host),
+        // so the user was told no project in dux had that repository, sent to
+        // the picker, made to choose one, and only then shown the real
+        // authentication error. The first message dux shows should be the true
+        // one.
+        if let Some(host) = reference.host.as_deref()
+            && !policy.allows(host)
+        {
+            self.set_error(format!(
+                "dux cannot look up pull requests on {host}. Sign in to that host with \
+                 `gh auth login --hostname {host}`, or paste a reference from a host you \
+                 are already signed in to."
+            ));
+            return Ok(());
+        }
+        let Some(repository) = reference.repository_label() else {
+            self.set_error("That reference does not name a repository.");
+            return Ok(());
+        };
+
+        // A resubmit supersedes whatever was already out: the old reply must
+        // not be allowed to act on this screen.
+        self.invalidate_pull_request_resolution();
+        self.prompt = PromptState::None;
+        let op =
+            dux_core::engine::status_op(format!("Looking for the project for {repository}..."))
+                .resolve_in_handler(|o: &PrLookupFinalOutcome| match o {
+                    PrLookupFinalOutcome::HandedOff | PrLookupFinalOutcome::Failed => {
+                        dux_core::engine::Final::clear()
+                    }
+                });
+        let pending = op.pending_status();
+        let op_id = op.id().to_string();
+        self.pending_pr_lookup_ops.insert(op_id.clone(), op);
+        // The op id IS the generation stamp. It is already unique per
+        // operation and already rides through the worker and back, so there is
+        // nothing to invent: a reply whose id is no longer the current one
+        // belongs to a screen the user has left.
+        self.pending_pr_reference_op = Some(op_id.clone());
+        self.apply_reaction(dux_core::engine::EventReaction::Status(pending));
+
+        let worker_tx = self.engine.worker_tx.clone();
+        let projects = self.engine.projects.clone();
+        thread::spawn(move || {
+            use std::panic::AssertUnwindSafe;
+            let tx_panic = worker_tx.clone();
+            let op_id_panic = op_id.clone();
+            let repository_panic = repository.clone();
+            let raw_panic = raw_input.clone();
+            if let Err(payload) = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                dux_core::pr_reference::run_reference_resolution_job(
+                    reference,
+                    raw_input,
+                    projects,
+                    policy,
+                    worker_tx,
+                    Some(op_id),
+                );
+            })) {
+                let reason = dux_core::engine::format_panic_payload(payload);
+                dux_core::logger::error(&format!(
+                    "pull-request-reference resolution worker panicked: {reason}"
+                ));
+                // A panic must still complete the event, or the busy strands
+                // and the modal never comes back. It is reported as a FAILURE,
+                // not as an empty match set: dux never found out whether any
+                // project is a checkout of that repository, and saying it did
+                // would be a lie the user cannot see through.
+                let _ = tx_panic.send(WorkerEvent::PullRequestReferenceResolved {
+                    raw_input: raw_panic,
+                    repository: repository_panic,
+                    result: Err(reason),
+                    status_op_id: Some(op_id_panic),
+                });
+            }
+        });
+        Ok(())
+    }
+
+    /// Forget the resolution this screen was waiting for, so its reply (which
+    /// may already be in flight and cannot be recalled) lands on nothing, and
+    /// dismiss its busy rather than leaving a spinner over a screen that is no
+    /// longer waiting for anything.
+    ///
+    /// Called on every close, retarget and resubmit. An abort mechanism would
+    /// be a fine addition on top; it could never replace this, because a reply
+    /// already on the channel still arrives.
+    pub(crate) fn invalidate_pull_request_resolution(&mut self) {
+        let Some(op_id) = self.pending_pr_reference_op.take() else {
+            return;
+        };
+        if let Some(op) = self.pending_pr_lookup_ops.remove(&op_id) {
+            self.apply_reaction(op.resolve(&PrLookupFinalOutcome::HandedOff).into_reaction());
+        }
+    }
+
+    /// What the resolution worker's answer means on screen. Three shapes, and
+    /// every one of them keeps the reference the user typed. A worker that fell
+    /// over is a fourth, and it is reported as a failure rather than folded
+    /// into "no project".
+    pub(crate) fn apply_pull_request_reference_resolution(
+        &mut self,
+        raw_input: String,
+        repository: String,
+        result: Result<dux_core::pr_reference::ReferenceResolution, String>,
+    ) -> Result<()> {
+        let resolution = match result {
+            Ok(resolution) => resolution,
+            Err(reason) => {
+                self.set_error(format!(
+                    "dux could not work out which project {repository} is open in: {reason}. \
+                     Try again, or choose an existing project."
+                ));
+                return Ok(());
+            }
+        };
+        let matches = &resolution.matches;
+        match matches.len() {
+            1 => {
+                let project = matches[0].clone();
+                self.dispatch_pull_request_lookup(project, raw_input)
+            }
+            0 => {
+                self.pending_pr_reference = Some(raw_input);
+                // What dux may claim depends on whether it managed to look at
+                // everything. With a project it could not inspect, "no project
+                // is a checkout of this" is a certainty dux does not have, and
+                // the one project that mattered may be exactly the unreadable
+                // one. dux does not clone, and neither wording may imply it
+                // might.
+                match resolution.uninspected_summary() {
+                    None => self.set_warning(format!(
+                        "No project in dux is a checkout of {repository}. Choose a project that \
+                         already has it, or add one from a directory on disk."
+                    )),
+                    Some(summary) => self.set_warning(format!(
+                        "No project dux could check is a checkout of {repository}, and dux \
+                         could not check every project ({summary}). Choose a project that \
+                         already has it, or add one from a directory on disk."
+                    )),
+                }
+                self.open_project_chooser_over(ProjectChooserIntent::FromPrReference, None)
+            }
+            _ => {
+                let ids: Vec<String> = matches.iter().map(|p| p.id.clone()).collect();
+                let count = ids.len();
+                self.pending_pr_reference = Some(raw_input);
+                self.set_info(format!(
+                    "{count} projects are checkouts of {repository}. Choose which one this \
+                     agent belongs in."
+                ));
+                self.open_project_chooser_over(ProjectChooserIntent::FromPrReference, Some(&ids))
+            }
+        }
     }
 
     pub(crate) fn dispatch_pull_request_lookup(
@@ -450,6 +699,9 @@ impl App {
         project: Project,
         raw_input: String,
     ) -> Result<()> {
+        #[cfg(test)]
+        self.dispatched_pr_lookups
+            .push((project.id.clone(), raw_input.clone()));
         self.prompt = PromptState::None;
         // Mint a HandlerStatusOp keyed by an opaque id. Its busy shows now; both
         // terminal outcomes resolve to a CLEAR in `drain_events` when the
@@ -3795,6 +4047,9 @@ mod tests {
             pending_persist_ops: std::collections::HashMap::new(),
             pending_worktree_ops: std::collections::HashMap::new(),
             pending_pr_lookup_ops: std::collections::HashMap::new(),
+            pending_pr_reference: None,
+            pending_pr_reference_op: None,
+            dispatched_pr_lookups: Vec::new(),
             pending_delete_ops: std::collections::HashMap::new(),
             pending_reconnect_ops: std::collections::HashMap::new(),
             pending_checkout_inspect_ops: std::collections::HashMap::new(),

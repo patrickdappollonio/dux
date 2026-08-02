@@ -58,12 +58,63 @@ impl App {
                 } => Some(id.clone()),
                 _ => None,
             };
+            // The reference-resolution answer is the SURFACE's to act on (the
+            // engine deliberately returns nothing for it), so take it off the
+            // event before it is consumed. It carries the same keyed-busy id as
+            // a lookup, and it dismisses that busy the same way.
+            let reference_resolution = match &event {
+                WorkerEvent::PullRequestReferenceResolved {
+                    raw_input,
+                    repository,
+                    result,
+                    status_op_id,
+                } => Some((
+                    raw_input.clone(),
+                    repository.clone(),
+                    result.clone(),
+                    status_op_id.clone(),
+                )),
+                _ => None,
+            };
             let reaction = self.engine.process_worker_event(event);
             let chains_forward = matches!(
                 reaction,
                 EventReaction::DispatchProjectDefaultBranchCheckout { .. }
             );
             self.apply_reaction(reaction);
+            if let Some((raw_input, repository, result, status_op_id)) = reference_resolution {
+                // The generation guard. `pending_pr_reference_op` names the ONE
+                // resolution this screen is still waiting for, and a reply that
+                // is not it belongs to a screen the user has left: they
+                // cancelled, retargeted at a project, or typed a different
+                // reference, and acting on this answer would create an agent
+                // from a reference they replaced and close the dialog they are
+                // looking at. Checking only that a pull-request modal is open
+                // does not catch that, because the open one may be a different
+                // question.
+                let current = self.pending_pr_reference_op.as_deref() == status_op_id.as_deref()
+                    && status_op_id.is_some();
+                if current {
+                    self.pending_pr_reference_op = None;
+                    if let Err(err) =
+                        self.apply_pull_request_reference_resolution(raw_input, repository, result)
+                    {
+                        self.set_error(format!("{err:#}"));
+                    }
+                }
+                // The busy is dismissed either way: even a superseded reply's
+                // spinner has to come off, and `invalidate_pull_request_resolution`
+                // has usually taken it already, in which case this is a no-op.
+                // The visible final is whatever the branch above produced (the
+                // lookup's own busy, or the picker's message).
+                if let Some(id) = status_op_id
+                    && let Some(op) = self.pending_pr_lookup_ops.remove(&id)
+                {
+                    self.apply_reaction(
+                        op.resolve(&PrLookupFinalOutcome::HandedOff).into_reaction(),
+                    );
+                }
+            }
             if let Some((id, succeeded)) = pr_lookup_completion
                 && let Some(op) = self.pending_pr_lookup_ops.remove(&id)
             {

@@ -156,9 +156,38 @@ async function request<T>(
   }
 }
 
+// What the server made of a typed pull-request reference: the repository it
+// names, the number it carried, and every project that is a checkout of that
+// repository. `projects.length` is what the caller branches on, exactly as the
+// terminal UI does: one proceeds, several ask, none reports and offers the
+// picker. `repository` is `host/owner/repo`, or `owner/repo` when the reference
+// named no host (which dux must NOT fill in as github.com).
+export interface ResolvedPullRequestReference {
+  repository: string | null
+  number: number | null
+  projects: { id: string; name: string }[]
+  // How many projects the server could not inspect at all (directory gone,
+  // address unreadable, host `gh` is not signed in to), and a clause naming
+  // them. These are NOT non-matches: they are unknowns, and without them an
+  // empty `projects` would be reported as "no project is a checkout of that
+  // repository" when the only project that mattered may be exactly the one that
+  // could not be read.
+  uninspected_count: number
+  uninspected_summary: string | null
+}
+
 export const sessionsApi = {
   create: (body: CreateSessionBody) =>
     request<SessionView>("POST", "/api/v1/sessions", body),
+  // Ask which project a typed pull-request reference belongs to. A read: it
+  // starts nothing, so a refusal (unreadable text, a bare number, a host dux
+  // may not ask about) comes back as a 400 with the reason rather than a toast.
+  resolvePullRequest: (reference: string) =>
+    request<ResolvedPullRequestReference>(
+      "POST",
+      "/api/v1/pull-requests/resolve",
+      { reference },
+    ),
   remove: (id: string, deleteWorktree: boolean) =>
     request<void>(
       "DELETE",

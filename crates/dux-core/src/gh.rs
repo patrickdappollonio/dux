@@ -1131,85 +1131,70 @@ fn normalize_github_host(host: &str) -> &str {
 }
 
 /// Parse a user-typed PR reference into a [`PullRequestLookup`] for the selected
-/// project's GitHub remote. Accepts:
-///   - a bare PR number (`123`) — assumes the selected project's host/repo,
-///   - a `#`-prefixed number (`#123`) — same assumption,
-///   - a full GitHub PR URL (`https://github.com/owner/repo/pull/123`,
-///     including GitHub Enterprise hosts and trailing `?query`/`#fragment`).
+/// project's GitHub remote.
 ///
-/// A URL whose host or owner/repo does not match the selected project's remote
-/// is rejected with an actionable error, since fetching another repo's PR head
-/// into this project's worktree would silently do the wrong thing.
+/// The grammar lives in [`crate::pr_reference`], which is deliberately separate
+/// from the parser for a project's CONFIGURED address (see that module's docs
+/// for why the two rules differ). This function is what turns a parsed
+/// reference into a lookup against a project the caller has already chosen, and
+/// it owns the three things that need the project to answer:
 ///
-/// This is a pure function shared by the TUI's new-agent-from-pr prompt and the
-/// web's `CreateAgentFromPr` wire flow.
+/// * **The host gate.** A host the user WROTE is the SECOND place a host can
+///   enter dux, qualified separately from a project's configured address so
+///   that fixing only the other gate would leave an enterprise user able to
+///   have their project recognised but not their pasted URL. Both ask the same
+///   policy, and both compare lowercased. A reference naming no host (`#123`,
+///   `owner/repo#123`) has nothing to gate; it inherits the selected project's
+///   host, which was itself qualified when it was read.
+/// * **The mismatch refusal.** A reference naming another repository is
+///   rejected with an actionable error, since fetching another repository's PR
+///   head into this project's worktree would silently do the wrong thing.
+/// * **The missing number.** A repository address on its own names no pull
+///   request, so it is refused rather than guessed at.
+///
+/// A pure function, shared by the TUI's new-agent-from-pr prompt and the web's
+/// `CreateAgentFromPr` wire flow.
 pub fn parse_pull_request_lookup(
     raw_input: &str,
     selected_host: &str,
     selected_owner_repo: &str,
     policy: &GithubHostPolicy,
 ) -> Result<PullRequestLookup, String> {
-    let input = raw_input.trim();
-    if input.is_empty() {
-        return Err("Enter a GitHub PR URL or PR number.".to_string());
-    }
+    let reference = crate::pr_reference::parse_typed_reference(raw_input)?;
 
-    if let Ok(number) = input.strip_prefix('#').unwrap_or(input).parse::<u64>() {
-        return Ok(PullRequestLookup {
-            host: selected_host.to_string(),
-            owner_repo: selected_owner_repo.to_string(),
-            number,
-        });
-    }
-
-    let Some((host, rest)) = parse_github_pull_url_parts(input, policy) else {
-        return Err("Enter a PR number, #number, or a GitHub PR URL.".to_string());
-    };
-    let parts: Vec<&str> = rest.split('/').collect();
-    if parts.len() < 4 || parts[2] != "pull" {
-        return Err(
-            "GitHub PR URLs must look like https://github.com/owner/repo/pull/123.".to_string(),
-        );
-    }
-    let owner_repo = format!("{}/{}", parts[0], parts[1]);
-    if !host.eq_ignore_ascii_case(selected_host)
-        || !owner_repo.eq_ignore_ascii_case(selected_owner_repo)
+    if let Some(host) = reference.host.as_deref()
+        && !policy.allows(host)
     {
         return Err(format!(
-            "PR belongs to {host}/{owner_repo}, but the selected project uses {selected_host}/{selected_owner_repo}."
+            "dux cannot look up pull requests on {host}. Sign in to that host with \
+             `gh auth login --hostname {host}`, or paste a reference from a host you \
+             are already signed in to."
         ));
     }
-    let number = parts[3]
-        .parse::<u64>()
-        .map_err(|_| "GitHub PR URL does not contain a valid PR number.".to_string())?;
+
+    if reference.owner_repo.is_some() && !reference.matches(selected_host, selected_owner_repo) {
+        let named = reference.repository_label().unwrap_or_default();
+        return Err(format!(
+            "PR belongs to {named}, but the selected project uses \
+             {selected_host}/{selected_owner_repo}."
+        ));
+    }
+
+    let Some(number) = reference.number else {
+        let named = reference
+            .repository_label()
+            .unwrap_or_else(|| selected_owner_repo.to_string());
+        return Err(format!(
+            "That address names {named} but no pull request. Add the number, for example \
+             {selected_owner_repo}#123."
+        ));
+    };
+
     Ok(PullRequestLookup {
-        host,
-        owner_repo,
+        host: selected_host.to_string(),
+        owner_repo: selected_owner_repo.to_string(),
         number,
     })
-}
-
-/// The SECOND place a host can enter: the one a person types.
-///
-/// It is qualified separately from a project's configured address, so fixing
-/// only the other gate would leave an enterprise user able to have their
-/// project recognised but not their pasted URL. Both now ask the same policy,
-/// and both compare lowercased.
-fn parse_github_pull_url_parts(input: &str, policy: &GithubHostPolicy) -> Option<(String, String)> {
-    let without_scheme = input
-        .strip_prefix("https://")
-        .or_else(|| input.strip_prefix("http://"))?;
-    let (host, rest) = without_scheme.split_once('/')?;
-    if !policy.allows(host) {
-        return None;
-    }
-    let rest = rest
-        .split(['?', '#'])
-        .next()
-        .unwrap_or(rest)
-        .trim_end_matches('/')
-        .to_string();
-    Some((host.to_string(), rest))
 }
 
 /// Resolve a PR reference for a project against the GitHub remote and `gh` CLI,
@@ -2596,7 +2581,7 @@ mod tests {
         let err =
             parse_pull_request_lookup("   ", "github.com", "octocat/Hello-World", &legacy_policy())
                 .expect_err("empty");
-        assert!(err.contains("Enter a GitHub PR URL or PR number"));
+        assert!(err.contains("Enter a pull request URL"), "{err}");
     }
 
     #[test]
@@ -2608,7 +2593,7 @@ mod tests {
             &legacy_policy(),
         )
         .expect_err("garbage");
-        assert!(err.contains("Enter a PR number, #number, or a GitHub PR URL"));
+        assert!(err.contains("Enter a pull request URL"), "{err}");
     }
 
     #[test]
@@ -2620,19 +2605,81 @@ mod tests {
             &legacy_policy(),
         )
         .expect_err("non-github host");
-        assert!(err.contains("Enter a PR number, #number, or a GitHub PR URL"));
+        // The host is now READ rather than left unparsed, so the refusal can say
+        // which host it is and what would make it work.
+        assert!(
+            err.contains("cannot look up pull requests on gitlab.com"),
+            "{err}"
+        );
     }
 
     #[test]
-    fn parse_pull_request_lookup_rejects_malformed_pull_path() {
+    fn parse_pull_request_lookup_reads_a_browser_route_as_the_repository_it_names() {
+        // `/issues/3` used to be refused as a malformed pull URL. A trailing
+        // browser route is now discarded, so the address names the repository
+        // and the only thing missing is the pull request number. Saying so is
+        // more use than calling the whole address malformed.
         let err = parse_pull_request_lookup(
             "https://github.com/octocat/Hello-World/issues/3",
             "github.com",
             "octocat/Hello-World",
             &legacy_policy(),
         )
-        .expect_err("not a pull URL");
-        assert!(err.contains("must look like https://github.com/owner/repo/pull/123"));
+        .expect_err("names no pull request");
+        assert!(
+            err.contains("names github.com/octocat/Hello-World but no pull request"),
+            "{err}"
+        );
+        assert!(err.contains("octocat/Hello-World#123"), "{err}");
+    }
+
+    #[test]
+    fn parse_pull_request_lookup_accepts_a_pull_url_under_a_browser_route() {
+        for input in [
+            "https://github.com/octocat/Hello-World/pull/7/files",
+            "https://github.com/octocat/Hello-World/pull/7/commits/deadbee",
+        ] {
+            let lookup = parse_pull_request_lookup(
+                input,
+                "github.com",
+                "octocat/Hello-World",
+                &legacy_policy(),
+            )
+            .unwrap_or_else(|err| panic!("{input}: {err}"));
+            assert_eq!(lookup.number, 7, "{input}");
+        }
+    }
+
+    #[test]
+    fn parse_pull_request_lookup_accepts_owner_repo_hash_number_for_the_selected_project() {
+        // It names no host, so it must not be assumed to mean github.com: it
+        // takes the selected project's host, whatever that is.
+        let lookup = parse_pull_request_lookup(
+            "octocat/Hello-World#42",
+            "git.company.example",
+            "octocat/Hello-World",
+            &legacy_policy(),
+        )
+        .expect("owner/repo#number");
+        assert_eq!(lookup.host, "git.company.example");
+        assert_eq!(lookup.owner_repo, "octocat/Hello-World");
+        assert_eq!(lookup.number, 42);
+    }
+
+    #[test]
+    fn parse_pull_request_lookup_rejects_owner_repo_hash_number_for_another_repository() {
+        let err = parse_pull_request_lookup(
+            "other/repo#42",
+            "github.com",
+            "octocat/Hello-World",
+            &legacy_policy(),
+        )
+        .expect_err("another repository");
+        assert!(err.contains("PR belongs to other/repo"), "{err}");
+        assert!(
+            err.contains("selected project uses github.com/octocat/Hello-World"),
+            "{err}"
+        );
     }
 
     fn lookup_test_project() -> Project {

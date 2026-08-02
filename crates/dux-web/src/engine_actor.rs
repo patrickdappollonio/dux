@@ -196,6 +196,23 @@ pub enum EngineRequest {
             )>,
         >,
     ),
+    /// Everything the pull-request reference resolver needs: the live project
+    /// list and the GitHub host policy. Both are instant clones off engine
+    /// state; the git call per project runs off-thread in the caller (the
+    /// [`EngineRequest::ProjectWorktreeInputs`] precedent), because reading a
+    /// project's configured address shells out to git and must not run on the
+    /// engine loop or the async reactor.
+    ///
+    /// Deliberately fetched per request, never cached: the answer changes when
+    /// an address is edited, when git's rewrite configuration changes, and when
+    /// a project's path moves under the same id.
+    PullRequestResolutionInputs(
+        oneshot::Sender<(
+            Vec<dux_core::model::Project>,
+            dux_core::gh::GithubHostPolicy,
+            bool,
+        )>,
+    ),
     /// Resolve a session's startup-command-log context: `(dux paths, project_id)`
     /// for the session, so a GET handler can list/read its startup-command logs
     /// off-thread. `None` when the session id is unknown. Instant clone off engine
@@ -973,6 +990,28 @@ impl EngineHandle {
             return None;
         }
         rx.await.unwrap_or(None)
+    }
+
+    /// The project list, host policy and gh-availability flag the pull-request
+    /// reference resolver needs. See
+    /// [`EngineRequest::PullRequestResolutionInputs`].
+    pub async fn pull_request_resolution_inputs(
+        &self,
+    ) -> Option<(
+        Vec<dux_core::model::Project>,
+        dux_core::gh::GithubHostPolicy,
+        bool,
+    )> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .req_tx
+            .send(EngineRequest::PullRequestResolutionInputs(tx))
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.ok()
     }
 
     /// Resolve a session's startup-command-log context: the dux paths and the
@@ -2277,6 +2316,13 @@ fn handle_request(
             // HTTP handler only refreshes the worktree it just mutated, which is
             // normally the watched one.
             engine.spawn_changed_files_refresh(std::path::PathBuf::from(worktree));
+        }
+        EngineRequest::PullRequestResolutionInputs(reply) => {
+            let _ = reply.send((
+                engine.projects.clone(),
+                engine.github_host_policy(),
+                engine.pr_agent_command_available(),
+            ));
         }
         EngineRequest::ProjectWorktreeInputs(project_id, reply) => {
             let inputs = engine

@@ -12,8 +12,10 @@ import { Input } from "@/components/ui/input"
 import { isValidAgentName, sanitizeAgentName } from "@/lib/agentName"
 import {
   closeCreateAgent,
+  openNewAgentPicker,
   setCreateAgentDraft,
   setCreateAgentPrInput,
+  setPendingPrReference,
   submitNameDialog,
   toggleCreateAgentCopyChanges,
   toggleCreateAgentRandomize,
@@ -22,7 +24,11 @@ import {
 
 // The name dialog mirrors the TUI prompt and serves three modes — creating a
 // fresh agent, forking an existing session, and creating an agent from a GitHub
-// PR — switched on the store's `createAgentTarget.kind`. The name input filters
+// PR, switched on the store's `createAgentTarget.kind`. The PR mode itself has
+// two shapes: project-first (opened from a project's own menu, unchanged), and
+// reference-first (opened from the global command), where no project is chosen,
+// the reference field leads, and a secondary action under it hands over to the
+// existing project selector for anyone who would rather start there. The name input filters
 // characters live (spaces -> dashes, disallowed chars dropped), and a "Use
 // randomized pet name" checkbox fills the input with a server-generated name when
 // toggled on (and clears it on toggle off only if the text is still that
@@ -38,6 +44,8 @@ export function CreateAgentDialog() {
     createAgentCopyChanges,
     createAgentNamePending,
     createAgentPrInput,
+    createAgentPrResolving,
+    createAgentPrError,
     spine,
   } = useDux()
   // Deliberately skips useVanishedTargetGuard: this target carries its own
@@ -46,8 +54,11 @@ export function CreateAgentDialog() {
   const open = createAgentTarget !== null
   const isFork = createAgentTarget?.kind === "fork"
   const isPr = createAgentTarget?.kind === "pr"
+  // Reference-first: no project chosen, and none asked for.
+  const resolvesProject = isPr && createAgentTarget.projectId === null
   const project =
-    createAgentTarget?.kind === "new" || createAgentTarget?.kind === "pr"
+    (createAgentTarget?.kind === "new" || createAgentTarget?.kind === "pr") &&
+    createAgentTarget.projectId !== null
       ? spine?.projects.find((p) => p.id === createAgentTarget.projectId)
       : undefined
   const forkSession =
@@ -70,18 +81,26 @@ export function CreateAgentDialog() {
   const invalidNonEmpty = !empty && !isValidAgentName(createAgentDraft)
   // In PR mode the PR reference is required: the server rejects an empty PR.
   const prEmpty = createAgentPrInput.trim() === ""
-  const disabled = invalidNonEmpty || (isFork && empty) || (isPr && prEmpty)
+  const disabled =
+    invalidNonEmpty ||
+    (isFork && empty) ||
+    (isPr && prEmpty) ||
+    createAgentPrResolving
 
   const title = isFork
     ? `Fork ${sourceLabel}`
-    : isPr
-      ? `New agent from PR in ${projectName}`
-      : `New agent in ${projectName}`
+    : resolvesProject
+      ? "New agent from PR"
+      : isPr
+        ? `New agent from PR in ${projectName}`
+        : `New agent in ${projectName}`
   const description = isFork
     ? "Forks the agent into a new git worktree + branch (copying its uncommitted and untracked files) and launches a fresh session."
-    : isPr
-      ? "Fetches the PR's head branch into a new git worktree and launches the agent. Paste a PR URL or enter a PR number. Leave the name blank to use the PR's branch name."
-      : "Creates a git worktree + branch and launches the agent. Tick “Use randomized pet name” to autofill a generated name."
+    : resolvesProject
+      ? "Paste a pull request link, or type owner/repo#123. dux finds the project that repository is open in, fetches the PR's head branch into a new git worktree and launches the agent. Leave the name blank to use the PR's branch name."
+      : isPr
+        ? "Fetches the PR's head branch into a new git worktree and launches the agent. Paste a PR URL or enter a PR number. Leave the name blank to use the PR's branch name."
+        : "Creates a git worktree + branch and launches the agent. Tick “Use randomized pet name” to autofill a generated name."
 
   function handleSubmit() {
     if (disabled) return
@@ -110,10 +129,49 @@ export function CreateAgentDialog() {
                 handleSubmit()
               }
             }}
-            placeholder="PR URL, #123, or 123"
+            placeholder={
+              resolvesProject
+                ? "Pull request link, or owner/repo#123"
+                : "PR URL, #123, or 123"
+            }
             aria-label="GitHub pull request"
+            aria-invalid={createAgentPrError !== null}
+            aria-describedby={
+              createAgentPrError ? "create-agent-pr-error" : undefined
+            }
             autoFocus
           />
+        )}
+        {isPr && createAgentPrError && (
+          // A refusal dux made without asking the server, shown in the field
+          // rather than as a toast: the thing that fixes it is right below.
+          <p
+            id="create-agent-pr-error"
+            role="alert"
+            className="text-destructive text-sm"
+          >
+            {createAgentPrError}
+          </p>
+        )}
+        {resolvesProject && (
+          <div className="flex justify-start">
+            <Button
+              variant="link"
+              // A secondary action, so it is quieter than the primary and sits
+              // under the field it is an alternative to. On a phone it still
+              // has to be a real target.
+              className="h-auto px-0 max-md:min-h-10 text-muted-foreground"
+              onClick={() => {
+                // Whatever has been typed travels with it, so stepping out to
+                // choose a project never costs the user their reference.
+                setPendingPrReference(createAgentPrInput.trim() || null)
+                closeCreateAgent()
+                openNewAgentPicker("from_pr")
+              }}
+            >
+              or choose an existing project
+            </Button>
+          </div>
         )}
         <div className="relative">
           <Input
@@ -183,7 +241,13 @@ export function CreateAgentDialog() {
             Cancel
           </Button>
           <Button onClick={handleSubmit} disabled={disabled}>
-            {isFork ? "Fork agent" : isPr ? "Create from PR" : "Create agent"}
+            {createAgentPrResolving
+              ? "Finding the project…"
+              : isFork
+                ? "Fork agent"
+                : isPr
+                  ? "Create from PR"
+                  : "Create agent"}
           </Button>
         </DialogFooter>
       </DialogContent>

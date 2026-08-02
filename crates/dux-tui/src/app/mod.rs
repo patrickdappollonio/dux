@@ -365,6 +365,40 @@ pub struct App {
     /// busy timeout, even though the visible final comes from elsewhere.
     pub(crate) pending_pr_lookup_ops:
         HashMap<String, dux_core::engine::HandlerStatusOp<PrLookupFinalOutcome>>,
+    /// The pull-request reference the user typed, held across a trip through the
+    /// project chooser so the chosen project can be handed straight to the
+    /// lookup. Set by the resolution completion when the answer was "several"
+    /// or "none", taken by [`ProjectChooserIntent::FromPrReference`], and
+    /// cleared whenever the chooser is abandoned so a later, unrelated pick
+    /// cannot inherit it.
+    pub(crate) pending_pr_reference: Option<String>,
+    /// The id of the ONE reference resolution whose answer this screen is still
+    /// waiting for, or `None` when it is waiting for none.
+    ///
+    /// This is the generation guard, and it is not optional. A resolution is a
+    /// git call per project, so it can easily still be out when the user has
+    /// cancelled the modal, retargeted it at a project, or submitted a
+    /// different reference. Nothing can recall a reply that is already in
+    /// flight, so the ONLY safe rule is that a reply acts on state when its id
+    /// is still the current one and is discarded otherwise. Checking merely
+    /// that some pull-request modal is open is not enough: the modal that is
+    /// open may be a different one, asking about a different reference.
+    ///
+    /// Stamped by [`App::dispatch_pull_request_reference`], and dropped by
+    /// [`App::invalidate_pull_request_resolution`] on every close, retarget and
+    /// resubmit.
+    pub(crate) pending_pr_reference_op: Option<String>,
+    /// Every `(project id, reference)` this screen has handed to the pull
+    /// request lookup, in order.
+    ///
+    /// A test seam, and it exists because the interesting assertions were
+    /// otherwise unwritable: `dispatch_pull_request_lookup` clears the prompt
+    /// and spawns a worker, so a test could only observe that the prompt went
+    /// away, which a cancel does too. What matters is WHICH project and WHICH
+    /// reference were dispatched, and this is the only place that is visible
+    /// without a live `gh`.
+    #[cfg(test)]
+    pub(crate) dispatched_pr_lookups: Vec<(String, String)>,
     /// In-flight async worktree-deletion status ops (the "Removing worktree for
     /// agent …" busy). When `begin_delete_session` takes the async path the TUI
     /// mints a [`dux_core::engine::HandlerStatusOp`] (its own opaque id), shows
@@ -1106,6 +1140,13 @@ pub(crate) enum ProjectChooserIntent {
     NewAgent,
     /// Create a new agent from a GitHub PR in the chosen project.
     FromPr,
+    /// Look up a pull request reference the user has ALREADY typed against the
+    /// chosen project. Reached two ways: the reference matched several projects
+    /// (one repository checked out twice), or it matched none and the picker is
+    /// being offered so the user can point at a checkout they already have. The
+    /// reference itself rides on [`App::pending_pr_reference`] rather than in
+    /// this enum, which stays `Copy`.
+    FromPrReference,
     /// Create a new agent from an existing worktree of the chosen project.
     FromWorktree,
     /// Make the chosen project the target for project-scoped palette commands.
@@ -1120,6 +1161,7 @@ impl ProjectChooserIntent {
         match self {
             ProjectChooserIntent::NewAgent => "New agent in project",
             ProjectChooserIntent::FromPr => "New agent from PR",
+            ProjectChooserIntent::FromPrReference => "Which project is this PR in?",
             ProjectChooserIntent::FromWorktree => "New agent from worktree",
             ProjectChooserIntent::Manage => "Manage project",
             ProjectChooserIntent::ProjectTerminal => "New terminal in project",
@@ -1309,6 +1351,22 @@ pub(crate) enum ConfirmNonDefaultBranchFocus {
 pub(crate) enum RenameSessionFocus {
     Input,
     RenameBranchCheckbox,
+}
+
+/// Which control has focus in the Create-Agent-From-PR modal.
+///
+/// The modal used to have exactly one control, so it needed no focus concept.
+/// Opened from the palette it now has two: the reference field, and the
+/// secondary "or choose an existing project" action that drops it into
+/// project-first mode. Two controls means an explicit focus enum and a focus
+/// that RENDERS, per the movement-keys tenet. Opened from a project's own menu
+/// the project is already chosen, the secondary action is not offered, and the
+/// ring has a single enabled stop, so the modal behaves exactly as it did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PullRequestInputFocus {
+    Input,
+    /// Only reachable when no project has been chosen yet.
+    ChooseProject,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1505,8 +1563,12 @@ pub(crate) enum PromptState {
         focus: RenameSessionFocus,
     },
     PullRequestInput {
-        project: Project,
+        /// `None` when the modal was opened from the global command: the
+        /// reference leads and dux resolves the project from it. `Some` when it
+        /// was opened from a project's own menu, which stays project-first.
+        project: Option<Project>,
         input: TextInput,
+        focus: PullRequestInputFocus,
     },
     NameNewAgent {
         request: CreateAgentRequest,
@@ -2258,6 +2320,10 @@ pub(crate) enum OverlayMouseLayout {
     /// The create-agent-from-PR modal's single text field.
     PullRequestInput {
         input: Rect,
+        /// The secondary "choose a project" action, published only when it is
+        /// drawn (no project chosen yet). A control that is not on screen must
+        /// not be clickable.
+        choose_project: Option<Rect>,
     },
     NameNewAgent {
         input: Rect,
@@ -2793,6 +2859,10 @@ impl App {
             pending_persist_ops: HashMap::new(),
             pending_worktree_ops: HashMap::new(),
             pending_pr_lookup_ops: HashMap::new(),
+            pending_pr_reference: None,
+            pending_pr_reference_op: None,
+            #[cfg(test)]
+            dispatched_pr_lookups: Vec::new(),
             pending_delete_ops: HashMap::new(),
             pending_reconnect_ops: HashMap::new(),
             pending_checkout_inspect_ops: HashMap::new(),
