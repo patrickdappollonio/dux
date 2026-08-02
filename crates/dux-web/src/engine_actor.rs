@@ -1306,6 +1306,12 @@ fn request_mutates_spine(req: &EngineRequest) -> bool {
         // probe answering "fresh or existing branch?"; it writes nothing.
         EngineRequest::CreateAgentBranchPlan(..) => false,
 
+        // A pure read of what the caller needs to resolve a typed pull request
+        // reference: the project list, the GitHub host policy, and whether the
+        // from-PR command is available. It clones all three and sends them back.
+        // The per-project git calls happen on the CALLER's worker, not here.
+        EngineRequest::PullRequestResolutionInputs(..) => false,
+
         // Writes that land somewhere the spine does not project. The changed-files
         // revision counter and the last-seen version are SQLite rows that no
         // `SpineView` field reads; the raw config save is persist-only by design
@@ -3842,6 +3848,11 @@ mod tests {
                 false,
             ),
             (
+                "PullRequestResolutionInputs",
+                EngineRequest::PullRequestResolutionInputs(dead_reply()),
+                false,
+            ),
+            (
                 "SessionWorktree",
                 EngineRequest::SessionWorktree("s1".into(), dead_reply()),
                 false,
@@ -3947,7 +3958,7 @@ mod tests {
         // through with a copied-from-its-neighbour `false` that nothing reads.
         assert_eq!(
             request_kind_answers().len(),
-            34,
+            35,
             "every EngineRequest kind needs a row in request_kind_answers; \
              update the count deliberately when adding one"
         );
