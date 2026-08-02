@@ -219,6 +219,11 @@ function makeState(): DuxState {
       available_providers: ["claude"],
       agent_tabs_max: 20,
       status_clear_seconds: 6,
+      // A real server always sends this, and the pane treats its ABSENCE as
+      // "not known yet, so not offered". Stated here rather than left to a
+      // fallback, so every other test in this file describes a dux that has
+      // finished loading and has the feature switched on.
+      file_drop_max_bytes: 1024,
     },
     offline: false,
     terminalEpoch: 0,
@@ -505,6 +510,49 @@ describe("the drop overlay", () => {
     // report, because nothing was attempted.
     expect(vi.mocked(toast.error)).not.toHaveBeenCalled()
     expect(vi.mocked(toast.warning)).not.toHaveBeenCalled()
+  })
+
+  it("offers nothing while the setting is not known yet", async () => {
+    // Bootstrap and the workspace load in parallel, so there is a real window
+    // in which the pane is on screen and dux does not yet know whether file
+    // drop exists. The gate defaulted that window to ENABLED, so a drag landing
+    // in it advertised a drop target and uploaded, even for a dux with the
+    // feature switched off. The previous test could not see this because it
+    // pre-seeded the setting. Recorded before the fix: the overlay rendered and
+    // uploadDroppedFile was called once.
+    uploadDroppedFile.mockResolvedValue(saved("shot.png"))
+    mockState = makeState()
+    mockState.bootstrap = null
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const pane = screen.getByTestId("terminal-container").closest(".group")!
+    fireEvent.dragEnter(pane, { dataTransfer: fileTransfer([]) })
+    expect(screen.queryByTestId("file-drop-overlay")).toBeNull()
+    await drop([file("shot.png")])
+    expect(uploadDroppedFile).not.toHaveBeenCalled()
+  })
+
+  it("takes the overlay back if the setting arrives disabled mid-drag", () => {
+    // The other half of the same window: the drag starts while the answer is
+    // unknown or the feature is on, and the bootstrap document lands saying it
+    // is off. The gate then refuses the matching dragleave and drop, so nothing
+    // is left that could clear the overlay and it would sit on the pane until
+    // it unmounted. Recorded before the fix: the overlay was still in the
+    // document after the setting arrived.
+    mockState = makeState()
+    mockState.bootstrap!.file_drop_max_bytes = 1024
+    const { rerender } = render(
+      <TerminalPane kind="agent" id="s1" sessionId="s1" />,
+    )
+    const pane = screen.getByTestId("terminal-container").closest(".group")!
+    fireEvent.dragEnter(pane, { dataTransfer: fileTransfer([]) })
+    expect(screen.getByTestId("file-drop-overlay")).toBeTruthy()
+
+    mockState = makeState()
+    mockState.bootstrap!.file_drop_max_bytes = 0
+    act(() => {
+      rerender(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    })
+    expect(screen.queryByTestId("file-drop-overlay")).toBeNull()
   })
 
   it("offers both the overlay and the upload when file drop is on", async () => {

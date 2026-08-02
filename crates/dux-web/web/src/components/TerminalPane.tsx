@@ -294,10 +294,27 @@ export function TerminalPane(props: TerminalPaneProps) {
   // file_drop_max_bytes = 0` switches the feature off, so the whole drag
   // surface goes with it (see `dragCarriesFiles`). Read reactively rather than
   // through a ref: the drag handlers are rendered props, not mount-effect
-  // closures, so they see the current value. A missing value is an older server
-  // that never sent the field, and before the first bootstrap fetch lands it is
-  // simply not known yet; both fall back to ON, matching the config default.
-  const fileDropEnabled = (bootstrap?.file_drop_max_bytes ?? 1) > 0
+  // closures, so they see the current value.
+  //
+  // NOT YET KNOWN is NOT ENABLED. Bootstrap and the workspace load in parallel,
+  // so the pane renders before the bootstrap document arrives, and an older
+  // server never sends the field at all. Defaulting that window to ON matched
+  // the config default but offered a feature dux could not yet say it had: with
+  // the setting switched off, a drag landing in that window still showed the
+  // overlay and still uploaded. There is nothing to lose by waiting, because
+  // the window closes in one fetch and the drag surface simply appears then.
+  const fileDropEnabled = (bootstrap?.file_drop_max_bytes ?? 0) > 0
+  // Retire any in-flight drag the moment the feature stops being available.
+  // The gate refuses events for a disabled feature, so once it closes there is
+  // no matching `dragleave` or `drop` left to clear the overlay, and it would
+  // sit on screen until the pane unmounted. This is reachable in the ordinary
+  // case: the bootstrap document can land, saying the feature is off, while a
+  // drag is already over the pane.
+  useEffect(() => {
+    if (fileDropEnabled) return
+    dragDepthRef.current = 0
+    setDragActive(false)
+  }, [fileDropEnabled])
   // The ref lags the rendered value by one commit (it is synced in an effect),
   // so an event firing inside that window can see the previous state. Both
   // mismatch directions degrade gracefully: a stale `false` falls through to
@@ -1601,7 +1618,9 @@ export function TerminalPane(props: TerminalPaneProps) {
   // `[server] file_drop_max_bytes = 0` is documented as switching file drop off,
   // and the server refuses every upload when it is. The server stays the real
   // enforcement; this gate is what stops a disabled feature ADVERTISING a drop
-  // target, accepting the drop and only then reporting a refusal per file.
+  // target, accepting the drop and only then reporting a refusal per file. It
+  // is closed while the setting is merely UNKNOWN too, so nothing is offered
+  // before dux can say the feature is there (see `fileDropEnabled`).
   function dragCarriesFiles(e: React.DragEvent): boolean {
     return (
       fileDropEnabled &&
