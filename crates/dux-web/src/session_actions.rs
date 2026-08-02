@@ -24,6 +24,11 @@
 //!   project startup command in its worktree (keyed Busy → final toast).
 //! - `POST   /api/v1/sessions/reorder`             — persist order (literal
 //!   segment, registered so it does not collide with `:id`).
+//! - `POST   /api/v1/pull-requests/resolve`        — read a typed pull-request
+//!   reference and say which projects are checkouts of the repository it names.
+//!   A READ, not a write: it starts nothing and changes nothing, so it answers
+//!   the client directly instead of going through a wire command and a toast.
+//!   The client then posts the create with the project it settled on.
 //!
 //! The idempotent `200` replay always serves
 //! [`crate::spine_routes::SessionWithTerminals`], the same nested shape as
@@ -63,6 +68,10 @@ use crate::server::AppState;
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/v1/sessions", post(create_session))
+        .route(
+            "/api/v1/pull-requests/resolve",
+            post(resolve_pull_request_reference),
+        )
         .route("/api/v1/sessions/reorder", post(reorder_sessions))
         .route("/api/v1/sessions/reorder-global", post(reorder_agents))
         .route(
@@ -847,5 +856,114 @@ mod tests {
             StatusCode::CONFLICT,
             "a confirmed attach must pass the preflight"
         );
+    }
+}
+
+// ── Pull-request reference resolution ────────────────────────────────────────
+
+/// What the client typed into the pull-request field.
+#[derive(Deserialize)]
+struct ResolvePullRequestBody {
+    reference: String,
+}
+
+/// One project that is a checkout of the repository the reference names.
+#[derive(Serialize)]
+struct PullRequestProjectMatch {
+    id: String,
+    name: String,
+}
+
+/// The answer: what the reference turned out to name, and which projects have
+/// it. The client branches on `projects.len()`, exactly as the terminal UI
+/// does: one proceeds, several ask, none reports and offers the picker.
+#[derive(Serialize)]
+struct ResolvePullRequestReply {
+    /// `host/owner/repo`, or `owner/repo` when the reference named no host.
+    /// Absent for a bare number, which names no repository at all.
+    repository: Option<String>,
+    /// The pull request number, when the reference carried one.
+    number: Option<u64>,
+    projects: Vec<PullRequestProjectMatch>,
+}
+
+/// Read a typed pull-request reference and match it against every project's
+/// configured address.
+///
+/// The parse is pure and answers inline. The MATCH is one `git` call per
+/// project, so it runs in `spawn_blocking` and never on the async reactor,
+/// following the same rule every other git-shelling read here follows.
+async fn resolve_pull_request_reference(
+    State(state): State<AppState>,
+    Json(body): Json<ResolvePullRequestBody>,
+) -> Response {
+    let reference = match dux_core::pr_reference::parse_typed_reference(&body.reference) {
+        Ok(reference) => reference,
+        Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
+    };
+    // A bare number names no repository, so there is nothing to resolve and
+    // nothing a git call could find. Refused here with the reason, rather than
+    // answered with an empty match set that would read as "no project has it".
+    if reference.owner_repo.is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            "A pull request number on its own does not say which repository it is in. \
+             Paste a link, type owner/repo#123, or choose an existing project first.",
+        )
+            .into_response();
+    }
+
+    let Some((projects, policy, gh_available)) =
+        state.engine.pull_request_resolution_inputs().await
+    else {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "engine unavailable").into_response();
+    };
+    // The same gate the create carries: a raw or stale client must not reach a
+    // resolution the create would then refuse.
+    if !gh_available {
+        return (
+            StatusCode::BAD_REQUEST,
+            "GitHub PR agent creation requires GitHub integration and an authenticated gh CLI.",
+        )
+            .into_response();
+    }
+    if let Some(host) = reference.host.as_deref()
+        && !policy.allows(host)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!(
+                "dux cannot look up pull requests on {host}. Sign in to that host with \
+                 `gh auth login --hostname {host}`, or paste a reference from a host you \
+                 are already signed in to."
+            ),
+        )
+            .into_response();
+    }
+
+    let repository = reference.repository_label();
+    let number = reference.number;
+    match tokio::task::spawn_blocking(move || {
+        dux_core::pr_reference::resolve_reference_projects(&reference, &projects, &policy)
+    })
+    .await
+    {
+        Ok(matches) => Json(ResolvePullRequestReply {
+            repository,
+            number,
+            projects: matches
+                .into_iter()
+                .map(|project| PullRequestProjectMatch {
+                    id: project.id,
+                    name: project.name,
+                })
+                .collect(),
+        })
+        .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("resolving the pull request reference failed: {e}"),
+        )
+            .into_response(),
     }
 }
