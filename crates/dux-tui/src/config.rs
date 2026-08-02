@@ -793,6 +793,35 @@ fn config_schema() -> Vec<ConfigEntry> {
             )),
             value_fn: |c| FieldValue::Usize(c.server.release_notes_max_concurrency as usize),
         },
+        ConfigEntry::Field {
+            key: "file_drop_max_bytes",
+            comment: Some(CommentSource::Static(
+                "# Largest single file you can drop onto a terminal or agent pane in the web\n\
+                 # UI, in bytes. Default 104857600, which is 100 MiB. dux sets this limit\n\
+                 # explicitly because the web framework's own default is 2 MB, small enough\n\
+                 # to reject an ordinary screenshot from a high-resolution display. A file\n\
+                 # over the limit is refused with a message saying so, and nothing is\n\
+                 # written. Set to 0 to switch file drop off entirely: uploads are refused\n\
+                 # and the browser stops offering the drop target. Read at startup, so a\n\
+                 # change needs a server restart.",
+            )),
+            value_fn: |c| FieldValue::Usize(c.server.file_drop_max_bytes),
+        },
+        ConfigEntry::Field {
+            key: "file_drop_max_concurrency",
+            comment: Some(CommentSource::Static(
+                "# How many dropped-file uploads the web server will accept at the same\n\
+                 # time. The slot is taken before the upload's body is read, which is what\n\
+                 # makes this bound how much upload dux holds in memory at once rather than\n\
+                 # merely queueing the work: a request body is buffered in full before the\n\
+                 # code handling it starts. With the default size limit above, the worst\n\
+                 # case is roughly 200 MiB. An upload beyond the limit waits for a free slot\n\
+                 # rather than being refused. Set to 0 and it clamps to 1, since no slots at\n\
+                 # all would stall every drop forever; use file_drop_max_bytes = 0 to switch\n\
+                 # the feature off. Read at startup, so a change needs a server restart.",
+            )),
+            value_fn: |c| FieldValue::Usize(c.server.file_drop_max_concurrency as usize),
+        },
         ConfigEntry::Blank,
         ConfigEntry::Keys,
         ConfigEntry::Blank,
@@ -1887,6 +1916,8 @@ mod tests {
         assert!(rendered.contains("search_index_max_files = 50000"));
         assert!(rendered.contains("tree_list_max_concurrency = 8"));
         assert!(rendered.contains("release_notes_max_concurrency = 2"));
+        assert!(rendered.contains("file_drop_max_bytes = 104857600"));
+        assert!(rendered.contains("file_drop_max_concurrency = 2"));
         assert!(rendered.contains("agent_tabs_max = 20"));
         assert!(rendered.contains("title = \"dux\""));
         // Assert the active key (not a commented-out line) so a regression that
