@@ -32,6 +32,30 @@
 //! Nothing here consults [`crate::gh::GithubHostPolicy`]. Parsing is about what
 //! the text SAYS; whether dux may ask `gh` about the host it says is a separate
 //! question, asked by the callers that have a host to ask about.
+//!
+//! # What is deliberately refused as ambiguous
+//!
+//! This field accepts both browser addresses and git addresses, and there are
+//! shapes where those two worlds read the SAME text as DIFFERENT repositories,
+//! with nothing in the text to settle which was meant. Each is refused, with a
+//! message asking for a spelling that has only one reading. None of them is an
+//! oversight, and none of them wants a heuristic:
+//!
+//! * **Digits after the colon that read as a port and as an owner.**
+//!   `github.com:123/scriptaculous/pull/7` is `github.com:123` /
+//!   `scriptaculous/pull` if the digits are a port, and `github.com` /
+//!   `123/scriptaculous` / pull request 7 if they are an owner. `123` is a real
+//!   GitHub account and it really does own `scriptaculous`, so both readings
+//!   name a repository that exists. See [`read_colon_form`] for the two cases
+//!   the text DOES settle.
+//!
+//! The tempting tie-breakers are all guesses at intent rather than readings of
+//! the text. "It ends in `pull/7`, so it must be the scp one" assumes a person
+//! never types a route onto an address with a port. A wrong repository here is
+//! worse than a refusal, because it is
+//! silent: the user gets an answer about a repository they did not name, and
+//! the pull request number quietly disappears or is invented. Do not add a
+//! heuristic. If a new shape turns out to be ambiguous, refuse it too.
 
 /// A repository, a pull request number, or both, as named by typed text.
 ///
@@ -95,6 +119,15 @@ impl TypedReference {
 /// not one of these".
 const UNPARSEABLE: &str =
     "Enter a pull request URL, owner/repo#123, or a PR number. A repository address works too.";
+
+/// The refusal for digits after a colon that read as a port and as an owner.
+/// It names both readings and both unambiguous spellings, because someone who
+/// typed this needs to know what to type instead, not merely that it was
+/// rejected.
+const AMBIGUOUS_PORT_OR_OWNER: &str = "The digits after the colon can be read as a port on the host, or as the repository owner, \
+     and the two readings name different repositories. Write the full address so only one \
+     reading is possible: https://host/owner/repo/pull/1 when the digits are the owner, or \
+     https://host:port/owner/repo when they are a port.";
 
 /// Parse typed text into the repository and/or pull request it names.
 pub fn parse_typed_reference(raw: &str) -> Result<TypedReference, String> {
@@ -277,6 +310,14 @@ fn classify(input: &str) -> Result<Form, String> {
     }
 }
 
+/// Whether a path's leading segments are an owner and a repository, which is
+/// what it takes for a reading to name a repository at all.
+fn segments_name_repository(segments: &[&str]) -> bool {
+    segments.len() >= 2
+        && is_repository_component(segments[0])
+        && is_repository_component(strip_dot_git(segments[1]))
+}
+
 /// A URL scheme as the spec spells one: a letter, then letters, digits, `+`,
 /// `-` and `.`.
 fn is_scheme_token(scheme: &str) -> bool {
@@ -453,9 +494,10 @@ fn parse_schemeless_form(input: &str) -> Result<Parts, String> {
     // `[user@]host:path`, git's scp-like shorthand, is ssh by definition. It is
     // recognised only when the colon comes before any slash, exactly as git
     // documents, so `example/application:tags` is not mistaken for an address.
-    let (host, path) = match split_scp_like(body) {
-        Some((authority, path)) => (Some(host_from_authority(authority, true)?), path),
-        None => {
+    let (host, path) = match read_colon_form(body) {
+        ColonForm::Ambiguous => return Err(AMBIGUOUS_PORT_OR_OWNER.to_string()),
+        ColonForm::Scp(authority, path) => (Some(host_from_authority(authority, true)?), path),
+        ColonForm::NotScp => {
             // A schemeless value is `owner/repo[/...]` or
             // `host/owner/repo[/...]`, and the shape of the leading segment is
             // what tells them apart. A dot (or a port, or `localhost`) makes it
@@ -485,8 +527,23 @@ fn parse_schemeless_form(input: &str) -> Result<Parts, String> {
     })
 }
 
-/// Git's scp-like shorthand, `[user@]host:path`, recognised only when the colon
-/// precedes any slash.
+/// How a schemeless text's colon is to be read.
+enum ColonForm<'a> {
+    /// Git's scp-like shorthand, as `(authority, path)`.
+    Scp(&'a str, &'a str),
+    /// Not scp shorthand: either there is no colon at all, or the colon
+    /// introduces a port on a browser address whose scheme was rubbed off.
+    NotScp,
+    /// Both readings name a repository, and nothing in the text says which.
+    Ambiguous,
+}
+
+/// Read a schemeless text's colon as git's scp-like shorthand, as a port, or as
+/// neither because it is both.
+///
+/// The shorthand is `[user@]host:path`, recognised only when the colon precedes
+/// any slash, exactly as git documents, so `example/application:tags` is not
+/// mistaken for an address.
 ///
 /// With ONE exception, which is a decision rather than an accident.
 /// `github.com:8443/acme/widget` is not scp syntax: git's scp shorthand has no
@@ -500,44 +557,58 @@ fn parse_schemeless_form(input: &str) -> Result<Parts, String> {
 /// **An all-digit run is not enough on its own to mean a port**, which is what
 /// this used to test, and that refused a real repository: `123` is a GitHub
 /// account and it owns `scriptaculous`, so `github.com:123/scriptaculous` is an
-/// ordinary scp address. The rule that separates them looks arbitrary until it
-/// is stated, so here it is: **the digits are a port only if reading them as
-/// one leaves a valid owner AND repository behind.**
+/// ordinary scp address. Nor is "the port reading leaves an owner and a
+/// repository" enough, which is what it tested next, because a text can satisfy
+/// both readings and that one answered "port" for all of them. The rule is:
 ///
-/// * `github.com:8443/acme/widget` as a port leaves `acme/widget`, a valid
-///   pair, so it is a web address with a port.
-/// * `github.com:123/scriptaculous` as a port leaves `scriptaculous`, a single
-///   segment, which cannot be an owner and a repository. So the digits are not
-///   a port and it is scp shorthand with the owner `123`.
+/// * The port reading leaves **fewer than two** segments, so it names no
+///   repository at all. `github.com:123/scriptaculous` leaves `scriptaculous`,
+///   which cannot be an owner and a repository, so the digits are the owner and
+///   this is scp shorthand.
+/// * The port reading leaves **exactly** an owner and a repository, with no
+///   route after it. `github.com:8443/acme/widget` names the whole text that
+///   way, while the scp reading has to discard `widget` as a route to get to
+///   `8443/acme`. Only one reading accounts for every segment, so it wins.
+/// * The port reading leaves an owner, a repository **and a route**, and so
+///   does the scp reading. `github.com:123/scriptaculous/pull/7` is
+///   `github.com:123` / `scriptaculous/pull` one way and `github.com` /
+///   `123/scriptaculous` / pull request 7 the other, both of them real
+///   repositories. Refused. Note what is deliberately NOT consulted: that the
+///   route reads `pull/7` and therefore "looks like" the scp reading. That is a
+///   guess at what the person meant, not a reading of what they wrote, and a
+///   person can just as well type a route onto an address with a port.
 ///
-/// A `user@` prefix still settles it the other way before any of this, because
-/// that is unambiguously scp and no browser address carries one before a port.
-/// Text that satisfies BOTH readings (`github.com:123/scriptaculous/pull/7`,
-/// where the port reading leaves `scriptaculous/pull`) is genuinely ambiguous
-/// and this rule answers "port"; no evidence in the text settles it, and
-/// inventing a tie-breaker from the trailing route would be guessing.
-fn split_scp_like(input: &str) -> Option<(&str, &str)> {
-    let colon = input.find(':')?;
+/// A `user@` prefix still settles it before any of this, because that is
+/// unambiguously scp and no browser address carries one before a port.
+fn read_colon_form(input: &str) -> ColonForm<'_> {
+    let Some(colon) = input.find(':') else {
+        return ColonForm::NotScp;
+    };
     if let Some(slash) = input.find('/')
         && slash < colon
     {
-        return None;
+        return ColonForm::NotScp;
     }
     let (authority, path) = input.split_at(colon);
     let path = &path[1..];
-    if !authority.contains('@') {
-        let head = path.split('/').next().unwrap_or(path);
-        if !head.is_empty() && head.chars().all(|c| c.is_ascii_digit()) {
-            let rest = path_segments(&path[head.len()..]);
-            if rest.len() >= 2
-                && is_repository_component(rest[0])
-                && is_repository_component(strip_dot_git(rest[1]))
-            {
-                return None;
-            }
-        }
+    if authority.contains('@') {
+        return ColonForm::Scp(authority, path);
     }
-    Some((authority, path))
+    let head = path.split('/').next().unwrap_or(path);
+    if head.is_empty() || !head.chars().all(|c| c.is_ascii_digit()) {
+        return ColonForm::Scp(authority, path);
+    }
+    let as_port = path_segments(&path[head.len()..]);
+    if !segments_name_repository(&as_port) {
+        return ColonForm::Scp(authority, path);
+    }
+    if as_port.len() == 2 {
+        return ColonForm::NotScp;
+    }
+    if segments_name_repository(&path_segments(path)) {
+        return ColonForm::Ambiguous;
+    }
+    ColonForm::NotScp
 }
 
 /// The host a message and a match should use, from a schemeless authority as
@@ -1240,6 +1311,40 @@ mod tests {
     }
 
     #[test]
+    fn digits_that_read_as_a_port_and_as_an_owner_are_refused_rather_than_answered() {
+        // `github.com:123/scriptaculous/pull/7` satisfies BOTH readings. As a
+        // port it names `github.com:123` / `scriptaculous/pull` and carries no
+        // pull request. As scp shorthand it names `github.com` / the real
+        // repository `123/scriptaculous` and pull request 7. Answering either
+        // one names a repository the other reading says is wrong, and silently
+        // drops or invents a pull request with it.
+        let err = parse_typed_reference("github.com:123/scriptaculous/pull/7").unwrap_err();
+        assert!(err.contains("port"), "{err}");
+        assert!(err.contains("owner"), "{err}");
+        assert!(
+            err.contains("https://"),
+            "the message must say what to type instead: {err}"
+        );
+        // The two readings that ARE settled by the text keep working.
+        assert_eq!(
+            repo_of("github.com:8443/acme/widget"),
+            (
+                Some("github.com:8443".to_string()),
+                Some("acme/widget".to_string())
+            ),
+            "the port reading names the whole text and the scp reading has to discard a segment"
+        );
+        assert_eq!(
+            repo_of("github.com:123/scriptaculous"),
+            (
+                Some("github.com".to_string()),
+                Some("123/scriptaculous".to_string())
+            ),
+            "read as a port this leaves one segment, which cannot be an owner and a repository"
+        );
+    }
+
+    #[test]
     fn a_scheme_relative_address_names_a_host_rather_than_an_owner() {
         // `//host/owner/repo` is a real address: a browser resolves it against
         // the page's scheme and opens `host`. Read as a bare path it named the
@@ -1776,6 +1881,31 @@ mod independent_typed_parser_check {
         assert_eq!(
             repo("github.com:8443/acme/widget").as_deref(),
             Some("github.com:8443/acme/widget")
+        );
+    }
+
+    /// Round three: a text that names two different real repositories
+    /// depending on which of the field's two worlds reads it.
+    #[test]
+    fn a_typed_address_that_reads_two_ways_is_refused_rather_than_answered() {
+        // Answered `github.com:123` / `scriptaculous/pull`, dropping the pull
+        // request, over `github.com` / `123/scriptaculous` / 7.
+        assert_eq!(repo("github.com:123/scriptaculous/pull/7"), None);
+        // The same cost the other way round: a route on an address with a port
+        // is exactly as readable as an owner with a route.
+        assert_eq!(repo("github.com:8443/acme/widget/pull/7"), None);
+        // And every text that reads only one way is untouched.
+        assert_eq!(
+            repo("github.com:8443/acme/widget").as_deref(),
+            Some("github.com:8443/acme/widget")
+        );
+        assert_eq!(
+            repo("github.com:123/scriptaculous").as_deref(),
+            Some("github.com/123/scriptaculous")
+        );
+        assert_eq!(
+            repo("git@github.com:acme/widget.git").as_deref(),
+            Some("github.com/acme/widget")
         );
     }
 
