@@ -126,7 +126,7 @@ pub fn parse_typed_reference(raw: &str) -> Result<TypedReference, String> {
         segments,
         fragment,
     } = match classify(input)? {
-        Form::Url(kind) => parse_url_form(input, kind)?,
+        Form::Url(kind, text) => parse_url_form(&text, kind)?,
         Form::Schemeless => parse_schemeless_form(input)?,
     };
 
@@ -208,7 +208,10 @@ enum SchemeKind {
 /// Whether the text is a URL dux should hand to the `url` crate, or one of the
 /// two shapes that are not urls at all and are parsed by hand.
 enum Form {
-    Url(SchemeKind),
+    /// A URL, together with the text to hand to the parser. That is normally
+    /// the input itself; a scheme-relative address gets the scheme a browser
+    /// would have supplied for it.
+    Url(SchemeKind, String),
     Schemeless,
 }
 
@@ -220,24 +223,57 @@ enum Form {
 /// repository `github.com/acme`: a repository nobody named, on a host nobody
 /// named. Text carrying a scheme is a claim about a transport, and a claim dux
 /// cannot honour is refused rather than reinterpreted.
+///
+/// Two spellings a browser accepts do NOT carry a literal `://`, and both used
+/// to fall into the hand parser and meet that same scp-like rule.
+///
+/// * `https:/github.com/acme/widget` and `https:github.com/acme/widget`. http
+///   and https are SPECIAL schemes, so a browser skips however many slashes are
+///   written (zero, one, three) and reads the authority next. Both address
+///   github.com, and both are what a paste looks like after it loses a
+///   character. Hand-split they answered with the host `https` and the
+///   repository `github.com/acme`. The other schemes here are not special, so
+///   an authority follows only a literal `://` for them; without one the parser
+///   reports no host at all and the text is refused a moment later, which is
+///   the right answer for `ssh:acme/widget`.
+/// * `//github.com/acme/widget`, the scheme-relative form. A browser resolves
+///   it against the page it is on, so it names a host like any other address;
+///   read as a bare path it named the repository `github.com/acme`, folding
+///   the server into the owner. dux supplies `https`, which is the scheme every
+///   host it can ask `gh` about is served over. That choice is visible only for
+///   an address writing out port 443, which https normalises away and http
+///   would keep.
 fn classify(input: &str) -> Result<Form, String> {
-    let Some((scheme, _)) = input.split_once("://") else {
-        return Ok(Form::Schemeless);
-    };
-    // Not every colon-slash-slash is a scheme. If what precedes it is not a
-    // scheme token, the text is something else entirely and the schemeless
-    // rules get their turn.
-    if !is_scheme_token(scheme) {
-        return Ok(Form::Schemeless);
+    if input.starts_with("//") {
+        return Ok(Form::Url(SchemeKind::Web, format!("https:{input}")));
     }
-    // Case-insensitively: a person may well type `HTTPS://`. Unlike a
-    // configured address, which git matches case-sensitively against its own
-    // table, this text is never handed to git.
-    match scheme.to_ascii_lowercase().as_str() {
-        "http" | "https" => Ok(Form::Url(SchemeKind::Web)),
-        "ssh" | "git+ssh" | "ssh+git" => Ok(Form::Url(SchemeKind::Ssh)),
-        "git" => Ok(Form::Url(SchemeKind::Git)),
-        _ => Err(UNPARSEABLE.to_string()),
+    // The scheme is whatever precedes the FIRST colon, which is how a browser
+    // reads one too. `git@github.com:acme/widget` is unaffected: its leading
+    // run holds an `@`, so it is not a scheme token and the schemeless rules
+    // get their turn. Case-insensitively, because a person may well type
+    // `HTTPS://`; unlike a configured address, which git matches
+    // case-sensitively against its own table, this text is never handed to git.
+    let scheme = input
+        .split_once(':')
+        .map(|(scheme, _)| scheme)
+        .unwrap_or("");
+    if is_scheme_token(scheme) {
+        match scheme.to_ascii_lowercase().as_str() {
+            "http" | "https" => return Ok(Form::Url(SchemeKind::Web, input.to_string())),
+            "ssh" | "git+ssh" | "ssh+git" => {
+                return Ok(Form::Url(SchemeKind::Ssh, input.to_string()));
+            }
+            "git" => return Ok(Form::Url(SchemeKind::Git, input.to_string())),
+            _ => {}
+        }
+    }
+    // Everything else. A scheme token dux does not speak is refused, and only
+    // in the `://` spelling: `github.com:acme/widget` reads as a scheme token
+    // too, and it is git's scp-like shorthand rather than a claim about a
+    // transport.
+    match input.split_once("://") {
+        Some((scheme, _)) if is_scheme_token(scheme) => Err(UNPARSEABLE.to_string()),
+        _ => Ok(Form::Schemeless),
     }
 }
 
@@ -1115,6 +1151,56 @@ mod tests {
     }
 
     #[test]
+    fn a_web_address_missing_a_slash_names_what_a_browser_names() {
+        // `https:/host/...` and even `https:host/...` are addresses a browser
+        // opens without complaint: http and https are SPECIAL schemes, so the
+        // parser skips however many slashes are written and reads the authority
+        // next. Both of these are ordinary results of a paste losing a
+        // character, and both name github.com / acme/widget / pull request 7.
+        //
+        // Read by hand they met git's scp-like rule instead, whose colon comes
+        // before its slash, and answered with the host `https` and the
+        // repository `github.com/acme`: a repository nobody named, on a host
+        // nobody named.
+        for input in [
+            "https:/github.com/acme/widget/pull/7",
+            "https:github.com/acme/widget/pull/7",
+            "http:/github.com/acme/widget/pull/7",
+        ] {
+            let reference = parsed(input);
+            assert_eq!(reference.host.as_deref(), Some("github.com"), "{input}");
+            assert_eq!(
+                reference.owner_repo.as_deref(),
+                Some("acme/widget"),
+                "{input}"
+            );
+            assert_eq!(reference.number, Some(7), "{input}");
+        }
+    }
+
+    #[test]
+    fn a_scheme_relative_address_names_a_host_rather_than_an_owner() {
+        // `//host/owner/repo` is a real address: a browser resolves it against
+        // the page's scheme and opens `host`. Read as a bare path it named the
+        // repository `host/owner`, folding the server into the owner, and that
+        // is a repository the user may well have a project for.
+        let reference = parsed("//host/owner/repo/pull/7");
+        assert_eq!(reference.host.as_deref(), Some("host"));
+        assert_eq!(reference.owner_repo.as_deref(), Some("owner/repo"));
+        assert_eq!(reference.number, Some(7));
+        assert_eq!(
+            repo_of("//github.com/acme/widget"),
+            (
+                Some("github.com".to_string()),
+                Some("acme/widget".to_string())
+            )
+        );
+        // And the same address with only two segments names a host and no
+        // repository, exactly as `github.com/example` already does.
+        assert!(parse_typed_reference("//example/application").is_err());
+    }
+
+    #[test]
     fn a_percent_in_an_ssh_family_authority_is_refused_rather_than_split_web_style() {
         // Git decodes a scheme-qualified ssh or native address and separates
         // host from path AFTERWARDS, in that order, so the escape is gone by
@@ -1580,6 +1666,20 @@ mod independent_typed_parser_check {
             Some("github.com/acme/widget")
         );
         assert_eq!(repo("https://github.com/acme%2Fwidget/pull/1"), None);
+        // The shapes a browser normalises name what the browser names, rather
+        // than falling into the hand parser and meeting git's scp-like rule.
+        assert_eq!(
+            repo("https:/github.com/acme/widget/pull/7").as_deref(),
+            Some("github.com/acme/widget")
+        );
+        assert_eq!(
+            repo("//github.com/acme/widget/pull/7").as_deref(),
+            Some("github.com/acme/widget")
+        );
+        // The two addresses git reads differently from a browser are refused
+        // rather than answered for the wrong host.
+        assert_eq!(repo("ssh://user%2Fx@github.com/acme/widget/pull/7"), None);
+        assert_eq!(repo("git://user@github.com/acme/widget"), None);
         // A scheme is never a hostname.
         for bad in [
             "ftp://github.com/acme/widget",
