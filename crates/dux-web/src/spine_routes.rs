@@ -2,12 +2,22 @@
 //! inside every per-tick `ViewModel` broadcast (Phase 3 of the REST-first
 //! migration).
 //!
-//! - `GET /api/v1/spine` — the whole spine `{ projects, sessions, sidebar }`, the
-//!   exact shapes the ViewModel used to carry. Invalidated by the coarse
+//! - `GET /api/v1/spine` — the whole spine `{ projects, sessions, terminals,
+//!   sidebar }`. Terminals ride here as ONE flat collection, each tagged with its
+//!   owner; this is the document the browser reads. Invalidated by the coarse
 //!   `projects.changed` / `sessions.changed` events.
 //! - `GET /api/v1/projects` — just the `ProjectView[]` (for programmability).
 //! - `GET /api/v1/sessions` — just the `SessionView[]`.
 //! - `GET /api/v1/sessions/:id` — one `SessionView`, 404 if unknown.
+//!
+//! The three thin reads are a documented programmability surface, separate from
+//! the spine document the browser consumes, and each has always carried a
+//! `terminals` array on the owner. Moving terminals to a flat collection was a
+//! change to what the BROWSER receives; it is deliberately NOT a change here, so
+//! those reads re-nest each owner's terminals ([`SessionWithTerminals`],
+//! [`ProjectWithTerminals`]) and nothing reading them loses information. The
+//! nested entries additionally carry the terminal's own `owner` tag, which is
+//! purely additive.
 //!
 //! Status codes:
 //! - 200 with the JSON body.
@@ -28,8 +38,68 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
+use dux_core::viewmodel::{ProjectView, SessionView, TerminalOwnerView, TerminalView};
+use serde::Serialize;
 
 use crate::server::AppState;
+
+/// A `SessionView` with the session's terminals nested under it, which is the
+/// shape `GET /api/v1/sessions` and `GET /api/v1/sessions/:id` have always
+/// served. `flatten` keeps every session field exactly where it was, so this
+/// adds the array back and changes nothing else.
+#[derive(Serialize)]
+pub struct SessionWithTerminals {
+    #[serde(flatten)]
+    session: SessionView,
+    terminals: Vec<TerminalView>,
+}
+
+impl SessionWithTerminals {
+    pub fn new(session: SessionView, terminals: Vec<TerminalView>) -> Self {
+        Self { session, terminals }
+    }
+}
+
+/// A `ProjectView` with the project's OWN project terminals nested under it, the
+/// shape `GET /api/v1/projects` has always served. A project does not absorb its
+/// agents' terminals: those are nested on the agent, exactly as before.
+#[derive(Serialize)]
+struct ProjectWithTerminals {
+    #[serde(flatten)]
+    project: ProjectView,
+    terminals: Vec<TerminalView>,
+}
+
+/// Re-nest the spine's flat, owner-tagged collection under the owners the thin
+/// reads document: `(by session id, by project id)`.
+///
+/// The match over the owner is EXHAUSTIVE with no wildcard arm, so a new kind of
+/// owner has to be answered for here rather than silently vanishing from these
+/// endpoints, which is the whole reason the owner is a tagged value.
+fn nest_terminals_by_owner(
+    terminals: Vec<TerminalView>,
+) -> (
+    std::collections::HashMap<String, Vec<TerminalView>>,
+    std::collections::HashMap<String, Vec<TerminalView>>,
+) {
+    let mut by_session: std::collections::HashMap<String, Vec<TerminalView>> =
+        std::collections::HashMap::new();
+    let mut by_project: std::collections::HashMap<String, Vec<TerminalView>> =
+        std::collections::HashMap::new();
+    for terminal in terminals {
+        match &terminal.owner {
+            TerminalOwnerView::Session { session_id } => by_session
+                .entry(session_id.clone())
+                .or_default()
+                .push(terminal),
+            TerminalOwnerView::Project { project_id } => by_project
+                .entry(project_id.clone())
+                .or_default()
+                .push(terminal),
+        }
+    }
+    (by_session, by_project)
+}
 
 /// Upper bound on the `:id` path segment before any lookup (matches the
 /// length-bounding convention for path params elsewhere).
@@ -68,14 +138,36 @@ async fn get_spine(State(state): State<AppState>) -> Response {
 
 async fn get_projects(State(state): State<AppState>) -> Response {
     match state.engine.spine().await {
-        Some(spine) => Json(spine.projects).into_response(),
+        Some(spine) => {
+            let (_, mut by_project) = nest_terminals_by_owner(spine.terminals);
+            let projects: Vec<ProjectWithTerminals> = spine
+                .projects
+                .into_iter()
+                .map(|project| {
+                    let terminals = by_project.remove(&project.id).unwrap_or_default();
+                    ProjectWithTerminals { project, terminals }
+                })
+                .collect();
+            Json(projects).into_response()
+        }
         None => engine_unavailable(),
     }
 }
 
 async fn get_sessions(State(state): State<AppState>) -> Response {
     match state.engine.spine().await {
-        Some(spine) => Json(spine.sessions).into_response(),
+        Some(spine) => {
+            let (mut by_session, _) = nest_terminals_by_owner(spine.terminals);
+            let sessions: Vec<SessionWithTerminals> = spine
+                .sessions
+                .into_iter()
+                .map(|session| {
+                    let terminals = by_session.remove(&session.id).unwrap_or_default();
+                    SessionWithTerminals::new(session, terminals)
+                })
+                .collect();
+            Json(sessions).into_response()
+        }
         None => engine_unavailable(),
     }
 }
@@ -89,7 +181,9 @@ async fn get_session(State(state): State<AppState>, Path(id): Path<String>) -> R
     // Project ONLY the requested session, not the whole spine. The outer `None`
     // is a dead engine (503); the inner `None` is an unknown session id (404).
     match state.engine.session(id).await {
-        Some(Some(session)) => Json(session).into_response(),
+        Some(Some((session, terminals))) => {
+            Json(SessionWithTerminals::new(session, terminals)).into_response()
+        }
         Some(None) => (StatusCode::NOT_FOUND, "unknown session").into_response(),
         None => engine_unavailable(),
     }

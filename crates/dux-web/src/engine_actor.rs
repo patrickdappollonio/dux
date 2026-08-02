@@ -135,11 +135,19 @@ pub enum EngineRequest {
     /// the loop because the cache is loop-local state.
     SpineJson(oneshot::Sender<String>),
     /// Project ONLY the requested session for `GET /api/v1/sessions/:id` instead of
-    /// building the whole spine to find one session. `None` when the id is unknown
-    /// (the handler returns 404).
+    /// building the whole spine to find one session, together with THAT session's
+    /// terminals: the thin read still nests them (see
+    /// [`crate::spine_routes::SessionWithTerminals`]), and fetching them here
+    /// keeps it to one round trip and one consistent snapshot. `None` when the id
+    /// is unknown (the handler returns 404).
     Session(
         String,
-        oneshot::Sender<Option<dux_core::viewmodel::SessionView>>,
+        oneshot::Sender<
+            Option<(
+                dux_core::viewmodel::SessionView,
+                Vec<dux_core::viewmodel::TerminalView>,
+            )>,
+        >,
     ),
     /// Resolve the session id produced by a create op (the opaque id returned in
     /// `WireCommandOutcome.created_op_id`). Lets the REST create handler poll for
@@ -830,10 +838,18 @@ impl EngineHandle {
         rx.await.ok()
     }
 
-    /// Project ONLY the session with `id` for `GET /api/v1/sessions/:id`. The outer
-    /// `Option` is `None` if the engine is gone (503); the inner `None` means the
-    /// session id is unknown (404).
-    pub async fn session(&self, id: String) -> Option<Option<dux_core::viewmodel::SessionView>> {
+    /// Project ONLY the session with `id` for `GET /api/v1/sessions/:id`, with the
+    /// terminals that session owns. The outer `Option` is `None` if the engine is
+    /// gone (503); the inner `None` means the session id is unknown (404).
+    pub async fn session(
+        &self,
+        id: String,
+    ) -> Option<
+        Option<(
+            dux_core::viewmodel::SessionView,
+            Vec<dux_core::viewmodel::TerminalView>,
+        )>,
+    > {
         let (tx, rx) = oneshot::channel();
         if self
             .req_tx
@@ -2084,7 +2100,12 @@ fn handle_request(
         // SpineJson is handled inline in the loop (it serves the loop-local cache).
         EngineRequest::SpineJson(_) => unreachable!("SpineJson handled in the loop"),
         EngineRequest::Session(id, reply) => {
-            let _ = reply.send(engine.session_view(&id));
+            let view = engine.session_view(&id).map(|session| {
+                let terminals = engine
+                    .terminal_views_for_owner(dux_core::model::TerminalOwnerRef::Session(&id));
+                (session, terminals)
+            });
+            let _ = reply.send(view);
         }
         EngineRequest::CreatedSessionForOp(op_id, reply) => {
             let _ = reply.send(engine.created_session_for_op(&op_id));

@@ -1230,3 +1230,105 @@ async fn rest_nested_git_and_file_routes_resolve() {
         "the old body-keyed /api/v1/file/* path must be gone"
     );
 }
+
+/// The thin programmability reads (`GET /api/v1/sessions/:id`, `/api/v1/sessions`,
+/// `/api/v1/projects`) keep nesting each owner's terminals.
+///
+/// The flat, owner-tagged collection is a change to what the BROWSER receives on
+/// `/api/v1/spine`. These three endpoints are documented separately, as the
+/// shapes a script or an integration reads, and they carried a `terminals` array
+/// on the owner. Dropping it would take information away from every such
+/// consumer with no way to get it back short of moving to the spine endpoint,
+/// which is a different document with different invalidation.
+#[tokio::test]
+async fn thin_reads_still_nest_terminals_for_both_owner_kinds() {
+    let (addr, _tmp) = boot().await;
+    let client = reqwest::Client::new();
+
+    // Before anything is spawned: an owner with no terminals carries an EMPTY
+    // array, never a missing field, exactly as the nested shape always did.
+    let empty: serde_json::Value = client
+        .get(format!("http://{addr}/api/v1/sessions/s1"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        empty["terminals"].as_array().map(|a| a.len()),
+        Some(0),
+        "an owner with no terminals must carry an empty array"
+    );
+
+    let session_tid = create_terminal_via_rest(addr, "s1").await;
+    let project_tid = create_project_terminal_via_rest(addr, "p1").await;
+
+    let one: serde_json::Value = client
+        .get(format!("http://{addr}/api/v1/sessions/s1"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        one["terminals"].as_array().map(|a| a
+            .iter()
+            .filter_map(|t| t["id"].as_str())
+            .collect::<Vec<_>>()),
+        Some(vec![session_tid.as_str()]),
+        "the per-session read must still nest that session's terminals"
+    );
+    // The session's own fields are untouched alongside it.
+    assert_eq!(one["id"].as_str(), Some("s1"));
+    assert_eq!(one["project_id"].as_str(), Some("p1"));
+
+    let sessions: serde_json::Value = client
+        .get(format!("http://{addr}/api/v1/sessions"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let s1 = sessions
+        .as_array()
+        .and_then(|arr| arr.iter().find(|s| s["id"].as_str() == Some("s1")))
+        .expect("s1 in the sessions list");
+    assert_eq!(
+        s1["terminals"].as_array().map(|a| a
+            .iter()
+            .filter_map(|t| t["id"].as_str())
+            .collect::<Vec<_>>()),
+        Some(vec![session_tid.as_str()]),
+        "the sessions list must still nest each session's terminals"
+    );
+    let projects: serde_json::Value = client
+        .get(format!("http://{addr}/api/v1/projects"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let p1 = projects
+        .as_array()
+        .and_then(|arr| arr.iter().find(|p| p["id"].as_str() == Some("p1")))
+        .expect("p1 in the projects list");
+    assert_eq!(
+        p1["terminals"].as_array().map(|a| a
+            .iter()
+            .filter_map(|t| t["id"].as_str())
+            .collect::<Vec<_>>()),
+        Some(vec![project_tid.as_str()]),
+        "the projects list must still nest each project's own project terminals"
+    );
+    // The project's terminals are ITS OWN: the session terminal above belongs to
+    // s1, not to p1, so it must not be folded in here.
+    assert_eq!(
+        p1["terminals"].as_array().map(|a| a.len()),
+        Some(1),
+        "a project must not absorb its sessions' terminals"
+    );
+}

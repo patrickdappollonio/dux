@@ -796,6 +796,29 @@ impl Engine {
         terminals
     }
 
+    /// Every terminal owned by `owner`, in the same `sort_order` ascending order
+    /// as the flat [`Engine::terminal_views`].
+    ///
+    /// The flat, owner-tagged collection is what the BROWSER receives. The thin
+    /// REST reads (`GET /api/v1/sessions/:id`, `/api/v1/sessions`,
+    /// `/api/v1/projects`) are a separately documented programmability surface
+    /// that has always nested a terminal inside its owner, and they re-nest
+    /// through this rather than making every script reading them move to the
+    /// spine document. Public for that reason.
+    pub fn terminal_views_for_owner(
+        &self,
+        owner: crate::model::TerminalOwnerRef<'_>,
+    ) -> Vec<TerminalView> {
+        let mut terminals: Vec<TerminalView> = self
+            .companion_terminals
+            .iter()
+            .filter(|(_, t)| t.owner.as_ref() == owner)
+            .map(|(id, t)| self.terminal_view(id, t))
+            .collect();
+        terminals.sort_by_key(|a| a.sort_order);
+        terminals
+    }
+
     /// The set of project ids that own at least one live project terminal. Feeds
     /// the sidebar split so a project with a live terminal never sinks below the
     /// "no agents" separator.

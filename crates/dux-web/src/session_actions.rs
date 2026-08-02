@@ -164,9 +164,17 @@ async fn create_session(
     let key = idempotency_key(&headers);
     if let Some(key) = &key
         && let Some(prev_id) = state.idempotency.get(key)
-        && let Some(Some(session)) = state.engine.session(prev_id).await
+        && let Some(Some((session, terminals))) = state.engine.session(prev_id).await
     {
-        return (StatusCode::OK, Json(session)).into_response();
+        // The same nested shape the per-session read serves, so a replay and a
+        // later GET of the same session agree field for field.
+        return (
+            StatusCode::OK,
+            Json(crate::spine_routes::SessionWithTerminals::new(
+                session, terminals,
+            )),
+        )
+            .into_response();
     }
 
     // Existing-branch consent (the "no silent attach" tenet): for a `new` create
@@ -290,7 +298,10 @@ async fn created_response(state: &AppState, id: String, key: Option<String>) -> 
     }
     let location = format!("/api/v1/sessions/{id}");
     let body = match state.engine.session(id.clone()).await {
-        Some(Some(session)) => Json(session).into_response(),
+        Some(Some((session, terminals))) => Json(crate::spine_routes::SessionWithTerminals::new(
+            session, terminals,
+        ))
+        .into_response(),
         _ => Json(CreatedRef { id }).into_response(),
     };
     (StatusCode::CREATED, [(header::LOCATION, location)], body).into_response()
