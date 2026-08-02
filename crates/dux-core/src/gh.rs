@@ -748,13 +748,34 @@ pub fn pull_request_url(host: &str, owner_repo: &str, number: u64) -> String {
     format!("https://{host}/{owner_repo}/pull/{number}")
 }
 
+/// The `--repo` argument for a `gh` call: ALWAYS `host/owner/repo`, including
+/// for github.com.
+///
+/// A bare `owner/repo` makes `gh` resolve the host from its own default, and the
+/// `GH_HOST` environment variable overrides that resolution, so a user who
+/// exports `GH_HOST` pointing at their company server had dux's github.com
+/// lookups quietly sent there instead. Naming the host is also what makes the
+/// per-host authentication check meaningful: the host dux qualified is then the
+/// host `gh` actually contacts. Verified against gh 2.95.0: the host-qualified
+/// form is accepted and ignores a conflicting `GH_HOST`; the bare form does not.
 pub fn gh_repo_arg(host: &str, owner_repo: &str) -> String {
     let host = normalize_github_host(host);
-    if host == "github.com" {
-        owner_repo.to_string()
-    } else {
-        format!("{host}/{owner_repo}")
-    }
+    format!("{host}/{owner_repo}")
+}
+
+/// Argument list for the bounded `gh pr view` lookup. Split out of
+/// [`run_pull_request_lookup_job`] so the exact argv dux builds can be asserted
+/// against a stand-in `gh`, without a network call or a real login.
+pub(crate) fn pr_view_args(host: &str, owner_repo: &str, number: u64) -> Vec<String> {
+    vec![
+        "pr".to_string(),
+        "view".to_string(),
+        number.to_string(),
+        "--repo".to_string(),
+        gh_repo_arg(host, owner_repo),
+        "--json".to_string(),
+        "number,title,state,headRefName".to_string(),
+    ]
 }
 
 fn normalize_github_host(host: &str) -> &str {
@@ -874,22 +895,11 @@ pub fn run_pull_request_lookup_job(
         }
     };
 
-    let repo = gh_repo_arg(&lookup.host, &lookup.owner_repo);
-    let number = lookup.number.to_string();
+    let args = pr_view_args(&lookup.host, &lookup.owner_repo, lookup.number);
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     // Bounded so a hung `gh pr view` (stalled network, credential prompt) can't
     // strand the web CreateAgentFromPr Busy status forever.
-    let result = match run_gh_with_timeout(
-        &[
-            "pr",
-            "view",
-            &number,
-            "--repo",
-            &repo,
-            "--json",
-            "number,title,state,headRefName",
-        ],
-        GH_CALL_TIMEOUT,
-    ) {
+    let result = match run_gh_with_timeout(&arg_refs, GH_CALL_TIMEOUT) {
         GhCallOutcome::Completed(output) if output.status.success() => {
             parse_resolved_pull_request_json(
                 &String::from_utf8_lossy(&output.stdout),
@@ -1359,9 +1369,65 @@ mod tests {
     }
 
     #[test]
-    fn gh_repo_arg_uses_owner_repo_for_github_dot_com() {
-        assert_eq!(gh_repo_arg("github.com", "owner/repo"), "owner/repo");
-        assert_eq!(gh_repo_arg("", "owner/repo"), "owner/repo");
+    fn gh_repo_arg_carries_the_host_for_github_dot_com() {
+        // A bare `owner/repo` lets `gh` resolve the host itself, and `GH_HOST`
+        // overrides that resolution, so a user pointing `GH_HOST` at their
+        // company server had github.com lookups quietly sent there. Every
+        // repository argument names its host.
+        assert_eq!(
+            gh_repo_arg("github.com", "owner/repo"),
+            "github.com/owner/repo"
+        );
+        assert_eq!(gh_repo_arg("", "owner/repo"), "github.com/owner/repo");
+    }
+
+    #[test]
+    fn pr_view_targets_the_intended_host_even_with_gh_host_set() {
+        // Hermetic regression test for the `GH_HOST` override: a stand-in `gh`
+        // records its own argv, so this asserts what dux ASKED for rather than
+        // depending on the network or on this machine's login. `GH_HOST` is set
+        // on the child command only, never on the test process.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let recorded = dir.path().join("argv.txt");
+        let script = dir.path().join("fake-gh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done > '{}'\nprintf '{{}}'\n",
+                recorded.display()
+            ),
+        )
+        .expect("write stand-in gh");
+        std::fs::set_permissions(
+            &script,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+        )
+        .expect("chmod");
+
+        let args = pr_view_args("github.com", "owner/repo", 42);
+        let mut cmd = std::process::Command::new(&script);
+        cmd.args(&args);
+        cmd.env("GH_HOST", "git.company.example");
+        let outcome = run_command_with_timeout(cmd, Duration::from_secs(10));
+        assert!(
+            matches!(outcome, GhCallOutcome::Completed(ref o) if o.status.success()),
+            "stand-in gh should have run",
+        );
+
+        let argv: Vec<String> = std::fs::read_to_string(&recorded)
+            .expect("stand-in recorded its argv")
+            .lines()
+            .map(str::to_string)
+            .collect();
+        let repo = argv
+            .iter()
+            .position(|a| a == "--repo")
+            .and_then(|i| argv.get(i + 1))
+            .expect("--repo argument");
+        assert_eq!(
+            repo, "github.com/owner/repo",
+            "the lookup must name github.com itself, not leave it to GH_HOST",
+        );
     }
 
     #[test]
