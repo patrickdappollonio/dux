@@ -2210,6 +2210,14 @@ impl Engine {
                 self.clear_in_flight(&InFlightKey::PrCheck(session_id));
                 EventReaction::Nothing
             }
+            WorkerEvent::PullRequestReferenceResolved { .. } => {
+                // Resolution is a question about the SURFACE's next screen (a
+                // lookup, a picker over the matches, or a message naming a
+                // repository dux has no project for), so the surface that asked
+                // reads it off the channel itself. The engine has nothing to
+                // decide here and deliberately does not invent a reaction.
+                EventReaction::Nothing
+            }
             WorkerEvent::PullRequestResolved {
                 result,
                 status_op_id,

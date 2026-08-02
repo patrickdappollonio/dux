@@ -107,6 +107,10 @@ pub(crate) enum ButtonPressedTarget {
     ConfigReloadFailedClose,
     ConfigReloadFailedApply,
     AddProjectFailedOk,
+    /// The Create-Agent-From-PR modal's secondary action, offered only when no
+    /// project has been chosen: it hands over to the project selector and comes
+    /// back in project-first mode.
+    PullRequestChooseProject,
     AgentInfoClose,
     StartupCommandLogsClose,
     /// The first-load modal's two pill buttons. Unlike every other entry here

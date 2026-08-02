@@ -1,6 +1,7 @@
 use super::components::{
     Button, ButtonKind, ButtonPressedTarget, Checkbox, CheckboxState, Hint, button_state_for,
-    modal_hint_line, render_scroll_marker, shared_button_width, wrap_styled_lines,
+    button_width_for, modal_hint_line, render_scroll_marker, shared_button_width,
+    wrap_styled_lines,
 };
 use super::*;
 use crate::tui_color::{to_ratatui_color, to_ratatui_modifier};
@@ -7651,42 +7652,65 @@ impl App {
                     }),
                 };
             }
-            PromptState::PullRequestInput { project, input } => {
+            PromptState::PullRequestInput {
+                project,
+                input,
+                focus,
+            } => {
                 self.render_dim_overlay(frame);
-                let area = centered_rect_exact(64, 8, frame.area());
+                // The reference-first shape carries a secondary action under the
+                // field, so it needs four more rows than the project-first one.
+                let has_project = project.is_some();
+                let height = if has_project { 8 } else { 12 };
+                let area = centered_rect_exact(64, height, frame.area());
                 self.clear_overlay_area(frame, area);
 
                 let outer = self.themed_overlay_block("Create Agent From PR");
                 let inner = outer.inner(area);
                 outer.render(area, frame.buffer_mut());
 
-                let [label_area, input_area, hint_area] = Layout::default()
+                let [label_area, input_area, action_area, hint_area] = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([
                         Constraint::Length(2),
                         Constraint::Length(3),
+                        Constraint::Length(if has_project { 0 } else { 4 }),
                         Constraint::Min(1),
                     ])
                     .areas(inner);
 
-                Paragraph::new(vec![
-                    Line::from(Span::styled(
-                        format!(" Project: {}", project.name),
-                        Style::default().fg(self.theme.input_label_fg),
-                    )),
-                    Line::from(Span::styled(
-                        " Paste a GitHub PR URL or enter a PR number:",
-                        Style::default().fg(self.theme.input_label_fg),
-                    )),
-                ])
-                .render(label_area, frame.buffer_mut());
+                let labels = match project {
+                    Some(project) => vec![
+                        Line::from(Span::styled(
+                            format!(" Project: {}", project.name),
+                            Style::default().fg(self.theme.input_label_fg),
+                        )),
+                        Line::from(Span::styled(
+                            " Paste a GitHub PR URL or enter a PR number:",
+                            Style::default().fg(self.theme.input_label_fg),
+                        )),
+                    ],
+                    None => vec![
+                        Line::from(Span::styled(
+                            " Paste a pull request link, or type owner/repo#123:",
+                            Style::default().fg(self.theme.input_label_fg),
+                        )),
+                        Line::from(Span::styled(
+                            " dux finds the project that repository is open in.",
+                            Style::default().fg(self.theme.hint_desc_fg),
+                        )),
+                    ],
+                };
+                Paragraph::new(labels).render(label_area, frame.buffer_mut());
 
-                // The title box is this modal's only control, so it always has
-                // focus and always draws its caret and focused border.
+                // Focus is visible or it is not focus: the border and the caret
+                // both follow it, so a field that will not take your keystrokes
+                // never draws a caret.
+                let field_focused = *focus == PullRequestInputFocus::Input;
                 let input_block = Block::default()
                     .borders(Borders::ALL)
                     .border_set(border::ROUNDED)
-                    .border_style(self.theme.overlay_field_border_style(true));
+                    .border_style(self.theme.overlay_field_border_style(field_focused));
                 let input_inner = input_block.inner(input_area);
                 Paragraph::new(render_single_line_cursor_input(
                     " ",
@@ -7694,27 +7718,60 @@ impl App {
                     input.cursor,
                     self.theme.input_cursor_fg,
                     self.theme.input_cursor_bg,
-                    true,
+                    field_focused,
                 ))
                 .block(input_block)
                 .render(input_area, frame.buffer_mut());
 
+                // The secondary action, and the misclick-safe blank row above
+                // it. Only offered when no project has been chosen: with one
+                // already chosen this modal is exactly what it always was.
+                let mut choose_button = None;
+                if !has_project && action_area.height >= 4 {
+                    let label = "Choose a project…";
+                    let width = button_width_for(label).min(action_area.width);
+                    let button = Rect {
+                        x: action_area.x + (action_area.width.saturating_sub(width)) / 2,
+                        y: action_area.y + 1,
+                        width,
+                        height: 3,
+                    };
+                    Button::new(label)
+                        .kind(ButtonKind::Confirm)
+                        .state(button_state_for(
+                            ButtonPressedTarget::PullRequestChooseProject,
+                            self.pressed_button,
+                            !field_focused,
+                            true,
+                        ))
+                        .render(frame, button, &self.theme);
+                    choose_button = Some(button);
+                }
+
                 let confirm_key = self.bindings.label_for(Action::Confirm);
                 let close_key = self.bindings.label_for(Action::CloseOverlay);
-                let mut hints = vec![Span::raw(" ")];
-                hints.extend(self.theme.key_badge_default(&confirm_key));
-                hints.push(Span::styled(
-                    " resolve  ",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ));
-                hints.extend(self.theme.key_badge_default(&close_key));
-                hints.push(Span::styled(
-                    " cancel",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ));
-                Paragraph::new(Line::from(hints)).render(hint_area, frame.buffer_mut());
-                self.overlay_layout.active =
-                    OverlayMouseLayout::PullRequestInput { input: input_inner };
+                let mut hints = vec![Hint::key(
+                    confirm_key,
+                    if field_focused {
+                        "resolve"
+                    } else {
+                        "choose a project"
+                    },
+                )];
+                if !has_project {
+                    hints.push(Hint::maybe_key(
+                        self.bindings
+                            .label_for_text_field_dialog(Action::ToggleSelection),
+                        "move focus",
+                    ));
+                }
+                hints.push(Hint::key(close_key, "cancel"));
+                Paragraph::new(modal_hint_line(&self.theme, &hints))
+                    .render(hint_area, frame.buffer_mut());
+                self.overlay_layout.active = OverlayMouseLayout::PullRequestInput {
+                    input: input_inner,
+                    choose_project: choose_button,
+                };
             }
             PromptState::None => {}
         }
@@ -15008,8 +15065,9 @@ mod tests {
         let mut input = TextInput::with_text(MULTIBYTE_NAME.to_string());
         input.cursor = cursor;
         PromptState::PullRequestInput {
-            project: app.engine.projects[0].clone(),
+            project: Some(app.engine.projects[0].clone()),
             input,
+            focus: PullRequestInputFocus::Input,
         }
     }
 
@@ -15143,7 +15201,7 @@ mod tests {
         app.prompt = multibyte_pull_request_prompt(&app, 0);
         let buf = draw(&mut app);
 
-        let OverlayMouseLayout::PullRequestInput { input } = app.overlay_layout.active else {
+        let OverlayMouseLayout::PullRequestInput { input, .. } = app.overlay_layout.active else {
             panic!(
                 "the PR modal must publish its input rect, got {:?}",
                 app.overlay_layout.active

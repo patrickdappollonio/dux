@@ -437,6 +437,27 @@ pub enum WorkerEvent {
     /// A one-shot PR check worker panicked; carries the session id so its
     /// `InFlightKey::PrCheck` guard is cleared without wiping the PR badge.
     PrCheckAborted(String),
+    /// A typed pull request reference has been matched against every project's
+    /// configured address. One `git` call per project ran on the worker; the
+    /// answer is not cached anywhere, because nothing dux watches would tell it
+    /// when the answer changed (see
+    /// [`crate::pr_reference::resolve_reference_projects`]).
+    ///
+    /// `matches` has three interesting shapes and the surface branches on all
+    /// three: exactly one project proceeds to the lookup, several mean the
+    /// repository is checked out twice and the user picks, and none means dux
+    /// has no project for `repository` and can only offer the project picker,
+    /// because dux does not clone.
+    PullRequestReferenceResolved {
+        /// The text the user typed, carried through so the chosen project can
+        /// be handed straight to the existing lookup.
+        raw_input: String,
+        /// How to name the repository in a message, from
+        /// [`crate::pr_reference::TypedReference::repository_label`].
+        repository: String,
+        matches: Vec<Project>,
+        status_op_id: Option<String>,
+    },
     PullRequestResolved {
         result: Result<ResolvedPullRequest, String>,
         /// Correlation id for a web `HandlerStatusOp` whose final is resolved in

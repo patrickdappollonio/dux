@@ -185,6 +185,7 @@ enum PromptMouseTarget {
     RenameInput,
     NameNewAgentInput,
     PullRequestInput,
+    PullRequestChooseProject,
     MacroNameInput,
     MacroTextInput,
     /// Index into `MacroSurface`'s `Agent, Terminal, Both` order.
@@ -203,6 +204,9 @@ impl ButtonPressedTarget {
     /// those targets keep their existing on-Down behavior.
     fn from_prompt_target(target: PromptMouseTarget) -> Option<Self> {
         match target {
+            PromptMouseTarget::PullRequestChooseProject => {
+                Some(ButtonPressedTarget::PullRequestChooseProject)
+            }
             PromptMouseTarget::RuntimeKillCancel => Some(ButtonPressedTarget::RuntimeKillCancel),
             PromptMouseTarget::RuntimeKillHovered => Some(ButtonPressedTarget::RuntimeKillHovered),
             PromptMouseTarget::RuntimeKillSelected => {
@@ -3762,29 +3766,49 @@ impl App {
         }
 
         if matches!(self.prompt, PromptState::PullRequestInput { .. }) {
-            let is_plain_char = matches!(key.code, KeyCode::Char(_))
-                && !key.modifiers.contains(KeyModifiers::CONTROL);
-            let action = if is_plain_char {
+            let field_focused = matches!(
+                self.prompt,
+                PromptState::PullRequestInput {
+                    focus: PullRequestInputFocus::Input,
+                    ..
+                }
+            );
+            // Same rule as the rename modal: while the single-line field has
+            // focus, plain characters and the horizontal arrows belong to the
+            // caret and never reach the binding lookup. Once focus is on the
+            // secondary action the field owns nothing and every key navigates.
+            let action = if binding_lookup_is_suppressed(key, field_focused) {
                 None
             } else {
                 self.bindings.lookup(&key, BindingScope::Dialog)
             };
 
-            match action {
-                Some(Action::CloseOverlay) => {
+            match modal_key_step(action, key, field_focused) {
+                ModalKeyStep::Close => {
                     self.prompt = PromptState::None;
+                    self.pending_pr_reference = None;
                 }
-                Some(Action::Confirm) => {
-                    let (project, raw_input) = match &self.prompt {
-                        PromptState::PullRequestInput { project, input } => {
-                            (project.clone(), input.text.trim().to_string())
-                        }
-                        _ => unreachable!(),
-                    };
-                    self.dispatch_pull_request_lookup(project, raw_input)?;
+                ModalKeyStep::Confirm => {
+                    if field_focused {
+                        self.confirm_pull_request_input()?;
+                    } else {
+                        self.open_pull_request_project_picker()?;
+                    }
                 }
-                _ => {
-                    if let PromptState::PullRequestInput { input, .. } = &mut self.prompt {
+                ModalKeyStep::MoveFocus(forward) => {
+                    self.focus_next_pull_request_control(forward);
+                }
+                ModalKeyStep::ActivateFocus => {
+                    // Space, with focus off the field: the secondary action is
+                    // the only other control.
+                    if !field_focused {
+                        self.open_pull_request_project_picker()?;
+                    }
+                }
+                ModalKeyStep::FallThroughToField => {
+                    if field_focused
+                        && let PromptState::PullRequestInput { input, .. } = &mut self.prompt
+                    {
                         input.handle_key(key);
                     }
                 }
@@ -5098,7 +5122,15 @@ impl App {
                     None
                 }
             }
-            OverlayMouseLayout::PullRequestInput { input } => {
+            OverlayMouseLayout::PullRequestInput {
+                input,
+                choose_project,
+            } => {
+                if let Some(button) = choose_project
+                    && contains_point(button, column, row)
+                {
+                    return Some(PromptMouseTarget::PullRequestChooseProject);
+                }
                 contains_point(input, column, row).then_some(PromptMouseTarget::PullRequestInput)
             }
             OverlayMouseLayout::RenameSession { input, checkbox } => {
@@ -6307,12 +6339,15 @@ impl App {
 
     fn set_pull_request_cursor_from_mouse(&mut self, column: u16) {
         let input_area = match self.overlay_layout.active {
-            OverlayMouseLayout::PullRequestInput { input } => input,
+            OverlayMouseLayout::PullRequestInput { input, .. } => input,
             _ => return,
         };
-        if let PromptState::PullRequestInput { input, .. } = &mut self.prompt {
+        if let PromptState::PullRequestInput { input, focus, .. } = &mut self.prompt {
             // The single-line renderer pads by one leading space.
             input.cursor = cursor_from_single_line_position(&input.text, input_area, 1, column);
+            // Focus follows the click, or the caret the click just placed would
+            // sit in a field that takes no keystrokes.
+            *focus = PullRequestInputFocus::Input;
         }
     }
 
@@ -6379,6 +6414,57 @@ impl App {
                 &[
                     (RenameSessionFocus::Input, true),
                     (RenameSessionFocus::RenameBranchCheckbox, true),
+                ],
+                *focus,
+                forward,
+            );
+        }
+    }
+
+    /// Confirm on the reference field. With a project already chosen this is the
+    /// project-first lookup, exactly as before. With none, dux resolves the
+    /// project from the reference.
+    pub(crate) fn confirm_pull_request_input(&mut self) -> Result<()> {
+        let (project, raw_input) = match &self.prompt {
+            PromptState::PullRequestInput { project, input, .. } => {
+                (project.clone(), input.text.trim().to_string())
+            }
+            _ => return Ok(()),
+        };
+        match project {
+            Some(project) => self.dispatch_pull_request_lookup(project, raw_input),
+            None => self.dispatch_pull_request_reference(raw_input),
+        }
+    }
+
+    /// The modal's secondary action: hand over to the existing project selector
+    /// and come back in project-first mode. Whatever has been typed travels
+    /// with it, so stepping out to choose a project never costs the reference.
+    pub(crate) fn open_pull_request_project_picker(&mut self) -> Result<()> {
+        let typed = match &self.prompt {
+            PromptState::PullRequestInput { input, .. } => input.text.trim().to_string(),
+            _ => String::new(),
+        };
+        self.pending_pr_reference = if typed.is_empty() { None } else { Some(typed) };
+        self.open_project_chooser(ProjectChooserIntent::FromPr)
+    }
+
+    /// Focus order for the Create-Agent-From-PR modal. The secondary action is
+    /// a CONDITIONAL stop: with a project already chosen it is not offered, so
+    /// the ring has one enabled entry and focus cannot leave the field.
+    fn focus_next_pull_request_control(&mut self, forward: bool) {
+        let has_project = matches!(
+            self.prompt,
+            PromptState::PullRequestInput {
+                project: Some(_),
+                ..
+            }
+        );
+        if let PromptState::PullRequestInput { focus, .. } = &mut self.prompt {
+            *focus = next_focus(
+                &[
+                    (PullRequestInputFocus::Input, true),
+                    (PullRequestInputFocus::ChooseProject, !has_project),
                 ],
                 *focus,
                 forward,
@@ -6901,6 +6987,10 @@ impl App {
             PromptMouseTarget::PullRequestInput => {
                 self.set_pull_request_cursor_from_mouse(mouse.column);
             }
+            // The button targets are armed on mouse-down and fired on release
+            // by the press machinery (`activate_button`), so nothing happens
+            // here; the arm exists so a new button cannot be forgotten.
+            PromptMouseTarget::PullRequestChooseProject => {}
             PromptMouseTarget::StartupCommandInput => {
                 // Single click focuses, double click engages, the same two-step
                 // the macro body uses. Focusing FIRST is the load-bearing half:
@@ -7015,6 +7105,12 @@ impl App {
     /// arms one-for-one — only the trigger event differs.
     fn activate_button(&mut self, button: ButtonPressedTarget) -> bool {
         match button {
+            ButtonPressedTarget::PullRequestChooseProject => {
+                if let Err(e) = self.open_pull_request_project_picker() {
+                    self.set_error(format!("{e:#}"));
+                }
+                false
+            }
             ButtonPressedTarget::RuntimeKillCancel => {
                 if let Err(e) =
                     self.execute_kill_running_footer_action(KillRunningFooterAction::Cancel)
@@ -22892,6 +22988,288 @@ cyan = "#00ffff"
         }
     }
 
+    /// Fixture: the reference-first modal, as the palette command opens it.
+    fn reference_first_modal(app: &mut App, typed: &str) {
+        app.prompt = PromptState::PullRequestInput {
+            project: None,
+            input: TextInput::with_text(typed.to_string()),
+            focus: crate::app::PullRequestInputFocus::Input,
+        };
+    }
+
+    #[test]
+    fn the_pr_modal_opens_with_no_project_and_asks_for_none() {
+        let mut app = test_app(default_bindings());
+        // The command is gated on gh being usable; that gate is unchanged and
+        // has its own tests. What is being checked here is what opens once it
+        // passes.
+        app.engine.github_integration_enabled = true;
+        app.engine.gh_status = dux_core::model::GhStatus::Available;
+        app.open_new_agent_from_pr_prompt()
+            .expect("open the reference-first modal");
+        match &app.prompt {
+            PromptState::PullRequestInput { project, focus, .. } => {
+                assert!(
+                    project.is_none(),
+                    "the global command must not bake a project into the modal"
+                );
+                assert_eq!(*focus, crate::app::PullRequestInputFocus::Input);
+            }
+            other => panic!("expected the PR modal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_bare_number_with_no_project_is_refused_inline_and_the_modal_stays_open() {
+        let mut app = test_app(default_bindings());
+        reference_first_modal(&mut app, "123");
+        app.confirm_pull_request_input().expect("confirm");
+
+        let status = app.status.text();
+        assert!(
+            status.contains("does not say which repository"),
+            "a bare number names nothing, and the message must say so: {status}"
+        );
+        assert!(
+            status.contains("choose an existing project"),
+            "and it must point at the way out: {status}"
+        );
+    }
+
+    #[test]
+    fn unreadable_text_is_refused_inline_before_any_worker_runs() {
+        let mut app = test_app(default_bindings());
+        reference_first_modal(&mut app, "not a reference");
+        app.confirm_pull_request_input().expect("confirm");
+        assert!(
+            app.status.text().contains("Enter a pull request URL"),
+            "{}",
+            app.status.text()
+        );
+    }
+
+    #[test]
+    fn the_secondary_action_reaches_the_project_picker_and_keeps_what_was_typed() {
+        let mut app = test_app(default_bindings());
+        reference_first_modal(&mut app, "acme/widget#7");
+        app.open_pull_request_project_picker()
+            .expect("open the picker");
+
+        assert!(
+            matches!(
+                app.prompt,
+                PromptState::PickProject {
+                    intent: ProjectChooserIntent::FromPr,
+                    ..
+                }
+            ),
+            "the secondary action opens the existing project selector, got {:?}",
+            app.prompt
+        );
+        assert_eq!(app.pending_pr_reference.as_deref(), Some("acme/widget#7"));
+
+        // Picking a project comes back in project-first mode with the reference
+        // still in the field.
+        app.confirm_project_chooser_selection().expect("pick");
+        match &app.prompt {
+            PromptState::PullRequestInput { project, input, .. } => {
+                assert!(
+                    project.is_some(),
+                    "picking a project makes it project-first"
+                );
+                assert_eq!(input.text, "acme/widget#7");
+            }
+            other => panic!("expected the PR modal, got {other:?}"),
+        }
+        assert_eq!(app.pending_pr_reference, None);
+    }
+
+    #[test]
+    fn focus_moves_between_the_field_and_the_secondary_action_only_when_it_is_offered() {
+        let mut app = test_app(default_bindings());
+        reference_first_modal(&mut app, "");
+        app.handle_key(key(KeyCode::Tab)).expect("move focus");
+        assert!(matches!(
+            app.prompt,
+            PromptState::PullRequestInput {
+                focus: crate::app::PullRequestInputFocus::ChooseProject,
+                ..
+            }
+        ));
+        app.handle_key(key(KeyCode::Tab)).expect("move focus back");
+        assert!(matches!(
+            app.prompt,
+            PromptState::PullRequestInput {
+                focus: crate::app::PullRequestInputFocus::Input,
+                ..
+            }
+        ));
+
+        // Project-first: the secondary action is not offered, so focus cannot
+        // leave the field and the modal behaves exactly as it always did.
+        let project = app.engine.projects[0].clone();
+        app.prompt = PromptState::PullRequestInput {
+            project: Some(project),
+            input: TextInput::new(),
+            focus: crate::app::PullRequestInputFocus::Input,
+        };
+        app.handle_key(key(KeyCode::Tab)).expect("move focus");
+        assert!(matches!(
+            app.prompt,
+            PromptState::PullRequestInput {
+                focus: crate::app::PullRequestInputFocus::Input,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_horizontal_arrow_moves_the_caret_rather_than_the_focus() {
+        // The selection-toggle action's default keys include the horizontal
+        // arrows, and this modal now has a focus concept for them to move. The
+        // field must still win while it has focus, or typing a reference would
+        // silently jump focus onto a button.
+        let mut app = test_app(default_bindings());
+        reference_first_modal(&mut app, "abc");
+        app.handle_key(key(KeyCode::Left)).expect("left");
+        match &app.prompt {
+            PromptState::PullRequestInput { input, focus, .. } => {
+                assert_eq!(input.cursor, 2, "the caret moved");
+                assert_eq!(*focus, crate::app::PullRequestInputFocus::Input);
+            }
+            other => panic!("expected the PR modal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn one_matching_project_goes_straight_to_the_lookup() {
+        let mut app = test_app(default_bindings());
+        let project = app.engine.projects[0].clone();
+        app.apply_pull_request_reference_resolution(
+            "acme/widget#7".to_string(),
+            "acme/widget".to_string(),
+            vec![project],
+        )
+        .expect("resolve");
+        assert!(
+            matches!(app.prompt, PromptState::None),
+            "one match proceeds to the existing lookup with no further question, got {:?}",
+            app.prompt
+        );
+    }
+
+    #[test]
+    fn several_matching_projects_ask_which_one() {
+        let mut app = test_app(default_bindings());
+        let first = app.engine.projects[0].clone();
+        let mut second = first.clone();
+        second.id = "second".to_string();
+        second.name = "widget-review".to_string();
+        app.engine.projects.push(second.clone());
+
+        app.apply_pull_request_reference_resolution(
+            "acme/widget#7".to_string(),
+            "acme/widget".to_string(),
+            vec![first.clone(), second.clone()],
+        )
+        .expect("resolve");
+
+        match &app.prompt {
+            PromptState::PickProject {
+                intent, entries, ..
+            } => {
+                assert_eq!(*intent, ProjectChooserIntent::FromPrReference);
+                assert_eq!(
+                    entries.len(),
+                    2,
+                    "only the two checkouts of that repository are worth showing"
+                );
+            }
+            other => panic!("expected the project chooser, got {other:?}"),
+        }
+        assert!(app.status.text().contains("acme/widget"));
+        assert_eq!(app.pending_pr_reference.as_deref(), Some("acme/widget#7"));
+    }
+
+    #[test]
+    fn no_matching_project_says_which_repository_and_never_offers_to_clone() {
+        let mut app = test_app(default_bindings());
+        app.apply_pull_request_reference_resolution(
+            "https://github.com/acme/unknown/pull/3".to_string(),
+            "github.com/acme/unknown".to_string(),
+            Vec::new(),
+        )
+        .expect("resolve");
+
+        let status = app.status.text();
+        assert!(
+            status.contains("github.com/acme/unknown"),
+            "the message must name the repository: {status}"
+        );
+        let lowered = status.to_ascii_lowercase();
+        assert!(
+            !lowered.contains("clone") && !lowered.contains("download"),
+            "dux does not clone, and the wording must not imply it might: {status}"
+        );
+        assert!(
+            matches!(
+                app.prompt,
+                PromptState::PickProject {
+                    intent: ProjectChooserIntent::FromPrReference,
+                    ..
+                }
+            ),
+            "the picker is offered so the user can point at a checkout they have, got {:?}",
+            app.prompt
+        );
+    }
+
+    #[test]
+    fn picking_a_project_after_resolution_completes_the_reference_already_typed() {
+        let mut app = test_app(default_bindings());
+        let project = app.engine.projects[0].clone();
+        app.apply_pull_request_reference_resolution(
+            "acme/widget#7".to_string(),
+            "acme/widget".to_string(),
+            Vec::new(),
+        )
+        .expect("resolve");
+        assert_eq!(app.pending_pr_reference.as_deref(), Some("acme/widget#7"));
+
+        app.confirm_project_chooser_selection().expect("pick");
+        assert_eq!(
+            app.pending_pr_reference, None,
+            "the reference is consumed by the pick rather than left to be inherited"
+        );
+        assert!(matches!(app.prompt, PromptState::None));
+        let _ = project;
+    }
+
+    #[test]
+    fn the_project_first_path_still_dispatches_the_lookup_unchanged() {
+        let mut app = test_app(default_bindings());
+        let project = app.engine.projects[0].clone();
+        app.begin_pr_agent_for_project(project)
+            .expect("project-first modal");
+        match &app.prompt {
+            PromptState::PullRequestInput { project, .. } => {
+                assert!(
+                    project.is_some(),
+                    "the project menu path stays project-first"
+                )
+            }
+            other => panic!("expected the PR modal, got {other:?}"),
+        }
+        if let PromptState::PullRequestInput { input, .. } = &mut app.prompt {
+            input.set_text("123".to_string());
+        }
+        app.confirm_pull_request_input().expect("confirm");
+        assert!(
+            matches!(app.prompt, PromptState::None),
+            "a bare number with a project chosen goes to the lookup exactly as before"
+        );
+    }
+
     #[test]
     fn mouse_click_pull_request_input_moves_caret_to_the_clicked_column() {
         use ratatui::Terminal;
@@ -22900,7 +23278,8 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         let project = app.engine.projects[0].clone();
         app.prompt = PromptState::PullRequestInput {
-            project,
+            focus: crate::app::PullRequestInputFocus::Input,
+            project: Some(project),
             input: TextInput::with_text("https://x/pull/12".to_string()),
         };
 
@@ -22913,7 +23292,7 @@ cyan = "#00ffff"
             .draw(|frame| app.render(frame))
             .expect("render frame");
 
-        let OverlayMouseLayout::PullRequestInput { input } = app.overlay_layout.active else {
+        let OverlayMouseLayout::PullRequestInput { input, .. } = app.overlay_layout.active else {
             panic!(
                 "the PR modal must publish its input rect, got {:?}",
                 app.overlay_layout.active

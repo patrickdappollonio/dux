@@ -15,7 +15,8 @@ pub(crate) mod scroll_marker;
 pub(crate) mod wrap_lines;
 
 pub(crate) use button::{
-    Button, ButtonKind, ButtonPressedTarget, PressedButton, button_state_for, shared_button_width,
+    Button, ButtonKind, ButtonPressedTarget, PressedButton, button_state_for, button_width_for,
+    shared_button_width,
 };
 pub(crate) use checkbox::{Checkbox, CheckboxState};
 pub(crate) use focus_ring::next_focus;

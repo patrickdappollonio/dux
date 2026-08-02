@@ -58,12 +58,47 @@ impl App {
                 } => Some(id.clone()),
                 _ => None,
             };
+            // The reference-resolution answer is the SURFACE's to act on (the
+            // engine deliberately returns nothing for it), so take it off the
+            // event before it is consumed. It carries the same keyed-busy id as
+            // a lookup, and it dismisses that busy the same way.
+            let reference_resolution = match &event {
+                WorkerEvent::PullRequestReferenceResolved {
+                    raw_input,
+                    repository,
+                    matches,
+                    status_op_id,
+                } => Some((
+                    raw_input.clone(),
+                    repository.clone(),
+                    matches.clone(),
+                    status_op_id.clone(),
+                )),
+                _ => None,
+            };
             let reaction = self.engine.process_worker_event(event);
             let chains_forward = matches!(
                 reaction,
                 EventReaction::DispatchProjectDefaultBranchCheckout { .. }
             );
             self.apply_reaction(reaction);
+            if let Some((raw_input, repository, matches, status_op_id)) = reference_resolution {
+                if let Err(err) =
+                    self.apply_pull_request_reference_resolution(raw_input, repository, matches)
+                {
+                    self.set_error(format!("{err:#}"));
+                }
+                // The resolution's own keyed busy is dismissed here: the visible
+                // final is whatever the branch above produced (the lookup's own
+                // busy, or the picker's message).
+                if let Some(id) = status_op_id
+                    && let Some(op) = self.pending_pr_lookup_ops.remove(&id)
+                {
+                    self.apply_reaction(
+                        op.resolve(&PrLookupFinalOutcome::HandedOff).into_reaction(),
+                    );
+                }
+            }
             if let Some((id, succeeded)) = pr_lookup_completion
                 && let Some(op) = self.pending_pr_lookup_ops.remove(&id)
             {

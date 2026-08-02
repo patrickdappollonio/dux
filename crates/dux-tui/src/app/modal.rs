@@ -408,6 +408,9 @@ pub(crate) fn layout_publishes_confirm_button(layout: &OverlayMouseLayout) -> bo
         | OverlayMouseLayout::ResourceMonitor { .. }
         | OverlayMouseLayout::StartupCommandLogs { .. }
         | OverlayMouseLayout::RenameSession { .. }
+        // The PR modal's one button hands over to the project picker; it does
+        // not commit the form. Its field is single-line, so Enter still submits
+        // and the dual-mode rule asks no confirm button of it.
         | OverlayMouseLayout::PullRequestInput { .. }
         | OverlayMouseLayout::NameNewAgent { .. } => false,
 
@@ -1023,7 +1026,8 @@ mod tests {
             (
                 "PullRequestInput",
                 PromptState::PullRequestInput {
-                    project: project.clone(),
+                    focus: crate::app::PullRequestInputFocus::Input,
+                    project: Some(project.clone()),
                     input: TextInput::new(),
                 },
             ),

@@ -288,6 +288,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         pending_persist_ops: std::collections::HashMap::new(),
         pending_worktree_ops: std::collections::HashMap::new(),
         pending_pr_lookup_ops: std::collections::HashMap::new(),
+        pending_pr_reference: None,
         pending_delete_ops: std::collections::HashMap::new(),
         pending_reconnect_ops: std::collections::HashMap::new(),
         pending_checkout_inspect_ops: std::collections::HashMap::new(),

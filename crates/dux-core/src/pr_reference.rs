@@ -359,6 +359,31 @@ pub fn resolve_reference_projects(
         .collect()
 }
 
+/// [`resolve_reference_projects`] on a worker thread, posting
+/// [`crate::worker::WorkerEvent::PullRequestReferenceResolved`] with the answer.
+///
+/// Parsing is NOT done here: it is pure and instant, so the surface does it
+/// inline and can refuse a bare number (or unreadable text) without a round
+/// trip. Only a reference that actually names a repository is worth a git call
+/// per project, which is what this thread is for.
+pub fn run_reference_resolution_job(
+    reference: TypedReference,
+    raw_input: String,
+    projects: Vec<crate::model::Project>,
+    policy: crate::gh::GithubHostPolicy,
+    worker_tx: std::sync::mpsc::Sender<crate::worker::WorkerEvent>,
+    status_op_id: Option<String>,
+) {
+    let repository = reference.repository_label().unwrap_or_default();
+    let matches = resolve_reference_projects(&reference, &projects, &policy);
+    let _ = worker_tx.send(crate::worker::WorkerEvent::PullRequestReferenceResolved {
+        raw_input,
+        repository,
+        matches,
+        status_op_id,
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
