@@ -90,12 +90,13 @@ const GH_READER_DRAIN: Duration = Duration::from_secs(2);
 pub fn run_pr_sync(
     sessions: &Arc<Mutex<Vec<PrSyncEntry>>>,
     backoff: &BackoffSnapshot,
+    policy: &GithubHostPolicy,
 ) -> PrSyncOutcome {
     let snapshot = match sessions.lock() {
         Ok(guard) => guard.clone(),
         Err(_) => return (Vec::new(), Vec::new()),
     };
-    run_entries(&snapshot, backoff)
+    run_entries(&snapshot, backoff, policy)
 }
 
 /// Single-session PR check (foreground / refs-watcher / exit triggers). Shares
@@ -104,8 +105,9 @@ pub fn run_pr_sync(
 pub fn check_pr_for_entry(
     entry: &PrSyncEntry,
     backoff: &BackoffSnapshot,
+    policy: &GithubHostPolicy,
 ) -> (Option<PrInfo>, Vec<HostSignal>) {
-    let (results, signals) = run_entries(std::slice::from_ref(entry), backoff);
+    let (results, signals) = run_entries(std::slice::from_ref(entry), backoff, policy);
     let pr = results.into_iter().next().and_then(|(_, pr)| pr);
     (pr, signals)
 }
@@ -172,8 +174,13 @@ impl Planned {
 /// | OPEN           | any            | head-ref discovery **+** by-number refresh|
 /// | MERGED/CLOSED  | yes            | head-ref discovery (catches a follow-up PR)|
 /// | MERGED/CLOSED  | no             | **zero calls** — reconstruct from SQLite  |
-fn run_entries(entries: &[PrSyncEntry], backoff: &BackoffSnapshot) -> PrSyncOutcome {
-    let (mut results, planned) = plan_entries(entries, &live_remote_resolver);
+fn run_entries(
+    entries: &[PrSyncEntry],
+    backoff: &BackoffSnapshot,
+    policy: &GithubHostPolicy,
+) -> PrSyncOutcome {
+    let (mut results, planned) =
+        plan_entries(entries, &|path| live_remote_resolver(path, policy), policy);
 
     // Group by host; for each host either skip it (already backed off — keep
     // last-known PRs, no gh call, no signal) or chunk its sessions by alias
@@ -238,8 +245,11 @@ fn run_entries(entries: &[PrSyncEntry], backoff: &BackoffSnapshot) -> PrSyncOutc
 /// The remote resolver production uses: the real one, reading the worktree's
 /// `origin` through git, with the user's own configuration applied. That is
 /// correct here, because the rewritten URL is the one git would really contact.
-fn live_remote_resolver(worktree_path: &Path) -> Option<git::GitHubRemote> {
-    git::remote_github_repo(worktree_path)
+fn live_remote_resolver(
+    worktree_path: &Path,
+    policy: &GithubHostPolicy,
+) -> Option<git::GitHubRemote> {
+    git::remote_github_repo(worktree_path, policy)
 }
 
 /// The planning half of [`run_entries`], split out so it can be exercised on
@@ -262,6 +272,7 @@ fn live_remote_resolver(worktree_path: &Path) -> Option<git::GitHubRemote> {
 fn plan_entries(
     entries: &[PrSyncEntry],
     resolve_remote: &dyn Fn(&Path) -> Option<git::GitHubRemote>,
+    policy: &GithubHostPolicy,
 ) -> (Vec<(String, Option<PrInfo>)>, Vec<Planned>) {
     let mut results: Vec<(String, Option<PrInfo>)> = Vec::new();
     let mut planned: Vec<Planned> = Vec::new();
@@ -278,6 +289,27 @@ fn plan_entries(
             results.push((entry.session_id.clone(), None));
             continue;
         };
+
+        // Hostnames are case-insensitive and this value becomes a `gh`
+        // `--hostname` argument. The parser lowercases a live remote, but this
+        // host can also come straight out of SQLite, where a legacy or
+        // externally written row may have kept its capitals, so the lowercasing
+        // belongs here, at the boundary, whatever the source.
+        let host = normalize_github_host(&host).to_ascii_lowercase();
+
+        // The eligibility test belongs HERE, after the choice between the live
+        // address and the stored one, and not inside the parsers alone. A host
+        // remembered from a previous pull request never passes through either
+        // parser: it is read back from SQLite and handed to `gh`. So a host that
+        // was eligible once, or that was written before dux asked `gh` which
+        // hosts it can serve, would otherwise reach `gh` unchecked. An entry
+        // dux may not ask about makes NO call at all and keeps whatever it last
+        // knew, rather than being reported as having no pull request.
+        if !policy.allows(&host) {
+            let pr = entry.known_pr.as_ref().and_then(reconstruct_from_stored);
+            results.push((entry.session_id.clone(), pr));
+            continue;
+        }
 
         // Terminal PR + exited agent: nobody is pushing to that branch anymore,
         // so reconstruct from SQLite with zero network calls.
@@ -296,13 +328,7 @@ fn plan_entries(
 
         planned.push(Planned::new(
             entry.session_id.clone(),
-            // Hostnames are case-insensitive and this value becomes a
-            // `gh --hostname` argument. The parser lowercases a live remote,
-            // but this host can also come straight out of SQLite, where a
-            // legacy or externally written row may have kept its capitals, so
-            // the lowercasing belongs here, at the boundary, whatever the
-            // source.
-            normalize_github_host(&host).to_ascii_lowercase(),
+            host,
             owner.to_string(),
             repo.to_string(),
             entry.branch_name.clone(),
@@ -1088,6 +1114,7 @@ pub fn parse_pull_request_lookup(
     raw_input: &str,
     selected_host: &str,
     selected_owner_repo: &str,
+    policy: &GithubHostPolicy,
 ) -> Result<PullRequestLookup, String> {
     let input = raw_input.trim();
     if input.is_empty() {
@@ -1102,7 +1129,7 @@ pub fn parse_pull_request_lookup(
         });
     }
 
-    let Some((host, rest)) = parse_github_pull_url_parts(input) else {
+    let Some((host, rest)) = parse_github_pull_url_parts(input, policy) else {
         return Err("Enter a PR number, #number, or a GitHub PR URL.".to_string());
     };
     let parts: Vec<&str> = rest.split('/').collect();
@@ -1129,12 +1156,18 @@ pub fn parse_pull_request_lookup(
     })
 }
 
-fn parse_github_pull_url_parts(input: &str) -> Option<(String, String)> {
+/// The SECOND place a host can enter: the one a person types.
+///
+/// It is qualified separately from a project's configured address, so fixing
+/// only the other gate would leave an enterprise user able to have their
+/// project recognised but not their pasted URL. Both now ask the same policy,
+/// and both compare lowercased.
+fn parse_github_pull_url_parts(input: &str, policy: &GithubHostPolicy) -> Option<(String, String)> {
     let without_scheme = input
         .strip_prefix("https://")
         .or_else(|| input.strip_prefix("http://"))?;
     let (host, rest) = without_scheme.split_once('/')?;
-    if host != "github.com" && !host.starts_with("github.") {
+    if !policy.allows(host) {
         return None;
     }
     let rest = rest
@@ -1161,9 +1194,12 @@ pub fn run_pull_request_lookup_job(
     custom_name: Option<String>,
     worker_tx: Sender<WorkerEvent>,
     status_op_id: Option<String>,
+    policy: GithubHostPolicy,
 ) {
-    let lookup = match git::remote_github_repo(Path::new(&project.path)) {
-        Some(remote) => parse_pull_request_lookup(&raw_input, &remote.host, &remote.owner_repo),
+    let lookup = match git::remote_github_repo(Path::new(&project.path), &policy) {
+        Some(remote) => {
+            parse_pull_request_lookup(&raw_input, &remote.host, &remote.owner_repo, &policy)
+        }
         None => Err(format!(
             "Project \"{}\" does not have a GitHub origin remote.",
             project.name
@@ -1263,16 +1299,43 @@ fn parse_resolved_pull_request_json(
 pub(crate) mod probe_test_support {
     use std::path::{Path, PathBuf};
 
+    /// The first argument the stand-in answers to, before its body runs. See
+    /// [`stand_in_gh`] for why it exists.
+    const WARMUP_ARG: &str = "--dux-stand-in-warmup";
+
     /// Write an executable `/bin/sh` stand-in for `gh` into `dir`.
+    ///
+    /// The script is exec'd once here before it is returned, because a freshly
+    /// written executable can be refused with `ETXTBSY` ("Text file busy") in a
+    /// multi-threaded process: any other test forking while this write's file
+    /// descriptor is open inherits it, and until that child execs, the kernel
+    /// sees an open write handle on this file and refuses to run it. That is a
+    /// real, observed flake, not a theoretical one. The warmup swallows the
+    /// window, and it answers [`WARMUP_ARG`] by exiting before the body so a
+    /// stand-in that records its calls does not record this one.
     pub(crate) fn stand_in_gh(dir: &Path, body: &str) -> PathBuf {
         let script = dir.join("fake-gh");
-        std::fs::write(&script, format!("#!/bin/sh\n{body}\n")).expect("write stand-in gh");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\ncase \"$1\" in {WARMUP_ARG}) exit 0 ;; esac\n{body}\n"),
+        )
+        .expect("write stand-in gh");
         std::fs::set_permissions(
             &script,
             <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
         )
         .expect("chmod stand-in gh");
-        script
+        for _ in 0..200 {
+            match std::process::Command::new(&script).arg(WARMUP_ARG).status() {
+                Ok(_) => return script,
+                Err(err) if err.raw_os_error() == Some(26) => {
+                    // ETXTBSY. The inheriting child has not exec'd yet.
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(err) => panic!("stand-in gh is not runnable: {err}"),
+            }
+        }
+        panic!("stand-in gh stayed busy for a second; something is holding it open");
     }
 
     /// A stand-in whose machine-readable answer reports each of `hosts` with a
@@ -1529,6 +1592,94 @@ mod host_policy_tests {
         }
     }
 
+    /// The journey the old name rule got wrong in both directions: a company
+    /// server that works is rejected on the strength of its name, and a
+    /// github.com whose login is broken is accepted on the strength of its.
+    ///
+    /// Availability and eligibility are separate answers here, which is the
+    /// whole point: the interface says GitHub is available (one host works)
+    /// while only that host's projects actually resolve.
+    #[test]
+    fn a_working_company_host_serves_its_projects_while_a_broken_github_com_does_not() {
+        let answer = r#"{"hosts":{
+            "git.company.example":[{"state":"success","active":true,"host":"git.company.example"}],
+            "github.com":[{"state":"error","active":true,"host":"github.com"}]
+        }}"#;
+        let probe = decide_gh_probe(GhCallOutcome::Completed(completed(0, answer)), || {
+            panic!("a parseable answer needs no fallback")
+        });
+        let GhProbe::Decided { available, policy } = probe else {
+            panic!("expected a decided probe, got {probe:?}");
+        };
+        assert!(available, "one working host means GitHub is available");
+
+        assert_eq!(
+            git::github_remote_from_git_output_with(
+                b"git@git.company.example:acme/widget.git\n",
+                &policy,
+            ),
+            Some(git::GitHubRemote {
+                host: "git.company.example".to_string(),
+                owner_repo: "acme/widget".to_string(),
+            }),
+            "a project on the working host resolves",
+        );
+        assert_eq!(
+            git::github_remote_from_git_output_with(
+                b"git@github.com:octocat/Hello-World.git\n",
+                &policy,
+            ),
+            None,
+            "and the broken host does not, even though it is literally github.com",
+        );
+        assert_eq!(
+            git::github_remote_from_git_output_with(b"git@gitlab.com:acme/widget.git\n", &policy),
+            None,
+            "GitLab is still rejected: gh has never heard of it",
+        );
+    }
+
+    /// An enterprise host has to clear BOTH gates. They are separate checks on
+    /// separate inputs (a project's configured address, and a reference the user
+    /// types), so fixing only one leaves a user whose project is recognised but
+    /// whose pasted URL is not.
+    #[test]
+    fn an_enterprise_host_works_as_a_project_address_and_in_a_typed_reference() {
+        let policy =
+            GithubHostPolicy::Hosts(["git.company.example".to_string()].into_iter().collect());
+
+        let remote = git::github_remote_from_git_output_with(
+            b"git@GIT.Company.Example:acme/widget.git\n",
+            &policy,
+        )
+        .expect("gate 1: the project's configured address");
+        assert_eq!(remote.host, "git.company.example", "compared lowercased");
+
+        let lookup = parse_pull_request_lookup(
+            "https://git.company.example/acme/widget/pull/42",
+            &remote.host,
+            &remote.owner_repo,
+            &policy,
+        )
+        .expect("gate 2: the reference the user types");
+        assert_eq!(lookup.host, "git.company.example");
+        assert_eq!(lookup.owner_repo, "acme/widget");
+        assert_eq!(lookup.number, 42);
+
+        // And a host the policy does not name is refused at gate 2 as well,
+        // whatever its spelling.
+        assert!(
+            parse_pull_request_lookup(
+                "https://github.enterprise.example/acme/widget/pull/42",
+                "git.company.example",
+                "acme/widget",
+                &policy,
+            )
+            .is_err(),
+            "a `github.`-named host gh cannot serve is not a way in",
+        );
+    }
+
     #[test]
     fn output_that_is_not_the_expected_shape_does_not_parse() {
         // How an older `gh` presents itself: it rejects the flag and writes
@@ -1717,6 +1868,16 @@ mod host_policy_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The rule dux applied before it asked `gh` which hosts it can serve:
+    /// `github.com` or `github.*`. The tests below are about parsing, planning
+    /// and argument building rather than about which hosts qualify, so they run
+    /// under the policy those behaviours were written against and keep meaning
+    /// exactly what they meant. The eligibility gates have their own tests,
+    /// which pass a real answered host set.
+    fn legacy_policy() -> GithubHostPolicy {
+        GithubHostPolicy::LegacyNameRule
+    }
 
     fn stored(number: u64, state: &str) -> StoredPr {
         StoredPr {
@@ -2031,6 +2192,7 @@ mod tests {
         let (results, signals) = run_entries(
             std::slice::from_ref(&entry),
             &std::collections::HashMap::new(),
+            &legacy_policy(),
         );
         // Zero-network (terminal+exited) → no host was queried, so no signal.
         assert!(signals.is_empty(), "no network call means no host signal");
@@ -2219,14 +2381,20 @@ mod tests {
 
     #[test]
     fn parse_pull_request_lookup_accepts_number_and_hash_number() {
-        let plain = parse_pull_request_lookup("123", "github.com", "octocat/Hello-World")
-            .expect("plain number");
+        let plain =
+            parse_pull_request_lookup("123", "github.com", "octocat/Hello-World", &legacy_policy())
+                .expect("plain number");
         assert_eq!(plain.host, "github.com");
         assert_eq!(plain.owner_repo, "octocat/Hello-World");
         assert_eq!(plain.number, 123);
 
-        let hashed = parse_pull_request_lookup("#456", "github.example.com", "octocat/Hello-World")
-            .expect("hash number");
+        let hashed = parse_pull_request_lookup(
+            "#456",
+            "github.example.com",
+            "octocat/Hello-World",
+            &legacy_policy(),
+        )
+        .expect("hash number");
         assert_eq!(hashed.host, "github.example.com");
         assert_eq!(hashed.owner_repo, "octocat/Hello-World");
         assert_eq!(hashed.number, 456);
@@ -2238,6 +2406,7 @@ mod tests {
             "https://github.com/octocat/Hello-World/pull/789?foo=bar",
             "github.com",
             "octocat/Hello-World",
+            &legacy_policy(),
         )
         .expect("matching URL");
         assert_eq!(lookup.host, "github.com");
@@ -2251,6 +2420,7 @@ mod tests {
             "https://github.example.com/octocat/Hello-World/pull/789",
             "github.example.com",
             "octocat/Hello-World",
+            &legacy_policy(),
         )
         .expect("matching enterprise URL");
         assert_eq!(lookup.host, "github.example.com");
@@ -2264,6 +2434,7 @@ mod tests {
             "https://github.com/octocat/Hello-World/pull/5/#discussion",
             "github.com",
             "octocat/Hello-World",
+            &legacy_policy(),
         )
         .expect("trailing slash + fragment");
         assert_eq!(lookup.number, 5);
@@ -2275,6 +2446,7 @@ mod tests {
             "https://github.com/other/repo/pull/12",
             "github.com",
             "octocat/Hello-World",
+            &legacy_policy(),
         )
         .expect_err("mismatched repo");
         assert!(err.contains("selected project uses github.com/octocat/Hello-World"));
@@ -2282,15 +2454,21 @@ mod tests {
 
     #[test]
     fn parse_pull_request_lookup_rejects_empty_input() {
-        let err = parse_pull_request_lookup("   ", "github.com", "octocat/Hello-World")
-            .expect_err("empty");
+        let err =
+            parse_pull_request_lookup("   ", "github.com", "octocat/Hello-World", &legacy_policy())
+                .expect_err("empty");
         assert!(err.contains("Enter a GitHub PR URL or PR number"));
     }
 
     #[test]
     fn parse_pull_request_lookup_rejects_garbage() {
-        let err = parse_pull_request_lookup("not-a-pr", "github.com", "octocat/Hello-World")
-            .expect_err("garbage");
+        let err = parse_pull_request_lookup(
+            "not-a-pr",
+            "github.com",
+            "octocat/Hello-World",
+            &legacy_policy(),
+        )
+        .expect_err("garbage");
         assert!(err.contains("Enter a PR number, #number, or a GitHub PR URL"));
     }
 
@@ -2300,6 +2478,7 @@ mod tests {
             "https://gitlab.com/octocat/Hello-World/pull/1",
             "github.com",
             "octocat/Hello-World",
+            &legacy_policy(),
         )
         .expect_err("non-github host");
         assert!(err.contains("Enter a PR number, #number, or a GitHub PR URL"));
@@ -2311,6 +2490,7 @@ mod tests {
             "https://github.com/octocat/Hello-World/issues/3",
             "github.com",
             "octocat/Hello-World",
+            &legacy_policy(),
         )
         .expect_err("not a pull URL");
         assert!(err.contains("must look like https://github.com/owner/repo/pull/123"));
@@ -2540,8 +2720,9 @@ mod tests {
         assert_eq!(remote.host, "github.com");
         assert_eq!(remote.owner_repo, "octocat/Hello-World");
 
-        let lookup = parse_pull_request_lookup("#7", &remote.host, &remote.owner_repo)
-            .expect("a resolved remote makes the lookup reachable");
+        let lookup =
+            parse_pull_request_lookup("#7", &remote.host, &remote.owner_repo, &legacy_policy())
+                .expect("a resolved remote makes the lookup reachable");
         assert_eq!(lookup.host, "github.com");
         assert_eq!(lookup.owner_repo, "octocat/Hello-World");
         assert_eq!(lookup.number, 7);
@@ -2582,12 +2763,16 @@ mod tests {
     fn plan_entries_queries_a_resolved_remote_for_a_session_with_no_known_pr() {
         let entry = planning_entry();
 
-        let (results, planned) = plan_entries(std::slice::from_ref(&entry), &|_| {
-            Some(git::GitHubRemote {
-                host: "github.com".to_string(),
-                owner_repo: "octocat/Hello-World".to_string(),
-            })
-        });
+        let (results, planned) = plan_entries(
+            std::slice::from_ref(&entry),
+            &|_| {
+                Some(git::GitHubRemote {
+                    host: "github.com".to_string(),
+                    owner_repo: "octocat/Hello-World".to_string(),
+                })
+            },
+            &legacy_policy(),
+        );
 
         assert!(
             results.is_empty(),
@@ -2615,12 +2800,62 @@ mod tests {
     fn plan_entries_records_nothing_for_an_unresolvable_remote_with_no_known_pr() {
         let entry = planning_entry();
 
-        let (results, planned) = plan_entries(std::slice::from_ref(&entry), &|_| None);
+        let (results, planned) =
+            plan_entries(std::slice::from_ref(&entry), &|_| None, &legacy_policy());
 
         assert!(planned.is_empty(), "a non-GitHub remote is never queried");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, "s0");
         assert!(results[0].1.is_none());
+    }
+
+    /// The THIRD place a host can enter, and the one that is easy to miss: a
+    /// host remembered from a previous pull request, read back from SQLite and
+    /// handed straight to `gh` without passing through either parser.
+    ///
+    /// An agent whose address cannot be read and whose stored host is not
+    /// eligible must produce NO `gh` invocation at all. It keeps what it last
+    /// knew rather than being reported as having no pull request, because dux
+    /// did not ask and therefore did not find out.
+    #[test]
+    fn an_unreadable_address_with_an_ineligible_stored_host_plans_no_gh_call() {
+        let entry = PrSyncEntry {
+            known_pr: Some(StoredPr {
+                session_id: "s0".to_string(),
+                pr_number: 7,
+                host: "git.company.example".to_string(),
+                owner_repo: "acme/widget".to_string(),
+                state: "OPEN".to_string(),
+                title: "Widget".to_string(),
+                url: "https://git.company.example/acme/widget/pull/7".to_string(),
+            }),
+            ..planning_entry()
+        };
+        // `gh` serves github.com and nothing else, so the stored host does not
+        // qualify. It once might have, or it may predate the policy entirely.
+        let policy = GithubHostPolicy::Hosts(["github.com".to_string()].into_iter().collect());
+
+        let (results, planned) = plan_entries(std::slice::from_ref(&entry), &|_| None, &policy);
+
+        assert!(
+            planned.is_empty(),
+            "an ineligible stored host must reach gh through no call at all, {} were planned",
+            planned.len(),
+        );
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].1.as_ref().map(|pr| pr.number),
+            Some(7),
+            "and the agent keeps the pull request it last knew about",
+        );
+
+        // The same entry under a policy that DOES name the host is queried
+        // normally, so the gate is the policy and not the fallback itself.
+        let serving =
+            GithubHostPolicy::Hosts(["git.company.example".to_string()].into_iter().collect());
+        let (_, planned) = plan_entries(std::slice::from_ref(&entry), &|_| None, &serving);
+        assert_eq!(planned.len(), 1);
+        assert_eq!(planned[0].host, "git.company.example");
     }
 
     /// The live remote is lowercased by the parser, but a stored pull request
@@ -2643,7 +2878,7 @@ mod tests {
         };
 
         // No remote at all, so planning must fall back to the stored PR.
-        let (_, planned) = plan_entries(std::slice::from_ref(&entry), &|_| None);
+        let (_, planned) = plan_entries(std::slice::from_ref(&entry), &|_| None, &legacy_policy());
 
         assert_eq!(planned.len(), 1);
         assert_eq!(planned[0].host, "github.com");

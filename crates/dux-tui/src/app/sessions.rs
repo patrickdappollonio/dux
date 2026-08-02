@@ -472,6 +472,7 @@ impl App {
         self.pending_pr_lookup_ops.insert(op_id.clone(), op);
         self.apply_reaction(dux_core::engine::EventReaction::Status(pending));
         let worker_tx = self.engine.worker_tx.clone();
+        let policy = self.engine.github_host_policy();
         thread::spawn(move || {
             use std::panic::AssertUnwindSafe;
             // The TUI resolves the PR first and then prompts for a name, so it
@@ -489,6 +490,7 @@ impl App {
                     None,
                     worker_tx,
                     Some(op_id),
+                    policy,
                 );
             })) {
                 let reason = dux_core::engine::format_panic_payload(payload);

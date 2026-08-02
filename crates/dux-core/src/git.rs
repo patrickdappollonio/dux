@@ -2202,7 +2202,10 @@ pub struct GitHubRemote {
 
 /// Returns the GitHub host and `"owner/repo"` parsed from the `origin` remote
 /// URL, or `None` if the remote doesn't point to GitHub or the command fails.
-pub fn remote_github_repo(worktree_path: &Path) -> Option<GitHubRemote> {
+pub fn remote_github_repo(
+    worktree_path: &Path,
+    policy: &crate::gh::GithubHostPolicy,
+) -> Option<GitHubRemote> {
     let output = Command::new("git")
         .args([
             "-C",
@@ -2216,7 +2219,7 @@ pub fn remote_github_repo(worktree_path: &Path) -> Option<GitHubRemote> {
     if !output.status.success() {
         return None;
     }
-    github_remote_from_git_output(&output.stdout)
+    github_remote_from_git_output_with(&output.stdout, policy)
 }
 
 /// The parse half of [`remote_github_repo`]: git's raw stdout for
@@ -2232,9 +2235,20 @@ pub fn remote_github_repo(worktree_path: &Path) -> Option<GitHubRemote> {
 /// neither a control character nor whitespace, so a replacement character used
 /// to survive every later check and travel into a `gh --repo` argument as part
 /// of a name nobody wrote.
-pub(crate) fn github_remote_from_git_output(stdout: &[u8]) -> Option<GitHubRemote> {
+pub(crate) fn github_remote_from_git_output_with(
+    stdout: &[u8],
+    policy: &crate::gh::GithubHostPolicy,
+) -> Option<GitHubRemote> {
     let text = std::str::from_utf8(stdout).ok()?;
-    parse_github_remote(strip_git_record_terminator(text))
+    parse_github_remote_with(strip_git_record_terminator(text), policy)
+}
+
+/// [`github_remote_from_git_output_with`] under the legacy name rule, for the
+/// tests that are about GIT OUTPUT HANDLING rather than about which hosts
+/// qualify. See the shim on [`parse_github_remote`].
+#[cfg(test)]
+pub(crate) fn github_remote_from_git_output(stdout: &[u8]) -> Option<GitHubRemote> {
+    github_remote_from_git_output_with(stdout, &crate::gh::GithubHostPolicy::LegacyNameRule)
 }
 
 /// Removes exactly one trailing `\n`. Nothing else, and in particular not a
@@ -2304,7 +2318,31 @@ const PERCENT_MOVES_THE_BOUNDARY: [&str; 4] = ["ssh", "git+ssh", "ssh+git", "git
 /// see `github_host`.
 const SSH_TRANSPORT_SCHEMES: [&str; 3] = ["ssh", "git+ssh", "ssh+git"];
 
+/// [`parse_github_remote_with`] under the rule this function used to hardcode
+/// (`github.com` or `github.*`).
+///
+/// It exists for the grammar tests below. WHICH SPELLINGS PARSE and WHICH HOSTS
+/// QUALIFY are two separate questions, and only the second one moved: pinning
+/// the tests to the legacy policy keeps every one of them meaning exactly what
+/// it meant when it was written, so this change cannot quietly widen or narrow
+/// the address grammar under them.
+#[cfg(test)]
 fn parse_github_remote(url: &str) -> Option<GitHubRemote> {
+    parse_github_remote_with(url, &crate::gh::GithubHostPolicy::LegacyNameRule)
+}
+
+/// Parse a git remote address into the GitHub host and `owner/repo` it names,
+/// with `policy` deciding which hosts count as GitHub.
+///
+/// The policy is a PARAMETER rather than a rule baked in here, because the two
+/// questions this function used to answer at once are separate: the grammar
+/// below decides what is an address at all and what repository it names, and
+/// `policy` decides whether dux may hand that host to `gh`. Enterprise support
+/// moved the second one; the first is untouched.
+fn parse_github_remote_with(
+    url: &str,
+    policy: &crate::gh::GithubHostPolicy,
+) -> Option<GitHubRemote> {
     // The input is consumed EXACTLY, with no trimming of any kind. Trimming
     // used to happen here and then again inside the literal check, which
     // MANUFACTURED matches out of values that are not GitHub remotes:
@@ -2330,7 +2368,7 @@ fn parse_github_remote(url: &str) -> Option<GitHubRemote> {
         // The scp-like spelling is ssh by definition, so GitHub's documented
         // port-443 ssh host is legitimate here.
         let written_host = strip_remote_userinfo(authority).to_ascii_lowercase();
-        let host = github_host(&written_host, true)?;
+        let host = github_host(&written_host, true, policy)?;
         // Git hands an scp-like path to ssh verbatim, so it is NOT
         // percent-decoded.
         return owner_repo_from_path(strip_boundary_slashes(path))
@@ -2419,7 +2457,11 @@ fn parse_github_remote(url: &str) -> Option<GitHubRemote> {
         // leaves the host's case alone, so lowercase it explicitly: hostnames
         // are case-insensitive and this value is handed to `gh`.
         let written_host = parsed.host_str()?.to_ascii_lowercase();
-        let host = github_host(&written_host, SSH_TRANSPORT_SCHEMES.contains(&raw_scheme))?;
+        let host = github_host(
+            &written_host,
+            SSH_TRANSPORT_SCHEMES.contains(&raw_scheme),
+            policy,
+        )?;
         // An ssh or git port is the transport service's port and has nothing to
         // do with the host's API, so dropping it is right. An http(s) port is part
         // of the server endpoint, and `gh` cannot express one: it refuses a
@@ -2715,14 +2757,26 @@ const GITHUB_SSH_ALT_HOST: &str = "ssh.github.com";
 /// endpoint and inventing one would be guessing at an address on somebody
 /// else's network. And it applies only over ssh, the transport it is documented
 /// for: `https://ssh.github.com/...` is not an endpoint GitHub offers.
-fn github_host(host: &str, ssh_transport: bool) -> Option<String> {
-    if ssh_transport && host == GITHUB_SSH_ALT_HOST {
-        return Some("github.com".to_string());
-    }
-    if host == "github.com" || host.starts_with("github.") {
-        return Some(host.to_string());
-    }
-    None
+fn github_host(
+    host: &str,
+    ssh_transport: bool,
+    policy: &crate::gh::GithubHostPolicy,
+) -> Option<String> {
+    // The normalisation happens FIRST and unconditionally, because it answers
+    // "which host is this really", not "may dux use it". `gh` has never heard of
+    // `ssh.github.com`, so the name that has to be checked against the policy,
+    // and handed onwards, is `github.com`.
+    let host = if ssh_transport && host == GITHUB_SSH_ALT_HOST {
+        "github.com"
+    } else {
+        host
+    };
+    // The qualification itself is the policy's, not a name rule of this
+    // function's own. `GithubHostPolicy::LegacyNameRule` still spells the old
+    // `github.com` / `github.*` test, so nothing about the grammar changed;
+    // what changed is that a working company server can now qualify and a
+    // `github.`-named host `gh` cannot serve no longer does.
+    policy.allows(host).then(|| host.to_string())
 }
 
 fn sync_entry(source: &Path, destination: &Path) -> Result<()> {

@@ -2081,7 +2081,7 @@ impl Engine {
                     crate::gh::GhProbe::NotInstalled => {
                         // Deny all rather than preserving the last known set:
                         // `gh` is gone, so dux can reach none of those hosts.
-                        self.gh_probe.policy = crate::gh::GithubHostPolicy::DenyAll;
+                        self.set_github_host_policy(crate::gh::GithubHostPolicy::DenyAll);
                         GhStatus::NotInstalled
                     }
                     crate::gh::GhProbe::Transient(reason) => {
@@ -2101,7 +2101,7 @@ impl Engine {
                         }
                     }
                     crate::gh::GhProbe::Decided { available, policy } => {
-                        self.gh_probe.policy = policy;
+                        self.set_github_host_policy(policy);
                         if available {
                             GhStatus::Available
                         } else {
@@ -2113,7 +2113,7 @@ impl Engine {
                 if matches!(status, GhStatus::Available) && self.github_integration_enabled {
                     logger::info(&format!(
                         "[gh-integration] gh CLI is available; host policy: {:?}",
-                        self.gh_probe.policy,
+                        self.github_host_policy(),
                     ));
                     // This completion is the ONE place pull-request work is
                     // armed. Every off-to-on site launches the probe and stops

@@ -6506,7 +6506,21 @@ leading_branch = "main"
             <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
         )
         .expect("chmod stand-in gh");
-        script.into()
+        // Exec it once here: a freshly written executable can be refused with
+        // ETXTBSY ("Text file busy") when another test forks while this write's
+        // file descriptor is open and inherits it. Observed as a real flake in
+        // dux-core's equivalent helper. This body has no side effects, so no
+        // warmup argument is needed.
+        for _ in 0..200 {
+            match std::process::Command::new(&script).status() {
+                Ok(_) => return script.into(),
+                Err(err) if err.raw_os_error() == Some(26) => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(err) => panic!("stand-in gh is not runnable: {err}"),
+            }
+        }
+        panic!("stand-in gh stayed busy for a second; something is holding it open");
     }
 
     /// The palette toggle is one of the four off-to-on transitions that must

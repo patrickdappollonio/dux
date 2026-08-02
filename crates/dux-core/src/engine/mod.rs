@@ -70,13 +70,20 @@ use crate::worker::{
 /// It lives on the engine and is passed EXPLICITLY to the things that need it,
 /// rather than being a process-global any code can reach into, which is how the
 /// name-based heuristic it replaces ended up duplicated.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct GhProbeState {
     /// Which hosts dux may name when it calls `gh`. Starts denying everything:
     /// before any probe completes no host qualifies and the GitHub features are
     /// off. Replaced atomically on a decisive result, so it is last-known-good
     /// rather than immutable for the process lifetime.
-    pub policy: crate::gh::GithubHostPolicy,
+    ///
+    /// Shared, because the pull-request poller is long-lived and outlives any
+    /// number of probes: it snapshots this once per cycle so a re-probe reaches
+    /// it, rather than being handed a copy at spawn time that could only ever
+    /// be as good as the answer dux held when the poller started. Read through
+    /// [`Engine::github_host_policy`]; the lock is never held across a `gh`
+    /// call.
+    pub policy: Arc<Mutex<crate::gh::GithubHostPolicy>>,
     /// Monotonic stamp for ordering overlapping probes. Bumped before each
     /// spawn; a result carrying an older stamp is discarded.
     pub generation: u64,
@@ -88,7 +95,7 @@ pub struct GhProbeState {
 impl Default for GhProbeState {
     fn default() -> Self {
         Self {
-            policy: crate::gh::GithubHostPolicy::DenyAll,
+            policy: Arc::new(Mutex::new(crate::gh::GithubHostPolicy::DenyAll)),
             generation: 0,
             program: std::ffi::OsString::from("gh"),
         }
@@ -1904,6 +1911,10 @@ impl Engine {
         }
         let control_for_loop = Arc::clone(&control);
         let backoff = Arc::clone(&self.pr_backoff);
+        // The SHARED policy, not a snapshot: this loop outlives any number of
+        // probes, so it must see a re-probe's answer rather than the one dux
+        // held when it started.
+        let policy = Arc::clone(&self.gh_probe.policy);
         let spawned = self.spawn_loop_worker(
             LoopWorkerSpec {
                 label: "pr-sync".into(),
@@ -1938,7 +1949,8 @@ impl Engine {
                 // snapshot (their sessions keep last-known PRs), so no global
                 // pause is needed here.
                 let snapshot = backoff.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                let (results, signals) = crate::gh::run_pr_sync(&sessions, &snapshot);
+                let policy = policy.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                let (results, signals) = crate::gh::run_pr_sync(&sessions, &snapshot, &policy);
                 Self::apply_pr_backoff(&backoff, &signals, tx);
                 if !results.is_empty() && tx.send(WorkerEvent::PrStatusReady(results)).is_err() {
                     // Receiver dropped (shutdown). Release the slot anyway, so a
@@ -2055,6 +2067,30 @@ impl Engine {
         }
     }
 
+    /// A snapshot of which hosts dux may name when it calls `gh`.
+    ///
+    /// Handed EXPLICITLY to each of the three places a host can enter (a
+    /// project's configured address, a pull-request reference the user types,
+    /// and a host remembered from a previous pull request) rather than reached
+    /// for as a process-global, which is how the name-based heuristic it
+    /// replaces ended up duplicated in the first place.
+    pub fn github_host_policy(&self) -> crate::gh::GithubHostPolicy {
+        self.gh_probe
+            .policy
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Replace the host policy. Only the probe's completion handler does this.
+    pub fn set_github_host_policy(&self, policy: crate::gh::GithubHostPolicy) {
+        *self
+            .gh_probe
+            .policy
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = policy;
+    }
+
     /// Stop pull-request background work: clear the arm flag so the live poller
     /// ends its loop on its next slice. Called on an explicit disable and on a
     /// DECISIVE `gh` answer that no host works, so work armed from an older,
@@ -2068,6 +2104,7 @@ impl Engine {
         self.pr_sync.note_refresh();
         let sessions = Arc::clone(&self.pr_sync_sessions);
         let backoff = Arc::clone(&self.pr_backoff);
+        let policy = self.github_host_policy();
         self.spawn_background_worker(
             BackgroundWorkerSpec {
                 label: "initial-pr-refresh".into(),
@@ -2079,7 +2116,7 @@ impl Engine {
             },
             move |tx| {
                 let snapshot = backoff.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                let (results, signals) = crate::gh::run_pr_sync(&sessions, &snapshot);
+                let (results, signals) = crate::gh::run_pr_sync(&sessions, &snapshot, &policy);
                 Self::apply_pr_backoff(&backoff, &signals, &tx);
                 if !results.is_empty() {
                     let _ = tx.send(WorkerEvent::PrStatusReady(results));
@@ -2279,6 +2316,7 @@ impl Engine {
         };
         let label = format!("pr-check:{}", entry.session_id);
         let backoff = Arc::clone(&self.pr_backoff);
+        let policy = self.github_host_policy();
         let abort_sid = entry.session_id.clone();
         self.spawn_background_worker(
             BackgroundWorkerSpec {
@@ -2293,7 +2331,7 @@ impl Engine {
             },
             move |tx| {
                 let snapshot = backoff.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                let (result, signals) = crate::gh::check_pr_for_entry(&entry, &snapshot);
+                let (result, signals) = crate::gh::check_pr_for_entry(&entry, &snapshot, &policy);
                 // Event-driven checks feed the shared backoff too, so a sustained
                 // failure arms the pause (and clears it on recovery) even when the
                 // blind poll is disabled.
@@ -4359,7 +4397,7 @@ mod tests {
     use crate::gh::{GhProbe, GithubHostPolicy};
 
     fn eligible(engine: &Engine) -> GithubHostPolicy {
-        engine.gh_probe.policy.clone()
+        engine.github_host_policy()
     }
 
     fn hosts(names: &[&str]) -> GithubHostPolicy {
@@ -4371,7 +4409,7 @@ mod tests {
         let (mut engine, _tmp) = test_engine();
         engine.github_integration_enabled = true;
         engine.gh_probe.generation = 2;
-        engine.gh_probe.policy = hosts(&["git.company.example"]);
+        engine.set_github_host_policy(hosts(&["git.company.example"]));
         engine.gh_status = GhStatus::Available;
 
         // An older probe finishing late, with a decisive but out-of-date answer.
@@ -4430,7 +4468,7 @@ mod tests {
         let (mut engine, _tmp) = test_engine();
         engine.github_integration_enabled = true;
         engine.gh_status = GhStatus::Available;
-        engine.gh_probe.policy = hosts(&["git.company.example"]);
+        engine.set_github_host_policy(hosts(&["git.company.example"]));
 
         engine.process_worker_event(WorkerEvent::GhStatusChecked {
             generation: engine.gh_probe.generation,
@@ -4446,7 +4484,7 @@ mod tests {
         let (mut engine, _tmp) = test_engine();
         engine.github_integration_enabled = true;
         engine.gh_status = GhStatus::Available;
-        engine.gh_probe.policy = hosts(&["git.company.example"]);
+        engine.set_github_host_policy(hosts(&["git.company.example"]));
 
         engine.process_worker_event(WorkerEvent::GhStatusChecked {
             generation: engine.gh_probe.generation,

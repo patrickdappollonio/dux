@@ -2586,6 +2586,7 @@ impl Engine {
         self.pending_web_pr_lookup_ops.insert(op_id.clone(), op);
         let raw_input = pr.to_string();
         let worker_tx = self.worker_tx.clone();
+        let policy = self.github_host_policy();
         std::thread::spawn(move || {
             crate::gh::run_pull_request_lookup_job(
                 project,
@@ -2593,6 +2594,7 @@ impl Engine {
                 custom_name,
                 worker_tx,
                 Some(op_id),
+                policy,
             );
         });
         Ok(pending)

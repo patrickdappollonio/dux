@@ -126,6 +126,18 @@ the working host still counts and the GitHub features stay on. On an older `gh`
 that cannot report its hosts, dux falls back to a single yes-or-no authentication
 check, which is stricter: any host in trouble turns the features off.
 
+**GitHub Enterprise works, on any hostname `gh` is logged in to.** A company
+server at `git.company.example` is treated exactly like `github.com` once
+`gh auth login --hostname git.company.example` succeeds. That covers both the PR
+banner and this from-PR path, and it covers a project's `origin` remote and a PR
+URL you paste alike. dux does not judge a host by its name: it counts when the
+account `gh` would actually use for it reports success, and it stops counting the
+moment that login breaks, whatever the host is called. A `github.`-prefixed
+hostname `gh` cannot serve does not qualify either. The exception is an older
+`gh` that cannot report its hosts, where dux falls back to recognising
+`github.com` and `github.*` only; if your enterprise host is spelled anything
+else, upgrade `gh`.
+
 When you trigger it, dux resolves the PR you paste or type, then asks you to
 confirm or edit the branch name, pre-filled with the PR's head branch name. In the
 terminal UI that is a second prompt after the PR reference; in the browser the PR
