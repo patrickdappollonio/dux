@@ -245,11 +245,8 @@ fn run_entries(
 /// The remote resolver production uses: the real one, reading the worktree's
 /// `origin` through git, with the user's own configuration applied. That is
 /// correct here, because the rewritten URL is the one git would really contact.
-fn live_remote_resolver(
-    worktree_path: &Path,
-    policy: &GithubHostPolicy,
-) -> Option<git::GitHubRemote> {
-    git::remote_github_repo(worktree_path, policy)
+fn live_remote_resolver(worktree_path: &Path, policy: &GithubHostPolicy) -> git::RemoteResolution {
+    git::resolve_remote_github_repo(worktree_path, policy)
 }
 
 /// The planning half of [`run_entries`], split out so it can be exercised on
@@ -271,7 +268,7 @@ fn live_remote_resolver(
 /// failed, so neither was testing the remote spelling it named.
 fn plan_entries(
     entries: &[PrSyncEntry],
-    resolve_remote: &dyn Fn(&Path) -> Option<git::GitHubRemote>,
+    resolve_remote: &dyn Fn(&Path) -> git::RemoteResolution,
     policy: &GithubHostPolicy,
 ) -> (Vec<(String, Option<PrInfo>)>, Vec<Planned>) {
     let mut results: Vec<(String, Option<PrInfo>)> = Vec::new();
@@ -280,14 +277,30 @@ fn plan_entries(
     for entry in entries {
         // Resolve (host, owner_repo): live remote first, else the known PR's repo
         // (works even after the branch/remote is gone).
-        let remote = resolve_remote(Path::new(&entry.worktree_path));
-        let (host, owner_repo) = if let Some(remote) = remote {
-            (remote.host, remote.owner_repo)
-        } else if let Some(known) = &entry.known_pr {
-            (known.host.clone(), known.owner_repo.clone())
-        } else {
-            results.push((entry.session_id.clone(), None));
-            continue;
+        //
+        // The live resolution has THREE outcomes and each wants its own
+        // handling. Only an UNRESOLVED address may fall back to a remembered
+        // host: nothing is known about where this agent pushes, so the last
+        // pull request is the best information there is. A DENIED address is
+        // the opposite case, and it used to be indistinguishable from the
+        // first: dux knows exactly where this agent pushes and knows it may not
+        // ask about it, so falling back sent the query to the stored host, a
+        // host this agent's address does not name. The gate below cannot catch
+        // that, because by then the live address is gone.
+        let (host, owner_repo) = match resolve_remote(Path::new(&entry.worktree_path)) {
+            git::RemoteResolution::Allowed(remote) => (remote.host, remote.owner_repo),
+            git::RemoteResolution::Denied => {
+                let pr = entry.known_pr.as_ref().and_then(reconstruct_from_stored);
+                results.push((entry.session_id.clone(), pr));
+                continue;
+            }
+            git::RemoteResolution::Unresolved => match &entry.known_pr {
+                Some(known) => (known.host.clone(), known.owner_repo.clone()),
+                None => {
+                    results.push((entry.session_id.clone(), None));
+                    continue;
+                }
+            },
         };
 
         // Hostnames are case-insensitive and this value becomes a `gh`
@@ -2817,7 +2830,7 @@ mod tests {
         let (results, planned) = plan_entries(
             std::slice::from_ref(&entry),
             &|_| {
-                Some(git::GitHubRemote {
+                git::RemoteResolution::Allowed(git::GitHubRemote {
                     host: "github.com".to_string(),
                     owner_repo: "octocat/Hello-World".to_string(),
                 })
@@ -2851,13 +2864,81 @@ mod tests {
     fn plan_entries_records_nothing_for_an_unresolvable_remote_with_no_known_pr() {
         let entry = planning_entry();
 
-        let (results, planned) =
-            plan_entries(std::slice::from_ref(&entry), &|_| None, &legacy_policy());
+        let (results, planned) = plan_entries(
+            std::slice::from_ref(&entry),
+            &|_| git::RemoteResolution::Unresolved,
+            &legacy_policy(),
+        );
 
         assert!(planned.is_empty(), "a non-GitHub remote is never queried");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, "s0");
         assert!(results[0].1.is_none());
+    }
+
+    /// A live address dux may not ask about is not the same thing as no live
+    /// address, and only the second may fall back to a remembered host.
+    ///
+    /// The agent's own remote is readable and names `git.company.example`,
+    /// which the policy does not allow. Its last known pull request is on
+    /// github.com, which the policy DOES allow. Collapsing the denied address
+    /// into "nothing resolved" made planning fall back to that stored host and
+    /// query github.com about an agent whose remote is somewhere else entirely.
+    /// The gate after the selection cannot catch it, because by then the live
+    /// address is gone.
+    ///
+    /// The address is classified by the real code rather than asserted about in
+    /// the abstract, so the test cannot pass on a hand-made verdict.
+    #[test]
+    fn a_readable_address_on_a_denied_host_never_falls_back_to_a_stored_one() {
+        let entry = PrSyncEntry {
+            known_pr: Some(StoredPr {
+                session_id: "s0".to_string(),
+                pr_number: 7,
+                host: "github.com".to_string(),
+                owner_repo: "octocat/Hello-World".to_string(),
+                state: "OPEN".to_string(),
+                title: "Hello".to_string(),
+                url: "https://github.com/octocat/Hello-World/pull/7".to_string(),
+            }),
+            ..planning_entry()
+        };
+        // `gh` serves github.com and nothing else.
+        let policy = GithubHostPolicy::Hosts(["github.com".to_string()].into_iter().collect());
+
+        // The address really is READABLE and really is denied, so what the
+        // planning does below is not the unreadable case under another name.
+        assert_eq!(
+            git::resolve_remote_from_git_output(
+                b"git@git.company.example:acme/widget.git\n",
+                &policy,
+            ),
+            git::RemoteResolution::Denied,
+        );
+
+        let (results, planned) = plan_entries(
+            std::slice::from_ref(&entry),
+            &|_| {
+                git::resolve_remote_from_git_output(
+                    b"git@git.company.example:acme/widget.git\n",
+                    &policy,
+                )
+            },
+            &policy,
+        );
+
+        assert!(
+            planned.is_empty(),
+            "a denied live address must produce no gh call, {} were planned to {:?}",
+            planned.len(),
+            planned.iter().map(|p| p.host.clone()).collect::<Vec<_>>(),
+        );
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].1.as_ref().map(|pr| pr.number),
+            Some(7),
+            "the agent keeps the pull request it last knew about",
+        );
     }
 
     /// The THIRD place a host can enter, and the one that is easy to miss: a
@@ -2886,7 +2967,11 @@ mod tests {
         // qualify. It once might have, or it may predate the policy entirely.
         let policy = GithubHostPolicy::Hosts(["github.com".to_string()].into_iter().collect());
 
-        let (results, planned) = plan_entries(std::slice::from_ref(&entry), &|_| None, &policy);
+        let (results, planned) = plan_entries(
+            std::slice::from_ref(&entry),
+            &|_| git::RemoteResolution::Unresolved,
+            &policy,
+        );
 
         assert!(
             planned.is_empty(),
@@ -2904,7 +2989,11 @@ mod tests {
         // normally, so the gate is the policy and not the fallback itself.
         let serving =
             GithubHostPolicy::Hosts(["git.company.example".to_string()].into_iter().collect());
-        let (_, planned) = plan_entries(std::slice::from_ref(&entry), &|_| None, &serving);
+        let (_, planned) = plan_entries(
+            std::slice::from_ref(&entry),
+            &|_| git::RemoteResolution::Unresolved,
+            &serving,
+        );
         assert_eq!(planned.len(), 1);
         assert_eq!(planned[0].host, "git.company.example");
     }
@@ -2929,7 +3018,11 @@ mod tests {
         };
 
         // No remote at all, so planning must fall back to the stored PR.
-        let (_, planned) = plan_entries(std::slice::from_ref(&entry), &|_| None, &legacy_policy());
+        let (_, planned) = plan_entries(
+            std::slice::from_ref(&entry),
+            &|_| git::RemoteResolution::Unresolved,
+            &legacy_policy(),
+        );
 
         assert_eq!(planned.len(), 1);
         assert_eq!(planned[0].host, "github.com");

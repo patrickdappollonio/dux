@@ -2200,13 +2200,57 @@ pub struct GitHubRemote {
     pub owner_repo: String,
 }
 
+/// What reading a worktree's `origin` concluded. THREE outcomes, not two,
+/// because a caller that can only see "resolved" and "nothing" cannot tell an
+/// address it may not ask about from an address it could not read, and those
+/// two want opposite handling.
+///
+/// The distinction is load-bearing in the PR poller: an unresolved address may
+/// fall back to the host remembered with the agent's last known pull request,
+/// because nothing is known about where this agent pushes. A DENIED one may
+/// not. Collapsing them sent dux to the remembered host, which is a host this
+/// agent's address does not name, and the eligibility gate after the choice
+/// could not recover because the live address was already gone by then.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RemoteResolution {
+    /// git could not read an `origin`, or what it read is not an address dux
+    /// can parse into a host and an `owner/repo`.
+    Unresolved,
+    /// A readable address whose host the policy does not allow. dux knows where
+    /// this agent pushes and knows it may not ask about it, so the answer is to
+    /// ask nothing rather than to ask elsewhere.
+    Denied,
+    /// A readable address on a host dux may name when it calls `gh`.
+    Allowed(GitHubRemote),
+}
+
+impl RemoteResolution {
+    /// The allowed remote, for callers whose only question is whether they have
+    /// one they may use.
+    pub fn allowed(self) -> Option<GitHubRemote> {
+        match self {
+            Self::Allowed(remote) => Some(remote),
+            Self::Unresolved | Self::Denied => None,
+        }
+    }
+}
+
 /// Returns the GitHub host and `"owner/repo"` parsed from the `origin` remote
 /// URL, or `None` if the remote doesn't point to GitHub or the command fails.
 pub fn remote_github_repo(
     worktree_path: &Path,
     policy: &crate::gh::GithubHostPolicy,
 ) -> Option<GitHubRemote> {
-    let output = Command::new("git")
+    resolve_remote_github_repo(worktree_path, policy).allowed()
+}
+
+/// [`remote_github_repo`] keeping the reason it has no answer. See
+/// [`RemoteResolution`].
+pub fn resolve_remote_github_repo(
+    worktree_path: &Path,
+    policy: &crate::gh::GithubHostPolicy,
+) -> RemoteResolution {
+    let Ok(output) = Command::new("git")
         .args([
             "-C",
             worktree_path.to_string_lossy().as_ref(),
@@ -2215,11 +2259,38 @@ pub fn remote_github_repo(
             "origin",
         ])
         .output()
-        .ok()?;
+    else {
+        return RemoteResolution::Unresolved;
+    };
     if !output.status.success() {
-        return None;
+        return RemoteResolution::Unresolved;
     }
-    github_remote_from_git_output_with(&output.stdout, policy)
+    resolve_remote_from_git_output(&output.stdout, policy)
+}
+
+/// The parse half of [`resolve_remote_github_repo`], keeping the reason.
+pub(crate) fn resolve_remote_from_git_output(
+    stdout: &[u8],
+    policy: &crate::gh::GithubHostPolicy,
+) -> RemoteResolution {
+    let Ok(text) = std::str::from_utf8(stdout) else {
+        return RemoteResolution::Unresolved;
+    };
+    classify_github_remote(strip_git_record_terminator(text), policy)
+}
+
+/// Split the two questions the parser used to answer at once: WHAT ADDRESS is
+/// this (the grammar, which does not consult the policy), and MAY DUX ASK about
+/// it (the policy, and nothing else).
+pub(crate) fn classify_github_remote(
+    url: &str,
+    policy: &crate::gh::GithubHostPolicy,
+) -> RemoteResolution {
+    match parse_remote_address(url) {
+        None => RemoteResolution::Unresolved,
+        Some(remote) if policy.allows(&remote.host) => RemoteResolution::Allowed(remote),
+        Some(_) => RemoteResolution::Denied,
+    }
 }
 
 /// The parse half of [`remote_github_repo`]: git's raw stdout for
@@ -2235,12 +2306,12 @@ pub fn remote_github_repo(
 /// neither a control character nor whitespace, so a replacement character used
 /// to survive every later check and travel into a `gh --repo` argument as part
 /// of a name nobody wrote.
+#[cfg(test)]
 pub(crate) fn github_remote_from_git_output_with(
     stdout: &[u8],
     policy: &crate::gh::GithubHostPolicy,
 ) -> Option<GitHubRemote> {
-    let text = std::str::from_utf8(stdout).ok()?;
-    parse_github_remote_with(strip_git_record_terminator(text), policy)
+    resolve_remote_from_git_output(stdout, policy).allowed()
 }
 
 /// [`github_remote_from_git_output_with`] under the legacy name rule, for the
@@ -2331,18 +2402,24 @@ fn parse_github_remote(url: &str) -> Option<GitHubRemote> {
     parse_github_remote_with(url, &crate::gh::GithubHostPolicy::LegacyNameRule)
 }
 
-/// Parse a git remote address into the GitHub host and `owner/repo` it names,
-/// with `policy` deciding which hosts count as GitHub.
-///
-/// The policy is a PARAMETER rather than a rule baked in here, because the two
-/// questions this function used to answer at once are separate: the grammar
-/// below decides what is an address at all and what repository it names, and
-/// `policy` decides whether dux may hand that host to `gh`. Enterprise support
-/// moved the second one; the first is untouched.
+/// [`parse_remote_address`] with the policy applied, discarding the reason.
+#[cfg(test)]
 fn parse_github_remote_with(
     url: &str,
     policy: &crate::gh::GithubHostPolicy,
 ) -> Option<GitHubRemote> {
+    classify_github_remote(url, policy).allowed()
+}
+
+/// Parse a git remote address into the host and `owner/repo` it names.
+///
+/// This is the GRAMMAR and only the grammar: what is an address at all, and
+/// what repository it names. Whether dux may hand the host to `gh` is a
+/// separate question, asked once by [`classify_github_remote`], because a
+/// caller has to be able to tell "this is not an address" from "this is an
+/// address on a host that is not allowed". Folding the policy in here made the
+/// two indistinguishable.
+fn parse_remote_address(url: &str) -> Option<GitHubRemote> {
     // The input is consumed EXACTLY, with no trimming of any kind. Trimming
     // used to happen here and then again inside the literal check, which
     // MANUFACTURED matches out of values that are not GitHub remotes:
@@ -2368,7 +2445,7 @@ fn parse_github_remote_with(
         // The scp-like spelling is ssh by definition, so GitHub's documented
         // port-443 ssh host is legitimate here.
         let written_host = strip_remote_userinfo(authority).to_ascii_lowercase();
-        let host = github_host(&written_host, true, policy)?;
+        let host = remote_api_host(&written_host, true);
         // Git hands an scp-like path to ssh verbatim, so it is NOT
         // percent-decoded.
         return owner_repo_from_path(strip_boundary_slashes(path))
@@ -2457,11 +2534,7 @@ fn parse_github_remote_with(
         // leaves the host's case alone, so lowercase it explicitly: hostnames
         // are case-insensitive and this value is handed to `gh`.
         let written_host = parsed.host_str()?.to_ascii_lowercase();
-        let host = github_host(
-            &written_host,
-            SSH_TRANSPORT_SCHEMES.contains(&raw_scheme),
-            policy,
-        )?;
+        let host = remote_api_host(&written_host, SSH_TRANSPORT_SCHEMES.contains(&raw_scheme));
         // An ssh or git port is the transport service's port and has nothing to
         // do with the host's API, so dropping it is right. An http(s) port is part
         // of the server endpoint, and `gh` cannot express one: it refuses a
@@ -2736,18 +2809,23 @@ fn owner_repo_from_path(path: &str) -> Option<String> {
 /// reached over a different port.
 const GITHUB_SSH_ALT_HOST: &str = "ssh.github.com";
 
-/// The GitHub host a remote names, or `None` if the remote is not GitHub's.
+/// The host to ASK ABOUT for a remote, which is not always the host written in
+/// the remote.
 ///
 /// `ssh_transport` says whether git would run this address over ssh, which
 /// matters for exactly one hostname and is passed rather than inferred so the
 /// two call sites have to state it.
 ///
-/// The answer is the host to ASK ABOUT, which is not always the host written in
-/// the remote. `ssh.github.com` is normalised to `github.com`, because this
-/// value is handed to the `gh` command line as the host to query and `gh` knows
-/// `github.com` as an API host; it has no idea what `ssh.github.com` is.
-/// Returning the name as written would turn one silent refusal into a failing
-/// lookup, which is not an improvement.
+/// `ssh.github.com` is normalised to `github.com`, because this value is handed
+/// to the `gh` command line as the host to query and `gh` knows `github.com` as
+/// an API host; it has no idea what `ssh.github.com` is. Returning the name as
+/// written would turn one silent refusal into a failing lookup, which is not an
+/// improvement.
+///
+/// This function answers "which host is this really" and nothing else. Whether
+/// dux may hand that host to `gh` is the policy's answer, asked once, by
+/// [`classify_github_remote`]; it used to be asked here too, which is what made
+/// a denied host indistinguishable from an unparseable address.
 ///
 /// That normalisation is deliberately the ONLY widening here. It is not a
 /// general "any `ssh.` prefix" rule: it is one hostname GitHub documents, and
@@ -2757,26 +2835,14 @@ const GITHUB_SSH_ALT_HOST: &str = "ssh.github.com";
 /// endpoint and inventing one would be guessing at an address on somebody
 /// else's network. And it applies only over ssh, the transport it is documented
 /// for: `https://ssh.github.com/...` is not an endpoint GitHub offers.
-fn github_host(
-    host: &str,
-    ssh_transport: bool,
-    policy: &crate::gh::GithubHostPolicy,
-) -> Option<String> {
-    // The normalisation happens FIRST and unconditionally, because it answers
-    // "which host is this really", not "may dux use it". `gh` has never heard of
-    // `ssh.github.com`, so the name that has to be checked against the policy,
-    // and handed onwards, is `github.com`.
-    let host = if ssh_transport && host == GITHUB_SSH_ALT_HOST {
-        "github.com"
+fn remote_api_host(host: &str, ssh_transport: bool) -> String {
+    // `gh` has never heard of `ssh.github.com`, so the name that has to be
+    // checked against the policy, and handed onwards, is `github.com`.
+    if ssh_transport && host == GITHUB_SSH_ALT_HOST {
+        "github.com".to_string()
     } else {
-        host
-    };
-    // The qualification itself is the policy's, not a name rule of this
-    // function's own. `GithubHostPolicy::LegacyNameRule` still spells the old
-    // `github.com` / `github.*` test, so nothing about the grammar changed;
-    // what changed is that a working company server can now qualify and a
-    // `github.`-named host `gh` cannot serve no longer does.
-    policy.allows(host).then(|| host.to_string())
+        host.to_string()
+    }
 }
 
 fn sync_entry(source: &Path, destination: &Path) -> Result<()> {
