@@ -10270,12 +10270,18 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["term-2"],
         );
-        assert!(
-            app.mouse_layout
-                .terminal_row_to_item
-                .iter()
-                .all(|item| *item == 0),
-            "a click can only land on the one visible row; got {:?}",
+        // The click map, pinned by LENGTH and by CONTENTS. `.iter().all(…)` is
+        // what this used to say, and an empty map satisfies it, so the check
+        // passed whether or not the one surviving terminal was clickable at all.
+        // A terminal row is exactly three lines tall (two content lines and the
+        // spacer, see `framed_row_item`), and there is exactly one row left, so
+        // the map is three entries and every one of them names item 0. That
+        // fails when the map is empty AND when it names a different row.
+        assert_eq!(
+            app.mouse_layout.terminal_row_to_item,
+            vec![0, 0, 0],
+            "the one visible row is three lines tall and every one of them must \
+             click through to it; got {:?}",
             app.mouse_layout.terminal_row_to_item
         );
     }
