@@ -15,9 +15,28 @@
 //! `terminals` array on the owner. Moving terminals to a flat collection was a
 //! change to what the BROWSER receives; it is deliberately NOT a change here, so
 //! those reads re-nest each owner's terminals ([`SessionWithTerminals`],
-//! [`ProjectWithTerminals`]) and nothing reading them loses information. The
-//! nested entries additionally carry the terminal's own `owner` tag, which is
-//! purely additive.
+//! [`ProjectWithTerminals`]) and nothing reading them loses information.
+//!
+//! ## The one shape change, stated plainly
+//!
+//! A nested terminal entry now carries an `owner` field it did not carry before,
+//! a tagged `{"kind":"session","session_id":…}` or
+//! `{"kind":"project","project_id":…}`. That is ADDITIVE and it is kept: adding a
+//! field is the ordinary way an API grows, a consumer that breaks on an unknown
+//! field is already fragile, and the tag says out loud what the nesting only
+//! implied. It is NOT hidden behind a parallel stripped-down type.
+//!
+//! What it is not allowed to be is a surprise. `thin_reads_pin_the_exact_terminal_key_set`
+//! and `session_create_and_its_replay_pin_the_same_terminal_key_set`
+//! (`tests/ws_transport.rs`) assert the EXACT key set of a terminal entry on
+//! every response that serves one: these three reads plus the session-create 201
+//! and its idempotent 200 replay. Add or remove a field on a terminal and those
+//! fail, which is the point: the previous tests checked only ids and lengths, so
+//! `owner` appearing was invisible to the suite.
+//!
+//! The same nested shape is served by `POST /api/v1/sessions` and its idempotent
+//! replay (see `session_actions.rs`), which reuse [`SessionWithTerminals`]
+//! directly so a create and a later GET of that session agree field for field.
 //!
 //! Status codes:
 //! - 200 with the JSON body.

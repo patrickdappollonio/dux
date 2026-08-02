@@ -1403,3 +1403,205 @@ async fn build_identity_is_stable_within_one_server_run_and_is_never_cached() {
     assert!(!first["process"].as_str().unwrap().is_empty());
     assert!(!first["version"].as_str().unwrap().is_empty());
 }
+
+/// The exact key set of a terminal entry on the documented thin reads, and of
+/// the session object it hangs off.
+///
+/// `TerminalView` grew an `owner` tag when terminals moved to one flat
+/// collection, so these responses changed. Adding a field is additive and is the
+/// normal way an API grows, and `owner` earns its place because it says what the
+/// terminal belongs to, which the nesting used to say implicitly. What was
+/// actually wrong is that nothing here could have NOTICED: every assertion in
+/// this file checked ids and lengths, so a field appearing or disappearing on a
+/// documented endpoint was invisible until somebody's script broke.
+///
+/// So these are characterisation tests. They are not a claim that the shape must
+/// never change; they are the thing that makes a change to it a decision, taken
+/// in a diff, rather than a surprise.
+const TERMINAL_KEYS: &[&str] = &[
+    "created_at",
+    "foreground_cmd",
+    "has_output",
+    "id",
+    "label",
+    "owner",
+    "sort_order",
+    "typing",
+    "updated_at",
+    "working",
+];
+
+/// Sorted key set of a JSON object, for comparison against the pins above.
+fn keys_of(value: &serde_json::Value) -> Vec<String> {
+    let mut keys: Vec<String> = value
+        .as_object()
+        .unwrap_or_else(|| panic!("expected a JSON object, got {value}"))
+        .keys()
+        .cloned()
+        .collect();
+    keys.sort();
+    keys
+}
+
+/// Assert `value` is a terminal entry with exactly the pinned key set.
+fn assert_terminal_shape(value: &serde_json::Value, where_: &str) {
+    assert_eq!(
+        keys_of(value),
+        TERMINAL_KEYS,
+        "the terminal entry on {where_} does not carry the documented key set"
+    );
+    // The owner tag itself is part of the documented shape: an internally tagged
+    // enum whose payload key names the owner kind.
+    let owner_keys = keys_of(&value["owner"]);
+    assert!(
+        owner_keys == vec!["kind", "session_id"] || owner_keys == vec!["kind", "project_id"],
+        "the owner tag on {where_} must be {{kind, session_id}} or {{kind, project_id}}, got {owner_keys:?}"
+    );
+}
+
+/// `GET /api/v1/sessions/:id`, `GET /api/v1/sessions` and `GET /api/v1/projects`
+/// all nest terminals, and all three serve the same terminal entry shape.
+#[tokio::test]
+async fn thin_reads_pin_the_exact_terminal_key_set() {
+    let (addr, _tmp) = boot().await;
+    let client = reqwest::Client::new();
+    let session_tid = create_terminal_via_rest(addr, "s1").await;
+    let project_tid = create_project_terminal_via_rest(addr, "p1").await;
+
+    let one: serde_json::Value = client
+        .get(format!("http://{addr}/api/v1/sessions/s1"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let entry = &one["terminals"][0];
+    assert_eq!(entry["id"].as_str(), Some(session_tid.as_str()));
+    assert_terminal_shape(entry, "GET /api/v1/sessions/:id");
+    assert_eq!(entry["owner"]["kind"].as_str(), Some("session"));
+    assert_eq!(entry["owner"]["session_id"].as_str(), Some("s1"));
+
+    let sessions: serde_json::Value = client
+        .get(format!("http://{addr}/api/v1/sessions"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let s1 = sessions
+        .as_array()
+        .and_then(|arr| arr.iter().find(|s| s["id"].as_str() == Some("s1")))
+        .expect("s1 in the sessions list");
+    assert_terminal_shape(&s1["terminals"][0], "GET /api/v1/sessions");
+
+    let projects: serde_json::Value = client
+        .get(format!("http://{addr}/api/v1/projects"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let p1 = projects
+        .as_array()
+        .and_then(|arr| arr.iter().find(|p| p["id"].as_str() == Some("p1")))
+        .expect("p1 in the projects list");
+    let project_entry = &p1["terminals"][0];
+    assert_eq!(project_entry["id"].as_str(), Some(project_tid.as_str()));
+    assert_terminal_shape(project_entry, "GET /api/v1/projects");
+    assert_eq!(project_entry["owner"]["kind"].as_str(), Some("project"));
+    assert_eq!(project_entry["owner"]["project_id"].as_str(), Some("p1"));
+
+    // The per-session read and the list must serve the SAME object for the same
+    // terminal: they are two ways of asking one question, and a shape that drifts
+    // between them is the bug this pins.
+    assert_eq!(
+        one["terminals"][0], s1["terminals"][0],
+        "the per-session read and the sessions list must agree field for field"
+    );
+    // And the session object around it keeps its own key set, with `terminals`
+    // present rather than merged away by the `flatten`.
+    let session_keys = keys_of(&one);
+    assert!(
+        session_keys.contains(&"terminals".to_string()),
+        "the nested terminals array must survive: {session_keys:?}"
+    );
+    assert!(session_keys.contains(&"id".to_string()));
+    assert!(session_keys.contains(&"project_id".to_string()));
+}
+
+/// `POST /api/v1/sessions` and its idempotent replay serve the same nested shape
+/// as the per-session read, terminal entries included.
+///
+/// The replay is taken AFTER the new session has acquired a terminal, which is
+/// the only way to see a terminal entry on that path at all: a session is created
+/// with none, so a replay issued immediately would assert against an empty array
+/// and prove nothing about the entry shape.
+#[tokio::test]
+async fn session_create_and_its_replay_pin_the_same_terminal_key_set() {
+    let (addr, _tmp) = boot_for_create_agent().await;
+    let client = reqwest::Client::new();
+
+    let created = client
+        .post(format!("http://{addr}/api/v1/sessions"))
+        .header("idempotency-key", "shape-1")
+        .json(&serde_json::json!({"kind":"new","project_id":"p1","name":"shape"}))
+        .send()
+        .await
+        .expect("create");
+    assert_eq!(created.status().as_u16(), 201);
+    let created_body: serde_json::Value = created.json().await.unwrap();
+    let session_id = created_body["id"].as_str().expect("created id").to_string();
+    assert_eq!(
+        created_body["terminals"].as_array().map(|a| a.len()),
+        Some(0),
+        "a brand new session carries an empty terminals array, never a missing field"
+    );
+
+    let terminal_id = create_terminal_via_rest(addr, &session_id).await;
+
+    let replay = client
+        .post(format!("http://{addr}/api/v1/sessions"))
+        .header("idempotency-key", "shape-1")
+        .json(&serde_json::json!({"kind":"new","project_id":"p1","name":"shape"}))
+        .send()
+        .await
+        .expect("replay");
+    assert_eq!(
+        replay.status().as_u16(),
+        200,
+        "an idempotent replay returns 200, not a second 201"
+    );
+    let replay_body: serde_json::Value = replay.json().await.unwrap();
+    assert_eq!(replay_body["id"].as_str(), Some(session_id.as_str()));
+    let entry = &replay_body["terminals"][0];
+    assert_eq!(entry["id"].as_str(), Some(terminal_id.as_str()));
+    assert_terminal_shape(entry, "the POST /api/v1/sessions idempotent replay");
+    assert_eq!(entry["owner"]["kind"].as_str(), Some("session"));
+    assert_eq!(
+        entry["owner"]["session_id"].as_str(),
+        Some(session_id.as_str())
+    );
+
+    // A replay and a later GET of the same session agree field for field, which
+    // is the promise the replay path makes in its own comment.
+    let read: serde_json::Value = client
+        .get(format!("http://{addr}/api/v1/sessions/{session_id}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        keys_of(&read),
+        keys_of(&replay_body),
+        "the replay and the per-session read must serve the same session key set"
+    );
+    assert_terminal_shape(
+        &read["terminals"][0],
+        "GET /api/v1/sessions/:id after create",
+    );
+}
