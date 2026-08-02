@@ -2221,6 +2221,14 @@ mod tests {
     fn filtered_palette_filters_by_name() {
         let bindings = default_bindings();
         let results = bindings.filtered_palette("toggle");
+        // A filter that matched nothing would satisfy the "every row matches"
+        // check below, so pin what the query must FIND before checking that it
+        // found nothing else.
+        let names: Vec<&str> = results.iter().filter_map(|b| b.palette_name).collect();
+        assert!(
+            names.contains(&"toggle-sidebar") && names.contains(&"toggle-git-pane"),
+            "the toggle commands must be among the matches: {names:?}"
+        );
         assert!(results.iter().all(|b| {
             b.palette_name.unwrap().contains("toggle")
                 || b.palette_description
