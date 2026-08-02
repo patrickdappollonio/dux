@@ -2,7 +2,7 @@
 //! inside every per-tick `ViewModel` broadcast (Phase 3 of the REST-first
 //! migration).
 //!
-//! - `GET /api/v1/spine` — the whole spine `{ projects, sessions, terminals,
+//! - `GET /api/v1/spine`, the whole spine `{ projects, sessions, terminals,
 //!   sidebar }`. Terminals ride here as ONE flat collection, each tagged with its
 //!   owner; this is the document the browser reads. Invalidated by the coarse
 //!   `projects.changed` / `sessions.changed` events.
