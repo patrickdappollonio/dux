@@ -721,17 +721,39 @@ impl ReferenceResolution {
 /// [`crate::git::resolve_remote_github_repo`] already returns. That is the
 /// correct anchor: it is the address git would really contact.
 ///
-/// A project whose path is missing, whose address git cannot read, or whose
-/// host the policy does not allow is reported as UNINSPECTED rather than
-/// silently dropped. Each of those means "dux cannot tell", which is a
+/// A project dux could not compare against the reference at all is reported as
+/// UNINSPECTED rather than silently dropped, because "dux cannot tell" is a
 /// different answer from "this is not a checkout of that repository", and a
 /// surface that cannot tell them apart states a certainty it does not have.
+/// That covers a missing path and an address git cannot read. It covers a
+/// project on a host the policy denies only when the reference does not settle
+/// the question anyway; see the rule at the top of the body.
 pub fn resolve_reference_projects(
     reference: &TypedReference,
     projects: &[crate::model::Project],
     policy: &crate::gh::GithubHostPolicy,
 ) -> ReferenceResolution {
     let mut resolution = ReferenceResolution::default();
+    // Whether a DENIED project is something dux failed to check, or something
+    // it checked and ruled out.
+    //
+    // A denial means the address read cleanly and its host is not one dux may
+    // ask `gh` about. When the reference names a host dux MAY ask about, a
+    // denied project is on some other host by construction (its host was
+    // refused, this one was not), so the two hosts are known and they differ,
+    // which is a plain non-match. Reporting it as uninspected made dux say it
+    // could not check every project about a project it had just conclusively
+    // ruled out.
+    //
+    // The other two shapes are genuinely uncheckable and stay uninspected.
+    // `owner/repo#123` names no host at all, so every host is a candidate and a
+    // denied one may well be the checkout being looked for. And a reference on
+    // a host dux may not ask about cannot be told apart from a denied project
+    // either, because that project may be on exactly that host.
+    let reference_host_is_askable = reference
+        .host
+        .as_deref()
+        .is_some_and(|host| policy.allows(host));
     if reference.owner_repo.is_none() {
         // A bare number names no repository, so there is nothing to resolve. The
         // caller refuses it with an explanation rather than searching for a
@@ -759,7 +781,11 @@ pub fn resolve_reference_projects(
             crate::git::RemoteResolution::Unresolved => {
                 uninspected(Uninspectable::AddressUnreadable)
             }
-            crate::git::RemoteResolution::Denied => uninspected(Uninspectable::HostNotAllowed),
+            crate::git::RemoteResolution::Denied => {
+                if !reference_host_is_askable {
+                    uninspected(Uninspectable::HostNotAllowed);
+                }
+            }
         }
     }
     resolution
@@ -1514,6 +1540,50 @@ mod resolution_tests {
         assert_eq!(
             resolution.uninspected_summary().as_deref(),
             Some("1 is on a host dux may not ask about")
+        );
+    }
+
+    #[test]
+    fn a_denied_project_on_another_host_than_the_reference_names_is_a_plain_non_match() {
+        // The reference names github.com, which dux may ask about. This project
+        // was refused because it is on gitlab.com, which dux may not. So the
+        // hosts are known and they differ, and that is an ordinary non-match:
+        // dux checked this project perfectly well. Calling it uninspected made
+        // dux say it "could not check every project" about a project it had
+        // just conclusively ruled out.
+        let (_a, mirror) = project_with_origin("mirror", "git@gitlab.com:acme/widget.git");
+        let projects = vec![mirror];
+
+        let reference = parse_typed_reference("https://github.com/acme/widget/pull/5").unwrap();
+        let resolution = resolve(&reference, &projects);
+        assert!(resolution.matches.is_empty());
+        assert_eq!(
+            resolution.uninspected,
+            vec![],
+            "its address read cleanly and its host is not the one written down"
+        );
+        assert!(resolution.is_complete());
+        assert_eq!(resolution.uninspected_summary(), None);
+    }
+
+    #[test]
+    fn a_denied_project_stays_uninspected_when_the_reference_names_that_same_denied_host() {
+        // The mirror image, and the reason the rule is about EVALUATING the
+        // host rather than about the denial itself. Here the reference names a
+        // host dux may not ask about either, so a denied project might be
+        // exactly the checkout being looked for and dux cannot tell.
+        let (_a, mirror) = project_with_origin("mirror", "git@gitlab.com:acme/widget.git");
+        let projects = vec![mirror];
+
+        let reference = parse_typed_reference("https://gitlab.com/acme/widget/pull/5").unwrap();
+        let resolution = resolve(&reference, &projects);
+        assert!(resolution.matches.is_empty());
+        assert_eq!(
+            resolution.uninspected,
+            vec![UninspectedProject {
+                name: "mirror".to_string(),
+                reason: Uninspectable::HostNotAllowed,
+            }]
         );
     }
 
