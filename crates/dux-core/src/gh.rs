@@ -402,13 +402,63 @@ pub enum GhProbe {
     },
 }
 
+/// The shape of `gh auth status --active --json hosts`, typed so that anything
+/// that is not that shape fails to deserialize instead of being read loosely.
+///
+/// Only the three fields the decision needs are named; `gh` sends more (login,
+/// scopes, gitProtocol, tokenSource) and serde ignores them, so a future field
+/// cannot break this.
+#[derive(serde::Deserialize)]
+struct AuthStatusOutput {
+    hosts: std::collections::BTreeMap<String, Vec<AuthStatusAccount>>,
+}
+
+#[derive(serde::Deserialize)]
+struct AuthStatusAccount {
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    active: Option<bool>,
+    #[serde(default)]
+    host: Option<String>,
+}
+
+impl AuthStatusAccount {
+    /// Whether this account makes `host_key` (already trimmed and lowercased) a
+    /// host dux may name when it calls `gh`.
+    fn qualifies(&self, host_key: &str) -> bool {
+        // EXACTLY boolean true. Excluding only an explicit `false` let a
+        // successful entry qualify on a missing, null or string-valued
+        // `active`, and with several accounts on one host it let a broken
+        // active entry ride in on a sibling whose `active` was malformed.
+        // Every call dux makes names a host and never an account, so `gh` uses
+        // that host's ACTIVE account: an entry that does not say, in the one
+        // way the format has of saying it, that it IS that account, tells us
+        // nothing about the call dux is going to make.
+        if self.active != Some(true) {
+            return false;
+        }
+        if self.state.as_deref() != Some("success") {
+            return false;
+        }
+        // The map key is what would be handed to `gh`, so an entry naming a
+        // different host is describing something else and cannot vouch for
+        // this one. An entry that omits its host contradicts nothing, and the
+        // key remains the authority.
+        match &self.host {
+            Some(host) => host.trim().eq_ignore_ascii_case(host_key),
+            None => true,
+        }
+    }
+}
+
 /// Parse the stdout of `gh auth status --active --json hosts` into the set of
 /// hosts whose active account works.
 ///
-/// Returns `None` when the output is not that shape, which is how an older `gh`
-/// that does not know the flag presents itself (it writes a usage error to
-/// stderr and leaves stdout empty). `None` is the ONLY thing that selects the
-/// fallback mode.
+/// Returns `None` when the output is not that shape. That is NOT on its own the
+/// older-`gh` signal any more: see [`decide_gh_probe`], where an unparseable
+/// answer selects the fallback only when `gh`'s own diagnostics say it did not
+/// understand the call.
 ///
 /// Measured against gh 2.95.0, whose output is one entry per account:
 /// `{"hosts":{"github.com":[{"state":"success","active":true,"host":"github.com",…}]}}`.
@@ -416,37 +466,68 @@ pub enum GhProbe {
 /// every host it merely KNOWS, including one whose login has expired, and in
 /// JSON mode it exits zero regardless.
 pub(crate) fn parse_auth_status_hosts(stdout: &str) -> Option<BTreeSet<String>> {
-    let value: serde_json::Value = serde_json::from_str(stdout.trim()).ok()?;
-    let hosts = value.get("hosts")?.as_object()?;
+    let parsed: AuthStatusOutput = serde_json::from_str(stdout.trim()).ok()?;
     let mut eligible = BTreeSet::new();
-    for (host, accounts) in hosts {
-        // A `hosts` map whose values are not account arrays is not the shape we
-        // know how to read, so treat the whole answer as unparseable rather than
-        // silently skipping entries.
-        for account in accounts.as_array()? {
-            // `--active` already narrows gh's output to the account it would
-            // actually use for this host, so in practice there is one entry.
-            // The explicit `active: false` guard is belt and braces for a `gh`
-            // that ever widens it: a host whose active login is broken must not
-            // qualify on the strength of some other working account.
-            let succeeded = account.get("state").and_then(|v| v.as_str()) == Some("success");
-            let inactive = account.get("active").and_then(|v| v.as_bool()) == Some(false);
-            if succeeded && !inactive {
-                eligible.insert(host.to_ascii_lowercase());
-                break;
-            }
+    for (key, accounts) in &parsed.hosts {
+        let key = key.trim().to_ascii_lowercase();
+        if key.is_empty() {
+            continue;
+        }
+        if accounts.iter().any(|account| account.qualifies(&key)) {
+            eligible.insert(key);
         }
     }
     Some(eligible)
 }
 
+/// Whether `gh`'s own diagnostics say it did not UNDERSTAND the call, as opposed
+/// to having tried it and failed.
+///
+/// This is the ONLY thing that selects the permissive older-`gh` fallback. The
+/// strings were measured on gh 2.95.0 here:
+///
+/// ```text
+/// $ gh auth status --nope                    stderr: unknown flag: --nope        exit 1
+/// $ gh auth status --active --json bogus     stderr: Unknown JSON field: "bogus" exit 1
+/// $ gh auth bogus                            stderr: unknown command "bogus" …   exit 1
+/// ```
+///
+/// In each case stdout is EMPTY, which is why "it did not parse" used to look
+/// like a good enough signal on its own. It is not: `gh` exits non-zero in JSON
+/// mode for ordinary fatal errors too, so a modern failure was indistinguishable
+/// from an old CLI and either widened the eligible hosts to the name rule or
+/// replaced the last known good policy on what was really a transient fault.
+///
+/// The first two strings are the ones an older `gh` produces for `--active` and
+/// `--json`. They are literals in cobra (`unknown flag: `, `unknown shorthand
+/// flag: `, `unknown command %q for %q`) and in `gh`'s own export layer
+/// (`Unknown JSON field: `), they have been stable across years of releases, and
+/// they are what every script wrapping `gh` already keys off. That is as stable
+/// as a diagnostic gets without `gh` offering a machine-readable capability
+/// query, which it does not.
+fn diagnostic_says_gh_cannot_do_this(output: &std::process::Output) -> bool {
+    // Both streams are scanned: `gh` writes these to stderr, but a wrapper or a
+    // future build putting one on stdout should still be understood. stdout has
+    // already failed to parse by the time this runs, so nothing is lost.
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout),
+    )
+    .to_ascii_lowercase();
+    text.contains("unknown flag")
+        || text.contains("unknown shorthand flag")
+        || text.contains("unknown command")
+        || text.contains("unknown json field")
+}
+
 /// Decide the probe's outcome from the machine-readable call, running the plain
-/// `gh auth status` fallback ONLY when that output does not parse.
+/// `gh auth status` fallback ONLY when `gh` says it did not understand it.
 pub(crate) fn decide_gh_probe(
     json: GhCallOutcome,
     plain: impl FnOnce() -> GhCallOutcome,
 ) -> GhProbe {
-    let stdout = match json {
+    let output = match json {
         GhCallOutcome::TimedOut => {
             return GhProbe::Transient(format!(
                 "gh auth status --json timed out after {}s",
@@ -456,15 +537,13 @@ pub(crate) fn decide_gh_probe(
         GhCallOutcome::Failed(msg) => {
             return GhProbe::Transient(format!("could not run gh auth status --json: {msg}"));
         }
-        // The exit status is deliberately ignored here. In JSON mode `gh` exits
-        // zero even when a known host is broken, and an older `gh` rejecting the
-        // flag exits non-zero with nothing parseable on stdout, which the parse
-        // below is what actually detects. Only the parse selects the mode.
-        GhCallOutcome::Completed(output) => String::from_utf8_lossy(&output.stdout).into_owned(),
+        GhCallOutcome::Completed(output) => output,
     };
 
-    // Step 1. A parseable answer IS the answer, and nothing is unioned onto it.
-    if let Some(eligible) = parse_auth_status_hosts(&stdout) {
+    // Step 1. A parseable answer IS the answer, whatever the exit status, and
+    // nothing is unioned onto it. The status carries no information here: in
+    // JSON mode `gh` exits zero even when a known host is broken.
+    if let Some(eligible) = parse_auth_status_hosts(&String::from_utf8_lossy(&output.stdout)) {
         return GhProbe::Decided {
             // GitHub is available when at least one host reports success. This
             // is the behaviour change: plain `gh auth status` exits non-zero
@@ -473,6 +552,19 @@ pub(crate) fn decide_gh_probe(
             available: !eligible.is_empty(),
             policy: GithubHostPolicy::Hosts(eligible),
         };
+    }
+
+    // The answer did not parse. That alone decides nothing: `gh` also exits
+    // non-zero in JSON mode for an ordinary fatal error, and it can be killed
+    // mid-write. Only `gh` saying it does not UNDERSTAND the call means the
+    // installed one is too old, so everything else is transient and the last
+    // known good policy stands.
+    if !diagnostic_says_gh_cannot_do_this(&output) {
+        return GhProbe::Transient(format!(
+            "gh auth status --json {} and wrote nothing dux could read; \
+             keeping the last known host policy",
+            output.status,
+        ));
     }
 
     // Step 2, reached ONLY because the machine-readable form did not exist in
@@ -1265,6 +1357,178 @@ mod host_policy_tests {
         );
     }
 
+    /// `active` must be EXACTLY boolean true. Excluding only an explicit
+    /// `false` let a successful entry qualify on a missing, null or
+    /// string-valued `active`, which is precisely the entry whose meaning dux
+    /// cannot know.
+    #[test]
+    fn an_entry_qualifies_only_on_an_exactly_true_active_field() {
+        for malformed in [
+            // absent
+            r#"{"hosts":{"github.com":[{"state":"success","host":"github.com"}]}}"#,
+            // null
+            r#"{"hosts":{"github.com":[{"state":"success","active":null,"host":"github.com"}]}}"#,
+            // the string "true", which is not a boolean
+            r#"{"hosts":{"github.com":[{"state":"success","active":"true","host":"github.com"}]}}"#,
+            // a number
+            r#"{"hosts":{"github.com":[{"state":"success","active":1,"host":"github.com"}]}}"#,
+        ] {
+            // Either the document is not a shape dux can read (a wrongly TYPED
+            // field), or it reads and the host is not in the set. Never
+            // eligible, which is the property that matters.
+            let parsed = parse_auth_status_hosts(malformed).unwrap_or_default();
+            assert!(
+                parsed.is_empty(),
+                "a malformed `active` must never qualify a host, got {parsed:?} from {malformed}",
+            );
+        }
+    }
+
+    /// With several accounts on one host, a broken active entry must not be
+    /// rescued by a sibling whose own `active` is malformed either.
+    #[test]
+    fn several_accounts_on_one_host_still_need_one_exactly_active_success() {
+        let broken_plus_malformed_sibling = r#"{"hosts":{"git.company.example":[
+            {"state":"error","active":true,"host":"git.company.example","login":"work"},
+            {"state":"success","host":"git.company.example","login":"personal"}
+        ]}}"#;
+        let parsed = parse_auth_status_hosts(broken_plus_malformed_sibling)
+            .expect("shape")
+            .len();
+        assert_eq!(
+            parsed, 0,
+            "the active account errored and no sibling is marked active",
+        );
+
+        // The same host DOES qualify when one of its accounts really is the
+        // active one and really succeeded.
+        let broken_plus_active_success = r#"{"hosts":{"git.company.example":[
+            {"state":"error","active":false,"host":"git.company.example","login":"old"},
+            {"state":"success","active":true,"host":"git.company.example","login":"work"}
+        ]}}"#;
+        assert_eq!(
+            parse_auth_status_hosts(broken_plus_active_success)
+                .expect("shape")
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["git.company.example".to_string()],
+        );
+    }
+
+    /// The key is what dux would hand `gh`, so an entry describing a DIFFERENT
+    /// host describes something else and cannot vouch for this one.
+    #[test]
+    fn an_entry_whose_host_disagrees_with_its_key_does_not_qualify() {
+        let disagreeing = r#"{"hosts":{"git.company.example":[{"state":"success","active":true,"host":"github.com"}]}}"#;
+        let parsed = parse_auth_status_hosts(disagreeing).expect("shape");
+        assert!(
+            parsed.is_empty(),
+            "the entry vouches for github.com, not for the key it sits under, got {parsed:?}",
+        );
+
+        // Agreement is case-insensitive, like every other host comparison.
+        let capitalised =
+            r#"{"hosts":{"GitHub.com":[{"state":"success","active":true,"host":"github.com"}]}}"#;
+        assert_eq!(
+            parse_auth_status_hosts(capitalised)
+                .expect("shape")
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["github.com".to_string()],
+        );
+    }
+
+    /// The mode switch. Only `gh` saying it does not UNDERSTAND the call selects
+    /// the permissive older-`gh` rule; a modern fatal failure, a truncated
+    /// answer and valid JSON of the wrong shape are all transient, so the last
+    /// known good policy stands rather than being replaced or widened.
+    #[test]
+    fn only_a_capability_diagnostic_selects_the_older_gh_mode() {
+        // Measured on gh 2.95.0: an unsupported flag writes exactly this to
+        // stderr, leaves stdout empty, and exits 1. That is how an older `gh`
+        // rejecting `--json`/`--active` presents itself.
+        let mut retried = false;
+        let probe = decide_gh_probe(
+            GhCallOutcome::Completed(completed_with_stderr(
+                1,
+                "",
+                "unknown flag: --json\n\nUsage:  gh auth status [flags]\n",
+            )),
+            || {
+                retried = true;
+                GhCallOutcome::Completed(completed(0, ""))
+            },
+        );
+        assert!(retried, "an unsupported flag is the older-gh case");
+        assert_eq!(
+            probe,
+            GhProbe::Decided {
+                available: true,
+                policy: GithubHostPolicy::LegacyNameRule,
+            },
+        );
+
+        // gh's own capability diagnostic for a field it cannot export, also
+        // measured (`gh auth status --active --json bogusfield`).
+        let mut retried = false;
+        let probe = decide_gh_probe(
+            GhCallOutcome::Completed(completed_with_stderr(
+                1,
+                "",
+                "Unknown JSON field: \"hosts\"\nAvailable fields:\n",
+            )),
+            || {
+                retried = true;
+                GhCallOutcome::Completed(completed(0, ""))
+            },
+        );
+        assert!(retried, "an unsupported JSON field is a capability answer");
+        assert!(matches!(probe, GhProbe::Decided { .. }), "got {probe:?}");
+
+        // Everything else that fails is TRANSIENT: it decides nothing, must not
+        // reach the permissive name rule, and must not replace the last known
+        // good policy.
+        for (label, output) in [
+            (
+                "a modern fatal error in JSON mode",
+                completed_with_stderr(
+                    1,
+                    "",
+                    "error: could not read the config: permission denied\n",
+                ),
+            ),
+            (
+                "JSON written to stderr instead of stdout",
+                completed_with_stderr(1, "", r#"{"hosts":{"github.com":[]}}"#),
+            ),
+            (
+                "a truncated answer",
+                completed_with_stderr(0, r#"{"hosts":{"github.com":["#, ""),
+            ),
+            (
+                "valid JSON of the wrong shape",
+                completed_with_stderr(0, r#"{"other":1}"#, ""),
+            ),
+            (
+                "nothing at all, with a zero exit",
+                completed_with_stderr(0, "", ""),
+            ),
+        ] {
+            let mut retried = false;
+            let probe = decide_gh_probe(GhCallOutcome::Completed(output), || {
+                retried = true;
+                GhCallOutcome::Completed(completed(0, ""))
+            });
+            assert!(!retried, "{label} must not reach the older-gh fallback");
+            assert!(
+                matches!(probe, GhProbe::Transient(_)),
+                "{label} must be transient, got {probe:?}",
+            );
+        }
+    }
+
     #[test]
     fn output_that_is_not_the_expected_shape_does_not_parse() {
         // How an older `gh` presents itself: it rejects the flag and writes
@@ -1431,6 +1695,13 @@ mod host_policy_tests {
     /// Build a `std::process::Output` with a real exit status, by running
     /// `sh -c 'exit N'`. `ExitStatus` cannot be constructed portably by hand.
     fn completed(code: i32, stdout: &str) -> std::process::Output {
+        completed_with_stderr(code, stdout, "")
+    }
+
+    /// [`completed`] with `gh`'s diagnostics too, which is where the mode switch
+    /// reads from: `gh` writes its unsupported-option message to stderr and
+    /// leaves stdout empty (measured on 2.95.0).
+    fn completed_with_stderr(code: i32, stdout: &str, stderr: &str) -> std::process::Output {
         let status = std::process::Command::new("sh")
             .args(["-c", &format!("exit {code}")])
             .status()
@@ -1438,7 +1709,7 @@ mod host_policy_tests {
         std::process::Output {
             status,
             stdout: stdout.as_bytes().to_vec(),
-            stderr: Vec::new(),
+            stderr: stderr.as_bytes().to_vec(),
         }
     }
 }

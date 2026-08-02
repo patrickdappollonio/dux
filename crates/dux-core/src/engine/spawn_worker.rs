@@ -297,6 +297,22 @@ impl Engine {
             self.mark_in_flight(key.clone());
         }
 
+        // Test-only: take the same exit a synchronous spawn failure takes,
+        // without exhausting the machine's process table to provoke a real one.
+        // Callers have to recover from this path themselves (no completion
+        // event will ever fire), so it needs to be reachable from a test.
+        #[cfg(test)]
+        if std::mem::take(&mut self.force_worker_spawn_failure) {
+            if let Some(key) = &spec.in_flight_key {
+                self.clear_in_flight(key);
+            }
+            crate::logger::error(&format!(
+                "spawn_background_worker[{}] failed to spawn thread: injected test failure",
+                spec.label,
+            ));
+            return BackgroundSpawn::SpawnFailed;
+        }
+
         // 2. Spawn with catch_unwind. On panic, log and post the synthesised
         //    completion event (if any) so the existing handler clears the
         //    in-flight key through the same path it would for a normal

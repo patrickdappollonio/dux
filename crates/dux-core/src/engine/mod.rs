@@ -177,6 +177,15 @@ pub struct Engine {
     /// members reap.
     pub pending_group_removals: Vec<lifecycle::GroupWorktreeRemoval>,
     pub gh_status: GhStatus,
+    /// Test-only injection point for the rare synchronous worker-spawn failure
+    /// (PID/RLIMIT exhaustion in production). Consumed by the next
+    /// `spawn_background_worker` call, which then behaves exactly as the real
+    /// failure does: it logs, clears any in-flight key, and returns
+    /// `BackgroundSpawn::SpawnFailed` without starting a thread. There is no way
+    /// to provoke that failure honestly from a test without exhausting the
+    /// machine's process table, which this project does not do.
+    #[cfg(test)]
+    pub(crate) force_worker_spawn_failure: bool,
     /// State owned by the `gh` host probe: which hosts qualify, the generation
     /// stamp that keeps overlapping probes ordered, and the program to run.
     pub gh_probe: GhProbeState,
@@ -1604,10 +1613,22 @@ impl Engine {
         self.gh_probe.generation = self.gh_probe.generation.wrapping_add(1);
         let generation = self.gh_probe.generation;
         let program = self.gh_probe.program.clone();
-        self.spawn_background_worker(
+        let spawn = self.spawn_background_worker(
             BackgroundWorkerSpec {
                 label: "gh-status-check".into(),
                 in_flight_key: None,
+                // The primitive logs a panic at error level before this event is
+                // built, so an OBSOLETE probe panicking still writes an error
+                // line even though the generation guard then discards its
+                // result. That is deliberate. Moving the logging into the
+                // generation-aware handler would make the one worker whose
+                // result may be discarded also the one whose crashes are
+                // invisible, and it would mean adding a per-caller knob to a
+                // primitive eleven sites share. A panic is a defect in dux's own
+                // code and it really happened; the generation stamp governs
+                // which ANSWER wins, not which events were true. The handler
+                // logs the discard at debug level so the pair reads correctly in
+                // `dux.log`.
                 panic_event: Some(Box::new(move |reason| WorkerEvent::GhStatusChecked {
                     generation,
                     // A panic decided nothing, so it is reported as transient:
@@ -1625,6 +1646,22 @@ impl Engine {
                 });
             },
         );
+        if spawn != BackgroundSpawn::Spawned {
+            // The primitive documents that a spawn it did not make produces NO
+            // completion event and needs the caller to recover. Without this the
+            // generation above is burned (so any older queued answer is
+            // discarded) with nothing arriving to replace it, and a FIRST probe
+            // would leave the status stuck on Unknown, which the interface
+            // renders as neither available nor unavailable. Reported as
+            // transient, through the normal channel, so it passes the same
+            // generation guard as any other way this probe can finish.
+            let _ = self.worker_tx.send(WorkerEvent::GhStatusChecked {
+                generation,
+                outcome: crate::gh::GhProbe::Transient(
+                    "could not start the gh host probe worker".to_string(),
+                ),
+            });
+        }
     }
 
     /// Point the changed-files watch at a session's worktree, or clear it. This
@@ -4481,6 +4518,35 @@ mod tests {
         assert_eq!(
             engine.gh_probe.generation, 2,
             "each spawn takes a fresh stamp, so two overlapping probes are ordered",
+        );
+    }
+
+    /// A worker that never started posts no completion event, so the caller has
+    /// to produce one. Without that the very first probe leaves the status stuck
+    /// on Unknown, which the interface renders as neither available nor
+    /// unavailable, and it has already burned a generation that will discard any
+    /// older queued answer with nothing arriving to replace it.
+    #[test]
+    fn a_probe_whose_worker_cannot_start_still_reports_a_transient_result() {
+        let (mut engine, _tmp) = test_engine();
+        let dir = tempfile::tempdir().expect("tempdir");
+        engine.gh_probe.program = stand_in_gh(dir.path(), "exit 0").into();
+        engine.github_integration_enabled = true;
+        engine.force_worker_spawn_failure = true;
+
+        engine.spawn_gh_status_check();
+        assert_eq!(engine.gh_probe.generation, 1, "the generation was burned");
+
+        settle_gh_probe(&mut engine);
+        assert_eq!(
+            engine.gh_status,
+            GhStatus::NotAuthenticated,
+            "a first probe that fails transiently must still leave Unknown",
+        );
+        assert_eq!(
+            eligible(&engine),
+            GithubHostPolicy::DenyAll,
+            "and it decided nothing, so nothing became eligible",
         );
     }
 

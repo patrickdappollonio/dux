@@ -2061,6 +2061,17 @@ impl Engine {
                 // launched close together can finish out of order, and an older
                 // answer overwriting a newer one presents as intermittent.
                 if generation != self.gh_probe.generation {
+                    // Logged so this pairs with anything the worker itself wrote
+                    // on its way here (the spawn primitive records a panic at
+                    // error level before the synthesised result is built, and it
+                    // is right to: the panic happened whether or not its answer
+                    // is used). Debug rather than warn: overlapping probes are
+                    // expected, not a fault.
+                    logger::debug(&format!(
+                        "[gh-integration] discarding a stale host probe result \
+                         (generation {generation}, current {})",
+                        self.gh_probe.generation,
+                    ));
                     return EventReaction::Nothing;
                 }
                 // A probe that DECIDED may tear armed work down; a transient one
