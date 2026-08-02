@@ -24,7 +24,7 @@
 //!   project startup command in its worktree (keyed Busy → final toast).
 //! - `POST   /api/v1/sessions/reorder`             — persist order (literal
 //!   segment, registered so it does not collide with `:id`).
-//! - `POST   /api/v1/pull-requests/resolve`        — read a typed pull-request
+//! - `POST   /api/v1/pull-requests/resolve`, read a typed pull-request
 //!   reference and say which projects are checkouts of the repository it names.
 //!   A READ, not a write: it starts nothing and changes nothing, so it answers
 //!   the client directly instead of going through a wire command and a toast.

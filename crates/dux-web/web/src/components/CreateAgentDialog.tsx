@@ -24,7 +24,7 @@ import {
 
 // The name dialog mirrors the TUI prompt and serves three modes — creating a
 // fresh agent, forking an existing session, and creating an agent from a GitHub
-// PR — switched on the store's `createAgentTarget.kind`. The PR mode itself has
+// PR, switched on the store's `createAgentTarget.kind`. The PR mode itself has
 // two shapes: project-first (opened from a project's own menu, unchanged), and
 // reference-first (opened from the global command), where no project is chosen,
 // the reference field leads, and a secondary action under it hands over to the
