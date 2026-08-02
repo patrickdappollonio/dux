@@ -113,6 +113,40 @@ describe("InsetHeader project terminal crumbs", () => {
   })
 })
 
+describe("InsetHeader standalone terminal crumbs", () => {
+  it("names the directory for a focused standalone terminal", () => {
+    // It has no owner to name, so a breadcrumb that only knows how to name
+    // owners would render blank. The directory is what it says instead, and it
+    // is the same string its sidebar row shows.
+    mockState = {
+      selectedSessionId: null,
+      selectedTarget: {
+        kind: "terminal",
+        terminalId: "solo-1",
+        owner: { kind: "standalone" },
+      },
+      spine: {
+        projects: [],
+        sessions: [],
+        terminals: [
+          {
+            id: "solo-1",
+            owner: { kind: "standalone", cwd_label: "~/code" },
+            label: "Terminal 1",
+            has_output: true,
+            foreground_cmd: null,
+          },
+        ],
+      },
+    } as unknown as DuxState
+    render(<InsetHeader />)
+    expect(screen.getByText("~/code")).toBeTruthy()
+    expect(screen.getByText(/directory:/)).toBeTruthy()
+    expect(screen.getByText("Terminal 1")).toBeTruthy()
+    expect(screen.getByText(/terminal:/)).toBeTruthy()
+  })
+})
+
 describe("InsetHeader branch drift cue", () => {
   it("shows the original branch only when the current branch differs", () => {
     mockState = stateFor("agent-tabs", "server-mode")

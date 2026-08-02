@@ -1369,8 +1369,20 @@ impl App {
             return;
         }
 
+        // The VISIBLE terminals: sorted, then pruned by the live sidebar query
+        // exactly as the agent list above is. Every index below (the rows, the
+        // selection, the mouse map) is an index into this list.
         let terminal_items = self.terminal_items();
         let has_terminals = !terminal_items.is_empty();
+        // The whole list, for the two questions that are not about what is on
+        // screen: which terminals a running one has to disambiguate its title
+        // against (a "(#2)" that renumbered as the user typed a query would be
+        // worse than useless), and how many terminals exist at all (the pane's
+        // "visible / total" count). The count is taken as a plain number rather
+        // than kept borrowed, because the title is built well after this pane
+        // has started writing its mouse layout back into `self`.
+        let all_terminals = self.sorted_terminal_items();
+        let total_terminal_count = all_terminals.len();
 
         // Split area vertically: projects on top, terminals on bottom (if any).
         let (projects_area, terminals_area) = if has_terminals {
@@ -1400,30 +1412,10 @@ impl App {
         let terminal_render_data: Vec<(String, Option<String>, String)> = terminal_items
             .iter()
             .map(|(id, t)| {
-                // A companion terminal shows `agent@project`; a project terminal
-                // shows just the project name (it has no agent).
-                let owner_name = match &t.owner {
-                    TerminalOwner::Session(sid) => self
-                        .engine
-                        .sessions
-                        .iter()
-                        .find(|s| &s.id == sid)
-                        .map(|s| {
-                            let agent = s.title.clone().unwrap_or_else(|| s.branch_name.clone());
-                            match self.engine.projects.iter().find(|p| p.id == s.project_id) {
-                                Some(p) => format!("{agent}@{}", p.name),
-                                None => agent,
-                            }
-                        })
-                        .unwrap_or_else(|| sid.clone()),
-                    TerminalOwner::Project(pid) => self
-                        .engine
-                        .projects
-                        .iter()
-                        .find(|p| &p.id == pid)
-                        .map(|p| p.name.clone())
-                        .unwrap_or_else(|| pid.clone()),
-                };
+                // The owner element, resolved by the one shared rule the sidebar
+                // filter also matches against, so a row can never say one thing
+                // and be searched by another.
+                let owner_name = self.terminal_owner_label(t);
                 // Idle (foreground normalizes to nothing) -> None -> "Terminal".
                 // Running -> the collision-resolved title, disambiguated against
                 // the OTHER same-owner terminals' foregrounds.
@@ -1432,7 +1424,7 @@ impl App {
                 )
                 .is_some()
                 {
-                    let siblings: Vec<Option<&str>> = terminal_items
+                    let siblings: Vec<Option<&str>> = all_terminals
                         .iter()
                         .filter(|(other_id, other)| other_id != id && other.owner == t.owner)
                         .map(|(_, other)| other.foreground_cmd.as_deref())
@@ -1627,8 +1619,15 @@ impl App {
         // and an agent row are pixel-identical in framing, spacing, and selection.
         if let Some(term_area) = terminals_area {
             let terminals_focused = focused && self.left_section == LeftSection::Terminals;
-            let term_title = format!("Terminals ({})", terminal_render_data.len());
             let term_count = terminal_render_data.len();
+            // The same visible-over-total count the Agents title carries while a
+            // query is live, for the same reason: a pruned list must not read as
+            // the whole roster.
+            let term_title = if self.agent_filter.is_some() {
+                format!("Terminals ({term_count}/{total_terminal_count})")
+            } else {
+                format!("Terminals ({term_count})")
+            };
             let term_block = self.themed_block(&term_title, terminals_focused);
             let term_inner = term_block.inner(term_area);
             // Two reservations for the framed selection, matching the agent path:
@@ -1657,6 +1656,20 @@ impl App {
             self.mouse_layout.terminal_list = term_content;
             let term_text_width = term_body.width;
             let spinner = crate::theme::SPINNER_FRAMES[self.spinner_frame_index()];
+            // A terminal row's owner element is a searched field, so a live hit
+            // inside it gets the same emphasis an agent row's project and branch
+            // get. Same style, same per-field range on the exact fitted text.
+            let term_highlight = self.agent_filter.as_ref().and_then(|input| {
+                let query = input.text.as_str();
+                (!dux_core::agent_search::normalize_query(query).is_empty()).then(|| {
+                    (
+                        query,
+                        Style::default()
+                            .fg(self.theme.search_match_fg)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                })
+            });
             let term_items: Vec<ListItem> = terminal_render_data
                 .iter()
                 .map(|(term_id, fg_cmd, owner_name)| {
@@ -1676,6 +1689,7 @@ impl App {
                         owner_name,
                         term_text_width,
                         self.start_time.elapsed().as_millis(),
+                        term_highlight,
                     );
                     // Same three-line row shape as the agents (see `framed_row_item`).
                     framed_row_item(line1, line2)
@@ -9248,6 +9262,10 @@ fn terminal_row_lines(
     owner_name: &str,
     text_width: u16,
     elapsed_ms: u128,
+    // The live sidebar query and the style to emphasize its hit with, or `None`
+    // when nothing is being filtered. The owner element is a searched field, so
+    // what matched is shown as matched.
+    highlight: Option<(&str, Style)>,
 ) -> (Line<'static>, Line<'static>) {
     // The glyph SHAPE encodes state (typing caret, running spinner, else the
     // steady dot); its color is the neutral identity color, never the live-state
@@ -9318,9 +9336,7 @@ fn terminal_row_lines(
         None,
         MetaLineStyle {
             sep: Style::default().fg(muted),
-            // Terminal rows carry no search highlight: the TUI's agent filter
-            // does not filter the terminal list, so nothing here matched.
-            highlight: None,
+            highlight,
         },
     );
 
@@ -9971,7 +9987,7 @@ mod tests {
         // and a muted "Idle" word. `terminal_row_lines` now returns the two
         // content lines; the trailing spacer is added by `framed_row_item`.
         let (idle0, idle1) =
-            terminal_row_lines(&theme, false, false, '⠋', None, "my-branch", width, 0);
+            terminal_row_lines(&theme, false, false, '⠋', None, "my-branch", width, 0, None);
         assert!(line_text(&idle0).contains(crate::theme::DOT_GLYPH));
         assert!(line_text(&idle0).contains("Terminal"));
         assert!(!line_text(&idle0).contains("zsh"));
@@ -9993,6 +10009,7 @@ mod tests {
             "proj",
             width,
             0,
+            None,
         );
         assert!(line_text(&working0).contains("cargo test"));
         assert!(!line_text(&working0).contains("zsh"));
@@ -10008,7 +10025,7 @@ mod tests {
         // Typing wins over working: the typing glyph shows, but line one stays
         // neutral; only the "Typing" word carries the session_typing color.
         let (typing0, typing1) =
-            terminal_row_lines(&theme, true, true, '⠹', Some("vim"), "proj", width, 0);
+            terminal_row_lines(&theme, true, true, '⠹', Some("vim"), "proj", width, 0, None);
         assert!(line_text(&typing0).contains(crate::theme::TYPING_GLYPH));
         assert!(line_text(&typing0).contains("vim"));
         assert_eq!(typing0.spans[0].style.fg, Some(theme.session_active));
@@ -10080,6 +10097,193 @@ mod tests {
             );
         }
         app
+    }
+
+    /// The journey: a standalone terminal appears in the sidebar, and because it
+    /// has no owner to name, its second line names the DIRECTORY it opened in,
+    /// with the home directory collapsed to `~`. Rendered rather than reasoned
+    /// about: this reads the row out of the frame buffer.
+    #[test]
+    fn a_standalone_terminal_row_names_its_directory_with_a_tilde() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        // A real directory under `$HOME`, so the `~` collapse has something to
+        // collapse; skipped where no home resolves, which is not this feature's
+        // problem to assert here (`home_path` owns that case).
+        let Some(home) = home::home_dir() else {
+            return;
+        };
+        let client = PtyClient::spawn(
+            "/bin/sh",
+            &["-c".to_string(), "sleep 30".to_string()],
+            &home,
+            24,
+            80,
+            100,
+        )
+        .expect("spawn pty");
+        app.engine.companion_terminals.insert(
+            "term-1".to_string(),
+            CompanionTerminal {
+                owner: dux_core::model::TerminalOwner::Standalone,
+                label: "Terminal 1".to_string(),
+                foreground_cmd: None,
+                client,
+                sort_order: 1,
+                created_at: chrono::Utc::now(),
+            },
+        );
+        app.focus = FocusPane::Left;
+        app.left_section = LeftSection::Terminals;
+        app.terminal_pane_height_pct = 50;
+
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(
+            rendered.contains("↳ ~ "),
+            "the standalone row's second line must name its directory as `~`; got:\n{rendered}"
+        );
+    }
+
+    /// The journey: two terminals are in the sidebar, one owned by an agent and
+    /// one owned by nothing. The user opens the sidebar filter and types `~`.
+    /// Only the standalone terminal names a directory, so it is the only
+    /// terminal left: the agent's terminal leaves the rendered list, the pane
+    /// count, and the click map with it.
+    ///
+    /// Rendered rather than reasoned about, deliberately. The test this replaced
+    /// called the matcher helper directly, so it never turned the filter on and
+    /// never looked at what was on screen, and it passed while the terminal list
+    /// was not filtered at all.
+    #[test]
+    fn the_sidebar_filter_hides_terminals_that_do_not_match_the_query() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        // The `~` collapse needs a home to collapse; the no-home case belongs to
+        // `home_path`, not to the filter (same skip as the row-rendering test).
+        let Some(home) = home::home_dir() else {
+            return;
+        };
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        // The agent's terminal, whose row names `agent-branch@demo`, and the
+        // standalone one, whose row names `~`. Neither label nor foreground can
+        // match `~`, so the owner element is the only thing the query can hit.
+        for (term_id, owner, dir) in [
+            (
+                "term-1",
+                dux_core::model::TerminalOwner::Session(session_id.clone()),
+                std::path::Path::new("."),
+            ),
+            (
+                "term-2",
+                dux_core::model::TerminalOwner::Standalone,
+                home.as_path(),
+            ),
+        ] {
+            let client = PtyClient::spawn(
+                "/bin/sh",
+                &["-c".to_string(), "sleep 30".to_string()],
+                dir,
+                24,
+                80,
+                100,
+            )
+            .expect("spawn pty");
+            app.engine.companion_terminals.insert(
+                term_id.to_string(),
+                CompanionTerminal {
+                    owner,
+                    label: format!("Terminal {}", &term_id[5..]),
+                    foreground_cmd: None,
+                    client,
+                    sort_order: 1,
+                    created_at: chrono::Utc::now(),
+                },
+            );
+        }
+        app.terminal_pane_height_pct = 50;
+        app.focus = FocusPane::Left;
+        app.left_section = LeftSection::Projects;
+        app.rebuild_left_items();
+
+        // `/` opens the filter; `~` is typed into it, exactly as a user would.
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
+            .expect("open the filter");
+        app.handle_key(KeyEvent::new(KeyCode::Char('~'), KeyModifiers::NONE))
+            .expect("type the query");
+        assert_eq!(
+            app.agent_filter.as_ref().map(|i| i.text.as_str()),
+            Some("~")
+        );
+
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+
+        assert!(
+            rendered.contains("↳ ~ "),
+            "the standalone terminal matches `~` and must still be on screen; got:\n{rendered}"
+        );
+        // The prefix, not the whole `agent-branch@demo`: the left pane is narrow
+        // enough that the owner element ellipsizes, so the full string is absent
+        // even when the row is right there on screen.
+        assert!(
+            !rendered.contains("↳ agent-br"),
+            "the agent's terminal matches nothing and must be gone from the list; got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("Terminals (1/2)"),
+            "the pane count must report the filtered list over the total; got:\n{rendered}"
+        );
+
+        // The visible list itself, which is what selection and the click map are
+        // indexed against.
+        assert_eq!(
+            app.terminal_items()
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["term-2"],
+        );
+        // The click map, pinned by LENGTH and by CONTENTS. `.iter().all(…)` is
+        // what this used to say, and an empty map satisfies it, so the check
+        // passed whether or not the one surviving terminal was clickable at all.
+        // A terminal row is exactly three lines tall (two content lines and the
+        // spacer, see `framed_row_item`), and there is exactly one row left, so
+        // the map is three entries and every one of them names item 0. That
+        // fails when the map is empty AND when it names a different row.
+        assert_eq!(
+            app.mouse_layout.terminal_row_to_item,
+            vec![0, 0, 0],
+            "the one visible row is three lines tall and every one of them must \
+             click through to it; got {:?}",
+            app.mouse_layout.terminal_row_to_item
+        );
     }
 
     #[test]

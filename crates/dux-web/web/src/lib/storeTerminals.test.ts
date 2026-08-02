@@ -247,6 +247,46 @@ describe("store companion-terminal lifecycle", () => {
     expect(del).toBeDefined()
   })
 
+  it("createStandaloneTerminal POSTs the un-nested endpoint and focuses it", async () => {
+    const mod = await loadStore()
+    mod.createStandaloneTerminal()
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().selectedTarget).toEqual({
+        kind: "terminal",
+        terminalId: "t9",
+        owner: { kind: "standalone" },
+      })
+    })
+    // No owner id anywhere in the address: that is the whole shape of it.
+    const post = find(
+      (u, init) => u === "/api/v1/terminals" && init?.method === "POST",
+    )
+    expect(post).toBeDefined()
+    expect(mod.getSnapshot().selectedSessionId).toBeNull()
+  })
+
+  it("deleteTerminal routes a STANDALONE terminal to the un-nested endpoint", async () => {
+    spineBody = {
+      projects: [{ id: "p1", name: "Repo" }],
+      sessions: [{ id: "s1", project_id: "p1" }],
+      terminals: [
+        {
+          id: "solo1",
+          label: "Terminal 1",
+          owner: { kind: "standalone", cwd_label: "~" },
+        },
+      ],
+      sidebar: { groups: [] },
+    }
+    const mod = await loadStore()
+    mod.deleteTerminal("solo1")
+    await tick()
+    const del = find(
+      (u, init) => u === "/api/v1/terminals/solo1" && init?.method === "DELETE",
+    )
+    expect(del).toBeDefined()
+  })
+
   it("stopAllRunning deletes project terminals too", async () => {
     // The trap this guards (T4): the panic button iterated only sessions'
     // terminals, so a hung project terminal survived "Stop all".

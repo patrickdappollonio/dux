@@ -85,6 +85,13 @@ export function groupTerminalsByOwner(
       case "project":
         push(byProject, owner.project_id, t)
         break
+      // A standalone terminal reaches no project, directly or through an agent,
+      // so it belongs in neither bucket. That is the right answer for this
+      // helper's one caller (`projectLiveCounts`) and is exactly the case the
+      // "LOSSY ON PURPOSE" note above describes: anything that must account for
+      // every terminal uses `groupTerminalsByOwnerKey` instead.
+      case "standalone":
+        break
       default:
         return assertNever(owner)
     }

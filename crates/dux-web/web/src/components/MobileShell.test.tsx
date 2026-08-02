@@ -249,6 +249,68 @@ describe("MobileShell project terminals", () => {
   })
 })
 
+describe("MobileShell standalone terminals", () => {
+  function standaloneSpine(): DuxState["spine"] {
+    return {
+      projects: [],
+      sessions: [],
+      terminals: [
+        {
+          id: "solo-1",
+          owner: { kind: "standalone", cwd_label: "~/code" },
+          label: "Terminal 1",
+          has_output: true,
+          foreground_cmd: null,
+        },
+      ],
+      sidebar: { groups: [], agentless_start: null },
+    } as unknown as DuxState["spine"]
+  }
+
+  // The state a phone is in while looking at a standalone terminal: focused on
+  // it, on the terminal screen, with no session anywhere in sight.
+  function standaloneState(): DuxState {
+    return makeState({
+      spine: standaloneSpine(),
+      bootstrap: {
+        title: "dux",
+        dux_version: "v1",
+        available_providers: ["claude"],
+      },
+      selectedTarget: {
+        kind: "terminal",
+        terminalId: "solo-1",
+        owner: { kind: "standalone" },
+      },
+      selectedSessionId: null,
+      mobileScreen: "terminal",
+      changes: { sessionId: null, phase: "empty", staged: [], unstaged: [] },
+      startedDormantTabs: [],
+      terminalEpoch: 0,
+    } as unknown as Partial<DuxState>)
+  }
+
+  it("reaches a real screen on a phone, naming the directory, not the hub", () => {
+    // The failure this pins: a kind of owner with no screen of its own fell
+    // through to the agent branch, which needs a session, and rendered the HUB.
+    // On a phone that looks exactly like tapping the terminal did nothing.
+    mockState = standaloneState()
+    render(<MobileShell />)
+    // The screen's own header, naming where the terminal is. The hub would have
+    // no Back control and no directory crumb at all.
+    expect(screen.getByLabelText("Back")).toBeTruthy()
+    expect(screen.getByText("~/code")).toBeTruthy()
+  })
+
+  it("sends the standalone terminal screen's chevron up instead of back", () => {
+    mockState = standaloneState()
+    render(<MobileShell />)
+    fireEvent.click(screen.getByLabelText("Back"))
+    expect(historyBack).not.toHaveBeenCalled()
+    expect(navigateUpMock).toHaveBeenCalledTimes(1)
+  })
+})
+
 describe("MobileShell attention dot", () => {
   it("renders the attention dot when the agent needs attention", () => {
     const spine = makeSessionSpine(1) as unknown as {

@@ -45,7 +45,8 @@ export interface FlatTerminal {
 //
 // A companion terminal is labeled `agent@project` (the agent's display name --
 // title, or branch name when untitled -- at its project); a project terminal
-// carries just the project name (it has no agent). An owner id that resolves to
+// carries just the project name (it has no agent); a standalone terminal carries
+// the `~`-shortened directory it opened in (it has no owner to name at all). An owner id that resolves to
 // nothing falls back to the id itself, matching the TUI's sidebar: the spine is
 // self-consistent so this should not happen, but showing the row with a truthful
 // id beats dropping it, which is the silent omission this shape exists to end.
@@ -92,6 +93,16 @@ export function assembleFlatTerminals(
           ? projectName(wire.project_id)
           : wire.project_id
         ownerLabel = proj
+        break
+      }
+      case "standalone": {
+        // No owner to name, so the row's second line names the DIRECTORY the
+        // terminal opened in, already shortened with `~` by the server. That is
+        // also what the sidebar search matches, which is why it goes in
+        // `ownerLabel` rather than somewhere beside it. The project tag is
+        // empty, truthfully: it belongs to no project.
+        proj = ""
+        ownerLabel = wire.cwd_label
         break
       }
       default:

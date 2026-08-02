@@ -85,6 +85,23 @@ export function InsetHeader() {
               siblings: terminalsForOwner(allTerminals, owner),
             }
           },
+          // No owner to name, so the crumb names WHERE the terminal is. The
+          // label is read off this terminal's own wire owner rather than the
+          // client-side reference, which carries no id and no label precisely
+          // because there is no owner: every standalone terminal shares one
+          // reference, and only the terminal itself knows its directory.
+          standalone: (owner) => {
+            const siblings = terminalsForOwner(allTerminals, owner)
+            const self = siblings.find(
+              (t) => t.id === focusedTerminal.terminalId,
+            )
+            const cwd =
+              self?.owner.kind === "standalone" ? self.owner.cwd_label : null
+            return {
+              crumbs: cwd ? [{ key: "directory", value: cwd }] : [],
+              siblings,
+            }
+          },
         })
       : null
 

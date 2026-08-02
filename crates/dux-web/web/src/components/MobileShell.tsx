@@ -94,23 +94,28 @@ function HomeScreen() {
   )
 }
 
-// The spoke for a PROJECT-owned terminal: a project-name crumb over the shared
-// terminal. It has no agent, so it borrows none of the agent screen's chrome
-// (no changes chip, no agent actions menu).
-function ProjectTerminalScreen({
+// The spoke for a terminal that is NOT session-owned: one identity crumb over
+// the shared terminal. Such a terminal has no agent, so it borrows none of the
+// agent screen's chrome (no changes chip, no agent actions menu).
+//
+// Shared by the project-owned and standalone screens, which differ only in what
+// the identity crumb says and in what has to exist for the screen to be valid;
+// the two wrappers below own that difference and nothing else, so the two spokes
+// cannot drift apart in layout, header height or touch targets.
+function AgentlessTerminalScreen({
   owner,
   terminalId,
+  primary,
 }: {
-  owner: Extract<TerminalOwnerRef, { kind: "project" }>
+  owner: TerminalOwnerRef
   terminalId: string
+  primary: string
 }) {
   const { spine } = useDux()
-  const project = spine?.projects.find((p) => p.id === owner.projectId)
-  if (!project) return <HomeScreen />
-  // This project's own terminals, selected out of the flat collection by owner,
-  // so the crumb still disambiguates against its true siblings.
-  const projectTerminals = terminalsForOwner(spine?.terminals ?? [], owner)
-  const terminal = projectTerminals.find((t) => t.id === terminalId)
+  // This owner's own terminals, selected out of the flat collection by owner, so
+  // the crumb still disambiguates against its true siblings.
+  const ownedTerminals = terminalsForOwner(spine?.terminals ?? [], owner)
+  const terminal = ownedTerminals.find((t) => t.id === terminalId)
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
       <header className="flex h-11 shrink-0 items-center gap-2 border-b px-3">
@@ -127,9 +132,9 @@ function ProjectTerminalScreen({
           <ChevronLeft />
         </Button>
         <div className="flex min-w-0 flex-1 items-baseline gap-1.5 text-sm">
-          <span className="truncate font-semibold">{project.name}</span>
+          <span className="truncate font-semibold">{primary}</span>
           <span className="truncate text-muted-foreground">
-            {terminal ? terminalTitle(terminal, projectTerminals) : "Terminal"}
+            {terminal ? terminalTitle(terminal, ownedTerminals) : "Terminal"}
           </span>
         </div>
       </header>
@@ -146,6 +151,52 @@ function ProjectTerminalScreen({
         </ChunkBoundary>
       </div>
     </div>
+  )
+}
+
+// The project-owned spoke: the crumb is the project's name, and a project that
+// is no longer in the workspace has no screen, so it lands home.
+function ProjectTerminalScreen({
+  owner,
+  terminalId,
+}: {
+  owner: Extract<TerminalOwnerRef, { kind: "project" }>
+  terminalId: string
+}) {
+  const { spine } = useDux()
+  const project = spine?.projects.find((p) => p.id === owner.projectId)
+  if (!project) return <HomeScreen />
+  return (
+    <AgentlessTerminalScreen
+      owner={owner}
+      terminalId={terminalId}
+      primary={project.name}
+    />
+  )
+}
+
+// The standalone spoke: the crumb is the DIRECTORY the terminal opened in,
+// `~`-shortened by the server, which is the same thing its sidebar row says.
+// There is no owner that could have gone missing, so unlike the project screen
+// there is nothing to fall home for: a terminal id the spine no longer carries
+// is handled by the router, not here.
+function StandaloneTerminalScreen({
+  owner,
+  terminalId,
+}: {
+  owner: Extract<TerminalOwnerRef, { kind: "standalone" }>
+  terminalId: string
+}) {
+  const { spine } = useDux()
+  const terminal = spine?.terminals.find((t) => t.id === terminalId)
+  const cwd =
+    terminal?.owner.kind === "standalone" ? terminal.owner.cwd_label : null
+  return (
+    <AgentlessTerminalScreen
+      owner={owner}
+      terminalId={terminalId}
+      primary={cwd ?? "Standalone terminal"}
+    />
   )
 }
 
@@ -180,6 +231,15 @@ function TerminalScreen() {
           session: () => null,
           project: (owner) => (
             <ProjectTerminalScreen
+              owner={owner}
+              terminalId={selectedTarget.terminalId}
+            />
+          ),
+          // A standalone terminal has no agent to render inside, so like a
+          // project terminal it gets a real screen of its own. This is the arm
+          // whose absence would have dropped the user on the home screen.
+          standalone: (owner) => (
+            <StandaloneTerminalScreen
               owner={owner}
               terminalId={selectedTarget.terminalId}
             />

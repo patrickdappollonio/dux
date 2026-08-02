@@ -27,9 +27,18 @@
 //!   with the same ownership enforcement: a terminal owned by a session (or by a
 //!   different project) is a 404 on this route, and a project terminal is a 404
 //!   on the session-nested route.
+//! - `POST   /api/v1/terminals`                    creates a STANDALONE terminal
+//!   (a plain shell in the user's home directory, owned by neither an agent nor
+//!   a project). Un-nested, because there is no owner to nest it under, and it
+//!   takes no path parameter for the same reason: nothing has to exist first.
+//! - `DELETE /api/v1/terminals/:tid`               deletes a standalone terminal.
+//!   The un-nested address serves standalone terminals ONLY: a session- or
+//!   project-owned `:tid` is a 404 here, exactly as a standalone `:tid` is a 404
+//!   on both nested addresses.
 //! - `POST   /api/v1/terminals/reorder`            reorders every companion
-//!   terminal (both owners) as one flat, global list; the body is the complete
-//!   set of terminal ids in the desired order. Runtime-only (no persistence).
+//!   terminal (all three owners) as one flat, global list; the body is the
+//!   complete set of terminal ids in the desired order. Runtime-only (no
+//!   persistence).
 
 use axum::{
     Json, Router,
@@ -66,7 +75,15 @@ pub fn routes() -> Router<AppState> {
             "/api/v1/projects/{id}/terminals/{tid}",
             delete(delete_project_terminal),
         )
+        // The literal `reorder` segment is registered BEFORE the `{tid}` delete
+        // so a router without literal-over-parameter precedence cannot read a
+        // reorder as a terminal id.
         .route("/api/v1/terminals/reorder", post(reorder_terminals))
+        .route("/api/v1/terminals", post(create_standalone_terminal))
+        .route(
+            "/api/v1/terminals/{tid}",
+            delete(delete_standalone_terminal),
+        )
 }
 
 /// 201 body for a terminal create: the new terminal's id (used to open the nested
@@ -128,6 +145,45 @@ async fn create_project_terminal(
     }
 }
 
+/// `POST /api/v1/terminals` creates a standalone terminal: a plain shell in the
+/// user's home directory, owned by nothing. Un-nested and parameterless, because
+/// there is no owner to resolve and nothing that has to exist first, which is
+/// exactly why the two routes above each begin by resolving theirs and this one
+/// does not.
+async fn create_standalone_terminal(State(state): State<AppState>) -> Response {
+    match state.engine.create_standalone_terminal().await {
+        Ok((terminal_id, label)) => {
+            let location = format!("/api/v1/terminals/{terminal_id}");
+            (
+                StatusCode::CREATED,
+                [(header::LOCATION, location)],
+                Json(CreatedTerminal { terminal_id, label }),
+            )
+                .into_response()
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
+}
+
+/// `DELETE /api/v1/terminals/:tid` deletes a standalone terminal, enforcing
+/// through the same exhaustive `is_at_route` that `:tid` really is standalone: an
+/// owned terminal is a 404 here, so the un-nested address cannot be used to
+/// sidestep the cross-owner rejections on the nested ones.
+async fn delete_standalone_terminal(
+    State(state): State<AppState>,
+    Path(tid): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if !id_within_bound(&tid) {
+        return unknown_terminal();
+    }
+    match state.engine.terminal_owner_of(tid.clone()).await {
+        Some(owner) if owner.is_at_route(TerminalRoute::Standalone) => {}
+        _ => return unknown_terminal(),
+    }
+    dispatch_delete(&state, tid, &headers).await
+}
+
 /// `DELETE /api/v1/sessions/:id/terminals/:tid` — delete a companion terminal,
 /// enforcing that `:tid` is session-owned by `:id` before dispatching the delete.
 async fn delete_terminal(
@@ -183,7 +239,7 @@ struct ReorderTerminalsBody {
 }
 
 /// `POST /api/v1/terminals/reorder`. The flat model's drag for terminals: reorder
-/// every companion terminal (session- and project-owned) as one global list.
+/// every companion terminal (all three owners) as one global list.
 /// `terminal_ids` must be the complete terminal set; the engine validates strictly
 /// and stamps each terminal's runtime `sort_order`. Runtime-only, so no persistence.
 async fn reorder_terminals(

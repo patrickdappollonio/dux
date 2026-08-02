@@ -139,8 +139,11 @@ impl App {
             // orphan branch unnoticed.
             let session_id = match pty.owner.as_ref().map(TerminalOwner::as_ref) {
                 Some(TerminalOwnerRef::Session(sid)) => sid,
-                // A project-owned or orphan tab has no session to surface on.
-                Some(TerminalOwnerRef::Project(_)) | None => continue,
+                // A project-owned, standalone or orphan tab has no session to
+                // surface on.
+                Some(TerminalOwnerRef::Project(_) | TerminalOwnerRef::Standalone) | None => {
+                    continue;
+                }
             };
             let is_main = pty.id == *session_id;
             let was_focused_tab = selected_before.as_deref() == Some(session_id)
@@ -224,7 +227,10 @@ impl App {
                         // here rather than being read as one.
                         && match p.owner.as_ref().map(TerminalOwner::as_ref) {
                             Some(TerminalOwnerRef::Session(sid)) => sid == current_id,
-                            Some(TerminalOwnerRef::Project(_)) | None => false,
+                            Some(
+                                TerminalOwnerRef::Project(_) | TerminalOwnerRef::Standalone,
+                            )
+                            | None => false,
                         }
                 })
                 // Don't bounce out of the pane if a live extra tab is focused:

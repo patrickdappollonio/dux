@@ -207,10 +207,13 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         hint_contexts: &[],
     },
     BindingDef {
-        // Enters filter mode over the flat agent list. `/` is free in the Left
-        // scope (it is only bound in Files/Browser today, and scopes are
-        // independent). In filter mode printable keys type the query, so
-        // navigation falls back to the arrow keys, mirroring the project browser.
+        // Enters filter mode over the whole sidebar: the flat agent list and the
+        // terminal list below it. `/` is free in the Left scope (it is only bound
+        // in Files/Browser today, and scopes are independent). In filter mode
+        // printable keys type the query, so navigation falls back to the arrow
+        // keys, mirroring the project browser; those arrows cross the
+        // agents/terminals boundary, so every result is reachable whichever kind
+        // of row matched.
         action: Action::FilterAgents,
         default_keys: &[KeyCombination::one_key(
             KeyCode::Char('/'),
@@ -219,7 +222,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[BindingScope::Left],
         help: Some(HelpEntry {
             section: "Projects pane",
-            description: "Filter agents by name, branch, project, or provider",
+            description: "Filter agents and terminals by name, branch, project, or provider",
         }),
         hint_contexts: &[
             (HintContext::LeftProject, "Filter"),
@@ -1118,6 +1121,15 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         // Palette-only: opens the project chooser to spawn a project terminal.
         // No default key (like manage-projects).
         action: Action::NewProjectTerminal,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+    },
+    BindingDef {
+        // Palette-only: opens a terminal owned by nothing, in the home
+        // directory. No default key (like new-terminal-for-project).
+        action: Action::NewStandaloneTerminal,
         default_keys: &[],
         scopes: &[],
         help: None,
@@ -2549,6 +2561,7 @@ mod tests {
             "new-agent-from-pr",
             "new-agent-from-worktree",
             "new-agent-tab",
+            "new-standalone-terminal",
             "new-terminal-for-agent",
             "new-terminal-for-project",
             "open-current-pr",

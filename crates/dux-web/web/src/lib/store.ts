@@ -1656,6 +1656,19 @@ function parseSelectionHash(hash: string): SelectedTarget | null {
       return null
     }
   }
+  // A standalone terminal deep-links as `#/terminal/<tid>`: no owner segment,
+  // because it has no owner. It cannot be confused with the two nested shapes,
+  // which both begin `#/agent/` or `#/project/`.
+  const sm = hash.match(/^#\/terminal\/([^/]+)$/)
+  if (sm) {
+    try {
+      const terminalId = decodeURIComponent(sm[1])
+      if (!terminalId) return null
+      return { kind: "terminal", terminalId, owner: { kind: "standalone" } }
+    } catch {
+      return null
+    }
+  }
   const m = hash.match(/^#\/agent\/([^/]+)(?:\/(tab|terminal)\/([^/]+))?$/)
   if (!m) return null
   // `decodeURIComponent` throws a URIError on malformed percent-encoding (e.g.
@@ -1704,6 +1717,10 @@ function selectionHash(target: SelectedTarget | null): string {
         return `#/project/${encodeURIComponent(owner.projectId)}/terminal/${tid}`
       case "session":
         return `#/agent/${encodeURIComponent(owner.sessionId)}/terminal/${tid}`
+      // No owner segment, because there is no owner. The terminal id alone
+      // names it, which is the whole grammar.
+      case "standalone":
+        return `#/terminal/${tid}`
       default:
         return assertNever(owner)
     }
@@ -1892,6 +1909,16 @@ function resolveRouteTarget(
       case "session":
         sessionId = owner.sessionId
         break
+      case "standalone":
+        // No owner to resolve against, so the only question is whether the
+        // terminal is still there.
+        applyStandaloneTerminalDeepLink(
+          spine,
+          target.terminalId,
+          "replace",
+          changes,
+        )
+        return
       default:
         return assertNever(owner)
     }
@@ -2018,6 +2045,9 @@ function applyDeepLinkSelection(
       // which resolves them against the project rather than a session, so they
       // never reach this function. Nothing to do, stated rather than implied.
       project: () => {},
+      // Standalone links restore through `applyStandaloneTerminalDeepLink` for
+      // the same reason, and never reach this function either.
+      standalone: () => {},
     })
     return
   }
@@ -2068,6 +2098,24 @@ function applyProjectTerminalDeepLink(
     spine.projects.some((p) => p.id === projectId) &&
     ownerHasTerminal(spine.terminals, owner, terminalId)
   ) {
+    selectTerminal(terminalId, owner, { urlMode, changes })
+    return
+  }
+  selectSessionRoute(null, urlMode)
+}
+
+// The standalone twin of `applyProjectTerminalDeepLink`: select the terminal
+// when the workspace still carries it, and land home (URL included, never
+// silently) when it is gone. There is no owner to check first, which is the only
+// difference; a standalone terminal that is gone is gone.
+function applyStandaloneTerminalDeepLink(
+  spine: Spine,
+  terminalId: string,
+  urlMode?: "replace",
+  changes?: boolean,
+): void {
+  const owner: TerminalOwnerRef = { kind: "standalone" }
+  if (ownerHasTerminal(spine.terminals, owner, terminalId)) {
     selectTerminal(terminalId, owner, { urlMode, changes })
     return
   }
@@ -2181,23 +2229,31 @@ function restoreReconnectDeepLink(spine: Spine): void {
     session: (owner) =>
       restoreSessionScopedReconnect(spine, armed, owner.sessionId),
     project: (owner) =>
-      restoreProjectTerminalReconnect(spine, armed, terminal.terminalId, owner),
+      restoreAgentlessTerminalReconnect(spine, armed, terminal.terminalId, owner),
+    // A standalone terminal restores on exactly the same terms as a project one
+    // (no resume phase, no reconnect eject, so the selection normally survives
+    // on its own), so it shares the restore rather than getting a near-copy of
+    // it. The owner is passed through because it is what `selectTerminal` needs.
+    standalone: (owner) =>
+      restoreAgentlessTerminalReconnect(spine, armed, terminal.terminalId, owner),
   })
 }
 
-// The project-terminal half of `restoreReconnectDeepLink`.
+// The AGENTLESS half of `restoreReconnectDeepLink`: a terminal owned by a
+// project, or by nothing at all. Both restore on identical terms, which is why
+// they share this rather than getting two near-copies.
 //
-// A project terminal has no resume phase and its pane never issues the reconnect
-// eject (that path is gated on the agent session-slot tab), so its selection
-// normally survives a reconnect on its own and this usually just disarms as a
-// no-op. The one restorable gap is a selection cleared by OUR OWN eject while
-// the intent was armed; any deliberate navigation (a non-null selection that is
-// not the armed terminal, or a home nav without the eject flag) disarms instead.
-function restoreProjectTerminalReconnect(
+// Neither has a resume phase and neither pane issues the reconnect eject (that
+// path is gated on the agent session-slot tab), so the selection normally
+// survives a reconnect on its own and this usually just disarms as a no-op. The
+// one restorable gap is a selection cleared by OUR OWN eject while the intent
+// was armed; any deliberate navigation (a non-null selection that is not the
+// armed terminal, or a home nav without the eject flag) disarms instead.
+function restoreAgentlessTerminalReconnect(
   spine: Spine,
   armed: ReconnectDeepLink,
   terminalId: string,
-  owner: Extract<TerminalOwnerRef, { kind: "project" }>,
+  owner: Exclude<TerminalOwnerRef, { kind: "session" }>,
 ): void {
   const sel = state.selectedSessionId
   const cur = state.selectedTarget
@@ -2220,9 +2276,15 @@ function restoreProjectTerminalReconnect(
     reconnectDeepLink = null
     return
   }
+  // The owner must still be there too, where there IS one. A standalone
+  // terminal has no owner that could have gone, so its existence is the whole
+  // question; a project terminal's project must have survived as well.
+  const ownerStillThere =
+    owner.kind === "project"
+      ? spine.projects.some((p) => p.id === owner.projectId)
+      : true
   const exists =
-    spine.projects.some((p) => p.id === owner.projectId) &&
-    ownerHasTerminal(spine.terminals, owner, terminalId)
+    ownerStillThere && ownerHasTerminal(spine.terminals, owner, terminalId)
   if (!exists) return // keep waiting within the TTL (the spine may lag)
   // A replace: this restores the position the browser is ALREADY parked on
   // (the hash still names it, or our own eject rewrote it). Pushing would add
@@ -2522,6 +2584,24 @@ export function createProjectTerminal(projectId: string): void {
     )
 }
 
+// Spawn a new STANDALONE terminal (a plain shell in the user's home directory,
+// owned by neither an agent nor a project) via REST, then focus it, mirroring
+// `createTerminal`. It takes no id, because nothing has to exist first.
+export function createStandaloneTerminal(): void {
+  terminalsApi
+    .createStandalone()
+    .then((created) =>
+      selectTerminal(created.terminal_id, { kind: "standalone" }),
+    )
+    .catch((e) =>
+      toast.error(
+        e instanceof Error
+          ? e.message
+          : "Could not create the standalone terminal.",
+      ),
+    )
+}
+
 // Open the close-terminal confirmation dialog for a companion terminal. The TUI
 // always confirms before killing a terminal's running process, so the web does
 // too (the ✕ no longer deletes on a single click).
@@ -2562,6 +2642,9 @@ function terminalDeleteRequest(
       return terminalsApi.remove(owner.sessionId, terminalId)
     case "project":
       return terminalsApi.removeForProject(owner.projectId, terminalId)
+    // Un-nested, because there is no owner to nest under.
+    case "standalone":
+      return terminalsApi.removeStandalone(terminalId)
     default:
       return assertNever(owner)
   }

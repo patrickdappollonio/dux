@@ -416,18 +416,38 @@ pub enum TerminalOwnerView {
     Session { session_id: String },
     /// A project terminal spawned at a project's repo root, with no agent.
     Project { project_id: String },
+    /// A standalone terminal, belonging to no agent and no project. There is no
+    /// owner id to send, so it carries the thing its row names it by instead:
+    /// the directory it opened in, written with the home directory collapsed to
+    /// `~` ([`crate::home_path::shorten_home`]). That string is the row's second
+    /// line and is what the sidebar search matches. It travels on the wire
+    /// rather than being derived client-side because the browser is not
+    /// necessarily on the same machine as the server and has no home directory
+    /// of the server's to collapse against.
+    Standalone { cwd_label: String },
 }
 
 impl crate::model::TerminalOwner {
     /// Presentation: project the owner onto the wire. Exhaustive, so a new owner
     /// kind cannot reach the browser as an untagged or missing owner.
-    pub fn to_view(&self) -> TerminalOwnerView {
+    ///
+    /// `cwd` is the directory the terminal was spawned in
+    /// ([`crate::pty::PtyClient::spawn_dir`]); only the standalone kind uses it,
+    /// because only it names itself by where it is. Deliberately the SPAWN
+    /// directory rather than a live probe: this string is projected on every
+    /// spine build and feeds the coarse change fingerprint, so a value that
+    /// moved every time the user typed `cd` would churn the sidebar and make the
+    /// row's search key unstable.
+    pub fn to_view(&self, cwd: &std::path::Path) -> TerminalOwnerView {
         match self.as_ref() {
             crate::model::TerminalOwnerRef::Session(id) => TerminalOwnerView::Session {
                 session_id: id.to_string(),
             },
             crate::model::TerminalOwnerRef::Project(id) => TerminalOwnerView::Project {
                 project_id: id.to_string(),
+            },
+            crate::model::TerminalOwnerRef::Standalone => TerminalOwnerView::Standalone {
+                cwd_label: crate::home_path::shorten_home(cwd),
             },
         }
     }
@@ -753,7 +773,7 @@ impl Engine {
     fn terminal_view(&self, id: &str, t: &crate::model::CompanionTerminal) -> TerminalView {
         TerminalView {
             id: id.to_string(),
-            owner: t.owner.to_view(),
+            owner: t.owner.to_view(t.client.spawn_dir()),
             label: t.label.clone(),
             has_output: t.client.has_output(),
             // A terminal is Working when it is streaming output OR a foreground app
@@ -827,7 +847,12 @@ impl Engine {
             .values()
             .filter_map(|t| match t.owner.as_ref() {
                 crate::model::TerminalOwnerRef::Project(pid) => Some(pid.to_string()),
-                crate::model::TerminalOwnerRef::Session(_) => None,
+                // Neither a session terminal nor a standalone terminal keeps a
+                // project row above the "no agents" separator: the first belongs
+                // to an agent the project already lists, and the second belongs
+                // to no project at all.
+                crate::model::TerminalOwnerRef::Session(_)
+                | crate::model::TerminalOwnerRef::Standalone => None,
             })
             .collect()
     }
@@ -1502,13 +1527,20 @@ mod tests {
         let (project_terminal, _) = engine
             .create_project_terminal("p1", 24, 80)
             .expect("project terminal");
+        let (standalone_terminal, _) = engine
+            .create_standalone_terminal(24, 80)
+            .expect("standalone terminal");
 
         let vm = engine.spine();
         let ids: Vec<&str> = vm.terminals.iter().map(|t| t.id.as_str()).collect();
         assert_eq!(
             ids,
-            vec![session_terminal.as_str(), project_terminal.as_str()],
-            "both owner kinds appear, in spawn (sort_order) order"
+            vec![
+                session_terminal.as_str(),
+                project_terminal.as_str(),
+                standalone_terminal.as_str()
+            ],
+            "every owner kind appears, in spawn (sort_order) order"
         );
         let owners: Vec<&TerminalOwnerView> = vm.terminals.iter().map(|t| &t.owner).collect();
         assert_eq!(
@@ -1519,6 +1551,11 @@ mod tests {
                 },
                 &TerminalOwnerView::Project {
                     project_id: "p1".to_string()
+                },
+                &TerminalOwnerView::Standalone {
+                    cwd_label: crate::home_path::shorten_home(
+                        &crate::home_path::standalone_terminal_dir()
+                    )
                 },
             ]
         );
@@ -1542,6 +1579,16 @@ mod tests {
         assert_eq!(
             project,
             serde_json::json!({ "kind": "project", "project_id": "p1" })
+        );
+        // The standalone tag carries no id (there is no owner) and instead
+        // carries the thing its row names it by: the `~`-shortened directory.
+        let standalone = serde_json::to_value(TerminalOwnerView::Standalone {
+            cwd_label: "~/code".to_string(),
+        })
+        .expect("serialize");
+        assert_eq!(
+            standalone,
+            serde_json::json!({ "kind": "standalone", "cwd_label": "~/code" })
         );
     }
 

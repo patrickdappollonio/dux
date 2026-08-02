@@ -71,6 +71,16 @@ export function projectTerminalPtyUrl(
   )}/terminals/${encodeURIComponent(terminalId)}/pty`
 }
 
+// A standalone terminal's PTY socket URL. Un-nested, because a standalone
+// terminal has no owner to nest under; the server still refuses an owned
+// terminal at this address, so the address is not a way around the nested
+// routes' cross-owner checks.
+export function standaloneTerminalPtyUrl(terminalId: string): string {
+  return `${wsScheme()}//${location.host}/ws/terminals/${encodeURIComponent(
+    terminalId,
+  )}/pty`
+}
+
 // A terminal's PTY socket URL, chosen by its OWNER. Which websocket route a
 // terminal is reachable at is an ownership decision, so it is a switch ending in
 // `assertNever` rather than a two-way conditional at the call site: a new owner
@@ -84,6 +94,8 @@ export function terminalSocketUrl(
       return terminalPtyUrl(owner.sessionId, terminalId)
     case "project":
       return projectTerminalPtyUrl(owner.projectId, terminalId)
+    case "standalone":
+      return standaloneTerminalPtyUrl(terminalId)
     default:
       return assertNever(owner)
   }

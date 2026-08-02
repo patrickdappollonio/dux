@@ -107,8 +107,22 @@ impl App {
     /// (terminal order resets on restart). A single terminal or an
     /// already-at-the-edge move is a no-op that leaves the sort mode untouched.
     pub(crate) fn move_selected_terminal(&mut self, dir: MoveDir) {
-        let order: Vec<String> = self
+        // The selection indexes the VISIBLE list, so the terminal to move comes
+        // from there; the move itself happens in the FULL order, which is the
+        // thing being persisted. Same shape as `move_selected_agent`, which
+        // resolves the agent from the filtered sidebar and then moves it within
+        // `engine.sessions`: a reorder must never rewrite the order as if the
+        // rows a live query is hiding did not exist.
+        let Some(terminal_id) = self
             .terminal_items()
+            .get(self.selected_terminal_index)
+            .map(|(id, _)| (*id).clone())
+        else {
+            self.set_error("Select a terminal to move.");
+            return;
+        };
+        let order: Vec<String> = self
+            .sorted_terminal_items()
             .iter()
             .map(|(id, _)| (*id).clone())
             .collect();
@@ -116,11 +130,10 @@ impl App {
             self.set_info("Only one terminal; nothing to reorder.");
             return;
         }
-        let Some(terminal_id) = order.get(self.selected_terminal_index).cloned() else {
-            self.set_error("Select a terminal to move.");
+        let Some(idx) = order.iter().position(|id| *id == terminal_id) else {
             return;
         };
-        let new_order = move_in_order(&order, self.selected_terminal_index, dir);
+        let new_order = move_in_order(&order, idx, dir);
         if new_order == order {
             return; // already at the relevant edge; leave the sort mode as it was
         }

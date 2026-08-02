@@ -7,8 +7,10 @@ import {
   getActivePtySocket,
   setActivePtySocket,
   projectTerminalPtyUrl,
+  standaloneTerminalPtyUrl,
   tabPtyUrl,
   terminalPtyUrl,
+  terminalSocketUrl,
 } from "./ptySocket"
 import type { ConnState } from "./types"
 
@@ -103,6 +105,27 @@ describe("ptySocket URL builders", () => {
     )
   })
 
+  it("builds the standalone-terminal PTY URL un-nested, naming no owner", () => {
+    expect(standaloneTerminalPtyUrl("t9")).toBe(
+      "ws://localhost:7070/ws/terminals/t9/pty",
+    )
+  })
+
+  it("routes each owner kind to its own socket", () => {
+    // Which address a terminal is reachable at is an ownership decision, so pin
+    // all three: a terminal sent to the wrong route 404s forever behind the
+    // reconnecting socket, with nothing visible saying why.
+    expect(terminalSocketUrl({ kind: "session", sessionId: "s1" }, "t9")).toBe(
+      "ws://localhost:7070/ws/sessions/s1/terminals/t9/pty",
+    )
+    expect(terminalSocketUrl({ kind: "project", projectId: "p1" }, "t9")).toBe(
+      "ws://localhost:7070/ws/projects/p1/terminals/t9/pty",
+    )
+    expect(terminalSocketUrl({ kind: "standalone" }, "t9")).toBe(
+      "ws://localhost:7070/ws/terminals/t9/pty",
+    )
+  })
+
   it("builds the extra-tab PTY URL nested under its session", () => {
     expect(tabPtyUrl("s1", "tab9")).toBe(
       "ws://localhost:7070/ws/sessions/s1/tabs/tab9/pty",
@@ -120,6 +143,9 @@ describe("ptySocket URL builders", () => {
     )
     expect(projectTerminalPtyUrl("p/1", "t/2")).toBe(
       "wss://example.com/ws/projects/p%2F1/terminals/t%2F2/pty",
+    )
+    expect(standaloneTerminalPtyUrl("t/2")).toBe(
+      "wss://example.com/ws/terminals/t%2F2/pty",
     )
   })
 })

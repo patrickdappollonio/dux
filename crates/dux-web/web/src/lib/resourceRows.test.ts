@@ -120,6 +120,60 @@ describe("taskManagerRows", () => {
     expect(row?.stats?.rss_bytes).toBe(10_485_760)
   })
 
+  it("emits a standalone terminal row, with its directory as the detail", () => {
+    // The kind with no owner section of its own. The Task Manager's rows and its
+    // "Stop all" count are computed from two different things (the rows here,
+    // the flat terminal collection there), so a terminal missing a row would
+    // leave the user reading a count of things it offers no way to stop.
+    const terminals = [
+      terminal({
+        id: "solo-1",
+        label: "Terminal 3",
+        owner: { kind: "standalone", cwd_label: "~/code" },
+      }),
+    ]
+    const rows = taskManagerRows([], [duxStat, totalStat], [], terminals)
+    const row = rows.find((r) => r.key === "term:solo-1")
+    expect(row).toBeDefined()
+    expect(row?.kind).toBe("terminal")
+    // No owner to name, so the row says where it is, exactly as its sidebar
+    // row does.
+    expect(row?.detail).toBe("~/code")
+    expect(row?.sessionId).toBeNull()
+    expect(row?.projectId).toBeNull()
+    expect(row?.targetId).toBe("solo-1")
+    expect(row?.stoppable).toBe(true)
+  })
+
+  it("the rows and the Stop-all count agree with a standalone terminal present", () => {
+    const projects = [project({ id: "p1", name: "Repo" })]
+    const sessions = [session({ id: "s1", status: "active" })]
+    const terminals = [
+      terminal({ id: "st-1" }),
+      projectTerminal({ id: "pt-1", projectId: "p1" }),
+      terminal({
+        id: "solo-1",
+        owner: { kind: "standalone", cwd_label: "~" },
+      }),
+    ]
+    const rows = taskManagerRows(
+      sessions,
+      [duxStat, totalStat],
+      projects,
+      terminals,
+    )
+    const terminalRows = rows.filter((r) => r.kind === "terminal")
+    // `TaskManagerDialog` counts `spine.terminals.length` for its Stop-all
+    // confirmation, so the two must be the same number, and every terminal must
+    // appear exactly once (the leftover sweep must not double-emit it).
+    expect(terminalRows).toHaveLength(terminals.length)
+    expect(terminalRows.map((r) => r.targetId).sort()).toEqual([
+      "pt-1",
+      "solo-1",
+      "st-1",
+    ])
+  })
+
   it("a_lone_project_terminal_means_something_is_running", () => {
     // The trap this guards (T6): with only a project terminal live the dialog
     // said "Nothing is running." and auto-closed.

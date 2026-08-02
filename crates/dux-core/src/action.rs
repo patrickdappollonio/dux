@@ -118,6 +118,11 @@ pub enum Action {
     /// project-owned terminal at that project's repo root. Distinct from
     /// `NewTerminal`, which is agent-scoped. No default keybinding.
     NewProjectTerminal,
+    /// Palette-only: spawn a terminal that belongs to nothing, in the user's
+    /// home directory. Distinct from `NewTerminal` (agent-scoped) and
+    /// `NewProjectTerminal` (project-scoped): this one needs nothing selected
+    /// and no owner to exist. No default keybinding.
+    NewStandaloneTerminal,
     RenameSession,
     DeleteProject,
     RemoveProject,
@@ -262,6 +267,7 @@ impl Action {
             Action::RenameWebInstance => "rename_web_instance",
             Action::NewTerminal => "new_terminal",
             Action::NewProjectTerminal => "new_project_terminal",
+            Action::NewStandaloneTerminal => "new_standalone_terminal",
             Action::RenameSession => "rename_session",
             Action::DeleteProject => "delete_project",
             Action::RemoveProject => "remove_project",
@@ -363,6 +369,9 @@ impl Action {
             Action::SelectTab9 => "Focus tab 9 of the selected agent.",
             Action::NewTerminal => "Spawn a new companion terminal for the selected agent.",
             Action::NewProjectTerminal => "Open a terminal for a project you pick.",
+            Action::NewStandaloneTerminal => {
+                "Open a standalone terminal in your home directory, belonging to no project or agent."
+            }
             Action::ExitInteractive => "Exit interactive mode (stop forwarding keys to agent).",
             Action::OpenMacroBar => "Open the macro command bar to send text macros.",
             Action::OpenCurrentPullRequest => {
@@ -585,6 +594,7 @@ impl Action {
             | Action::RenameWebInstance
             | Action::NewTerminal
             | Action::NewProjectTerminal
+            | Action::NewStandaloneTerminal
             | Action::RenameSession
             | Action::DeleteProject
             | Action::RemoveProject

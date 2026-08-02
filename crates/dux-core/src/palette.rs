@@ -358,6 +358,14 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         // Per-project: web spawns project terminals from the project row menu inline.
     },
     PaletteCommand {
+        action: Action::NewStandaloneTerminal,
+        name: "new-standalone-terminal",
+        description: "Open a standalone terminal in your home directory",
+        // Global and parameter-free: it needs no agent, no project, and nothing
+        // selected, so it also earns a row in the web app menu (see
+        // `crates/dux-web/web/src/lib/appMenu.ts`).
+    },
+    PaletteCommand {
         action: Action::RenameSession,
         name: "rename-agent",
         description: "Rename the selected agent session",

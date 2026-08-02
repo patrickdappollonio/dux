@@ -384,7 +384,13 @@ impl Engine {
                     Some(crate::model::TerminalOwnerRef::Session(sid)) => {
                         (!self.any_tab_active(sid)).then(|| sid.to_string())
                     }
-                    Some(crate::model::TerminalOwnerRef::Project(_)) | None => None,
+                    // A project terminal, a standalone terminal and an orphan PTY
+                    // all have no session behind them to mark Detached.
+                    Some(
+                        crate::model::TerminalOwnerRef::Project(_)
+                        | crate::model::TerminalOwnerRef::Standalone,
+                    )
+                    | None => None,
                 };
             let agent_detached = detaching_session.is_some();
             if let Some(sid) = &detaching_session {
@@ -567,6 +573,14 @@ impl Engine {
 
     /// SIGTERM every companion terminal belonging to a session and move them all
     /// into the terminating set (used when the owning agent is deleted).
+    ///
+    /// A STANDALONE terminal is deliberately not in scope, and the omission is a
+    /// decision rather than something to be tidied up later. It belongs to no
+    /// agent, so deleting an agent has nothing to do with it. Nothing closes a
+    /// standalone terminal automatically: it ends when the user closes it or dux
+    /// shuts down. The same note sits on `begin_close_project_terminals` below,
+    /// and the rule itself is on `TerminalOwner::closed_by_session_delete`, whose
+    /// exhaustive match is what actually enforces it.
     pub fn begin_close_session_terminals(&mut self, session_id: &str) {
         let ids: Vec<String> = self
             .companion_terminals
@@ -581,6 +595,15 @@ impl Engine {
 
     /// SIGTERM every project terminal belonging to a project and move them all
     /// into the terminating set (used when the project is removed).
+    ///
+    /// A STANDALONE terminal is deliberately not in scope, and the omission is a
+    /// decision rather than something to be tidied up later. It belongs to no
+    /// project, so removing a project has nothing to do with it. Nothing closes
+    /// a standalone terminal automatically: it ends when the user closes it or
+    /// dux shuts down. The same note sits on `begin_close_session_terminals`
+    /// above, and the rule itself is on
+    /// `TerminalOwner::closed_by_project_removal`, whose exhaustive match is
+    /// what actually enforces it.
     pub fn begin_close_project_terminals(&mut self, project_id: &str) {
         let ids: Vec<String> = self
             .companion_terminals
@@ -2479,6 +2502,54 @@ mod tests {
         assert!(
             engine.companion_terminals.contains_key(&session_tid),
             "the session terminal must be untouched"
+        );
+    }
+
+    #[test]
+    fn nothing_closes_a_standalone_terminal_but_the_user() {
+        // The journey: a user keeps a standalone terminal open while they delete
+        // an agent and remove a project. Both of those close their OWN terminals.
+        // The standalone one is still there afterwards, because it belongs to
+        // neither and nothing closes it automatically.
+        let (mut engine, _tmp) = test_engine();
+        let repo = tempfile::tempdir().expect("project dir");
+        engine
+            .projects
+            .push(sample_project("p1", repo.path().to_string_lossy().as_ref()));
+        let mut session = sample_session("s1", "p1", "feat");
+        session.worktree_path = repo.path().to_string_lossy().to_string();
+        engine.sessions.push(session);
+        engine.config.terminal.command = "cat".to_string();
+        engine.config.terminal.args = vec![];
+
+        let (session_tid, _) = engine
+            .create_companion_terminal("s1", 24, 80)
+            .expect("session terminal");
+        let (project_tid, _) = engine
+            .create_project_terminal("p1", 24, 80)
+            .expect("project terminal");
+        let (standalone_tid, _) = engine
+            .create_standalone_terminal(24, 80)
+            .expect("standalone terminal");
+
+        engine.begin_close_session_terminals("s1");
+        assert!(
+            !engine.companion_terminals.contains_key(&session_tid),
+            "deleting the agent closes the agent's own terminal"
+        );
+        assert!(
+            engine.companion_terminals.contains_key(&standalone_tid),
+            "deleting an agent must leave a terminal that belongs to no agent"
+        );
+
+        engine.begin_close_project_terminals("p1");
+        assert!(
+            !engine.companion_terminals.contains_key(&project_tid),
+            "removing the project closes the project's own terminal"
+        );
+        assert!(
+            engine.companion_terminals.contains_key(&standalone_tid),
+            "removing a project must leave a terminal that belongs to no project"
         );
     }
 

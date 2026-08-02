@@ -117,6 +117,11 @@ companion terminals do not get them: they inherit dux's own environment, plus th
 `TERM`/`COLORTERM` and terminal-identity values dux sets, with your `[env]` and
 `[[projects]] env` keys layered on top.
 
+A standalone terminal belongs to no project, so there is no `[[projects]] env` to
+layer: it gets the global `[env]` and nothing else. It runs no startup command
+either, for the same reason a project terminal does not: a startup command is
+worktree provisioning for a new agent, not a shell rc.
+
 ## The startup shell
 
 Startup commands run through a shell, not directly. The global

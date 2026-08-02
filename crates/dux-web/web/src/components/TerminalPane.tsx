@@ -364,6 +364,8 @@ export function TerminalPane(props: TerminalPaneProps) {
           // before; the generic fallback stays "Agent" for the same reason.
           session: () => session?.title || session?.branch_name || "Agent",
           project: () => project?.name || "Terminal",
+          // No owner to be named after, so the generic noun is the whole name.
+          standalone: () => "Terminal",
         })
       : session?.title || session?.branch_name || "Agent"
   const notifyTitleRef = useRef(notifyTitle)

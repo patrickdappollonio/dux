@@ -103,7 +103,9 @@ struct ProjectWithTerminals {
 ///
 /// The match over the owner is EXHAUSTIVE with no wildcard arm, so a new kind of
 /// owner has to be answered for here rather than silently vanishing from these
-/// endpoints, which is the whole reason the owner is a tagged value.
+/// endpoints, which is the whole reason the owner is a tagged value. A terminal
+/// owned by nothing nests under nothing and is answered for by being dropped, on
+/// purpose and out loud at the arm below.
 fn nest_terminals_by_owner(
     terminals: Vec<TerminalView>,
 ) -> (
@@ -124,6 +126,14 @@ fn nest_terminals_by_owner(
                 .entry(project_id.clone())
                 .or_default()
                 .push(terminal),
+            // A standalone terminal is owned by nothing, so it nests under
+            // nothing and is dropped from these two re-nested reads. That is not
+            // an omission: these endpoints answer "what does this session/project
+            // have", and the answer for a terminal that belongs to neither is
+            // "not yours". `GET /api/v1/spine` is where every terminal of every
+            // kind is listed, flat and owner-tagged, and it is the only read that
+            // claims to be complete.
+            TerminalOwnerView::Standalone { .. } => {}
         }
     }
     (by_session, by_project)
