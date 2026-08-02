@@ -29,10 +29,13 @@ collapsible "Inactive" tail so finished work isn't in your face.
 ▾ Terminals
   ● cargo test    ↳ auth-refactor@dux   Running
   ○ zsh           ↳ project              Idle
+  ○ Terminal      ↳ ~/code               Idle
 ```
 
 A terminal's second line names its owner as `agent@project` (or just the project,
-for a project terminal), so you always know whose shell you're looking at.
+for a project terminal), so you always know whose shell you're looking at. A
+standalone terminal has no owner, so it names the directory it opened in instead,
+shortened with `~`. Whichever it shows is what the sidebar search matches on.
 
 ## Sorting
 

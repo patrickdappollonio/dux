@@ -213,6 +213,8 @@ Each agent gets its own companion terminal: a separate shell session in the same
 
 Projects get terminals too. A **project terminal** is a plain shell opened at the project's repo root with no agent attached, handy for repo-wide chores (and, over the web UI, for reaching the machine when there is no local terminal to fall back to). Spawn one from the project's menu on either surface; removing the project closes its project terminals.
 
+And a **standalone terminal** belongs to nothing at all: no agent, no project. It opens in your home directory, so you can reach for one before you have added a single project. Open it from the `new-standalone-terminal` palette command in the TUI or the cog menu in the browser. Its sidebar row shows the directory it opened in rather than an owner. Nothing closes it for you: removing a project or deleting an agent closes their own terminals and leaves this one alone, so it ends when you close it or when dux shuts down.
+
 ### Forking Sessions
 
 See an agent going down the wrong path? Fork it. dux creates a new worktree with the current files copied over so you can try a different approach without losing the original session. It's branching, but for your AI conversations.

@@ -52,6 +52,8 @@ link to a teammate on the same instance and they land exactly where you are:
 - An extra provider tab is `#/agent/<sessionId>/tab/<tabId>`.
 - A companion terminal is `#/agent/<sessionId>/terminal/<terminalId>`.
 - A project terminal is `#/project/<projectId>/terminal/<terminalId>`.
+- A standalone terminal is `#/terminal/<terminalId>`, with no owner in the
+  address, because it does not have one.
 - The phone's Changes screen is the same link with `/changes` on the end.
 
 The URL is the whole story of where you are, which is what makes the browser's
@@ -77,8 +79,8 @@ Back cannot drop you straight back onto the dead end. If the agent
 you are watching is deleted out from under you, dux moves you to the next active
 agent, or home when there is not one. A link to a terminal that has since closed
 is not an error, since terminals come and go: it lands you on the agent that
-owned it, or on the home screen for a terminal that belonged to a project rather
-than an agent, and tidies the address bar to match.
+owned it, or on the home screen for a terminal that belonged to a project, or to
+nothing at all, and tidies the address bar to match.
 
 ## Adding projects
 
@@ -189,6 +191,19 @@ even over Tailscale with no local terminal in sight. Spawn one from the project'
 project named as its owner, shows
 up in the Task Manager, and is destroyed on close exactly like any other terminal.
 Removing the project closes its project terminals.
+
+And then there is the third kind, which belongs to nothing at all. A **standalone
+terminal** opens in your home directory with no agent and no project behind it,
+so you can reach for one before you have added a single project. It is the plain
+shell you would have opened on the machine anyway, except it is in the browser.
+Open one from the cog menu ("New standalone terminal"). Its row shows the
+directory it opened in, shortened with `~`, where the other two show their owner,
+so the sidebar search finds it by path.
+
+Nothing closes a standalone terminal for you. Removing a project closes that
+project's terminals and deleting an agent closes that agent's; neither has
+anything to do with this one. It ends when you close it, or when dux shuts
+down.
 
 ## Macros
 
