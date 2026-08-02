@@ -467,42 +467,47 @@ struct AuthStatusOutput {
     hosts: std::collections::BTreeMap<String, Vec<AuthStatusAccount>>,
 }
 
+/// One account under one host key.
+///
+/// All three fields are REQUIRED, so a record missing one, or carrying null or
+/// the wrong type in one, fails to deserialize and takes the whole response
+/// down with it. That is deliberate, and it is the difference between "gh says
+/// no" and "dux could not read what gh said". They were previously optional,
+/// which produced two decisive-looking answers out of records that decided
+/// nothing: a missing or null `active` yielded an empty but successfully parsed
+/// host set, which is a decisive "gh serves nothing" that turns every GitHub
+/// feature off and replaces the last known good policy; and a missing or null
+/// `host` alongside a successful, active record qualified the MAP KEY on the
+/// strength of a record that never said which host it describes.
+///
+/// A response containing an unreadable record is therefore transient (see
+/// [`decide_gh_probe`]), which preserves the last known good policy. gh 2.95.0
+/// emits all three fields on every account.
 #[derive(serde::Deserialize)]
 struct AuthStatusAccount {
-    #[serde(default)]
-    state: Option<String>,
-    #[serde(default)]
-    active: Option<bool>,
-    #[serde(default)]
-    host: Option<String>,
+    state: String,
+    active: bool,
+    host: String,
 }
 
 impl AuthStatusAccount {
     /// Whether this account makes `host_key` (already trimmed and lowercased) a
     /// host dux may name when it calls `gh`.
     fn qualifies(&self, host_key: &str) -> bool {
-        // EXACTLY boolean true. Excluding only an explicit `false` let a
-        // successful entry qualify on a missing, null or string-valued
-        // `active`, and with several accounts on one host it let a broken
-        // active entry ride in on a sibling whose `active` was malformed.
         // Every call dux makes names a host and never an account, so `gh` uses
-        // that host's ACTIVE account: an entry that does not say, in the one
-        // way the format has of saying it, that it IS that account, tells us
-        // nothing about the call dux is going to make.
-        if self.active != Some(true) {
+        // that host's ACTIVE account: an account that is not the active one
+        // tells us nothing about the call dux is going to make, and a working
+        // sibling cannot vouch for a broken active account.
+        if !self.active {
             return false;
         }
-        if self.state.as_deref() != Some("success") {
+        if self.state != "success" {
             return false;
         }
-        // The map key is what would be handed to `gh`, so an entry naming a
+        // The map key is what would be handed to `gh`, so a record naming a
         // different host is describing something else and cannot vouch for
-        // this one. An entry that omits its host contradicts nothing, and the
-        // key remains the authority.
-        match &self.host {
-            Some(host) => host.trim().eq_ignore_ascii_case(host_key),
-            None => true,
-        }
+        // this one.
+        self.host.trim().eq_ignore_ascii_case(host_key)
     }
 }
 
@@ -1448,47 +1453,117 @@ mod host_policy_tests {
         );
     }
 
-    /// `active` must be EXACTLY boolean true. Excluding only an explicit
-    /// `false` let a successful entry qualify on a missing, null or
-    /// string-valued `active`, which is precisely the entry whose meaning dux
-    /// cannot know.
+    /// A record dux cannot read IN FULL is not evidence of anything, so the
+    /// answer containing it is not an answer.
+    ///
+    /// This used to be asserted with `unwrap_or_default()`, which masked the
+    /// outcome it was supposed to be about: a missing or null `active` DID
+    /// parse, into an empty host set, and an empty host set is a DECISIVE "gh
+    /// serves nothing" that replaces the last known good policy and turns every
+    /// GitHub feature off. A wrongly typed one failed to parse and was
+    /// transient. The test could not tell those apart because it defaulted the
+    /// one into the other. They are now the same thing, and it asserts which.
+    ///
+    /// A missing or null `host` was worse: the record said nothing about which
+    /// host it describes, and the map KEY was taken as qualified on the
+    /// strength of it.
     #[test]
-    fn an_entry_qualifies_only_on_an_exactly_true_active_field() {
+    fn a_record_dux_cannot_read_in_full_is_not_an_answer() {
         for malformed in [
-            // absent
+            // `active` absent, null, or not a boolean.
             r#"{"hosts":{"github.com":[{"state":"success","host":"github.com"}]}}"#,
-            // null
             r#"{"hosts":{"github.com":[{"state":"success","active":null,"host":"github.com"}]}}"#,
-            // the string "true", which is not a boolean
             r#"{"hosts":{"github.com":[{"state":"success","active":"true","host":"github.com"}]}}"#,
-            // a number
             r#"{"hosts":{"github.com":[{"state":"success","active":1,"host":"github.com"}]}}"#,
+            // `host` absent or null: the record does not say what it describes.
+            r#"{"hosts":{"github.com":[{"state":"success","active":true}]}}"#,
+            r#"{"hosts":{"github.com":[{"state":"success","active":true,"host":null}]}}"#,
+            // `state` absent or null: the record does not say whether it works.
+            r#"{"hosts":{"github.com":[{"active":true,"host":"github.com"}]}}"#,
+            r#"{"hosts":{"github.com":[{"state":null,"active":true,"host":"github.com"}]}}"#,
+            // One unreadable record spoils the answer even alongside a good
+            // one, because dux cannot know what it was going to say.
+            r#"{"hosts":{"github.com":[{"state":"success","active":true,"host":"github.com"}],"git.company.example":[{"state":"success"}]}}"#,
         ] {
-            // Either the document is not a shape dux can read (a wrongly TYPED
-            // field), or it reads and the host is not in the set. Never
-            // eligible, which is the property that matters.
-            let parsed = parse_auth_status_hosts(malformed).unwrap_or_default();
-            assert!(
-                parsed.is_empty(),
-                "a malformed `active` must never qualify a host, got {parsed:?} from {malformed}",
+            assert_eq!(
+                parse_auth_status_hosts(malformed),
+                None,
+                "a record dux cannot read must make the answer unreadable: {malformed}",
+            );
+        }
+    }
+
+    /// And what the caller does with that: an unreadable record is TRANSIENT,
+    /// so the last known good policy stands. It must not be mistaken for a `gh`
+    /// too old to answer, and it must not be mistaken for a decisive "gh serves
+    /// no hosts", which is what an empty parsed set means.
+    #[test]
+    fn a_response_carrying_an_unreadable_record_is_transient() {
+        let mut retried = false;
+        let probe = decide_gh_probe(
+            GhCallOutcome::Completed(completed(
+                0,
+                r#"{"hosts":{"github.com":[{"state":"success","host":"github.com"}]}}"#,
+            )),
+            || {
+                retried = true;
+                GhCallOutcome::Completed(completed(0, ""))
+            },
+        );
+        assert!(!retried, "an unreadable record is not an older gh");
+        assert!(
+            matches!(probe, GhProbe::Transient(_)),
+            "an unreadable record decides nothing, got {probe:?}",
+        );
+
+        // The contrast, so the assertion above is not just "anything odd is
+        // transient": a WELL-FORMED record saying the account is not active, or
+        // that its state is not success, is a decisive no for that host, and an
+        // answer made only of those is a decisive empty set.
+        for decisive in [
+            r#"{"hosts":{"github.com":[{"state":"success","active":false,"host":"github.com"}]}}"#,
+            r#"{"hosts":{"github.com":[{"state":"error","active":true,"host":"github.com"}]}}"#,
+        ] {
+            assert_eq!(
+                decide_gh_probe(GhCallOutcome::Completed(completed(0, decisive)), || {
+                    panic!("a parseable answer needs no fallback")
+                }),
+                GhProbe::Decided {
+                    available: false,
+                    policy: GithubHostPolicy::Hosts(BTreeSet::new()),
+                },
+                "{decisive}",
             );
         }
     }
 
     /// With several accounts on one host, a broken active entry must not be
-    /// rescued by a sibling whose own `active` is malformed either.
+    /// rescued by a sibling, whether that sibling is well-formed and inactive
+    /// or unreadable.
     #[test]
     fn several_accounts_on_one_host_still_need_one_exactly_active_success() {
-        let broken_plus_malformed_sibling = r#"{"hosts":{"git.company.example":[
+        let broken_plus_inactive_sibling = r#"{"hosts":{"git.company.example":[
+            {"state":"error","active":true,"host":"git.company.example","login":"work"},
+            {"state":"success","active":false,"host":"git.company.example","login":"personal"}
+        ]}}"#;
+        assert_eq!(
+            parse_auth_status_hosts(broken_plus_inactive_sibling)
+                .expect("every record is well-formed, so this is an answer")
+                .len(),
+            0,
+            "the active account errored and the sibling is not the active one",
+        );
+
+        // The same host with an UNREADABLE sibling is not an answer at all,
+        // rather than an answer of "no". See
+        // `a_record_dux_cannot_read_in_full_is_not_an_answer`.
+        let broken_plus_unreadable_sibling = r#"{"hosts":{"git.company.example":[
             {"state":"error","active":true,"host":"git.company.example","login":"work"},
             {"state":"success","host":"git.company.example","login":"personal"}
         ]}}"#;
-        let parsed = parse_auth_status_hosts(broken_plus_malformed_sibling)
-            .expect("shape")
-            .len();
         assert_eq!(
-            parsed, 0,
-            "the active account errored and no sibling is marked active",
+            parse_auth_status_hosts(broken_plus_unreadable_sibling),
+            None
         );
 
         // The same host DOES qualify when one of its accounts really is the
