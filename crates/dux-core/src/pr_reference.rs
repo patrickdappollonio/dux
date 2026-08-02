@@ -1954,6 +1954,49 @@ mod independent_typed_parser_check {
             .and_then(|r| r.repository_label())
     }
 
+    /// Round three: text with two valid readings naming different repositories
+    /// must be refused, not decided by a rule of thumb.
+    #[test]
+    fn genuinely_ambiguous_text_is_refused_with_a_way_out() {
+        for ambiguous in [
+            "github.com:123/scriptaculous/pull/7",
+            "https:acme/widget/pull/7",
+            "github.com:8443/acme/widget/pull/7",
+        ] {
+            let err =
+                parse_typed_reference(ambiguous).expect_err(&format!("must refuse {ambiguous}"));
+            assert!(
+                err.to_lowercase().contains("read"),
+                "the refusal must say it can be read two ways: {err}"
+            );
+            assert!(
+                err.contains("https://"),
+                "the refusal must show what to type instead: {err}"
+            );
+        }
+        // The unambiguous neighbours keep working.
+        assert_eq!(
+            repo("github.com:8443/acme/widget").as_deref(),
+            Some("github.com:8443/acme/widget")
+        );
+        assert_eq!(
+            repo("github.com:123/scriptaculous").as_deref(),
+            Some("github.com/123/scriptaculous")
+        );
+        assert_eq!(
+            repo("https:/github.com/acme/widget/pull/7").as_deref(),
+            Some("github.com/acme/widget")
+        );
+        assert_eq!(
+            repo("//github.com/acme/widget/pull/7").as_deref(),
+            Some("github.com/acme/widget")
+        );
+        assert_eq!(
+            repo("git@github.com:acme/widget.git").as_deref(),
+            Some("github.com/acme/widget")
+        );
+    }
+
     /// Round two of my own cases: authorities git reads differently, browser
     /// address shapes with no literal `://`, and the numeric-owner ambiguity.
     #[test]
