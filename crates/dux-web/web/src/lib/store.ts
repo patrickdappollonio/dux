@@ -3671,6 +3671,9 @@ function requestAgentName(): void {
           createAgentDraft: res.name,
           createAgentGeneratedName: res.name,
           createAgentNamePending: false,
+          // This fill replaces the name too, so it retires an in-flight
+          // resolve for the same reason typing one does.
+          ...retireInFlightPrResolve(),
         })
       }
     })
@@ -3732,11 +3735,29 @@ export function setPendingPrReference(reference: string | null): void {
   setState({ pendingPrReference: reference })
 }
 
+// Editing either field of the reference-first dialog retires whatever resolve
+// is out for it, exactly as cancelling, retargeting and resubmitting already
+// do. The reply carries the reference and the name AS THEY WERE AT SUBMIT, so
+// letting it land after an edit creates the agent from text the user has
+// already replaced and then closes the dialog on them. Nothing can recall a
+// request in flight, so the reply has to arrive on a generation nobody is
+// waiting for. Returns the patch to fold into the caller's own write, and
+// nothing at all when no resolve is out, so an ordinary keystroke writes
+// exactly what it used to.
+function retireInFlightPrResolve(): Partial<DuxState> {
+  if (state.createAgentPrRequestId === null) return {}
+  return { createAgentPrRequestId: null, createAgentPrResolving: false }
+}
+
 // Update the PR-reference field. Free text — unlike the agent name, this is NOT
 // sanitized (a PR URL contains slashes, colons, etc.); the server parses it.
 export function setCreateAgentPrInput(raw: string): void {
   // Editing the field retires its refusal: the user is answering it.
-  setState({ createAgentPrInput: raw, createAgentPrError: null })
+  setState({
+    createAgentPrInput: raw,
+    createAgentPrError: null,
+    ...retireInFlightPrResolve(),
+  })
 }
 
 // Update the input as the user types, sanitizing live (space -> dash, drop
@@ -3746,7 +3767,11 @@ export function setCreateAgentDraft(raw: string): void {
   const draft = sanitizeAgentName(raw)
   const generated =
     draft === state.createAgentGeneratedName ? state.createAgentGeneratedName : null
-  setState({ createAgentDraft: draft, createAgentGeneratedName: generated })
+  setState({
+    createAgentDraft: draft,
+    createAgentGeneratedName: generated,
+    ...retireInFlightPrResolve(),
+  })
 }
 
 // Toggle the "Copy uncommitted changes from the project checkout" checkbox.
@@ -3760,7 +3785,11 @@ export function toggleCreateAgentCopyChanges(): void {
 //          keep the user's edits. Either way, forget the generated name.
 export function toggleCreateAgentRandomize(): void {
   if (!state.createAgentRandomize) {
-    setState({ createAgentRandomize: true, createAgentNamePending: true })
+    setState({
+      createAgentRandomize: true,
+      createAgentNamePending: true,
+      ...retireInFlightPrResolve(),
+    })
     requestAgentName()
   } else {
     const keepText = state.createAgentDraft !== state.createAgentGeneratedName
@@ -3771,6 +3800,7 @@ export function toggleCreateAgentRandomize(): void {
       // Unchecking abandons any in-flight request; its reply is ignored by
       // `onAgentName` (randomize is false by then), so stop the spinner now.
       createAgentNamePending: false,
+      ...retireInFlightPrResolve(),
     })
   }
 }
@@ -3957,9 +3987,10 @@ function submitPrReferenceFirst(reference: string, name: string): void {
     .then((resolved) => {
       // The generation guard. A reply that is not the one this dialog is
       // waiting for belongs to a question the user has already replaced (they
-      // cancelled, retargeted at a project, or submitted a different
-      // reference), and acting on it would create an agent from the old
-      // reference and close the dialog showing the new one.
+      // cancelled, retargeted at a project, submitted a different reference,
+      // or EDITED either field, since `reference` and `name` here are the
+      // values as they were at submit), and acting on it would create an agent
+      // from the old reference and close the dialog showing the new one.
       if (state.createAgentPrRequestId !== generation) return
       setState({ createAgentPrResolving: false, createAgentPrRequestId: null })
       const repository = resolved.repository ?? reference

@@ -413,6 +413,114 @@ describe("the reference-first from-PR flow", () => {
     expect(mod.getSnapshot().newAgentPickerOpen).toBe(false)
   })
 
+  it("editing the reference while it is resolving retires that resolution", async () => {
+    // The reply carries the reference and the name AS THEY WERE AT SUBMIT. So
+    // an edit in between is the same situation as a cancel or a resubmit: the
+    // answer coming back is about a question the dialog is no longer asking,
+    // and acting on it creates the agent from text the user has replaced, then
+    // closes the dialog on them.
+    const mod = await loadStore()
+    deferResolve = () => {}
+    mod.openCreateAgentFromPr(null)
+    mod.setCreateAgentPrInput("acme/widget#1")
+    mod.submitNameDialog("")
+    await vi.waitFor(() => {
+      expect(typeof deferResolve).toBe("function")
+    })
+    const releaseA = deferResolve as (value: unknown) => void
+
+    // The user keeps typing rather than cancelling.
+    mod.setCreateAgentPrInput("acme/gadget#2")
+    expect(
+      mod.getSnapshot().createAgentPrRequestId,
+      "an edited field is a question nothing is waiting for an answer to",
+    ).toBeNull()
+    expect(
+      mod.getSnapshot().createAgentPrResolving,
+      "and its spinner belongs to that retired question",
+    ).toBe(false)
+
+    releaseA({
+      repository: "acme/widget",
+      number: 1,
+      projects: [{ id: "p1", name: "widget" }],
+      uninspected_count: 0,
+      uninspected_summary: null,
+    })
+    await new Promise((r) => setTimeout(r, 0))
+
+    expect(
+      createBodies(),
+      "creating from acme/widget#1 would use a reference the user replaced",
+    ).toEqual([])
+    expect(
+      mod.getSnapshot().createAgentTarget,
+      "and the dialog must stay open on what they are typing",
+    ).not.toBeNull()
+    expect(mod.getSnapshot().createAgentPrInput).toBe("acme/gadget#2")
+  })
+
+  it("editing the name while the reference is resolving retires it too", async () => {
+    // The same defect through the other field: the captured name rides along
+    // with the captured reference, so an agent would be created under a name
+    // the user had already changed.
+    const mod = await loadStore()
+    deferResolve = () => {}
+    mod.openCreateAgentFromPr(null)
+    mod.setCreateAgentPrInput("acme/widget#1")
+    mod.submitNameDialog("first-name")
+    await vi.waitFor(() => {
+      expect(typeof deferResolve).toBe("function")
+    })
+    const releaseA = deferResolve as (value: unknown) => void
+
+    mod.setCreateAgentDraft("second-name")
+    expect(mod.getSnapshot().createAgentPrRequestId).toBeNull()
+
+    releaseA({
+      repository: "acme/widget",
+      number: 1,
+      projects: [{ id: "p1", name: "widget" }],
+      uninspected_count: 0,
+      uninspected_summary: null,
+    })
+    await new Promise((r) => setTimeout(r, 0))
+
+    expect(
+      createBodies(),
+      "creating as first-name would use a name the user replaced",
+    ).toEqual([])
+    expect(mod.getSnapshot().createAgentDraft).toBe("second-name")
+  })
+
+  it("turning the randomized name on while resolving retires it as well", async () => {
+    // The checkbox replaces the name just as typing does, so the captured one
+    // is stale by the time the reply lands.
+    const mod = await loadStore()
+    deferResolve = () => {}
+    mod.openCreateAgentFromPr(null)
+    mod.setCreateAgentPrInput("acme/widget#1")
+    mod.submitNameDialog("first-name")
+    await vi.waitFor(() => {
+      expect(typeof deferResolve).toBe("function")
+    })
+    const releaseA = deferResolve as (value: unknown) => void
+
+    mod.toggleCreateAgentRandomize()
+    expect(mod.getSnapshot().createAgentPrRequestId).toBeNull()
+
+    releaseA({
+      repository: "acme/widget",
+      number: 1,
+      projects: [{ id: "p1", name: "widget" }],
+      uninspected_count: 0,
+      uninspected_summary: null,
+    })
+    await new Promise((r) => setTimeout(r, 0))
+
+    expect(createBodies()).toEqual([])
+  })
+
   it("a stale rejection does not clear or overwrite a newer request", async () => {
     const mod = await loadStore()
     deferResolve = () => {}
