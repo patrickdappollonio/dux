@@ -103,9 +103,10 @@ and embedded-repository contents, and empty directories.
 
 ## Creating an agent from a GitHub PR
 
-In the browser, that is **New agent from PR…** in a project's `⋯` menu; in the
-terminal UI, the `new-agent-from-pr` palette command, then a project from the
-chooser. This path is only available when the `gh` CLI is installed, authenticated
+In the browser, that is **New agent from PR…** in the New-agent split button's
+`⋯` menu (or in a project's own `⋯` menu, to start from that project); in the
+terminal UI, the `new-agent-from-pr` palette command. This path is only
+available when the `gh` CLI is installed, authenticated
 (`gh auth login`), and the `github_integration` setting is enabled (it defaults to
 `true`):
 
@@ -138,10 +139,81 @@ hostname `gh` cannot serve does not qualify either. The exception is an older
 `github.com` and `github.*` only; if your enterprise host is spelled anything
 else, upgrade `gh`.
 
-When you trigger it, dux resolves the PR you paste or type, then asks you to
-confirm or edit the branch name, pre-filled with the PR's head branch name. In the
-terminal UI that is a second prompt after the PR reference; in the browser the PR
-reference and the name are two fields in one dialog. The name you confirm is what
+### The reference comes first, and dux works out the project
+
+Open this from the global command (the `new-agent-from-pr` palette entry in the
+terminal UI, **New agent from PR…** in the browser's New-agent menu) and the
+first thing you see is the reference field. No project is chosen and none is
+asked for: paste the link and dux compares the repository it names against every
+project you have, then takes you to the right one.
+
+Three things can happen:
+
+- **One project is a checkout of that repository.** dux goes straight on to
+  resolve the pull request and name the agent.
+- **Two or more are** (you keep the same repository checked out twice). dux
+  shows you just those and asks which one this agent belongs in.
+- **None is.** dux tells you which repository it could not find a project for and
+  offers the project picker so you can point at a checkout you already have on
+  disk. **dux will not clone a repository it does not have.** Every way of adding
+  a project takes a directory that already exists; if the repository is not on
+  this machine yet, clone it yourself and add it as a project first.
+
+If you would rather start from a project, there is a secondary action under the
+field, "choose an existing project", that opens the project selector and puts the dialog back
+into project-first mode. Anything you have already typed comes with you. Opening
+this path from a project's own `⋯` menu (browser) skips straight to that mode,
+exactly as it always did.
+
+### What the field accepts
+
+It is generous on purpose, because you are pasting from a browser bar, a chat
+message, or memory. Every one of these names the same repository:
+
+```
+example/application
+github.com/example/application
+git@github.com:example/application.git
+https://github.com/example/application
+https://github.com/example/application/issues
+https://github.com/example/application/security/dependabot
+```
+
+A trailing path is a browser route and is ignored, so a link copied off the Files
+or Commits tab of a pull request works as-is. On top of those, the pull-request
+spellings:
+
+```
+https://github.com/example/application/pull/123
+example/application#123
+#123
+123
+```
+
+`example/application#123` deliberately names **no host**, and dux does not assume
+github.com for it: it looks for that repository across all your projects on
+whatever host each one is on, so it finds your company server's checkout if that
+is the only one you have.
+
+A number on its own (`#123` or `123`) is the one form that needs a project
+already chosen, because by itself it does not say which repository it is in. With
+no project, dux refuses it and points you at the "choose an existing project"
+action; with a project chosen it behaves exactly as it always has.
+
+This leniency applies only to what **you** type. A project's own `origin` address
+is read from git, and dux reads it by git's rules alone, where a trailing path is
+part of the address rather than a route to ignore.
+
+Resolution reads each project's `origin` fresh every time, in a background
+worker. There is no cache, so editing a remote, changing a git `insteadOf`
+rewrite, or repairing a broken address takes effect immediately.
+
+### Naming and fetching
+
+Once the pull request is resolved, dux asks you to confirm or edit the branch
+name, pre-filled with the PR's head branch name. In the terminal UI that is a
+second prompt after the PR reference; in the browser the PR reference and the
+name are two fields in one dialog. The name you confirm is what
 the fetch targets, so on confirmation dux:
 
 1. Fetches the PR's head ref into that local branch using

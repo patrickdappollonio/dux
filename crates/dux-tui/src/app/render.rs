@@ -7728,7 +7728,9 @@ impl App {
                 // already chosen this modal is exactly what it always was.
                 let mut choose_button = None;
                 if !has_project && action_area.height >= 4 {
-                    let label = "Choose a project…";
+                    // The same words the inline refusal of a bare number uses,
+                    // so the message and the control it points at agree.
+                    let label = "Choose an existing project…";
                     let width = button_width_for(label).min(action_area.width);
                     let button = Rect {
                         x: action_area.x + (action_area.width.saturating_sub(width)) / 2,
