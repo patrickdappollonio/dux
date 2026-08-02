@@ -418,6 +418,32 @@ pub fn save_drop_from<R: Read>(
     }
 }
 
+/// Where a file dropped onto a pane will land, resolved from the pane's PTY.
+///
+/// The two cases really are different questions, which is why this is a choice
+/// rather than one path: an agent's answer is a fixed directory the engine
+/// already knows, while a terminal's has to be asked of a live process every
+/// time.
+#[derive(Debug, Clone)]
+pub enum FileDropDestination {
+    /// An AGENT pane: the root of that agent's worktree, so the file is visible
+    /// to git and can be committed alongside whatever the agent does with it.
+    Worktree(PathBuf),
+    /// A TERMINAL pane: wherever that terminal actually is right now.
+    Terminal(WorkingDirectory),
+}
+
+impl FileDropDestination {
+    /// Pin the destination directory. Blocking: this reads `/proc` (Linux) or
+    /// runs `lsof` (macOS), so it belongs on a blocking pool.
+    pub fn open(&self) -> std::io::Result<DropDir> {
+        match self {
+            Self::Worktree(path) => DropDir::open(path),
+            Self::Terminal(plan) => plan.open(),
+        }
+    }
+}
+
 /// The plan for finding the directory a terminal is ACTUALLY in.
 ///
 /// Built by [`crate::pty::PtyClient::working_directory`], which owns the policy;

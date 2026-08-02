@@ -113,6 +113,15 @@ pub enum EngineRequest {
     /// Resolve a session's worktree path (instant lookup; diff I/O happens
     /// off-thread in the server handler).
     SessionWorktree(String, oneshot::Sender<Option<String>>),
+    /// Where a file dropped onto the pane showing this pty id should be saved.
+    /// The pty id may be a terminal, an agent's session id, or an extra tab's
+    /// id; the engine resolves all three. A terminal answers with a PLAN rather
+    /// than a path, so the live-directory probe (a `/proc` read, or `lsof` on
+    /// macOS) happens on a blocking pool and never on this thread.
+    FileDropDestination(
+        String,
+        oneshot::Sender<Option<dux_core::file_drop::FileDropDestination>>,
+    ),
     /// Resolve a project's repo-root path (instant lookup). Lets the project
     /// terminal routes and the project-nested PTY socket 404 an unknown project
     /// before acting, mirroring how `SessionWorktree` gates the session routes.
@@ -784,6 +793,24 @@ impl EngineHandle {
         }
     }
 
+    /// Resolve `pty_id` to a file-drop destination. `None` when the pty id is
+    /// unknown or the engine thread is gone.
+    pub async fn file_drop_destination(
+        &self,
+        pty_id: String,
+    ) -> Option<dux_core::file_drop::FileDropDestination> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .req_tx
+            .send(EngineRequest::FileDropDestination(pty_id, tx))
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.unwrap_or(None)
+    }
+
     pub async fn session_worktree(&self, session_id: String) -> Option<String> {
         let (tx, rx) = oneshot::channel();
         if self
@@ -1288,6 +1315,7 @@ fn request_mutates_spine(req: &EngineRequest) -> bool {
         EngineRequest::TerminalOwnerOf(..)
         | EngineRequest::TabSession(..)
         | EngineRequest::SessionWorktree(..)
+        | EngineRequest::FileDropDestination(..)
         | EngineRequest::ProjectPath(..)
         | EngineRequest::ProjectWorktreeInputs(..)
         | EngineRequest::SessionStartupLogContext(..)
@@ -2251,6 +2279,9 @@ fn handle_request(
                     )
                 });
             let _ = reply.send(plan);
+        }
+        EngineRequest::FileDropDestination(pty_id, reply) => {
+            let _ = reply.send(engine.file_drop_destination(&pty_id));
         }
         EngineRequest::SessionWorktree(session_id, reply) => {
             let worktree = engine
@@ -3855,6 +3886,11 @@ mod tests {
             (
                 "SessionWorktree",
                 EngineRequest::SessionWorktree("s1".into(), dead_reply()),
+                false,
+            ),
+            (
+                "FileDropDestination",
+                EngineRequest::FileDropDestination("s1".into(), dead_reply()),
                 false,
             ),
             (

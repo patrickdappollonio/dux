@@ -101,6 +101,18 @@ pub struct AppState {
     /// limit WAITS (`acquire_owned().await`) rather than being rejected — and
     /// with the six-hour notes cache the waiter usually answers from cache.
     pub release_notes_semaphore: Option<Arc<tokio::sync::Semaphore>>,
+    /// Per-file size cap for a dropped file (`[server] file_drop_max_bytes`),
+    /// applied to the upload route as an explicit body limit. `0` disables file
+    /// drop entirely and the route refuses every upload.
+    pub file_drop_max_bytes: usize,
+    /// Bounds how many dropped-file uploads are in flight
+    /// (`[server] file_drop_max_concurrency`). Unlike [`tree_list_semaphore`]
+    /// this is never `None`: a configured `0` clamps to one permit, because the
+    /// point of this bound is total buffered-upload MEMORY and "unlimited" would
+    /// not bound it at all. The permit is taken in a LAYER around the handler,
+    /// not inside it, because a request body is buffered in full before the
+    /// handler's first line runs.
+    pub file_drop_semaphore: Arc<tokio::sync::Semaphore>,
     /// The web-layer event bus: resource-change signals (`/ws/events`) plus the
     /// per-topic interest refcount that drives the changed-files poller.
     pub event_bus: Arc<EventBus>,
@@ -132,6 +144,28 @@ pub struct AppState {
     /// it is not computed per request and why the version is stamped on
     /// dismissal rather than at startup.
     pub first_load: Arc<crate::first_load_routes::FirstLoadState>,
+}
+
+impl AppState {
+    /// Whether some OTHER connection currently holds input on `pty_id`.
+    ///
+    /// This exists so the file-drop route can refuse a drop from a read-only
+    /// viewer with a clear message instead of saving a file the browser will
+    /// then be unable to paste. **It is a COURTESY, not the protection.** The
+    /// only thing enforcing input authority is the websocket's own write check
+    /// (see [`PtySizeOwners::may_write`]), which is why the upload route saves
+    /// bytes and never writes to a terminal: a handler injecting text would walk
+    /// straight past that gate, and hiding the drop target from non-owners is a
+    /// courtesy too.
+    ///
+    /// An UNOWNED pty is not denied, matching `may_write`: the first write
+    /// claims it.
+    pub(crate) fn input_held_by_someone_else(&self, pty_id: &str, conn_id: u64) -> bool {
+        matches!(
+            self.pty_size_owners.owners.lock().unwrap().map.get(pty_id),
+            Some(owner) if *owner != conn_id
+        )
+    }
 }
 
 /// Maximum size of a single inbound WebSocket message (text or binary). This
@@ -234,6 +268,15 @@ pub struct RouterParams {
     /// paths override it from config via
     /// [`with_release_notes_max_concurrency`]. `0` means unlimited.
     pub release_notes_max_concurrency: u32,
+    /// Per-file size cap for a dropped file (`[server] file_drop_max_bytes`).
+    /// Defaults to [`dux_core::config::DEFAULT_FILE_DROP_MAX_BYTES`]; the serve
+    /// paths override it from config via [`with_file_drop_limits`]. `0` disables
+    /// file drop.
+    pub file_drop_max_bytes: usize,
+    /// Cap on concurrent dropped-file uploads
+    /// (`[server] file_drop_max_concurrency`). Defaults to
+    /// [`dux_core::config::DEFAULT_FILE_DROP_MAX_CONCURRENCY`]; `0` clamps to 1.
+    pub file_drop_max_concurrency: u32,
     /// The IPs the server actually bound to. When non-empty, `build_app` wraps
     /// the router with the Host allowlist (DNS-rebinding defense). An empty vec
     /// disables the guard; used by tests that do not exercise the host guard.
@@ -268,6 +311,8 @@ impl RouterParams {
             search_index_max_files: dux_core::config::DEFAULT_SEARCH_INDEX_MAX_FILES,
             tree_list_max_concurrency: dux_core::config::DEFAULT_TREE_LIST_MAX_CONCURRENCY,
             release_notes_max_concurrency: dux_core::config::DEFAULT_RELEASE_NOTES_MAX_CONCURRENCY,
+            file_drop_max_bytes: dux_core::config::DEFAULT_FILE_DROP_MAX_BYTES,
+            file_drop_max_concurrency: dux_core::config::DEFAULT_FILE_DROP_MAX_CONCURRENCY,
             bound_ips: Vec::new(),
             configured_hosts: Vec::new(),
             release_notes_api_base: dux_core::urls::GITHUB_API_BASE.to_string(),
@@ -305,6 +350,17 @@ impl RouterParams {
     /// configured value (not just the default) bounds `/api/v1/release-notes`.
     pub fn with_release_notes_max_concurrency(mut self, max_concurrency: u32) -> Self {
         self.release_notes_max_concurrency = max_concurrency;
+        self
+    }
+
+    /// Set the file-drop size and concurrency caps from `[server]
+    /// file_drop_max_bytes` / `file_drop_max_concurrency`. The serve paths call
+    /// this so the configured values (not just the defaults) bound
+    /// `/api/v1/file-drop`. Both are read here, at startup, which is why the
+    /// documentation says changing either needs a restart.
+    pub fn with_file_drop_limits(mut self, max_bytes: usize, max_concurrency: u32) -> Self {
+        self.file_drop_max_bytes = max_bytes;
+        self.file_drop_max_concurrency = max_concurrency;
         self
     }
 
@@ -484,6 +540,15 @@ pub fn build_app(
                 params.release_notes_max_concurrency as usize,
             )))
         },
+        file_drop_max_bytes: params.file_drop_max_bytes,
+        // Deliberately NOT the `0 = unlimited` convention of the two semaphores
+        // above. This one bounds how much upload is held in MEMORY at once, so
+        // "unlimited" would defeat its only purpose; `0` clamps to one permit
+        // instead. Switching file drop off is what `file_drop_max_bytes = 0` is
+        // for.
+        file_drop_semaphore: Arc::new(tokio::sync::Semaphore::new(
+            params.file_drop_max_concurrency.max(1) as usize,
+        )),
         event_bus,
         changes,
         resources,
@@ -526,6 +591,7 @@ pub fn build_app(
         .merge(crate::project_reads::routes())
         .merge(crate::startup_logs::routes())
         .merge(crate::terminal_actions::routes())
+        .merge(crate::file_drop_routes::routes(&state))
         .merge(crate::tab_actions::routes())
         .merge(crate::browse_routes::routes())
         .merge(crate::config_routes::routes())
@@ -3217,6 +3283,43 @@ mod tests {
     /// claim happens when a client sends a size). The later claimer owns; the
     /// earlier one does not. After the owner drops, the surviving connection
     /// reclaims on its next size.
+    /// The file-drop route's courtesy check. It is NOT the protection (the
+    /// socket's own write gate is), so its only job is turning "your file was
+    /// saved and then silently not pasted" into a refusal a viewer can act on.
+    /// It must therefore match `may_write`'s answer exactly, including the case
+    /// that is easy to get backwards: an UNOWNED pty is not denied, because the
+    /// first write claims it.
+    #[test]
+    fn the_file_drop_courtesy_check_matches_the_real_write_gate() {
+        let owners = PtySizeOwners::default();
+        let pty = "term-1";
+        let driver = owners.next_conn_id();
+        let viewer = owners.next_conn_id();
+
+        let denied =
+            |conn: u64| matches!(owners.owners.lock().unwrap().map.get(pty), Some(o) if *o != conn);
+
+        assert!(
+            !denied(viewer),
+            "an unowned pty must not be denied: the first write claims it, which \
+             is exactly what may_write does"
+        );
+
+        owners.claim(pty, driver);
+        assert!(!denied(driver), "the owner is never denied");
+        assert!(
+            denied(viewer),
+            "a viewer whose device is not driving must be told before a file is \
+             written, not after"
+        );
+
+        owners.release(pty, driver);
+        assert!(
+            !denied(viewer),
+            "once the driver disconnects the pty is unowned again"
+        );
+    }
+
     #[test]
     fn pty_size_owner_is_most_recent_claim_and_releases_on_drop() {
         let owners = PtySizeOwners::default();
