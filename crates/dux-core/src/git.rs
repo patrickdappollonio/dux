@@ -2315,6 +2315,33 @@ fn parse_github_remote(url: &str) -> Option<GitHubRemote> {
         if !GIT_URL_SCHEMES.contains(&parsed.scheme()) {
             return None;
         }
+        // The authority is read RAW as well, because two things about it can
+        // only be seen before the parser has split it up.
+        let raw_authority = raw_url_authority(url)?;
+        // A percent in the authority can move the boundary git splits on, and
+        // the split the parser has already performed cannot show it. Git
+        // decodes a scheme-qualified URL and separates host from path
+        // AFTERWARDS, so `ssh://user%2F@github.com/o/r.git` reaches ssh as host
+        // `user`, path `/@github.com/o/r.git` (measured with a stub
+        // GIT_SSH_COMMAND), while the crate reports host `github.com`.
+        // Reproducing git's ordering from the crate's already-split output is
+        // not possible, and no legitimate GitHub remote percent-encodes its
+        // authority, so the honest answer is to refuse rather than guess.
+        if raw_authority.contains('%') {
+            return None;
+        }
+        // Git's native protocol has no user component, unlike its ssh URL
+        // syntax, so a `user@` here is part of the HOST:
+        // `git://user@github.com/o/r.git` sends git looking up
+        // `user@github.com` on port 9418 (measured with GIT_TRACE), not
+        // github.com. The crate applies the generic URL grammar and discards
+        // the user, which would answer for a repository on a host the remote
+        // never names. `ssh`, `git+ssh` and `ssh+git` are ssh, where a user is
+        // legitimate; under http(s) userinfo is legitimate credentials and is
+        // correctly dropped as such. Only the native protocol lacks it.
+        if parsed.scheme() == "git" && raw_authority.contains('@') {
+            return None;
+        }
         // The ssh port belongs to the ssh service rather than to the host's
         // API, and credentials must never reach a log line or a `gh` argument;
         // taking only the host drops both. For a non-special scheme the parser
@@ -2417,6 +2444,18 @@ fn remote_input_is_literal(url: &str) -> bool {
 /// no normalisation can reach it. Userinfo and an IPv6 literal cannot contain an
 /// unescaped `/`, so the first `/` after the `://` starts the path. `None` when
 /// there is no path, which is not a repository either way.
+/// The authority of a scheme-qualified remote, sliced out of the ORIGINAL input:
+/// everything between the `://` and the `/` that ends it, or the whole remainder
+/// when no slash follows. Read raw because the `url` crate has already decoded
+/// and split it, and both of those steps can hide where git would have cut.
+fn raw_url_authority(url: &str) -> Option<&str> {
+    let after_scheme = url.split_once("://")?.1;
+    Some(match after_scheme.find('/') {
+        Some(slash) => &after_scheme[..slash],
+        None => after_scheme,
+    })
+}
+
 fn raw_url_path(url: &str) -> Option<&str> {
     let after_scheme = url.split_once("://")?.1;
     let slash = after_scheme.find('/')?;
@@ -4617,6 +4656,88 @@ mod tests {
         );
     }
 
+    /// A percent-encoded authority moves the boundary git splits the address
+    /// on, and the parsed answer cannot show it.
+    ///
+    /// Measured with a stub `GIT_SSH_COMMAND` that prints the arguments git
+    /// hands ssh. For `ssh://user%2F@github.com/octocat/Hello-World.git` git
+    /// runs `ssh user git-upload-pack '/@github.com/octocat/Hello-World.git'`:
+    /// it decodes first and splits afterwards, so the host is `user` and the
+    /// repository path is the rest. `ssh://git%2Fhub.com/o/r` becomes host
+    /// `git`, path `/hub.com/o/r` the same way. The `url` crate reports
+    /// `github.com` for both, and the decoded-slash check only ever sees the
+    /// path, so dux answered with a repository on a host the remote does not
+    /// address.
+    #[test]
+    fn parse_github_remote_refuses_a_percent_encoded_authority() {
+        for url in [
+            // The encoded slash sits in the user part.
+            "ssh://user%2F@github.com/octocat/Hello-World.git",
+            "git+ssh://user%2F@github.com/o/r.git",
+            "ssh+git://user%2F@github.com/o/r.git",
+            "git://user%2F@github.com/o/r.git",
+            "https://user%2F@github.com/o/r.git",
+            "http://user%2F@github.com/o/r.git",
+            // And in the host itself.
+            "ssh://git%2Fhub.com/o/r",
+            "ssh://git@git%2Fhub.com/o/r",
+            "https://git%2Fhub.com/o/r",
+            // An encoding that decodes to nothing structural is refused too:
+            // dux cannot reproduce git's decode-then-split order from the
+            // crate's already-split output, so it declines to guess at all.
+            "ssh://git%40github.com/o/r",
+        ] {
+            assert_eq!(parse_github_remote(url), None, "{url}");
+        }
+        // The ordinary spelling is untouched.
+        assert_eq!(
+            parse_github_remote("ssh://git@github.com/o/r.git"),
+            Some(GitHubRemote {
+                host: "github.com".to_string(),
+                owner_repo: "o/r".to_string(),
+            }),
+        );
+    }
+
+    /// Git's native protocol has no user component, so a `user@` in a `git://`
+    /// authority is part of the HOST.
+    ///
+    /// Measured: `GIT_TRACE=1 git ls-remote git://user@github.com/octocat/Hello-World.git`
+    /// reports `unable to look up user@github.com (port 9418)`. The `url`
+    /// crate reads the same string by the generic URL grammar, reports the host
+    /// `github.com` and throws `user@` away as userinfo, so dux answered with a
+    /// GitHub repository for a remote that never names github.com.
+    ///
+    /// This is scheme-specific on purpose. Git's ssh URL syntax DOES have a
+    /// user component (`ssh://user@host/path` is the documented spelling), and
+    /// `git+ssh`/`ssh+git` are the same transport, so a user is legitimate
+    /// there. Under http(s) userinfo is legitimate credentials, already dropped
+    /// as such. Only the native protocol lacks the component.
+    #[test]
+    fn parse_github_remote_refuses_a_user_in_a_native_git_url() {
+        assert_eq!(
+            parse_github_remote("git://user@github.com/octocat/Hello-World.git"),
+            None,
+        );
+        let github = |owner_repo: &str| {
+            Some(GitHubRemote {
+                host: "github.com".to_string(),
+                owner_repo: owner_repo.to_string(),
+            })
+        };
+        // The native protocol without a user, and every scheme whose syntax
+        // really does carry one, keep working.
+        for url in [
+            "git://github.com/o/r.git",
+            "ssh://user@github.com/o/r.git",
+            "git+ssh://user@github.com/o/r.git",
+            "ssh+git://user@github.com/o/r.git",
+            "https://user:token@github.com/o/r.git",
+        ] {
+            assert_eq!(parse_github_remote(url), github("o/r"), "{url}");
+        }
+    }
+
     /// The full behaviour table, pinned as one test so no future rewrite of the
     /// parser can quietly move any single row of it.
     #[test]
@@ -4627,7 +4748,11 @@ mod tests {
                 owner_repo: owner_repo.to_string(),
             })
         };
-        let cases: [(&str, Option<GitHubRemote>); 23] = [
+        let cases: [(&str, Option<GitHubRemote>); 25] = [
+            // The authority decides where git cuts, so both of these name
+            // something other than a repository on github.com.
+            ("ssh://user%2F@github.com/o/r.git", None),
+            ("git://user@github.com/o/r.git", None),
             ("github.com/o/r", github("o/r")),
             (r"C:\repo", None),
             ("ssh://github.com/o/r/extra", None),
