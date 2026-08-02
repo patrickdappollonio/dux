@@ -2255,12 +2255,18 @@ fn strip_git_record_terminator(text: &str) -> &str {
 
 /// Extracts `"owner/repo"` from a GitHub remote URL.
 ///
-/// Supports the two spellings git has for a remote that leaves the machine:
+/// Handles the two spellings that can name a GitHub repository git could reach:
 /// the scp-like SSH shorthand (`[user@]github.com:owner/repo.git`, whose colon
 /// must precede any slash) and scheme-qualified URLs (`ssh://`, `git://`,
 /// `git+ssh://`, `ssh+git://`, `http://`, `https://`, with optional credentials
 /// and port). A value with neither is a relative local path to git, not an
 /// address, so `github.com/owner/repo` is refused.
+///
+/// Those are the two spellings dux handles, not the whole of git's grammar. Git
+/// also reads the deprecated `ftp`/`ftps` schemes, `<helper>::<address>` for an
+/// explicit remote helper, and the tilde-expanded ssh path forms. None of them
+/// is a way anyone reaches GitHub, so each is refused deliberately rather than
+/// overlooked.
 #[cfg(test)]
 fn parse_github_owner_repo(url: &str) -> Option<String> {
     parse_github_remote(url).map(|remote| remote.owner_repo)
@@ -2270,8 +2276,10 @@ fn parse_github_owner_repo(url: &str) -> Option<String> {
 /// spells them. Anything else is refused, and the comparison is CASE SENSITIVE
 /// because git's is: see the check site in `parse_github_remote`.
 ///
-/// Beyond being the truthful set, this is the second line of defence against a
-/// scp-like remote: `github.com:owner/repo.git` parses "successfully" as a URL
+/// This is the set dux handles, not the full set git understands: the
+/// deprecated `ftp`/`ftps` and any `<helper>::` remote helper are refused on
+/// purpose, since neither names GitHub. Beyond that, the table is the second
+/// line of defence against a scp-like remote: `github.com:owner/repo.git` parses "successfully" as a URL
 /// whose *scheme* is `github.com`, and it would be rejected here even if the
 /// scp-like branch below were ever bypassed.
 ///
@@ -2286,6 +2294,15 @@ const GIT_URL_SCHEMES: [&str; 6] = ["ssh", "git", "git+ssh", "ssh+git", "http", 
 /// afterwards. See the decision site in `parse_github_remote` for the
 /// measurements behind the split.
 const PERCENT_MOVES_THE_BOUNDARY: [&str; 4] = ["ssh", "git+ssh", "ssh+git", "git"];
+
+/// The scheme spellings git actually runs over ssh, matched case sensitively
+/// like the table above. Git's native protocol is deliberately absent: it is a
+/// different transport on a different port, not an ssh spelling.
+///
+/// This exists for one host. GitHub documents `ssh.github.com` for SSH and only
+/// for SSH, so the acceptance of that name is scoped to these three schemes;
+/// see `github_host`.
+const SSH_TRANSPORT_SCHEMES: [&str; 3] = ["ssh", "git+ssh", "ssh+git"];
 
 fn parse_github_remote(url: &str) -> Option<GitHubRemote> {
     // The input is consumed EXACTLY, with no trimming of any kind. Trimming
@@ -2310,10 +2327,10 @@ fn parse_github_remote(url: &str) -> Option<GitHubRemote> {
     //    and it is tried FIRST because `github.com:owner/repo` would otherwise
     //    be read as a URL whose scheme is the hostname.
     if let Some((authority, path)) = split_scp_like(url) {
-        let host = strip_remote_userinfo(authority).to_ascii_lowercase();
-        if !is_github_host(&host) {
-            return None;
-        }
+        // The scp-like spelling is ssh by definition, so GitHub's documented
+        // port-443 ssh host is legitimate here.
+        let written_host = strip_remote_userinfo(authority).to_ascii_lowercase();
+        let host = github_host(&written_host, true)?;
         // Git hands an scp-like path to ssh verbatim, so it is NOT
         // percent-decoded.
         return owner_repo_from_path(strip_boundary_slashes(path))
@@ -2401,10 +2418,8 @@ fn parse_github_remote(url: &str) -> Option<GitHubRemote> {
         // taking only the host drops both. For a non-special scheme the parser
         // leaves the host's case alone, so lowercase it explicitly: hostnames
         // are case-insensitive and this value is handed to `gh`.
-        let host = parsed.host_str()?.to_ascii_lowercase();
-        if !is_github_host(&host) {
-            return None;
-        }
+        let written_host = parsed.host_str()?.to_ascii_lowercase();
+        let host = github_host(&written_host, SSH_TRANSPORT_SCHEMES.contains(&raw_scheme))?;
         // An ssh or git port is the SSH service's port and has nothing to do
         // with the host's API, so dropping it is right. An http(s) port is part
         // of the server endpoint, and `gh` cannot express one: it refuses a
@@ -2674,8 +2689,40 @@ fn owner_repo_from_path(path: &str) -> Option<String> {
     Some(format!("{owner}/{repo}"))
 }
 
-fn is_github_host(host: &str) -> bool {
-    host == "github.com" || host.starts_with("github.")
+/// GitHub's documented second SSH endpoint, offered for networks that block
+/// port 22 and normally written with an explicit `:443`. It is the same GitHub,
+/// reached over a different port.
+const GITHUB_SSH_ALT_HOST: &str = "ssh.github.com";
+
+/// The GitHub host a remote names, or `None` if the remote is not GitHub's.
+///
+/// `ssh_transport` says whether git would run this address over ssh, which
+/// matters for exactly one hostname and is passed rather than inferred so the
+/// two call sites have to state it.
+///
+/// The answer is the host to ASK ABOUT, which is not always the host written in
+/// the remote. `ssh.github.com` is normalised to `github.com`, because this
+/// value is handed to the `gh` command line as the host to query and `gh` knows
+/// `github.com` as an API host; it has no idea what `ssh.github.com` is.
+/// Returning the name as written would turn one silent refusal into a failing
+/// lookup, which is not an improvement.
+///
+/// That normalisation is deliberately the ONLY widening here. It is not a
+/// general "any `ssh.` prefix" rule: it is one hostname GitHub documents, and
+/// it is matched exactly, so `sshgithub.com`, `x.ssh.github.com` and
+/// `ssh.github.com.attacker.example` are all refused. There is no enterprise
+/// counterpart either, because GitHub Enterprise Server publishes no equivalent
+/// endpoint and inventing one would be guessing at an address on somebody
+/// else's network. And it applies only over ssh, the transport it is documented
+/// for: `https://ssh.github.com/...` is not an endpoint GitHub offers.
+fn github_host(host: &str, ssh_transport: bool) -> Option<String> {
+    if ssh_transport && host == GITHUB_SSH_ALT_HOST {
+        return Some("github.com".to_string());
+    }
+    if host == "github.com" || host.starts_with("github.") {
+        return Some(host.to_string());
+    }
+    None
 }
 
 fn sync_entry(source: &Path, destination: &Path) -> Result<()> {
@@ -5022,7 +5069,22 @@ mod tests {
                 owner_repo: owner_repo.to_string(),
             })
         };
-        let cases: [(&str, Option<GitHubRemote>); 34] = [
+        let cases: [(&str, Option<GitHubRemote>); 42] = [
+            // GitHub's documented port-443 SSH endpoint is github.com reached
+            // another way, so it parses, and it comes back NORMALISED because
+            // the host is handed to `gh` as an API host.
+            ("ssh://git@ssh.github.com:443/o/r.git", github("o/r")),
+            ("ssh://git@ssh.github.com/o/r.git", github("o/r")),
+            ("git@ssh.github.com:o/r.git", github("o/r")),
+            // It is documented for ssh and nothing else, it has no enterprise
+            // equivalent, and the match is the exact hostname.
+            ("https://ssh.github.com/o/r", None),
+            ("ssh://git@ssh.github.example.com/o/r", None),
+            ("ssh://git@sshgithub.com/o/r", None),
+            ("ssh://git@evil-ssh.github.com.attacker.example/o/r", None),
+            // The colon precedes the first slash, so git reads this as the
+            // scp-like form and contacts the host `user`.
+            ("user:token@github.com/o/r", None),
             // Git matches a scheme case sensitively and reads
             // `<transport>::<address>` as an explicit remote helper, so neither
             // of these names a GitHub repository git could reach.
@@ -5158,6 +5220,107 @@ mod tests {
         );
     }
 
+    /// GitHub documents a second SSH endpoint, `ssh.github.com` on port 443,
+    /// for people on networks that block port 22. A remote pointed at it is an
+    /// ordinary GitHub remote and must produce a pull-request banner like any
+    /// other, so both spellings of it parse.
+    ///
+    /// The host comes back as `github.com` rather than as written. MEASURED,
+    /// git 2.55.0, isolated `HOME`, `GIT_CONFIG_NOSYSTEM=1` and a stub
+    /// `GIT_SSH_COMMAND` printing its argv, so nothing left the machine:
+    ///
+    /// ```text
+    /// ssh://git@ssh.github.com:443/o/r.git
+    ///   -> -o SendEnv=GIT_PROTOCOL -p 443 git@ssh.github.com git-upload-pack '/o/r.git'
+    /// ssh://git@ssh.github.com/o/r.git
+    ///   -> git@ssh.github.com git-upload-pack '/o/r.git'
+    /// git@ssh.github.com:o/r.git
+    ///   -> git@ssh.github.com git-upload-pack 'o/r.git'
+    /// ```
+    ///
+    /// The port is dropped as it is for every ssh remote: it is the ssh
+    /// service's port and says nothing about the host's API.
+    #[test]
+    fn parse_github_documented_ssh_alt_host_normalises_to_github_com() {
+        for url in [
+            "ssh://git@ssh.github.com:443/o/r.git",
+            "ssh://git@ssh.github.com/o/r.git",
+            "ssh://ssh.github.com/o/r.git",
+            "git@ssh.github.com:o/r.git",
+            "ssh.github.com:o/r",
+            "git+ssh://git@ssh.github.com/o/r.git",
+            "ssh+git://git@ssh.github.com/o/r.git",
+            "ssh://git@SSH.GitHub.com/o/r.git",
+        ] {
+            assert_eq!(
+                parse_github_remote(url),
+                Some(GitHubRemote {
+                    host: "github.com".to_string(),
+                    owner_repo: "o/r".to_string(),
+                }),
+                "{url}",
+            );
+        }
+    }
+
+    /// The alt host is accepted for the transport GitHub documents it for and
+    /// for nothing else, and it is an EXACT hostname match rather than a prefix,
+    /// suffix or substring test.
+    ///
+    /// `https://ssh.github.com/...` is not a documented endpoint, so dux does
+    /// not invent one. Neither is an enterprise `ssh.` variant: GitHub
+    /// Enterprise Server publishes no equivalent, so guessing at one would be
+    /// making up an address on a customer's own network. And the native git
+    /// protocol on that name is not documented either.
+    #[test]
+    fn parse_github_refuses_undocumented_ssh_alt_host_spellings() {
+        for url in [
+            // Not a documented endpoint for the web transports.
+            "https://ssh.github.com/o/r",
+            "https://ssh.github.com/o/r.git",
+            "http://ssh.github.com/o/r",
+            "git://ssh.github.com/o/r",
+            // No documented GitHub Enterprise Server equivalent exists.
+            "ssh://git@ssh.github.example.com/o/r",
+            "git@ssh.github.example.com:o/r.git",
+            // Exact match, not a substring or suffix test.
+            "ssh://git@sshgithub.com/o/r",
+            "ssh://git@evil-ssh.github.com.attacker.example/o/r",
+            "ssh://git@ssh.github.com.attacker.example/o/r",
+            "ssh://git@x.ssh.github.com/o/r",
+            "git@sshgithub.com:o/r.git",
+        ] {
+            assert_eq!(parse_github_remote(url), None, "{url}");
+        }
+    }
+
+    /// `user:token@host/o/r` is not the bare `host/path` form: the colon
+    /// precedes the first slash, so git reads the WHOLE value as the scp-like
+    /// spelling and the host it contacts is `user`. MEASURED, git 2.55.0, same
+    /// isolated setup and stub ssh as above:
+    ///
+    /// ```text
+    /// $ git remote add origin user:token@nonexistent-host.invalid/o/r
+    /// $ git ls-remote origin
+    /// STUB-SSH-ARGV: user git-upload-pack 'token@nonexistent-host.invalid/o/r'
+    /// ```
+    ///
+    /// (Drop the colon and it really is a local path: `user@nonexistent-host
+    /// .invalid/o/r` fails with "does not appear to be a git repository" and the
+    /// stub ssh is never called.)
+    ///
+    /// It lives here rather than in the bare-form test because it is refused for
+    /// a different reason: not "git reads this as a folder", but "the host git
+    /// would contact is `user`, which is not GitHub".
+    #[test]
+    fn parse_github_remote_refuses_credentials_before_a_scp_like_colon() {
+        assert_eq!(
+            parse_github_remote("user:token@github.com/octocat/Hello-World"),
+            None,
+        );
+        assert_eq!(parse_github_remote("user:token@github.com/o/r"), None);
+    }
+
     #[test]
     fn parse_github_ssh_scheme_rejects_non_github_host() {
         // The parsed host is queried with `gh`, so a non-GitHub host must not
@@ -5247,7 +5410,6 @@ mod tests {
             "github.com/o/r",
             "github.com/o/r/x",
             "user@github.com/octocat/Hello-World",
-            "user:token@github.com/octocat/Hello-World",
             "gitlab.com/o/r",
         ] {
             assert_eq!(parse_github_remote(url), None, "{url}");
