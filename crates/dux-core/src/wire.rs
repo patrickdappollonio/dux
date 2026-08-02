@@ -3987,7 +3987,7 @@ mod tests {
         // staged with no remaining working-tree change. The TUI blocks this.
         let repo = init_repo_with_commit();
         std::fs::write(repo.path().join("a.txt"), "staged change\n").expect("modify file");
-        let ok = std::process::Command::new("git")
+        let ok = crate::git::test_support::git_command()
             .args(["add", "a.txt"])
             .current_dir(repo.path())
             .status()
@@ -4297,7 +4297,7 @@ mod tests {
     fn init_repo() -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("tempdir");
         let run = |args: &[&str]| {
-            let ok = std::process::Command::new("git")
+            let ok = crate::git::test_support::git_command()
                 .args(args)
                 .current_dir(dir.path())
                 .status()
@@ -4939,7 +4939,7 @@ mod tests {
     fn init_repo_on_feature_branch(default_branch: &str) -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("tempdir");
         let run = |args: &[&str]| {
-            let ok = std::process::Command::new("git")
+            let ok = crate::git::test_support::git_command()
                 .args(args)
                 .current_dir(dir.path())
                 .status()
@@ -4956,7 +4956,7 @@ mod tests {
     }
 
     fn current_git_branch(repo: &std::path::Path) -> String {
-        let out = std::process::Command::new("git")
+        let out = crate::git::test_support::git_command()
             .args([
                 "-C",
                 repo.to_string_lossy().as_ref(),
@@ -5435,7 +5435,7 @@ mod tests {
         // The helper leaves origin on `feature`; put it back on the default so
         // the clone's origin/HEAD points there.
         let run_in = |dir: &std::path::Path, args: &[&str]| {
-            let ok = std::process::Command::new("git")
+            let ok = crate::git::test_support::git_command()
                 .args(args)
                 .current_dir(dir)
                 .status()
@@ -5496,7 +5496,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let run = |args: &[&str]| {
             assert!(
-                std::process::Command::new("git")
+                crate::git::test_support::git_command()
                     .args(args)
                     .current_dir(dir.path())
                     .status()
@@ -5846,7 +5846,7 @@ mod tests {
 
     fn run_in_repo(dir: &std::path::Path, args: &[&str]) {
         assert!(
-            std::process::Command::new("git")
+            crate::git::test_support::git_command()
                 .args(args)
                 .current_dir(dir)
                 .status()
@@ -6050,7 +6050,7 @@ mod tests {
 
     // Helper: detach HEAD on a path (requires at least one commit).
     fn detach_head(repo: &std::path::Path) {
-        let ok = std::process::Command::new("git")
+        let ok = crate::git::test_support::git_command()
             .args([
                 "-C",
                 repo.to_string_lossy().as_ref(),
@@ -6307,7 +6307,7 @@ mod tests {
         // StageFile dispatches to EventReaction::Nothing -> no status.
         assert!(outcome.status.is_none());
 
-        let staged = std::process::Command::new("git")
+        let staged = crate::git::test_support::git_command()
             .args(["diff", "--cached", "--name-only"])
             .current_dir(repo.path())
             .output()
@@ -6490,7 +6490,7 @@ mod tests {
     fn init_repo_with_commit() -> tempfile::TempDir {
         let dir = init_repo();
         let run = |args: &[&str]| {
-            let ok = std::process::Command::new("git")
+            let ok = crate::git::test_support::git_command()
                 .args(args)
                 .current_dir(dir.path())
                 .status()
@@ -7820,7 +7820,7 @@ mod tests {
         let repo = engine.paths.root.join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
         let run = |cwd: &Path, args: &[&str]| {
-            let ok = std::process::Command::new("git")
+            let ok = crate::git::test_support::git_command()
                 .args(args)
                 .current_dir(cwd)
                 .status()
@@ -8176,7 +8176,7 @@ mod tests {
         // (success or failure).
         let repo = init_repo_with_commit();
         let run = |args: &[&str]| {
-            let _ = std::process::Command::new("git")
+            let _ = crate::git::test_support::git_command()
                 .args(args)
                 .current_dir(repo.path())
                 .status();

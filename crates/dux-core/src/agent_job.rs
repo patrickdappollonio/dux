@@ -938,7 +938,6 @@ pub fn run_agent_launch_job(request: AgentLaunchRequest, worker_tx: Sender<Worke
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
-    use std::process::Command;
     use std::sync::mpsc;
 
     use super::*;
@@ -949,7 +948,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path();
         let run = |args: &[&str]| {
-            let out = Command::new("git")
+            let out = crate::git::test_support::git_command()
                 .args(args)
                 .current_dir(p)
                 .output()
@@ -1077,7 +1076,7 @@ mod tests {
     /// Create a branch `name` (pointing at HEAD) in `repo` so an "attach to
     /// existing branch" path can find it.
     fn create_branch(repo: &Path, name: &str) {
-        let out = Command::new("git")
+        let out = crate::git::test_support::git_command()
             .args(["branch", name])
             .current_dir(repo)
             .output()
@@ -1206,7 +1205,7 @@ mod tests {
     // ── uncommitted-changes copy and best-effort pull ────────────
 
     fn git_in(cwd: &Path, args: &[&str]) {
-        let out = Command::new("git")
+        let out = crate::git::test_support::git_command()
             .args(args)
             .current_dir(cwd)
             .output()
@@ -1221,7 +1220,7 @@ mod tests {
     }
 
     fn git_stdout(cwd: &Path, args: &[&str]) -> String {
-        let out = Command::new("git")
+        let out = crate::git::test_support::git_command()
             .args(args)
             .current_dir(cwd)
             .output()

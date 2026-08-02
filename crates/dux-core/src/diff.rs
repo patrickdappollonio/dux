@@ -147,7 +147,7 @@ mod tests {
     fn init_repo() -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("tempdir");
         let run = |args: &[&str]| {
-            let ok = std::process::Command::new("git")
+            let ok = crate::git::test_support::git_command()
                 .args(args)
                 .current_dir(dir.path())
                 .status()
@@ -173,7 +173,7 @@ mod tests {
     fn commit_file_bytes(dir: &Path, rel: &str, content: &[u8]) {
         std::fs::write(dir.join(rel), content).expect("write file");
         let run = |args: &[&str]| {
-            let ok = std::process::Command::new("git")
+            let ok = crate::git::test_support::git_command()
                 .args(args)
                 .current_dir(dir)
                 .status()

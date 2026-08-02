@@ -201,11 +201,10 @@ pub fn seed_gitignore(repo: &Path) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
 
     fn init_repo_dir() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
-        let out = Command::new("git")
+        let out = crate::git::test_support::git_command()
             .args(["init"])
             .current_dir(dir.path())
             .output()
@@ -341,7 +340,7 @@ mod tests {
             ["config", "user.name", "test"],
             ["config", "user.email", "t@t"],
         ] {
-            let out = Command::new("git")
+            let out = crate::git::test_support::git_command()
                 .args(args)
                 .current_dir(repo.path())
                 .output()
@@ -349,7 +348,7 @@ mod tests {
             assert!(out.status.success());
         }
         crate::git::create_initial_commit(repo.path()).unwrap();
-        let out = Command::new("git")
+        let out = crate::git::test_support::git_command()
             .args(["-c", "color.status=false", "status", "--porcelain"])
             .current_dir(repo.path())
             .output()

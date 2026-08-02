@@ -2133,39 +2133,43 @@ pub fn agent_name_char_map(text: &str, cursor: usize, ch: char) -> Option<char> 
 
 #[cfg(test)]
 pub(crate) mod test_support {
-    /// Present git with an empty system and global configuration for the rest
-    /// of the test process.
+    /// A `git` command that cannot see the developer's own configuration.
     ///
-    /// Every fixture that builds a repository by shelling out to `git` must
-    /// call this first. The repository's own commands are only half the
-    /// problem: production code under test then runs `git remote get-url`, and
-    /// that command APPLIES `url.*.insteadOf` rewrites, so a developer who has
-    /// one configured (a common setup, and this repository's own author has
-    /// exactly that) would see the fixture's remote resolve to a host nobody
-    /// wrote down, and the test would pass or fail for reasons that have
-    /// nothing to do with the code. Git output must be immune to user
-    /// configuration, in tests as much as in production.
+    /// EVERY git-shelling test fixture in this crate builds its command here.
+    /// A fixture that shells out to git directly reads whatever the developer
+    /// has configured, and then it passes or fails for reasons that belong to
+    /// nobody's code. The concrete hazard is `url.*.insteadOf`, which
+    /// `git remote get-url` APPLIES: a developer with one configured (a common
+    /// setup, and this repository's own author has exactly that) sees a fixture
+    /// remote resolve to a host nobody wrote down. `gh.rs` demonstrates the
+    /// rewrite happening rather than asserting it from memory.
     ///
-    /// Isolation is at the process level because that is where it has to be:
-    /// the production call inherits the test process's environment and takes no
-    /// configuration of its own.
-    pub(crate) fn isolate_git_from_user_configuration() {
-        static ONCE: std::sync::Once = std::sync::Once::new();
-        ONCE.call_once(|| {
-            // SAFETY: test-only, run once, and setting variables no other part
-            // of dux reads. `Once` keeps it off the path of every later call,
-            // and every git-backed fixture routes through here so the process
-            // reaches a single settled state rather than flipping.
-            unsafe {
-                // Refuses `/etc/gitconfig` on every git version.
-                std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
-                // The explicit paths (git >= 2.32) also cover `$HOME` and
-                // `$XDG_CONFIG_HOME` lookups, which is what makes the global
-                // file unreachable rather than merely relocated.
-                std::env::set_var("GIT_CONFIG_SYSTEM", "/dev/null");
-                std::env::set_var("GIT_CONFIG_GLOBAL", "/dev/null");
-            }
-        });
+    /// The isolation is PER COMMAND, set through the child's environment. It
+    /// used to be process-wide, via `std::env::set_var`, which is unsound in a
+    /// threaded test binary (which is why Rust marks it unsafe) and was also
+    /// incomplete: several fixtures never called the helper at all, and any of
+    /// them could run first or run alongside it.
+    ///
+    /// Per-command isolation cannot reach a git command spawned by PRODUCTION
+    /// code, which inherits the test process's environment. That is deliberate
+    /// and is not worked around here: a test whose behaviour depends on git's
+    /// configuration composes the two halves itself, running the git command
+    /// through this helper and handing the output to the pure parser, which is
+    /// the same composition production performs. Production is left alone on
+    /// purpose. dux WANTS `insteadOf` rewrites applied when it runs for real,
+    /// because the rewritten URL is the one git would actually contact; do not
+    /// "fix" production by isolating it from the user's configuration.
+    pub(crate) fn git_command() -> std::process::Command {
+        let mut command = std::process::Command::new("git");
+        command
+            // Refuses `/etc/gitconfig` on every git version.
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            // The explicit paths (git >= 2.32) also cover `$HOME` and
+            // `$XDG_CONFIG_HOME` lookups, which is what makes the global file
+            // unreachable rather than merely relocated.
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null");
+        command
     }
 }
 
@@ -2191,8 +2195,34 @@ pub fn remote_github_repo(worktree_path: &Path) -> Option<GitHubRemote> {
     if !output.status.success() {
         return None;
     }
-    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    parse_github_remote(&url)
+    github_remote_from_git_output(&output.stdout)
+}
+
+/// The parse half of [`remote_github_repo`]: git's raw stdout for
+/// `git remote get-url` in, a GitHub remote out.
+///
+/// This is the ONLY place a byte is allowed off the end of a remote, and the
+/// only byte it takes off is the one git put there: a single output record
+/// terminator. Everything else git printed is part of the remote and reaches
+/// the parser intact, because a remote really can hold edge whitespace and a
+/// remote with a space in its host is not a GitHub remote.
+///
+/// Invalid UTF-8 is refused rather than lossily substituted. `U+FFFD` is
+/// neither a control character nor whitespace, so a replacement character used
+/// to survive every later check and travel into a `gh --repo` argument as part
+/// of a name nobody wrote.
+pub(crate) fn github_remote_from_git_output(stdout: &[u8]) -> Option<GitHubRemote> {
+    let text = std::str::from_utf8(stdout).ok()?;
+    parse_github_remote(strip_git_record_terminator(text))
+}
+
+/// Removes exactly one trailing `\n`, and the `\r` immediately before it if
+/// there is one. Nothing else.
+fn strip_git_record_terminator(text: &str) -> &str {
+    match text.strip_suffix('\n') {
+        Some(rest) => rest.strip_suffix('\r').unwrap_or(rest),
+        None => text,
+    }
 }
 
 /// Extracts `"owner/repo"` from a GitHub remote URL.
@@ -2217,7 +2247,14 @@ fn parse_github_owner_repo(url: &str) -> Option<String> {
 const GIT_URL_SCHEMES: [&str; 6] = ["ssh", "git", "git+ssh", "ssh+git", "http", "https"];
 
 fn parse_github_remote(url: &str) -> Option<GitHubRemote> {
-    let url = url.trim();
+    // The input is consumed EXACTLY, with no trimming of any kind. Trimming
+    // used to happen here and then again inside the literal check, which
+    // MANUFACTURED matches out of values that are not GitHub remotes:
+    // `" ssh://github.com/o/r "` and a value with a trailing tab both became
+    // `github.com` `o/r`. A git remote can hold edge whitespace, and what git
+    // would then contact is a host with a space in it. Git's own record
+    // terminator is removed at the process boundary, in
+    // `github_remote_from_git_output`, and nowhere else.
 
     // 0. Refuse anything the URL parser would silently rewrite rather than
     //    read. This has to come first, because the rewriting happens inside
@@ -2238,7 +2275,8 @@ fn parse_github_remote(url: &str) -> Option<GitHubRemote> {
         }
         // Git hands an scp-like path to ssh verbatim, so it is NOT
         // percent-decoded.
-        return owner_repo_from_path(path).map(|owner_repo| GitHubRemote { host, owner_repo });
+        return owner_repo_from_path(strip_boundary_slashes(path))
+            .map(|owner_repo| GitHubRemote { host, owner_repo });
     }
 
     // 2. Everything with a real scheme goes through the URL parser, which
@@ -2258,14 +2296,32 @@ fn parse_github_remote(url: &str) -> Option<GitHubRemote> {
         if !is_github_host(&host) {
             return None;
         }
+        // An ssh or git port is the SSH service's port and has nothing to do
+        // with the host's API, so dropping it is right. An http(s) port is part
+        // of the server endpoint, and `gh` cannot express one: it refuses a
+        // colon in a hostname and builds fixed API URLs. Keeping the host and
+        // discarding the port would send the query to a different server than
+        // the remote names, so it is refused instead. A port written out that is
+        // the scheme's own default names no other server; the `url` crate has
+        // already normalised those away, so `port()` is `None` for them.
+        if matches!(parsed.scheme(), "http" | "https") && parsed.port().is_some() {
+            return None;
+        }
         // The path is taken from the RAW input, not from `Url::path()`. The
         // parser canonicalises `.` and `..` segments away, which git does not
         // do, so `Url::path()` can name a repository the remote never mentioned
         // (`/o/../r/z` becomes `/r/z`). The parser is used for the authority,
         // which it gets right, and for nothing else.
         let raw_path = raw_url_path(url)?;
+        // The SYNTACTIC slashes at the boundaries come off BEFORE decoding:
+        // exactly the one leading slash the URL grammar puts there, and one
+        // trailing slash if it is written. Trimming slash characters after
+        // decoding instead erased DECODED separators at those boundaries, so
+        // `/%2Fo/r` (three components, the first empty) answered `o/r`.
+        let raw_path = strip_boundary_slashes(raw_path);
         // Git percent-decodes the path of a URL, so `%2E` really is a dot. The
-        // decoding can introduce a separator, so segments are counted after it.
+        // decoding can introduce a separator, so segments are counted after it,
+        // and no decoded slash is trimmed away first.
         let path = percent_decode_str(raw_path).decode_utf8().ok()?;
         return owner_repo_from_path(&path).map(|owner_repo| GitHubRemote { host, owner_repo });
     }
@@ -2286,7 +2342,8 @@ fn parse_github_remote(url: &str) -> Option<GitHubRemote> {
     if !is_github_host(&host) {
         return None;
     }
-    owner_repo_from_path(path).map(|owner_repo| GitHubRemote { host, owner_repo })
+    owner_repo_from_path(strip_boundary_slashes(path))
+        .map(|owner_repo| GitHubRemote { host, owner_repo })
 }
 
 /// Whether a remote URL can be read literally, which is the only way it can be
@@ -2306,9 +2363,27 @@ fn parse_github_remote(url: &str) -> Option<GitHubRemote> {
 /// repository path, so keeping the parser's answer would name a different
 /// repository. Neither character can appear in a GitHub owner or repository
 /// name, so nothing legitimate is lost by declining to guess.
+///
+/// A raw backslash is refused for the third variation of the same theme. Under
+/// http and https the `url` crate treats `\` as a path separator, so for
+/// `https://github.com\ignored/o/r` the crate reported the host `github.com`
+/// while the raw-path scan below skipped `\ignored` and answered `o/r`: two
+/// parsers disagreeing about where a component begins, which is exactly the
+/// hazard this parser exists to remove. No GitHub owner or repository name can
+/// contain one, so it is refused wherever it appears rather than reconciled.
+///
+/// Edge whitespace is refused too. The value used to be trimmed before it got
+/// here, so `" ssh://github.com/o/r "` became a GitHub remote. It is not one:
+/// git would look up a host with a space in it.
 fn remote_input_is_literal(url: &str) -> bool {
+    if url.is_empty() {
+        return false;
+    }
+    if url.starts_with(char::is_whitespace) || url.ends_with(char::is_whitespace) {
+        return false;
+    }
     !url.bytes()
-        .any(|b| b < 0x20 || b == 0x7f || b == b'?' || b == b'#')
+        .any(|b| b < 0x20 || b == 0x7f || b == b'?' || b == b'#' || b == b'\\')
 }
 
 /// The path of a scheme-qualified remote, sliced out of the ORIGINAL input so
@@ -2364,8 +2439,23 @@ fn strip_remote_userinfo(authority: &str) -> &str {
     }
 }
 
-/// Takes `owner/repo` from a remote's path, tolerating surrounding slashes and
-/// a `.git` suffix on the repository name.
+/// Removes the SYNTACTIC slashes at the two ends of a remote's path: at most
+/// one at each end, never more.
+///
+/// It has to be at most one, and it has to run before any percent-decoding.
+/// Trimming every slash character erased a DECODED separator sitting at a
+/// boundary along with the syntactic one, so `/%2Fo/r` lost the empty first
+/// component the decode had just produced and answered `o/r`, and a trailing
+/// `%2F` was erased the same way. The leading slash is the URL grammar's; the
+/// trailing one is a spelling git tolerates and so does dux.
+fn strip_boundary_slashes(path: &str) -> &str {
+    let path = path.strip_prefix('/').unwrap_or(path);
+    path.strip_suffix('/').unwrap_or(path)
+}
+
+/// Takes `owner/repo` from a remote's path, which its caller has already
+/// stripped of its boundary slashes, tolerating a `.git` suffix on the
+/// repository name.
 ///
 /// EXACTLY two components, for every family of remote. To git the whole path is
 /// the repository path, so a third segment means git addresses a repository
@@ -2377,7 +2467,7 @@ fn strip_remote_userinfo(authority: &str) -> &str {
 /// `git remote get-url`, never from an address bar, so tolerating a browser
 /// route bought nothing and produced wrong answers.
 fn owner_repo_from_path(path: &str) -> Option<String> {
-    let mut segments = path.trim_matches('/').split('/');
+    let mut segments = path.split('/');
     let owner = segments.next()?;
     let repo = segments.next()?;
     if segments.next().is_some() {
@@ -2586,11 +2676,10 @@ mod tests {
     /// Create a temporary bare-ish git repo with an initial commit so
     /// worktrees and branches can be created from it.
     fn init_test_repo() -> tempfile::TempDir {
-        test_support::isolate_git_from_user_configuration();
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path();
         let run = |args: &[&str]| {
-            let out = Command::new("git")
+            let out = test_support::git_command()
                 .args(args)
                 .current_dir(p)
                 .output()
@@ -2612,7 +2701,7 @@ mod tests {
     /// Create a worktree + branch from the test repo. Returns the worktree path.
     fn add_worktree(repo: &Path, branch: &str) -> PathBuf {
         let wt = repo.join(format!("wt-{branch}"));
-        let out = Command::new("git")
+        let out = test_support::git_command()
             .args([
                 "-C",
                 repo.to_string_lossy().as_ref(),
@@ -2637,7 +2726,7 @@ mod tests {
         let repo = init_test_repo();
         let p = repo.path();
         let g = |args: &[&str]| {
-            Command::new("git")
+            test_support::git_command()
                 .args(args)
                 .current_dir(p)
                 .output()
@@ -2692,7 +2781,7 @@ mod tests {
         let repo = init_test_repo();
         let p = repo.path();
         let g = |args: &[&str]| {
-            Command::new("git")
+            test_support::git_command()
                 .args(args)
                 .current_dir(p)
                 .output()
@@ -2971,7 +3060,7 @@ mod tests {
     }
 
     fn run_git(cwd: &Path, args: &[&str]) {
-        let out = Command::new("git")
+        let out = test_support::git_command()
             .args(args)
             .current_dir(cwd)
             .output()
@@ -3243,7 +3332,7 @@ mod tests {
         run_git(p, &["mv", "orig.txt", "ours.txt"]);
         commit_all(p, "ours side");
 
-        let merge = Command::new("git")
+        let merge = test_support::git_command()
             .args(["merge", "theirs"])
             .current_dir(p)
             .output()
@@ -3399,7 +3488,7 @@ mod tests {
         commit_all(sub_origin.path(), "sub base");
 
         let repo = init_test_repo();
-        let out = Command::new("git")
+        let out = test_support::git_command()
             .args([
                 "-c",
                 "protocol.file.allow=always",
@@ -3808,7 +3897,7 @@ mod tests {
         let wt = add_worktree(repo.path(), "staged-diff");
         fs::write(wt.join("hello.txt"), "hello world\n").unwrap();
         let run = |args: &[&str]| {
-            let out = Command::new("git")
+            let out = test_support::git_command()
                 .args(args)
                 .current_dir(&wt)
                 .output()
@@ -4201,6 +4290,170 @@ mod tests {
         }
     }
 
+    /// The parser consumes its input EXACTLY. It used to trim leading and
+    /// trailing whitespace first, which MANUFACTURED a match: a remote really
+    /// can hold edge whitespace, and `" ssh://github.com/o/r "` is not a GitHub
+    /// remote, it is a remote whose host git would look up with a space in it.
+    #[test]
+    fn parse_github_remote_consumes_its_input_exactly() {
+        for url in [
+            " ssh://github.com/octocat/Hello-World",
+            "ssh://github.com/octocat/Hello-World ",
+            " ssh://github.com/octocat/Hello-World ",
+            "\tssh://github.com/octocat/Hello-World",
+            "ssh://github.com/octocat/Hello-World\t",
+            " git@github.com:octocat/Hello-World.git",
+            "github.com/octocat/Hello-World ",
+            "",
+            " ",
+        ] {
+            assert_eq!(parse_github_remote(url), None, "{url:?}");
+        }
+    }
+
+    /// The one place trimming is legitimate is the process boundary, and only
+    /// for what git actually appends: a single output record terminator, one
+    /// `\n` with an optional preceding `\r`. Anything else in git's output is
+    /// part of the remote and must reach the parser intact.
+    #[test]
+    fn github_remote_from_git_output_removes_only_the_record_terminator() {
+        let expected = Some(GitHubRemote {
+            host: "github.com".to_string(),
+            owner_repo: "octocat/Hello-World".to_string(),
+        });
+        for stdout in [
+            "ssh://github.com/octocat/Hello-World.git\n",
+            "ssh://github.com/octocat/Hello-World.git\r\n",
+            // git's output is read the same way when the terminator is absent.
+            "ssh://github.com/octocat/Hello-World.git",
+        ] {
+            assert_eq!(
+                github_remote_from_git_output(stdout.as_bytes()),
+                expected,
+                "{stdout:?}",
+            );
+        }
+        for stdout in [
+            // A space before the terminator is part of the remote.
+            "ssh://github.com/octocat/Hello-World.git \n",
+            "ssh://github.com/octocat/Hello-World.git\t\n",
+            " ssh://github.com/octocat/Hello-World.git\n",
+            // Only ONE terminator comes off; the rest is a control character.
+            "ssh://github.com/octocat/Hello-World.git\n\n",
+            "ssh://github.com/octocat/Hello-World.git\r\r\n",
+        ] {
+            assert_eq!(
+                github_remote_from_git_output(stdout.as_bytes()),
+                None,
+                "{stdout:?}"
+            );
+        }
+        // Bytes that are not UTF-8 are not lossily substituted into a name: a
+        // replacement character is neither a control nor whitespace, so it used
+        // to survive into a `--repo` argument.
+        assert_eq!(
+            github_remote_from_git_output(b"ssh://github.com/octocat/Hello\xffWorld\n"),
+            None,
+        );
+    }
+
+    /// The `url` crate treats a backslash as a path separator under http(s), so
+    /// the crate and the hand-written raw-path scan disagreed about where the
+    /// path starts: for `https://github.com\ignored/o/r` the crate reported the
+    /// host `github.com` while the raw scan skipped `\ignored` and answered
+    /// `o/r`. Two parsers disagreeing about component boundaries is the whole
+    /// hazard, and neither a GitHub owner nor a repository name can hold a
+    /// backslash, so one is refused outright wherever it appears.
+    #[test]
+    fn parse_github_remote_rejects_a_raw_backslash() {
+        for url in [
+            r"https://github.com\ignored/octocat/Hello-World",
+            r"http://github.com\ignored/octocat/Hello-World",
+            r"ssh://github.com\ignored/octocat/Hello-World",
+            r"ssh://github.com/octocat\Hello-World",
+            r"git@github.com:octocat\Hello-World.git",
+            r"github.com:octocat\Hello-World",
+            r"github.com/octocat\Hello-World",
+            r"C:\repo",
+        ] {
+            assert_eq!(parse_github_remote(url), None, "{url}");
+        }
+    }
+
+    /// Separators are counted after decoding, which was true in the middle of
+    /// the path and false at its boundaries: the ONE syntactic leading slash was
+    /// removed by trimming every slash, so a decoded one at the front was erased
+    /// along with it and `/%2Fo/r` answered `o/r`. The syntactic slashes now come
+    /// off BEFORE decoding, exactly one at each end, and no decoded slash is
+    /// trimmed afterwards.
+    #[test]
+    fn parse_github_remote_counts_decoded_separators_at_the_path_boundaries() {
+        for url in [
+            // A decoded leading separator leaves an empty first component.
+            "ssh://github.com/%2Foctocat/Hello-World",
+            "https://github.com/%2Foctocat/Hello-World",
+            // A decoded trailing separator leaves an empty last component; it
+            // is not the trailing raw slash the parser tolerates.
+            "ssh://github.com/octocat/Hello-World%2F",
+            "https://github.com/octocat/Hello-World.git%2F",
+            // Already handled, kept pinned: a decoded separator in the middle.
+            "ssh://github.com/octocat/Hello-World%2Fextra",
+            // An empty component is an empty component however it arrives.
+            "ssh://github.com/octocat/Hello-World//",
+        ] {
+            assert_eq!(parse_github_remote(url), None, "{url}");
+        }
+        // One trailing RAW slash is still tolerated, and still comes off before
+        // the `.git` suffix is matched.
+        for url in [
+            "ssh://github.com/octocat/Hello-World.git/",
+            "https://github.com/octocat/Hello-World.git/",
+            "github.com:octocat/Hello-World.git/",
+        ] {
+            assert_eq!(
+                parse_github_remote(url),
+                Some(GitHubRemote {
+                    host: "github.com".to_string(),
+                    owner_repo: "octocat/Hello-World".to_string(),
+                }),
+                "{url}",
+            );
+        }
+    }
+
+    /// An ssh or git port is the ssh service's port, not the API's, so dropping
+    /// it is right. An http(s) port is part of the server endpoint, and `gh`
+    /// cannot express one at all: it refuses a colon in a hostname and builds
+    /// fixed API URLs. Keeping the host and discarding the port would send the
+    /// query to a DIFFERENT server than the remote names, so it is refused. A
+    /// port written out that is the scheme's own default names no other server
+    /// and is accepted.
+    #[test]
+    fn parse_github_remote_rejects_a_non_default_http_port() {
+        let github = Some(GitHubRemote {
+            host: "github.com".to_string(),
+            owner_repo: "octocat/Hello-World".to_string(),
+        });
+        for url in [
+            "https://github.com:443/octocat/Hello-World.git",
+            "http://github.com:80/octocat/Hello-World.git",
+            // ssh and git transports keep dropping their port.
+            "ssh://git@github.com:2222/octocat/Hello-World.git",
+            "git://github.com:9418/octocat/Hello-World.git",
+            "git+ssh://github.com:2222/octocat/Hello-World.git",
+        ] {
+            assert_eq!(parse_github_remote(url), github, "{url}");
+        }
+        for url in [
+            "https://github.com:8443/octocat/Hello-World.git",
+            "http://github.com:8080/octocat/Hello-World.git",
+            "https://github.com:80/octocat/Hello-World.git",
+            "http://github.com:443/octocat/Hello-World.git",
+        ] {
+            assert_eq!(parse_github_remote(url), None, "{url}");
+        }
+    }
+
     /// `Url::path()` drops `?query` and `#fragment`, and canonicalises `.` and
     /// `..` segments. For a git remote none of that is true: those characters
     /// and segments are ordinary parts of the repository path, so the answer
@@ -4297,7 +4550,9 @@ mod tests {
                 owner_repo: owner_repo.to_string(),
             })
         };
-        let cases: [(&str, Option<GitHubRemote>); 21] = [
+        let cases: [(&str, Option<GitHubRemote>); 23] = [
+            ("github.com/o/r", github("o/r")),
+            (r"C:\repo", None),
             ("ssh://github.com/o/r/extra", None),
             ("github.com:o/r/extra", None),
             ("git@github.com:o/r/extra", None),
@@ -4498,12 +4753,16 @@ mod tests {
     }
 
     /// A trailing slash is not part of the repository name, and it has to come
-    /// off before the `.git` suffix or the suffix no longer matches.
+    /// off before the `.git` suffix or the suffix no longer matches. Exactly ONE
+    /// comes off, though: `Hello-World//` used to be pinned here as `o/r` and is
+    /// now refused, because the second slash leaves an empty component and an
+    /// empty component is not a repository. That is the same rule that stops a
+    /// decoded `%2F` at the boundary from impersonating the syntactic slash; see
+    /// `parse_github_remote_counts_decoded_separators_at_the_path_boundaries`.
     #[test]
-    fn parse_github_remote_trims_trailing_slashes() {
+    fn parse_github_remote_trims_one_trailing_slash() {
         for url in [
             "ssh://github.com/octocat/Hello-World.git/",
-            "ssh://github.com/octocat/Hello-World//",
             "https://github.com/octocat/Hello-World.git/",
             "github.com:octocat/Hello-World.git/",
         ] {
@@ -4639,11 +4898,10 @@ mod tests {
     /// Create a temporary repo with `git init` but NO commit (unborn HEAD),
     /// with a local identity configured so a commit can be made if asked.
     fn init_test_repo_no_commit() -> tempfile::TempDir {
-        test_support::isolate_git_from_user_configuration();
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path();
         let run = |args: &[&str]| {
-            let out = Command::new("git")
+            let out = test_support::git_command()
                 .args(args)
                 .current_dir(p)
                 .output()
@@ -4706,7 +4964,7 @@ mod tests {
         std::fs::write(repo.path().join("wip.txt"), "work in progress").unwrap();
         create_initial_commit(repo.path()).expect("initial commit should succeed");
 
-        let out = Command::new("git")
+        let out = test_support::git_command()
             .args([
                 "-C",
                 repo.path().to_string_lossy().as_ref(),
@@ -4729,7 +4987,7 @@ mod tests {
         // caller can still register the project.
         let repo = init_test_repo(); // one empty commit on "main"
         assert!(repo_has_commits(repo.path()));
-        let count_before = Command::new("git")
+        let count_before = test_support::git_command()
             .args([
                 "-C",
                 repo.path().to_string_lossy().as_ref(),
@@ -4747,7 +5005,7 @@ mod tests {
             create_initial_commit(repo.path()).expect("already-born repo is idempotent success");
         assert_eq!(branch, "main", "returns the current branch");
 
-        let count_after = Command::new("git")
+        let count_after = test_support::git_command()
             .args([
                 "-C",
                 repo.path().to_string_lossy().as_ref(),
@@ -4773,7 +5031,7 @@ mod tests {
         create_initial_commit(repo.path()).expect("initial commit should succeed");
 
         // `git show --stat` on a truly empty commit lists no files.
-        let out = Command::new("git")
+        let out = test_support::git_command()
             .args([
                 "-C",
                 repo.path().to_string_lossy().as_ref(),
@@ -4797,7 +5055,7 @@ mod tests {
         // bake them into the "empty" initial commit. Refuse instead.
         let repo = init_test_repo_no_commit();
         std::fs::write(repo.path().join("secret.env"), "TOKEN=abc").unwrap();
-        let add = Command::new("git")
+        let add = test_support::git_command()
             .args([
                 "-C",
                 repo.path().to_string_lossy().as_ref(),
@@ -4898,7 +5156,7 @@ mod tests {
         // be used — the plumbing path must still bootstrap it.
         let dir = tempfile::tempdir().unwrap();
         let run = |args: &[&str]| {
-            let out = Command::new("git")
+            let out = test_support::git_command()
                 .args(args)
                 .current_dir(dir.path())
                 .output()
@@ -4924,7 +5182,7 @@ mod tests {
         let repo = init_test_repo(); // one commit on "main"
         let run = |args: &[&str]| {
             assert!(
-                Command::new("git")
+                test_support::git_command()
                     .args(args)
                     .current_dir(repo.path())
                     .output()
@@ -4945,7 +5203,7 @@ mod tests {
             branch.is_empty(),
             "a detached HEAD has no branch name, got {branch:?}"
         );
-        let out = Command::new("git")
+        let out = test_support::git_command()
             .args([
                 "-C",
                 repo.path().to_string_lossy().as_ref(),
@@ -4988,7 +5246,7 @@ mod tests {
             "neither racer should hard-error, got: {results:?}"
         );
         // Exactly one commit exists (the CAS prevented a second).
-        let out = Command::new("git")
+        let out = test_support::git_command()
             .args([
                 "-C",
                 path.to_string_lossy().as_ref(),
@@ -5043,7 +5301,7 @@ mod tests {
         assert_eq!(repo_path_kind(plain.path()), RepoPathKind::NotARepo);
 
         let bare = tempfile::tempdir().unwrap();
-        let out = Command::new("git")
+        let out = test_support::git_command()
             .args(["init", "--bare"])
             .current_dir(bare.path())
             .output()
@@ -5077,7 +5335,7 @@ mod tests {
     fn repo_path_kind_flags_bare_repo_internals() {
         // Catches registering a bare repository's internals as a project.
         let bare = tempfile::tempdir().unwrap();
-        let out = Command::new("git")
+        let out = test_support::git_command()
             .args(["init", "--bare"])
             .current_dir(bare.path())
             .output()
@@ -5103,7 +5361,7 @@ mod tests {
         let base = tempfile::tempdir().unwrap();
         let repo = base.path().join(std::ffi::OsStr::from_bytes(b"rep\xFFo"));
         std::fs::create_dir(&repo).unwrap();
-        let out = Command::new("git")
+        let out = test_support::git_command()
             .arg("-C")
             .arg(&repo)
             .arg("init")
@@ -5165,7 +5423,7 @@ mod tests {
         let bare_dir = tempfile::tempdir().unwrap();
         let bare = bare_dir.path();
         let run = |cwd: &Path, args: &[&str]| {
-            let out = Command::new("git")
+            let out = test_support::git_command()
                 .args(args)
                 .current_dir(cwd)
                 .output()

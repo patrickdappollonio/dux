@@ -3169,7 +3169,7 @@ mod tests {
     use crate::engine::test_support::{sample_project, sample_session, test_engine};
 
     fn init_plain_repo(path: &std::path::Path) {
-        let out = std::process::Command::new("git")
+        let out = crate::git::test_support::git_command()
             .args(["init"])
             .current_dir(path)
             .output()
@@ -3384,7 +3384,7 @@ mod tests {
         // Regression guard for shipped bare-repo support.
         let (engine, _tmp) = test_engine();
         let bare = tempfile::tempdir().unwrap();
-        let out = std::process::Command::new("git")
+        let out = crate::git::test_support::git_command()
             .args(["init", "--bare"])
             .current_dir(bare.path())
             .output()
@@ -3408,7 +3408,7 @@ mod tests {
         assert!(err.contains("already a git repository"), "got: {err}");
 
         let bare = tempfile::tempdir().unwrap();
-        let out = std::process::Command::new("git")
+        let out = crate::git::test_support::git_command()
             .args(["init", "--bare"])
             .current_dir(bare.path())
             .output()

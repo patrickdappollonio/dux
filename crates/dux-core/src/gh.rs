@@ -1539,13 +1539,12 @@ mod tests {
     /// `ssh://` scheme, which is what git reports whenever an `url.*.insteadOf`
     /// rewrite maps onto an ssh base.
     fn ssh_origin_repo(url: &str) -> tempfile::TempDir {
-        git::test_support::isolate_git_from_user_configuration();
         let dir = tempfile::tempdir().unwrap();
         for args in [
             vec!["init", "--quiet"],
             vec!["remote", "add", "origin", url],
         ] {
-            let out = std::process::Command::new("git")
+            let out = crate::git::test_support::git_command()
                 .args(&args)
                 .current_dir(dir.path())
                 .output()
@@ -1575,7 +1574,7 @@ mod tests {
             "[url \"ssh://git@evil.example/\"]\n\tinsteadOf = ssh://git@github.com/\n",
         )
         .unwrap();
-        let out = std::process::Command::new("git")
+        let out = crate::git::test_support::git_command()
             .args([
                 "-C",
                 dir.path().to_str().unwrap(),
@@ -1593,14 +1592,14 @@ mod tests {
         );
     }
 
-    /// So the fixtures isolate git's system and global configuration for the
-    /// whole test process. Whatever the developer has configured, git sees an
+    /// So the fixtures isolate git's system and global configuration on every
+    /// command they run. Whatever the developer has configured, git sees an
     /// empty global config here, and these tests pass or fail for reasons that
     /// belong to the code.
     #[test]
     fn git_fixtures_run_against_an_empty_global_configuration() {
         let dir = ssh_origin_repo("ssh://git@github.com/octocat/Hello-World.git");
-        let out = std::process::Command::new("git")
+        let out = crate::git::test_support::git_command()
             .args([
                 "-C",
                 dir.path().to_str().unwrap(),
@@ -1612,9 +1611,31 @@ mod tests {
             .unwrap();
         assert!(
             String::from_utf8_lossy(&out.stdout).trim().is_empty(),
-            "the test process must see no global git configuration, got:\n{}",
+            "a git command built by the fixture helper must see no global git \
+             configuration, got:\n{}",
             String::from_utf8_lossy(&out.stdout)
         );
+    }
+
+    /// The `origin` remote of a fixture repository, resolved the way production
+    /// resolves it but with the git half isolated from the developer's
+    /// configuration.
+    ///
+    /// `git::remote_github_repo` is deliberately NOT used: it spawns git itself
+    /// and inherits the test process's environment, so it applies whatever
+    /// `url.*.insteadOf` the developer has configured (which is correct in
+    /// production, since the rewritten URL is the one git would really contact,
+    /// and is exactly what must not decide a test's outcome). This runs the same
+    /// command through the isolating helper and hands the output to the same
+    /// pure parser, which is the composition production performs and the half
+    /// where the behaviour under test lives.
+    fn isolated_origin_remote(dir: &std::path::Path) -> Option<git::GitHubRemote> {
+        let out = crate::git::test_support::git_command()
+            .args(["-C", dir.to_str().unwrap(), "remote", "get-url", "origin"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git remote get-url failed");
+        git::github_remote_from_git_output(&out.stdout)
     }
 
     #[test]
@@ -1624,7 +1645,7 @@ mod tests {
         // GitHub origin remote". This covers everything the job does before it
         // shells out to `gh`, which is the part that was broken.
         let dir = ssh_origin_repo("ssh://git@github.com/octocat/Hello-World.git");
-        let remote = git::remote_github_repo(dir.path()).expect("ssh:// origin resolves");
+        let remote = isolated_origin_remote(dir.path()).expect("ssh:// origin resolves");
         assert_eq!(remote.host, "github.com");
         assert_eq!(remote.owner_repo, "octocat/Hello-World");
 

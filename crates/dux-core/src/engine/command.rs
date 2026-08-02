@@ -1879,7 +1879,7 @@ mod tests {
     fn discard_test_repo() -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("tempdir");
         let run = |args: &[&str]| {
-            let ok = std::process::Command::new("git")
+            let ok = crate::git::test_support::git_command()
                 .args(args)
                 .current_dir(dir.path())
                 .status()
@@ -2314,7 +2314,7 @@ mod tests {
     fn watch_test_repo() -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("tempdir");
         let run = |args: &[&str]| {
-            let ok = std::process::Command::new("git")
+            let ok = crate::git::test_support::git_command()
                 .args(args)
                 .current_dir(dir.path())
                 .status()
@@ -2533,7 +2533,7 @@ mod tests {
     fn refresh_test_repo() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         let run = |args: &[&str]| {
-            let out = std::process::Command::new("git")
+            let out = crate::git::test_support::git_command()
                 .args(args)
                 .current_dir(dir.path())
                 .output()
@@ -2555,7 +2555,7 @@ mod tests {
     }
 
     fn git_ok(cwd: &std::path::Path, args: &[&str]) {
-        let out = std::process::Command::new("git")
+        let out = crate::git::test_support::git_command()
             .args(args)
             .current_dir(cwd)
             .output()

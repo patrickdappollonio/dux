@@ -482,7 +482,7 @@ mod tests {
     }
 
     fn run_git(cwd: &Path, args: &[&str]) {
-        let out = std::process::Command::new("git")
+        let out = crate::git::test_support::git_command()
             .args(args)
             .current_dir(cwd)
             .output()
@@ -835,7 +835,7 @@ mod tests {
         assert!(!add.branch.is_empty(), "the committed branch is persisted");
         assert!(!add.leading_branch.is_empty());
         assert!(dir.path().join(".gitignore").exists());
-        let out = std::process::Command::new("git")
+        let out = crate::git::test_support::git_command()
             .args(["rev-list", "--count", "HEAD"])
             .current_dir(dir.path())
             .output()
