@@ -483,6 +483,18 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
         "release_notes_max_concurrency",
         config.server.release_notes_max_concurrency as usize,
     );
+    patch_table_usize(
+        doc,
+        "server",
+        "file_drop_max_bytes",
+        config.server.file_drop_max_bytes,
+    );
+    patch_table_usize(
+        doc,
+        "server",
+        "file_drop_max_concurrency",
+        config.server.file_drop_max_concurrency as usize,
+    );
 
     // --- [terminal] ---
     patch_table_str(doc, "terminal", "command", &config.terminal.command);
@@ -1516,6 +1528,71 @@ mod tests {
         let parsed: Config = toml::from_str(&saved).expect("patched file re-parses");
         assert_eq!(
             parsed.server.tree_list_max_concurrency, 16,
+            "saved:\n{saved}"
+        );
+    }
+
+    #[test]
+    fn file_drop_settings_default_and_round_trip() {
+        // The size default is the one the maintainer chose against real
+        // screenshots, and it is deliberately far above the web framework's own
+        // 2 MB body limit, which is the whole reason the route sets it.
+        let rendered = render_config_plain(&Config::default());
+        let parsed: Config = toml::from_str(&rendered).expect("re-parse");
+        assert_eq!(
+            parsed.server.file_drop_max_bytes,
+            crate::config::DEFAULT_FILE_DROP_MAX_BYTES
+        );
+        assert_eq!(parsed.server.file_drop_max_bytes, 104_857_600);
+        assert_eq!(
+            parsed.server.file_drop_max_concurrency,
+            crate::config::DEFAULT_FILE_DROP_MAX_CONCURRENCY
+        );
+
+        // Both survive a regenerate, including the `0` that switches file drop
+        // off: a zero that silently reverted to the default would turn the
+        // documented opt-out into a no-op.
+        let config = Config {
+            server: crate::config::ServerConfig {
+                file_drop_max_bytes: 0,
+                file_drop_max_concurrency: 7,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let rendered = render_config_plain(&config);
+        let parsed: Config = toml::from_str(&rendered).expect("re-parse");
+        assert_eq!(parsed.server.file_drop_max_bytes, 0);
+        assert_eq!(parsed.server.file_drop_max_concurrency, 7);
+    }
+
+    #[test]
+    fn file_drop_user_values_survive_patch() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            "[server]\nfile_drop_max_bytes = 1\nfile_drop_max_concurrency = 1\n",
+        )
+        .expect("seed config");
+
+        let config = Config {
+            server: crate::config::ServerConfig {
+                file_drop_max_bytes: 5_000_000,
+                file_drop_max_concurrency: 3,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        patch_config_file_with(&path, &config, Durability::NoFsync).expect("patch");
+        let saved = fs::read_to_string(&path).expect("read back");
+        let parsed: Config = toml::from_str(&saved).expect("patched file re-parses");
+        assert_eq!(
+            parsed.server.file_drop_max_bytes, 5_000_000,
+            "saved:\n{saved}"
+        );
+        assert_eq!(
+            parsed.server.file_drop_max_concurrency, 3,
             "saved:\n{saved}"
         );
     }

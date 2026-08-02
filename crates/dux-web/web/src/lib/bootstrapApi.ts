@@ -157,6 +157,13 @@ export interface Bootstrap {
    * what's-new screen only; the app menu entry still opens it. Older servers omit
    * it, so consumers fall back to false. */
   disable_release_notes?: boolean
+  /** Mirrors `config.server.file_drop_max_bytes`: the per-file size cap for a
+   * file dropped onto a pane, where 0 switches file drop OFF. The terminal pane
+   * gates its whole drag surface on this, so a disabled feature offers nothing
+   * rather than advertising a drop target and collecting a server refusal after
+   * the fact (the server refusal remains the real enforcement). Older servers
+   * omit it, so consumers fall back to treating file drop as ON. */
+  file_drop_max_bytes?: number
 }
 
 /** One numbered getting-started step. The number is carried by the server, not

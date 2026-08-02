@@ -217,6 +217,15 @@ pub struct BootstrapView {
     /// what's-new screen after a version change only. The app menu's "What's
     /// new…" still opens it. Read by the web's Preferences dialog.
     pub disable_release_notes: bool,
+    /// Mirrors `config.server.file_drop_max_bytes`: the per-file size cap for a
+    /// file dropped onto a pane, where `0` switches the feature OFF.
+    ///
+    /// Projected so a browser can tell whether the feature EXISTS. The server
+    /// stays the enforcement (it refuses the upload either way), but without
+    /// this the pane advertised a drop target and accepted a drop for a feature
+    /// that was switched off, and only then collected a refusal per file. Older
+    /// servers omit it, so the web falls back to treating file drop as on.
+    pub file_drop_max_bytes: usize,
 }
 
 /// One numbered getting-started step, projected from
@@ -1018,6 +1027,7 @@ impl Engine {
             pending_first_load: None,
             disable_automated_welcome_screen: self.config.ui.disable_automated_welcome_screen,
             disable_release_notes: self.config.ui.disable_release_notes,
+            file_drop_max_bytes: self.config.server.file_drop_max_bytes,
         }
     }
 }
@@ -1911,6 +1921,25 @@ mod tests {
     }
 
     #[test]
+    fn the_file_drop_size_cap_is_projected_so_the_browser_can_hide_a_disabled_feature() {
+        // Zero is documented as switching file drop OFF, and the server refuses
+        // every upload when it is. Without the value in the bootstrap document
+        // the browser had no way to know: it still advertised a drop target,
+        // still accepted the drop, and only then collected a refusal per file.
+        // The server's refusal stays the enforcement; this is what lets a
+        // disabled feature offer nothing.
+        let (mut engine, _tmp) = test_engine();
+        assert_eq!(
+            engine.bootstrap().file_drop_max_bytes,
+            crate::config::DEFAULT_FILE_DROP_MAX_BYTES
+        );
+        engine.config.server.file_drop_max_bytes = 0;
+        assert_eq!(engine.bootstrap().file_drop_max_bytes, 0);
+        engine.config.server.file_drop_max_bytes = 4242;
+        assert_eq!(engine.bootstrap().file_drop_max_bytes, 4242);
+    }
+
+    #[test]
     fn bootstrap_serializes_to_json_with_expected_fields() {
         let (engine, _tmp) = test_engine();
         let json = serde_json::to_string(&engine.bootstrap()).expect("serialize");
@@ -1945,6 +1974,7 @@ mod tests {
             "pending_first_load",
             "disable_automated_welcome_screen",
             "disable_release_notes",
+            "file_drop_max_bytes",
         ] {
             assert!(
                 json.contains(&format!("\"{field}\"")),

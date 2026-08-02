@@ -176,12 +176,122 @@ impl Engine {
 
         Ok((terminal_id, label))
     }
+
+    /// Where a file dropped onto the pane currently showing `pty_id` should be
+    /// saved.
+    ///
+    /// `pty_id` is whatever the browser pane is attached to, which is the only
+    /// identifier it reliably has: a terminal id, an agent's session id (the
+    /// session-slot tab), or an extra tab's id. Resolving all three here keeps
+    /// the upload route from having to know how tabs relate to sessions.
+    ///
+    /// The two answers are deliberately different in kind. An AGENT drops at the
+    /// root of its worktree, a fixed directory git can see, and every tab of one
+    /// agent shares that one worktree, so which tab is on screen does not
+    /// change the answer. A TERMINAL gets a PLAN rather than a path, because the
+    /// real answer needs a live process and must not be computed on this thread.
+    pub fn file_drop_destination(
+        &self,
+        pty_id: &str,
+    ) -> Option<crate::file_drop::FileDropDestination> {
+        if let Some(terminal) = self.companion_terminals.get(pty_id) {
+            return Some(crate::file_drop::FileDropDestination::Terminal(
+                terminal.client.working_directory(),
+            ));
+        }
+        let session_id = if self.sessions.iter().any(|s| s.id == pty_id) {
+            pty_id
+        } else {
+            self.agent_tabs.get(pty_id)?.session_id.as_str()
+        };
+        self.sessions.iter().find(|s| s.id == session_id).map(|s| {
+            crate::file_drop::FileDropDestination::Worktree(s.worktree_path.clone().into())
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::engine::test_support::{sample_project, sample_session, test_engine};
     use crate::model::TerminalOwner;
+
+    #[test]
+    fn a_drop_on_any_tab_of_an_agent_lands_at_that_agent_s_worktree_root() {
+        // Every tab of one agent shares one worktree, so which tab is on screen
+        // must not change where the file lands. The session-slot tab's id equals
+        // the session id; an extra tab's does not, and resolving that is the
+        // half a route would otherwise have to know about.
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "feature");
+        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        engine.sessions.push(session);
+        engine.agent_tabs.insert(
+            "tab-9".to_string(),
+            crate::model::AgentTab {
+                id: "tab-9".to_string(),
+                session_id: "s1".to_string(),
+                provider: crate::model::ProviderKind::new("claude"),
+                sort_order: 1,
+                created_at: chrono::Utc::now(),
+            },
+        );
+
+        for pty_id in ["s1", "tab-9"] {
+            let dest = engine
+                .file_drop_destination(pty_id)
+                .unwrap_or_else(|| panic!("{pty_id} should resolve to a destination"));
+            match dest {
+                crate::file_drop::FileDropDestination::Worktree(path) => {
+                    assert_eq!(path, worktree.path(), "for {pty_id}")
+                }
+                other => panic!("{pty_id} resolved to {other:?}, not the worktree root"),
+            }
+        }
+
+        assert!(
+            engine.file_drop_destination("nobody").is_none(),
+            "an unknown pty id must not resolve to a directory"
+        );
+    }
+
+    #[test]
+    fn a_drop_on_a_terminal_resolves_to_a_live_lookup_not_a_stored_path() {
+        // The distinction that matters: a terminal must NOT hand back a fixed
+        // path, because a shell's directory changes the moment someone types
+        // `cd`. It hands back a plan that asks the live process.
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "feature");
+        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        engine.sessions.push(session);
+        engine.config.terminal.command = "cat".to_string();
+        engine.config.terminal.args = vec![];
+
+        let (terminal_id, _) = engine
+            .create_companion_terminal("s1", 24, 80)
+            .expect("create companion terminal");
+
+        match engine.file_drop_destination(&terminal_id) {
+            Some(crate::file_drop::FileDropDestination::Terminal(plan)) => {
+                assert_eq!(plan.spawn_dir, worktree.path());
+                assert!(
+                    plan.shell_pid.is_some(),
+                    "the plan must carry a live process to ask, or it can only \
+                     ever report the spawn directory"
+                );
+            }
+            other => panic!("a terminal resolved to {other:?}, not a live lookup"),
+        }
+    }
 
     #[test]
     fn create_companion_terminal_spawns_and_registers() {

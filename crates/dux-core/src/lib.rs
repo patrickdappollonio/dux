@@ -19,6 +19,7 @@ pub mod config_write;
 pub mod diff;
 pub mod editor;
 pub mod engine;
+pub mod file_drop;
 pub mod first_load;
 pub mod flat_list;
 pub mod focus;

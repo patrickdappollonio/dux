@@ -220,6 +220,25 @@ pub const DEFAULT_TREE_LIST_MAX_CONCURRENCY: u32 = 8;
 /// everything` convention of the `max_websocket_*_connections` family.
 pub const DEFAULT_RELEASE_NOTES_MAX_CONCURRENCY: u32 = 2;
 
+/// Default per-file size cap for a file dropped onto a web terminal or agent
+/// pane, in bytes (100 MiB).
+///
+/// It is set EXPLICITLY on the upload route because the web framework's own
+/// default body limit is 2 MB, which would reject an ordinary screenshot on a
+/// high-resolution display. `0` disables file drop entirely, matching how other
+/// zero-valued settings in dux read as off.
+pub const DEFAULT_FILE_DROP_MAX_BYTES: usize = 100 * 1024 * 1024;
+
+/// Default cap on how many dropped-file uploads may be in flight at once.
+///
+/// The permit is taken BEFORE the request body is read, so together with
+/// [`DEFAULT_FILE_DROP_MAX_BYTES`] this bounds the worst case at roughly two
+/// hundred megabytes of buffered upload. Unlike the `max_websocket_*` family,
+/// `0` here does not block everything: it clamps to 1, because a zero-permit
+/// semaphore would deadlock every drop forever rather than disabling a feature.
+/// Disabling file drop is what the size cap's `0` is for.
+pub const DEFAULT_FILE_DROP_MAX_CONCURRENCY: u32 = 2;
+
 /// Default seconds to wait for SIGTERMed agents/terminals to exit before
 /// force-killing them on shutdown. Shared by the top-level
 /// [`Config::shutdown_timeout_seconds`] (TUI quit) and
@@ -425,6 +444,26 @@ pub struct ServerConfig {
     /// usually returns immediately from cache. `0` disables the bound entirely.
     /// Default 2. Takes effect on the next server restart.
     pub release_notes_max_concurrency: u32,
+    /// Maximum size, in bytes, of a single file dropped onto a terminal or agent
+    /// pane in the web UI. Default 104857600 (100 MiB). Set EXPLICITLY on the
+    /// upload route, because the web framework's own default of 2 MB would
+    /// reject an ordinary screenshot. A file over the cap is refused with a
+    /// message saying so and nothing is written. `0` disables file drop
+    /// entirely: the route refuses every upload and the browser stops offering
+    /// the drop overlay. Read at startup, so changing it needs a server
+    /// restart.
+    pub file_drop_max_bytes: usize,
+    /// Maximum number of dropped-file uploads the web server will have in flight
+    /// at once. The permit is taken BEFORE the request body is read (the body is
+    /// fully buffered in memory before a handler's first line runs, so taking it
+    /// inside the handler would be too late and the memory already spent), which
+    /// is what makes this bound total buffered upload memory rather than just
+    /// serializing the work. A request beyond the limit WAITS for a free slot
+    /// rather than being refused. Default 2, so with the default size cap the
+    /// worst case is roughly 200 MiB of buffered upload. `0` clamps to 1 rather
+    /// than disabling the bound: a zero-permit semaphore would stall every drop
+    /// forever. Read at startup, so changing it needs a server restart.
+    pub file_drop_max_concurrency: u32,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -765,6 +804,8 @@ impl Default for ServerConfig {
             search_index_max_files: DEFAULT_SEARCH_INDEX_MAX_FILES,
             tree_list_max_concurrency: DEFAULT_TREE_LIST_MAX_CONCURRENCY,
             release_notes_max_concurrency: DEFAULT_RELEASE_NOTES_MAX_CONCURRENCY,
+            file_drop_max_bytes: DEFAULT_FILE_DROP_MAX_BYTES,
+            file_drop_max_concurrency: DEFAULT_FILE_DROP_MAX_CONCURRENCY,
         }
     }
 }

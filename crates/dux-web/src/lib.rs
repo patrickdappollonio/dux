@@ -33,6 +33,7 @@ pub mod config_routes;
 pub mod console;
 pub mod engine_actor;
 pub mod event_bus;
+pub mod file_drop_routes;
 pub mod file_routes;
 pub mod first_load_routes;
 pub mod git_routes;
@@ -375,6 +376,8 @@ fn run_plain_http(paths: DuxPaths, addrs: Vec<PlanAddr>, version: String) -> Res
     let search_index_max_files = engine.config.server.search_index_max_files;
     let tree_list_max_concurrency = engine.config.server.tree_list_max_concurrency;
     let release_notes_max_concurrency = engine.config.server.release_notes_max_concurrency;
+    let file_drop_max_bytes = engine.config.server.file_drop_max_bytes;
+    let file_drop_max_concurrency = engine.config.server.file_drop_max_concurrency;
     let engine_allowed_hosts = engine.config.server.allowed_hosts.clone();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -445,6 +448,7 @@ fn run_plain_http(paths: DuxPaths, addrs: Vec<PlanAddr>, version: String) -> Res
                 .with_search_index_max_files(search_index_max_files)
                 .with_tree_list_max_concurrency(tree_list_max_concurrency)
                 .with_release_notes_max_concurrency(release_notes_max_concurrency)
+                .with_file_drop_limits(file_drop_max_bytes, file_drop_max_concurrency)
                 .with_host_allowlist(bound_ips, engine_allowed_hosts.clone()),
         );
 
@@ -708,6 +712,8 @@ pub fn serve_with_engine(
     let flip_search_index_max_files = engine.config.server.search_index_max_files;
     let flip_tree_list_max_concurrency = engine.config.server.tree_list_max_concurrency;
     let flip_release_notes_max_concurrency = engine.config.server.release_notes_max_concurrency;
+    let flip_file_drop_max_bytes = engine.config.server.file_drop_max_bytes;
+    let flip_file_drop_max_concurrency = engine.config.server.file_drop_max_concurrency;
 
     // The std listeners travel through the flip (the TUI bound them BEFORE tearing
     // down, so there is no rebind race); tokio needs them non-blocking. Adoption
@@ -782,6 +788,7 @@ pub fn serve_with_engine(
                 .with_search_index_max_files(flip_search_index_max_files)
                 .with_tree_list_max_concurrency(flip_tree_list_max_concurrency)
                 .with_release_notes_max_concurrency(flip_release_notes_max_concurrency)
+                .with_file_drop_limits(flip_file_drop_max_bytes, flip_file_drop_max_concurrency)
                 .with_host_allowlist(flip_bound_ips, flip_allowed_hosts),
         )
     };
