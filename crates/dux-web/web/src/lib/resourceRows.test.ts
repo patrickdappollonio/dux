@@ -252,13 +252,30 @@ describe("taskManagerRows", () => {
     ])
   })
 
+  // What this pins is ROWS AGAINST COUNT, and nothing about the server.
+  //
   // The Task Manager's bulk confirmation counts EVERY terminal in the flat
   // collection, so a terminal the row walk fails to place would make the rows
-  // and the count disagree about what "Stop all" is about to stop. Rows are
-  // therefore emitted from the flat list itself: a terminal whose owner the walk
-  // over sessions and projects never reaches is emitted at the END, still
-  // stoppable, rather than dropped.
-  it("emits_a_row_for_every_terminal_even_when_its_owner_is_not_walked", () => {
+  // and the count disagree about what "Stop all" is about to stop: the dialog
+  // would say "stop 3" while showing 2. Rows are therefore emitted from the flat
+  // list itself, and one the walk over sessions and projects never reaches lands
+  // at the END rather than being dropped.
+  //
+  // BE PRECISE ABOUT `stoppable`. It is a RENDERING property, "this row carries a
+  // Stop control and is not inert", and it is asserted here only because a row
+  // the user can see but cannot act on is the other half of the same
+  // disagreement. It is NOT a claim that the server would honour the request:
+  // the delete is owner-scoped (`DELETE /api/v1/sessions/:id/terminals/:tid`),
+  // and an owner the workspace does not have is a 404, which is exactly what
+  // `terminal_delete_routes_404_across_owner_kinds` pins on the Rust side.
+  //
+  // And the state is HYPOTHETICAL. No engine path was demonstrated that produces
+  // a terminal whose owner is absent from the spine; the fixture stands in for
+  // any terminal this walk has no section for, whatever the reason. Nothing here
+  // adds a route for stopping one, deliberately, because there is no
+  // demonstrated way to reach it and a route for an unreachable state is a route
+  // nobody can test.
+  it("emits_and_counts_every_terminal_even_when_its_owner_is_not_walked", () => {
     const sessions = [session({ id: "s1", tabs: [tab({ id: "s1" })] })]
     const terminals = [
       terminal({ id: "term-known", owner: { kind: "session", session_id: "s1" } }),
@@ -275,10 +292,13 @@ describe("taskManagerRows", () => {
       "total",
     ])
     const orphan = rows.find((r) => r.key === "term:term-orphan")
+    // Rendered with a live Stop control (see the caveat above: this says what the
+    // ROW looks like, not what the server would answer).
     expect(orphan?.stoppable).toBe(true)
     expect(orphan?.targetId).toBe("term-orphan")
     // The count of terminal rows always equals the count of terminals, which is
-    // the number the "Stop all" confirmation puts in front of the user.
+    // the number the "Stop all" confirmation puts in front of the user. This is
+    // the assertion the test is really for.
     expect(rows.filter((r) => r.kind === "terminal")).toHaveLength(
       terminals.length,
     )

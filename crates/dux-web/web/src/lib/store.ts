@@ -57,6 +57,7 @@ import type { EditorTabsState } from "./editorTabs"
 import { newClientId } from "./uid"
 import { assertNever } from "./assertNever"
 import {
+  matchOwner,
   ownerRefFromWire,
   ownerSessionId,
   type TerminalOwnerRef,
@@ -1994,18 +1995,30 @@ function applyDeepLinkSelection(
   changes?: boolean,
 ): void {
   if (target.kind === "terminal") {
-    // Only session-owned terminals resolve through a session; project-terminal
-    // links restore via `applyProjectTerminalDeepLink` and never reach here.
-    if (target.owner.kind !== "session") return
-    const owner = target.owner
-    if (ownerHasTerminal(terminals, owner, target.terminalId)) {
-      selectTerminal(target.terminalId, owner, { urlMode, changes })
-      return
-    }
-    // Terminal id gone, so fall back to the owning agent, keeping the changes
-    // screen: changed files are SESSION-scoped, so they survive any fallback
-    // that stays inside the same session.
-    selectSessionRoute(owner.sessionId, urlMode, changes)
+    // A handler per owner variant, not `if (owner.kind !== "session") return`.
+    //
+    // That early return was silent in both directions: it said nothing about
+    // WHICH other owner it was declining, and it would have gone on declining a
+    // third kind that has no other restore path at all, dropping the user's
+    // position with no trace. Written as a match, a new variant cannot be added
+    // without answering for it here.
+    const terminal = target
+    matchOwner(target.owner, {
+      session: (owner) => {
+        if (ownerHasTerminal(terminals, owner, terminal.terminalId)) {
+          selectTerminal(terminal.terminalId, owner, { urlMode, changes })
+          return
+        }
+        // Terminal id gone, so fall back to the owning agent, keeping the
+        // changes screen: changed files are SESSION-scoped, so they survive any
+        // fallback that stays inside the same session.
+        selectSessionRoute(owner.sessionId, urlMode, changes)
+      },
+      // Project-terminal links restore through `applyProjectTerminalDeepLink`,
+      // which resolves them against the project rather than a session, so they
+      // never reach this function. Nothing to do, stated rather than implied.
+      project: () => {},
+    })
     return
   }
   if (
@@ -2078,11 +2091,12 @@ function applyProjectTerminalDeepLink(
 // user reading changed files twice over, first because the anchored
 // `parseSelectionHash` read `#/agent/<sid>/changes` as no link at all, and then
 // because the restore would have dropped them onto the terminal screen.
-let reconnectDeepLink: {
+interface ReconnectDeepLink {
   target: SelectedTarget
   changes: boolean
   armedAt: number
-} | null = null
+}
+let reconnectDeepLink: ReconnectDeepLink | null = null
 
 // Bound how long the re-armed intent stays live, measured from the LATEST
 // events-socket reopen (armReconnectDeepLink refreshes `armedAt` on every
@@ -2147,67 +2161,90 @@ function armReconnectDeepLink(): void {
 function restoreReconnectDeepLink(spine: Spine): void {
   const armed = reconnectDeepLink
   if (!armed) return
-  const sel = state.selectedSessionId
   const armedTarget = armed.target
-  if (armedTarget.kind === "terminal" && armedTarget.owner.kind === "project") {
-    // A project terminal has no resume phase and its pane never issues the
-    // reconnect eject (that path is gated on the agent session-slot tab), so
-    // its selection normally survives a reconnect on its own, so this branch's
-    // usual job is to disarm as a no-op. The one restorable gap is a
-    // selection cleared by OUR OWN eject while the intent was armed; any
-    // deliberate navigation (a non-null selection that is not the armed
-    // terminal, or a home nav without the eject flag) disarms instead.
-    const target = armedTarget
-    const owner = armedTarget.owner
-    const cur = state.selectedTarget
-    if (
-      cur?.kind === "terminal" &&
-      cur.terminalId === target.terminalId
-    ) {
-      // Still on the armed terminal: the route survived, nothing to undo.
-      reconnectDeepLink = null
-      return
-    }
-    if (sel !== null || cur !== null) {
-      // The user moved somewhere else on their own; respect it.
-      reconnectDeepLink = null
-      return
-    }
-    if (!lastClearWasReconnectEject) {
-      // A deliberate home navigation, not our eject.
-      reconnectDeepLink = null
-      return
-    }
-    if (Date.now() - armed.armedAt > RECONNECT_DEEPLINK_TTL_MS) {
-      reconnectDeepLink = null
-      return
-    }
-    const exists =
-      spine.projects.some((p) => p.id === owner.projectId) &&
-      ownerHasTerminal(spine.terminals, owner, target.terminalId)
-    if (!exists) return // keep waiting within the TTL (the spine may lag)
-    // A replace: this restores the position the browser is ALREADY parked on
-    // (the hash still names it, or our own eject rewrote it). Pushing would add
-    // an entry per reconnect, so a flaky link would put an unbounded pile of
-    // duplicates between the user and home.
-    selectTerminal(target.terminalId, owner, {
-      urlMode: "replace",
-      changes: armed.changes,
-    })
+  if (armedTarget.kind === "agent") {
+    restoreSessionScopedReconnect(spine, armed, armedTarget.sessionId)
+    return
+  }
+  // A handler per owner variant, not a predicate plus a nullable id.
+  //
+  // This used to test `owner.kind === "project"` and send everything else
+  // through `ownerSessionId`, so a third kind of owner would have answered null
+  // and had its restoration intent silently dropped: the user's position would
+  // quietly fail to come back after a reconnect, with nothing anywhere saying
+  // why. That is precisely the class of silence the owner tag exists to remove,
+  // and a predicate cannot remove it, because a predicate keeps compiling. The
+  // matcher's object literal is missing a key the moment a variant is added,
+  // which is a compile error HERE, where the decision is.
+  const terminal = armedTarget
+  matchOwner(terminal.owner, {
+    session: (owner) =>
+      restoreSessionScopedReconnect(spine, armed, owner.sessionId),
+    project: (owner) =>
+      restoreProjectTerminalReconnect(spine, armed, terminal.terminalId, owner),
+  })
+}
+
+// The project-terminal half of `restoreReconnectDeepLink`.
+//
+// A project terminal has no resume phase and its pane never issues the reconnect
+// eject (that path is gated on the agent session-slot tab), so its selection
+// normally survives a reconnect on its own and this usually just disarms as a
+// no-op. The one restorable gap is a selection cleared by OUR OWN eject while
+// the intent was armed; any deliberate navigation (a non-null selection that is
+// not the armed terminal, or a home nav without the eject flag) disarms instead.
+function restoreProjectTerminalReconnect(
+  spine: Spine,
+  armed: ReconnectDeepLink,
+  terminalId: string,
+  owner: Extract<TerminalOwnerRef, { kind: "project" }>,
+): void {
+  const sel = state.selectedSessionId
+  const cur = state.selectedTarget
+  if (cur?.kind === "terminal" && cur.terminalId === terminalId) {
+    // Still on the armed terminal: the route survived, nothing to undo.
     reconnectDeepLink = null
     return
   }
-  // Lossy on purpose: below, the only question asked of this is whether there is
-  // a session to restore alongside the target, which a non-session owner never
-  // has.
-  const armedSessionId =
-    armedTarget.kind === "agent"
-      ? armedTarget.sessionId
-      : ownerSessionId(armedTarget.owner)
-  if (armedSessionId === null) {
+  if (sel !== null || cur !== null) {
+    // The user moved somewhere else on their own; respect it.
     reconnectDeepLink = null
     return
   }
+  if (!lastClearWasReconnectEject) {
+    // A deliberate home navigation, not our eject.
+    reconnectDeepLink = null
+    return
+  }
+  if (Date.now() - armed.armedAt > RECONNECT_DEEPLINK_TTL_MS) {
+    reconnectDeepLink = null
+    return
+  }
+  const exists =
+    spine.projects.some((p) => p.id === owner.projectId) &&
+    ownerHasTerminal(spine.terminals, owner, terminalId)
+  if (!exists) return // keep waiting within the TTL (the spine may lag)
+  // A replace: this restores the position the browser is ALREADY parked on
+  // (the hash still names it, or our own eject rewrote it). Pushing would add
+  // an entry per reconnect, so a flaky link would put an unbounded pile of
+  // duplicates between the user and home.
+  selectTerminal(terminalId, owner, {
+    urlMode: "replace",
+    changes: armed.changes,
+  })
+  reconnectDeepLink = null
+}
+
+// The session-scoped half of `restoreReconnectDeepLink`: an agent target, or a
+// terminal owned by a session. `armedSessionId` is the session to wait for and
+// is never null, because the caller reached here by MATCHING an owner variant
+// that has one rather than by reducing an owner to a nullable id.
+function restoreSessionScopedReconnect(
+  spine: Spine,
+  armed: ReconnectDeepLink,
+  armedSessionId: string,
+): void {
+  const sel = state.selectedSessionId
   // The user actively moved to a DIFFERENT agent since we armed — respect it and
   // drop the intent so we never yank them back.
   if (sel !== null && sel !== armedSessionId) {
