@@ -515,6 +515,7 @@ pub fn build_app(
         .merge(crate::changes_routes::routes())
         .merge(crate::resource_routes::routes())
         .merge(crate::bootstrap_routes::routes())
+        .merge(crate::build_routes::routes())
         .merge(crate::spine_routes::routes())
         .merge(crate::session_actions::routes())
         .merge(crate::project_actions::routes())

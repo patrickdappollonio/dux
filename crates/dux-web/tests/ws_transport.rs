@@ -1332,3 +1332,74 @@ async fn thin_reads_still_nest_terminals_for_both_owner_kinds() {
         "a project must not absorb its sessions' terminals"
     );
 }
+
+/// `GET /api/v1/build` is the probe a reconnecting tab uses to decide whether the
+/// server it got back to is the one that served it.
+///
+/// What this pins is the property an obvious implementation gets wrong: the run
+/// id is minted ONCE per process, so every read within one server run agrees. A
+/// per-request uuid would tell two servers apart just as well, and would also
+/// tell the SAME tab that the server changed on every single reconnect, hard
+/// reloading it forever. Two separately booted routers here share one process on
+/// purpose, which is exactly the "same server, reconnected" case.
+///
+/// It also answers with NO engine round-trip, which is why a client can ask right
+/// after a reconnect while the engine is still coming up, and it forbids caching,
+/// since a cached answer would be the tab telling itself what it already believes.
+#[tokio::test]
+async fn build_identity_is_stable_within_one_server_run_and_is_never_cached() {
+    let (first_addr, _tmp_a) = boot().await;
+    let (second_addr, _tmp_b) = boot().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("http://{first_addr}/api/v1/build"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.headers()
+            .get(reqwest::header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok()),
+        Some("no-store"),
+        "a cached build probe cannot notice that the server changed"
+    );
+    let first: serde_json::Value = resp.json().await.unwrap();
+
+    // A second read, and a read from another router in the same process: both
+    // must agree, or a reconnecting tab would reload on every blip.
+    let again: serde_json::Value = client
+        .get(format!("http://{first_addr}/api/v1/build"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let other: serde_json::Value = client
+        .get(format!("http://{second_addr}/api/v1/build"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(first, again, "two reads of one server run must agree");
+    assert_eq!(
+        first, other,
+        "one process is one run, whatever is serving it"
+    );
+
+    // The documented shape, exactly: two keys, both non-empty strings.
+    let mut keys: Vec<&str> = first
+        .as_object()
+        .expect("a JSON object")
+        .keys()
+        .map(|k| k.as_str())
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(keys, vec!["process", "version"]);
+    assert!(!first["process"].as_str().unwrap().is_empty());
+    assert!(!first["version"].as_str().unwrap().is_empty());
+}

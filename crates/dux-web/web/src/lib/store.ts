@@ -19,6 +19,12 @@ import { browseApi } from "./browseApi"
 import { configApi } from "./configApi"
 import { setConnectionId } from "./connection"
 import {
+  fetchServerIdentity,
+  serverChanged,
+  type ServerIdentity,
+} from "./buildApi"
+import { reloadPage } from "./reloadPage"
+import {
   ChangesFetchError,
   fetchChanges,
   type SessionChangesResponse,
@@ -874,6 +880,34 @@ eventsSocket.onEvent = (ev: EventsServerMessage) => {
 // reconnect skipped it and the app stayed empty with no recovery path.
 let skipNextEventsOnOpenLoad = false
 
+// Which run of which build of dux this tab loaded against, read once at boot
+// (see `buildApi.ts`). `null` until that read lands, or forever if it failed,
+// and a null baseline never forces a reload: unknown is not "changed".
+let serverIdentityBaseline: ServerIdentity | null = null
+
+// Learn the baseline. Called from `boot`, alongside the other initial reads.
+async function loadServerIdentityBaseline(): Promise<void> {
+  serverIdentityBaseline = await fetchServerIdentity()
+}
+
+// The reconnect's first question: is this the server that served this tab?
+//
+// A reconnect is the ONLY moment dux can have been restarted under an open tab,
+// and a tab whose server was replaced is running code that no longer matches
+// what it is being sent. So the answer decides between two whole recovery
+// strategies: identical, and the ordinary in-place refetch below is exactly
+// right; different, and there is nothing in the page worth keeping, so the
+// window is hard reloaded with no prompt.
+//
+// It runs ALONGSIDE that refetch rather than gating it. The probe is a network
+// round-trip, and blocking recovery on it would strand the app whenever the
+// probe hung; letting the refetch start a moment early costs nothing, because a
+// reload discards whatever it produced.
+async function reloadIfServerChanged(): Promise<void> {
+  const current = await fetchServerIdentity()
+  if (serverChanged(serverIdentityBaseline, current)) reloadPage()
+}
+
 // After a (re)connect the socket has re-sent the whole interest set; re-fetch so
 // anything missed while disconnected is recovered (an event that arrived during
 // the outage is gone otherwise). The `config` coarse topic is always subscribed,
@@ -894,6 +928,11 @@ eventsSocket.onOpen = () => {
     // during the reconnect (the center pane resets to home while the agent is
     // momentarily `detached`) can be re-restored once the agent resumes. Reading
     // the hash here — before any spine apply runs — beats that eject wiping it.
+    //
+    // First, though: ask whether this is even the same server. dux may have been
+    // restarted during the outage, in which case refetching state into old code
+    // is the wrong recovery and the window is reloaded instead.
+    void reloadIfServerChanged()
     armReconnectDeepLink()
     loadBootstrap()
     loadSpine()
@@ -1535,6 +1574,9 @@ function boot(): void {
   eventsSocket.connect()
   loadBootstrap()
   loadSpine()
+  // Remember which server served this tab, so a later reconnect can tell whether
+  // it is still talking to it.
+  void loadServerIdentityBaseline()
 }
 // Off-browser (a build-time static render) there is no server to talk to and no
 // socket to open, so the store simply stays at its initial state until whoever

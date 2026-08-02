@@ -83,6 +83,36 @@ instead of two processes fighting over the same SQLite database. So one process
 serves one front end at a time. The in-app flip below is how you move a running
 workspace from one to the other without restarting anything.
 
+#### Restarting it, with a tab still open
+
+Restart dux while a browser tab is sitting there, and that tab keeps running the
+interface the *old* server sent it. It reconnects happily and carries on
+rendering the new server's data through the old page, which is fine right up
+until the two disagree about something, at which point it is quietly wrong in a
+place nobody thinks to look.
+
+So the tab checks. It reads `GET /api/v1/build` when it loads and remembers the
+answer, then reads it again the moment it gets back onto a socket. The response is
+two fields:
+
+```json
+{ "version": "development", "process": "0d0f7a2c-4d1e-4f0a-9d55-6b1f2c3a4d5e" }
+```
+
+`version` is the same string shown under the logo, and `process` identifies that
+particular *run* of the server, minted fresh each time it starts. If both still
+match, the reconnect is the ordinary one: the tab refetches its state in place
+and whatever you had open (a half-written commit message, an editor tab) is
+untouched. If either has moved, dux **reloads the page** for you, no prompt. The
+page is stale by definition at that point, so there is nothing in it worth
+keeping.
+
+The `process` half is what makes this work while you are hacking on dux:
+`version` reads `development` for every build that is not a tagged release, so it
+would never move between two `cargo run`s. A dropped Wi-Fi connection, by
+contrast, returns to the same run of the same build and reconnects in place,
+exactly as it always did.
+
 ### Flip a running TUI into the browser
 
 Already in the TUI with agents running and want a browser instead? Open the

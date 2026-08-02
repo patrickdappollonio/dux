@@ -26,6 +26,7 @@
 pub mod bootstrap;
 pub mod bootstrap_routes;
 pub mod browse_routes;
+pub mod build_routes;
 pub mod changes;
 pub mod changes_routes;
 pub mod config_routes;
