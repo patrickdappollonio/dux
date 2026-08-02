@@ -38,8 +38,9 @@ describe("fetchSpine", () => {
     // `last_focused_tab: null`.
     expect(result).toEqual({
       ...body,
-      // A body that omits the flat top-level `terminals` collection (an older
-      // server, which nested them instead) is coerced to `[]`.
+      // This body carries no terminals in EITHER shape (no flat collection and
+      // no nested arrays), so the flat collection is empty. A body that nests
+      // them is a different case, covered below.
       terminals: [],
       sessions: [
         {
@@ -59,6 +60,99 @@ describe("fetchSpine", () => {
     expect(fetchMock).toHaveBeenCalledWith("/api/v1/spine", {
       credentials: "same-origin",
     })
+  })
+
+  // Leaving a browser tab open while dux restarts is ordinary, so a client can
+  // outlive the server that served it and end up talking to a build that sends
+  // the OTHER shape. A server predating the flat collection nests each terminal
+  // inside its owner and puts no owner on the terminal itself, so the ingestion
+  // boundary flattens those and attaches the owner they were nested under.
+  // Reading only the flat field and normalizing a missing one to `[]` would show
+  // that user no terminals at all, which is not what the old client did with the
+  // very same body.
+  it("flattens an older server's nested terminals and attaches the owner they were nested under", async () => {
+    const body = {
+      projects: [
+        {
+          id: "p1",
+          terminals: [{ id: "t-p1", label: "Terminal 2", sort_order: 2 }],
+        },
+      ],
+      sessions: [
+        {
+          id: "s1",
+          project_id: "p1",
+          terminals: [
+            { id: "t-s1a", label: "Terminal 1", sort_order: 1 },
+            { id: "t-s1b", label: "Terminal 3", sort_order: 3 },
+          ],
+        },
+      ],
+      sidebar: { groups: [], agentless_start: null },
+    }
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => body,
+        text: async () => "",
+        headers: { get: () => null },
+      })) as unknown as typeof fetch,
+    )
+
+    const result = await fetchSpine()
+    // Flat, in the `sort_order` order the new shape promises, each carrying the
+    // owner it was nested under.
+    expect(result.terminals.map((t) => [t.id, t.owner])).toEqual([
+      ["t-s1a", { kind: "session", session_id: "s1" }],
+      ["t-p1", { kind: "project", project_id: "p1" }],
+      ["t-s1b", { kind: "session", session_id: "s1" }],
+    ])
+    // Older servers omit the newer terminal fields as well; they are coerced
+    // here exactly as a flat terminal's are.
+    expect(result.terminals[0].working).toBe(false)
+    expect(result.terminals[0].typing).toBe(false)
+    // The nested arrays do not survive: the flat collection is the one place
+    // terminals live, so nothing downstream can read a second, staler copy.
+    expect(
+      (result.sessions[0] as unknown as { terminals?: unknown }).terminals,
+    ).toBeUndefined()
+    expect(
+      (result.projects[0] as unknown as { terminals?: unknown }).terminals,
+    ).toBeUndefined()
+  })
+
+  // The flat collection wins when a body somehow carries both, so the owner-
+  // tagged shape is never second-guessed by a nested leftover.
+  it("prefers the flat collection and drops nested arrays when a body carries both", async () => {
+    const body = {
+      projects: [{ id: "p1", terminals: [{ id: "stale-p", label: "old" }] }],
+      sessions: [
+        { id: "s1", project_id: "p1", terminals: [{ id: "stale-s", label: "old" }] },
+      ],
+      terminals: [
+        {
+          id: "t-1",
+          owner: { kind: "session", session_id: "s1" },
+          label: "Terminal 1",
+        },
+      ],
+      sidebar: { groups: [], agentless_start: null },
+    }
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => body,
+        text: async () => "",
+        headers: { get: () => null },
+      })) as unknown as typeof fetch,
+    )
+
+    const result = await fetchSpine()
+    expect(result.terminals.map((t) => t.id)).toEqual(["t-1"])
   })
 
   it("passes a session's last_focused_tab through verbatim when the server sends one", async () => {

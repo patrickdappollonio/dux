@@ -31,7 +31,8 @@ export interface Spine {
    * the manual `sort_order`. Each entry carries its own tagged `owner`, so the
    * client no longer rebuilds this list by walking two nested collections and
    * inferring ownership from which one it was in. An older server that predates
-   * the flat shape omits the field; `fetchSpine` normalizes it to `[]`. */
+   * the flat shape nests its terminals instead; `fetchSpine` flattens those and
+   * tags each with the owner it was nested under (see `ingestTerminals`). */
   terminals: TerminalView[]
   /** Core-computed sidebar grouping (projects + sessions, orphans surfaced) so
    * both surfaces render an identical tree without re-deriving grouping. */
@@ -77,7 +78,7 @@ export async function fetchSpine(): Promise<Spine> {
     Spine,
     "sessions" | "projects" | "terminals"
   > & {
-    projects: ProjectView[]
+    projects: Array<ProjectView & { terminals?: LegacyTerminal[] }>
     terminals?: RawTerminal[]
     sessions: Array<
       Omit<
@@ -95,18 +96,19 @@ export async function fetchSpine(): Promise<Spine> {
         needs_attention?: boolean
         typing?: boolean
         last_focused_tab?: string | null
+        terminals?: LegacyTerminal[]
       }
     >
   }
   return {
     ...raw,
-    // An older server that predates the flat, owner-bearing collection omits the
-    // field; every downstream consumer treats it as required, so normalize to
-    // `[]` here (that server nested its terminals instead, and a client running
-    // against it simply shows none, which is the same thing the pre-existing
-    // `?? []` fallbacks did for a missing nested list).
-    terminals: (raw.terminals ?? []).map(normalizeTerminal),
-    sessions: raw.sessions.map((s) => ({
+    terminals: ingestTerminals(raw),
+    // The nested arrays, when an older server sent them, are dropped from the
+    // owner they rode on: `ingestTerminals` has already lifted them into the one
+    // flat collection, and leaving a second, staler copy behind invites a
+    // consumer to read it.
+    projects: raw.projects.map(({ terminals: _nested, ...p }) => p),
+    sessions: raw.sessions.map(({ terminals: _nested, ...s }) => ({
       ...s,
       tabs: (s.tabs ?? []).map(normalizeTab),
       initial_branch: s.initial_branch ?? "",
@@ -143,6 +145,62 @@ type RawTerminal = Omit<
   sort_order?: number
   created_at?: string
   updated_at?: string
+}
+
+// A terminal as an OLDER server sent it: nested inside its owner, and carrying
+// no owner of its own, because the collection it sat in was the ownership.
+type LegacyTerminal = Omit<RawTerminal, "owner">
+
+// The flat, owner-bearing collection, from EITHER shape the server may send.
+//
+// The two shapes belong to two builds of dux, and a browser tab left open while
+// dux restarts (entirely ordinary during development) is how one client meets
+// both. A new server sends `terminals` at the top level, each entry tagged with
+// its owner. An older one omits that field and nests terminals inside the
+// session or the project that owns them instead, so ownership is which array a
+// terminal was found in; those are lifted out and tagged here, at the single
+// ingestion boundary, rather than being discarded. Discarding them would show
+// that user an empty Terminals section with every terminal still running.
+//
+// The flat field wins whenever it is present, even when empty: a new server with
+// no terminals sends `[]` and means it.
+//
+// The OTHER direction cannot be repaired from here: a client old enough to want
+// nested arrays, talking to a server that no longer sends them, sees no
+// terminals, and dux has no mechanism that would make such a tab reload. The
+// only reload path in the client is reactive, `ChunkBoundary` catching a failed
+// lazy-chunk import after the assets it wants have gone.
+function ingestTerminals(raw: {
+  terminals?: RawTerminal[]
+  sessions: ReadonlyArray<{ id: string; terminals?: LegacyTerminal[] }>
+  projects: ReadonlyArray<{ id: string; terminals?: LegacyTerminal[] }>
+}): TerminalView[] {
+  if (raw.terminals) return raw.terminals.map(normalizeTerminal)
+  const nested: TerminalView[] = []
+  for (const session of raw.sessions) {
+    for (const t of session.terminals ?? []) {
+      nested.push(
+        normalizeTerminal({
+          ...t,
+          owner: { kind: "session", session_id: session.id },
+        }),
+      )
+    }
+  }
+  for (const project of raw.projects) {
+    for (const t of project.terminals ?? []) {
+      nested.push(
+        normalizeTerminal({
+          ...t,
+          owner: { kind: "project", project_id: project.id },
+        }),
+      )
+    }
+  }
+  // The flat collection promises the global `sort_order` base order, which the
+  // nested arrays only held WITHIN each owner. `Array.prototype.sort` is stable,
+  // so terminals sharing a `sort_order` keep the order they were nested in.
+  return nested.sort((a, b) => a.sort_order - b.sort_order)
 }
 
 function normalizeTab(t: RawTab): AgentTabView {
