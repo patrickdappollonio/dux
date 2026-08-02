@@ -43,10 +43,18 @@ typed `cd docs/images`, a file dropped on it lands in `docs/images`, because
 that is where you are. dux asks the live process each time rather than
 remembering where it started, and it prefers whatever program is in the
 foreground over the shell behind it, on the reasoning that a file handed to a
-terminal belongs to whatever is reading it.
+terminal belongs to whatever is reading it. If that foreground program has
+already exited but its job is still running, dux asks a surviving part of that
+job before it falls back to the shell, because a pipeline whose first stage
+finished is an ordinary thing and the shell is not where you are.
 
-The toast that appears afterwards always names the folder, so you never have to
-guess.
+If dux cannot read the process at all, it refuses the drop and tells you, rather
+than writing somewhere else and naming that instead. Being unable to see where a
+terminal is has never been a good reason to guess.
+
+The toast that appears afterwards names the folder for each file, so you never
+have to guess. Drop several onto a terminal, type `cd` in the middle, and they
+genuinely do land in different folders; the toast says which went where.
 
 ## Nothing is ever overwritten
 
@@ -78,6 +86,20 @@ A handful of names are refused outright, with the reason named:
 When a name is right at the length limit and a collision forces a suffix, dux
 trims the front of the name to make room and keeps the extension, so the file is
 still recognizable as an image.
+
+## The folder has to be nameable too
+
+The name is only the last part of the path, and the path is what ends up in your
+prompt, so the folders above it are held to the same standard. dux refuses a drop
+into a folder whose own path could not survive the trip to your terminal: one
+holding a line feed (which arrives as a submit rather than as text), one holding
+an escape character (which the program reading your terminal simply obeys), or
+one whose name is not valid text at all. Quoting does not help with any of those,
+because none of them is a shell problem.
+
+Everything that *is* only a quoting problem still works. Spaces, dollars,
+backticks, quotes and semicolons in a folder name are all fine, which matters
+because a worktree path is built from your project's name.
 
 ## Several files at once
 

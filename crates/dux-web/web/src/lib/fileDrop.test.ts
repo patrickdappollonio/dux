@@ -8,15 +8,36 @@ import {
   type DropOutcome,
 } from "./fileDrop"
 
-const agent = { kind: "agent" as const, folderLabel: "~/code/app/wt" }
-const terminal = { kind: "terminal" as const, folderLabel: "~/code/app" }
+const agent = { kind: "agent" as const }
+const terminal = { kind: "terminal" as const }
 
-function pasted(name: string, saved = name): DropOutcome {
+function sent(
+  name: string,
+  saved = name,
+  folderLabel = "~/code/app",
+): DropOutcome {
   return {
-    kind: "pasted",
+    kind: "sent",
     requestedName: name,
     savedName: saved,
     path: `/home/p/code/app/${saved}`,
+    folderLabel,
+  }
+}
+
+function notSent(
+  name: string,
+  saved = name,
+  folderLabel = "~/code/app",
+  reason = "the connection dropped",
+): DropOutcome {
+  return {
+    kind: "saved-not-sent",
+    requestedName: name,
+    savedName: saved,
+    path: `/home/p/code/app/${saved}`,
+    folderLabel,
+    reason,
   }
 }
 
@@ -62,21 +83,21 @@ describe("pastePayload", () => {
 
 describe("dropToastFor", () => {
   it("names the file and the folder for a single success", () => {
-    const t = dropToastFor([pasted("shot.png")], terminal)
+    const t = dropToastFor([sent("shot.png")], terminal)
     expect(t.tone).toBe("success")
     expect(t.message).toContain("shot.png")
     expect(t.message).toContain("~/code/app")
   })
 
   it("describes an agent's destination as the worktree root, not a long path", () => {
-    const t = dropToastFor([pasted("shot.png")], agent)
+    const t = dropToastFor([sent("shot.png")], agent)
     expect(t.tone).toBe("success")
     expect(t.message).toContain("worktree root")
   })
 
   it("gives a count rather than a list for several successes", () => {
     const t = dropToastFor(
-      [pasted("a.png"), pasted("b.png"), pasted("c.png")],
+      [sent("a.png"), sent("b.png"), sent("c.png")],
       terminal,
     )
     expect(t.tone).toBe("success")
@@ -86,7 +107,7 @@ describe("dropToastFor", () => {
   it("lists a rename as original and saved name, never as a count", () => {
     // A count tells the user something changed without telling them what the
     // file is now called, which defeats the point of reporting it at all.
-    const t = dropToastFor([pasted("shot.png", "shot-S-1.png")], terminal)
+    const t = dropToastFor([sent("shot.png", "shot-S-1.png")], terminal)
     expect(t.tone).toBe("success")
     expect(t.message).toContain("shot.png")
     expect(t.message).toContain("shot-S-1.png")
@@ -95,7 +116,7 @@ describe("dropToastFor", () => {
 
   it("falls back to naming the folder when there are too many renames to list", () => {
     const many = Array.from({ length: MAX_NAMED_FILES + 2 }, (_, i) =>
-      pasted(`shot${i}.png`, `shot${i}-S-1.png`),
+      sent(`shot${i}.png`, `shot${i}-S-1.png`),
     )
     const t = dropToastFor(many, terminal)
     expect(t.message).toContain("~/code/app")
@@ -123,13 +144,12 @@ describe("dropToastFor", () => {
     // required here and a shortened folder is not enough.
     const t = dropToastFor(
       [
-        {
-          kind: "saved-not-sent",
-          requestedName: "shot.png",
-          savedName: "shot.png",
-          path: "/home/p/code/app/shot.png",
-          reason: "another device is driving this terminal",
-        },
+        notSent(
+          "shot.png",
+          "shot.png",
+          "~/code/app",
+          "another device is driving this terminal",
+        ),
       ],
       terminal,
     )
@@ -141,28 +161,22 @@ describe("dropToastFor", () => {
   it("lets the worse outcome win over successes, at every rung", () => {
     // A bad outcome must never be reported as a good one, so each rung is
     // checked MIXED with a success rather than alone.
-    const notSent: DropOutcome = {
-      kind: "saved-not-sent",
-      requestedName: "b.png",
-      savedName: "b.png",
-      path: "/home/p/code/app/b.png",
-      reason: "the connection dropped",
-    }
+    const stranded = notSent("b.png")
     const refused: DropOutcome = {
       kind: "refused",
       requestedName: "c.png",
       reason: "over the size limit",
     }
 
-    expect(dropToastFor([pasted("a.png"), notSent], terminal).tone).toBe(
+    expect(dropToastFor([sent("a.png"), stranded], terminal).tone).toBe(
       "warning",
     )
-    expect(dropToastFor([pasted("a.png"), refused], terminal).tone).toBe(
+    expect(dropToastFor([sent("a.png"), refused], terminal).tone).toBe(
       "warning",
     )
     // Not-sent outranks refused: it is the one with a file the user now has to
     // find by hand.
-    const both = dropToastFor([pasted("a.png"), notSent, refused], terminal)
+    const both = dropToastFor([sent("a.png"), stranded, refused], terminal)
     expect(both.tone).toBe("warning")
     expect(both.message).toContain("/home/p/code/app/b.png")
     // ...and the refusal is still reported, because dropping it would leave the
@@ -173,8 +187,8 @@ describe("dropToastFor", () => {
   it("says what saved and what did not when refusals sit alongside successes", () => {
     const t = dropToastFor(
       [
-        pasted("a.png"),
-        pasted("b.png"),
+        sent("a.png"),
+        sent("b.png"),
         { kind: "refused", requestedName: "c.png", reason: "an unusable name" },
       ],
       terminal,
@@ -198,5 +212,101 @@ describe("dropToastFor", () => {
       )
       expect(t.message).toContain(reason)
     }
+  })
+})
+
+describe("a drop whose files did not all end the same way", () => {
+  // The four defects this covers, with the values the old code produced:
+  //
+  //  - The saved-but-not-sent rung never added the rename note, so a mixed drop
+  //    reported only "Saved to ~/second, but the path was not sent: ...", losing
+  //    a.png -> a-1.png entirely, exactly when the user has to find it by hand.
+  //  - Renames among the SENT files were dropped the moment anything else was
+  //    not sent, for the same reason.
+  //  - Only the last successful upload's folder was kept, so two files in two
+  //    folders read "Saved 2 files to ~/second", which was false for the first.
+  //  - Success said "pasted their paths", which dux cannot know: a take-over
+  //    between the courtesy check and the socket frame makes the server drop it
+  //    with no acknowledgement.
+  const mixed: DropOutcome[] = [
+    sent("a.png", "a-1.png", "~/first"),
+    notSent("b.png", "b-1.png", "~/second"),
+    { kind: "refused", requestedName: "c.png", reason: "over the size limit" },
+  ]
+
+  it("keeps every rename, whichever rung the toast lands on", () => {
+    const t = dropToastFor(mixed, terminal)
+    expect(t.tone).toBe("warning")
+    expect(t.message).toContain("a.png was saved as a-1.png")
+    expect(t.message).toContain("b.png was saved as b-1.png")
+  })
+
+  it("never claims one folder for files that went to two", () => {
+    const t = dropToastFor(mixed, terminal)
+    expect(t.message).toContain("a-1.png to ~/first")
+    expect(t.message).toContain("b-1.png to ~/second")
+    // The specific falsehood: a blanket "to <one folder>" clause.
+    expect(t.message).not.toContain("Saved to ~/second,")
+    expect(t.message).not.toMatch(/Saved \d+ files to ~\//)
+  })
+
+  it("still says the folder plainly when every file did go to one", () => {
+    // The breakdown is for the case that needs it. One folder must not be
+    // dressed up as a list.
+    const t = dropToastFor(
+      [sent("a.png", "a.png", "~/one"), sent("b.png", "b.png", "~/one")],
+      terminal,
+    )
+    expect(t.message).toContain("Saved 2 files to ~/one")
+    expect(t.message).not.toContain("did not all land together")
+  })
+
+  it("groups the breakdown by folder rather than listing every file", () => {
+    const t = dropToastFor(
+      [
+        sent("a.png", "a.png", "~/one"),
+        sent("b.png", "b.png", "~/one"),
+        sent("c.png", "c.png", "~/two"),
+      ],
+      terminal,
+    )
+    expect(t.message).toContain("a.png and b.png to ~/one")
+    expect(t.message).toContain("c.png to ~/two")
+  })
+
+  it("an agent's files are described by the worktree root and never broken down", () => {
+    // Every tab of one agent shares one worktree, so there is nothing to break
+    // down even though each outcome carries a label.
+    const t = dropToastFor(
+      [sent("a.png", "a.png", "~/wt"), sent("b.png", "b.png", "~/wt")],
+      agent,
+    )
+    expect(t.message).toContain("the agent's worktree root")
+    expect(t.message).not.toContain("did not all land together")
+  })
+
+  it("claims only that the path was SENT, never that it was pasted", () => {
+    // A write to the PTY socket is not acknowledged, and a take-over landing
+    // between the upload's courtesy check and the frame reaching the server
+    // makes the server drop it silently. So the toast says what dux did.
+    for (const t of [
+      dropToastFor([sent("a.png")], terminal),
+      dropToastFor([sent("a.png"), sent("b.png")], terminal),
+      dropToastFor([sent("a.png", "a-1.png")], terminal),
+      dropToastFor(mixed, terminal),
+      dropToastFor(
+        [
+          sent("a.png"),
+          { kind: "refused", requestedName: "c.png", reason: "too big" },
+        ],
+        terminal,
+      ),
+    ]) {
+      expect(t.message).not.toContain("pasted")
+      expect(t.message).not.toContain("Pasted")
+    }
+    expect(dropToastFor([sent("a.png")], terminal).message).toContain(
+      "sent its path",
+    )
   })
 })

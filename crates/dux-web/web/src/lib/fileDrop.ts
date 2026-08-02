@@ -16,33 +16,49 @@
 /// reads and the folder listing is the better answer.
 export const MAX_NAMED_FILES = 5
 
+/// What one SAVED file has in common whichever way it ended.
+///
+/// The folder belongs HERE rather than to the drop as a whole. A terminal's
+/// directory changes the moment someone types `cd`, and the uploads are
+/// sequential, so two files dropped together can genuinely land in two different
+/// folders. Keeping one folder for the whole drop meant the last upload's folder
+/// was reported for every file in it.
+export type SavedFile = {
+  requestedName: string
+  savedName: string
+  /// The absolute path, which is what the user needs when the path was not sent.
+  path: string
+  /// The folder, already shortened with `~` by the server (which is the machine
+  /// whose home directory it is).
+  folderLabel: string
+}
+
 /// What became of one dropped file. Exactly three endings, and the toast is
 /// chosen from an ORDERED list of these in the order the files were dropped,
-/// which is also the order their paths are pasted.
+/// which is also the order their paths are sent.
 export type DropOutcome =
-  /// Saved, and the path was handed to an open socket we own.
-  | { kind: "pasted"; requestedName: string; savedName: string; path: string }
+  /// Saved, and the path was written to an open socket we own.
+  ///
+  /// Called SENT rather than "pasted" deliberately. Nothing acknowledges a
+  /// write to the PTY socket, and a take-over between the courtesy check and the
+  /// frame reaching the server makes the server drop it silently, so what dux
+  /// knows is that it sent the path, never that the path arrived.
+  | ({ kind: "sent" } & SavedFile)
   /// Saved, but the path was NOT sent: we do not hold input, or the socket was
   /// closed. The user has to be able to reach the file by hand, so this carries
   /// the full path.
-  | {
-      kind: "saved-not-sent"
-      requestedName: string
-      savedName: string
-      path: string
-      reason: string
-    }
+  | ({ kind: "saved-not-sent"; reason: string } & SavedFile)
   /// Never saved. The reason is the server's own words, not a generic one.
   | { kind: "refused"; requestedName: string; reason: string }
 
-/// Where the files went, in the terms the message should use.
+/// How the destination should be DESCRIBED, which is the one thing that is a
+/// property of the whole drop rather than of a file.
 export type DropContext = {
   /// An agent's destination is described as its worktree root, which reads
-  /// better than a long path; a terminal's is the real directory.
+  /// better than a long path and is the same for every file, because every tab
+  /// of one agent shares one worktree. A terminal's is the real directory, which
+  /// each saved file carries for itself.
   kind: "agent" | "terminal"
-  /// The directory, already shortened with `~` by the server (which is the
-  /// machine whose home directory it is).
-  folderLabel: string
 }
 
 export type DropToast = {
@@ -77,8 +93,57 @@ export function pastePayload(path: string): string {
   return `${quoteShellToken(path)} `
 }
 
-function folderPhrase(ctx: DropContext): string {
-  return ctx.kind === "agent" ? "the agent's worktree root" : ctx.folderLabel
+/// Every distinct folder the saved files landed in, in the order they were hit.
+function foldersOf(saved: SavedFile[]): string[] {
+  return [...new Set(saved.map((s) => s.folderLabel).filter(Boolean))]
+}
+
+/// How to describe where the drop went, when ONE phrase can honestly cover it.
+///
+/// Empty when the terminal's files went to more than one folder: no single
+/// phrase is true then, and claiming one is the bug this exists to prevent. The
+/// caller reaches for `folderBreakdown` instead.
+function folderPhrase(saved: SavedFile[], ctx: DropContext): string {
+  if (ctx.kind === "agent") return "the agent's worktree root"
+  const folders = foldersOf(saved)
+  if (folders.length === 1) return folders[0]
+  // No folder at all can only happen if the server sent an empty label; say
+  // something true rather than "undefined".
+  return folders.length === 0 ? "the terminal's folder" : ""
+}
+
+/// The per-folder listing used when one phrase cannot cover the drop.
+///
+/// Grouped rather than enumerated per file, so three files in two folders read
+/// as two clauses instead of three.
+function folderBreakdown(saved: SavedFile[], ctx: DropContext): string {
+  if (folderPhrase(saved, ctx) !== "") return ""
+  const order: string[] = []
+  const byFolder = new Map<string, string[]>()
+  for (const s of saved) {
+    const names = byFolder.get(s.folderLabel)
+    if (names) names.push(s.savedName)
+    else {
+      byFolder.set(s.folderLabel, [s.savedName])
+      order.push(s.folderLabel)
+    }
+  }
+  const clauses = order.map((folder) => {
+    const names = byFolder.get(folder) ?? []
+    const listed =
+      names.length > MAX_NAMED_FILES
+        ? `${names.length} files`
+        : names.join(" and ")
+    return `${listed} to ${folder}`
+  })
+  return ` A terminal moves, so they did not all land together: ${clauses.join(", ")}.`
+}
+
+/// `to <somewhere>` when one phrase covers the drop, and nothing when it does
+/// not, because `folderBreakdown` then says it properly.
+function toPhrase(saved: SavedFile[], ctx: DropContext): string {
+  const where = folderPhrase(saved, ctx)
+  return where === "" ? "" : ` to ${where}`
 }
 
 function reasonList(items: { requestedName: string; reason: string }[]): string {
@@ -88,16 +153,20 @@ function reasonList(items: { requestedName: string; reason: string }[]): string 
   return items.map((r) => `${r.requestedName} (${r.reason})`).join(", ")
 }
 
-function renameNote(
-  saved: { requestedName: string; savedName: string }[],
-  ctx: DropContext,
-): string {
+/// The renamed-file note, applied to EVERY saved file at EVERY rung.
+///
+/// It used to be dropped whenever the toast landed on a worse rung, which lost
+/// the original-to-saved pair exactly when the user needed it most: a file that
+/// was renamed AND whose path never went out is one they have to find by hand
+/// under a name they were never told.
+function renameNote(saved: SavedFile[], ctx: DropContext): string {
   const renamed = saved.filter((s) => s.requestedName !== s.savedName)
   if (renamed.length === 0) return ""
   // Named, never counted: a count says something changed without saying what
   // the file is now called, which is the whole reason for mentioning it.
   if (renamed.length > MAX_NAMED_FILES) {
-    return ` ${renamed.length} already existed and were saved under new names, which are listed in ${folderPhrase(ctx)}.`
+    const where = folderPhrase(renamed, ctx)
+    return ` ${renamed.length} already existed and were saved under new names, which are listed in ${where === "" ? "the folders above" : where}.`
   }
   const pairs = renamed
     .map((r) => `${r.requestedName} was saved as ${r.savedName}`)
@@ -117,15 +186,18 @@ function renameNote(
 ///                                     reference them by hand)
 ///   3. anything refused            -> warning
 ///   4. otherwise                   -> success
+///
+/// Two things are said at EVERY rung that has a saved file, whichever one it
+/// lands on: what a renamed file is now called, and which folder each file went
+/// to when they did not all go to the same one.
 export function dropToastFor(
   outcomes: DropOutcome[],
   ctx: DropContext,
 ): DropToast {
-  const pastedFiles = outcomes.filter((o) => o.kind === "pasted")
+  const sent = outcomes.filter((o) => o.kind === "sent")
   const notSent = outcomes.filter((o) => o.kind === "saved-not-sent")
   const refused = outcomes.filter((o) => o.kind === "refused")
-  const savedFiles = [...pastedFiles, ...notSent]
-  const where = folderPhrase(ctx)
+  const savedFiles: SavedFile[] = [...sent, ...notSent]
 
   // 1. Nothing saved.
   if (savedFiles.length === 0) {
@@ -143,8 +215,13 @@ export function dropToastFor(
 
   // 2. Something saved whose path never went out. Precise about what "sent"
   // means: we KNOW these did not go, because we do not hold input or the socket
-  // was closed. (A path handed to an open socket is claimed no more strongly
+  // was closed. (A path written to an open socket is claimed no more strongly
   // than any keystroke, because nothing acknowledges it.)
+  //
+  // The rename note and the folder breakdown belong here as much as anywhere:
+  // this is the rung where the user has to go and find the file themselves, so
+  // a name they were never told and a folder they were told wrongly are worse
+  // here than on any other rung.
   if (notSent.length > 0) {
     const stranded = notSent
       .map((n) => `${n.savedName} (${n.path})`)
@@ -152,7 +229,7 @@ export function dropToastFor(
       .join(", ")
     const overflow =
       notSent.length > MAX_NAMED_FILES
-        ? ` and ${notSent.length - MAX_NAMED_FILES} more in ${where}`
+        ? ` and ${notSent.length - MAX_NAMED_FILES} more`
         : ""
     const why = notSent[0].reason
     const alsoRefused =
@@ -160,36 +237,41 @@ export function dropToastFor(
     return {
       tone: "warning",
       message:
-        `Saved to ${where}, but the path was not sent: ${why}. ` +
-        `The file is at ${stranded}${overflow}.${alsoRefused}`,
+        `Saved${toPhrase(savedFiles, ctx)}, but the path was not sent: ${why}. ` +
+        `The file is at ${stranded}${overflow}.${alsoRefused}` +
+        renameNote(savedFiles, ctx) +
+        folderBreakdown(savedFiles, ctx),
     }
   }
 
-  // 3. Everything that saved was pasted, but something was refused outright.
+  // 3. Everything that saved was sent, but something was refused outright.
   if (refused.length > 0) {
     const total = outcomes.length
     return {
       tone: "warning",
       message:
-        `Saved ${savedFiles.length} of ${total} files to ${where} and pasted their paths. ` +
+        `Saved ${savedFiles.length} of ${total} files${toPhrase(savedFiles, ctx)} and sent their paths. ` +
         `Refused: ${reasonList(refused)}.` +
-        renameNote(savedFiles, ctx),
+        renameNote(savedFiles, ctx) +
+        folderBreakdown(savedFiles, ctx),
     }
   }
 
   // 4. Everything worked.
   if (savedFiles.length === 1) {
     const one = savedFiles[0]
+    const where = toPhrase(savedFiles, ctx)
     const named =
       one.requestedName === one.savedName
-        ? `Saved ${one.savedName} to ${where} and pasted its path.`
-        : `Saved ${one.requestedName} to ${where} as ${one.savedName}, so nothing was overwritten, and pasted its path.`
+        ? `Saved ${one.savedName}${where} and sent its path.`
+        : `Saved ${one.requestedName}${where} as ${one.savedName}, so nothing was overwritten, and sent its path.`
     return { tone: "success", message: named }
   }
   return {
     tone: "success",
     message:
-      `Saved ${savedFiles.length} files to ${where} and pasted their paths.` +
-      renameNote(savedFiles, ctx),
+      `Saved ${savedFiles.length} files${toPhrase(savedFiles, ctx)} and sent their paths.` +
+      renameNote(savedFiles, ctx) +
+      folderBreakdown(savedFiles, ctx),
   }
 }

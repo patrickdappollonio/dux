@@ -1498,13 +1498,12 @@ export function TerminalPane(props: TerminalPaneProps) {
   // Save each dropped file, then paste its path.
   //
   // Sequential on purpose. The list of outcomes is in DROPPED order, and that is
-  // also the order the paths are pasted, which must not become whichever order
-  // the uploads happen to finish in. One toast reports the whole drop at the
-  // end, so a handful of files does not bury the screen.
+  // also the order the paths are sent, which must not become whichever order the
+  // uploads happen to finish in. One toast reports the whole drop at the end, so
+  // a handful of files does not bury the screen.
   async function handleDroppedFiles(files: File[]) {
     if (files.length === 0) return
     const outcomes: DropOutcome[] = []
-    let folderLabel = ""
 
     for (const file of files) {
       let saved
@@ -1524,19 +1523,27 @@ export function TerminalPane(props: TerminalPaneProps) {
         })
         continue
       }
-      folderLabel = saved.folder_label
+      // The folder travels with THIS file, not with the drop. A terminal's
+      // directory changes the moment someone types `cd`, and these uploads are
+      // sequential, so two files dropped together really can land in two
+      // folders; keeping one label for the whole drop reported the last one for
+      // all of them.
+      const where = {
+        requestedName: saved.requested_name,
+        savedName: saved.saved_name,
+        path: saved.path,
+        folderLabel: saved.folder_label,
+      }
 
       // Both checks happen IMMEDIATELY BEFORE this paste, not once at the start
       // of the drop: ownership can move and the socket can close between two
       // files. A write to a closed socket is dropped silently, so without the
-      // second check a file would be reported as pasted with nothing sent.
+      // second check a file would be reported as sent with nothing written.
       const term = termRef.current
       if (!isOwnerRef.current) {
         outcomes.push({
           kind: "saved-not-sent",
-          requestedName: saved.requested_name,
-          savedName: saved.saved_name,
-          path: saved.path,
+          ...where,
           reason: "another device took over input",
         })
         continue
@@ -1544,9 +1551,7 @@ export function TerminalPane(props: TerminalPaneProps) {
       if (!term || !(ptyRef.current?.isOpen ?? false)) {
         outcomes.push({
           kind: "saved-not-sent",
-          requestedName: saved.requested_name,
-          savedName: saved.saved_name,
-          path: saved.path,
+          ...where,
           reason: "the connection dropped",
         })
         continue
@@ -1562,17 +1567,15 @@ export function TerminalPane(props: TerminalPaneProps) {
       // break and a submitting Enter distinct on the wire. A dropped path
       // contains neither, so the reason does not apply here.
       term.paste(pastePayload(saved.path))
-      outcomes.push({
-        kind: "pasted",
-        requestedName: saved.requested_name,
-        savedName: saved.saved_name,
-        path: saved.path,
-      })
+      // SENT, not "arrived". This is a socket write like any keystroke and
+      // nothing acknowledges it: a take-over landing between the upload's
+      // courtesy check and this frame reaching the server makes the server drop
+      // it silently, so the toast claims only what dux knows.
+      outcomes.push({ kind: "sent", ...where })
     }
 
     const ctx: DropContext = {
       kind: props.kind === "agent" ? "agent" : "terminal",
-      folderLabel,
     }
     const report = dropToastFor(outcomes, ctx)
     // Through the SHARED final-toast raiser, so the user's configured dismiss

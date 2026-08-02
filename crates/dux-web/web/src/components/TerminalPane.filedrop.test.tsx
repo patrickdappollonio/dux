@@ -10,11 +10,24 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import type { DuxState } from "@/lib/store"
 import { notifyPtyOwner, resetPtyOwnerEpochs } from "@/lib/ptyOwnership"
 
+/// A stand-in for xterm that does what xterm's `paste()` REALLY does.
+///
+/// Recording the argument and stopping there let a test report a successful
+/// paste with no socket write at all, which is the one thing that matters: the
+/// path only reaches the agent if it goes out over the PTY socket. So this
+/// mirrors the installed `@xterm/xterm` implementation of `paste()` exactly
+/// (`src/browser/Clipboard.ts`): normalize `\r?\n` to `\r`, bracket the text
+/// when the running program asked for bracketed paste, and fire the data event
+/// that the pane's `onData` handler turns into a socket write.
+///
+/// The newline rewriting is the part worth mirroring. A path carrying a line
+/// feed does not arrive as a line feed; it arrives as a CARRIAGE RETURN, which
+/// SUBMITS. A stub that only records the argument cannot see that at all.
 class TermStub {
   static instances: TermStub[] = []
-  /// Every `paste()` call, in order. This is the whole point of the stub: it is
-  /// what proves the paste ORDER and the payload SHAPE.
+  /// Every `paste()` call's ARGUMENT, in order, before xterm's preparation.
   static pastes: string[] = []
+  private dataHandler: ((s: string) => void) | null = null
   options: Record<string, unknown>
   constructor(options?: Record<string, unknown>) {
     this.options = options ?? {}
@@ -36,7 +49,8 @@ class TermStub {
   }
   loadAddon() {}
   open() {}
-  onData() {
+  onData(cb: (s: string) => void) {
+    this.dataHandler = cb
     return { dispose() {} }
   }
   attachCustomKeyEventHandler() {}
@@ -51,6 +65,9 @@ class TermStub {
   reset() {}
   paste(text: string) {
     TermStub.pastes.push(text)
+    let out = text.replace(/\r?\n/g, "\r")
+    if (this.modes.bracketedPasteMode) out = `\x1b[200~${out}\x1b[201~`
+    this.dataHandler?.(out)
   }
   write(_data: unknown, cb?: () => void) {
     cb?.()
@@ -241,6 +258,21 @@ function file(name: string) {
   return new File(["x"], name, { type: "image/png" })
 }
 
+/// Everything the pane actually WROTE TO THE SOCKET, decoded, in order.
+///
+/// This is the layer the assertions live at now. `term.paste()` returning
+/// without throwing proves nothing: the path reaches the agent only if it goes
+/// out here, and between the two sit xterm's own preparation and the pane's
+/// ownership gate, both of which can swallow it.
+function sentToSocket(): string[] {
+  const socket = FakePtySocket.instances.at(-1)
+  if (!socket) return []
+  const decoder = new TextDecoder()
+  return socket.sendInput.mock.calls.map(([bytes]) =>
+    decoder.decode(bytes as Uint8Array),
+  )
+}
+
 beforeEach(() => {
   FakePtySocket.instances = []
   TermStub.instances = []
@@ -260,16 +292,35 @@ afterEach(() => {
 })
 
 describe("dropping a file onto an agent", () => {
-  it("uploads it and pastes the quoted path with no newline", async () => {
+  it("uploads it and the quoted path reaches the socket with nothing that submits", async () => {
     uploadDroppedFile.mockResolvedValue(saved("shot.png"))
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     await drop([file("shot.png")])
 
     expect(uploadDroppedFile).toHaveBeenCalledTimes(1)
     expect(TermStub.pastes).toEqual(["'/tmp/p1/shot.png' "])
-    // A newline SUBMITS in these tools, so its absence is the load-bearing part.
-    expect(TermStub.pastes[0]).not.toContain("\n")
+    // Asserted after xterm's real preparation and after the pane's own gate, so
+    // this is the byte stream the agent would receive rather than a call that
+    // was merely made. A newline SUBMITS in these tools, and xterm turns one
+    // into a CARRIAGE RETURN on the way through, so both are checked here where
+    // the rewriting has actually happened.
+    expect(sentToSocket()).toEqual(["'/tmp/p1/shot.png' "])
+    expect(sentToSocket()[0]).not.toContain("\n")
+    expect(sentToSocket()[0]).not.toContain("\r")
     expect(vi.mocked(toast.success)).toHaveBeenCalled()
+  })
+
+  it("brackets the path when the running program asked for bracketed paste", async () => {
+    // The pane deliberately leaves this to xterm rather than building the
+    // markers itself, so the proof has to be that the markers are on the wire.
+    uploadDroppedFile.mockResolvedValue(saved("shot.png"))
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    TermStub.instances.at(-1)!.modes.bracketedPasteMode = true
+    await drop([file("shot.png")])
+
+    expect(sentToSocket()).toEqual([
+      "\x1b[200~'/tmp/p1/shot.png' \x1b[201~",
+    ])
   })
 
   it("tells the user the new name when the file was renamed", async () => {
@@ -280,7 +331,7 @@ describe("dropping a file onto an agent", () => {
     const message = vi.mocked(toast.success).mock.calls[0][0] as string
     expect(message).toContain("shot.png")
     expect(message).toContain("shot-S-1.png")
-    expect(TermStub.pastes).toEqual(["'/tmp/p1/shot-S-1.png' "])
+    expect(sentToSocket()).toEqual(["'/tmp/p1/shot-S-1.png' "])
   })
 
   it("carries the terminal socket's own connection id, not the events one", async () => {
@@ -293,29 +344,61 @@ describe("dropping a file onto an agent", () => {
 })
 
 describe("dropping several files", () => {
-  it("pastes the paths in the order they were dropped, not the order they finished", async () => {
-    // The uploads resolve BACKWARDS, which is exactly the race the sequential
-    // loop exists to prevent: a naive Promise.all would paste c, b, a.
-    const order = ["a.png", "b.png", "c.png"]
-    const delays: Record<string, number> = { "a.png": 30, "b.png": 20, "c.png": 0 }
+  it("finishes each upload and sends its path before the next one starts", async () => {
+    // What the code actually does, stated as the thing it is. The earlier
+    // version handed the uploads different timings and asserted the pastes came
+    // out in order, which cannot fail: the loop awaits each upload before
+    // starting the next, so no two are ever in flight and the timings never
+    // interleave anything. It would have passed against a broken implementation
+    // that merely happened to be fast.
+    //
+    // The real guarantee is SEQUENCING, so that is what is pinned: upload N+1
+    // is not started until upload N has resolved AND its path has gone out. The
+    // uploads are held open one at a time and released by hand, so nothing is
+    // raced for and the ordering is observed rather than hoped for.
+    const gates: ((v: unknown) => void)[] = []
+    const started: string[] = []
     uploadDroppedFile.mockImplementation(
       (f: File) =>
-        new Promise((resolve) =>
-          setTimeout(() => resolve(saved(f.name)), delays[f.name]),
-        ),
+        new Promise((resolve) => {
+          started.push(f.name)
+          gates.push(() => resolve(saved(f.name)))
+        }),
     )
+
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     const pane = screen.getByTestId("terminal-container").closest(".group")!
     await act(async () => {
-      fireEvent.drop(pane, { dataTransfer: fileTransfer(order.map(file)) })
-      await new Promise((r) => setTimeout(r, 200))
+      fireEvent.drop(pane, {
+        dataTransfer: fileTransfer(["a.png", "b.png", "c.png"].map(file)),
+      })
+      await Promise.resolve()
     })
 
-    expect(TermStub.pastes).toEqual([
-      "'/tmp/p1/a.png' ",
-      "'/tmp/p1/b.png' ",
-      "'/tmp/p1/c.png' ",
-    ])
+    // Only the first has even been ASKED for. A parallel implementation would
+    // have all three here.
+    expect(started).toEqual(["a.png"])
+    expect(sentToSocket()).toEqual([])
+
+    for (const [i, name] of ["a.png", "b.png", "c.png"].entries()) {
+      await act(async () => {
+        gates[i]()
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+      // Each release sends exactly that file's path, and only then is the next
+      // upload started.
+      expect(sentToSocket()).toEqual(
+        ["a.png", "b.png", "c.png"]
+          .slice(0, i + 1)
+          .map((n) => `'/tmp/p1/${n}' `),
+      )
+      expect(started).toEqual(
+        ["a.png", "b.png", "c.png"].slice(0, Math.min(i + 2, 3)),
+      )
+      expect(name).toBe(started[i])
+    }
+
     const message = vi.mocked(toast.success).mock.calls[0][0] as string
     expect(message).toContain("3 files")
   })
@@ -334,6 +417,7 @@ describe("when a file cannot be pasted", () => {
     await drop([file("shot.png")])
 
     expect(TermStub.pastes).toEqual([])
+    expect(sentToSocket()).toEqual([])
     expect(vi.mocked(toast.success)).not.toHaveBeenCalled()
     const message = vi.mocked(toast.warning).mock.calls[0][0] as string
     expect(message).toContain("not sent")
@@ -351,6 +435,7 @@ describe("when a file cannot be pasted", () => {
     await drop([file("shot.png")])
 
     expect(TermStub.pastes).toEqual([])
+    expect(sentToSocket()).toEqual([])
     const message = vi.mocked(toast.warning).mock.calls[0][0] as string
     expect(message).toContain("/tmp/p1/shot.png")
     expect(message).toContain("the connection dropped")
@@ -368,6 +453,7 @@ describe("when a file cannot be pasted", () => {
     await drop([file("big.png")])
 
     expect(TermStub.pastes).toEqual([])
+    expect(sentToSocket()).toEqual([])
     const message = vi.mocked(toast.error).mock.calls[0][0] as string
     expect(message).toContain("big.png")
     expect(message).toContain("over the 1024 byte limit")
