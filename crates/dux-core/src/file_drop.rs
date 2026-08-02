@@ -46,7 +46,11 @@
 //!   cannot make sense of what it sees. Only the first falls through to the next
 //!   candidate directory. The rest refuse, because writing to the suspended
 //!   parent's directory and then confidently naming it in a toast is worse than
-//!   saying no.
+//!   saying no. A process that has EXITED but has not been reaped counts as
+//!   gone, even though its pid still answers signal 0; so does a member that
+//!   vanished mid-scan. What may never count as gone is a process dux simply
+//!   could not inspect, and a group scan carries that difference rather than
+//!   returning a short list as if it were the whole truth.
 
 use std::io::Read;
 use std::io::Write;
@@ -161,9 +165,11 @@ pub enum DropDirError {
     /// verifiably correct in that view can be produced.
     ForeignMountNamespace,
     /// The foreground process group still owns the terminal, its leader has
-    /// exited, and this platform cannot enumerate the surviving members to ask
-    /// one of them. Guessing the shell's directory instead would be wrong
-    /// exactly when a job is running.
+    /// exited, and dux could not establish where the surviving members are:
+    /// either this platform cannot enumerate a process group at all, or the
+    /// enumeration could not inspect every process and so its emptiness proves
+    /// nothing. Guessing the shell's directory instead would be wrong exactly
+    /// when a job is running.
     ForegroundGroupUnreadable,
 }
 
@@ -717,7 +723,7 @@ fn probe_process_cwd(pid: u32) -> CwdProbe {
             CwdProbe::Failed(DropDirError::Io(e))
         }
         Err(e) => {
-            if process_exists(pid) {
+            if process_can_answer(pid) {
                 CwdProbe::Failed(e)
             } else {
                 CwdProbe::Gone
@@ -726,11 +732,26 @@ fn probe_process_cwd(pid: u32) -> CwdProbe {
     }
 }
 
-/// Whether `pid` still names a live process, via signal 0.
+/// Whether `pid` names a process that can still answer for itself.
 ///
-/// `EPERM` means it is there and belongs to someone else, which is still THERE:
-/// only `ESRCH` means gone.
-fn process_exists(pid: u32) -> bool {
+/// Signal 0 alone is not enough, and reading it as the whole answer was a bug.
+/// It reports `ESRCH` for a pid nobody is using and `EPERM` for one that is
+/// there and belongs to someone else, which is still THERE. But a process that
+/// has EXITED and has not yet been reaped, a ZOMBIE, answers signal 0 too: its
+/// pid stays allocated while it holds an exit status for its parent, and a
+/// shell does not reap a finished job the instant it ends.
+///
+/// A zombie has nothing left to ask. Verified against the kernel rather than
+/// reasoned about: for a real unreaped child, `/proc/<pid>/cwd` and
+/// `/proc/<pid>/ns/mnt` both answer `ENOENT` while `kill(pid, 0)` succeeds. So
+/// treating it as alive turned "this job finished" into a REFUSAL, exactly
+/// where a surviving group member or the shell should have been asked instead.
+fn process_can_answer(pid: u32) -> bool {
+    signal_zero_finds(pid) && !process_is_zombie(pid)
+}
+
+/// Whether signal 0 finds anything at `pid`. `EPERM` counts as found.
+fn signal_zero_finds(pid: u32) -> bool {
     let Ok(pid) = i32::try_from(pid) else {
         return false;
     };
@@ -743,12 +764,86 @@ fn process_exists(pid: u32) -> bool {
     )
 }
 
-/// The members of a process group, when they can be enumerated at all.
+/// Whether `pid` has exited without being reaped.
+///
+/// Linux keeps `/proc/<pid>/stat` readable for a zombie (it is one of the few
+/// things that survives), and its state field is `Z`. An unreadable stat is NOT
+/// read as a zombie: that is a different failure, and the signal-0 answer
+/// stands.
+#[cfg(target_os = "linux")]
+fn process_is_zombie(pid: u32) -> bool {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    stat_process_state(&stat) == Some('Z')
+}
+
+/// The same question where there is no `/proc`.
+///
+/// `state` is a POSIX `ps -o` keyword and macOS prints `Z` for a zombie. This
+/// adds no new kind of dependency: the non-Linux directory probe itself already
+/// runs `lsof`. Anything other than a leading `Z`, including `ps` failing to run
+/// at all, leaves the signal-0 answer standing.
+///
+/// Not exercised by dux's test suite, which runs on Linux.
+#[cfg(not(target_os = "linux"))]
+fn process_is_zombie(pid: u32) -> bool {
+    let Ok(out) = std::process::Command::new("ps")
+        .args(["-o", "state=", "-p", &pid.to_string()])
+        .output()
+    else {
+        return false;
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .trim_start()
+        .starts_with('Z')
+}
+
+/// The members of a process group, and whether every process was inspected.
 #[derive(Debug)]
 enum ProcessGroup {
+    /// The members, from a scan that saw everything there was to see. An empty
+    /// one is a FACT: the group has gone.
     Members(Vec<u32>),
-    /// This platform cannot answer. Not the same as "no members".
+    /// The members that could be identified, from a scan that could not inspect
+    /// at least one process. Deliberately not the same case as `Members`: an
+    /// empty one says only that dux does not know, and reading that as "the
+    /// group has gone" is what sent a file to the shell's folder instead.
+    Incomplete(Vec<u32>),
+    /// This platform cannot answer at all. Not the same as "no members".
     Unknown,
+}
+
+/// What one process contributed to a group scan.
+#[derive(Debug, PartialEq, Eq)]
+enum ScanEntry {
+    Member,
+    NotAMember,
+    /// It could not be inspected. An inability to LOOK, never a fact about the
+    /// world, so it makes the whole scan incomplete.
+    Unreadable,
+}
+
+/// Classify one process from its `/proc/<pid>/stat`.
+///
+/// Pure, because a genuinely unreadable stat cannot be built on this machine:
+/// the file is world-readable, and the kernel's own way of hiding a process
+/// (the `hidepid` mount option) removes the whole directory from the listing
+/// instead, which is a different thing entirely.
+#[cfg(target_os = "linux")]
+fn group_scan_step(stat: std::io::Result<String>, pgid: u32) -> ScanEntry {
+    match stat {
+        Ok(stat) => match stat_process_group(&stat) {
+            Some(found) if found == pgid => ScanEntry::Member,
+            Some(_) => ScanEntry::NotAMember,
+            // Present, readable, and not something this code can make sense of.
+            None => ScanEntry::Unreadable,
+        },
+        // It exited between the listing and the read. Ordinary churn, and a
+        // fact: it is not in the group any more.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => ScanEntry::NotAMember,
+        Err(_) => ScanEntry::Unreadable,
+    }
 }
 
 /// Every live process in group `pgid`, leader excluded.
@@ -756,6 +851,12 @@ enum ProcessGroup {
 /// Linux answers from `/proc`, which is a directory read and no subprocess. On
 /// every other platform this is [`ProcessGroup::Unknown`], and the caller
 /// refuses rather than guessing; see [`WorkingDirectory::open`].
+///
+/// A scan that could not inspect some process comes back as
+/// [`ProcessGroup::Incomplete`] rather than as whatever it happened to collect.
+/// The two are read differently by the caller, because "the group has gone" and
+/// "dux could not look properly" are different facts and only the first may
+/// fall through to the shell.
 fn process_group_members(pgid: u32) -> ProcessGroup {
     // Group 0 is not a group. Every kernel thread reports a process group of 0,
     // so scanning for it would sweep them all in and then refuse the drop the
@@ -769,21 +870,32 @@ fn process_group_members(pgid: u32) -> ProcessGroup {
             return ProcessGroup::Unknown;
         };
         let mut members = Vec::new();
-        for entry in entries.flatten() {
+        let mut complete = true;
+        for entry in entries {
+            // The listing itself failed part-way. Nothing was seen there, so
+            // nothing may be concluded from what is missing.
+            let Ok(entry) = entry else {
+                complete = false;
+                continue;
+            };
             let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+                // Not a pid directory at all (`/proc/self`, `/proc/meminfo`).
                 continue;
             };
             if pid == pgid {
                 continue;
             }
-            let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
-                continue;
-            };
-            if stat_process_group(&stat) == Some(pgid) {
-                members.push(pid);
+            match group_scan_step(std::fs::read_to_string(format!("/proc/{pid}/stat")), pgid) {
+                ScanEntry::Member => members.push(pid),
+                ScanEntry::NotAMember => {}
+                ScanEntry::Unreadable => complete = false,
             }
         }
-        ProcessGroup::Members(members)
+        if complete {
+            ProcessGroup::Members(members)
+        } else {
+            ProcessGroup::Incomplete(members)
+        }
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -802,6 +914,15 @@ fn process_group_members(pgid: u32) -> ProcessGroup {
 fn stat_process_group(stat: &str) -> Option<u32> {
     let after_comm = &stat[stat.rfind(')')? + 1..];
     after_comm.split_whitespace().nth(2)?.parse().ok()
+}
+
+/// The state letter out of a `/proc/<pid>/stat` line: the first field after the
+/// executable name, so `Z` for an exited-but-unreaped process. Parsed from the
+/// last `)` for the same reason as [`stat_process_group`].
+#[cfg(target_os = "linux")]
+fn stat_process_state(stat: &str) -> Option<char> {
+    let after_comm = &stat[stat.rfind(')')? + 1..];
+    after_comm.split_whitespace().next()?.chars().next()
 }
 
 impl WorkingDirectory {
@@ -831,22 +952,33 @@ impl WorkingDirectory {
             match probe(foreground) {
                 CwdProbe::Pinned(dir) => return Ok(dir),
                 CwdProbe::Failed(e) => return Err(e),
-                CwdProbe::Gone => match members(foreground) {
-                    ProcessGroup::Members(pids) => {
-                        for pid in pids {
-                            match probe(pid) {
-                                CwdProbe::Pinned(dir) => return Ok(dir),
-                                CwdProbe::Failed(e) => return Err(e),
-                                CwdProbe::Gone => continue,
-                            }
+                CwdProbe::Gone => {
+                    // An INCOMPLETE scan is not an empty one. Whatever it found
+                    // is still worth asking (any member of the group is an
+                    // acceptable answer), but if none of them answers, the
+                    // emptiness proves nothing and the drop is refused rather
+                    // than falling through to the shell.
+                    let (pids, complete) = match members(foreground) {
+                        ProcessGroup::Members(pids) => (pids, true),
+                        ProcessGroup::Incomplete(pids) => (pids, false),
+                        ProcessGroup::Unknown => {
+                            return Err(DropDirError::ForegroundGroupUnreadable);
                         }
-                        // The whole group is gone, so the foreground job really
-                        // did end and the shell is the honest next answer.
+                    };
+                    for pid in pids {
+                        match probe(pid) {
+                            CwdProbe::Pinned(dir) => return Ok(dir),
+                            CwdProbe::Failed(e) => return Err(e),
+                            CwdProbe::Gone => continue,
+                        }
                     }
-                    ProcessGroup::Unknown => {
+                    if !complete {
                         return Err(DropDirError::ForegroundGroupUnreadable);
                     }
-                },
+                    // Every member was seen and every member is gone, so the
+                    // foreground job really did end and the shell is the honest
+                    // next answer.
+                }
             }
         }
         if let Some(shell) = self.shell_pid {
@@ -1583,7 +1715,7 @@ mod tests {
         }
 
         // A pid the kernel will never hand out: nothing to read, nothing alive.
-        assert!(!process_exists(0));
+        assert!(!process_can_answer(0));
         assert!(
             matches!(probe_process_cwd(0), CwdProbe::Gone),
             "a process that does not exist must classify as gone so the chain continues"
@@ -1648,6 +1780,271 @@ mod tests {
         }
         let _ = shell.kill();
         let _ = shell.wait();
+    }
+
+    #[test]
+    fn an_exited_but_unreaped_process_is_gone_rather_than_alive() {
+        // A zombie: the process has exited and nobody has reaped it, so the pid
+        // is still allocated (it is holding an exit status for its parent) but
+        // there is nothing behind it. Verified against this kernel before the
+        // fix: /proc/<pid>/cwd and /proc/<pid>/ns/mnt both answer ENOENT while
+        // kill(pid, 0) SUCCEEDS.
+        //
+        // So asking signal 0 to tell "gone" from "alive but not ours" gets the
+        // wrong answer here, and the wrong answer was CwdProbe::Failed, which
+        // refuses the whole drop. Recorded before the fix: `process_exists`
+        // said true and `probe_process_cwd` classified a finished process as a
+        // failure.
+        //
+        // The state is CONSTRUCTED, not raced for: the child is never waited
+        // on, and the test does not continue until /proc says its state is Z.
+        let mut child = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("exit 0")
+            .spawn()
+            .expect("spawn a child that exits at once");
+        let pid = child.id();
+        wait_until_zombie(pid);
+
+        assert!(
+            signal_zero_finds(pid),
+            "the premise of the bug: a zombie still answers signal 0"
+        );
+        assert!(
+            process_is_zombie(pid),
+            "the state was built wrong: this pid is not a zombie"
+        );
+        assert!(
+            !process_can_answer(pid),
+            "an exited-but-unreaped process cannot answer for itself and must \
+             read as gone, or the chain refuses instead of continuing"
+        );
+        assert!(
+            matches!(probe_process_cwd(pid), CwdProbe::Gone),
+            "a zombie must classify as gone so a surviving group member or the \
+             shell gets its turn"
+        );
+
+        child.wait().expect("reap the child");
+    }
+
+    #[test]
+    fn a_surviving_member_answers_for_a_leader_that_was_never_reaped() {
+        // The end-to-end shape of the same bug, and the reason the existing
+        // surviving-group test does not catch it: that one calls `wait` on the
+        // leader, which is exactly what a terminal's shell does NOT do
+        // instantly. Recorded before the fix: the drop was REFUSED with an I/O
+        // error for the leader instead of landing in the live member's folder.
+        use std::os::unix::process::CommandExt;
+
+        let member_dir = tmp();
+        let shell_dir = tmp();
+        let spawn_dir = tmp();
+        let member_target = std::fs::canonicalize(member_dir.path()).unwrap();
+
+        let mut leader = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!(
+                "(cd {} && echo ready && exec sleep 300) & exit 0",
+                shell_single_quote(&member_target.to_string_lossy())
+            ))
+            .stdout(std::process::Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .expect("spawn the group leader");
+        let pgid = leader.id();
+        let mut stdout = leader.stdout.take().expect("stdout");
+        let mut buf = [0u8; 6];
+        stdout.read_exact(&mut buf).expect("read ready marker");
+        assert_eq!(&buf, b"ready\n");
+        // Deliberately NOT reaped, so the leader sits there as a zombie.
+        wait_until_zombie(pgid);
+
+        let mut shell = park_in(shell_dir.path());
+        let plan = WorkingDirectory {
+            foreground_pid: Some(pgid),
+            shell_pid: Some(shell.id()),
+            spawn_dir: spawn_dir.path().to_path_buf(),
+        };
+
+        let pinned = plan
+            .open()
+            .expect("an unreaped leader must not refuse the drop");
+        assert_eq!(
+            std::fs::canonicalize(pinned.path()).unwrap(),
+            member_target,
+            "the leader is finished, so the live member of its group is the answer"
+        );
+
+        if let Ok(raw) = i32::try_from(pgid)
+            && let Some(raw) = rustix::process::Pid::from_raw(raw)
+        {
+            let _ = rustix::process::kill_process_group(raw, rustix::process::Signal::KILL);
+        }
+        let _ = leader.wait();
+        let _ = shell.kill();
+        let _ = shell.wait();
+    }
+
+    /// Block until `pid` is an exited-but-unreaped process, reading the kernel's
+    /// own answer rather than sleeping for a guessed interval.
+    fn wait_until_zombie(pid: u32) {
+        for _ in 0..2000 {
+            if process_is_zombie(pid) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        panic!("process {pid} never became a zombie");
+    }
+
+    #[test]
+    fn a_group_scan_that_could_not_read_a_process_is_not_an_empty_group() {
+        // The scan used to discard every per-entry failure and return whatever
+        // it managed to collect, so a group it could not fully inspect came back
+        // as an EMPTY group, which the chain reads as "the whole job ended" and
+        // falls through to the shell. Recorded before the fix: the drop landed
+        // in the shell's directory and the toast named it.
+        //
+        // The classification is a pure function because a real unreadable
+        // /proc/<pid>/stat cannot be built here: the file is world-readable, and
+        // the kernel's own way of hiding a process (hidepid) removes the whole
+        // directory from the listing instead, which is a different thing.
+        assert_eq!(
+            group_scan_step(Ok("1 (sh) S 0 4242 0".to_string()), 4242),
+            ScanEntry::Member
+        );
+        assert_eq!(
+            group_scan_step(Ok("1 (sh) S 0 7 0".to_string()), 4242),
+            ScanEntry::NotAMember
+        );
+        // Gone between listing /proc and reading its stat: ordinary churn, and a
+        // FACT about the world (it is not in the group any more), so it must not
+        // spoil the scan.
+        assert_eq!(
+            group_scan_step(
+                Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
+                4242
+            ),
+            ScanEntry::NotAMember
+        );
+        // Anything else is an inability to LOOK, never a fact.
+        assert_eq!(
+            group_scan_step(
+                Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+                4242
+            ),
+            ScanEntry::Unreadable
+        );
+        // Present, readable, and not something this code can parse. Also an
+        // inability to look.
+        assert_eq!(
+            group_scan_step(Ok("nonsense with no paren".to_string()), 4242),
+            ScanEntry::Unreadable
+        );
+    }
+
+    #[test]
+    fn an_incomplete_group_scan_refuses_instead_of_falling_through_to_the_shell() {
+        // The whole point of carrying the difference: an empty INCOMPLETE scan
+        // must refuse exactly as an unreadable directory does, while an empty
+        // COMPLETE scan still lets the shell answer.
+        let spawn = tmp();
+        let shell_dir = tmp();
+        let mut shell = park_in(shell_dir.path());
+        let plan = WorkingDirectory {
+            foreground_pid: Some(4242),
+            shell_pid: Some(shell.id()),
+            spawn_dir: spawn.path().to_path_buf(),
+        };
+        let probe = |pid: u32| {
+            if pid == 4242 {
+                CwdProbe::Gone
+            } else {
+                probe_process_cwd(pid)
+            }
+        };
+
+        let err = plan
+            .open_with(probe, |_| ProcessGroup::Incomplete(Vec::new()))
+            .expect_err("a group dux could not fully inspect must refuse");
+        assert!(
+            matches!(err, DropDirError::ForegroundGroupUnreadable),
+            "got {err:?}"
+        );
+        assert!(
+            std::fs::read_dir(spawn.path()).unwrap().next().is_none(),
+            "nothing may be written on a refusal"
+        );
+
+        // And a member that DID answer still answers: an incomplete scan is only
+        // a refusal when nothing in it could tell us where the job is.
+        let member_dir = tmp();
+        let mut member = park_in(member_dir.path());
+        let member_pid = member.id();
+        let pinned = plan
+            .open_with(probe, move |_| ProcessGroup::Incomplete(vec![member_pid]))
+            .expect("a member that answered is an answer");
+        assert_eq!(
+            std::fs::canonicalize(pinned.path()).unwrap(),
+            std::fs::canonicalize(member_dir.path()).unwrap()
+        );
+
+        let _ = member.kill();
+        let _ = member.wait();
+        let _ = shell.kill();
+        let _ = shell.wait();
+    }
+
+    #[test]
+    fn a_real_group_scan_finds_a_live_member_and_calls_itself_complete() {
+        // The pure classifier above is only honest if the real scan agrees, so
+        // the ordinary case is exercised against real processes: a member in a
+        // group of its own must be found, and a scan of a machine dux can read
+        // must call itself COMPLETE rather than incomplete.
+        use std::os::unix::process::CommandExt;
+
+        let dir = tmp();
+        let mut child = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("echo ready && read _line")
+            .current_dir(dir.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .expect("spawn sh in its own group");
+        let mut stdout = child.stdout.take().expect("stdout");
+        let mut buf = [0u8; 6];
+        stdout.read_exact(&mut buf).expect("read ready marker");
+
+        // The child IS the leader of its own group, and the leader is excluded,
+        // so the group reads as complete and empty. A grandchild joins it.
+        let mut inner = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("echo ready && read _line")
+            .current_dir(dir.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .process_group(child.id() as i32)
+            .spawn()
+            .expect("spawn a second member of the same group");
+        let mut inner_out = inner.stdout.take().expect("stdout");
+        inner_out.read_exact(&mut buf).expect("read ready marker");
+
+        match process_group_members(child.id()) {
+            ProcessGroup::Members(pids) => assert!(
+                pids.contains(&inner.id()),
+                "the live member {} was not found in {pids:?}",
+                inner.id()
+            ),
+            other => panic!("a readable /proc must produce a complete scan, got {other:?}"),
+        }
+
+        let _ = inner.kill();
+        let _ = inner.wait();
+        let _ = child.kill();
+        let _ = child.wait();
     }
 
     #[test]
