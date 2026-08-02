@@ -40,9 +40,12 @@
 //! fail, which is the point: the previous tests checked only ids and lengths, so
 //! `owner` appearing was invisible to the suite.
 //!
-//! The same nested shape is served by `POST /api/v1/sessions` and its idempotent
-//! replay (see `session_actions.rs`), which reuse [`SessionWithTerminals`]
-//! directly so a create and a later GET of that session agree field for field.
+//! `POST /api/v1/sessions` and its idempotent replay also reuse
+//! [`SessionWithTerminals`] (see `session_actions.rs`). The replay always does,
+//! so it and a later GET of that session agree field for field. The create's
+//! `201` does so only when the session view is available, and otherwise answers
+//! with a minimal id-only body, so state that agreement for the replay and not
+//! for both.
 //!
 //! Status codes:
 //! - 200 with the JSON body.
