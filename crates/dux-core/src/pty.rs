@@ -1504,6 +1504,27 @@ impl PtyClient {
         &self.spawn_dir
     }
 
+    /// Where this terminal ACTUALLY is right now, as a plan that can be carried
+    /// off the engine thread and resolved on a blocking pool.
+    ///
+    /// This is the one place the policy lives, deliberately: the ordering and
+    /// the fallback are easy to re-invent slightly differently at a call site,
+    /// and half of them would then be wrong. See
+    /// [`crate::file_drop::WorkingDirectory`] for what the order means and for
+    /// the ways it is an approximation.
+    ///
+    /// The foreground group is only offered when it is NOT the shell's own
+    /// group, because at an idle prompt `tcgetpgrp` returns the shell and asking
+    /// twice about the same process buys nothing.
+    pub fn working_directory(&self) -> crate::file_drop::WorkingDirectory {
+        let shell_pid = self.child_process_id();
+        crate::file_drop::WorkingDirectory {
+            foreground_pid: self.foreground_pgid().filter(|fg| Some(*fg) != shell_pid),
+            shell_pid,
+            spawn_dir: self.spawn_dir.clone(),
+        }
+    }
+
     /// The PTY's foreground process group id (via `tcgetpgrp` on the master), or
     /// `None` if it cannot be read. Equals the child's own pid when the shell owns
     /// the foreground (an idle prompt); differs when a job-controlled app runs in
@@ -4343,6 +4364,50 @@ mod tests {
             );
             thread::sleep(std::time::Duration::from_millis(20));
         }
+    }
+
+    #[test]
+    fn working_directory_follows_a_cd_typed_into_the_terminal() {
+        // The journey: someone opens a terminal, types `cd` somewhere else, then
+        // drops a file on it. The file must land where they actually ARE, not
+        // where the terminal was opened. A shell's directory changes the moment
+        // someone types `cd`, so the stored spawn directory is a fallback and
+        // never the answer while the shell can be asked.
+        let start = tempfile::tempdir().expect("start dir");
+        let elsewhere = tempfile::tempdir().expect("elsewhere");
+        let target = std::fs::canonicalize(elsewhere.path()).expect("canonicalize");
+        let spawn_dir = std::fs::canonicalize(start.path()).expect("canonicalize");
+        assert_ne!(spawn_dir, target);
+
+        let args = vec![
+            "--norc".to_string(),
+            "--noprofile".to_string(),
+            "-i".to_string(),
+        ];
+        let client = match PtyClient::spawn("bash", &args, start.path(), 24, 80, 100) {
+            Ok(c) => c,
+            Err(_) => return, // bash unavailable on this host; skip.
+        };
+
+        // The marker is split in the typed text so the shell's ECHO of the
+        // command line cannot satisfy the wait: only the command's real output
+        // spells it whole. Waiting on the child's own output is what makes this
+        // deterministic rather than a sleep.
+        client
+            .write_bytes(format!("cd '{}' && echo arri''ved\n", target.display()).as_bytes())
+            .expect("write to the shell");
+        wait_for_viewport(&client, "arrived");
+
+        let dir = client
+            .working_directory()
+            .open()
+            .expect("pin the terminal's live working directory");
+        assert_eq!(
+            std::fs::canonicalize(dir.path()).expect("canonicalize"),
+            target,
+            "the drop destination was the spawn directory, not where the shell \
+             actually is after the cd"
+        );
     }
 
     #[test]
