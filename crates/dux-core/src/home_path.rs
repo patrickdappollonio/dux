@@ -28,11 +28,22 @@ use std::path::{Path, PathBuf};
 /// because the walk follows symlinks, a dangling link reports `ENOENT`. The
 /// `is_dir` check is then belt and braces rather than the load-bearing part.
 ///
+/// The EMPTY path is rejected before the probe runs, because joining `.` onto
+/// it is the one input where the join changes the question being asked: an
+/// empty path has no components, so `"".join(".")` is `"."`, the CURRENT
+/// directory, which is essentially always usable. The probe would answer yes
+/// about a directory nobody asked about, and the empty path itself would then
+/// go to the spawn and fail. Every other shape keeps its subject (see
+/// `joining_a_dot_only_changes_the_subject_for_the_empty_path`).
+///
 /// This is a probe, so it is inherently a moment in time: a directory can be
 /// removed between the check and the spawn. It is not a guarantee, it is the
 /// difference between the common unusable-home cases costing the user a
 /// terminal and costing them nothing.
 pub fn dir_is_usable(path: &Path) -> bool {
+    if path.as_os_str().is_empty() {
+        return false;
+    }
     std::fs::metadata(path.join("."))
         .map(|meta| meta.is_dir())
         .unwrap_or(false)
@@ -46,7 +57,10 @@ pub fn dir_is_usable(path: &Path) -> bool {
 /// filesystem root, which exists on every platform dux supports.
 ///
 /// A home that resolves but is NOT USABLE ([`dir_is_usable`]) takes the same
-/// fallback, because it is the same situation from the user's side. The
+/// fallback, because it is the same situation from the user's side. An EMPTY
+/// path is one of those: it is a resolver answering without answering, and it
+/// is not a directory anything can start in, so it is treated as no home at
+/// all rather than as the current directory. The
 /// directory is handed to the spawn as the child's working directory, so a home
 /// that is a regular file, a dangling symlink, or a directory dux may not
 /// search fails the spawn outright and the terminal is never created. That is a
@@ -149,6 +163,59 @@ mod tests {
             PathBuf::from("/"),
             "a regular file where home should be is not somewhere a shell can run"
         );
+    }
+
+    /// An EMPTY home is a resolver that answered without answering, and it is a
+    /// shape the platform can produce (`home` returns `$HOME` when it is set to
+    /// the empty string on some platforms). It has to be treated as no home at
+    /// all, because the empty path is not a directory anything can start in.
+    ///
+    /// This is also the one input where the probe's `path.join(".")` changes
+    /// the question it is asking: joining a component onto the empty path
+    /// yields `.`, the CURRENT directory, which is very much usable, so the
+    /// probe said yes and the spawn then got the empty path and failed.
+    #[test]
+    fn an_empty_home_falls_back_to_the_root() {
+        let empty = PathBuf::new();
+        assert!(
+            !dir_is_usable(&empty),
+            "the empty path is not a usable directory; asking about it must not \
+             silently become asking about the current directory"
+        );
+        assert_eq!(
+            standalone_terminal_dir_from(Some(empty)),
+            PathBuf::from("/")
+        );
+    }
+
+    /// The other half of the empty-path finding, and the reason the guard is
+    /// only needed there. For every other shape a home can take, joining `.`
+    /// asks about the same directory: `Path::join` appends rather than
+    /// normalizing, and a non-leading `.` is not a component, so the joined
+    /// path walks to exactly the same place. The empty path is the sole input
+    /// that loses its subject: it has no components at all, so the joined `.`
+    /// is the only component left and the question becomes "is the CURRENT
+    /// directory usable", which is a different question with a different (and
+    /// almost always affirmative) answer.
+    #[test]
+    fn joining_a_dot_only_changes_the_subject_for_the_empty_path() {
+        let same_subject = |path: &str| {
+            Path::new(path)
+                .join(".")
+                .components()
+                .eq(Path::new(path).components())
+        };
+        assert!(
+            !same_subject(""),
+            "the empty path is the case this guard exists for"
+        );
+        assert_eq!(Path::new("").join("."), Path::new("."));
+        for path in ["/", "/home/ada", "/home/ada/", ".", "..", "/home/ada/."] {
+            assert!(
+                same_subject(path),
+                "joining a dot onto {path:?} must still ask about {path:?}"
+            );
+        }
     }
 
     #[test]
