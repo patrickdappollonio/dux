@@ -31,6 +31,7 @@ pub mod logger;
 pub mod macros;
 pub mod model;
 pub mod palette;
+pub mod pr_reference;
 pub mod project_browser;
 pub mod provider;
 pub mod pty;
