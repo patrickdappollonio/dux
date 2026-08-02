@@ -546,6 +546,14 @@ mod tests {
         // So the proof is about the BODY: one upload holds the only permit with
         // a body that never finishes, and a second request's body must not be
         // consumed at all while it waits.
+        //
+        // The second request must not START until the first genuinely holds the
+        // permit, or the test is a scheduling race that would also pass if the
+        // second simply had not been reached yet. The first request SAYS when it
+        // is holding: its body reports the moment anything polls it, and the only
+        // thing that polls it is the buffering step INSIDE the handler, which is
+        // downstream of the permit layer. So a poll of the first body is proof
+        // the permit was acquired, and the second request is only built after it.
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -553,8 +561,10 @@ mod tests {
 
         // The first upload's body yields one chunk and then never completes, so
         // its handler stays parked inside the buffering step, holding the permit.
+        let (holding_tx, holding_rx) = tokio::sync::oneshot::channel::<()>();
         let (blocker_tx, blocker_rx) = tokio::sync::oneshot::channel::<()>();
         let first_body = axum::body::Body::from_stream(futures_util::stream::once(async move {
+            let _ = holding_tx.send(());
             let _ = blocker_rx.await;
             Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"never finishes"))
         }));
@@ -567,6 +577,9 @@ mod tests {
                     .unwrap(),
             ),
         );
+        holding_rx
+            .await
+            .expect("the first upload must reach its body, which means it holds the permit");
 
         // The second upload's body flags the instant anything polls it.
         let polled = Arc::new(AtomicBool::new(false));
