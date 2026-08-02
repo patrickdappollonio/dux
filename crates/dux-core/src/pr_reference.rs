@@ -262,6 +262,7 @@ fn is_scheme_token(scheme: &str) -> bool {
 /// path segments means the repository dux names is the repository the address
 /// names, dot segments and percent escapes and all.
 fn parse_url_form(input: &str, kind: SchemeKind) -> Result<Parts, String> {
+    refuse_authority_git_reads_differently(input, kind)?;
     // A malformed authority (`https://[::1/...`, a space in the host, an empty
     // host) fails here, where it used to be read as a host called `[::1`.
     let url = url::Url::parse(input).map_err(|_| UNPARSEABLE.to_string())?;
@@ -318,6 +319,71 @@ fn parse_url_form(input: &str, kind: SchemeKind) -> Result<Parts, String> {
         host: Some(host),
         segments,
         fragment,
+    })
+}
+
+/// Refuse the two authorities where git's own rule differs from the browser
+/// rule this parser otherwise follows, rather than answering for a host the
+/// address does not name.
+///
+/// The typed field is lenient because a person is typing a BROWSER address into
+/// it, and a browser is the right authority on `https://` and on the shapes it
+/// normalises. It is not the right authority on `ssh://` or on git's native
+/// protocol, which no browser opens and which git parses by its own rule. Where
+/// the two rules disagree, dux cannot faithfully reproduce git's, so it refuses.
+/// That is the same decision, for the same reason, that
+/// [`crate::git::parse_remote_address`] already documents for a configured
+/// address, and both refusals are measured there.
+///
+/// The two disagreements:
+///
+/// * A PERCENT in an ssh-family or native-git authority. Git decodes the whole
+///   address and separates host from path AFTERWARDS, in that order, so
+///   `ssh://user%2Fx@github.com/acme/widget` reaches ssh as the host `user`
+///   with the path `/x@github.com/acme/widget`, and `git://us%2Fer@host/o/r`
+///   makes git look up the host `us`. The generic URL grammar splits first and
+///   reports the written host, so it answers for a different server. Under
+///   http(s) the same shape moves no boundary (curl splits the authority off
+///   first and decodes each piece after), so a percent is left alone there:
+///   refusing it would refuse an ordinary address whose password holds an
+///   escape.
+/// * An `@` in a NATIVE git authority. Git's own protocol has no user
+///   component, unlike its ssh URL syntax, so `git://user@github.com/o/r` sends
+///   git looking up `user@github.com` on port 9418. The URL grammar discards
+///   the user and answers for `github.com`, a host the address never names.
+///   Under ssh a user is legitimate, and under http(s) it is credentials that
+///   are correctly dropped as credentials.
+fn refuse_authority_git_reads_differently(input: &str, kind: SchemeKind) -> Result<(), String> {
+    let percent_moves_the_boundary = match kind {
+        SchemeKind::Ssh | SchemeKind::Git => true,
+        SchemeKind::Web => return Ok(()),
+    };
+    // The authority has to be read from the ORIGINAL text: the crate has
+    // already split and decoded it, which is exactly the split being questioned.
+    // Both of these schemes are non-special, so an authority exists only after a
+    // literal `://`; without one the crate reports no host at all and the
+    // address is refused a moment later regardless.
+    let Some(authority) = raw_url_authority(input) else {
+        return Ok(());
+    };
+    if percent_moves_the_boundary && authority.contains('%') {
+        return Err(UNPARSEABLE.to_string());
+    }
+    if matches!(kind, SchemeKind::Git) && authority.contains('@') {
+        return Err(UNPARSEABLE.to_string());
+    }
+    Ok(())
+}
+
+/// The authority of a scheme-qualified address, sliced out of the ORIGINAL
+/// input so no normalisation can reach it. Userinfo and an IPv6 literal cannot
+/// hold an unescaped `/`, `?` or `#`, so the first of those after the `://`
+/// ends the authority.
+fn raw_url_authority(input: &str) -> Option<&str> {
+    let after_scheme = input.split_once("://")?.1;
+    Some(match after_scheme.find(['/', '?', '#']) {
+        Some(end) => &after_scheme[..end],
+        None => after_scheme,
     })
 }
 
@@ -1045,6 +1111,65 @@ mod tests {
                 Some("github.com".to_string()),
                 Some("acme/widget".to_string())
             )
+        );
+    }
+
+    #[test]
+    fn a_percent_in_an_ssh_family_authority_is_refused_rather_than_split_web_style() {
+        // Git decodes a scheme-qualified ssh or native address and separates
+        // host from path AFTERWARDS, in that order, so the escape is gone by
+        // the time the cut is made: `ssh://user%2Fx@github.com/acme/widget`
+        // really reaches ssh as the host `user` with the path
+        // `/x@github.com/acme/widget`. A browser-style parser splits first and
+        // answers `github.com` / `acme/widget`, a host and a repository the
+        // address does not name.
+        //
+        // This is the same refusal, for the same reason, as the configured
+        // address parser's: where dux cannot faithfully reproduce what git
+        // does, it refuses rather than guessing.
+        for input in [
+            "ssh://user%2Fx@github.com/acme/widget/pull/7",
+            "git+ssh://user%2Fx@github.com/acme/widget",
+            "ssh+git://user%2Fx@github.com/acme/widget",
+            "git://us%2Fer@github.com/acme/widget",
+        ] {
+            assert!(
+                parse_typed_reference(input).is_err(),
+                "{input} names a host dux cannot work out, so it must be refused"
+            );
+        }
+        // And the ordinary spellings are untouched.
+        assert_eq!(
+            repo_of("ssh://git@github.com/acme/widget"),
+            (
+                Some("github.com".to_string()),
+                Some("acme/widget".to_string())
+            )
+        );
+        assert_eq!(
+            repo_of("https://user%2Fx@github.com/acme/widget"),
+            (
+                Some("github.com".to_string()),
+                Some("acme/widget".to_string())
+            ),
+            "curl splits the authority off FIRST and decodes each piece after, \
+             so a percent under http(s) moves no boundary and is credentials"
+        );
+    }
+
+    #[test]
+    fn a_user_in_a_native_git_address_is_part_of_the_host_so_it_is_refused() {
+        // Git's native protocol has no user component, unlike its ssh URL
+        // syntax, so `git://user@github.com/acme/widget` sends git looking up
+        // `user@github.com` on port 9418, not github.com.
+        assert!(parse_typed_reference("git://user@github.com/acme/widget").is_err());
+        assert_eq!(
+            repo_of("git://github.com/acme/widget"),
+            (
+                Some("github.com".to_string()),
+                Some("acme/widget".to_string())
+            ),
+            "the native protocol without a user still names what it says"
         );
     }
 
