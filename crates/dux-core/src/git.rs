@@ -2466,10 +2466,6 @@ fn remote_input_is_literal(url: &str) -> bool {
         .any(|b| b < 0x20 || b == 0x7f || b == b'?' || b == b'#' || b == b'\\')
 }
 
-/// The path of a scheme-qualified remote, sliced out of the ORIGINAL input so
-/// no normalisation can reach it. Userinfo and an IPv6 literal cannot contain an
-/// unescaped `/`, so the first `/` after the `://` starts the path. `None` when
-/// there is no path, which is not a repository either way.
 /// The authority of a scheme-qualified remote, sliced out of the ORIGINAL input:
 /// everything between the `://` and the `/` that ends it, or the whole remainder
 /// when no slash follows. Read raw because the `url` crate has already decoded
@@ -2482,6 +2478,10 @@ fn raw_url_authority(url: &str) -> Option<&str> {
     })
 }
 
+/// The path of a scheme-qualified remote, sliced out of the ORIGINAL input so
+/// no normalisation can reach it. Userinfo and an IPv6 literal cannot contain an
+/// unescaped `/`, so the first `/` after the `://` starts the path. `None` when
+/// there is no path, which is not a repository either way.
 fn raw_url_path(url: &str) -> Option<&str> {
     let after_scheme = url.split_once("://")?.1;
     let slash = after_scheme.find('/')?;
