@@ -2264,10 +2264,13 @@ fn parse_github_owner_repo(url: &str) -> Option<String> {
     parse_github_remote(url).map(|remote| remote.owner_repo)
 }
 
-/// The transport schemes a git remote URL may use. Anything else is refused.
+/// The transport schemes a git remote URL may use, spelled exactly as git
+/// spells them. Anything else is refused, and the comparison is CASE SENSITIVE
+/// because git's is: see the check site in `parse_github_remote`.
+///
 /// Beyond being the truthful set, this is the second line of defence against a
 /// scp-like remote: `github.com:owner/repo.git` parses "successfully" as a URL
-/// whose *scheme* is `github.com`, and the allow-list rejects that even if the
+/// whose *scheme* is `github.com`, and it would be rejected here even if the
 /// scp-like branch below were ever bypassed.
 ///
 /// `git+ssh` and `ssh+git` are spellings of `ssh` and invoke the same transport;
@@ -2320,7 +2323,30 @@ fn parse_github_remote(url: &str) -> Option<GitHubRemote> {
     //    rejects a malformed authority (an out-of-range or non-numeric port is
     //    a parse error) instead of guessing at one.
     if let Ok(parsed) = Url::parse(url) {
-        if !GIT_URL_SCHEMES.contains(&parsed.scheme()) {
+        // The scheme is matched AS WRITTEN, case sensitively, because that is
+        // how git matches it: it compares the literal text before the `://`
+        // against its own lowercase table, and anything else it takes as the
+        // name of a remote helper to run. MEASURED, git 2.55.0, with a stub
+        // `GIT_SSH_COMMAND` printing its argv and a `.invalid` host:
+        // `ssh://git@nonexistent-host.invalid/o/r` reaches ssh as
+        // `git@nonexistent-host.invalid git-upload-pack '/o/r'`, while
+        // `SSH://git@nonexistent-host.invalid/o/r` fails with "git:
+        // 'remote-SSH' is not a git command" and "remote helper 'SSH' aborted
+        // session". `Ssh://`, `HTTPS://`, `GIT://` and `Git+SSH://` fail the
+        // same way, each naming its own missing helper.
+        //
+        // `parsed.scheme()` cannot be used for this: the `url` crate lowercases
+        // the scheme, so it says `ssh` for `SSH://` too, and checking it there
+        // is what made dux answer host `github.com`, repository `o/r` for an
+        // address git cannot connect with. The HOST is a different matter and
+        // stays case insensitive below, because git really does ignore host
+        // case (`ssh://NONEXISTENT-HOST.INVALID/o/r` reaches ssh unchanged).
+        //
+        // Reading the raw scheme also keeps the scp-like second line of
+        // defence: `github.com:owner/repo.git` parses as a URL whose scheme is
+        // the hostname, and it has no `://` at all, so it stops here.
+        let raw_scheme = url.split_once("://")?.0;
+        if !GIT_URL_SCHEMES.contains(&raw_scheme) {
             return None;
         }
         // The authority is read RAW as well, because two things about it can
@@ -2509,13 +2535,42 @@ fn remote_component_is_usable(component: &str) -> bool {
 }
 
 /// Splits `[user@]host:path` into its authority and path when the string is
-/// git's scp-like SSH shorthand: a colon that appears before any slash and is
-/// not the `://` of a scheme.
+/// git's scp-like SSH shorthand: a colon that appears before any slash, and is
+/// neither the `://` of a scheme nor the `::` of an explicit remote helper.
 fn split_scp_like(url: &str) -> Option<(&str, &str)> {
     let colon = url.find(':')?;
     let (authority, rest) = url.split_at(colon);
     let rest = &rest[1..];
     if authority.is_empty() || authority.contains('/') || rest.starts_with("//") {
+        return None;
+    }
+    // A SECOND colon right after the first is git's explicit remote-helper
+    // syntax, `<transport>::<address>`, which takes precedence over everything
+    // else and is not the scp-like shorthand at all. MEASURED, git 2.55.0, same
+    // stub ssh and `.invalid` host: `nonexistent-host.invalid::o/r` and
+    // `nonexistent-host.invalid::` both fail with "git:
+    // 'remote-nonexistent-host.invalid' is not a git command" and "remote helper
+    // 'nonexistent-host.invalid' aborted session", never touching ssh, while the
+    // single-colon `nonexistent-host.invalid:o/r` reaches ssh as
+    // `nonexistent-host.invalid git-upload-pack 'o/r'`. dux used to read the
+    // first of those as an scp-like remote and answer host `github.com`,
+    // repository `:o/r`: a host git never contacts, and an owner carrying a
+    // stray colon.
+    //
+    // The `user@` spelling is refused here too, for a measurably different
+    // reason worth writing down: git requires a helper name to be made of
+    // URL-scheme characters and `@` is not one, so
+    // `git@nonexistent-host.invalid::o/r` is NOT a helper invocation, it reaches
+    // ssh as `git@nonexistent-host.invalid git-upload-pack ':o/r'`. That path is
+    // still not `o/r` and `:o` is not an owner, so it is wrong either way.
+    //
+    // The test is on the byte after the FIRST colon, deliberately, rather than a
+    // blunt "the input contains `::`": a scheme-qualified IPv6 literal such as
+    // `ssh://[::1]/o/r` contains `::` and is an ordinary ssh remote (measured:
+    // it reaches ssh as `::1 git-upload-pack '/o/r'`). Such an address is
+    // already ended by the `//` check above and must stay refused only by the
+    // host check, which is the one reason that applies to it.
+    if rest.starts_with(':') {
         return None;
     }
     Some((authority, rest))
@@ -4818,6 +4873,132 @@ mod tests {
         }
     }
 
+    /// Git matches a URL scheme CASE SENSITIVELY. It compares the literal text
+    /// before the `://` against its own lowercase table, and anything else is
+    /// taken as the name of a remote helper, so an uppercase spelling does not
+    /// select the transport it looks like.
+    ///
+    /// MEASURED, git 2.55.0, with a stub `GIT_SSH_COMMAND` that prints its argv
+    /// and a `.invalid` host so nothing leaves the machine:
+    ///
+    /// ```text
+    /// $ git ls-remote ssh://git@nonexistent-host.invalid/o/r
+    /// SSH-INVOKED argv: git@nonexistent-host.invalid git-upload-pack '/o/r'
+    /// $ git ls-remote SSH://git@nonexistent-host.invalid/o/r
+    /// git: 'remote-SSH' is not a git command. See 'git --help'.
+    /// fatal: remote helper 'SSH' aborted session
+    /// ```
+    ///
+    /// `Ssh://`, `HTTPS://`, `GIT://` and `Git+SSH://` all fail the same way,
+    /// each naming its own missing `git-remote-<as-written>` helper. So dux used
+    /// to answer host `github.com`, repository `o/r` for an address git cannot
+    /// connect with at all.
+    ///
+    /// The HOST stays case insensitive, because git really does ignore host
+    /// case: `ssh://NONEXISTENT-HOST.INVALID/o/r` reaches ssh as
+    /// `NONEXISTENT-HOST.INVALID git-upload-pack '/o/r'`, and
+    /// `git@NonExistent-Host.Invalid:o/r.git` reaches it too. Only the scheme is
+    /// case sensitive; making both insensitive was the regression this pins.
+    #[test]
+    fn parse_github_remote_refuses_a_scheme_spelled_in_the_wrong_case() {
+        for url in [
+            "SSH://git@github.com/o/r",
+            "Ssh://git@github.com/o/r",
+            "HTTPS://github.com/o/r",
+            "Https://github.com/o/r",
+            "GIT://github.com/o/r",
+            "Git+SSH://github.com/o/r",
+            "SSH+GIT://github.com/o/r",
+            "HTTP://github.com/o/r",
+        ] {
+            assert_eq!(parse_github_remote(url), None, "{url}");
+        }
+        // The host really is case insensitive, in every family, and stays so.
+        let github = |owner_repo: &str| {
+            Some(GitHubRemote {
+                host: "github.com".to_string(),
+                owner_repo: owner_repo.to_string(),
+            })
+        };
+        for url in [
+            "ssh://GITHUB.COM/o/r",
+            "ssh://git@GitHub.com/o/r",
+            "git@GitHub.com:o/r.git",
+            "https://GitHub.COM/o/r.git",
+            "GitHub.com/o/r",
+        ] {
+            assert_eq!(parse_github_remote(url), github("o/r"), "{url}");
+        }
+    }
+
+    /// `<transport>::<address>` is git's EXPLICIT remote-helper syntax, which
+    /// takes precedence over everything else. It is not the scp-like shorthand,
+    /// and there is no host and no `owner/repo` in it for dux to report.
+    ///
+    /// MEASURED, git 2.55.0, same stub ssh and `.invalid` host:
+    ///
+    /// ```text
+    /// $ git ls-remote nonexistent-host.invalid::o/r
+    /// git: 'remote-nonexistent-host.invalid' is not a git command.
+    /// fatal: remote helper 'nonexistent-host.invalid' aborted session
+    /// $ git ls-remote nonexistent-host.invalid::
+    /// git: 'remote-nonexistent-host.invalid' is not a git command.
+    /// fatal: remote helper 'nonexistent-host.invalid' aborted session
+    /// $ git ls-remote nonexistent-host.invalid:o/r
+    /// SSH-INVOKED argv: nonexistent-host.invalid git-upload-pack 'o/r'
+    /// ```
+    ///
+    /// dux used to answer host `github.com`, repository `:o/r` for the first of
+    /// those: a host git never contacts, and an owner with a stray colon on it.
+    ///
+    /// The `user@` spelling is refused too, but for a measurably DIFFERENT
+    /// reason, and the difference is worth stating so nobody rediscovers it as a
+    /// contradiction. Git requires a helper name to be made of URL-scheme
+    /// characters, and `@` is not one, so `git@nonexistent-host.invalid::o/r` is
+    /// NOT a helper invocation: it reaches ssh as
+    /// `git@nonexistent-host.invalid git-upload-pack ':o/r'`. That path is still
+    /// not `o/r`, and `:o` is not an owner any host can have, so answering
+    /// `o/r`, or `:o/r`, for it would be wrong either way.
+    #[test]
+    fn parse_github_remote_refuses_gits_explicit_remote_helper_syntax() {
+        for url in [
+            "github.com::o/r",
+            "git@github.com::o/r",
+            "github.com::",
+            "github.com::o/r.git",
+        ] {
+            assert_eq!(parse_github_remote(url), None, "{url}");
+        }
+        // The ordinary scp-like forms are untouched, including the verbatim
+        // encoded one: git hands an scp-like path to ssh without decoding it.
+        let github = |owner_repo: &str| {
+            Some(GitHubRemote {
+                host: "github.com".to_string(),
+                owner_repo: owner_repo.to_string(),
+            })
+        };
+        assert_eq!(parse_github_remote("github.com:o/r"), github("o/r"));
+        assert_eq!(parse_github_remote("git@github.com:o/r.git"), github("o/r"));
+        assert_eq!(parse_github_remote("github.com:o%2Fr/x"), github("o%2Fr/x"),);
+    }
+
+    /// The remote-helper rule tests the byte after the FIRST colon, and not a
+    /// blunt "contains `::`", because a scheme-qualified IPv6 literal contains
+    /// `::` and is not a helper invocation. Such an address never reaches the
+    /// scp-like branch at all (the `//` after the scheme ends it first), and
+    /// this pins that it still does not.
+    ///
+    /// MEASURED: `git ls-remote ssh://[::1]/o/r` reaches ssh as
+    /// `::1 git-upload-pack '/o/r'`, an ordinary ssh remote. dux refuses it
+    /// because `::1` is not a GitHub host, which is the only reason it should.
+    #[test]
+    fn parse_github_remote_leaves_a_scheme_qualified_ipv6_address_to_the_host_check() {
+        assert_eq!(split_scp_like("ssh://[::1]/o/r"), None);
+        assert_eq!(split_scp_like("ssh://[::1]:2222/o/r"), None);
+        assert_eq!(parse_github_remote("ssh://[::1]/o/r"), None);
+        assert_eq!(parse_github_remote("ssh://[::1]:2222/o/r"), None);
+    }
+
     /// The full behaviour table, pinned as one test so no future rewrite of the
     /// parser can quietly move any single row of it.
     #[test]
@@ -4828,7 +5009,14 @@ mod tests {
                 owner_repo: owner_repo.to_string(),
             })
         };
-        let cases: [(&str, Option<GitHubRemote>); 28] = [
+        let cases: [(&str, Option<GitHubRemote>); 32] = [
+            // Git matches a scheme case sensitively and reads
+            // `<transport>::<address>` as an explicit remote helper, so neither
+            // of these names a GitHub repository git could reach.
+            ("SSH://git@GitHub.com/o/r", None),
+            ("HTTPS://github.com/o/r", None),
+            ("github.com::o/r", None),
+            ("git@github.com::o/r", None),
             // The authority decides where git cuts for the ssh-style
             // transports, so both of these name something other than a
             // repository on github.com.
@@ -5112,13 +5300,22 @@ mod tests {
     /// Hostnames are case-insensitive, and the parsed host is handed to `gh`,
     /// so it is compared and stored lowercased. A capitalised host used to fall
     /// into the same silent no-pull-request-anywhere failure as the ssh one.
+    ///
+    /// This list used to carry `SSH://git@GitHub.com/octocat/Hello-World.git`
+    /// as an accepted row, and it passed for the wrong reason: the round that
+    /// made the HOST case insensitive checked the scheme after the `url` crate
+    /// had lowercased it, which made the SCHEME case insensitive too. Git's is
+    /// not (measured in
+    /// `parse_github_remote_refuses_a_scheme_spelled_in_the_wrong_case`), so
+    /// that row asserted dux answering for a remote git cannot connect with. It
+    /// has moved to that test, as a refusal.
     #[test]
     fn parse_github_host_is_matched_and_stored_case_insensitively() {
         for url in [
             "git@GitHub.com:octocat/Hello-World.git",
             "GitHub.com:octocat/Hello-World.git",
             "ssh://GITHUB.COM/octocat/Hello-World.git",
-            "SSH://git@GitHub.com/octocat/Hello-World.git",
+            "ssh://git@GitHub.com/octocat/Hello-World.git",
             "https://GitHub.COM/octocat/Hello-World.git",
             "GitHub.com/octocat/Hello-World",
         ] {
