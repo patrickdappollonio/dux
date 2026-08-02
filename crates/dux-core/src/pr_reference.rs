@@ -1742,6 +1742,43 @@ mod independent_typed_parser_check {
             .and_then(|r| r.repository_label())
     }
 
+    /// Round two of my own cases: authorities git reads differently, browser
+    /// address shapes with no literal `://`, and the numeric-owner ambiguity.
+    #[test]
+    fn a_typed_address_agrees_with_git_and_with_a_browser() {
+        // ssh-family and native git: dux cannot reproduce git's decode-then-split,
+        // so it refuses rather than naming a host the address does not name.
+        for bad in [
+            "ssh://user%2Fx@github.com/acme/widget/pull/7",
+            "git://user@github.com/acme/widget",
+            "ssh://git@git%2Fhub.com/acme/widget",
+        ] {
+            assert_eq!(repo(bad), None, "must refuse: {bad}");
+        }
+        // Web addresses with a percent in the authority are fine: curl splits first.
+        assert!(parse_typed_reference("https://user:p%40ss@github.com/acme/widget").is_ok());
+        // Browser shapes without a literal `://`.
+        assert_eq!(
+            repo("https:/github.com/acme/widget/pull/7").as_deref(),
+            Some("github.com/acme/widget")
+        );
+        assert_eq!(
+            repo("//github.com/acme/widget/pull/7").as_deref(),
+            Some("github.com/acme/widget")
+        );
+        // Numeric owner versus port, decided by what is left over.
+        assert_eq!(
+            repo("github.com:123/scriptaculous").as_deref(),
+            Some("github.com/123/scriptaculous")
+        );
+        // A real port leaves a valid pair, so it stays ON the host. It parses,
+        // and simply will not match a project whose address has no port.
+        assert_eq!(
+            repo("github.com:8443/acme/widget").as_deref(),
+            Some("github.com:8443/acme/widget")
+        );
+    }
+
     /// A typed address must name the repository a BROWSER would name. Every case
     /// here previously answered with a different, real repository, or read a
     /// scheme as a hostname.
