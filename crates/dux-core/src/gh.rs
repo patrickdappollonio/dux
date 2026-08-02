@@ -1516,4 +1516,83 @@ mod tests {
         .expect_err("missing head");
         assert!(err.contains("head branch"));
     }
+
+    /// A real repository whose `origin` remote is spelled with an explicit
+    /// `ssh://` scheme, which is what git reports whenever an `url.*.insteadOf`
+    /// rewrite maps onto an ssh base.
+    fn ssh_origin_repo(url: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for args in [
+            vec!["init", "--quiet"],
+            vec!["remote", "add", "origin", url],
+        ] {
+            let out = std::process::Command::new("git")
+                .args(&args)
+                .current_dir(dir.path())
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        dir
+    }
+
+    #[test]
+    fn pull_request_lookup_resolves_an_ssh_scheme_origin_remote() {
+        // The from-PR flow resolves the project's remote before it can look
+        // anything up; an unparsed spelling made it fail with "does not have a
+        // GitHub origin remote". This covers everything the job does before it
+        // shells out to `gh`, which is the part that was broken.
+        let dir = ssh_origin_repo("ssh://git@github.com/octocat/Hello-World.git");
+        let remote = git::remote_github_repo(dir.path()).expect("ssh:// origin resolves");
+        assert_eq!(remote.host, "github.com");
+        assert_eq!(remote.owner_repo, "octocat/Hello-World");
+
+        let lookup = parse_pull_request_lookup("#7", &remote.host, &remote.owner_repo)
+            .expect("a resolved remote makes the lookup reachable");
+        assert_eq!(lookup.host, "github.com");
+        assert_eq!(lookup.owner_repo, "octocat/Hello-World");
+        assert_eq!(lookup.number, 7);
+    }
+
+    #[test]
+    fn run_entries_resolves_an_ssh_scheme_remote_rather_than_recording_nothing() {
+        // The poller resolves each agent's remote the same way, and when that
+        // yielded nothing it recorded an empty result and moved on, so no PR
+        // banner ever appeared and nothing said why.
+        //
+        // The resolution is pinned without any network call: the host the
+        // ssh:// remote names is backed off, while the stored PR names a
+        // different host. Only a resolved remote puts the entry on the
+        // backed-off host, which keeps the stored PR, makes no `gh` call, and
+        // therefore emits no host signal.
+        let dir = ssh_origin_repo("ssh://git@github.com/octocat/Hello-World.git");
+        let mut known = stored(42, "OPEN");
+        known.host = "github.example.com".to_string();
+        let entry = PrSyncEntry {
+            session_id: "s0".to_string(),
+            branch_name: "feat/x".to_string(),
+            worktree_path: dir.path().to_string_lossy().to_string(),
+            known_pr: Some(known),
+            agent_exited: false,
+        };
+        let mut backoff = BackoffSnapshot::new();
+        backoff.insert(
+            "github.com".to_string(),
+            Instant::now() + Duration::from_secs(600),
+        );
+
+        let (results, signals) = run_entries(std::slice::from_ref(&entry), &backoff);
+        assert!(
+            signals.is_empty(),
+            "the remote's host is backed off, so the entry must be planned against it with no gh call"
+        );
+        assert_eq!(results.len(), 1);
+        let pr = results[0].1.as_ref().expect("last-known PR preserved");
+        assert_eq!(pr.number, 42);
+    }
 }
