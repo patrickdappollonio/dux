@@ -207,10 +207,13 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         hint_contexts: &[],
     },
     BindingDef {
-        // Enters filter mode over the flat agent list. `/` is free in the Left
-        // scope (it is only bound in Files/Browser today, and scopes are
-        // independent). In filter mode printable keys type the query, so
-        // navigation falls back to the arrow keys, mirroring the project browser.
+        // Enters filter mode over the whole sidebar: the flat agent list and the
+        // terminal list below it. `/` is free in the Left scope (it is only bound
+        // in Files/Browser today, and scopes are independent). In filter mode
+        // printable keys type the query, so navigation falls back to the arrow
+        // keys, mirroring the project browser; those arrows cross the
+        // agents/terminals boundary, so every result is reachable whichever kind
+        // of row matched.
         action: Action::FilterAgents,
         default_keys: &[KeyCombination::one_key(
             KeyCode::Char('/'),
@@ -219,7 +222,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[BindingScope::Left],
         help: Some(HelpEntry {
             section: "Projects pane",
-            description: "Filter agents by name, branch, project, or provider",
+            description: "Filter agents and terminals by name, branch, project, or provider",
         }),
         hint_contexts: &[
             (HintContext::LeftProject, "Filter"),

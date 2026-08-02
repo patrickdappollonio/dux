@@ -550,9 +550,13 @@ impl App {
         // the palette chord, etc.) falls through to normal handling. Esc is already
         // handled just above via `close_top_overlay`, keeping filter dismissal
         // uniform with how prompts are dismissed.
+        //
+        // EITHER section, deliberately. The filter prunes the terminal list too,
+        // so the terminals are part of the result set; gating this on the agents
+        // section meant the query stopped being editable the moment the cursor
+        // stepped down into a terminal it had just found.
         if self.agent_filter.is_some()
             && self.focus == FocusPane::Left
-            && self.left_section == LeftSection::Projects
             && self.handle_agent_filter_key(key)?
         {
             return Ok(false);
@@ -780,6 +784,74 @@ impl App {
         self.update_missing_project_warning();
     }
 
+    /// Move the Left pane's cursor one row DOWN, across the whole sidebar: the
+    /// agent rows, then the terminal rows below them, then back to the top.
+    ///
+    /// The sidebar is one list with two sections, so this owns the whole
+    /// traversal and both callers share it: ordinary Left-pane navigation and
+    /// the agent-list filter, whose rows ARE these rows. Duplicating half of it
+    /// into the filter is how a filtered result set became visible but
+    /// unreachable when the only matches were terminals.
+    pub(crate) fn move_left_cursor_down(&mut self) {
+        if self.left_section == LeftSection::Terminals {
+            if self.selected_terminal_index + 1 < self.terminal_items().len() {
+                self.selected_terminal_index += 1;
+            } else if let Some(first) = self.first_selectable_left_item() {
+                // Wrap: down from the last terminal loops back to the first
+                // agent at the top of the list.
+                self.left_section = LeftSection::Projects;
+                self.select_left_agent_item(first);
+            } else {
+                // Nothing above to wrap onto (a query matching terminals only),
+                // so the wrap stays inside the terminals.
+                self.selected_terminal_index = 0;
+            }
+            return;
+        }
+        if let Some(next) = self.next_selectable_left_item_after(self.selected_left) {
+            self.select_left_agent_item(next);
+        } else if self.has_terminal_items() {
+            // Jump to terminals section.
+            self.left_section = LeftSection::Terminals;
+            self.selected_terminal_index = 0;
+            self.close_diff_view();
+        } else if let Some(first) = self.first_selectable_left_item() {
+            // Wrap: past the last agent (no terminals below) loops
+            // back to the top of the list.
+            self.select_left_agent_item(first);
+        }
+    }
+
+    /// Move the Left pane's cursor one row UP. The mirror of
+    /// [`Self::move_left_cursor_down`]; see it for why this traversal is shared.
+    pub(crate) fn move_left_cursor_up(&mut self) {
+        if self.left_section == LeftSection::Terminals {
+            if self.selected_terminal_index > 0 {
+                self.selected_terminal_index -= 1;
+            } else if let Some(last) = self.last_selectable_left_item() {
+                // Jump back to projects section, onto the last agent.
+                self.left_section = LeftSection::Projects;
+                self.select_left_agent_item(last);
+            } else {
+                // No agent row to land on, so wrap within the terminals.
+                self.selected_terminal_index = self.terminal_items().len().saturating_sub(1);
+            }
+            return;
+        }
+        if let Some(prev) = self.previous_selectable_left_item_before(self.selected_left) {
+            self.select_left_agent_item(prev);
+        } else if self.has_terminal_items() {
+            // Wrap: up from the first agent lands on the last terminal.
+            self.left_section = LeftSection::Terminals;
+            self.selected_terminal_index = self.terminal_items().len().saturating_sub(1);
+            self.close_diff_view();
+        } else if let Some(last) = self.last_selectable_left_item() {
+            // Wrap: up from the first agent (no terminals) loops to the
+            // last agent.
+            self.select_left_agent_item(last);
+        }
+    }
+
     fn handle_left_key(&mut self, key: KeyEvent) -> Result<()> {
         if self.left_section == LeftSection::Terminals {
             return self.handle_left_terminal_key(key);
@@ -787,37 +859,8 @@ impl App {
 
         if let Some(action) = self.bindings.lookup(&key, BindingScope::Left) {
             match action {
-                Action::MoveDown => {
-                    if let Some(next) = self.next_selectable_left_item_after(self.selected_left) {
-                        self.select_left_agent_item(next);
-                    } else if self.has_terminal_items() {
-                        // Jump to terminals section.
-                        self.left_section = LeftSection::Terminals;
-                        self.selected_terminal_index = 0;
-                        self.close_diff_view();
-                    } else if let Some(first) = self.first_selectable_left_item() {
-                        // Wrap: past the last agent (no terminals below) loops
-                        // back to the top of the list.
-                        self.select_left_agent_item(first);
-                    }
-                }
-                Action::MoveUp => {
-                    if let Some(prev) =
-                        self.previous_selectable_left_item_before(self.selected_left)
-                    {
-                        self.select_left_agent_item(prev);
-                    } else if self.has_terminal_items() {
-                        // Wrap: up from the first agent lands on the last terminal.
-                        self.left_section = LeftSection::Terminals;
-                        self.selected_terminal_index =
-                            self.terminal_items().len().saturating_sub(1);
-                        self.close_diff_view();
-                    } else if let Some(last) = self.last_selectable_left_item() {
-                        // Wrap: up from the first agent (no terminals) loops to the
-                        // last agent.
-                        self.select_left_agent_item(last);
-                    }
-                }
+                Action::MoveDown => self.move_left_cursor_down(),
+                Action::MoveUp => self.move_left_cursor_up(),
                 Action::FocusAgent => self.activate_selected_left_item(true)?,
                 Action::ExitInteractive => self.activate_selected_left_item(false)?,
                 Action::OpenProjectBrowser => {
@@ -877,13 +920,34 @@ impl App {
     ///
     /// Printable characters and Backspace edit the live query and re-filter the
     /// list; Up/Down move the selection over the filtered rows; Enter activates the
-    /// selected row and exits filter mode, keeping that agent selected in the
+    /// selected row and exits filter mode, keeping that row selected in the
     /// restored full list.
+    ///
+    /// The rows are the WHOLE sidebar, agents and terminals alike, because the
+    /// query prunes both. So Up/Down go through the shared traversal that
+    /// crosses the section boundary, and Enter opens whichever KIND of row the
+    /// cursor is on. Anything narrower leaves a result set that renders and
+    /// cannot be used: a query matching only terminals was exactly that.
     fn handle_agent_filter_key(&mut self, key: KeyEvent) -> Result<bool> {
         if self.agent_filter.is_none() {
             return Ok(false);
         }
         match key.code {
+            KeyCode::Enter if self.left_section == LeftSection::Terminals => {
+                // The terminal is resolved by id BEFORE the filter closes: the
+                // restored full list is longer, so the index the cursor holds
+                // now names a different terminal afterwards.
+                let keep = self
+                    .terminal_items()
+                    .get(self.selected_terminal_index)
+                    .map(|(id, _)| (*id).clone());
+                self.open_terminal_from_terminal_list()?;
+                self.close_agent_filter();
+                if let Some(id) = keep {
+                    self.reselect_left_terminal(&id);
+                }
+                Ok(true)
+            }
             KeyCode::Enter => {
                 // Preserve the activated agent across the exit so the restored full
                 // list keeps it selected (Enter on the Inactive toggle has no agent).
@@ -896,23 +960,11 @@ impl App {
                 Ok(true)
             }
             KeyCode::Down => {
-                if let Some(next) = self.next_selectable_left_item_after(self.selected_left) {
-                    self.selected_left = next;
-                    self.project_chooser_context = None;
-                    self.close_diff_view();
-                    self.reload_changed_files();
-                    self.update_missing_project_warning();
-                }
+                self.move_left_cursor_down();
                 Ok(true)
             }
             KeyCode::Up => {
-                if let Some(prev) = self.previous_selectable_left_item_before(self.selected_left) {
-                    self.selected_left = prev;
-                    self.project_chooser_context = None;
-                    self.close_diff_view();
-                    self.reload_changed_files();
-                    self.update_missing_project_warning();
-                }
+                self.move_left_cursor_up();
                 Ok(true)
             }
             _ => {
@@ -945,29 +997,26 @@ impl App {
         }
     }
 
+    /// After leaving filter mode, move the terminal cursor back onto the row for
+    /// `terminal_id` in the restored full list, if it is still there. The twin
+    /// of [`Self::reselect_left_session`], and needed for the same reason: the
+    /// cursor is an INDEX into the visible list, and un-pruning that list moves
+    /// every row the query had been hiding back underneath it.
+    pub(crate) fn reselect_left_terminal(&mut self, terminal_id: &str) {
+        if let Some(index) = self
+            .terminal_items()
+            .iter()
+            .position(|(id, _)| id.as_str() == terminal_id)
+        {
+            self.selected_terminal_index = index;
+        }
+    }
+
     fn handle_left_terminal_key(&mut self, key: KeyEvent) -> Result<()> {
-        let term_count = self.terminal_items().len();
         if let Some(action) = self.bindings.lookup(&key, BindingScope::Left) {
             match action {
-                Action::MoveDown => {
-                    if self.selected_terminal_index + 1 < term_count {
-                        self.selected_terminal_index += 1;
-                    } else if let Some(first) = self.first_selectable_left_item() {
-                        // Wrap: down from the last terminal loops back to the first
-                        // agent at the top of the list.
-                        self.left_section = LeftSection::Projects;
-                        self.select_left_agent_item(first);
-                    }
-                }
-                Action::MoveUp => {
-                    if self.selected_terminal_index > 0 {
-                        self.selected_terminal_index -= 1;
-                    } else if let Some(last) = self.last_selectable_left_item() {
-                        // Jump back to projects section, onto the last agent.
-                        self.left_section = LeftSection::Projects;
-                        self.select_left_agent_item(last);
-                    }
-                }
+                Action::MoveDown => self.move_left_cursor_down(),
+                Action::MoveUp => self.move_left_cursor_up(),
                 Action::FocusAgent | Action::ExitInteractive => {
                     // Open terminal overlay for the selected terminal item.
                     self.open_terminal_from_terminal_list()?;
@@ -17643,6 +17692,131 @@ cyan = "#00ffff"
             app.left_section,
             LeftSection::Projects,
             "an empty terminals section hands focus back to the agents"
+        );
+    }
+
+    /// The journey, keyboard only: the user opens the sidebar filter and types a
+    /// query only a TERMINAL matches. The result has to be reachable and
+    /// openable, and the query has to stay editable once the cursor is down
+    /// among the terminals.
+    ///
+    /// Filtering the terminal list was only half the feature. The filter's keys
+    /// were routed exclusively while the Left pane sat on the agents section,
+    /// and its Enter/Up/Down went exclusively through agent selection, so a
+    /// search whose only results were terminals rendered them, refused to move
+    /// the cursor onto them, refused to open one, and stopped accepting query
+    /// edits the moment focus reached the section.
+    #[test]
+    fn the_filter_reaches_and_opens_a_matching_terminal_with_the_keyboard_alone() {
+        // The `~` collapse needs a home to collapse; a machine without one is
+        // `home_path`'s business, not the filter's.
+        if home::home_dir().is_none() {
+            return;
+        }
+        let mut app = test_app(default_bindings());
+        app.engine.config.terminal.command = "cat".to_string();
+        app.engine.config.terminal.args = vec![];
+        let session_id = app.engine.sessions[0].id.clone();
+        let (session_tid, _) = app
+            .engine
+            .create_companion_terminal(&session_id, 24, 80)
+            .expect("session terminal");
+        let (standalone_tid, _) = app
+            .engine
+            .create_standalone_terminal(24, 80)
+            .expect("standalone terminal");
+        app.engine.config.ui.agent_sort = "manual".to_string();
+        app.focus = FocusPane::Left;
+        app.left_section = LeftSection::Projects;
+        app.rebuild_left_items();
+
+        // The filter opens and the query is typed, exactly as a user would.
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
+            .expect("open the filter");
+        app.handle_key(KeyEvent::new(KeyCode::Char('~'), KeyModifiers::NONE))
+            .expect("type the query");
+        assert_eq!(
+            app.agent_filter.as_ref().map(|i| i.text.as_str()),
+            Some("~")
+        );
+        // Only the standalone terminal names a directory, so it is the only
+        // match anywhere in the sidebar: no agent row survives, which is the
+        // whole point of the case.
+        assert!(
+            !app.left_items()
+                .iter()
+                .any(|item| matches!(item, LeftItem::Session(_))),
+            "the query must match no agent, or the terminals are not the only way \
+             through; got {:?}",
+            app.left_items()
+        );
+        assert_eq!(
+            app.terminal_items()
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>(),
+            vec![standalone_tid.as_str()],
+            "the standalone terminal is the one visible result",
+        );
+
+        // Down crosses into the terminals section and lands on the one result.
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .expect("move down");
+        assert_eq!(
+            app.left_section,
+            LeftSection::Terminals,
+            "down from the agents must reach the matching terminal"
+        );
+        assert_eq!(app.selected_terminal_index, 0);
+
+        // The query is still the thing being typed into, from down here.
+        app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
+            .expect("type from the terminals section");
+        assert_eq!(
+            app.agent_filter.as_ref().map(|i| i.text.as_str()),
+            Some("~x"),
+            "a printable key must edit the query, not fire a terminal hotkey"
+        );
+        app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
+            .expect("correct the query");
+        assert_eq!(
+            app.agent_filter.as_ref().map(|i| i.text.as_str()),
+            Some("~")
+        );
+
+        // `~x` matched nothing, so the emptied section handed focus back; the
+        // corrected query brings the row back and down reaches it again.
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .expect("move down again");
+        assert_eq!(app.left_section, LeftSection::Terminals);
+
+        // Enter opens the result and leaves filter mode, exactly as it does for
+        // an agent row.
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .expect("open the terminal");
+        assert_eq!(
+            app.active_terminal_id.as_deref(),
+            Some(standalone_tid.as_str()),
+            "enter must open the terminal the cursor is on"
+        );
+        assert_eq!(app.session_surface, SessionSurface::Terminal);
+        assert!(app.agent_filter.is_none(), "opening leaves filter mode");
+        // The restored full list keeps the cursor on the terminal that opened,
+        // rather than on whatever now sits at the old index.
+        assert_eq!(
+            app.terminal_items()
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>(),
+            vec![session_tid.as_str(), standalone_tid.as_str()],
+            "the full list is back",
+        );
+        assert_eq!(
+            app.terminal_items()
+                .get(app.selected_terminal_index)
+                .map(|(id, _)| id.as_str()),
+            Some(standalone_tid.as_str()),
+            "the cursor follows the terminal it opened, not its old index"
         );
     }
 
