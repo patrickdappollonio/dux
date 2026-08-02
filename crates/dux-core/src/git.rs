@@ -6486,4 +6486,47 @@ mod tests {
             "expected no 'symbolic-ref' in error, got: {msg}"
         );
     }
+
+    /// The two rules must not have leaked into each other. Everything below is
+    /// something a PERSON may type into the pull request field, and every one of
+    /// them must be refused as a project's CONFIGURED address, which git alone
+    /// decides. This is the safety property that keeps the leniency from naming
+    /// a different repository than the one on disk.
+    #[test]
+    fn independent_check_lenient_typed_forms_are_not_configured_addresses() {
+        // Only the forms git itself does NOT accept as an address. A plain
+        // `https://host/owner/repo` is a real address and legitimately parses as
+        // both, which is not a leak.
+        let lenient = [
+            "example/application",
+            "github.com/example/application",
+            "https://github.com/example/application/issues",
+            "https://github.com/example/application/security/dependabot",
+            "https://github.com/example/application/this/is/a/made/up/path",
+        ];
+        for raw in lenient {
+            assert!(
+                crate::pr_reference::parse_typed_reference(raw).is_ok(),
+                "a person may type this: {raw}"
+            );
+            assert_eq!(
+                parse_github_remote(raw),
+                None,
+                "but it must NEVER be read as a configured address: {raw}"
+            );
+        }
+        for both in [
+            "git@github.com:example/application.git",
+            "https://github.com/example/application",
+        ] {
+            assert!(
+                parse_github_remote(both).is_some(),
+                "a real address must still parse: {both}"
+            );
+            assert!(
+                crate::pr_reference::parse_typed_reference(both).is_ok(),
+                "and a person may equally type it: {both}"
+            );
+        }
+    }
 }
