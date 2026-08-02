@@ -2051,10 +2051,75 @@ impl Engine {
                     EventReaction::Nothing
                 }
             }
-            WorkerEvent::GhStatusChecked(status) => {
+            WorkerEvent::GhStatusChecked {
+                generation,
+                outcome,
+            } => {
+                // Discard a stale result FIRST: before the status changes,
+                // before the host policy changes, before it is logged, and
+                // before it can start the pull-request workers. Two probes
+                // launched close together can finish out of order, and an older
+                // answer overwriting a newer one presents as intermittent.
+                if generation != self.gh_probe.generation {
+                    // Logged so this pairs with anything the worker itself wrote
+                    // on its way here (the spawn primitive records a panic at
+                    // error level before the synthesised result is built, and it
+                    // is right to: the panic happened whether or not its answer
+                    // is used). Debug rather than warn: overlapping probes are
+                    // expected, not a fault.
+                    logger::debug(&format!(
+                        "[gh-integration] discarding a stale host probe result \
+                         (generation {generation}, current {})",
+                        self.gh_probe.generation,
+                    ));
+                    return EventReaction::Nothing;
+                }
+                // A probe that DECIDED may tear armed work down; a transient one
+                // may not, because it decided nothing.
+                let decisive = !matches!(outcome, crate::gh::GhProbe::Transient(_));
+                let status = match outcome {
+                    crate::gh::GhProbe::NotInstalled => {
+                        // Deny all rather than preserving the last known set:
+                        // `gh` is gone, so dux can reach none of those hosts.
+                        self.set_github_host_policy(crate::gh::GithubHostPolicy::DenyAll);
+                        GhStatus::NotInstalled
+                    }
+                    crate::gh::GhProbe::Transient(reason) => {
+                        logger::info(&format!(
+                            "[gh-integration] gh host probe did not decide ({reason}); \
+                             keeping the last known host policy",
+                        ));
+                        // The previously computed value stands unchanged. The one
+                        // exception is the very first probe: it must still move
+                        // the status off Unknown to an unavailable one, so the
+                        // interface reports something rather than rendering as
+                        // neither available nor unavailable.
+                        if matches!(self.gh_status, GhStatus::Unknown) {
+                            GhStatus::NotAuthenticated
+                        } else {
+                            self.gh_status
+                        }
+                    }
+                    crate::gh::GhProbe::Decided { available, policy } => {
+                        self.set_github_host_policy(policy);
+                        if available {
+                            GhStatus::Available
+                        } else {
+                            GhStatus::NotAuthenticated
+                        }
+                    }
+                };
                 self.gh_status = status;
                 if matches!(status, GhStatus::Available) && self.github_integration_enabled {
-                    logger::info("[gh-integration] gh CLI is available and authenticated");
+                    logger::info(&format!(
+                        "[gh-integration] gh CLI is available; host policy: {:?}",
+                        self.github_host_policy(),
+                    ));
+                    // This completion is the ONE place pull-request work is
+                    // armed. Every off-to-on site launches the probe and stops
+                    // there, so an enable produces exactly one refresh, and
+                    // `spawn_pr_sync_worker` is single-instance so it produces
+                    // at most one poller however often this runs.
                     self.update_pr_sync_sessions();
                     self.spawn_refs_watcher();
                     self.spawn_pr_sync_worker();
@@ -2064,6 +2129,15 @@ impl Engine {
                         "[gh-integration] gh status: {:?}, integration enabled: {}",
                         status, self.github_integration_enabled,
                     ));
+                    if decisive {
+                        // `gh` answered, and the answer is that nothing works
+                        // here (or the integration is off). Work armed from an
+                        // older, better answer must not keep polling while the
+                        // interface says GitHub is unavailable. A TRANSIENT
+                        // result never reaches this: it decided nothing, so the
+                        // last known good state stands.
+                        self.disarm_pr_sync();
+                    }
                 }
                 EventReaction::Nothing
             }

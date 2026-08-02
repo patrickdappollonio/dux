@@ -472,6 +472,7 @@ impl App {
         self.pending_pr_lookup_ops.insert(op_id.clone(), op);
         self.apply_reaction(dux_core::engine::EventReaction::Status(pending));
         let worker_tx = self.engine.worker_tx.clone();
+        let policy = self.engine.github_host_policy();
         thread::spawn(move || {
             use std::panic::AssertUnwindSafe;
             // The TUI resolves the PR first and then prompts for a name, so it
@@ -489,6 +490,7 @@ impl App {
                     None,
                     worker_tx,
                     Some(op_id),
+                    policy,
                 );
             })) {
                 let reason = dux_core::engine::format_panic_payload(payload);
@@ -3607,10 +3609,11 @@ mod tests {
             terminating_ptys: Vec::new(),
             pending_group_removals: Vec::new(),
             gh_status: crate::model::GhStatus::Unknown,
+            gh_probe: Default::default(),
             pr_statuses: std::collections::HashMap::new(),
             branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
             pr_sync_sessions: Arc::new(Mutex::new(Vec::new())),
-            pr_sync_enabled: Arc::new(AtomicBool::new(false)),
+            pr_sync: Arc::new(Default::default()),
             pr_poll_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             pr_backoff: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             refs_watcher: None,
@@ -3832,10 +3835,11 @@ mod tests {
             terminating_ptys: Vec::new(),
             pending_group_removals: Vec::new(),
             gh_status: crate::model::GhStatus::Unknown,
+            gh_probe: Default::default(),
             pr_statuses: std::collections::HashMap::new(),
             branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
             pr_sync_sessions: Arc::new(Mutex::new(Vec::new())),
-            pr_sync_enabled: Arc::new(AtomicBool::new(false)),
+            pr_sync: Arc::new(Default::default()),
             pr_poll_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             pr_backoff: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             refs_watcher: None,

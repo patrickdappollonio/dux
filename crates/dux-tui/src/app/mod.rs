@@ -2562,7 +2562,7 @@ impl App {
         let watched_worktree: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
         let branch_sync_sessions = Arc::new(Mutex::new(Vec::new()));
         let pr_sync_sessions = Arc::new(Mutex::new(Vec::new()));
-        let pr_sync_enabled = Arc::new(AtomicBool::new(false));
+        let pr_sync: Arc<dux_core::engine::PrSyncControl> = Arc::new(Default::default());
         let has_active_processes = Arc::new(AtomicBool::new(false));
         let initial_status = format!(
             "Press {} to add a project, {} to create an agent, {} for help.",
@@ -2620,10 +2620,11 @@ impl App {
             terminating_ptys: Vec::new(),
             pending_group_removals: Vec::new(),
             gh_status: crate::model::GhStatus::Unknown,
+            gh_probe: Default::default(),
             pr_statuses: HashMap::new(),
             branch_sync_sessions,
             pr_sync_sessions,
-            pr_sync_enabled,
+            pr_sync,
             pr_poll_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             pr_backoff: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             refs_watcher: None,
@@ -3707,15 +3708,18 @@ impl App {
             "toggle-github-integration" => {
                 self.engine.github_integration_enabled = !self.engine.github_integration_enabled;
                 self.engine.config.ui.github_integration = self.engine.github_integration_enabled;
-                if self.engine.github_integration_enabled
-                    && matches!(self.engine.gh_status, crate::model::GhStatus::Available)
-                {
-                    self.engine.update_pr_sync_sessions();
-                    self.engine.spawn_initial_pr_refresh();
-                    self.engine.pr_sync_enabled.store(true, Ordering::Relaxed);
-                } else if !self.engine.github_integration_enabled {
+                if self.engine.github_integration_enabled {
+                    // Off-to-on: re-ask `gh` which hosts it can serve, and do
+                    // NOTHING else. The user who logs in to their enterprise
+                    // host and then enables the integration must not be stuck
+                    // with the answer from boot, and the status held right now
+                    // is that answer: acting on it here armed a refresh the
+                    // probe's completion then armed again, along with a second
+                    // poller. The completion arms the work, exactly once.
+                    self.engine.spawn_gh_status_check();
+                } else {
                     self.engine.pr_statuses.clear();
-                    self.engine.pr_sync_enabled.store(false, Ordering::Relaxed);
+                    self.engine.disarm_pr_sync();
                     self.rebuild_left_items();
                 }
                 let state = if self.engine.github_integration_enabled {
@@ -3847,7 +3851,13 @@ impl App {
         self.terminal_pane_height_pct = config.ui.terminal_pane_height_pct;
         self.staged_pane_height_pct = config.ui.staged_pane_height_pct;
         self.commit_pane_height_pct = config.ui.commit_pane_height_pct;
+        let github_was_enabled = self.engine.github_integration_enabled;
         self.engine.github_integration_enabled = config.ui.github_integration;
+        if !github_was_enabled && self.engine.github_integration_enabled {
+            // Off-to-on through a config reload is the same transition as the
+            // palette toggle, and needs the same fresh answer from `gh`.
+            self.engine.spawn_gh_status_check();
+        }
         self.pr_banner_at_bottom = config.ui.pr_banner_position == "bottom";
         // Re-seed the changes (right) pane's hidden state from the reloaded
         // config, mirroring startup; if it just became hidden while the Files
@@ -3880,15 +3890,21 @@ impl App {
             self.selected_left = self.left_items_cache.len().saturating_sub(1);
         }
         self.engine.update_branch_sync_sessions();
-        if self.engine.github_integration_enabled
+        if !self.engine.github_integration_enabled {
+            self.engine.pr_statuses.clear();
+            self.engine.disarm_pr_sync();
+        } else if github_was_enabled
             && matches!(self.engine.gh_status, crate::model::GhStatus::Available)
         {
+            // The integration was ALREADY on, so this reload is not an
+            // off-to-on transition and the status is a settled answer rather
+            // than one a probe is about to replace: re-deriving the sync set and
+            // refreshing is the right thing to do. The off-to-on case is handled
+            // above by launching the probe and nothing else, whose completion
+            // arms this same work exactly once.
             self.engine.update_pr_sync_sessions();
             self.engine.spawn_initial_pr_refresh();
-            self.engine.pr_sync_enabled.store(true, Ordering::Relaxed);
-        } else {
-            self.engine.pr_statuses.clear();
-            self.engine.pr_sync_enabled.store(false, Ordering::Relaxed);
+            self.engine.spawn_pr_sync_worker();
         }
         self.reload_changed_files();
         self.refresh_current_diff()?;
@@ -6483,6 +6499,139 @@ leading_branch = "main"
             ..Default::default()
         };
         assert_eq!(sel.to_origin_row(0, now), Some(20));
+    }
+
+    /// Write a harmless executable stand-in for `gh`, so a test that trips an
+    /// off-to-on transition spawns the probe against it rather than shelling out
+    /// to the real `gh` (which would need a network call and a real login).
+    fn stand_in_gh(dir: &std::path::Path) -> std::ffi::OsString {
+        let script = dir.join("fake-gh");
+        std::fs::write(&script, "#!/bin/sh\nexit 0\n").expect("write stand-in gh");
+        std::fs::set_permissions(
+            &script,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+        )
+        .expect("chmod stand-in gh");
+        // Exec it once here: a freshly written executable can be refused with
+        // ETXTBSY ("Text file busy") when another test forks while this write's
+        // file descriptor is open and inherits it. Observed as a real flake in
+        // dux-core's equivalent helper. This body has no side effects, so no
+        // warmup argument is needed.
+        for _ in 0..200 {
+            match std::process::Command::new(&script).status() {
+                Ok(_) => return script.into(),
+                Err(err) if err.raw_os_error() == Some(26) => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(err) => panic!("stand-in gh is not runnable: {err}"),
+            }
+        }
+        panic!("stand-in gh stayed busy for a second; something is holding it open");
+    }
+
+    /// The palette toggle is one of the four off-to-on transitions that must
+    /// re-ask `gh` which hosts it can serve. Without it a user who logs in to
+    /// their enterprise host and then enables the integration would be stuck
+    /// with the answer dux computed at boot.
+    #[test]
+    fn the_palette_toggle_re_runs_the_host_probe() {
+        let mut app = test_support::test_app(test_support::default_bindings());
+        let dir = tempfile::tempdir().expect("tempdir");
+        app.engine.gh_probe.program = stand_in_gh(dir.path());
+        app.engine.github_integration_enabled = false;
+        app.engine.config.ui.github_integration = false;
+        assert_eq!(app.engine.gh_probe.generation, 0);
+
+        app.execute_command("toggle-github-integration".to_string())
+            .expect("toggle on");
+        assert_eq!(
+            app.engine.gh_probe.generation, 1,
+            "enabling re-runs the probe",
+        );
+
+        app.execute_command("toggle-github-integration".to_string())
+            .expect("toggle off");
+        assert_eq!(
+            app.engine.gh_probe.generation, 1,
+            "disabling asks gh nothing new",
+        );
+
+        app.execute_command("toggle-github-integration".to_string())
+            .expect("toggle on again");
+        assert_eq!(
+            app.engine.gh_probe.generation, 2,
+            "off and on again re-runs the probe a second time",
+        );
+    }
+
+    /// The terminal UI's two off-to-on sites obey the same rule as the web's:
+    /// launch the probe, arm nothing. Counted, because the failure mode is
+    /// multiplication rather than absence: acting on the pre-probe status armed
+    /// a refresh that the probe's completion then armed again, and each enable
+    /// left another permanent poller behind.
+    #[test]
+    fn the_tui_off_to_on_sites_arm_nothing_until_the_probe_answers() {
+        let mut app = test_support::test_app(test_support::default_bindings());
+        let dir = tempfile::tempdir().expect("tempdir");
+        app.engine.gh_probe.program = stand_in_gh(dir.path());
+        app.engine.github_integration_enabled = false;
+        app.engine.config.ui.github_integration = false;
+        // The stale answer an enable must NOT act on: gh looked available when
+        // the integration was last on, and nothing has re-checked since.
+        app.engine.gh_status = crate::model::GhStatus::Available;
+
+        app.execute_command("toggle-github-integration".to_string())
+            .expect("palette toggle on");
+        assert_eq!(
+            (
+                app.engine.pr_sync.refresh_starts(),
+                app.engine.pr_sync.poller_starts(),
+            ),
+            (0, 0),
+            "the palette toggle must arm no refresh and no poller of its own",
+        );
+        assert_eq!(app.engine.gh_probe.generation, 1, "it launched the probe");
+
+        // The same flip arriving through a config reload.
+        app.execute_command("toggle-github-integration".to_string())
+            .expect("palette toggle off");
+        let mut config = app.engine.config.clone();
+        config.ui.github_integration = true;
+        app.apply_reloaded_config(config)
+            .expect("apply reloaded config");
+        assert_eq!(
+            (
+                app.engine.pr_sync.refresh_starts(),
+                app.engine.pr_sync.poller_starts(),
+            ),
+            (0, 0),
+            "nor may an off-to-on config reload",
+        );
+        assert_eq!(app.engine.gh_probe.generation, 2, "it launched the probe");
+    }
+
+    /// The other TUI transition: the same flip arriving through a config reload.
+    #[test]
+    fn a_tui_config_reload_that_enables_the_integration_re_runs_the_probe() {
+        let mut app = test_support::test_app(test_support::default_bindings());
+        let dir = tempfile::tempdir().expect("tempdir");
+        app.engine.gh_probe.program = stand_in_gh(dir.path());
+        app.engine.github_integration_enabled = false;
+        app.engine.config.ui.github_integration = false;
+
+        let mut config = app.engine.config.clone();
+        config.ui.github_integration = true;
+        app.apply_reloaded_config(config.clone())
+            .expect("apply reloaded config");
+        assert_eq!(
+            app.engine.gh_probe.generation, 1,
+            "a reload that turns the integration on re-runs the probe",
+        );
+
+        // A reload that leaves it on is not a transition and must not re-run it.
+        app.apply_reloaded_config(config)
+            .expect("apply reloaded config again");
+        assert_eq!(app.engine.gh_probe.generation, 1);
     }
 
     /// A reentrant config reload (one already in flight) returns an Info status

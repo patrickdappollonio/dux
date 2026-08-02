@@ -5,7 +5,7 @@ use std::collections::HashSet;
 ///
 /// Reasons not to add a variant here: the field is a rate-limit (use a
 /// `HashMap<Key, Instant>` instead) or a kill-switch (use an
-/// `AtomicBool`). The `pr_last_checked` map and `pr_sync_enabled` flag
+/// `AtomicBool`). The `pr_last_checked` map and `pr_sync` control
 /// are deliberately NOT migrated here for exactly that reason.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum InFlightKey {

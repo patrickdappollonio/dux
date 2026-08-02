@@ -1604,14 +1604,13 @@ impl Engine {
     /// Flip `ui.github_integration` and persist it, mirroring the TUI's
     /// `toggle-github-integration` handler. Besides the config flag, this drives
     /// the engine's PR-sync side effects so the running server actually starts or
-    /// stops polling `gh`: enabling (when `gh` is available) re-derives the
-    /// sync set, kicks an initial refresh, and arms the sync flag; disabling
-    /// clears cached PR statuses and disarms it. The eager save runs FIRST: if it
-    /// fails nothing is mutated, so the engine never ends up half-changed against
-    /// a config that did not persist.
+    /// stops polling `gh`. Disabling clears cached PR statuses and disarms the
+    /// sync; ENABLING launches the `gh` host probe and does nothing else, because
+    /// the status it holds right now predates that probe by definition. The
+    /// probe's completion is what arms the work, exactly once. The eager save
+    /// runs FIRST: if it fails nothing is mutated, so the engine never ends up
+    /// half-changed against a config that did not persist.
     fn toggle_github_integration(&mut self) -> WireStatus {
-        use std::sync::atomic::Ordering;
-
         let next = !self.github_integration_enabled;
         let state = if next { "enabled" } else { "disabled" };
         // Persist a candidate config first; only mutate runtime state + PR sync
@@ -1627,13 +1626,20 @@ impl Engine {
         }
         self.github_integration_enabled = next;
         self.config.ui.github_integration = next;
-        if next && matches!(self.gh_status, crate::model::GhStatus::Available) {
-            self.update_pr_sync_sessions();
-            self.spawn_initial_pr_refresh();
-            self.pr_sync_enabled.store(true, Ordering::Relaxed);
-        } else if !next {
+        if next {
+            // Off-to-on: re-ask `gh` which hosts it can serve, and do NOTHING
+            // else. Without the re-ask the host policy would stay whatever it
+            // was when the server booted, so a user who logs in to their
+            // enterprise host and then enables the integration would get an
+            // empty eligible set and no explanation. And acting on
+            // `self.gh_status` here would be acting on the answer this probe is
+            // about to replace: it launched a refresh immediately, the probe's
+            // completion launched a second one plus another poller, and doing it
+            // twice multiplied the API traffic again.
+            self.spawn_gh_status_check();
+        } else {
             self.pr_statuses.clear();
-            self.pr_sync_enabled.store(false, Ordering::Relaxed);
+            self.disarm_pr_sync();
         }
         let detail = if next {
             "dux now syncs pull-request status in the background. Turn it off again in Preferences."
@@ -2580,6 +2586,7 @@ impl Engine {
         self.pending_web_pr_lookup_ops.insert(op_id.clone(), op);
         let raw_input = pr.to_string();
         let worker_tx = self.worker_tx.clone();
+        let policy = self.github_host_policy();
         std::thread::spawn(move || {
             crate::gh::run_pull_request_lookup_job(
                 project,
@@ -2587,6 +2594,7 @@ impl Engine {
                 custom_name,
                 worker_tx,
                 Some(op_id),
+                policy,
             );
         });
         Ok(pending)
@@ -3825,7 +3833,9 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::test_support::{sample_project, sample_session, test_engine};
+    use crate::engine::test_support::{
+        sample_project, sample_session, settle_gh_probe, test_engine,
+    };
     use crate::engine::{DeleteTerminalView, InFlightKey};
     use crate::model::AgentSession;
     use crate::statusline::StatusTone;
@@ -4585,16 +4595,185 @@ mod tests {
         );
     }
 
+    /// The lifecycle rule, counted rather than merely observed: an off-to-on
+    /// site launches the probe and does NOTHING else, and the probe's own
+    /// completion arms pull-request work exactly once.
+    ///
+    /// Counting is the point. Acting on the PRE-probe status meant an enable
+    /// launched a refresh from a stale answer, and the completion then launched
+    /// a second refresh AND another poller. `spawn_pr_sync_worker` had no
+    /// single-instance guard and the running poller reads its kill switch only
+    /// once every few seconds, so a fast off-then-on left the old poller alive
+    /// and created a permanent second one. A test that only asserted "a poller
+    /// exists" would have passed with three of them.
     #[test]
-    fn apply_wire_toggle_github_integration_flips_flag() {
-        use std::sync::atomic::Ordering;
-
+    fn a_rapid_off_on_off_on_arms_one_poller_and_one_refresh_per_enable() {
         let (mut engine, _tmp) = test_engine();
+        let dir = tempfile::tempdir().expect("tempdir");
+        engine.gh_probe.program =
+            crate::gh::probe_test_support::stand_in_gh_serving(dir.path(), &["github.com"]).into();
         engine.github_integration_enabled = false;
         engine.config.ui.github_integration = false;
-        // gh present so the enable path arms PR sync (the side effect, not just
-        // the flag, is what we want to cover).
-        engine.gh_status = crate::model::GhStatus::Available;
+
+        let counts = |engine: &Engine| {
+            (
+                engine.pr_sync.refresh_starts(),
+                engine.pr_sync.poller_starts(),
+            )
+        };
+        let toggle = |engine: &mut Engine| {
+            engine
+                .apply_wire(WireCommand::ToggleGithubIntegration {})
+                .expect("toggle github integration");
+        };
+
+        toggle(&mut engine);
+        let after_first_enable = counts(&engine);
+        settle_gh_probe(&mut engine);
+        let after_first_probe = counts(&engine);
+        assert_eq!(engine.gh_status, crate::model::GhStatus::Available);
+
+        toggle(&mut engine);
+        assert!(!engine.pr_sync.is_armed(), "disabling disarms immediately");
+
+        // Straight back on, inside the poller's read window.
+        toggle(&mut engine);
+        let after_second_enable = counts(&engine);
+        settle_gh_probe(&mut engine);
+        let after_second_probe = counts(&engine);
+
+        assert_eq!(
+            (
+                after_first_enable,
+                after_first_probe,
+                after_second_enable,
+                after_second_probe,
+            ),
+            ((0, 0), (1, 1), (1, 1), (2, 1)),
+            "(refreshes, pollers) after: first enable, its probe, second enable, its probe. \
+             An enable must arm nothing on its own, each probe must arm exactly one refresh, \
+             and there must never be a second poller.",
+        );
+    }
+
+    /// A success followed by a decisive failure must leave ZERO pollers armed.
+    /// The handler used to change the status and leave the arm flag alone, so
+    /// work armed from the older, better answer went on polling `gh` while the
+    /// interface said GitHub was unavailable.
+    #[test]
+    fn a_success_followed_by_a_decisive_failure_leaves_zero_pollers_armed() {
+        for outcome in [
+            crate::gh::GhProbe::Decided {
+                available: false,
+                policy: crate::gh::GithubHostPolicy::Hosts(Default::default()),
+            },
+            crate::gh::GhProbe::NotInstalled,
+        ] {
+            let (mut engine, _tmp) = test_engine();
+            engine.github_integration_enabled = true;
+            engine.process_worker_event(crate::worker::WorkerEvent::GhStatusChecked {
+                generation: engine.gh_probe.generation,
+                outcome: crate::gh::GhProbe::Decided {
+                    available: true,
+                    policy: crate::gh::GithubHostPolicy::Hosts(
+                        ["github.com".to_string()].into_iter().collect(),
+                    ),
+                },
+            });
+            assert!(engine.pr_sync.is_armed(), "a success arms the work");
+            assert_eq!(engine.pr_sync.poller_starts(), 1);
+
+            engine.process_worker_event(crate::worker::WorkerEvent::GhStatusChecked {
+                generation: engine.gh_probe.generation,
+                outcome: outcome.clone(),
+            });
+
+            assert!(
+                !engine.pr_sync.is_armed(),
+                "a decisive {outcome:?} must disarm pull-request work",
+            );
+            assert_eq!(
+                engine.pr_sync.poller_starts(),
+                1,
+                "and must not have started another poller on the way",
+            );
+        }
+    }
+
+    /// The mirror image: a TRANSIENT result decides nothing, so it must leave
+    /// the armed work alone rather than tearing it down.
+    #[test]
+    fn a_transient_failure_after_a_success_leaves_the_work_armed() {
+        let (mut engine, _tmp) = test_engine();
+        engine.github_integration_enabled = true;
+        engine.process_worker_event(crate::worker::WorkerEvent::GhStatusChecked {
+            generation: engine.gh_probe.generation,
+            outcome: crate::gh::GhProbe::Decided {
+                available: true,
+                policy: crate::gh::GithubHostPolicy::Hosts(
+                    ["github.com".to_string()].into_iter().collect(),
+                ),
+            },
+        });
+        assert!(engine.pr_sync.is_armed());
+
+        engine.process_worker_event(crate::worker::WorkerEvent::GhStatusChecked {
+            generation: engine.gh_probe.generation,
+            outcome: crate::gh::GhProbe::Transient("timed out".to_string()),
+        });
+
+        assert!(
+            engine.pr_sync.is_armed(),
+            "a transient failure decides nothing and must not disarm",
+        );
+        assert_eq!(engine.pr_sync.poller_starts(), 1);
+    }
+
+    #[test]
+    fn the_web_toggle_re_runs_the_host_probe_on_every_off_to_on_transition() {
+        // A user who logs in to their enterprise host after starting the server
+        // and then enables the integration must get a fresh answer from `gh`,
+        // not the empty set the server booted with.
+        let (mut engine, _tmp) = test_engine();
+        let dir = tempfile::tempdir().expect("tempdir");
+        engine.gh_probe.program =
+            crate::gh::probe_test_support::stand_in_gh(dir.path(), "exit 0").into();
+        engine.github_integration_enabled = false;
+        engine.config.ui.github_integration = false;
+        assert_eq!(engine.gh_probe.generation, 0);
+
+        engine
+            .apply_wire(WireCommand::ToggleGithubIntegration {})
+            .expect("toggle on");
+        assert_eq!(engine.gh_probe.generation, 1, "enabling re-runs the probe");
+
+        engine
+            .apply_wire(WireCommand::ToggleGithubIntegration {})
+            .expect("toggle off");
+        assert_eq!(
+            engine.gh_probe.generation, 1,
+            "disabling asks gh nothing new",
+        );
+
+        engine
+            .apply_wire(WireCommand::ToggleGithubIntegration {})
+            .expect("toggle on again");
+        assert_eq!(
+            engine.gh_probe.generation, 2,
+            "off and on again re-runs the probe a second time",
+        );
+    }
+
+    #[test]
+    fn apply_wire_toggle_github_integration_flips_flag() {
+        let (mut engine, _tmp) = test_engine();
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Enabling re-runs the host probe; point it at a stand-in serving one
+        // host so the suite never shells out to the real `gh`.
+        engine.gh_probe.program =
+            crate::gh::probe_test_support::stand_in_gh_serving(dir.path(), &["github.com"]).into();
+        engine.github_integration_enabled = false;
+        engine.config.ui.github_integration = false;
 
         engine
             .apply_wire(WireCommand::ToggleGithubIntegration {})
@@ -4605,8 +4784,13 @@ mod tests {
             "config flag flips on in lockstep with the runtime flag"
         );
         assert!(
-            engine.pr_sync_enabled.load(Ordering::Relaxed),
-            "enabling with gh available must arm PR sync"
+            !engine.pr_sync.is_armed(),
+            "the enable itself arms nothing: the probe it launched decides",
+        );
+        settle_gh_probe(&mut engine);
+        assert!(
+            engine.pr_sync.is_armed(),
+            "the probe answering that a host works is what arms PR sync",
         );
 
         engine
@@ -4615,7 +4799,7 @@ mod tests {
         assert!(!engine.github_integration_enabled);
         assert!(!engine.config.ui.github_integration);
         assert!(
-            !engine.pr_sync_enabled.load(Ordering::Relaxed),
+            !engine.pr_sync.is_armed(),
             "disabling must disarm PR sync and clear cached PR statuses"
         );
         assert!(engine.pr_statuses.is_empty());

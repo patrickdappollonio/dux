@@ -114,8 +114,29 @@ chooser. This path is only available when the `gh` CLI is installed, authenticat
 github_integration = true
 ```
 
-dux checks `gh` availability at startup. If it is missing or not authenticated, the
-path is hidden outright on both front ends: no palette command, no menu entry.
+dux checks `gh` availability at startup, and again whenever you switch the
+integration on, so running `gh auth login` while dux is up is enough: turn the
+setting off and on again and dux picks it up without a restart. If `gh` is missing,
+or none of the hosts it is logged in to are working, the path is hidden outright on
+both front ends: no palette command, no menu entry.
+
+dux asks `gh` for its per-host login status, so one expired login no longer takes
+the rest down with it. Signed in to two hosts with a stale token on one of them,
+the working host still counts and the GitHub features stay on. On an older `gh`
+that cannot report its hosts, dux falls back to a single yes-or-no authentication
+check, which is stricter: any host in trouble turns the features off.
+
+**GitHub Enterprise works, on any hostname `gh` is logged in to.** A company
+server at `git.company.example` is treated exactly like `github.com` once
+`gh auth login --hostname git.company.example` succeeds. That covers both the PR
+banner and this from-PR path, and it covers a project's `origin` remote and a PR
+URL you paste alike. dux does not judge a host by its name: it counts when the
+account `gh` would actually use for it reports success, and it stops counting the
+moment that login breaks, whatever the host is called. A `github.`-prefixed
+hostname `gh` cannot serve does not qualify either. The exception is an older
+`gh` that cannot report its hosts, where dux falls back to recognising
+`github.com` and `github.*` only; if your enterprise host is spelled anything
+else, upgrade `gh`.
 
 When you trigger it, dux resolves the PR you paste or type, then asks you to
 confirm or edit the branch name, pre-filled with the PR's head branch name. In the

@@ -297,6 +297,22 @@ impl Engine {
             self.mark_in_flight(key.clone());
         }
 
+        // Test-only: take the same exit a synchronous spawn failure takes,
+        // without exhausting the machine's process table to provoke a real one.
+        // Callers have to recover from this path themselves (no completion
+        // event will ever fire), so it needs to be reachable from a test.
+        #[cfg(test)]
+        if std::mem::take(&mut self.force_worker_spawn_failure) {
+            if let Some(key) = &spec.in_flight_key {
+                self.clear_in_flight(key);
+            }
+            crate::logger::error(&format!(
+                "spawn_background_worker[{}] failed to spawn thread: injected test failure",
+                spec.label,
+            ));
+            return BackgroundSpawn::SpawnFailed;
+        }
+
         // 2. Spawn with catch_unwind. On panic, log and post the synthesised
         //    completion event (if any) so the existing handler clears the
         //    in-flight key through the same path it would for a normal
@@ -381,7 +397,12 @@ impl Engine {
     /// intervals measured in seconds (2s, 10s, and the configurable PR-sync
     /// interval — 180s default, up to 21600s, 0 = disabled) the overhead is
     /// negligible and not worth optimising.
-    pub fn spawn_loop_worker<F>(&self, spec: LoopWorkerSpec, mut body: F)
+    ///
+    /// Returns whether the thread actually started. Most callers ignore it (a
+    /// watcher that cannot start is logged and that is all dux can do), but a
+    /// caller holding a single-instance slot for the loop must release it, or
+    /// the loop can never be started again.
+    pub fn spawn_loop_worker<F>(&self, spec: LoopWorkerSpec, mut body: F) -> bool
     where
         F: FnMut(&Sender<WorkerEvent>) -> LoopControl + Send + 'static,
     {
@@ -417,6 +438,8 @@ impl Engine {
             crate::logger::error(&format!(
                 "spawn_loop_worker[{label_for_thread}] failed to spawn thread: {err}",
             ));
+            return false;
         }
+        true
     }
 }

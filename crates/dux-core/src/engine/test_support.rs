@@ -63,10 +63,12 @@ pub(crate) fn test_engine() -> (Engine, TempDir) {
         terminating_ptys: Vec::new(),
         pending_group_removals: Vec::new(),
         gh_status: GhStatus::Unknown,
+        force_worker_spawn_failure: false,
+        gh_probe: Default::default(),
         pr_statuses: HashMap::new(),
         branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
         pr_sync_sessions: Arc::new(Mutex::new(Vec::new())),
-        pr_sync_enabled: Arc::new(AtomicBool::new(false)),
+        pr_sync: Arc::new(Default::default()),
         pr_poll_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         pr_backoff: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         refs_watcher: None,
@@ -151,4 +153,29 @@ pub(crate) fn sample_session(id: &str, project_id: &str, branch: &str) -> AgentS
         updated_at: now,
         last_focused_tab: None,
     }
+}
+
+/// Pump worker events until the `gh` host probe's result has been applied.
+///
+/// Shared by the engine's own probe tests and the wire toggle's lifecycle
+/// tests, because both need to distinguish "the probe was launched" from "the
+/// probe's answer has landed", which is the whole point of the off-to-on rule:
+/// an enable site launches the probe and does nothing else, and the completion
+/// is what arms the pull-request work.
+pub(crate) fn settle_gh_probe(engine: &mut Engine) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while std::time::Instant::now() < deadline {
+        let Ok(event) = engine
+            .worker_rx
+            .recv_timeout(std::time::Duration::from_millis(500))
+        else {
+            continue;
+        };
+        let is_probe = matches!(event, crate::worker::WorkerEvent::GhStatusChecked { .. });
+        engine.process_worker_event(event);
+        if is_probe {
+            return;
+        }
+    }
+    panic!("host probe never reported");
 }
