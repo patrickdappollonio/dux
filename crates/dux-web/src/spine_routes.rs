@@ -29,8 +29,12 @@
 //! What it is not allowed to be is a surprise. `thin_reads_pin_the_exact_terminal_key_set`
 //! and `session_create_and_its_replay_pin_the_same_terminal_key_set`
 //! (`tests/ws_transport.rs`) assert the EXACT key set of a terminal entry on
-//! every response that serves one: these three reads plus the session-create 201
-//! and its idempotent 200 replay. Add or remove a field on a terminal and those
+//! every response that can carry one: these three reads and the idempotent 200
+//! replay. The session-create 201 is deliberately NOT in that list, because a
+//! session that has just been created owns no terminals, so it has no entry to
+//! assert against; what the 201 pins instead is its own key set and that the
+//! array is present and empty rather than missing. Its entry shape is the
+//! replay's, because both answer with the same type. Add or remove a field and those
 //! fail, which is the point: the previous tests checked only ids and lengths, so
 //! `owner` appearing was invisible to the suite.
 //!

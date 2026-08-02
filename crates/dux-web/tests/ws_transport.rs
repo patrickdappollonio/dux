@@ -1554,6 +1554,21 @@ async fn session_create_and_its_replay_pin_the_same_terminal_key_set() {
     assert_eq!(created.status().as_u16(), 201);
     let created_body: serde_json::Value = created.json().await.unwrap();
     let session_id = created_body["id"].as_str().expect("created id").to_string();
+    // What the 201 CAN pin: its own key set, and that the array is present and
+    // empty rather than missing. It cannot pin a terminal ENTRY, because a
+    // session created a moment ago owns none. The entry shape is the replay's
+    // below, which answers with the same type.
+    let mut created_keys: Vec<&str> = created_body
+        .as_object()
+        .expect("201 object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    created_keys.sort_unstable();
+    assert!(
+        created_keys.contains(&"terminals"),
+        "the 201 must carry a terminals array: {created_keys:?}"
+    );
     assert_eq!(
         created_body["terminals"].as_array().map(|a| a.len()),
         Some(0),
