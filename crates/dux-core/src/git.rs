@@ -2274,6 +2274,14 @@ fn parse_github_owner_repo(url: &str) -> Option<String> {
 /// they are accepted and handled identically. `ftp`/`ftps` stay refused.
 const GIT_URL_SCHEMES: [&str; 6] = ["ssh", "git", "git+ssh", "ssh+git", "http", "https"];
 
+/// The schemes for which git decodes the whole address BEFORE it separates host
+/// from path, which is what lets a percent escape in the authority move that
+/// boundary. Everything git runs over ssh, plus its native protocol; `http` and
+/// `https` are deliberately absent, because curl splits first and decodes
+/// afterwards. See the decision site in `parse_github_remote` for the
+/// measurements behind the split.
+const PERCENT_MOVES_THE_BOUNDARY: [&str; 4] = ["ssh", "git+ssh", "ssh+git", "git"];
+
 fn parse_github_remote(url: &str) -> Option<GitHubRemote> {
     // The input is consumed EXACTLY, with no trimming of any kind. Trimming
     // used to happen here and then again inside the literal check, which
@@ -2318,16 +2326,34 @@ fn parse_github_remote(url: &str) -> Option<GitHubRemote> {
         // The authority is read RAW as well, because two things about it can
         // only be seen before the parser has split it up.
         let raw_authority = raw_url_authority(url)?;
-        // A percent in the authority can move the boundary git splits on, and
-        // the split the parser has already performed cannot show it. Git
-        // decodes a scheme-qualified URL and separates host from path
-        // AFTERWARDS, so `ssh://user%2F@github.com/o/r.git` reaches ssh as host
-        // `user`, path `/@github.com/o/r.git` (measured with a stub
-        // GIT_SSH_COMMAND), while the crate reports host `github.com`.
-        // Reproducing git's ordering from the crate's already-split output is
-        // not possible, and no legitimate GitHub remote percent-encodes its
-        // authority, so the honest answer is to refuse rather than guess.
-        if raw_authority.contains('%') {
+        // A percent in the authority can move the boundary git splits on, but
+        // only for some of the transports, and the split the parser has
+        // already performed cannot show it. The asymmetry below is MEASURED,
+        // and it is not an oversight.
+        //
+        // For the ssh-style transports and the native protocol, git decodes a
+        // scheme-qualified address and separates host from path AFTERWARDS, in
+        // that order, so the encoding is gone by the time the cut is made.
+        // `ssh://user%2Fx@host/o/r` reaches ssh as host `user` with the path
+        // `/x@host/o/r` (measured with a stub GIT_SSH_COMMAND that prints what
+        // git hands ssh), and `git://us%2Fer@host/o/r` makes git look up the
+        // host `us` on port 9418 (measured with GIT_TRACE). The crate applies
+        // the generic URL grammar, which splits first, and so reports the
+        // written host for both. Reproducing git's ordering from output that
+        // has already been split would mean reimplementing git's parser, and
+        // no legitimate GitHub remote percent-encodes its authority, so these
+        // are refused rather than guessed at.
+        //
+        // For http and https the same shape does NOT move the boundary. Git
+        // hands those to curl, which separates the authority from the path
+        // first and decodes each piece afterwards, the opposite order:
+        // `https://user%2Fx@host/o/r` and `https://u:p%40ss@host/o/r` both
+        // reach `https://host/o/r/`, the host and path the address names,
+        // which is what the crate reports too. The userinfo there is
+        // credentials and is already dropped as credentials. So a percent is
+        // allowed under the web schemes, and refusing it would refuse an
+        // ordinary remote whose password contains an escaped character.
+        if PERCENT_MOVES_THE_BOUNDARY.contains(&parsed.scheme()) && raw_authority.contains('%') {
             return None;
         }
         // Git's native protocol has no user component, unlike its ssh URL
@@ -4657,31 +4683,35 @@ mod tests {
     }
 
     /// A percent-encoded authority moves the boundary git splits the address
-    /// on, and the parsed answer cannot show it.
+    /// on for the ssh-style transports, and the parsed answer cannot show it.
     ///
     /// Measured with a stub `GIT_SSH_COMMAND` that prints the arguments git
     /// hands ssh. For `ssh://user%2F@github.com/octocat/Hello-World.git` git
     /// runs `ssh user git-upload-pack '/@github.com/octocat/Hello-World.git'`:
     /// it decodes first and splits afterwards, so the host is `user` and the
     /// repository path is the rest. `ssh://git%2Fhub.com/o/r` becomes host
-    /// `git`, path `/hub.com/o/r` the same way. The `url` crate reports
-    /// `github.com` for both, and the decoded-slash check only ever sees the
-    /// path, so dux answered with a repository on a host the remote does not
-    /// address.
+    /// `git`, path `/hub.com/o/r` the same way. The native protocol behaves
+    /// identically: `GIT_TRACE=1 git ls-remote git://us%2Fer@host.invalid/o/r`
+    /// reports `unable to look up us (port 9418)`. The `url` crate reports
+    /// `github.com` for all of them, and the decoded-slash check only ever sees
+    /// the path, so dux answered with a repository on a host the remote does
+    /// not address.
+    ///
+    /// This covers the ssh-style transports ONLY. See the companion test for
+    /// http(s), where the same shape is harmless and is accepted.
     #[test]
-    fn parse_github_remote_refuses_a_percent_encoded_authority() {
+    fn parse_github_remote_refuses_a_percent_encoded_authority_on_ssh_style_transports() {
         for url in [
             // The encoded slash sits in the user part.
             "ssh://user%2F@github.com/octocat/Hello-World.git",
-            "git+ssh://user%2F@github.com/o/r.git",
-            "ssh+git://user%2F@github.com/o/r.git",
+            "ssh://user%2F@github.com/o/r.git",
+            "git+ssh://user%2F@github.com/o/r",
+            "ssh+git://user%2F@github.com/o/r",
+            "git://user%2F@github.com/o/r",
             "git://user%2F@github.com/o/r.git",
-            "https://user%2F@github.com/o/r.git",
-            "http://user%2F@github.com/o/r.git",
             // And in the host itself.
             "ssh://git%2Fhub.com/o/r",
             "ssh://git@git%2Fhub.com/o/r",
-            "https://git%2Fhub.com/o/r",
             // An encoding that decodes to nothing structural is refused too:
             // dux cannot reproduce git's decode-then-split order from the
             // crate's already-split output, so it declines to guess at all.
@@ -4697,6 +4727,56 @@ mod tests {
                 owner_repo: "o/r".to_string(),
             }),
         );
+    }
+
+    /// Under http and https a percent in the authority is harmless, so it is
+    /// accepted. This is the asymmetry, and it is measured rather than assumed.
+    ///
+    /// Git hands an http(s) remote to curl, which separates the authority from
+    /// the path FIRST and decodes each piece afterwards, the opposite order
+    /// from the ssh-style transports. So the escape never moves the boundary:
+    ///
+    /// ```text
+    /// git ls-remote 'https://user%2Fx@nonexistent-host.invalid/o/r'
+    ///   -> unable to access 'https://nonexistent-host.invalid/o/r/'
+    /// git ls-remote 'https://u:p%40ss@nonexistent-host.invalid/o/r'
+    ///   -> unable to access 'https://nonexistent-host.invalid/o/r/'
+    /// ```
+    ///
+    /// Both reach the host the address names, with the path the address names,
+    /// which is exactly what the `url` crate reports. Refusing these was the
+    /// cost of the ssh rule being applied to every scheme, and it refused an
+    /// ordinary web remote carrying credentials with an escaped character in
+    /// the password, which is a real thing users have.
+    #[test]
+    fn parse_github_remote_accepts_a_percent_encoded_authority_on_web_transports() {
+        let github = || {
+            Some(GitHubRemote {
+                host: "github.com".to_string(),
+                owner_repo: "o/r".to_string(),
+            })
+        };
+        for url in [
+            // The regressed case: an escape inside the password.
+            "https://user:p%40ss@github.com/o/r.git",
+            "http://u:p%40ss@github.com/o/r",
+            // An escaped slash in the user part does NOT move the boundary
+            // here, per the measurement above, so it is not a hole.
+            "https://user%2Fx@github.com/o/r.git",
+            "http://user%2F@github.com/o/r.git",
+        ] {
+            assert_eq!(parse_github_remote(url), github(), "{url}");
+        }
+        // An escape in the HOST is still handled identically by both, so
+        // nothing has to be refused on dux's side to keep them agreeing. curl
+        // decodes the host and rejects a decoded `/` outright ("URL rejected:
+        // Bad hostname" for `https://git%2Fhub.com/o/r`), which is what the
+        // `url` crate does too, so this stays refused for its own reason.
+        assert_eq!(parse_github_remote("https://git%2Fhub.com/o/r"), None);
+        // And a decoded escape that IS a legal host character resolves the
+        // same way in both: `git ls-remote https://nonexistent-host%2Einvalid/o/r`
+        // reports `Could not resolve host: nonexistent-host.invalid`.
+        assert_eq!(parse_github_remote("https://github%2Ecom/o/r"), github());
     }
 
     /// Git's native protocol has no user component, so a `user@` in a `git://`
@@ -4748,11 +4828,19 @@ mod tests {
                 owner_repo: owner_repo.to_string(),
             })
         };
-        let cases: [(&str, Option<GitHubRemote>); 25] = [
-            // The authority decides where git cuts, so both of these name
-            // something other than a repository on github.com.
+        let cases: [(&str, Option<GitHubRemote>); 28] = [
+            // The authority decides where git cuts for the ssh-style
+            // transports, so both of these name something other than a
+            // repository on github.com.
             ("ssh://user%2F@github.com/o/r.git", None),
+            ("git://user%2F@github.com/o/r", None),
             ("git://user@github.com/o/r.git", None),
+            // The web transports split before they decode, so the same escape
+            // moves nothing and these are ordinary GitHub remotes. Measured:
+            // both reach `https://nonexistent-host.invalid/o/r/` when the
+            // authority is spelled against a host that does not resolve.
+            ("https://user:p%40ss@github.com/o/r.git", github("o/r")),
+            ("https://user%2Fx@github.com/o/r.git", github("o/r")),
             ("github.com/o/r", github("o/r")),
             (r"C:\repo", None),
             ("ssh://github.com/o/r/extra", None),
