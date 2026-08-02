@@ -36,10 +36,10 @@
 //! # What is deliberately refused as ambiguous
 //!
 //! This field accepts both browser addresses and git addresses, and there are
-//! shapes where those two worlds read the SAME text as DIFFERENT repositories,
-//! with nothing in the text to settle which was meant. Each is refused, with a
-//! message asking for a spelling that has only one reading. None of them is an
-//! oversight, and none of them wants a heuristic:
+//! two shapes where those two worlds read the SAME text as DIFFERENT
+//! repositories, with nothing in the text to settle which was meant. Both are
+//! refused, with a message asking for a spelling that has only one reading.
+//! Neither is an oversight, and neither wants a heuristic:
 //!
 //! * **Digits after the colon that read as a port and as an owner.**
 //!   `github.com:123/scriptaculous/pull/7` is `github.com:123` /
@@ -48,11 +48,18 @@
 //!   GitHub account and it really does own `scriptaculous`, so both readings
 //!   name a repository that exists. See [`read_colon_form`] for the two cases
 //!   the text DOES settle.
+//! * **A missing scheme separator that is also scp shorthand.**
+//!   `https:acme/widget/pull/7` is `acme` / `widget/pull` to a browser, which
+//!   skips however many slashes a special scheme was written with, and
+//!   `acme/widget` / pull request 7 on a host literally named `https` to git,
+//!   which has no `://` to see. Both are right in their own world. See
+//!   [`classify`] for the case the text DOES settle.
 //!
 //! The tempting tie-breakers are all guesses at intent rather than readings of
 //! the text. "It ends in `pull/7`, so it must be the scp one" assumes a person
-//! never types a route onto an address with a port. A wrong repository here is
-//! worse than a refusal, because it is
+//! never types a route onto a port; "prefer the browser reading, this is a
+//! pasted URL field" assumes away the git addresses this field explicitly
+//! accepts. A wrong repository here is worse than a refusal, because it is
 //! silent: the user gets an answer about a repository they did not name, and
 //! the pull request number quietly disappears or is invented. Do not add a
 //! heuristic. If a new shape turns out to be ambiguous, refuse it too.
@@ -128,6 +135,18 @@ const AMBIGUOUS_PORT_OR_OWNER: &str = "The digits after the colon can be read as
      and the two readings name different repositories. Write the full address so only one \
      reading is possible: https://host/owner/repo/pull/1 when the digits are the owner, or \
      https://host:port/owner/repo when they are a port.";
+
+/// The refusal for a colon with no `//` after it, where the browser reading and
+/// git's scp-like reading both name a repository.
+fn ambiguous_scheme_separator(scheme: &str) -> String {
+    format!(
+        "\"{scheme}:\" with no \"//\" after it can be read two ways, and they name different \
+         repositories: a browser reads what follows as the host, and git reads it as a path on a \
+         host literally named \"{scheme}\". Write the full address so only one reading is \
+         possible: https://host/owner/repo/pull/1 for a web address, or host:owner/repo for an \
+         ssh one."
+    )
+}
 
 /// Parse typed text into the repository and/or pull request it names.
 pub fn parse_typed_reference(raw: &str) -> Result<TypedReference, String> {
@@ -269,6 +288,28 @@ enum Form {
 ///   an authority follows only a literal `://` for them; without one the parser
 ///   reports no host at all and the text is refused a moment later, which is
 ///   the right answer for `ssh:acme/widget`.
+///
+///   **Recovering that separator is only safe when the text cannot ALSO be
+///   scp shorthand**, and whether it can is decided by looking at both readings
+///   rather than by counting slashes. Measured, on git 2.55.0, with an ssh
+///   command that logs the host it is handed: `https:/acme/widget` reaches ssh
+///   as the host `https` with the path `/acme/widget`, exactly as
+///   `https:acme/widget` does, so a slash straight after the colon does NOT
+///   make a text un-scp-like. `host:/absolute/path` is ordinary scp syntax and
+///   git honours it. What separates the two spellings is the OWNER each reading
+///   would produce: in `https:/github.com/acme/widget` the scp reading's owner
+///   would be `github.com`, and an owner cannot hold a dot (see
+///   [`looks_like_host`]), so only the browser reading names a repository and
+///   the recovery is unambiguous. In `https:acme/widget/pull/7` both readings
+///   name one, and it is refused. That also means the same refusal reaches
+///   `https:/acme/widget/pull/7`, which a slash-counting rule would have
+///   answered.
+///
+///   A literal `://` is exempt, and that is measured too: the same probe shows
+///   git invoking no ssh at all for `https://acme.invalid/widget`, because
+///   `scheme://` is a URL to git as much as to a browser. Without the exemption
+///   an ordinary `https://acme/widget/pull/7` (a dotless intranet host) would
+///   be refused for a conflict that does not exist.
 /// * `//github.com/acme/widget`, the scheme-relative form. A browser resolves
 ///   it against the page it is on, so it names a host like any other address;
 ///   read as a bare path it named the repository `github.com/acme`, folding
@@ -292,7 +333,14 @@ fn classify(input: &str) -> Result<Form, String> {
         .unwrap_or("");
     if is_scheme_token(scheme) {
         match scheme.to_ascii_lowercase().as_str() {
-            "http" | "https" => return Ok(Form::Url(SchemeKind::Web, input.to_string())),
+            "http" | "https" => {
+                let separator_written = input[scheme.len()..].starts_with("://");
+                if !separator_written && both_readings_name_a_repository_without_a_separator(input)
+                {
+                    return Err(ambiguous_scheme_separator(scheme));
+                }
+                return Ok(Form::Url(SchemeKind::Web, input.to_string()));
+            }
             "ssh" | "git+ssh" | "ssh+git" => {
                 return Ok(Form::Url(SchemeKind::Ssh, input.to_string()));
             }
@@ -308,6 +356,32 @@ fn classify(input: &str) -> Result<Form, String> {
         Some((scheme, _)) if is_scheme_token(scheme) => Err(UNPARSEABLE.to_string()),
         _ => Ok(Form::Schemeless),
     }
+}
+
+/// Whether an `http`/`https` text written WITHOUT the `://` separator names a
+/// repository under both of its readings, which is what makes recovering the
+/// separator a guess rather than a repair.
+///
+/// The browser reading is the one the `url` crate produces, and the scp reading
+/// is the one git produces: the scheme is the host, and everything after the
+/// colon is the path. The scp reading's owner is additionally held to the rule
+/// every other owner here is held to, that it cannot be host-shaped, because a
+/// reading whose owner could not exist is not a reading anyone meant.
+fn both_readings_name_a_repository_without_a_separator(input: &str) -> bool {
+    let Some((_, path)) = input.split_once(':') else {
+        return false;
+    };
+    let scp = path_segments(path);
+    let scp_names_one = segments_name_repository(&scp)
+        && !looks_like_host(scp.first().copied().unwrap_or_default());
+    if !scp_names_one {
+        return false;
+    }
+    let Ok(browser) = parse_url_form(input, SchemeKind::Web) else {
+        return false;
+    };
+    let browser: Vec<&str> = browser.segments.iter().map(String::as_str).collect();
+    segments_name_repository(&browser)
 }
 
 /// Whether a path's leading segments are an owner and a repository, which is
@@ -1345,6 +1419,39 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_scheme_separator_that_is_also_scp_shorthand_is_refused() {
+        // `https:acme/widget/pull/7` is valid scp shorthand for a host literally
+        // named `https`, and it is equally a web address that lost its `//`.
+        // Recovering the separator answered `acme` / `widget/pull` with no pull
+        // request: a different repository, silently.
+        let err = parse_typed_reference("https:acme/widget/pull/7").unwrap_err();
+        assert!(err.contains("https"), "{err}");
+        assert!(
+            err.contains("https://host/owner/repo"),
+            "the message must say what to type instead: {err}"
+        );
+        // A first segment that cannot be an owner leaves only one reading, so
+        // the recovery stays for every address a person actually pastes.
+        for input in [
+            "https:/github.com/acme/widget/pull/7",
+            "https:github.com/acme/widget/pull/7",
+            "http:/github.com/acme/widget/pull/7",
+        ] {
+            assert_eq!(
+                repo_of(input),
+                (
+                    Some("github.com".to_string()),
+                    Some("acme/widget".to_string())
+                ),
+                "{input}"
+            );
+            assert_eq!(parsed(input).number, Some(7), "{input}");
+        }
+        // Scheme-relative has no colon, so it has no competing reading.
+        assert_eq!(parsed("//host/owner/repo/pull/7").number, Some(7));
+    }
+
+    #[test]
     fn a_scheme_relative_address_names_a_host_rather_than_an_owner() {
         // `//host/owner/repo` is a real address: a browser resolves it against
         // the page's scheme and opens `host`. Read as a bare path it named the
@@ -1884,15 +1991,22 @@ mod independent_typed_parser_check {
         );
     }
 
-    /// Round three: a text that names two different real repositories
-    /// depending on which of the field's two worlds reads it.
+    /// Round three: the two texts that name two different real repositories
+    /// depending on which of the field's two worlds reads them.
     #[test]
     fn a_typed_address_that_reads_two_ways_is_refused_rather_than_answered() {
         // Answered `github.com:123` / `scriptaculous/pull`, dropping the pull
         // request, over `github.com` / `123/scriptaculous` / 7.
         assert_eq!(repo("github.com:123/scriptaculous/pull/7"), None);
-        // The same cost the other way round: a route on an address with a port
-        // is exactly as readable as an owner with a route.
+        // Answered `acme` / `widget/pull`, dropping the pull request, over the
+        // scp reading `https` / `acme/widget` / 7.
+        assert_eq!(repo("https:acme/widget/pull/7"), None);
+        // A slash after the colon does not settle it: git reads
+        // `https:/acme/widget` as the host `https` too. Refusing this is the
+        // cost of the rule being about the readings rather than about slashes.
+        assert_eq!(repo("https:/acme/widget/pull/7"), None);
+        // Same cost on the other side: a route on an address with a port is
+        // exactly as readable as an owner with a route.
         assert_eq!(repo("github.com:8443/acme/widget/pull/7"), None);
         // And every text that reads only one way is untouched.
         assert_eq!(
@@ -1902,6 +2016,31 @@ mod independent_typed_parser_check {
         assert_eq!(
             repo("github.com:123/scriptaculous").as_deref(),
             Some("github.com/123/scriptaculous")
+        );
+        assert_eq!(
+            repo("https:/github.com/acme/widget/pull/7").as_deref(),
+            Some("github.com/acme/widget")
+        );
+        assert_eq!(
+            repo("https:github.com/acme/widget/pull/7").as_deref(),
+            Some("github.com/acme/widget")
+        );
+        // A literal `://` is a URL to git as much as to a browser, so a dotless
+        // host keeps working rather than colliding with a reading git would
+        // never take.
+        assert_eq!(
+            repo("https://intranet/acme/widget/pull/7").as_deref(),
+            Some("intranet/acme/widget")
+        );
+        assert_eq!(
+            parse_typed_reference("https://intranet/acme/widget/pull/7")
+                .unwrap()
+                .number,
+            Some(7)
+        );
+        assert_eq!(
+            repo("//github.com/acme/widget/pull/7").as_deref(),
+            Some("github.com/acme/widget")
         );
         assert_eq!(
             repo("git@github.com:acme/widget.git").as_deref(),
