@@ -490,14 +490,32 @@ fn parse_schemeless_form(input: &str) -> Result<Parts, String> {
 ///
 /// With ONE exception, which is a decision rather than an accident.
 /// `github.com:8443/acme/widget` is not scp syntax: git's scp shorthand has no
-/// notion of a port, so an all-digit run between the colon and the first slash
-/// cannot be part of a path a person meant. It is a browser address with the
-/// scheme rubbed off, which is exactly what dropping `https://` from an address
-/// bar produces, and it is read as `host:port` + path by the schemeless branch,
-/// keeping the port on the host as every other web address does. Read as scp it
-/// answered with the host `github.com` and the repository `8443/acme`. A
-/// `user@` prefix settles the ambiguity the other way, because that is
-/// unambiguously scp and no browser address carries one before a port.
+/// notion of a port, so that all-digit run cannot be part of a path a person
+/// meant. It is a browser address with the scheme rubbed off, which is exactly
+/// what dropping `https://` from an address bar produces, and it is read as
+/// `host:port` + path by the schemeless branch, keeping the port on the host as
+/// every other web address does. Read as scp it answered with the host
+/// `github.com` and the repository `8443/acme`.
+///
+/// **An all-digit run is not enough on its own to mean a port**, which is what
+/// this used to test, and that refused a real repository: `123` is a GitHub
+/// account and it owns `scriptaculous`, so `github.com:123/scriptaculous` is an
+/// ordinary scp address. The rule that separates them looks arbitrary until it
+/// is stated, so here it is: **the digits are a port only if reading them as
+/// one leaves a valid owner AND repository behind.**
+///
+/// * `github.com:8443/acme/widget` as a port leaves `acme/widget`, a valid
+///   pair, so it is a web address with a port.
+/// * `github.com:123/scriptaculous` as a port leaves `scriptaculous`, a single
+///   segment, which cannot be an owner and a repository. So the digits are not
+///   a port and it is scp shorthand with the owner `123`.
+///
+/// A `user@` prefix still settles it the other way before any of this, because
+/// that is unambiguously scp and no browser address carries one before a port.
+/// Text that satisfies BOTH readings (`github.com:123/scriptaculous/pull/7`,
+/// where the port reading leaves `scriptaculous/pull`) is genuinely ambiguous
+/// and this rule answers "port"; no evidence in the text settles it, and
+/// inventing a tie-breaker from the trailing route would be guessing.
 fn split_scp_like(input: &str) -> Option<(&str, &str)> {
     let colon = input.find(':')?;
     if let Some(slash) = input.find('/')
@@ -510,7 +528,13 @@ fn split_scp_like(input: &str) -> Option<(&str, &str)> {
     if !authority.contains('@') {
         let head = path.split('/').next().unwrap_or(path);
         if !head.is_empty() && head.chars().all(|c| c.is_ascii_digit()) {
-            return None;
+            let rest = path_segments(&path[head.len()..]);
+            if rest.len() >= 2
+                && is_repository_component(rest[0])
+                && is_repository_component(strip_dot_git(rest[1]))
+            {
+                return None;
+            }
         }
     }
     Some((authority, path))
@@ -1140,6 +1164,17 @@ mod tests {
         assert_eq!(reference.host.as_deref(), Some("github.com:8443"));
         assert_eq!(reference.owner_repo.as_deref(), Some("acme/widget"));
         assert_eq!(reference.number, Some(123));
+        // And a numeric owner is still an owner. `123` is a real GitHub
+        // account, and it owns `scriptaculous`.
+        assert_eq!(
+            repo_of("github.com:123/scriptaculous"),
+            (
+                Some("github.com".to_string()),
+                Some("123/scriptaculous".to_string())
+            ),
+            "read as a port this leaves one segment, which cannot be an owner \
+             and a repository, so it is scp shorthand with a numeric owner"
+        );
         // And a colon followed by anything else is still scp syntax.
         assert_eq!(
             repo_of("github.com:acme/widget"),
