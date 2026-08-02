@@ -273,7 +273,13 @@ fn plan_entries(entries: &[PrSyncEntry]) -> (Vec<(String, Option<PrInfo>)>, Vec<
 
         planned.push(Planned::new(
             entry.session_id.clone(),
-            normalize_github_host(&host).to_string(),
+            // Hostnames are case-insensitive and this value becomes a
+            // `gh --hostname` argument. The parser lowercases a live remote,
+            // but this host can also come straight out of SQLite, where a
+            // legacy or externally written row may have kept its capitals, so
+            // the lowercasing belongs here, at the boundary, whatever the
+            // source.
+            normalize_github_host(&host).to_ascii_lowercase(),
             owner.to_string(),
             repo.to_string(),
             entry.branch_name.clone(),
@@ -1533,6 +1539,7 @@ mod tests {
     /// `ssh://` scheme, which is what git reports whenever an `url.*.insteadOf`
     /// rewrite maps onto an ssh base.
     fn ssh_origin_repo(url: &str) -> tempfile::TempDir {
+        git::test_support::isolate_git_from_user_configuration();
         let dir = tempfile::tempdir().unwrap();
         for args in [
             vec!["init", "--quiet"],
@@ -1551,6 +1558,63 @@ mod tests {
             );
         }
         dir
+    }
+
+    /// The hazard these fixtures have to be protected from, demonstrated rather
+    /// than asserted from memory: `git remote get-url` APPLIES the user's
+    /// `url.*.insteadOf` rewrites, so a developer with one configured would see
+    /// these tests resolve a host nobody wrote down. The rewrite is supplied
+    /// per-command here, so this reproduces on every machine and reads nobody's
+    /// real configuration.
+    #[test]
+    fn git_remote_get_url_applies_insteadof_rewrites() {
+        let dir = ssh_origin_repo("ssh://git@github.com/octocat/Hello-World.git");
+        let hostile = dir.path().join("hostile.gitconfig");
+        std::fs::write(
+            &hostile,
+            "[url \"ssh://git@evil.example/\"]\n\tinsteadOf = ssh://git@github.com/\n",
+        )
+        .unwrap();
+        let out = std::process::Command::new("git")
+            .args([
+                "-C",
+                dir.path().to_str().unwrap(),
+                "remote",
+                "get-url",
+                "origin",
+            ])
+            .env("GIT_CONFIG_GLOBAL", &hostile)
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            "ssh://git@evil.example/octocat/Hello-World.git",
+            "if this stops rewriting, the isolation below is no longer load-bearing"
+        );
+    }
+
+    /// So the fixtures isolate git's system and global configuration for the
+    /// whole test process. Whatever the developer has configured, git sees an
+    /// empty global config here, and these tests pass or fail for reasons that
+    /// belong to the code.
+    #[test]
+    fn git_fixtures_run_against_an_empty_global_configuration() {
+        let dir = ssh_origin_repo("ssh://git@github.com/octocat/Hello-World.git");
+        let out = std::process::Command::new("git")
+            .args([
+                "-C",
+                dir.path().to_str().unwrap(),
+                "config",
+                "--global",
+                "--list",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&out.stdout).trim().is_empty(),
+            "the test process must see no global git configuration, got:\n{}",
+            String::from_utf8_lossy(&out.stdout)
+        );
     }
 
     #[test]
@@ -1625,5 +1689,35 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, "s0");
         assert!(results[0].1.is_none());
+    }
+
+    /// The live remote is lowercased by the parser, but a stored pull request
+    /// comes straight out of SQLite, and a legacy or externally written row can
+    /// carry a capitalised host. That host is handed to `gh --hostname`, so it
+    /// is lowercased at the planning boundary whatever its source.
+    #[test]
+    fn plan_entries_lowercases_a_host_taken_from_a_stored_pull_request() {
+        // No remote at all, so planning must fall back to the stored PR.
+        let dir = tempfile::tempdir().unwrap();
+        let entry = PrSyncEntry {
+            session_id: "s0".to_string(),
+            branch_name: "feat/x".to_string(),
+            worktree_path: dir.path().to_string_lossy().to_string(),
+            known_pr: Some(StoredPr {
+                session_id: "s0".to_string(),
+                pr_number: 7,
+                host: "GitHub.COM".to_string(),
+                owner_repo: "octocat/Hello-World".to_string(),
+                state: "OPEN".to_string(),
+                title: "t".to_string(),
+                url: "https://github.com/octocat/Hello-World/pull/7".to_string(),
+            }),
+            agent_exited: false,
+        };
+
+        let (_, planned) = plan_entries(std::slice::from_ref(&entry));
+
+        assert_eq!(planned.len(), 1);
+        assert_eq!(planned[0].host, "github.com");
     }
 }
