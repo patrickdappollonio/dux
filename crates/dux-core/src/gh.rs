@@ -395,13 +395,28 @@ pub enum GithubHostPolicy {
 }
 
 impl GithubHostPolicy {
-    /// Whether `host` may be handed to `gh`. Compared lowercased. An empty host
-    /// never qualifies: callers that mean github.com say so (see
-    /// `normalize_github_host`), and treating "" as github.com here would let an
-    /// unparsed remote through the gate.
+    /// Whether `host` may be handed to `gh`. Compared lowercased, and compared
+    /// EXACTLY otherwise. An empty host never qualifies: callers that mean
+    /// github.com say so (see `normalize_github_host`), and treating "" as
+    /// github.com here would let an unparsed remote through the gate.
+    ///
+    /// Lowercasing is a normalisation this function may perform because it
+    /// changes no answer: hostnames are case-insensitive, and every caller
+    /// lowercases before it gets here anyway. TRIMMING is not, and doing it
+    /// here WIDENED THE REMOTE GRAMMAR from the far side. `git@ github.com:o/r`
+    /// (a space after the at sign) is a literal address with an interior space,
+    /// so the scp-like branch reads the host as `" github.com"` and hands it
+    /// here; a trim made this answer for `github.com`, a DIFFERENT host, and
+    /// the caller then returned the host it was holding, spaces and all, to be
+    /// handed to `gh`. Whitespace in a host is a defect in the caller or in the
+    /// address, and the answer to a defect is no. It is refused OUTRIGHT rather
+    /// than left to each mode to fail on its own, because one of them would
+    /// not: `LegacyNameRule` accepts anything beginning `github.`, so
+    /// `"github.com "` matched the prefix on its own merits even with the trim
+    /// gone, and `git@github.com :o/r` resolved to a host with a space on it.
     pub fn allows(&self, host: &str) -> bool {
-        let host = host.trim().to_ascii_lowercase();
-        if host.is_empty() {
+        let host = host.to_ascii_lowercase();
+        if host.is_empty() || host.chars().any(|c| c.is_whitespace() || c.is_control()) {
             return false;
         }
         match self {
@@ -1702,6 +1717,42 @@ mod host_policy_tests {
         );
         assert!(!policy.allows("gitlab.com"));
         assert!(!policy.allows(""));
+    }
+
+    /// The policy compares WHAT IT IS GIVEN. It used to trim first, which made
+    /// it answer for a host other than the one it was asked about: with the
+    /// parser preserving an interior space, `git@ git.company.example:o/r` was
+    /// checked as `git.company.example`, allowed, and then handed onwards with
+    /// the space still on it. Whitespace in a host is a defect in the caller or
+    /// in the address, and the answer to a defect is no.
+    #[test]
+    fn the_policy_never_trims_the_host_it_is_asked_about() {
+        let named =
+            GithubHostPolicy::Hosts(["git.company.example".to_string()].into_iter().collect());
+        for host in [
+            " git.company.example",
+            "git.company.example ",
+            "\tgit.company.example",
+            "git.company.example\n",
+            " ",
+        ] {
+            assert!(
+                !named.allows(host),
+                "an answered host set must not match {host:?} with whitespace on it",
+            );
+        }
+
+        for host in [
+            " github.com",
+            "github.com ",
+            "\tgithub.com",
+            " github.enterprise",
+        ] {
+            assert!(
+                !GithubHostPolicy::LegacyNameRule.allows(host),
+                "the name rule must not match {host:?} either",
+            );
+        }
     }
 
     #[test]

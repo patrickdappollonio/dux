@@ -5123,7 +5123,18 @@ mod tests {
                 owner_repo: owner_repo.to_string(),
             })
         };
-        let cases: [(&str, Option<GitHubRemote>); 42] = [
+        let cases: [(&str, Option<GitHubRemote>); 46] = [
+            // Whitespace INSIDE the address. The literal check refuses only
+            // whitespace at the edges, because a git remote really can hold it
+            // there and refusing it is the point; an interior space is a
+            // different thing, and it is part of the host or of the path. What
+            // git would contact for the first of these is a host whose name
+            // begins with a space, so none of them names a repository on
+            // github.com, and the policy must not launder the space away.
+            ("git@ github.com:o/r.git", None),
+            ("ssh://git@ github.com/o/r", None),
+            ("github.com :o/r", None),
+            ("git@github.com: o/r", None),
             // GitHub's documented port-443 SSH endpoint is github.com reached
             // another way, so it parses, and it comes back NORMALISED because
             // the host is handed to `gh` as an API host.
