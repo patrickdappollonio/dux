@@ -509,6 +509,10 @@ pub fn build_app(
             "/ws/projects/{id}/terminals/{tid}/pty",
             get(ws_project_terminal_pty_upgrade),
         )
+        .route(
+            "/ws/terminals/{tid}/pty",
+            get(ws_standalone_terminal_pty_upgrade),
+        )
         .route("/ws/sessions/{id}/tabs/{tab}/pty", get(ws_tab_pty_upgrade))
         .merge(crate::git_routes::routes())
         .merge(crate::file_routes::routes())
@@ -1167,6 +1171,73 @@ async fn ws_project_terminal_pty_upgrade(
         &state.ws_terminal_semaphore,
         peer.ip(),
         "/ws/projects/:id/terminals/:tid/pty",
+        "max_websocket_terminal_connections",
+    ) {
+        Some(permit) => permit,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "too many WebSocket connections; try again shortly",
+            )
+                .into_response();
+        }
+    };
+    let engine = state.engine.clone();
+    let console = state.console.clone();
+    let pty_size_owners = Arc::clone(&state.pty_size_owners);
+    let bus = Arc::clone(&state.event_bus);
+    let connections = Arc::clone(&state.connections);
+    let peer_ip = peer.ip();
+    let user_agent = captured_user_agent(&headers);
+    ws.max_message_size(MAX_WS_MESSAGE_SIZE)
+        .on_upgrade(move |socket| {
+            handle_pty_socket(
+                socket,
+                engine,
+                PtyTarget::Terminal(tid),
+                console,
+                peer_ip,
+                permit,
+                pty_size_owners,
+                bus,
+                connections,
+                user_agent,
+            )
+        })
+        .into_response()
+}
+
+/// Upgrade handler for `GET /ws/terminals/:tid/pty`: stream a STANDALONE
+/// terminal's PTY. Un-nested, because a standalone terminal has no owner to nest
+/// under, so there is no owner-exists check to run first; the ownership check
+/// that remains is the important half, and it goes the other way: the exhaustive
+/// `is_at_route` refuses an owned terminal here, so this address cannot be used
+/// to attach to a session's or a project's terminal without its path owner.
+async fn ws_standalone_terminal_pty_upgrade(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+    Path(tid): Path<String>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if !same_origin_allowed(&headers) {
+        return (
+            StatusCode::FORBIDDEN,
+            "cross-origin WebSocket upgrade rejected",
+        )
+            .into_response();
+    }
+    if !crate::rest_common::id_within_bound(&tid) {
+        return (StatusCode::NOT_FOUND, "unknown terminal").into_response();
+    }
+    match state.engine.terminal_owner_of(tid.clone()).await {
+        Some(owner) if owner.is_at_route(dux_core::model::TerminalRoute::Standalone) => {}
+        _ => return (StatusCode::NOT_FOUND, "unknown terminal").into_response(),
+    }
+    let permit = match acquire_ws_permit(
+        &state.ws_terminal_semaphore,
+        peer.ip(),
+        "/ws/terminals/:tid/pty",
         "max_websocket_terminal_connections",
     ) {
         Some(permit) => permit,

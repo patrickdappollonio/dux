@@ -77,6 +77,10 @@ pub enum EngineRequest {
     /// Create a project terminal for a project (a plain shell at the project's
     /// repo root with no agent attached), replying `(terminal_id, label)`.
     CreateProjectTerminal(String, oneshot::Sender<Result<(String, String), String>>),
+    /// Create a standalone terminal (a plain shell in the user's home directory,
+    /// owned by neither an agent nor a project), replying `(terminal_id, label)`.
+    /// Carries no owner id, because there is no owner to name.
+    CreateStandaloneTerminal(oneshot::Sender<Result<(String, String), String>>),
     /// Resolve the owner of a companion terminal (instant lookup), or `None`
     /// when the terminal id is unknown. Lets the nested PTY sockets and the
     /// terminal REST routes enforce that a `:tid` belongs to its path owner
@@ -664,6 +668,18 @@ impl EngineHandle {
         let (tx, rx) = oneshot::channel();
         self.req_tx
             .send(EngineRequest::CreateProjectTerminal(project_id, tx))
+            .await
+            .map_err(|_| "engine thread gone".to_string())?;
+        rx.await.map_err(|_| "engine reply dropped".to_string())?
+    }
+
+    /// Create a standalone terminal (a plain shell in the user's home directory
+    /// owned by nothing), replying `(terminal_id, label)`. Takes no owner id,
+    /// which is the whole point of the kind.
+    pub async fn create_standalone_terminal(&self) -> Result<(String, String), String> {
+        let (tx, rx) = oneshot::channel();
+        self.req_tx
+            .send(EngineRequest::CreateStandaloneTerminal(tx))
             .await
             .map_err(|_| "engine thread gone".to_string())?;
         rx.await.map_err(|_| "engine reply dropped".to_string())?
@@ -1602,6 +1618,7 @@ pub(crate) fn run_engine_loop(
                         EngineRequest::ApplyWire(..)
                             | EngineRequest::CreateTerminal(..)
                             | EngineRequest::CreateProjectTerminal(..)
+                            | EngineRequest::CreateStandaloneTerminal(..)
                             | EngineRequest::CreateAgentTab(..)
                     );
                     handle_request(
@@ -1748,6 +1765,13 @@ impl StatusEmitter {
 /// coarse event firing, and no client would ever refetch. Partitioning by owner
 /// keeps exactly the event that fired before firing now: a session-owned
 /// terminal moves the sessions half, a project terminal moves the projects half.
+///
+/// A STANDALONE terminal never rode in either container, so there is no event to
+/// preserve and one has to be chosen. It moves the SESSIONS half, because that
+/// is the event the flat sidebar list's churn already fires on and because the
+/// client refetches the whole `/spine` on either event regardless. What matters
+/// is that it fires on ONE of them: firing on neither is the silent-omission bug
+/// this whole partition exists to prevent.
 fn spine_fingerprints(engine: &Engine) -> (String, String) {
     fingerprint_halves(&engine.spine())
 }
@@ -1762,6 +1786,11 @@ fn fingerprint_halves(spine: &dux_core::viewmodel::SpineView) -> (String, String
         spine.terminals.iter().partition(|t| match &t.owner {
             dux_core::viewmodel::TerminalOwnerView::Session { .. } => true,
             dux_core::viewmodel::TerminalOwnerView::Project { .. } => false,
+            // Owned by nothing, so it rode in neither container and there is no
+            // previous event to preserve. It fires the sessions event, which is
+            // where the flat sidebar list's churn already goes; see the note on
+            // `spine_fingerprints`.
+            dux_core::viewmodel::TerminalOwnerView::Standalone { .. } => true,
         });
     let projects = serde_json::to_string(&(&spine.projects, &project_terminals))
         .unwrap_or_else(|_| "[]".to_string());
@@ -2039,6 +2068,12 @@ fn handle_request(
         EngineRequest::CreateProjectTerminal(project_id, reply) => {
             let res = engine
                 .create_project_terminal(&project_id, 24, 80)
+                .map_err(|e| e.to_string());
+            let _ = reply.send(res);
+        }
+        EngineRequest::CreateStandaloneTerminal(reply) => {
+            let res = engine
+                .create_standalone_terminal(24, 80)
                 .map_err(|e| e.to_string());
             let _ = reply.send(res);
         }
@@ -3132,6 +3167,38 @@ mod tests {
             sessions_before, sessions_after,
             "and must not spuriously fire sessions.changed"
         );
+    }
+
+    #[test]
+    fn a_standalone_terminal_fires_a_coarse_change_rather_than_none() {
+        // The silent half of a new owner kind: it rides in NEITHER of the two
+        // nested containers, so leaving it out of both halves would mean a
+        // standalone terminal appearing, changing its command, or being dragged
+        // fires no event at all and no browser ever refetches. What it fires
+        // matters less than THAT it fires; it goes with the sessions half.
+        let before = empty_spine();
+        let mut after = empty_spine();
+        after.terminals.push(sample_terminal_view(
+            "term-1",
+            dux_core::viewmodel::TerminalOwnerView::Standalone {
+                cwd_label: "~/code".to_string(),
+            },
+        ));
+
+        let (projects_before, sessions_before) = fingerprint_halves(&before);
+        let (projects_after, sessions_after) = fingerprint_halves(&after);
+        assert_ne!(
+            sessions_before, sessions_after,
+            "a standalone terminal must fire a coarse change, not silence"
+        );
+        assert_eq!(projects_before, projects_after);
+
+        // And a FIELD change on a live one, which is the case a mere "does it
+        // appear" test would pass while the browser showed stale information.
+        let mut changed = after.clone();
+        changed.terminals[0].foreground_cmd = Some("vim".to_string());
+        let (_, sessions_changed) = fingerprint_halves(&changed);
+        assert_ne!(sessions_after, sessions_changed);
     }
 
     #[test]

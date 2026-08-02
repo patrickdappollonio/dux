@@ -988,6 +988,194 @@ async fn project_terminal_rest_create_and_delete() {
     );
 }
 
+/// Create a standalone terminal over REST and return its id. No owner id,
+/// because there is no owner: this is the whole shape of the un-nested address.
+async fn create_standalone_terminal_via_rest(addr: SocketAddr) -> String {
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{addr}/api/v1/terminals"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status().as_u16(),
+        201,
+        "standalone terminal create should be 201"
+    );
+    assert!(
+        resp.headers().contains_key("location"),
+        "201 must carry a Location header"
+    );
+    let body: serde_json::Value = resp.json().await.unwrap();
+    body["terminal_id"]
+        .as_str()
+        .expect("terminal_id in create response")
+        .to_string()
+}
+
+/// Whether the spine's flat `terminals` collection carries `terminal_id` tagged
+/// as owned by nothing.
+fn spine_has_standalone_terminal(spine: &serde_json::Value, terminal_id: &str) -> bool {
+    spine_terminal_has_owner_kind(spine, terminal_id, "standalone")
+}
+
+/// The journey: a user opens a terminal that belongs to nothing, works in it,
+/// and closes it, all through addresses that name no owner. It reaches the
+/// browser as part of the one flat collection, tagged `standalone` and carrying
+/// the directory it opened in.
+#[tokio::test]
+async fn a_standalone_terminal_opens_streams_and_closes_at_un_nested_addresses() {
+    let (addr, _tmp) = boot().await;
+    let client = reqwest::Client::new();
+
+    let tid = create_standalone_terminal_via_rest(addr).await;
+
+    // It arrives in the ONE flat collection, tagged as owned by nothing, and
+    // carrying the `~`-shortened directory its row names it by.
+    assert!(
+        wait_for_spine(addr, |spine| {
+            spine_has_standalone_terminal(spine, &tid)
+                && spine["terminals"]
+                    .as_array()
+                    .map(|ts| {
+                        ts.iter().any(|t| {
+                            t["id"].as_str() == Some(tid.as_str())
+                                && t["owner"]["cwd_label"]
+                                    .as_str()
+                                    .is_some_and(|l| !l.is_empty())
+                        })
+                    })
+                    .unwrap_or(false)
+        })
+        .await,
+        "a standalone terminal must reach the browser tagged, with its directory"
+    );
+
+    // Its own websocket, un-nested, streams its bytes.
+    let (mut ws, _) =
+        tokio_tungstenite::connect_async(format!("ws://{addr}/ws/terminals/{tid}/pty"))
+            .await
+            .expect("connect the standalone terminal pty");
+    ws.send(Message::Text(r#"{"rows":24,"cols":80}"#.into()))
+        .await
+        .unwrap();
+    ws.send(Message::Binary(b"dux-standalone-marker\n".to_vec()))
+        .await
+        .unwrap();
+    let mut acc = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Some(Ok(m))) = tokio::time::timeout(Duration::from_millis(300), ws.next()).await {
+            if let Message::Binary(b) = m {
+                acc.extend_from_slice(&b);
+            }
+            if String::from_utf8_lossy(&acc).contains("dux-standalone-marker") {
+                break;
+            }
+        }
+    }
+    assert!(
+        String::from_utf8_lossy(&acc).contains("dux-standalone-marker"),
+        "the standalone terminal socket did not stream; got {} bytes",
+        acc.len()
+    );
+    let _ = ws.close(None).await;
+
+    // And it closes at its own un-nested address.
+    let del = client
+        .delete(format!("http://{addr}/api/v1/terminals/{tid}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        del.status().as_u16(),
+        204,
+        "standalone delete should be 204"
+    );
+    assert!(
+        wait_for_spine(addr, |spine| !spine_has_standalone_terminal(spine, &tid)).await,
+        "the deleted standalone terminal must leave the spine"
+    );
+}
+
+/// The un-nested address is not a back door. An OWNED terminal is a 404 there,
+/// on both verbs and on the socket, and a standalone terminal is a 404 on both
+/// nested addresses, so the existing cross-owner rejections still refuse with a
+/// third kind in play.
+#[tokio::test]
+async fn the_un_nested_terminal_address_refuses_owned_terminals_and_vice_versa() {
+    let (addr, _tmp) = boot().await;
+    let client = reqwest::Client::new();
+
+    let session_tid = create_terminal_via_rest(addr, "s1").await;
+    let project_tid = create_project_terminal_via_rest(addr, "p1").await;
+    let standalone_tid = create_standalone_terminal_via_rest(addr).await;
+
+    for owned in [&session_tid, &project_tid] {
+        let resp = client
+            .delete(format!("http://{addr}/api/v1/terminals/{owned}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status().as_u16(),
+            404,
+            "an owned terminal must 404 on the un-nested delete"
+        );
+        assert!(
+            tokio_tungstenite::connect_async(format!("ws://{addr}/ws/terminals/{owned}/pty"))
+                .await
+                .is_err(),
+            "an owned terminal must not attach at the un-nested socket"
+        );
+    }
+
+    // And the other direction: the standalone terminal is a 404 under both owners.
+    let via_session = client
+        .delete(format!(
+            "http://{addr}/api/v1/sessions/s1/terminals/{standalone_tid}"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        via_session.status().as_u16(),
+        404,
+        "a standalone terminal must 404 on the session route"
+    );
+    let via_project = client
+        .delete(format!(
+            "http://{addr}/api/v1/projects/p1/terminals/{standalone_tid}"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        via_project.status().as_u16(),
+        404,
+        "a standalone terminal must 404 on the project route"
+    );
+    assert!(
+        tokio_tungstenite::connect_async(format!(
+            "ws://{addr}/ws/sessions/s1/terminals/{standalone_tid}/pty"
+        ))
+        .await
+        .is_err(),
+        "a standalone terminal must not attach through a session path"
+    );
+
+    // Nothing was deleted by any of those refusals.
+    assert!(
+        wait_for_spine(addr, |spine| {
+            spine_has_terminal(spine, &session_tid)
+                && spine_has_project_terminal(spine, &project_tid)
+                && spine_has_standalone_terminal(spine, &standalone_tid)
+        })
+        .await,
+        "the cross-owner 404s must not delete anything"
+    );
+}
+
 /// Ownership is enforced per VARIANT, both directions: a project terminal is a
 /// 404 on the session-nested route, and a session terminal is a 404 on the
 /// project-nested route. A raw-id comparison across owner kinds would pass one
