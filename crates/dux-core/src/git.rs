@@ -2265,7 +2265,7 @@ fn strip_git_record_terminator(text: &str) -> &str {
 /// Those are the two spellings dux handles, not the whole of git's grammar. Git
 /// also reads the deprecated `ftp`/`ftps` schemes, `<helper>::<address>` for an
 /// explicit remote helper, and the tilde-expanded ssh path forms. None of them
-/// is a way anyone reaches GitHub, so each is refused deliberately rather than
+/// is a way dux can read reliably, so each is refused deliberately rather than
 /// overlooked.
 #[cfg(test)]
 fn parse_github_owner_repo(url: &str) -> Option<String> {
@@ -2420,8 +2420,8 @@ fn parse_github_remote(url: &str) -> Option<GitHubRemote> {
         // are case-insensitive and this value is handed to `gh`.
         let written_host = parsed.host_str()?.to_ascii_lowercase();
         let host = github_host(&written_host, SSH_TRANSPORT_SCHEMES.contains(&raw_scheme))?;
-        // An ssh or git port is the SSH service's port and has nothing to do
-        // with the host's API, so dropping it is right. An http(s) port is part
+        // An ssh or git port is the transport service's port and has nothing to
+        // do with the host's API, so dropping it is right. An http(s) port is part
         // of the server endpoint, and `gh` cannot express one: it refuses a
         // colon in a hostname and builds fixed API URLs. Keeping the host and
         // discarding the port would send the query to a different server than
