@@ -58,6 +58,11 @@ describe("no-auth boot", () => {
     const mod = await import("./store")
     // booted is set synchronously at module load, so no vi.waitFor needed.
     expect(mod.getSnapshot().booted).toBe(true)
+    // Boot does issue requests: without this, a boot that fetched nothing at
+    // all would satisfy the "no /api/me" check below and prove nothing.
+    await vi.waitFor(() => {
+      expect(requestedUrls.length).toBeGreaterThan(0)
+    })
     // No /api/me call should have been made.
     expect(requestedUrls.some((u) => u.includes("/api/me"))).toBe(false)
   })
