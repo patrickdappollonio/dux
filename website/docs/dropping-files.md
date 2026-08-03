@@ -185,7 +185,10 @@ from its side. dux sends the correct bytes; the receiving tool rewrites them.
   quoting dux adds counts toward that. dux measures the finished paste rather than
   the file's own path, and when it would go over the limit it does not send it at
   all: the toast tells you the file was saved, gives you its full path, and says
-  the agent will not pick it up automatically.
+  the agent will not pick it up automatically. The limit belongs to Codex, not to
+  a quoting style, so it applies whichever `web_dragdrop_paste` value you give
+  Codex, and it applies to nothing else. No other CLI has been measured to have
+  one, and a terminal has none at all.
 
 A `file://` URL is deliberately **not** one of the four values. Codex and OpenCode
 both resolve one, but whether Claude Code does on its paste path has not been
@@ -207,7 +210,9 @@ is precisely the thing that would split a path on its spaces, expand a `$` in it
 and run a command substitution the moment you press Enter on the line the path
 landed in. dux permits all of those characters in a destination path, so the
 quoting is what makes them inert. The path is pasted at your cursor as one
-literal word and nothing is submitted for you.
+literal word and nothing is submitted for you. There is no length limit either:
+that limit is a property of Codex's composer, and a shell does not have one, so a
+very long path is sent to a terminal rather than held back.
 
 ## Several files at once
 

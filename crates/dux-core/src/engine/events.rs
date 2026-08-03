@@ -1050,8 +1050,11 @@ impl Engine {
     }
 
     /// Remember the drag-and-drop paste form a tab LAUNCHED with, so the web
-    /// bootstrap can still answer for that provider name after the user renames
-    /// or removes its `[providers.<name>]` block. Taken from the exact
+    /// bootstrap can answer for that TAB rather than for its provider's name:
+    /// two live tabs of one provider launched either side of a config edit need
+    /// the two forms they each started with, and one name cannot carry both. It
+    /// is also what still answers after the user renames or removes the tab's
+    /// `[providers.<name>]` block. Taken from the exact
     /// [`ProviderCommandConfig`] the launch used rather than re-read from the
     /// current config, because the whole point is to survive a later edit.
     /// Retired by [`Engine::clear_tab_runtime`] when the process goes.

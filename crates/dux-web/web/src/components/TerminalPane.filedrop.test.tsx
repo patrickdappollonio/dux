@@ -540,6 +540,113 @@ describe("the paste form follows the provider running in the pane", () => {
       await dropOnTerminalOwnedBy("claude", "/tmp/p1/Bob's app/shot.png"),
     ).toEqual(["'/tmp/p1/Bob'\\''s app/shot.png' "])
   })
+
+  it("sends a very long path to a TERMINAL, because a shell has no such limit", async () => {
+    // The paste-length limit used to be keyed by FORM, and a terminal always
+    // uses the shell-safe form, so a terminal inherited codex's composer limit.
+    // dux withheld a perfectly good path from a shell and told the user it was
+    // too long for "this agent", which is not even what it was talking to.
+    //
+    // 2000 characters, comfortably past codex's threshold, and it goes out.
+    const longPath = `/tmp/p1/${"a".repeat(1_992)}`
+    expect(longPath.length).toBe(2000)
+    vi.mocked(toast.warning).mockClear()
+    expect(await dropOnTerminalOwnedBy("codex", longPath)).toEqual([
+      `'${longPath}' `,
+    ])
+    expect(vi.mocked(toast.warning)).not.toHaveBeenCalled()
+  })
+
+  it("holds a long path back from codex on EVERY form it can be configured with", async () => {
+    // The other direction of the same mistake. `bare`, `double_quoted` and
+    // `backslash_escaped` are all valid choices for codex, and with the limit
+    // keyed by form they escaped it entirely: dux sent an over-limit payload
+    // codex silently ignores while the toast claimed the file was attached.
+    for (const form of ["bare", "double_quoted", "backslash_escaped"]) {
+      cleanup()
+      FakePtySocket.instances = []
+      TermStub.instances = []
+      TermStub.pastes = []
+      uploadDroppedFile.mockReset()
+      vi.mocked(toast.warning).mockClear()
+      const longPath = `/tmp/p1/${"a".repeat(1_992)}`
+      uploadDroppedFile.mockResolvedValue({
+        path: longPath,
+        saved_name: "shot.png",
+        requested_name: "shot.png",
+        folder: "/tmp/p1",
+        folder_label: "~/p1",
+        renamed: false,
+      })
+      mockState = stateForFocusedTabProvider("codex")
+      mockState.bootstrap!.provider_web_dragdrop_paste = { codex: form }
+      render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+      await drop([file("shot.png")])
+      expect(sentToSocket(), `codex configured as ${form}`).toEqual([])
+      const message = vi.mocked(toast.warning).mock.calls[0][0] as string
+      expect(message).toContain("1000 characters")
+    }
+  })
+})
+
+describe("two live tabs of one provider that launched with different forms", () => {
+  // The case a map keyed by provider NAME cannot answer, and the reason the
+  // server publishes the launched forms keyed by TAB ID.
+  //
+  // Launch a codex tab, edit `[providers.codex] web_dragdrop_paste`, launch a
+  // second codex tab. Both processes are live, both report the provider name
+  // `codex`, and each needs the form it started with. Folded onto one provider
+  // key there is one slot for two answers, so one of the two panes got the
+  // other's form, and which one depended on server-side map iteration order.
+
+  /// Two live codex tabs whose LAUNCHED forms differ, over a current config
+  /// value that matches NEITHER, so a pane reading the provider map instead of
+  /// its own tab shows up in the bytes rather than passing by luck.
+  function stateWithTwoLaunchedTabs(): DuxState {
+    const s = stateRunning("codex", "codex")
+    const session = s.spine!.sessions[0]
+    session.tabs = [
+      { ...session.tabs[0], id: "s1", provider: "codex" },
+      { ...session.tabs[0], id: "tab-b", provider: "codex" },
+    ]
+    s.bootstrap!.provider_web_dragdrop_paste = { codex: "bare" }
+    s.bootstrap!.tab_web_dragdrop_paste = {
+      s1: "single_quoted",
+      "tab-b": "backslash_escaped",
+    }
+    return s
+  }
+
+  async function dropOnTab(tabId: string, path: string) {
+    cleanup()
+    FakePtySocket.instances = []
+    TermStub.instances = []
+    TermStub.pastes = []
+    uploadDroppedFile.mockReset()
+    uploadDroppedFile.mockResolvedValue({
+      path,
+      saved_name: "shot.png",
+      requested_name: "shot.png",
+      folder: "/tmp/p1",
+      folder_label: "~/p1",
+      renamed: false,
+    })
+    mockState = stateWithTwoLaunchedTabs()
+    render(<TerminalPane kind="agent" id={tabId} sessionId="s1" />)
+    await drop([file("shot.png")])
+    return sentToSocket()
+  }
+
+  it("gives each pane the form its OWN tab launched with", async () => {
+    const path = "/tmp/p1/Web App/shot.png"
+    expect(await dropOnTab("s1", path)).toEqual(["'/tmp/p1/Web App/shot.png' "])
+    expect(await dropOnTab("tab-b", path)).toEqual([
+      "/tmp/p1/Web\\ App/shot.png ",
+    ])
+    // And neither pane got the CURRENT config value, which is the single answer
+    // a provider-keyed map would have handed both of them.
+    expect(await dropOnTab("s1", path)).not.toEqual([`${path} `])
+  })
 })
 
 describe("dropping several files", () => {

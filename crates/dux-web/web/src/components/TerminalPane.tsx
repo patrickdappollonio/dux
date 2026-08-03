@@ -13,11 +13,11 @@ import {
   composeSendWrites,
 } from "@/lib/composebar"
 import {
+  type DragDropPasteForms,
   type DropContext,
   type DropOutcome,
   dropToastFor,
-  attachmentCharLimit,
-  dragDropPasteFormFor,
+  dragDropPasteFor,
   pasteExceedsAttachmentLimit,
   pastePayload,
   tooLongToAttachReason,
@@ -315,10 +315,16 @@ export function TerminalPane(props: TerminalPaneProps) {
   // middle of one; the form is resolved immediately before each paste, so a
   // reload takes effect from the next file onward instead of being ignored for
   // the rest of the drop.
-  const dragDropPasteFormsRef = useRef(bootstrap?.provider_web_dragdrop_paste)
+  const dragDropPasteFormsRef = useRef<DragDropPasteForms>({
+    byTab: bootstrap?.tab_web_dragdrop_paste,
+    byProvider: bootstrap?.provider_web_dragdrop_paste,
+  })
   useEffect(() => {
-    dragDropPasteFormsRef.current = bootstrap?.provider_web_dragdrop_paste
-  }, [bootstrap?.provider_web_dragdrop_paste])
+    dragDropPasteFormsRef.current = {
+      byTab: bootstrap?.tab_web_dragdrop_paste,
+      byProvider: bootstrap?.provider_web_dragdrop_paste,
+    }
+  }, [bootstrap?.tab_web_dragdrop_paste, bootstrap?.provider_web_dragdrop_paste])
   // Retire any in-flight drag the moment the feature stops being available.
   // The gate refuses events for a disabled feature, so once it closes there is
   // no matching `dragleave` or `drop` left to clear the overlay, and it would
@@ -1621,10 +1627,14 @@ export function TerminalPane(props: TerminalPaneProps) {
       }
 
       // Resolved here, per file, rather than once per drop: see the note above.
-      const form = dragDropPasteFormFor(
+      // The FORM and the CLI's character LIMIT come out together, keyed by the
+      // same target, so neither can be derived from the other: a terminal is a
+      // shell and has no limit whatever form it uses, and codex has its limit on
+      // every form it can be configured with.
+      const { form, charLimit } = dragDropPasteFor(
         dragDropPasteFormsRef.current,
         kind === "agent"
-          ? { kind: "agent", provider: providerNameRef.current }
+          ? { kind: "agent", tabId: id, provider: providerNameRef.current }
           : { kind: "terminal" },
       )
       const payload = pastePayload(where.path, form)
@@ -1634,12 +1644,11 @@ export function TerminalPane(props: TerminalPaneProps) {
       // the prompt and attach nothing, while the toast claimed success. Report
       // it as the stranded file it is: saved, here is the full path, go and
       // reference it yourself.
-      const limit = attachmentCharLimit(form)
-      if (limit !== null && pasteExceedsAttachmentLimit(payload, form)) {
+      if (charLimit !== null && pasteExceedsAttachmentLimit(payload, charLimit)) {
         outcomes.push({
           kind: "saved-not-sent",
           ...where,
-          reason: tooLongToAttachReason(limit),
+          reason: tooLongToAttachReason(charLimit),
         })
         continue
       }

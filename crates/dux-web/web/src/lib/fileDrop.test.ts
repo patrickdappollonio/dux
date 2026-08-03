@@ -3,13 +3,31 @@ import { describe, expect, it } from "vitest"
 import {
   MAX_NAMED_FILES,
   TERMINAL_PASTE_FORM,
-  attachmentCharLimit,
+  attachmentCharLimitFor,
+  dragDropPasteFor,
   dragDropPasteFormFor,
   dropToastFor,
   pasteExceedsAttachmentLimit,
   pastePayload,
+  type DragDropPasteForm,
+  type DragDropPasteForms,
   type DropOutcome,
 } from "./fileDrop"
+
+const ALL_FORMS: readonly DragDropPasteForm[] = [
+  "bare",
+  "single_quoted",
+  "double_quoted",
+  "backslash_escaped",
+]
+
+/// The two maps the server publishes, as the client bundles them.
+function published(
+  byProvider: Record<string, string> | undefined,
+  byTab?: Record<string, string>,
+): DragDropPasteForms {
+  return { byProvider, byTab }
+}
 
 const agent = { kind: "agent" as const }
 const terminal = { kind: "terminal" as const }
@@ -423,13 +441,82 @@ describe("pastePayload", () => {
 })
 
 describe("dragDropPasteFormFor", () => {
-  const forms = { claude: "bare", codex: "single_quoted", opencode: "bare" }
+  const forms = published({
+    claude: "bare",
+    codex: "single_quoted",
+    opencode: "bare",
+  })
   const running = (provider: string | undefined) =>
-    ({ kind: "agent", provider }) as const
+    ({ kind: "agent", tabId: "tab-1", provider }) as const
 
   it("uses the form the server published for the running provider", () => {
     expect(dragDropPasteFormFor(forms, running("codex"))).toBe("single_quoted")
     expect(dragDropPasteFormFor(forms, running("claude"))).toBe("bare")
+  })
+
+  it("prefers the form THIS TAB launched with over the provider's current one", () => {
+    // The scenario a provider-keyed answer cannot serve. Two live tabs of one
+    // provider, launched either side of a config edit: they report the same
+    // provider name and need different forms. The server publishes what each
+    // one launched with, keyed by tab, and the pane resolves by its own tab.
+    //
+    // This is also why the launched form WINS rather than merely filling a gap.
+    // If the current config value won, both tabs would resolve to it again and
+    // publishing per tab would buy nothing. A config edit takes effect on the
+    // tab's next launch.
+    const live = published(
+      { codex: "backslash_escaped" },
+      { "tab-a": "single_quoted", "tab-b": "backslash_escaped" },
+    )
+    expect(
+      dragDropPasteFormFor(live, {
+        kind: "agent",
+        tabId: "tab-a",
+        provider: "codex",
+      }),
+    ).toBe("single_quoted")
+    expect(
+      dragDropPasteFormFor(live, {
+        kind: "agent",
+        tabId: "tab-b",
+        provider: "codex",
+      }),
+    ).toBe("backslash_escaped")
+  })
+
+  it("answers for a tab whose provider config no longer names", () => {
+    // The user renamed or deleted `[providers.codex-nightly]` while the tab was
+    // still running it. The provider map cannot answer and `bare` is the form
+    // codex silently ignores, so the launched entry is the only truth left.
+    expect(
+      dragDropPasteFormFor(published({}, { "tab-a": "single_quoted" }), {
+        kind: "agent",
+        tabId: "tab-a",
+        provider: "codex-nightly",
+      }),
+    ).toBe("single_quoted")
+  })
+
+  it("falls back to the provider map for a tab with no launched entry", () => {
+    // A tab launched since the last bootstrap fetch. Nothing has changed since
+    // it launched, so the current config value is the right answer for it.
+    expect(
+      dragDropPasteFormFor(published({ codex: "single_quoted" }, { other: "bare" }), {
+        kind: "agent",
+        tabId: "tab-new",
+        provider: "codex",
+      }),
+    ).toBe("single_quoted")
+  })
+
+  it("falls back to bare for a launched form name it does not recognize", () => {
+    expect(
+      dragDropPasteFormFor(published({ codex: "single_quoted" }, { "tab-a": "nonsense" }), {
+        kind: "agent",
+        tabId: "tab-a",
+        provider: "codex",
+      }),
+    ).toBe("bare")
   })
 
   it("falls back to bare for a provider the server said nothing about", () => {
@@ -437,7 +524,9 @@ describe("dragDropPasteFormFor", () => {
     // the map at all, and a tab whose provider is not known yet. Bare is the
     // do-nothing option.
     expect(dragDropPasteFormFor(forms, running("myagent"))).toBe("bare")
-    expect(dragDropPasteFormFor(undefined, running("codex"))).toBe("bare")
+    expect(dragDropPasteFormFor(published(undefined), running("codex"))).toBe(
+      "bare",
+    )
     expect(dragDropPasteFormFor(forms, running(undefined))).toBe("bare")
   })
 
@@ -445,22 +534,17 @@ describe("dragDropPasteFormFor", () => {
     // The server normalizes and warns once at config load, so this should not
     // arise; a client that trusted the string blindly would still be one config
     // typo from pasting the literal word into somebody's prompt.
-    expect(dragDropPasteFormFor({ codex: "single-quoted" }, running("codex"))).toBe(
-      "bare",
-    )
-    expect(dragDropPasteFormFor({ codex: "file_url" }, running("codex"))).toBe(
-      "bare",
-    )
+    expect(
+      dragDropPasteFormFor(published({ codex: "single-quoted" }), running("codex")),
+    ).toBe("bare")
+    expect(
+      dragDropPasteFormFor(published({ codex: "file_url" }), running("codex")),
+    ).toBe("bare")
   })
 
   it("recognizes all four shipped forms", () => {
-    for (const form of [
-      "bare",
-      "single_quoted",
-      "double_quoted",
-      "backslash_escaped",
-    ] as const) {
-      expect(dragDropPasteFormFor({ p: form }, running("p"))).toBe(form)
+    for (const form of ALL_FORMS) {
+      expect(dragDropPasteFormFor(published({ p: form }), running("p"))).toBe(form)
     }
   })
 
@@ -474,10 +558,12 @@ describe("dragDropPasteFormFor", () => {
     expect(dragDropPasteFormFor(forms, { kind: "terminal" })).toBe(
       "single_quoted",
     )
-    // The target type gives a terminal no provider FIELD, so no configuration of
-    // the map can change this answer.
-    expect(dragDropPasteFormFor({}, { kind: "terminal" })).toBe("single_quoted")
-    expect(dragDropPasteFormFor(undefined, { kind: "terminal" })).toBe(
+    // The target type gives a terminal no provider FIELD and no tab id, so no
+    // configuration of either map can change this answer.
+    expect(dragDropPasteFormFor(published({}), { kind: "terminal" })).toBe(
+      "single_quoted",
+    )
+    expect(dragDropPasteFormFor(published(undefined), { kind: "terminal" })).toBe(
       "single_quoted",
     )
   })
@@ -494,7 +580,9 @@ describe("dragDropPasteFormFor", () => {
       "/home/p/Bob's app/shot.png",
       '/home/p/it"s/shot.png',
     ]) {
-      const form = dragDropPasteFormFor(undefined, { kind: "terminal" })
+      const form = dragDropPasteFormFor(published(undefined), {
+        kind: "terminal",
+      })
       expect(posixLex(pastePayload(path, form).slice(0, -1))).toEqual([path])
     }
   })
@@ -507,11 +595,52 @@ describe("the attachment length limit", () => {
   // it ever looks for an image path. So a long enough path is never attached,
   // and quoting, which adds characters, is what can push one over.
 
-  it("carries a limit only for the form that exists because of codex", () => {
-    expect(attachmentCharLimit("single_quoted")).toBe(1000)
-    expect(attachmentCharLimit("bare")).toBe(null)
-    expect(attachmentCharLimit("double_quoted")).toBe(null)
-    expect(attachmentCharLimit("backslash_escaped")).toBe(null)
+  const codexTab = { kind: "agent", tabId: "tab-1", provider: "codex" } as const
+
+  it("belongs to the CLI, so it follows codex onto every form", () => {
+    // It used to be keyed by FORM, which was wrong in both directions, and both
+    // are pinned here. Codex configured with any of the other three forms
+    // escaped the limit entirely and dux would send an over-limit payload codex
+    // silently ignores.
+    for (const form of ALL_FORMS) {
+      const plan = dragDropPasteFor(published({ codex: form }), codexTab)
+      expect(plan.form).toBe(form)
+      expect(plan.charLimit).toBe(1000)
+    }
+  })
+
+  it("gives a TERMINAL none, because a shell has none", () => {
+    // The other direction of the same mistake. A terminal always uses the
+    // shell-safe form, so keying by form made it inherit codex's composer limit,
+    // and dux withheld a perfectly good path from a shell while telling the user
+    // it was too long for "this agent" — which is not what it was talking to.
+    const plan = dragDropPasteFor(published({ codex: "single_quoted" }), {
+      kind: "terminal",
+    })
+    expect(plan.form).toBe("single_quoted")
+    expect(plan.charLimit).toBe(null)
+    const huge = pastePayload(`/tmp/${"a".repeat(5_000)}`, plan.form)
+    expect(pasteExceedsAttachmentLimit(huge, plan.charLimit)).toBe(false)
+  })
+
+  it("gives a provider with no measured limit none", () => {
+    // Only codex has been measured. A provider dux ships that has not, and one
+    // the user added themselves, both get no limit: guessing one would withhold
+    // files a CLI would have taken.
+    for (const provider of ["claude", "opencode", "copilot", "myagent"]) {
+      expect(
+        attachmentCharLimitFor({ kind: "agent", tabId: "tab-1", provider }),
+      ).toBe(null)
+    }
+    // ...as does a tab whose provider is not known yet.
+    expect(
+      attachmentCharLimitFor({
+        kind: "agent",
+        tabId: "tab-1",
+        provider: undefined,
+      }),
+    ).toBe(null)
+    expect(attachmentCharLimitFor(codexTab)).toBe(1000)
   })
 
   it("measures the FINAL payload, not the path on disk", () => {
@@ -522,21 +651,20 @@ describe("the attachment length limit", () => {
     expect([...path].length).toBe(998)
     const payload = pastePayload(path, "single_quoted")
     expect([...payload].length).toBe(1001)
-    expect(pasteExceedsAttachmentLimit(payload, "single_quoted")).toBe(true)
+    expect(pasteExceedsAttachmentLimit(payload, 1000)).toBe(true)
     // The same path bare is 999 characters and fits, which is the whole point:
-    // the answer belongs to the payload and not to the file.
+    // the answer belongs to the payload and not to the file. (Same CLI, same
+    // limit: only the quoting differs, and that is what pushes it over.)
     expect([...pastePayload(path, "bare")].length).toBe(999)
-    expect(pasteExceedsAttachmentLimit(pastePayload(path, "bare"), "bare")).toBe(
+    expect(pasteExceedsAttachmentLimit(pastePayload(path, "bare"), 1000)).toBe(
       false,
     )
   })
 
   it("puts the boundary exactly where the CLI puts it", () => {
     // `char_count > 1000`, so 1000 fits and 1001 does not.
-    const at = "x".repeat(1000)
-    const over = "x".repeat(1001)
-    expect(pasteExceedsAttachmentLimit(at, "single_quoted")).toBe(false)
-    expect(pasteExceedsAttachmentLimit(over, "single_quoted")).toBe(true)
+    expect(pasteExceedsAttachmentLimit("x".repeat(1000), 1000)).toBe(false)
+    expect(pasteExceedsAttachmentLimit("x".repeat(1001), 1000)).toBe(true)
   })
 
   it("counts characters, not UTF-16 code units", () => {
@@ -545,14 +673,11 @@ describe("the attachment length limit", () => {
     const payload = "🙂".repeat(600)
     expect(payload.length).toBe(1200)
     expect([...payload].length).toBe(600)
-    expect(pasteExceedsAttachmentLimit(payload, "single_quoted")).toBe(false)
+    expect(pasteExceedsAttachmentLimit(payload, 1000)).toBe(false)
   })
 
-  it("never refuses a form that has no measured limit", () => {
-    const huge = "x".repeat(100_000)
-    for (const form of ["bare", "double_quoted", "backslash_escaped"] as const) {
-      expect(pasteExceedsAttachmentLimit(huge, form)).toBe(false)
-    }
+  it("never refuses anything when there is no limit", () => {
+    expect(pasteExceedsAttachmentLimit("x".repeat(100_000), null)).toBe(false)
   })
 })
 

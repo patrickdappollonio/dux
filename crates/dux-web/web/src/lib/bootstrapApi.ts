@@ -26,8 +26,21 @@ export interface Bootstrap {
    * learns what shape to give a DROPPED file's path for the provider running in
    * it, since the agent CLIs do not agree on how they read a pasted path. Keyed by
    * provider name; a name absent from the map means "bare", as does the whole
-   * field being absent on an older server (see `dragDropPasteFormFor`). */
+   * field being absent on an older server (see `dragDropPasteFormFor`). This is
+   * a plain projection of config; what a live process launched with is in
+   * `tab_web_dragdrop_paste`, and the pane prefers that. */
   provider_web_dragdrop_paste?: Record<string, string>
+  /** The form each LIVE tab actually launched with, keyed by TAB ID (same
+   * normalized names as `provider_web_dragdrop_paste`). The terminal pane
+   * prefers this over the provider map, because two live tabs of one provider
+   * can need different forms: launch a tab, edit that provider's
+   * `web_dragdrop_paste`, launch another, and both processes report the same
+   * provider name, so a provider-keyed map has one slot for two answers. It
+   * also covers a tab whose `[providers.<name>]` block the user has since
+   * renamed or deleted. A tab absent here (one launched since the last
+   * bootstrap fetch) falls back to the provider map, then to "bare"; older
+   * servers omit the field entirely, which is the same fallback. */
+  tab_web_dragdrop_paste?: Record<string, string>
   /** Text macros from `[macros]` in config order (the macro popover/editor). */
   macros: MacroView[]
   /** The rotating welcome tips shown on the empty-state screen. */

@@ -84,11 +84,30 @@ const DRAG_DROP_PASTE_FORMS: readonly DragDropPasteForm[] = [
   "backslash_escaped",
 ]
 
-/// What a drop is landing on. An agent pane runs a provider and therefore has a
-/// configured form; a terminal has no provider FIELD at all, which is what makes
-/// it impossible for the terminal branch below to read one.
+/// The two maps the server publishes, bundled so a caller cannot pass one where
+/// the other belongs.
+///
+/// They answer two different questions and must never be folded into one key.
+/// `byTab` says what a LIVE PROCESS launched with; `byProvider` says what CONFIG
+/// currently asks for. Two live tabs of one provider can need different forms
+/// (launch a tab, edit config, launch another), which is precisely what a
+/// provider-keyed answer cannot express: it has one slot for two answers, and
+/// which one it held came down to server-side map iteration order.
+export type DragDropPasteForms = {
+  /// `bootstrap.tab_web_dragdrop_paste`, keyed by TAB ID: the form each live
+  /// tab's process actually launched with. Absent on an older server.
+  byTab: Record<string, string> | undefined
+  /// `bootstrap.provider_web_dragdrop_paste`, keyed by PROVIDER NAME: a plain
+  /// projection of config. Absent on an older server.
+  byProvider: Record<string, string> | undefined
+}
+
+/// What a drop is landing on. An agent pane runs a provider in a tab, so it has
+/// both a launched form and a configured one, and a measured CLI limit may apply
+/// to it; a terminal has no provider FIELD and no tab id at all, which is what
+/// makes it impossible for the terminal branches below to read either.
 export type DropPasteTarget =
-  | { kind: "agent"; provider: string | undefined }
+  | { kind: "agent"; tabId: string; provider: string | undefined }
   | { kind: "terminal" }
 
 /// The form a plain terminal always gets, whatever provider its owner runs and
@@ -123,26 +142,41 @@ export const TERMINAL_PASTE_FORM: DragDropPasteForm = "single_quoted"
 /// setting describes how an agent CLI reads a paste and a shell is not an agent
 /// CLI. See `TERMINAL_PASTE_FORM`.
 ///
-/// For an agent, `forms` is the server's `bootstrap.provider_web_dragdrop_paste`
-/// map, keyed by provider name. `bare` is the answer for everything the map does
-/// not cover: a provider the user added themselves, a server too old to send the
-/// map, a tab whose provider is not known yet, and, defensively, a form name this
-/// client does not know. The server already normalizes and already warned about a
-/// misspelling once at config load, so the last case should not arise; a client
-/// that trusted the string blindly would still be one config typo away from
-/// pasting the literal word into somebody's prompt.
+/// For an agent, the answer is looked up in this order:
+///
+///   1. `forms.byTab` under the pane's TAB ID: what this tab's live process
+///      actually launched with. It WINS rather than merely filling a gap, and
+///      that precedence is the whole point. If the current config value won,
+///      two sibling tabs launched either side of a config edit would resolve to
+///      the same form again and publishing per tab would buy nothing. A config
+///      edit therefore takes effect on that tab's next launch.
+///   2. `forms.byProvider` under the running provider's NAME: what config asks
+///      for. This is the right answer for a tab with no launched entry, i.e. one
+///      launched since the last bootstrap fetch, because nothing has changed
+///      since it launched.
+///   3. `bare`, which covers everything neither map does: a provider the user
+///      added themselves, a server too old to send either map, a tab whose
+///      provider is not known yet, and, defensively, a form name this client
+///      does not know. The server already normalizes and already warned about a
+///      misspelling once at config load, so the last case should not arise; a
+///      client that trusted the string blindly would still be one config typo
+///      away from pasting the literal word into somebody's prompt.
 export function dragDropPasteFormFor(
-  forms: Record<string, string> | undefined,
+  forms: DragDropPasteForms,
   target: DropPasteTarget,
 ): DragDropPasteForm {
   if (target.kind === "terminal") return TERMINAL_PASTE_FORM
-  const named =
-    target.provider === undefined ? undefined : forms?.[target.provider]
-  return DRAG_DROP_PASTE_FORMS.find((f) => f === named) ?? "bare"
+  const launched = forms.byTab?.[target.tabId]
+  const known = (name: string | undefined) =>
+    DRAG_DROP_PASTE_FORMS.find((f) => f === name)
+  if (launched !== undefined) return known(launched) ?? "bare"
+  const configured =
+    target.provider === undefined ? undefined : forms.byProvider?.[target.provider]
+  return known(configured) ?? "bare"
 }
 
-/// How many characters of pasted text each form's receiving end will still look
-/// at as a possible file path, or `null` when nothing measurable applies.
+/// How many characters of pasted text a CLI will still look at as a possible
+/// file path, keyed by PROVIDER NAME.
 ///
 /// Only one entry is real. Codex's composer compares the pasted text's character
 /// count against `LARGE_PASTE_CHAR_THRESHOLD` (1000) and, when it is over, files
@@ -150,24 +184,50 @@ export function dragDropPasteFormFor(
 /// image path. So a long enough path is never attached, however correctly it is
 /// quoted, and the quoting itself adds characters that can push one over.
 ///
-/// Keyed by FORM rather than by provider, which is an approximation and is worth
-/// saying out loud: the threshold belongs to the receiving CLI, and `single_quoted`
-/// is simply the only form dux ships pointing at a CLI with a measured one. A user
-/// who sets `single_quoted` for some other provider gets this limit applied to it
-/// too. That errs toward telling the user the file may not be attached, which is
-/// the safe direction: the file is saved either way and the toast gives its path.
-/// If a second CLI is ever measured and its limit differs, this becomes a
-/// per-provider value published alongside the form.
-const ATTACHMENT_CHAR_LIMITS: Record<DragDropPasteForm, number | null> = {
-  bare: null,
-  single_quoted: 1000,
-  double_quoted: null,
-  backslash_escaped: null,
+/// KEYED BY PROVIDER, DELIBERATELY, AND NOT BY FORM. The threshold belongs to
+/// the receiving CLI, which is the same thing the form is keyed by, so this
+/// travels BESIDE the form rather than being derived from it. Keying it by form
+/// was wrong in both directions at once: a TERMINAL always uses the shell-safe
+/// form and so inherited codex's composer limit, which a shell does not have,
+/// and codex configured with any of the other three forms (all valid choices)
+/// escaped the limit entirely and was handed an over-limit payload it silently
+/// ignores.
+///
+/// A provider absent from this table has NO limit. Guessing one would withhold
+/// files a CLI would have taken; a new entry belongs here only once someone has
+/// MEASURED it, the same rule the forms themselves follow.
+const PROVIDER_ATTACHMENT_CHAR_LIMITS: Record<string, number> = {
+  codex: 1000,
 }
 
-/// The character limit for a form, or `null` when it has none.
-export function attachmentCharLimit(form: DragDropPasteForm): number | null {
-  return ATTACHMENT_CHAR_LIMITS[form]
+/// The character limit that applies to a drop target, or `null` when none does.
+///
+/// A terminal has none: it is a shell, and a shell has no composer that files a
+/// long paste away somewhere else.
+export function attachmentCharLimitFor(target: DropPasteTarget): number | null {
+  if (target.kind === "terminal") return null
+  if (target.provider === undefined) return null
+  return PROVIDER_ATTACHMENT_CHAR_LIMITS[target.provider] ?? null
+}
+
+/// Everything a pane needs to turn one saved file into one paste: the FORM and
+/// the CLI's character LIMIT, resolved together because they answer to the same
+/// thing (which CLI is receiving this) and must not be derived from each other.
+export type DropPastePlan = {
+  form: DragDropPasteForm
+  /// `null` means unlimited, not "zero".
+  charLimit: number | null
+}
+
+/// Resolve both halves for one drop target.
+export function dragDropPasteFor(
+  forms: DragDropPasteForms,
+  target: DropPasteTarget,
+): DropPastePlan {
+  return {
+    form: dragDropPasteFormFor(forms, target),
+    charLimit: attachmentCharLimitFor(target),
+  }
 }
 
 /// Whether this PAYLOAD is too long for the receiving CLI to read as a file path.
@@ -177,14 +237,16 @@ export function attachmentCharLimit(form: DragDropPasteForm): number | null {
 /// payload over it, and counting the file's own path would miss exactly the cases
 /// this exists to catch.
 ///
+/// Takes the LIMIT rather than the form, for the reason spelled out on
+/// `PROVIDER_ATTACHMENT_CHAR_LIMITS`. A `null` limit refuses nothing.
+///
 /// Counts CHARACTERS, because that is what the CLI counts. JavaScript's `.length`
 /// counts UTF-16 code units, so a path full of emoji would look twice as long as
 /// it is and be refused when the CLI would have accepted it.
 export function pasteExceedsAttachmentLimit(
   payload: string,
-  form: DragDropPasteForm,
+  limit: number | null,
 ): boolean {
-  const limit = ATTACHMENT_CHAR_LIMITS[form]
   // Strictly greater, matching `char_count > LARGE_PASTE_CHAR_THRESHOLD`: a
   // payload of exactly the limit still gets looked at.
   return limit !== null && [...payload].length > limit

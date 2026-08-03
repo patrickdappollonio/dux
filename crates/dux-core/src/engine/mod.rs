@@ -167,15 +167,27 @@ pub struct Engine {
     /// The web drag-and-drop paste form each LIVE tab launched with, keyed by tab
     /// id, carrying the provider NAME it launched as alongside the form.
     ///
-    /// This exists for one case: the user renames or deletes a
-    /// `[providers.<name>]` block while a tab is still running that provider. The
-    /// tab keeps reporting the name it launched as (that is what is actually on
-    /// screen), so a browser looking that name up in the configured map would find
-    /// nothing and fall back to `bare`, changing how a dropped path is quoted
-    /// under a running agent that never changed. Keeping the launched form with
-    /// the PROCESS is the fix; it retires when the process does, through
-    /// `clear_tab_runtime`, and a name config still carries always resolves from
-    /// config instead (config wins for an explicit preference).
+    /// Keyed by TAB, not by provider name, because a provider name cannot carry
+    /// the answer. Launch a tab, edit that provider's `web_dragdrop_paste`,
+    /// launch another: both processes are live, both report the same provider
+    /// name, and each needs the form it started with. It is published per tab in
+    /// [`crate::viewmodel::BootstrapView::tab_web_dragdrop_paste`] and the browser
+    /// resolves it by the pane's own tab, so the LAUNCHED form wins for a live tab
+    /// and a config edit takes effect on that tab's next launch.
+    ///
+    /// It also covers the case it was first written for: the user renames or
+    /// deletes a `[providers.<name>]` block while a tab is still running that
+    /// provider. The tab keeps reporting the name it launched as (that is what is
+    /// actually on screen), so a browser looking that name up in the configured
+    /// map would find nothing and fall back to `bare`, changing how a dropped path
+    /// is quoted under a running agent that never changed. Keeping the launched
+    /// form with the PROCESS is the fix, and it retires when the process does,
+    /// through `clear_tab_runtime`.
+    ///
+    /// The provider NAME rides along in the value but is deliberately NOT
+    /// published: it is diagnostic, and publishing it would only invite folding
+    /// these entries back onto a provider key, which is the collapse this map
+    /// exists to avoid.
     ///
     /// The alternative considered was to refuse a rename or a removal while a
     /// process is live. It was rejected because `config.toml` is a file the user
