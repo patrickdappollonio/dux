@@ -843,7 +843,24 @@ fn group_scan_step(stat: std::io::Result<Vec<u8>>, pgid: u32) -> ScanEntry {
         },
         // It exited between the listing and the read. Ordinary churn, and a
         // fact: it is not in the group any more.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => ScanEntry::NotAMember,
+        //
+        // TWO errnos say that, and knowing only one of them is what made this
+        // wrong. ENOENT is the pid directory being gone before the open. ESRCH
+        // is the subtler one, and it was MEASURED rather than reasoned about:
+        // `std::fs::read` opens and then reads, and procfs resolves the task at
+        // READ time, so a process reaped in between opens perfectly and then
+        // fails with "no such process". Rust has no `ErrorKind` for it, so it
+        // arrives as `Uncategorized`, and reading that as "dux could not look"
+        // marked the whole scan INCOMPLETE and refused an ordinary drop because
+        // an unrelated program somewhere on the machine happened to exit at the
+        // wrong moment. Same shape as every other defect in this file: an
+        // inability to look and a fact about the world collapsed into one.
+        Err(e)
+            if e.kind() == std::io::ErrorKind::NotFound
+                || e.raw_os_error() == Some(libc::ESRCH) =>
+        {
+            ScanEntry::NotAMember
+        }
         Err(_) => ScanEntry::Unreadable,
     }
 }
@@ -2031,6 +2048,51 @@ mod tests {
         assert_eq!(
             group_scan_step(Ok(b"nonsense with no paren".to_vec()), 4242),
             ScanEntry::Unreadable
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_process_reaped_between_the_open_and_the_read_is_not_a_member() {
+        // The production read is `std::fs::read`, which OPENS and then READS,
+        // and procfs resolves the task at READ time. So a process reaped in
+        // between opens perfectly and then fails, and the errno is ESRCH rather
+        // than the ENOENT the case above covers. Rust has no `ErrorKind` for
+        // ESRCH, so it arrives as `Uncategorized` and was classified as "dux
+        // could not look", which marked the whole scan INCOMPLETE and refused a
+        // perfectly ordinary drop because some unrelated program on the machine
+        // happened to exit while dux was scanning.
+        //
+        // The window is held open with a real dependency rather than provoked
+        // with load: open a live child's stat, reap the child, then read the
+        // handle already held. That is exactly the production window, made
+        // deterministic. The errno is taken from the KERNEL here rather than
+        // written down, so this test cannot pass by agreeing with a constant
+        // that is wrong.
+        let mut child = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("exit 0")
+            .spawn()
+            .expect("spawn a short-lived child");
+        let pid = child.id();
+        let mut file = std::fs::File::open(format!("/proc/{pid}/stat")).expect("open a live stat");
+        child.wait().expect("reap the child");
+
+        let mut buf = Vec::new();
+        let err = file
+            .read_to_end(&mut buf)
+            .expect_err("a reaped process's stat must stop reading");
+        assert_ne!(
+            err.kind(),
+            std::io::ErrorKind::NotFound,
+            "if this ever becomes NotFound the case above already covers it and \
+             this test is no longer about anything; got {err:?}"
+        );
+        assert_eq!(
+            group_scan_step(Err(err), 4242),
+            ScanEntry::NotAMember,
+            "a process that exited is a FACT about the world, not an inability \
+             to look at it"
         );
     }
 
