@@ -681,6 +681,7 @@ pub(crate) fn probe_github_hosts_with(program: &OsStr) -> GhProbe {
 /// Outcome of a bounded `gh` invocation. `Failed` carries the failure text (a
 /// spawn or wait error) so callers can log the real cause instead of conflating
 /// it with a timeout.
+#[derive(Debug)]
 pub(crate) enum GhCallOutcome {
     Completed(std::process::Output),
     TimedOut,
@@ -2417,22 +2418,25 @@ mod tests {
         // records its own argv, so this asserts what dux ASKED for rather than
         // depending on the network or on this machine's login. `GH_HOST` is set
         // on the child command only, never on the test process.
+        //
+        // Built through the SHARED stand-in helper rather than hand-rolled. This
+        // test used to write and chmod its own script, which is the pattern
+        // `stand_in_gh` exists to replace: a freshly written executable can be
+        // refused with ETXTBSY in a multi-threaded process, because another test
+        // forking while the write handle is open inherits it and the kernel then
+        // sees an open write handle on the file. That is exactly how this test
+        // failed, once, in a full run, with an assertion that did not say why.
+        // The helper warms the script up until it runs, and the assertion below
+        // now names the outcome so a recurrence cannot be anonymous again.
         let dir = tempfile::tempdir().expect("tempdir");
         let recorded = dir.path().join("argv.txt");
-        let script = dir.path().join("fake-gh");
-        std::fs::write(
-            &script,
-            format!(
-                "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done > '{}'\nprintf '{{}}'\n",
+        let script = probe_test_support::stand_in_gh(
+            dir.path(),
+            &format!(
+                "for a in \"$@\"; do printf '%s\\n' \"$a\"; done > '{}'\nprintf '{{}}'\n",
                 recorded.display()
             ),
-        )
-        .expect("write stand-in gh");
-        std::fs::set_permissions(
-            &script,
-            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
-        )
-        .expect("chmod");
+        );
 
         let args = pr_view_args("github.com", "owner/repo", 42);
         let mut cmd = std::process::Command::new(&script);
@@ -2441,7 +2445,7 @@ mod tests {
         let outcome = run_command_with_timeout(cmd, Duration::from_secs(10));
         assert!(
             matches!(outcome, GhCallOutcome::Completed(ref o) if o.status.success()),
-            "stand-in gh should have run",
+            "stand-in gh should have run, got {outcome:?}",
         );
 
         let argv: Vec<String> = std::fs::read_to_string(&recorded)
@@ -2806,6 +2810,16 @@ mod tests {
             ])
             .output()
             .unwrap();
+        // The exit status is asserted FIRST, and it is what makes the emptiness
+        // below mean anything. A git command that fails to run at all prints
+        // nothing on stdout, so an emptiness assertion on its own passes for the
+        // one reason it must never pass for.
+        assert!(
+            out.status.success(),
+            "the fixture's git command must succeed, got status {} and stderr:\n{}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
         assert!(
             String::from_utf8_lossy(&out.stdout).trim().is_empty(),
             "a git command built by the fixture helper must see no global git \

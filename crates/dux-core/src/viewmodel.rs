@@ -223,8 +223,13 @@ pub struct BootstrapView {
     /// Projected so a browser can tell whether the feature EXISTS. The server
     /// stays the enforcement (it refuses the upload either way), but without
     /// this the pane advertised a drop target and accepted a drop for a feature
-    /// that was switched off, and only then collected a refusal per file. Older
-    /// servers omit it, so the web falls back to treating file drop as on.
+    /// that was switched off, and only then collected a refusal per file.
+    ///
+    /// NOT YET KNOWN IS NOT ENABLED. An older server omits the field, and the
+    /// browser renders before the bootstrap document has arrived at all, so the
+    /// web treats an absent value as OFF and offers nothing until dux has said
+    /// the feature exists. Defaulting that window to on would advertise a drop
+    /// target for a feature that may be switched off.
     pub file_drop_max_bytes: usize,
 }
 

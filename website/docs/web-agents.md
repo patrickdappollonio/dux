@@ -1,6 +1,6 @@
 ---
 title: Agents from the browser
-description: Create, fork, adopt, and manage agents in server mode, plus provider tabs, dormant tabs after a restart, attention indicators and browser notifications, and the difference between killing and deleting an agent.
+description: Create, fork, adopt, and manage agents in server mode, including starting from a pull request with no project chosen, plus provider tabs, dormant tabs after a restart, attention indicators and browser notifications, and the difference between killing and deleting an agent.
 group: Web UI
 order: 64
 ---
@@ -28,7 +28,43 @@ project info, and remove project, among the agent-creation actions below.
 
 ## Creating an agent
 
-The **New agent** dialog offers three ways in, reached from a project's `⋯` menu:
+There are two doors into agent creation, and they differ in what you start from.
+
+The **New agent** split button sits at the bottom of the sidebar (and on the
+mobile hub). Its one-click primary opens the picker for a plain new agent; the
+attached `⋯` segment carries the same three variants below. This is the door to
+use when you have not picked a project yet, and it is the only place the
+reference-first flow lives.
+
+### Starting from a pull request, with no project
+
+Pick **New agent from PR…** from that `⋯` segment and the dialog opens with the
+reference field first. **No project is chosen and none is asked for.** Paste a PR
+link (or `owner/repo#123`, or a bare `owner/repo`) and dux compares the repository
+it names against every project you have, then takes you to the right one:
+
+- **One project is a checkout of that repository** and dux goes straight on to
+  resolve the pull request.
+- **Two or more are** and dux shows you just those and asks which.
+- **None is** and dux names the repository it could not place, then offers the
+  project picker. **dux will not clone a repository it does not have**: point it
+  at a checkout that already exists on the server, or clone one yourself first.
+
+A number on its own (`#123` or `123`) is the one form this door cannot take,
+because by itself it does not say which repository it belongs to. dux refuses it
+and points you at the secondary action under the field, "choose an existing
+project", which opens the project selector and puts the dialog into the
+project-first mode below. Anything you have already typed comes with you.
+
+The full list of accepted spellings, and what happens to projects dux cannot
+compare, is in [Creating agents](/docs/creating-agents).
+
+### Starting from a project
+
+The **New agent** dialog offers three ways in, reached from a project's `⋯` menu.
+Coming in this way skips the resolution step entirely, exactly as it always did:
+the project is already chosen, so **New agent from PR…** here takes a reference
+scoped to that project and a bare `123` is perfectly meaningful.
 
 - **New agent…** creates a fresh git worktree and branch and launches the agent.
   The branch name is optional; leave it blank and dux generates a memorable pet

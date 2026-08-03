@@ -843,7 +843,24 @@ fn group_scan_step(stat: std::io::Result<Vec<u8>>, pgid: u32) -> ScanEntry {
         },
         // It exited between the listing and the read. Ordinary churn, and a
         // fact: it is not in the group any more.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => ScanEntry::NotAMember,
+        //
+        // TWO errnos say that, and knowing only one of them is what made this
+        // wrong. ENOENT is the pid directory being gone before the open. ESRCH
+        // is the subtler one, and it was MEASURED rather than reasoned about:
+        // `std::fs::read` opens and then reads, and procfs resolves the task at
+        // READ time, so a process reaped in between opens perfectly and then
+        // fails with "no such process". Rust has no `ErrorKind` for it, so it
+        // arrives as `Uncategorized`, and reading that as "dux could not look"
+        // marked the whole scan INCOMPLETE and refused an ordinary drop because
+        // an unrelated program somewhere on the machine happened to exit at the
+        // wrong moment. Same shape as every other defect in this file: an
+        // inability to look and a fact about the world collapsed into one.
+        Err(e)
+            if e.kind() == std::io::ErrorKind::NotFound
+                || e.raw_os_error() == Some(libc::ESRCH) =>
+        {
+            ScanEntry::NotAMember
+        }
         Err(_) => ScanEntry::Unreadable,
     }
 }
@@ -901,6 +918,27 @@ fn process_group_members(pgid: u32) -> ProcessGroup {
     }
     #[cfg(not(target_os = "linux"))]
     {
+        // macOS answers UNKNOWN, deliberately, and it is a real gap rather than
+        // a placeholder waiting to be filled in casually.
+        //
+        // Linux enumerates a process group by reading `/proc`. macOS has no
+        // `/proc`, so the equivalent is `proc_listpids` through libproc or a
+        // parse of `ps -eo pid,pgid`, and either one is a guess until it has
+        // been RUN on a Mac: what `ps` prints for a zombie, whether a
+        // partially-readable listing can be told from a complete one, and what
+        // libproc returns for a group whose leader has just gone are all
+        // measurable facts and none of them is memory. Writing an unverified
+        // enumeration here would not fail loudly; it would report a confident
+        // empty group, which falls through to the SHELL's directory, which is
+        // exactly the "guessed the wrong destination" defect this whole chain
+        // exists to prevent.
+        //
+        // So the honest answer is Unknown, which the caller turns into a
+        // refusal. The window is narrow: it opens only when the foreground
+        // leader has already exited while its group still owns the terminal
+        // (`open_with` only asks for members in the `Gone` arm), and the user
+        // is told to run the drop again. `website/docs/dropping-files.md` says
+        // so rather than promising the Linux behaviour everywhere.
         let _ = pgid;
         ProcessGroup::Unknown
     }
@@ -1067,20 +1105,49 @@ pub fn open_process_cwd(pid: u32) -> Result<DropDir, DropDirError> {
                 "lsof could not report the working directory of process {pid}"
             ))));
         }
-        let text = String::from_utf8_lossy(&output.stdout);
-        // `-Fn` prints one field per line, each prefixed by its field letter;
-        // `n` is the name field, which for the `cwd` descriptor is the path.
-        let cwd = text
-            .lines()
-            .find_map(|line| line.strip_prefix('n'))
-            .filter(|p| !p.is_empty())
-            .ok_or_else(|| {
-                DropDirError::Io(std::io::Error::other(format!(
-                    "lsof reported no working directory for process {pid}"
-                )))
-            })?;
-        DropDir::open(Path::new(cwd))
+        let cwd = lsof_cwd_path(&output.stdout).ok_or_else(|| {
+            DropDirError::Io(std::io::Error::other(format!(
+                "lsof reported no working directory for process {pid}"
+            )))
+        })?;
+        DropDir::open(&cwd)
     }
+}
+
+/// The working directory out of `lsof -Fn` output, as BYTES.
+///
+/// A Unix path is a byte string and is not required to be valid UTF-8, so this
+/// never decodes. Decoding lsof's answer lossily, which is what this used to do,
+/// substitutes a replacement character for every byte it cannot read, and the
+/// result is a DIFFERENT path: usually one that names nothing, occasionally one
+/// that names something else. Either way dux would then open it, save into it,
+/// and report it as the folder the file landed in. The rule everywhere else in
+/// this module is that a path dux cannot name exactly is REFUSED and never
+/// substituted, and a lossy decode is a substitution wearing a success. So the
+/// bytes are carried through unchanged, the directory that is opened is the real
+/// one, and a path that genuinely cannot be reported as text is refused where
+/// every other unreportable path is, as [`UnreportablePath::NotUtf8`], at the
+/// moment it would be sent to a terminal.
+///
+/// `-Fn` prints one field per line, each prefixed by its field letter; `n` is
+/// the name field, which for the `cwd` descriptor is the path. One limit of that
+/// format is left open and is stated rather than glossed: a field is terminated
+/// by a newline, so a directory whose own name contains a newline is
+/// indistinguishable from two fields and comes back truncated. lsof offers a
+/// NUL-terminated mode for exactly this, and it is deliberately not used here,
+/// because this branch only ever runs on macOS and nobody has been able to
+/// measure that flag against the lsof macOS ships. Guessing at an unverified
+/// flag on a path that cannot be exercised is how the rest of this file went
+/// wrong; a documented limit is the honest alternative.
+#[cfg(any(not(target_os = "linux"), test))]
+fn lsof_cwd_path(stdout: &[u8]) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+
+    stdout
+        .split(|&b| b == b'\n')
+        .find_map(|line| line.strip_prefix(b"n"))
+        .filter(|path| !path.is_empty())
+        .map(|path| PathBuf::from(std::ffi::OsStr::from_bytes(path)))
 }
 
 #[cfg(test)]
@@ -1986,6 +2053,51 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn a_process_reaped_between_the_open_and_the_read_is_not_a_member() {
+        // The production read is `std::fs::read`, which OPENS and then READS,
+        // and procfs resolves the task at READ time. So a process reaped in
+        // between opens perfectly and then fails, and the errno is ESRCH rather
+        // than the ENOENT the case above covers. Rust has no `ErrorKind` for
+        // ESRCH, so it arrives as `Uncategorized` and was classified as "dux
+        // could not look", which marked the whole scan INCOMPLETE and refused a
+        // perfectly ordinary drop because some unrelated program on the machine
+        // happened to exit while dux was scanning.
+        //
+        // The window is held open with a real dependency rather than provoked
+        // with load: open a live child's stat, reap the child, then read the
+        // handle already held. That is exactly the production window, made
+        // deterministic. The errno is taken from the KERNEL here rather than
+        // written down, so this test cannot pass by agreeing with a constant
+        // that is wrong.
+        let mut child = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("exit 0")
+            .spawn()
+            .expect("spawn a short-lived child");
+        let pid = child.id();
+        let mut file = std::fs::File::open(format!("/proc/{pid}/stat")).expect("open a live stat");
+        child.wait().expect("reap the child");
+
+        let mut buf = Vec::new();
+        let err = file
+            .read_to_end(&mut buf)
+            .expect_err("a reaped process's stat must stop reading");
+        assert_ne!(
+            err.kind(),
+            std::io::ErrorKind::NotFound,
+            "if this ever becomes NotFound the case above already covers it and \
+             this test is no longer about anything; got {err:?}"
+        );
+        assert_eq!(
+            group_scan_step(Err(err), 4242),
+            ScanEntry::NotAMember,
+            "a process that exited is a FACT about the world, not an inability \
+             to look at it"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn a_stat_line_is_parsed_out_of_its_bytes() {
         // The state letter and the group id are both ASCII; only the name
         // between them is arbitrary bytes. Pinning the parser directly, because
@@ -2351,6 +2463,69 @@ mod tests {
 
     fn shell_single_quote(s: &str) -> String {
         format!("'{}'", s.replace('\'', "'\\''"))
+    }
+
+    // ── lsof's answer is bytes, and bytes are what a path is ─────────────────
+    //
+    // These run everywhere, including on Linux where the parser they cover is
+    // never called, because the branch that calls it is macOS-only and the only
+    // machines available here are Linux. A parser nobody can exercise is a
+    // parser nobody can check.
+
+    #[test]
+    fn reads_the_working_directory_out_of_lsof_field_output() {
+        assert_eq!(
+            lsof_cwd_path(b"p4242\nn/home/patrick/notes\n"),
+            Some(PathBuf::from("/home/patrick/notes")),
+            "the `n` field of the `cwd` descriptor is the directory"
+        );
+    }
+
+    #[test]
+    fn a_directory_that_is_not_valid_utf8_survives_lsof_exactly() {
+        use std::os::unix::ffi::OsStrExt;
+
+        // The bug this pins: decoding lsof's answer lossily replaced the 0xFF
+        // with U+FFFD, so dux opened, wrote into and then NAMED a directory that
+        // is not the one the terminal is in. A path is a byte string; the bytes
+        // come through untouched, and a path that cannot be rendered as text is
+        // refused later (`UnreportablePath::NotUtf8`) rather than substituted
+        // here.
+        let raw: &[u8] = b"p9\nn/tmp/od\xffd\n";
+        let parsed = lsof_cwd_path(raw).expect("a non-UTF-8 directory still parses");
+        assert_eq!(
+            parsed.as_os_str().as_bytes(),
+            b"/tmp/od\xffd",
+            "the bytes must survive; got {parsed:?}"
+        );
+        assert!(
+            !parsed.to_string_lossy().contains('\u{fffd}') || parsed.to_str().is_none(),
+            "a replacement character must come from RENDERING it, never from parsing it"
+        );
+        assert!(
+            parsed.to_str().is_none(),
+            "and this path really is one that cannot be rendered, so the \
+             assertion above is not vacuous"
+        );
+    }
+
+    #[test]
+    fn lsof_saying_nothing_useful_is_not_a_directory() {
+        for empty in [
+            &b""[..],
+            // The process was gone by the time lsof looked: a process record and
+            // no name field at all.
+            &b"p4242\n"[..],
+            // A name field that is empty names nothing, and `Path::new("")` is a
+            // relative path that would resolve against dux's own directory.
+            &b"p4242\nn\n"[..],
+        ] {
+            assert_eq!(
+                lsof_cwd_path(empty),
+                None,
+                "must refuse rather than invent a directory from {empty:?}"
+            );
+        }
     }
 }
 

@@ -48,6 +48,14 @@ already exited but its job is still running, dux asks a surviving part of that
 job before it falls back to the shell, because a pipeline whose first stage
 finished is an ordinary thing and the shell is not where you are.
 
+That last step, asking the rest of a job whose first program has already gone, is
+**Linux only**. On macOS dux cannot enumerate the job, and it will not pretend a
+job it cannot see has finished, so in that one situation it refuses the drop and
+asks you to try again rather than quietly saving into the shell's folder instead.
+The window is narrow and it closes on its own: drop the file again and the
+program now in the foreground answers for itself. Everything else on this page
+behaves identically on both platforms.
+
 If dux cannot read the process at all, it refuses the drop and tells you, rather
 than writing somewhere else and naming that instead. Being unable to see where a
 terminal is has never been a good reason to guess.
