@@ -117,7 +117,6 @@ const projects: ProjectView[] = [
     id: STOREFRONT,
     name: "storefront",
     path: "/home/dev/code/storefront",
-    terminals: [devServer],
   }),
   project({
     id: BILLING,
@@ -177,14 +176,6 @@ const sessions: SessionView[] = [
     provider: "codex",
     branch_name: "dux/invoice-pdf-export",
     // Idle: nothing running, nothing waiting on the user.
-    terminals: [
-      terminal({
-        id: "term-pytest-watch",
-        label: "Terminal 2",
-        foreground_cmd: null,
-        sort_order: 2,
-      }),
-    ],
   }),
   session({
     id: "agt-search-ranking",
@@ -203,9 +194,27 @@ const sessions: SessionView[] = [
   }),
 ]
 
+// Terminals travel as ONE flat list, each carrying its owner, which is what the
+// browser reads. They used to be nested inside the project or session that owns
+// them, and this figure kept seeding them that way after the wire changed, so
+// the sidebar's terminals section rendered empty and `verify-figure` caught it.
+const terminals: TerminalView[] = [
+  { ...devServer, owner: { kind: "project", project_id: STOREFRONT } },
+  {
+    ...terminal({
+      id: "term-pytest-watch",
+      label: "Terminal 2",
+      foreground_cmd: null,
+      sort_order: 2,
+    }),
+    owner: { kind: "session", session_id: "agt-invoice-pdf" },
+  },
+]
+
 export const spine: Spine = {
   projects,
   sessions,
+  terminals,
   sidebar: {
     groups: [
       {
