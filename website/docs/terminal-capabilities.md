@@ -55,6 +55,31 @@ tmux markers from the agent so the agent emits plain, unwrapped escape sequences
 and dux re-wraps them itself when forwarding. You get your real terminal's identity
 with tmux in the middle, which is the whole point.
 
+### Plain shells get an identity too
+
+The identity above is not an agent privilege. Every shell dux opens gets it, so a
+terminal you open for yourself sees the same terminal an agent would, and the tools
+you run in it behave the same way. There are three kinds and they differ only in
+what they belong to:
+
+- A **companion terminal** belongs to an agent and opens in that agent's worktree.
+- A **project terminal** belongs to a project and opens at its repo root.
+- A **standalone terminal** belongs to nothing at all. It opens in your home
+  directory, which means you can have one before you have added a single project.
+  Open one from the cog menu ("New standalone terminal").
+
+Environment is the one place the third kind is genuinely different: the two owned
+kinds merge your global `[env]` with their project's, and a standalone terminal has
+no project, so it gets the global half and nothing else. None of the three runs a
+project's `startup_command` (see
+[Startup commands](/docs/startup-commands)), because that is worktree provisioning
+for a new agent, not a shell rc.
+
+Nothing closes a standalone terminal for you, either. Removing a project closes
+that project's terminals and deleting an agent closes that agent's; neither event
+has anything to do with one that belongs to nobody. It ends when you close it, or
+when dux shuts down.
+
 ## Forwarding what the agent emits
 
 Presenting a real identity means agents start emitting real notifications again.
