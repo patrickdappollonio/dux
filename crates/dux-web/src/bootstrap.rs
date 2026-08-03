@@ -147,6 +147,7 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
         created_session_by_op: HashMap::new(),
         providers: HashMap::new(),
         running_provider_pins: HashMap::new(),
+        launched_dragdrop_paste: Default::default(),
         companion_terminals: HashMap::new(),
         agent_tabs: agent_tabs.into_iter().map(|t| (t.id.clone(), t)).collect(),
         terminating_ptys: Vec::new(),

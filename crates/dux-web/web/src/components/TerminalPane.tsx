@@ -16,8 +16,11 @@ import {
   type DropContext,
   type DropOutcome,
   dropToastFor,
+  attachmentCharLimit,
   dragDropPasteFormFor,
+  pasteExceedsAttachmentLimit,
   pastePayload,
+  tooLongToAttachReason,
 } from "@/lib/fileDrop"
 import { FileDropApiError, uploadDroppedFile } from "@/lib/fileDropApi"
 import { showFinalToast } from "@/lib/finalToast"
@@ -305,6 +308,17 @@ export function TerminalPane(props: TerminalPaneProps) {
   // overlay and still uploaded. There is nothing to lose by waiting, because
   // the window closes in one fetch and the drag surface simply appears then.
   const fileDropEnabled = (bootstrap?.file_drop_max_bytes ?? 0) > 0
+  // The per-provider drop-paste forms, mirrored into a ref so the drop loop can
+  // read the CURRENT map rather than the one that happened to be in the closure
+  // when the drag landed. A drop's uploads run one at a time and a multi-file
+  // drop is not quick, so a `config.changed` refetch really can land in the
+  // middle of one; the form is resolved immediately before each paste, so a
+  // reload takes effect from the next file onward instead of being ignored for
+  // the rest of the drop.
+  const dragDropPasteFormsRef = useRef(bootstrap?.provider_web_dragdrop_paste)
+  useEffect(() => {
+    dragDropPasteFormsRef.current = bootstrap?.provider_web_dragdrop_paste
+  }, [bootstrap?.provider_web_dragdrop_paste])
   // Retire any in-flight drag the moment the feature stops being available.
   // The gate refuses events for a disabled feature, so once it closes there is
   // no matching `dragleave` or `drop` left to clear the overlay, and it would
@@ -426,6 +440,13 @@ export function TerminalPane(props: TerminalPaneProps) {
       : (ownedTerminals?.find((t) => t.id === id)?.has_output ?? false)
   const providerName =
     kind === "agent" ? (focusedTab?.provider ?? session?.provider) : session?.provider
+  // Mirrored for the same reason as the paste-form map: the drop loop is async
+  // and its closure would otherwise pin whichever provider was running when the
+  // drag landed, so a retarget or a relaunch mid-drop would be missed.
+  const providerNameRef = useRef(providerName)
+  useEffect(() => {
+    providerNameRef.current = providerName
+  }, [providerName])
   // Kept current for the mount effect's PTY-gone check (an extra tab's socket
   // must stop reconnecting once its tab is no longer in the spine — see
   // `isTabGone`) WITHOUT being a dependency of that effect, which would tear
@@ -1534,18 +1555,18 @@ export function TerminalPane(props: TerminalPaneProps) {
   // there rather than opening a channel of its own, and a config reload refreshes
   // it through the same `config.changed` refetch as every other config value.
   //
-  // A TERMINAL runs a plain shell rather than a provider, so it has no configured
-  // form and resolves to `bare`, which is what it did before this setting existed.
-  // The owning session's provider is deliberately NOT consulted: a companion
-  // terminal is not that agent, and reading its CLI's preference here would quote
-  // paths for a program that is not the one receiving them.
+  // A TERMINAL is not a provider pane and never reads that setting: it runs a
+  // SHELL, which is exactly why its path is always quoted rather than left bare
+  // (see `TERMINAL_PASTE_FORM`). The owning session's provider is not consulted
+  // either, for the separate reason that a companion terminal is not that agent.
+  //
+  // The form is resolved IMMEDIATELY BEFORE EACH PASTE, out of refs, for the same
+  // reason the ownership and socket checks are: a drop's uploads are sequential,
+  // so a config reload or a provider retarget can land between two files, and a
+  // form snapshotted once at the top of the drop would silently outlive it.
   async function handleDroppedFiles(files: File[]) {
     if (files.length === 0) return
     const outcomes: DropOutcome[] = []
-    const dragDropPasteForm = dragDropPasteFormFor(
-      bootstrap?.provider_web_dragdrop_paste,
-      kind === "agent" ? providerName : undefined,
-    )
 
     for (const file of files) {
       let saved
@@ -1599,6 +1620,30 @@ export function TerminalPane(props: TerminalPaneProps) {
         continue
       }
 
+      // Resolved here, per file, rather than once per drop: see the note above.
+      const form = dragDropPasteFormFor(
+        dragDropPasteFormsRef.current,
+        kind === "agent"
+          ? { kind: "agent", provider: providerNameRef.current }
+          : { kind: "terminal" },
+      )
+      const payload = pastePayload(where.path, form)
+      // Too long for the receiving CLI to look at as a path. Codex files any
+      // paste over its threshold away as generic large content before it tries
+      // to recognize a path at all, so pasting this would put a placeholder in
+      // the prompt and attach nothing, while the toast claimed success. Report
+      // it as the stranded file it is: saved, here is the full path, go and
+      // reference it yourself.
+      const limit = attachmentCharLimit(form)
+      if (limit !== null && pasteExceedsAttachmentLimit(payload, form)) {
+        outcomes.push({
+          kind: "saved-not-sent",
+          ...where,
+          reason: tooLongToAttachReason(limit),
+        })
+        continue
+      }
+
       // xterm's own paste, which applies bracketed paste (DECSET 2004) when the
       // running program asked for it and sends plain text when it did not.
       // Building the bracket markers by hand here would be a second
@@ -1608,7 +1653,7 @@ export function TerminalPane(props: TerminalPaneProps) {
       // paste. That rule exists because compose text has to keep a soft line
       // break and a submitting Enter distinct on the wire. A dropped path
       // contains neither, so the reason does not apply here.
-      term.paste(pastePayload(saved.path, dragDropPasteForm))
+      term.paste(payload)
       // SENT, not "arrived". This is a socket write like any keystroke and
       // nothing acknowledges it: a take-over landing between the upload's
       // courtesy check and this frame reaching the server makes the server drop

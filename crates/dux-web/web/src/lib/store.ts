@@ -960,8 +960,8 @@ eventsSocket.onOpen = () => {
   } else {
     // A reconnect (or an open the driver did not pre-load for): re-fetch both so
     // anything missed during the outage — or a load that failed on first boot —
-    // recovers. Concurrent loads are safe: spine is seq-guarded and bootstrap
-    // apply is idempotent.
+    // recovers. Concurrent loads are safe: both the spine and the bootstrap load
+    // are seq-guarded, so an older reply cannot overwrite a newer one.
     //
     // Capture the deep-linked route BEFORE `loadSpine` so a transient exit-eject
     // during the reconnect (the center pane resets to home while the agent is
@@ -1066,14 +1066,32 @@ export function refreshChanges(): void {
   loadChanges(id)
 }
 
+// Monotonic sequence for bootstrap loads, mirroring `loadSpineSeq` exactly. Two
+// `config.changed` events in quick succession (a config edit followed by another,
+// or an edit landing during a reconnect refetch) fire concurrent
+// `fetchBootstrap()`s, and nothing orders the replies. Without this an older
+// response resolving last overwrites a newer one, and every client keeps applying
+// config the server has already replaced until the next edit happens to come back
+// in order. Every value the document carries is exposed to that; the one that
+// prompted the guard is `provider_web_dragdrop_paste`, where the stale answer
+// decides how a dropped file's path is quoted.
+let loadBootstrapSeq = 0
+
 // Fetch the bootstrap document and fold it into state. Errors are swallowed: on
 // first boot the slice stays `null` (consumers fall back to defaults) and a
 // later `config.changed` event or a reconnect retries; on a refetch the last
 // good bootstrap is kept rather than blanking the UI. Never surfaces as an
 // unhandled rejection.
 function loadBootstrap(): void {
+  const seq = ++loadBootstrapSeq
   fetchBootstrap()
-    .then((b) => applyBootstrap(b))
+    .then((b) => {
+      // Discard this (now-stale) result once a newer load has started. Same rule
+      // as `applySpine`: the newest request wins, whatever order the replies
+      // arrive in.
+      if (seq < loadBootstrapSeq) return
+      applyBootstrap(b)
+    })
     .catch((err) => {
       // Keep the previous bootstrap (null on first boot); a config.changed event
       // or reconnect will retry. Warn so a persistently-failing fetch (e.g. a

@@ -747,6 +747,11 @@ impl Engine {
             let detached =
                 self.detach_conflicting_worktree_session(&session.worktree_path, &session.id);
             self.providers.insert(tab_id.clone(), client);
+            self.record_launched_dragdrop_paste(
+                &tab_id,
+                &request.provider,
+                &request.provider_config,
+            );
             self.sessions.insert(0, session.clone());
             // Correlate this create op with the session it just produced so a REST
             // create handler holding the op id (from `WireCommandOutcome.created_op_id`)
@@ -842,6 +847,7 @@ impl Engine {
         let detached =
             self.detach_conflicting_worktree_session(&session.worktree_path, &session.id);
         self.providers.insert(tab_id.clone(), client);
+        self.record_launched_dragdrop_paste(&tab_id, &request.provider, &request.provider_config);
         if request.resume {
             self.resume_fallback_candidates
                 .insert(tab_id.clone(), Instant::now());
@@ -1050,9 +1056,31 @@ impl Engine {
     /// extra tab) and `clear_session_tab_runtime` (a whole session, looped)
     /// call this, so adding a new tab-keyed map is a one-line change here rather
     /// than a comment-enforced convention across two files.
+    /// Remember the drag-and-drop paste form a tab LAUNCHED with, so the web
+    /// bootstrap can still answer for that provider name after the user renames
+    /// or removes its `[providers.<name>]` block. Taken from the exact
+    /// [`ProviderCommandConfig`] the launch used rather than re-read from the
+    /// current config, because the whole point is to survive a later edit.
+    /// Retired by [`Engine::clear_tab_runtime`] when the process goes.
+    fn record_launched_dragdrop_paste(
+        &mut self,
+        tab_id: &str,
+        provider: &ProviderKind,
+        provider_config: &crate::config::ProviderCommandConfig,
+    ) {
+        self.launched_dragdrop_paste.insert(
+            tab_id.to_string(),
+            (
+                provider.as_str().to_string(),
+                provider_config.resolved_web_dragdrop_paste(),
+            ),
+        );
+    }
+
     pub fn clear_tab_runtime(&mut self, tab_id: &str) {
         self.providers.remove(tab_id);
         self.running_provider_pins.remove(tab_id);
+        self.launched_dragdrop_paste.remove(tab_id);
         self.resume_fallback_candidates.remove(tab_id);
         self.pty_activity.remove(tab_id);
         self.pty_input.remove(tab_id);
@@ -2704,6 +2732,29 @@ mod tests {
         );
         // The delete aborted, so the session record survives.
         assert!(engine.sessions.iter().any(|s| s.id == "s1"));
+    }
+
+    #[test]
+    fn clearing_a_tab_retires_the_form_it_launched_with() {
+        // The sticky launched form is what lets a live tab keep its quoting after
+        // its provider is renamed out of config. It must RETIRE with the process:
+        // an entry that outlived its tab would keep publishing a provider name the
+        // workspace no longer runs, and a later tab launching under that same name
+        // would inherit a form nobody configured.
+        let (mut engine, _tmp) = test_engine();
+        engine.launched_dragdrop_paste.insert(
+            "s1".to_string(),
+            (
+                "codex".to_string(),
+                crate::config::WebDragDropPaste::SingleQuoted,
+            ),
+        );
+        engine.clear_tab_runtime("s1");
+        assert!(
+            !engine.launched_dragdrop_paste.contains_key("s1"),
+            "the launched paste form must be torn down with the tab, like every \
+             other tab-keyed runtime map"
+        );
     }
 
     #[test]

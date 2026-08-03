@@ -985,7 +985,15 @@ impl Engine {
         let mut available_providers: Vec<String> =
             self.config.providers.commands.keys().cloned().collect();
         available_providers.sort();
-        let provider_web_dragdrop_paste = self
+        // Configured providers first, then the forms LIVE tabs launched with for
+        // any provider name config no longer carries. A user who renames or
+        // deletes a `[providers.<name>]` block while a tab is still running it
+        // would otherwise drop that tab to `bare` mid-session, because the tab
+        // keeps reporting the name it launched as. Config wins wherever it still
+        // names the provider, so an edited form takes effect on the next paste;
+        // only a name config has LOST falls through to the launched value. See
+        // `Engine::launched_dragdrop_paste`.
+        let mut provider_web_dragdrop_paste: BTreeMap<String, String> = self
             .config
             .providers
             .commands
@@ -997,6 +1005,11 @@ impl Engine {
                 )
             })
             .collect();
+        for (name, form) in self.launched_dragdrop_paste.values() {
+            provider_web_dragdrop_paste
+                .entry(name.clone())
+                .or_insert_with(|| form.as_str().to_string());
+        }
         BootstrapView {
             available_providers,
             provider_web_dragdrop_paste,
@@ -1964,6 +1977,52 @@ mod tests {
         assert_eq!(engine.bootstrap().file_drop_max_bytes, 0);
         engine.config.server.file_drop_max_bytes = 4242;
         assert_eq!(engine.bootstrap().file_drop_max_bytes, 4242);
+    }
+
+    #[test]
+    fn bootstrap_keeps_a_renamed_providers_form_while_its_process_lives() {
+        // A user renames or deletes a `[providers.<name>]` block while a tab is
+        // still running that provider. The tab's own `provider` string does not
+        // change (it is what actually launched), so the browser looks that name
+        // up in this map and, before the sticky entry below, found nothing and
+        // fell back to `bare`: a live codex tab would start receiving unquoted
+        // paths mid-session, which is precisely the case codex silently ignores.
+        //
+        // The launched form is therefore kept with the PROCESS and retires with
+        // it. The alternative was to refuse the rename, and a config file the
+        // user edits in their own editor cannot be refused.
+        let (mut engine, _tmp) = test_engine();
+        engine.launched_dragdrop_paste.insert(
+            "s1".to_string(),
+            (
+                "codex-nightly".to_string(),
+                crate::config::WebDragDropPaste::SingleQuoted,
+            ),
+        );
+        let forms = engine.bootstrap().provider_web_dragdrop_paste;
+        assert_eq!(
+            forms.get("codex-nightly").map(String::as_str),
+            Some("single_quoted"),
+            "a live process keeps the form it launched with, even once config no \
+             longer names its provider"
+        );
+
+        // ...and the CONFIGURED value always wins for a name config still has, so
+        // an edit in the other direction (keep the name, change the form) takes
+        // effect on the next paste rather than being pinned by the launch.
+        engine.launched_dragdrop_paste.insert(
+            "s2".to_string(),
+            (
+                "claude".to_string(),
+                crate::config::WebDragDropPaste::BackslashEscaped,
+            ),
+        );
+        let forms = engine.bootstrap().provider_web_dragdrop_paste;
+        assert_eq!(
+            forms.get("claude").map(String::as_str),
+            Some("bare"),
+            "config wins for a provider it still names"
+        );
     }
 
     #[test]

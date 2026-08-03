@@ -603,22 +603,32 @@ impl WebDragDropPaste {
         }
     }
 
+    /// The warning text for one unrecognized value, or `None` when the value is a
+    /// form dux knows.
+    ///
+    /// Returned rather than logged so the message itself is testable: a warning
+    /// that only ever reaches a file cannot be asserted on without racing the
+    /// process-wide logger, and "warns once per load" is exactly the property
+    /// worth pinning.
+    pub fn unknown_value_warning(provider: &str, s: &str) -> Option<String> {
+        if Self::parse(s).is_some() {
+            return None;
+        }
+        Some(format!(
+            "unknown providers.{provider}.web_dragdrop_paste value {s:?}; falling back to \
+             \"bare\" (valid: bare, single_quoted, double_quoted, backslash_escaped)"
+        ))
+    }
+
     /// Parse a config string, falling back to [`WebDragDropPaste::Bare`] with a logged
     /// warning on an unrecognized value. Call this at config load/reload (once),
     /// not per paste, so a typo is surfaced without spamming the log; the paste
     /// path uses the non-warning [`WebDragDropPaste::parse`].
     pub fn from_config_str(provider: &str, s: &str) -> Self {
-        match Self::parse(s) {
-            Some(mode) => mode,
-            None => {
-                crate::logger::warn(&format!(
-                    "unknown providers.{provider}.web_dragdrop_paste value {s:?}; falling back to \
-                     \"bare\" (valid: bare, single_quoted, double_quoted, \
-                     backslash_escaped)"
-                ));
-                Self::Bare
-            }
+        if let Some(warning) = Self::unknown_value_warning(provider, s) {
+            crate::logger::warn(&warning);
         }
+        Self::parse(s).unwrap_or(Self::Bare)
     }
 
     /// The canonical lowercase name. This is what goes in `config.toml` and what
@@ -1704,11 +1714,27 @@ pub fn load_config(paths: &DuxPaths) -> Config {
 /// degradation would be silent and a user who typed `single-quoted` would never
 /// learn why their dropped path stopped being quoted.
 fn warn_on_unknown_web_dragdrop_paste_forms(providers: &ProvidersConfig) {
-    for (name, provider) in &providers.commands {
-        if let Some(raw) = provider.web_dragdrop_paste.as_deref() {
-            let _ = WebDragDropPaste::from_config_str(name, raw);
-        }
+    for warning in web_dragdrop_paste_warnings(providers) {
+        crate::logger::warn(&warning);
     }
+}
+
+/// Every warning a load would emit for an unrecognized
+/// `providers.<name>.web_dragdrop_paste`, in config order: exactly one per
+/// misspelled provider, and none at all for a config that is clean.
+///
+/// Split out from the logging so the messages can be asserted directly. The
+/// per-paste resolution ([`ProviderCommandConfig::resolved_web_dragdrop_paste`])
+/// deliberately does not go through this, which is what keeps the warning to once
+/// per load rather than once per dropped file.
+pub fn web_dragdrop_paste_warnings(providers: &ProvidersConfig) -> Vec<String> {
+    providers
+        .commands
+        .iter()
+        .filter_map(|(name, provider)| {
+            WebDragDropPaste::unknown_value_warning(name, provider.web_dragdrop_paste.as_deref()?)
+        })
+        .collect()
 }
 
 /// Warn once when a `config.toml` still carries the removed
@@ -2908,6 +2934,65 @@ mod agent_tabs_cap_tests {
             WebDragDropPaste::from_config_str("codex", "single-quoted"),
             WebDragDropPaste::Bare
         );
+    }
+
+    #[test]
+    fn a_misspelled_web_dragdrop_paste_warns_once_per_load_and_says_what_is_valid() {
+        // The test above asserts only the FALLBACK, and the fallback is the
+        // silent half. Nothing looked at the warning at all, so a degradation
+        // that told the user nothing would have passed just as happily, which is
+        // the failure mode the warning exists to prevent: a typed
+        // `single-quoted` stops quoting paths and nothing anywhere says why.
+        //
+        // The message is asserted directly rather than read back out of the log
+        // file: `logger::init` sets a process-wide `OnceLock`, so whichever test
+        // runs first owns it, and a test that read the file would pass or fail on
+        // ordering. `web_dragdrop_paste_warnings` returns the exact strings
+        // `load_config` hands to the logger, so this pins the text AND the count.
+        let config: Config = toml::from_str(
+            "[providers.claude]\ncommand = \"claude\"\nweb_dragdrop_paste = \"bare\"\n\
+             [providers.codex]\ncommand = \"codex\"\nweb_dragdrop_paste = \"single-quoted\"\n\
+             [providers.opencode]\ncommand = \"opencode\"\nweb_dragdrop_paste = \"file_url\"\n",
+        )
+        .expect("a typo must not fail the whole config load");
+
+        let warnings = web_dragdrop_paste_warnings(&config.providers);
+        // ONE per misspelled provider. Not one per provider, and not one per
+        // dropped file.
+        assert_eq!(
+            warnings.len(),
+            2,
+            "expected exactly one warning per misspelled provider, got {warnings:?}"
+        );
+        let joined = warnings.join("\n");
+        assert!(joined.contains("providers.codex.web_dragdrop_paste"));
+        assert!(joined.contains("\"single-quoted\""));
+        assert!(joined.contains("providers.opencode.web_dragdrop_paste"));
+        assert!(joined.contains("\"file_url\""));
+        // The correctly spelled provider is not mentioned at all.
+        assert!(!joined.contains("providers.claude"));
+        // And each warning says what happens instead and what would have worked,
+        // because a warning that only says "unknown" leaves the user guessing.
+        for warning in &warnings {
+            assert!(warning.contains("falling back to \"bare\""), "{warning}");
+            assert!(warning.contains("single_quoted"), "{warning}");
+            assert!(warning.contains("double_quoted"), "{warning}");
+            assert!(warning.contains("backslash_escaped"), "{warning}");
+        }
+
+        // The per-paste path resolves the same value as often as it likes and
+        // produces no warning, which is what "once per load" means: the count is
+        // a function of the config, not of how often the value has been read.
+        for _ in 0..5 {
+            assert_eq!(
+                config.providers.commands["codex"].resolved_web_dragdrop_paste(),
+                WebDragDropPaste::Bare
+            );
+        }
+        assert_eq!(web_dragdrop_paste_warnings(&config.providers).len(), 2);
+
+        // A clean config says nothing at all.
+        assert!(web_dragdrop_paste_warnings(&ProvidersConfig::default()).is_empty());
     }
 
     #[test]

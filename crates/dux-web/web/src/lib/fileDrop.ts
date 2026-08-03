@@ -84,22 +84,126 @@ const DRAG_DROP_PASTE_FORMS: readonly DragDropPasteForm[] = [
   "backslash_escaped",
 ]
 
-/// Which form to use for the provider running in the pane being dropped on.
+/// What a drop is landing on. An agent pane runs a provider and therefore has a
+/// configured form; a terminal has no provider FIELD at all, which is what makes
+/// it impossible for the terminal branch below to read one.
+export type DropPasteTarget =
+  | { kind: "agent"; provider: string | undefined }
+  | { kind: "terminal" }
+
+/// The form a plain terminal always gets, whatever provider its owner runs and
+/// whatever anybody configured.
 ///
-/// `forms` is the server's `bootstrap.provider_web_dragdrop_paste` map, keyed by
-/// provider name. `bare` is the answer for everything the map does not cover: a
-/// provider the user added themselves, a server too old to send the map, a pane
-/// with no provider at all (a plain terminal), and, defensively, a form name this
+/// A terminal runs a SHELL, and that is the reason it must be quoted, not a
+/// reason it can go bare. The first version of this feature had that exactly
+/// backwards: it sent a terminal's path `bare` "because a terminal runs a shell,
+/// not that CLI". But dux deliberately permits `$`, a backtick, a space, a
+/// semicolon, a quote and parentheses in a destination path, and a bare path
+/// carrying any of those is pasted onto a command line the user is about to
+/// press Enter on. The shell then splits it into several arguments, substitutes a
+/// variable, or runs a command substitution. Quoting is what makes those
+/// characters inert, so a shell needs MORE protection than an agent CLI, not
+/// less.
+///
+/// `single_quoted` is the form that provides it: inside POSIX single quotes
+/// nothing is special at all, so the whole path is one literal word.
+///
+/// Note that the shell in question is POSIX. dux's `[terminal] command` is
+/// configurable, so a user can point it at a shell with different quoting rules
+/// (PowerShell, for instance, does not treat a single-quoted `$` the same way,
+/// and fish differs on `\` inside single quotes). That is not handled here and
+/// deliberately gets no setting of its own: dux targets macOS and Linux, where
+/// the default shell is POSIX, and a form for a non-POSIX shell should be added
+/// only once someone has MEASURED one, the same rule the provider forms follow.
+export const TERMINAL_PASTE_FORM: DragDropPasteForm = "single_quoted"
+
+/// Which form to use for the pane being dropped on.
+///
+/// A TERMINAL is decided first and reads nothing else, because the provider
+/// setting describes how an agent CLI reads a paste and a shell is not an agent
+/// CLI. See `TERMINAL_PASTE_FORM`.
+///
+/// For an agent, `forms` is the server's `bootstrap.provider_web_dragdrop_paste`
+/// map, keyed by provider name. `bare` is the answer for everything the map does
+/// not cover: a provider the user added themselves, a server too old to send the
+/// map, a tab whose provider is not known yet, and, defensively, a form name this
 /// client does not know. The server already normalizes and already warned about a
 /// misspelling once at config load, so the last case should not arise; a client
 /// that trusted the string blindly would still be one config typo away from
 /// pasting the literal word into somebody's prompt.
 export function dragDropPasteFormFor(
   forms: Record<string, string> | undefined,
-  provider: string | undefined,
+  target: DropPasteTarget,
 ): DragDropPasteForm {
-  const named = provider === undefined ? undefined : forms?.[provider]
+  if (target.kind === "terminal") return TERMINAL_PASTE_FORM
+  const named =
+    target.provider === undefined ? undefined : forms?.[target.provider]
   return DRAG_DROP_PASTE_FORMS.find((f) => f === named) ?? "bare"
+}
+
+/// How many characters of pasted text each form's receiving end will still look
+/// at as a possible file path, or `null` when nothing measurable applies.
+///
+/// Only one entry is real. Codex's composer compares the pasted text's character
+/// count against `LARGE_PASTE_CHAR_THRESHOLD` (1000) and, when it is over, files
+/// the paste away as generic large content BEFORE it ever tries to recognize an
+/// image path. So a long enough path is never attached, however correctly it is
+/// quoted, and the quoting itself adds characters that can push one over.
+///
+/// Keyed by FORM rather than by provider, which is an approximation and is worth
+/// saying out loud: the threshold belongs to the receiving CLI, and `single_quoted`
+/// is simply the only form dux ships pointing at a CLI with a measured one. A user
+/// who sets `single_quoted` for some other provider gets this limit applied to it
+/// too. That errs toward telling the user the file may not be attached, which is
+/// the safe direction: the file is saved either way and the toast gives its path.
+/// If a second CLI is ever measured and its limit differs, this becomes a
+/// per-provider value published alongside the form.
+const ATTACHMENT_CHAR_LIMITS: Record<DragDropPasteForm, number | null> = {
+  bare: null,
+  single_quoted: 1000,
+  double_quoted: null,
+  backslash_escaped: null,
+}
+
+/// The character limit for a form, or `null` when it has none.
+export function attachmentCharLimit(form: DragDropPasteForm): number | null {
+  return ATTACHMENT_CHAR_LIMITS[form]
+}
+
+/// Whether this PAYLOAD is too long for the receiving CLI to read as a file path.
+///
+/// Takes the payload rather than the path on purpose: the quotes and the trailing
+/// space are pasted too, so a path comfortably under the limit can produce a
+/// payload over it, and counting the file's own path would miss exactly the cases
+/// this exists to catch.
+///
+/// Counts CHARACTERS, because that is what the CLI counts. JavaScript's `.length`
+/// counts UTF-16 code units, so a path full of emoji would look twice as long as
+/// it is and be refused when the CLI would have accepted it.
+export function pasteExceedsAttachmentLimit(
+  payload: string,
+  form: DragDropPasteForm,
+): boolean {
+  const limit = ATTACHMENT_CHAR_LIMITS[form]
+  // Strictly greater, matching `char_count > LARGE_PASTE_CHAR_THRESHOLD`: a
+  // payload of exactly the limit still gets looked at.
+  return limit !== null && [...payload].length > limit
+}
+
+/// Why a saved file's path was held back rather than pasted, in the words the
+/// stranded-file toast will show after "the path was not sent: ".
+///
+/// The path IS still reported, in full, by that same toast, so the user can hand
+/// it to the agent themselves. Pasting it anyway would be worse than not: over
+/// the limit the CLI swaps the text out for a placeholder, so the path would not
+/// even be readable in the prompt, and the toast would have claimed the file was
+/// attached when it was not.
+export function tooLongToAttachReason(limit: number): string {
+  return (
+    `the path is longer than this agent reads as a file path ` +
+    `(${limit} characters, counting the quoting dux adds), so it would have been ` +
+    `taken as ordinary pasted text rather than attached`
+  )
 }
 
 /// The characters `backslashEscaped` protects: whitespace, the quoting and
@@ -122,15 +226,23 @@ function singleQuoted(path: string): string {
   return `'${path.replaceAll("'", `'\\''`)}'`
 }
 
-/// Wrap in double quotes, escaping the two characters that would otherwise end or
-/// alter the quoting.
+/// Wrap in double quotes, escaping all four characters a double-quoted string
+/// gives meaning to: `"`, `\`, `$` and a backtick.
 ///
-/// A shell EVALUATOR also expands `$` and a backtick inside double quotes, but the
-/// thing on the receiving end is a LEXER deciding how many words it is looking at,
-/// and a lexer leaves both alone. Escaping them would change the bytes the CLI
-/// finally sees for no gain.
+/// AN EARLIER VERSION ESCAPED ONLY THE FIRST TWO, AND THE REASON GIVEN FOR IT WAS
+/// WRONG. That reason was that the receiving end is a LEXER counting words rather
+/// than an evaluator expanding them, so escaping `$` and a backtick would change
+/// the bytes the CLI finally sees for no gain. The premise is right and the
+/// conclusion does not follow: shell lexing REMOVES the backslash from `\$` and
+/// from the backslash-backtick pair, handing back the literal characters, so the
+/// escape costs nothing at all. (`shlex` 1.3.0's `parse_double` is explicit about
+/// it: `$`, a backtick, `"` and `\` after a backslash each yield just that
+/// character.) It is lossless, and it is what makes this form safe if it ever
+/// reaches something that EVALUATES what it reads instead of merely lexing it.
+/// Current Codex is safe either way; the next reader of a double-quoted path may
+/// not be.
 function doubleQuoted(path: string): string {
-  return `"${path.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`
+  return `"${path.replaceAll(/[\\"$`]/g, (c) => `\\${c}`)}"`
 }
 
 /// No quotes; escape each shell-significant character on its own.
@@ -159,10 +271,22 @@ function backslashEscaped(path: string): string {
 ///     out as exactly ONE token, so a bare path containing a space is silently
 ///     ignored and `single_quoted` is what it needs.
 ///
-/// KNOWN LIMITATION, stated rather than worked around: a path containing a
-/// BACKSLASH is mangled by Claude Code's unescape step in EVERY form, because the
-/// unescape eats the backslash. That is a property of the receiving tool and dux
-/// cannot fix it from this side.
+/// A TERMINAL is not one of these cases and does not consult the setting at all:
+/// it runs a shell, which is why it always gets the shell-safe form. See
+/// `TERMINAL_PASTE_FORM`.
+///
+/// KNOWN LIMITATIONS, stated rather than worked around:
+///
+///   - A path containing a BACKSLASH is mangled by Claude Code's unescape step in
+///     EVERY form, because the unescape eats the backslash. That is a property of
+///     the receiving tool and dux cannot fix it from this side.
+///   - OpenCode strips quote characters off BOTH ENDS rather than one matching
+///     pair, so a path whose own last character is a quote loses it, and it
+///     unescapes backslash sequences, so a path holding a backslash is mangled
+///     there too.
+///   - Length is a separate question this function does not answer: a payload can
+///     be perfectly formed and still be too long for the CLI to look at. See
+///     `pasteExceedsAttachmentLimit`.
 ///
 /// One file per paste. In these tools a newline SUBMITS, so a file arriving with
 /// an automatic submit would fire a half-written prompt. Several files means

@@ -2,8 +2,11 @@ import { describe, expect, it } from "vitest"
 
 import {
   MAX_NAMED_FILES,
+  TERMINAL_PASTE_FORM,
+  attachmentCharLimit,
   dragDropPasteFormFor,
   dropToastFor,
+  pasteExceedsAttachmentLimit,
   pastePayload,
   type DropOutcome,
 } from "./fileDrop"
@@ -54,76 +57,138 @@ const AWKWARD = {
   backslash: "/home/p/a\\b/shot.png",
 }
 
+/// The word separators the real lexer uses, and no others. Exactly three
+/// characters: a space, a tab and a newline. Notably NOT a carriage return, a
+/// vertical tab, a form feed or a non-breaking space, all of which are ordinary
+/// characters that live INSIDE a word.
+const WORD_SEPARATORS = " \t\n"
+
 /// A hand-written POSIX shell lexer, just enough to answer the ONE question the
 /// receiving CLI actually asks: does this text come out as exactly one word?
 ///
 /// Written here rather than pulled in as a dependency, because the property under
 /// test is small and a dependency would move the thing being tested out of the
-/// repository. It implements the POSIX token-recognition rules a lexer uses (which
-/// is all Codex's shlex does): unquoted whitespace separates words; a backslash
-/// outside quotes escapes the next character; single quotes make everything
-/// literal until the next single quote; inside double quotes a backslash escapes
-/// only `"`, `\`, `$` and a backtick, and everything else, INCLUDING `$` and a
-/// backtick on their own, is an ordinary character. It deliberately does NOT
-/// expand anything: a lexer counts words, it does not run them.
+/// repository. What it is a model OF is not "POSIX in general" but one specific
+/// program: `shlex` 1.3.0's `Shlex` iterator (`src/bytes.rs`), which is what Codex
+/// pins and therefore the only lexer whose answer matters here. It is written to
+/// mirror that source arm for arm, and the golden cases below pin the four places
+/// an earlier, looser version of this function DISAGREED with it:
+///
+///   - a backslash-newline pair is REMOVED, inside double quotes and out; the
+///     earlier version kept the newline, which would have reported a token that
+///     the real lexer never produces;
+///   - `#` starts a comment, but only where a word would start; the earlier
+///     version had no notion of comments at all and lexed `#x` as a token;
+///   - the separators are exactly space, tab and newline; the earlier version used
+///     JavaScript's `\s`, which also splits on a carriage return, a form feed, a
+///     vertical tab and every Unicode space, none of which the real lexer splits
+///     on;
+///   - a trailing backslash and an unclosed quote are ERRORS (`had_error`, which
+///     makes `shlex::split` return `None`), which this models by throwing.
+///
+/// None of those four could change an answer for the paths dux actually sends,
+/// because dux refuses a newline or a tab in a path. They are fixed anyway: the
+/// value of this function is entirely in being a faithful model, and a checker
+/// nobody checks proves nothing about the thing it checks.
+///
+/// One deliberate divergence: `shlex::bytes::Shlex` walks BYTES, and this walks
+/// Unicode code points. Every character it gives meaning to is ASCII, so the two
+/// agree on any valid UTF-8 input, and code points are what a JavaScript test can
+/// honestly assert on.
 ///
 /// Returns the tokens, so a test can assert both the count AND that the one token
 /// is the original path rather than merely some single word.
 function posixLex(input: string): string[] {
-  const tokens: string[] = []
-  let token = ""
-  let started = false
+  const chars = [...input]
   let i = 0
-  while (i < input.length) {
-    const c = input[i]
-    if (/\s/.test(c)) {
-      if (started) {
-        tokens.push(token)
-        token = ""
-        started = false
-      }
-      i += 1
-    } else if (c === "\\") {
-      if (i + 1 >= input.length) throw new Error("trailing backslash")
-      token += input[i + 1]
-      started = true
-      i += 2
-    } else if (c === "'") {
-      const close = input.indexOf("'", i + 1)
-      if (close === -1) throw new Error("unterminated single quote")
-      token += input.slice(i + 1, close)
-      started = true
-      i = close + 1
-    } else if (c === '"') {
-      i += 1
-      started = true
-      for (;;) {
-        if (i >= input.length) throw new Error("unterminated double quote")
-        if (input[i] === '"') {
-          i += 1
-          break
-        }
-        if (input[i] === "\\" && '"\\$`'.includes(input[i + 1] ?? "")) {
-          token += input[i + 1]
-          i += 2
-          continue
-        }
-        token += input[i]
-        i += 1
-      }
-    } else {
-      token += c
-      started = true
-      i += 1
+  const next = (): string | undefined => (i < chars.length ? chars[i++] : undefined)
+
+  // `Shlex::parse_single`: everything is literal until the closing quote.
+  function parseSingle(): string {
+    let out = ""
+    for (;;) {
+      const c = next()
+      if (c === undefined) throw new Error("input ended inside a single-quoted string")
+      if (c === "'") return out
+      out += c
     }
   }
-  if (started) tokens.push(token)
-  return tokens
+
+  // `Shlex::parse_double`: a backslash gives meaning to `"`, `\`, `$` and a
+  // backtick, ERASES a following newline, and in front of anything else is kept
+  // along with the character it failed to escape.
+  function parseDouble(): string {
+    let out = ""
+    for (;;) {
+      const c = next()
+      if (c === undefined) throw new Error("input ended inside a double-quoted string")
+      if (c === '"') return out
+      if (c !== "\\") {
+        out += c
+        continue
+      }
+      const escaped = next()
+      if (escaped === undefined) {
+        throw new Error("input ended inside a double-quoted string")
+      }
+      if ('"\\$`'.includes(escaped)) out += escaped
+      else if (escaped !== "\n") out += `\\${escaped}`
+    }
+  }
+
+  // `Shlex::parse_word`.
+  function parseWord(first: string): string {
+    let ch: string | undefined = first
+    let out = ""
+    for (;;) {
+      if (ch === '"') out += parseDouble()
+      else if (ch === "'") out += parseSingle()
+      else if (ch === "\\") {
+        const escaped = next()
+        if (escaped === undefined) {
+          throw new Error("input ended right after an unescaped backslash")
+        }
+        // A backslash-newline pair is a line continuation and contributes
+        // NOTHING, which is the case the earlier version of this function got
+        // wrong: it preserved whatever followed the backslash, always.
+        if (escaped !== "\n") out += escaped
+      } else if (WORD_SEPARATORS.includes(ch)) break
+      else out += ch
+      ch = next()
+      if (ch === undefined) break
+    }
+    return out
+  }
+
+  const tokens: string[] = []
+  // `<Shlex as Iterator>::next`, called until it stops yielding.
+  for (;;) {
+    let ch = next()
+    if (ch === undefined) return tokens
+    // Skip leading separators and any whole comment. A `#` is a comment opener
+    // ONLY here, at the position a word would start; inside a word it is an
+    // ordinary character (there is no `#` arm in `parse_word`).
+    for (;;) {
+      if (WORD_SEPARATORS.includes(ch)) {
+        // Nothing to do; fall through to reading the next character.
+      } else if (ch === "#") {
+        for (;;) {
+          const c = next()
+          if (c === undefined || c === "\n") break
+        }
+      } else break
+      const c = next()
+      if (c === undefined) return tokens
+      ch = c
+    }
+    tokens.push(parseWord(ch))
+  }
 }
 
 describe("posixLex (the check the quoting tests lean on)", () => {
   // A checker nobody checks proves nothing about the thing it checks, so pin its
-  // behaviour on cases whose answer is not in doubt.
+  // behaviour on cases whose answer is not in doubt. Every expectation below was
+  // read off `shlex` 1.3.0's `src/bytes.rs`, the lexer Codex pins.
   it("splits on unquoted whitespace and keeps quoted runs whole", () => {
     expect(posixLex("a b")).toEqual(["a", "b"])
     expect(posixLex("'a b'")).toEqual(["a b"])
@@ -139,7 +204,51 @@ describe("posixLex (the check the quoting tests lean on)", () => {
   it("unescapes only the four characters a double quote gives meaning to", () => {
     expect(posixLex('"a\\"b"')).toEqual(['a"b'])
     expect(posixLex('"a\\\\b"')).toEqual(["a\\b"])
+    expect(posixLex('"a\\$b"')).toEqual(["a$b"])
+    expect(posixLex('"a\\`b"')).toEqual(["a`b"])
+    // Anything else keeps BOTH the backslash and the character after it.
     expect(posixLex('"a\\nb"')).toEqual(["a\\nb"])
+  })
+
+  it("starts a comment at a `#` that begins a word, and nowhere else", () => {
+    expect(posixLex("#x")).toEqual([])
+    expect(posixLex("a #b")).toEqual(["a"])
+    expect(posixLex("#c\na")).toEqual(["a"])
+    // Inside a word it is an ordinary character, and quoting it makes it one
+    // even at the start.
+    expect(posixLex("a#b")).toEqual(["a#b"])
+    expect(posixLex("'#x'")).toEqual(["#x"])
+  })
+
+  it("removes a backslash-newline pair entirely, quoted or not", () => {
+    expect(posixLex("a\\\nb")).toEqual(["ab"])
+    expect(posixLex('"a\\\nb"')).toEqual(["ab"])
+  })
+
+  it("separates on a space, a tab and a newline, and on nothing else", () => {
+    expect(posixLex("a\tb\nc d")).toEqual(["a", "b", "c", "d"])
+    // A carriage return, a vertical tab, a form feed and a non-breaking space
+    // are ordinary characters. JavaScript's `\s` matches all four, which is why
+    // the earlier version of this lexer split on them.
+    expect(posixLex("a\rb")).toEqual(["a\rb"])
+    expect(posixLex("a\u000bb")).toEqual(["a\u000bb"])
+    expect(posixLex("a\fb")).toEqual(["a\fb"])
+    expect(posixLex("a\u00a0b")).toEqual(["a\u00a0b"])
+  })
+
+  it("errors rather than guessing when the input ends mid-token", () => {
+    // The real lexer sets `had_error`, throws out the last token and stops,
+    // which makes `shlex::split` return `None`. Throwing is how that is modelled
+    // here: an answer would be a fiction.
+    expect(() => posixLex("a\\")).toThrow()
+    expect(() => posixLex("'a")).toThrow()
+    expect(() => posixLex('"a')).toThrow()
+    expect(() => posixLex('"a\\')).toThrow()
+  })
+
+  it("yields an empty token for an empty quoted string", () => {
+    expect(posixLex("''")).toEqual([""])
+    expect(posixLex('""')).toEqual([""])
   })
 })
 
@@ -211,9 +320,14 @@ describe("pastePayload", () => {
 
   describe("double_quoted", () => {
     it("produces the exact expected string for each awkward input", () => {
-      // Only the double quote and the backslash are escaped. A dollar and a
-      // backtick are left alone deliberately: the receiving end is a LEXER
-      // counting words, not an evaluator expanding them.
+      // All FOUR characters a double quote gives meaning to are escaped: the
+      // quote, the backslash, the dollar and the backtick. The dollar and the
+      // backtick used to be left alone, on the stated reasoning that escaping
+      // them would change the bytes the CLI finally sees. That reasoning was
+      // WRONG, and the case below is the proof: shell lexing turns `\$` back
+      // into `$` and the backslash-backtick pair back into a backtick, so the
+      // escape is lossless and the form is safe even in front of something that
+      // EVALUATES rather than lexes.
       expect(pastePayload(AWKWARD.plain, "double_quoted")).toBe(
         `"/home/p/shot.png" `,
       )
@@ -227,14 +341,25 @@ describe("pastePayload", () => {
         `"/home/p/it\\"s/shot.png" `,
       )
       expect(pastePayload(AWKWARD.dollar, "double_quoted")).toBe(
-        `"/home/p/$(rm -rf ~)/shot.png" `,
+        `"/home/p/\\$(rm -rf ~)/shot.png" `,
       )
       expect(pastePayload(AWKWARD.backtick, "double_quoted")).toBe(
-        '"/home/p/`whoami`/shot.png" ',
+        '"/home/p/\\`whoami\\`/shot.png" ',
       )
       expect(pastePayload(AWKWARD.backslash, "double_quoted")).toBe(
         `"/home/p/a\\\\b/shot.png" `,
       )
+    })
+
+    it("escapes the dollar and the backtick LOSSLESSLY, which is why it may", () => {
+      // The whole correction in one assertion: the escaped payload lexes back to
+      // the byte-for-byte original path. Nothing is added to what the CLI reads,
+      // so there was never a cost to weigh against the safety.
+      for (const path of [AWKWARD.dollar, AWKWARD.backtick]) {
+        const quoted = pastePayload(path, "double_quoted").slice(0, -1)
+        expect(quoted).toContain("\\")
+        expect(posixLex(quoted)).toEqual([path])
+      }
     })
 
     it("lexes to exactly ONE token, which is the path, for every input", () => {
@@ -299,27 +424,33 @@ describe("pastePayload", () => {
 
 describe("dragDropPasteFormFor", () => {
   const forms = { claude: "bare", codex: "single_quoted", opencode: "bare" }
+  const running = (provider: string | undefined) =>
+    ({ kind: "agent", provider }) as const
 
   it("uses the form the server published for the running provider", () => {
-    expect(dragDropPasteFormFor(forms, "codex")).toBe("single_quoted")
-    expect(dragDropPasteFormFor(forms, "claude")).toBe("bare")
+    expect(dragDropPasteFormFor(forms, running("codex"))).toBe("single_quoted")
+    expect(dragDropPasteFormFor(forms, running("claude"))).toBe("bare")
   })
 
   it("falls back to bare for a provider the server said nothing about", () => {
     // A provider the user added themselves, an older server that does not send
-    // the map at all, and a pane with no provider (a plain terminal). Bare is
-    // the do-nothing option.
-    expect(dragDropPasteFormFor(forms, "myagent")).toBe("bare")
-    expect(dragDropPasteFormFor(undefined, "codex")).toBe("bare")
-    expect(dragDropPasteFormFor(forms, undefined)).toBe("bare")
+    // the map at all, and a tab whose provider is not known yet. Bare is the
+    // do-nothing option.
+    expect(dragDropPasteFormFor(forms, running("myagent"))).toBe("bare")
+    expect(dragDropPasteFormFor(undefined, running("codex"))).toBe("bare")
+    expect(dragDropPasteFormFor(forms, running(undefined))).toBe("bare")
   })
 
   it("falls back to bare for a form name it does not recognize", () => {
     // The server normalizes and warns once at config load, so this should not
     // arise; a client that trusted the string blindly would still be one config
     // typo from pasting the literal word into somebody's prompt.
-    expect(dragDropPasteFormFor({ codex: "single-quoted" }, "codex")).toBe("bare")
-    expect(dragDropPasteFormFor({ codex: "file_url" }, "codex")).toBe("bare")
+    expect(dragDropPasteFormFor({ codex: "single-quoted" }, running("codex"))).toBe(
+      "bare",
+    )
+    expect(dragDropPasteFormFor({ codex: "file_url" }, running("codex"))).toBe(
+      "bare",
+    )
   })
 
   it("recognizes all four shipped forms", () => {
@@ -329,7 +460,98 @@ describe("dragDropPasteFormFor", () => {
       "double_quoted",
       "backslash_escaped",
     ] as const) {
-      expect(dragDropPasteFormFor({ p: form }, "p")).toBe(form)
+      expect(dragDropPasteFormFor({ p: form }, running("p"))).toBe(form)
+    }
+  })
+
+  it("gives a TERMINAL the shell-safe form, and reads no provider at all", () => {
+    // The correction. A terminal runs a SHELL, and that is precisely why its
+    // path has to be quoted rather than left bare: dux permits a dollar, a
+    // backtick, a space, a semicolon, a quote and parentheses in a destination
+    // path, and a shell splits and substitutes every one of them the moment the
+    // user presses Enter on the line the path was pasted into.
+    expect(TERMINAL_PASTE_FORM).toBe("single_quoted")
+    expect(dragDropPasteFormFor(forms, { kind: "terminal" })).toBe(
+      "single_quoted",
+    )
+    // The target type gives a terminal no provider FIELD, so no configuration of
+    // the map can change this answer.
+    expect(dragDropPasteFormFor({}, { kind: "terminal" })).toBe("single_quoted")
+    expect(dragDropPasteFormFor(undefined, { kind: "terminal" })).toBe(
+      "single_quoted",
+    )
+  })
+
+  it("makes a shell-hostile path inert for a terminal", () => {
+    // What "shell-safe" has to mean, asserted on the bytes rather than on the
+    // form name: the payload lexes to exactly ONE word, and that word is the
+    // path, so nothing in it is a command, a variable or an argument boundary.
+    for (const path of [
+      "/home/p/$(rm -rf ~)/shot.png",
+      "/home/p/`whoami`/shot.png",
+      "/home/p/Web App/shot.png",
+      "/home/p/a;b/shot.png",
+      "/home/p/Bob's app/shot.png",
+      '/home/p/it"s/shot.png',
+    ]) {
+      const form = dragDropPasteFormFor(undefined, { kind: "terminal" })
+      expect(posixLex(pastePayload(path, form).slice(0, -1))).toEqual([path])
+    }
+  })
+})
+
+describe("the attachment length limit", () => {
+  // Measured from the receiving CLI's own source rather than assumed: codex's
+  // `chat_composer.rs` compares `char_count > LARGE_PASTE_CHAR_THRESHOLD` (1000)
+  // and, when it is over, files the paste away as generic large content BEFORE
+  // it ever looks for an image path. So a long enough path is never attached,
+  // and quoting, which adds characters, is what can push one over.
+
+  it("carries a limit only for the form that exists because of codex", () => {
+    expect(attachmentCharLimit("single_quoted")).toBe(1000)
+    expect(attachmentCharLimit("bare")).toBe(null)
+    expect(attachmentCharLimit("double_quoted")).toBe(null)
+    expect(attachmentCharLimit("backslash_escaped")).toBe(null)
+  })
+
+  it("measures the FINAL payload, not the path on disk", () => {
+    // A path of exactly 998 characters is comfortably under the limit. Its
+    // single-quoted payload is 1001, because two quotes and the trailing space
+    // are part of what gets pasted, and that is over.
+    const path = `/tmp/${"a".repeat(993)}`
+    expect([...path].length).toBe(998)
+    const payload = pastePayload(path, "single_quoted")
+    expect([...payload].length).toBe(1001)
+    expect(pasteExceedsAttachmentLimit(payload, "single_quoted")).toBe(true)
+    // The same path bare is 999 characters and fits, which is the whole point:
+    // the answer belongs to the payload and not to the file.
+    expect([...pastePayload(path, "bare")].length).toBe(999)
+    expect(pasteExceedsAttachmentLimit(pastePayload(path, "bare"), "bare")).toBe(
+      false,
+    )
+  })
+
+  it("puts the boundary exactly where the CLI puts it", () => {
+    // `char_count > 1000`, so 1000 fits and 1001 does not.
+    const at = "x".repeat(1000)
+    const over = "x".repeat(1001)
+    expect(pasteExceedsAttachmentLimit(at, "single_quoted")).toBe(false)
+    expect(pasteExceedsAttachmentLimit(over, "single_quoted")).toBe(true)
+  })
+
+  it("counts characters, not UTF-16 code units", () => {
+    // An emoji is one character to the CLI and two units to JavaScript. Counting
+    // units would refuse a payload the CLI would have accepted.
+    const payload = "🙂".repeat(600)
+    expect(payload.length).toBe(1200)
+    expect([...payload].length).toBe(600)
+    expect(pasteExceedsAttachmentLimit(payload, "single_quoted")).toBe(false)
+  })
+
+  it("never refuses a form that has no measured limit", () => {
+    const huge = "x".repeat(100_000)
+    for (const form of ["bare", "double_quoted", "backslash_escaped"] as const) {
+      expect(pasteExceedsAttachmentLimit(huge, form)).toBe(false)
     }
   })
 })

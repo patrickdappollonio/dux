@@ -164,6 +164,25 @@ pub struct Engine {
     /// showing what's actually running until the user exits and relaunches
     /// the agent. Cleared whenever the PTY is torn down.
     pub running_provider_pins: HashMap<String, ProviderKind>,
+    /// The web drag-and-drop paste form each LIVE tab launched with, keyed by tab
+    /// id, carrying the provider NAME it launched as alongside the form.
+    ///
+    /// This exists for one case: the user renames or deletes a
+    /// `[providers.<name>]` block while a tab is still running that provider. The
+    /// tab keeps reporting the name it launched as (that is what is actually on
+    /// screen), so a browser looking that name up in the configured map would find
+    /// nothing and fall back to `bare`, changing how a dropped path is quoted
+    /// under a running agent that never changed. Keeping the launched form with
+    /// the PROCESS is the fix; it retires when the process does, through
+    /// `clear_tab_runtime`, and a name config still carries always resolves from
+    /// config instead (config wins for an explicit preference).
+    ///
+    /// The alternative considered was to refuse a rename or a removal while a
+    /// process is live. It was rejected because `config.toml` is a file the user
+    /// edits in their own editor and dux reloads: there is no point at which a
+    /// refusal could be delivered, and the reload would either have to be
+    /// abandoned wholesale or silently keep a block the file no longer contains.
+    pub launched_dragdrop_paste: HashMap<String, (String, crate::config::WebDragDropPaste)>,
     pub companion_terminals: HashMap<String, CompanionTerminal>,
     /// Persisted **extra tabs** (secondary provider tabs), keyed by tab id with
     /// the owning `session_id` carried in the value (mirrors `companion_terminals`
