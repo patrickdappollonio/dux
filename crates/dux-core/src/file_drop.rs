@@ -36,10 +36,13 @@
 //!   DIRECTORY is held to the same standard: absolute, valid UTF-8, free of
 //!   control characters, and verified to still name the pinned directory. A
 //!   folder holding a line feed or an escape byte would arrive at the line
-//!   editor as something other than a path, and quoting does not protect that
-//!   layer; a folder that is not valid UTF-8 would arrive full of replacement
-//!   characters. Refusing the drop is better than saving a file the user cannot
-//!   reference.
+//!   editor as something other than a path, and no way of writing the path
+//!   protects that layer; a folder that is not valid UTF-8 would arrive full of
+//!   replacement characters. Refusing the drop is better than saving a file the
+//!   user cannot reference. (The web pastes the path BARE, neither quoted nor
+//!   escaped, because the agent CLIs do not tokenise the paste the way a shell
+//!   does; the reasoning lives on `pastePayload` in
+//!   `crates/dux-web/web/src/lib/fileDrop.ts`.)
 //! - **An unreadable process is a refusal, not a licence to write elsewhere.**
 //!   Asking a live process where it is can fail because the process has GONE, or
 //!   because dux is not allowed to look (a shell running as another user) or
@@ -126,7 +129,7 @@ pub enum UnreportablePath {
     /// Holds a control character. A line feed becomes a CARRIAGE RETURN on the
     /// way through the terminal, which submits rather than typing; an escape
     /// byte is obeyed by the line editor or by whatever full-screen program is
-    /// running. Neither is something quoting can fix.
+    /// running. Neither is something any way of writing the path can fix.
     Control,
     /// The path no longer names the directory that was pinned. The folder was
     /// removed, or it is only reachable under this name from somewhere else.
@@ -1096,8 +1099,9 @@ mod tests {
     #[test]
     fn keeps_ordinary_awkward_names_exactly_as_dropped() {
         // Spaces, parentheses and quotes are all legal in a filename and are
-        // what a screenshot is actually called. They are a QUOTING problem at
-        // paste time, not a naming problem here.
+        // what a screenshot is actually called. They are the paste layer's
+        // business, not a naming problem here, and the paste sends the path
+        // bare, so they travel unchanged.
         for name in [
             "Screen Shot 2026-08-01 at 12.00.00.png",
             "report (final).pdf",
@@ -1469,8 +1473,8 @@ mod tests {
         // the token submits instead of naming a file; the escape byte is obeyed
         // by the line editor or by whatever full-screen program is reading; and
         // the invalid UTF-8 came back as "dir\u{fffd}\u{fffd}name", which names
-        // nothing at all. Quoting protects none of that, because none of it is a
-        // shell problem.
+        // nothing at all. None of that is a shell problem, so no way of writing
+        // the path protects against it.
         for (label, raw, want) in [
             (
                 "a line feed",
@@ -1504,13 +1508,14 @@ mod tests {
     }
 
     #[test]
-    fn the_folders_that_are_only_a_quoting_problem_still_work() {
+    fn the_folders_that_only_look_awkward_still_work() {
         // The other half of the rule, and the reason the check is about control
         // characters and encoding rather than "unusual characters". A dollar, a
-        // backtick, a space and a single quote all survive as ONE shell token
-        // once the path is quoted, so refusing them would break ordinary folders
-        // for no safety gain: a worktree path is built from the project's name
-        // and routinely contains spaces.
+        // backtick, a space and a single quote all reach the agent unchanged,
+        // because the path is pasted bare and the receiving CLI takes the whole
+        // string rather than splitting it into shell words. Refusing them would
+        // break ordinary folders for no safety gain: a worktree path is built
+        // from the project's name and routinely contains spaces.
         for name in [
             "with $dollar",
             "with `backtick`",

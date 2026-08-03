@@ -297,22 +297,59 @@ afterEach(() => {
 })
 
 describe("dropping a file onto an agent", () => {
-  it("uploads it and the quoted path reaches the socket with nothing that submits", async () => {
+  it("uploads it and the bare path reaches the socket with nothing that submits", async () => {
     uploadDroppedFile.mockResolvedValue(saved("shot.png"))
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     await drop([file("shot.png")])
 
     expect(uploadDroppedFile).toHaveBeenCalledTimes(1)
-    expect(TermStub.pastes).toEqual(["'/tmp/p1/shot.png' "])
+    expect(TermStub.pastes).toEqual(["/tmp/p1/shot.png "])
     // Asserted after xterm's real preparation and after the pane's own gate, so
     // this is the byte stream the agent would receive rather than a call that
     // was merely made. A newline SUBMITS in these tools, and xterm turns one
     // into a CARRIAGE RETURN on the way through, so both are checked here where
     // the rewriting has actually happened.
-    expect(sentToSocket()).toEqual(["'/tmp/p1/shot.png' "])
+    expect(sentToSocket()).toEqual(["/tmp/p1/shot.png "])
     expect(sentToSocket()[0]).not.toContain("\n")
     expect(sentToSocket()[0]).not.toContain("\r")
     expect(vi.mocked(toast.success)).toHaveBeenCalled()
+  })
+
+  it("sends an awkward path byte for byte as it is on disk", async () => {
+    // The cases that motivated dropping the quoting. The receiving CLIs do not
+    // tokenise a pasted path the way a shell does: they trim the whole string,
+    // strip ONE surrounding pair of matching quotes, and unescape backslash
+    // sequences. So quoting buys nothing on an ordinary path and actively
+    // CORRUPTS one holding an apostrophe, because POSIX single-quoting writes
+    // an embedded quote as '\'' and that unescape step turns it into '''.
+    //
+    // Asserted at the SOCKET rather than on the payload helper, so what is
+    // pinned is the byte stream the agent would actually receive, after
+    // xterm's own preparation and the pane's ownership gate.
+    for (const path of [
+      "/tmp/p1/Web App/shot.png",
+      "/tmp/p1/Bob's app/shot.png",
+      "/tmp/p1/$(rm -rf ~)/shot.png",
+      "/tmp/p1/`whoami`/shot.png",
+      '/tmp/p1/it"s a dir/shot.png',
+    ]) {
+      cleanup()
+      FakePtySocket.instances = []
+      TermStub.instances = []
+      TermStub.pastes = []
+      uploadDroppedFile.mockReset()
+      uploadDroppedFile.mockResolvedValue({
+        path,
+        saved_name: "shot.png",
+        requested_name: "shot.png",
+        folder: "/tmp/p1",
+        folder_label: "~/p1",
+        renamed: false,
+      })
+      render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+      await drop([file("shot.png")])
+      expect(sentToSocket()).toEqual([`${path} `])
+    }
   })
 
   it("brackets the path when the running program asked for bracketed paste", async () => {
@@ -324,7 +361,7 @@ describe("dropping a file onto an agent", () => {
     await drop([file("shot.png")])
 
     expect(sentToSocket()).toEqual([
-      "\x1b[200~'/tmp/p1/shot.png' \x1b[201~",
+      "\x1b[200~/tmp/p1/shot.png \x1b[201~",
     ])
   })
 
@@ -336,7 +373,7 @@ describe("dropping a file onto an agent", () => {
     const message = vi.mocked(toast.success).mock.calls[0][0] as string
     expect(message).toContain("shot.png")
     expect(message).toContain("shot-S-1.png")
-    expect(sentToSocket()).toEqual(["'/tmp/p1/shot-S-1.png' "])
+    expect(sentToSocket()).toEqual(["/tmp/p1/shot-S-1.png "])
   })
 
   it("carries the terminal socket's own connection id, not the events one", async () => {
@@ -396,7 +433,7 @@ describe("dropping several files", () => {
       expect(sentToSocket()).toEqual(
         ["a.png", "b.png", "c.png"]
           .slice(0, i + 1)
-          .map((n) => `'/tmp/p1/${n}' `),
+          .map((n) => `/tmp/p1/${n} `),
       )
       expect(started).toEqual(
         ["a.png", "b.png", "c.png"].slice(0, Math.min(i + 2, 3)),

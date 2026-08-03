@@ -94,12 +94,35 @@ prompt, so the folders above it are held to the same standard. dux refuses a dro
 into a folder whose own path could not survive the trip to your terminal: one
 holding a line feed (which arrives as a submit rather than as text), one holding
 an escape character (which the program reading your terminal simply obeys), or
-one whose name is not valid text at all. Quoting does not help with any of those,
-because none of them is a shell problem.
+one whose name is not valid text at all. Those are the only refusals, and none
+of them is something a different way of writing the path could rescue.
 
-Everything that *is* only a quoting problem still works. Spaces, dollars,
-backticks, quotes and semicolons in a folder name are all fine, which matters
-because a worktree path is built from your project's name.
+Everything else works. Spaces, dollars, backticks, quotes and semicolons in a
+folder name are all fine, which matters because a worktree path is built from
+your project's name.
+
+## The path arrives exactly as it is on disk
+
+dux pastes the path **bare**: no quotes around it and no escaping inside it.
+That is deliberate, and an earlier version got it wrong by wrapping the path in
+shell quotes.
+
+The thing on the other end is not a shell. An agent CLI that turns a pasted path
+into an attached image does not split the paste into shell words; it takes the
+whole string, trims it, strips one surrounding pair of matching quotes, undoes
+backslash escapes, and asks whether what is left looks like an image file. So a
+bare path with spaces in it is read perfectly well, because nothing splits on a
+space. Quoting was not buying anything, and on one very ordinary case it was
+doing damage: shell quoting writes an apostrophe inside a quoted string in a way
+that the CLI's own unescaping step then mangles, so a file in a folder called
+`Bob's app` came out with three apostrophes in the middle of it and pointed at
+nothing.
+
+One known limitation, which is not ours to fix: a path containing a **backslash**
+is mangled by that same unescaping step, quoted or not. dux sends the correct
+bytes; the receiving tool eats the backslash. Backslashes in file and folder
+names are rare on macOS and Linux, and dux cannot do anything about it from its
+side.
 
 ## Several files at once
 
@@ -107,8 +130,8 @@ Drop a handful and they are saved one after another, and their paths are pasted
 **in the order you dropped them**, not in whatever order the uploads happened to
 finish. Each path is pasted on its own, followed by a single space and no
 newline, because a newline would submit your half-written prompt, and because
-these tools only treat a pasted path as an attachment when it is a single token
-on its own.
+these tools only treat a pasted path as an attachment when the whole paste is
+that one path.
 
 You get **one** toast for the whole drop rather than one per file.
 

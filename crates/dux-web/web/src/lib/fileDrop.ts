@@ -66,31 +66,45 @@ export type DropToast = {
   message: string
 }
 
-/// Quote `path` as exactly ONE shell token.
+/// What to paste for one saved file: the BARE path, one trailing space, and NO
+/// newline.
 ///
-/// The whole path is quoted, not just the filename. An earlier design claimed
-/// that validating the filename removed the need to quote; that was wrong,
-/// because the filename is only the last part. The DIRECTORY routinely contains
-/// spaces, since a worktree path is built from the project's name.
+/// The path is sent exactly as it is on disk. Nothing is quoted and nothing is
+/// escaped, and that is deliberate, because an earlier version of this file DID
+/// quote the whole path as one POSIX shell token and that was measured to be
+/// wrong. Do not put the quoting back.
 ///
-/// Single quotes, because inside them every character is literal; the one
-/// escape needed is for a single quote itself, which closes, escapes and
-/// reopens. Codex's source unquotes both quote styles, and GNOME Terminal and
-/// Konsole both quote dropped paths this way.
-export function quoteShellToken(path: string): string {
-  return `'${path.replaceAll("'", "'\\''")}'`
-}
-
-/// What to paste for one saved file: the quoted path, one trailing space, and
-/// NO newline.
+/// The reason is that the receiving end is not a shell. The agent CLIs that
+/// turn a pasted path into an attached image do not tokenise the paste the way
+/// a shell does; they take the WHOLE pasted string and test it. Measured
+/// against the installed Claude Code binary (2.1.220), its detection is: trim,
+/// then strip ONE surrounding pair of matching quotes, then unescape backslash
+/// sequences, then test the result against `/\.(png|jpe?g|gif|webp)$/i`. So:
 ///
-/// One file per paste. In these tools a newline SUBMITS, so a file arriving with
-/// an automatic submit would fire a half-written prompt. Several files means
-/// several pastes in sequence, because Codex only treats a pasted path as an
-/// attachment when it parses as exactly one token, so two paths in one paste
-/// become plain text.
+///   - a bare path containing SPACES is read correctly, because nothing ever
+///     splits on a space;
+///   - a quoted path is also read correctly in the ordinary case, because the
+///     quote-stripping step undoes the quoting, so quoting bought nothing;
+///   - but a path containing an APOSTROPHE is read WRONGLY when quoted. POSIX
+///     single-quoting escapes an embedded quote as `'\''`, and that unescape
+///     step turns it into `'''`. Running those two functions against exactly
+///     what dux used to produce, a real `/home/p/Bob's app/shot.png` came back
+///     as `/home/p/Bob'''s app/shot.png`, which names nothing.
+///
+/// So quoting cannot help and can hurt, and the bare path is what goes out.
+///
+/// KNOWN LIMITATION, stated rather than worked around: a path containing a
+/// BACKSLASH is still mangled by that CLI's unescape step, bare or quoted,
+/// because the unescape eats the backslash. dux cannot prevent that from its
+/// side; it is a property of the receiving tool.
+///
+/// One file per paste. In these tools a newline SUBMITS, so a file arriving
+/// with an automatic submit would fire a half-written prompt. Several files
+/// means several pastes in sequence, because these tools only treat a pasted
+/// path as an attachment when the whole pasted string is that one path, so two
+/// paths in one paste become plain text.
 export function pastePayload(path: string): string {
-  return `${quoteShellToken(path)} `
+  return `${path} `
 }
 
 /// Every distinct folder the saved files landed in, in the order they were hit.

@@ -4,7 +4,6 @@ import {
   MAX_NAMED_FILES,
   dropToastFor,
   pastePayload,
-  quoteShellToken,
   type DropOutcome,
 } from "./fileDrop"
 
@@ -41,43 +40,32 @@ function notSent(
   }
 }
 
-describe("quoteShellToken", () => {
-  it("wraps the whole path as one token so a directory with spaces survives", () => {
-    // The case the first design missed: the FILENAME is only the last part. A
-    // worktree path is built from the project's name, and "Web App" is a
-    // project name in dux's own tests.
-    expect(quoteShellToken("/home/p/Web App/shot.png")).toBe(
-      "'/home/p/Web App/shot.png'",
-    )
-  })
-
-  it("survives a directory containing quotes and shell metacharacters", () => {
-    expect(quoteShellToken("/tmp/it's a \"dir\"/x.png")).toBe(
-      "'/tmp/it'\\''s a \"dir\"/x.png'",
-    )
-    expect(quoteShellToken("/tmp/$(rm -rf ~)/x.png")).toBe(
-      "'/tmp/$(rm -rf ~)/x.png'",
-    )
-    expect(quoteShellToken("/tmp/a;b|c&d/x.png")).toBe("'/tmp/a;b|c&d/x.png'")
-  })
-
-  it("keeps a non-Latin name intact", () => {
-    expect(quoteShellToken("/tmp/スクリーンショット.png")).toBe(
-      "'/tmp/スクリーンショット.png'",
-    )
-  })
-})
-
 describe("pastePayload", () => {
-  it("is the quoted path, one trailing space, and NO newline", () => {
+  it("is the BARE path, one trailing space, and NO newline", () => {
     // A newline submits in these tools, so a file arriving with an automatic
     // submit would fire a half-written prompt. This is the assertion that
     // pins it.
     const payload = pastePayload("/home/p/shot.png")
-    expect(payload).toBe("'/home/p/shot.png' ")
+    expect(payload).toBe("/home/p/shot.png ")
     expect(payload).not.toContain("\n")
     expect(payload).not.toContain("\r")
     expect(payload.endsWith(" ")).toBe(true)
+  })
+
+  it("adds nothing at all to an awkward path", () => {
+    // The whole point of the reversal: whatever is on disk is what goes out.
+    // The byte-for-byte proof lives in the pane's own tests, at the socket;
+    // this is the same rule stated where the payload is built.
+    for (const path of [
+      "/home/p/Web App/shot.png",
+      "/home/p/Bob's app/shot.png",
+      "/tmp/$(rm -rf ~)/x.png",
+      "/tmp/`whoami`/x.png",
+      '/tmp/it"s/x.png',
+      "/tmp/スクリーンショット.png",
+    ]) {
+      expect(pastePayload(path)).toBe(`${path} `)
+    }
   })
 })
 
