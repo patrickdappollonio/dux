@@ -313,8 +313,8 @@ impl Engine {
     /// (owning `has_minimal_output` and the `resume_wait_timeout_ms` window):
     /// - `RetryExitedMinimal` / `RetryHungTimeout` -> `retry_resume_fallback`
     ///   with the window-appropriate status message; a `Retried` reaction is
-    ///   collected. The tab's activity/input stamps are cleared too (a retry
-    ///   removes its provider but not those maps).
+    ///   collected. That retry tears down every tab-keyed map itself, through
+    ///   `clear_tab_runtime`, so this loop names none of them.
     /// - `DropNonMinimalExit` -> drop the candidate so the normal exit-prune
     ///   path detaches it.
     /// - `Wait` -> leave it alone.
@@ -388,11 +388,11 @@ impl Engine {
             if let ResumeFallbackOutcome::Retried { reaction } =
                 self.retry_resume_fallback(&tab_id, pty_size, status_message)
             {
-                // A retry removes the provider/pin/candidate but not the
-                // activity/input stamps; clear them so a recycled id can't
-                // inherit stale activity (the TUI cleared these by hand before).
-                self.pty_activity.remove(&tab_id);
-                self.pty_input.remove(&tab_id);
+                // No hand-clearing here. The retry's teardown goes through
+                // `clear_tab_runtime`, which knows every tab-keyed map, so this
+                // site was a second, PARTIAL copy of that list: it named the
+                // activity and input stamps and nothing else, which is exactly
+                // the drift `clear_tab_runtime` exists to prevent.
                 reactions.push(*reaction);
             }
         }
@@ -763,18 +763,38 @@ mod tests {
         // The teardown therefore goes through `clear_tab_runtime`, the one
         // function that knows the whole tab-keyed map list, so the next map
         // added there does not have to remember this site too.
+        //
+        // EVERY map that function clears is SEEDED below, and every one is
+        // asserted empty afterwards. An earlier version of this test seeded five
+        // of them and asserted on a sixth it had never filled, so that assertion
+        // was true before the code under test ran and could not have failed; the
+        // two it neither seeded nor asserted were not covered at all. A test of
+        // a teardown that leaves maps out is exactly the shape of leak it is
+        // supposed to catch.
+        //
+        // The one entry that CANNOT be seeded is the in-flight `AgentLaunch` key:
+        // step 1 of the retry returns `InFlight` and touches nothing when that
+        // key is set, so seeding it would test a different path entirely. It is
+        // still asserted, where what is being observed is that the FAILED
+        // relaunch released its own key.
         let (mut engine, tmp) = test_engine();
         let mut session = sample_session("s1", "p1", "feat/x");
         session.worktree_path = tmp.path().to_string_lossy().to_string();
         session.provider = ProviderKind::new("dux-test-nonexistent-provider-zzz");
         engine.sessions.push(session);
+
+        // Everything the launch that just died had left keyed by this tab id.
         engine
             .resume_fallback_candidates
             .insert("s1".to_string(), Instant::now());
+        engine.providers.insert(
+            "s1".to_string(),
+            crate::pty::PtyClient::spawn_with_env("cat", &[], tmp.path(), 24, 80, 1000, &[])
+                .expect("spawn the stale attempt's PTY"),
+        );
         engine
             .running_provider_pins
             .insert("s1".to_string(), ProviderKind::new("codex"));
-        // Everything the launch that just died had left keyed by this tab id.
         engine.launched_drop_paste.insert(
             "s1".to_string(),
             crate::engine::LaunchedDropPaste {
@@ -783,7 +803,16 @@ mod tests {
                 command_name: "codex".to_string(),
             },
         );
+        engine.pty_activity.insert("s1".to_string(), Instant::now());
+        engine.pty_input.insert("s1".to_string(), Instant::now());
         engine.needs_attention.insert("s1".to_string());
+        engine.pty_progress.insert(
+            "s1".to_string(),
+            crate::pty::ProgressReport {
+                working: true,
+                at: Instant::now(),
+            },
+        );
         engine.agent_viewed.insert("s1".to_string(), Instant::now());
 
         let outcome = engine.retry_resume_fallback("s1", (24, 80), "fresh".to_string());
@@ -808,14 +837,33 @@ mod tests {
         assert!(saw_failed, "the launch job never reported failure in time");
 
         assert!(
+            !engine.providers.contains_key("s1"),
+            "the stale attempt's PTY must not outlive the relaunch"
+        );
+        assert!(
             !engine.launched_drop_paste.contains_key("s1"),
-            "a dead process must not keep publishing its drop-paste form"
+            "a dead process must not keep publishing its drop-paste profile"
         );
         assert!(!engine.running_provider_pins.contains_key("s1"));
         assert!(!engine.resume_fallback_candidates.contains_key("s1"));
+        assert!(
+            !engine.pty_activity.contains_key("s1"),
+            "stale activity would read as a working tab with no process"
+        );
+        assert!(
+            !engine.pty_input.contains_key("s1"),
+            "stale input would read as a typing tab with no process"
+        );
         assert!(!engine.needs_attention.contains("s1"));
+        assert!(
+            !engine.pty_progress.contains_key("s1"),
+            "a stale progress override leaves a spinner on a dead tab"
+        );
         assert!(!engine.agent_viewed.contains_key("s1"));
-        assert!(!engine.pty_progress.contains_key("s1"));
+        assert!(
+            !engine.is_in_flight(&crate::engine::InFlightKey::AgentLaunch("s1".to_string())),
+            "the failed relaunch must release its own in-flight key"
+        );
     }
 
     #[test]
