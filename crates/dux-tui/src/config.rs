@@ -1370,36 +1370,38 @@ fn render_provider_config(out: &mut String, name: &str, config: &ProviderCommand
         None => out.push_str("# forward_scroll = true\n"),
     }
     out.push_str(
-        "# What a DRAGGED AND DROPPED file's path looks like when the web UI writes\n\
-         # it into this provider's prompt. This affects the browser and nothing else,\n\
-         # which is what the \"web_\" prefix is here to say: in the terminal UI,\n\
-         # dropping a file onto the window is your terminal emulator's job and dux is\n\
-         # not involved at all.\n\
-         # Four forms:\n\
-         #   bare              = the path exactly as it is on disk. Nothing added,\n\
-         #                       nothing escaped.\n\
-         #   single_quoted     = wrapped in 'single quotes', with an apostrophe\n\
-         #                       inside it escaped the POSIX way.\n\
-         #   double_quoted     = wrapped in \"double quotes\", with a double quote\n\
-         #                       or backslash inside it escaped.\n\
-         #   backslash_escaped = no quotes, with shell-significant characters\n\
-         #                       escaped one by one, so My File.png goes out as\n\
-         #                       My\\ File.png. This is what several terminal\n\
-         #                       emulators emit when you drop a file on them.\n\
-         # Which one is right depends on how this CLI reads a pasted path, and the\n\
-         # CLIs genuinely differ. Some take the whole pasted string and only strip\n\
-         # quotes off it, so quoting buys nothing and actively corrupts a path\n\
-         # containing an apostrophe. Others lex the text with shell rules and accept\n\
-         # it only if it comes out as a single word, so a path with a space in it is\n\
-         # quietly ignored unless it is quoted or escaped. The values dux ships were\n\
-         # measured against each CLI rather than guessed.\n\
-         # Two combinations are known to fail, and neither is fixable from dux's\n\
-         # side: single-quoting a path that contains an apostrophe breaks Claude\n\
-         # Code, and any form carrying a backslash is mangled by the same CLI's own\n\
-         # unescaping step.\n\
-         # Getting it wrong is not usually a breakage: the normal symptom is that the\n\
-         # file is not attached automatically and its path is left sitting in the\n\
-         # prompt as ordinary text, which you can still work with.\n\
+        "# What a dragged and dropped file's path looks like when the web UI writes it\n\
+         # into this provider's prompt.\n\
+         #\n\
+         # You almost certainly do not need to touch this. dux ships the value it\n\
+         # measured for each CLI it knows about.\n\
+         #\n\
+         # A file at:  /home/you/My Project/it's here.png  goes out as\n\
+         #   bare               /home/you/My Project/it's here.png\n\
+         #   single_quoted      '/home/you/My Project/it'\\''s here.png'\n\
+         #   double_quoted      \"/home/you/My Project/it's here.png\"\n\
+         #   backslash_escaped  /home/you/My\\ Project/it\\'s\\ here.png\n\
+         #\n\
+         # Why it varies: the CLIs genuinely differ. Some take the whole pasted string\n\
+         # and only strip quotes off it, so quoting buys nothing and corrupts a path\n\
+         # with an apostrophe in it. Others lex the text with shell rules and accept it\n\
+         # only if it comes out as one word, so an unquoted path with a space is quietly\n\
+         # ignored. If a dropped file arrives as plain text instead of attaching, this\n\
+         # CLI probably wants it quoted; if the path arrives visibly mangled, with stray\n\
+         # quote or backslash characters in it, this CLI probably wants it bare.\n\
+         #\n\
+         # Known failures, neither fixable from dux's side: single_quoted breaks Claude\n\
+         # Code on a path containing an apostrophe, and any form carrying a backslash is\n\
+         # mangled by that same CLI's unescaping step. Getting it wrong is not usually\n\
+         # a breakage, though: the normal symptom is that the file is\n\
+         # not attached automatically and its path is left in the prompt as plain text.\n\
+         #\n\
+         # This is web-only, which is what the \"web_\" prefix says: in the terminal UI\n\
+         # dropping a file on the window is your terminal emulator's job, not dux's. It\n\
+         # does not apply to dux's own terminals either, in the web UI or anywhere else:\n\
+         # a terminal runs a shell, so its dropped paths are always quoted, whatever this\n\
+         # says.\n\
+         #\n\
          # An absent key, or a value dux does not recognize, means bare.\n",
     );
     match &config.web_dragdrop_paste {
@@ -3012,6 +3014,47 @@ mod web_dragdrop_paste_render_tests {
                 "the comment must list the {form} form"
             );
         }
+        // The WORKED EXAMPLE, which is the part that does most of the explaining.
+        // Pinned verbatim, because a worked example that is subtly wrong is worse
+        // than none: these four strings are what the web's `pastePayload` actually
+        // produces for that sample path, and the same four appear on the docs
+        // pages, so a change to any of them fails here.
+        assert!(
+            rendered.contains("A file at:  /home/you/My Project/it's here.png  goes out as"),
+            "the comment must show a sample path"
+        );
+        for line in [
+            r"#   bare               /home/you/My Project/it's here.png",
+            r"#   single_quoted      '/home/you/My Project/it'\''s here.png'",
+            "#   double_quoted      \"/home/you/My Project/it's here.png\"",
+            r"#   backslash_escaped  /home/you/My\ Project/it\'s\ here.png",
+        ] {
+            assert!(
+                rendered.contains(line),
+                "the worked example must carry this line verbatim: {line}"
+            );
+        }
+        // The reader who is here because a drop did not attach needs BOTH
+        // directions, since either kind of wrongness sends them to this setting.
+        assert!(
+            rendered.contains("probably wants it quoted"),
+            "the comment must say what an unattached plain-text path means"
+        );
+        assert!(
+            rendered.contains("probably wants it bare"),
+            "the comment must say what a mangled path means"
+        );
+        // A terminal never reads this, and a reader will otherwise wonder why
+        // their terminal ignores it.
+        assert!(
+            rendered.contains("a terminal runs a shell"),
+            "the comment must say the terminal case is not covered by this setting"
+        );
+        // The line that saves most readers from the rest of it.
+        assert!(
+            rendered.contains("You almost certainly do not need to touch this"),
+            "the comment must say up front that the shipped value is measured"
+        );
         // The web-only reason, which is why the key carries a `web_` prefix.
         assert!(
             rendered.contains("terminal emulator's job"),

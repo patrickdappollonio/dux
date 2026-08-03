@@ -51,6 +51,15 @@ install_hint = "curl -fsSL https://claude.ai/install.sh | bash"
 web_dragdrop_paste = "bare"
 ```
 
+A file at `/home/you/My Project/it's here.png` goes out as:
+
+| Value | What is written into the prompt |
+|---|---|
+| `bare` | `/home/you/My Project/it's here.png` |
+| `single_quoted` | `'/home/you/My Project/it'\''s here.png'` |
+| `double_quoted` | `"/home/you/My Project/it's here.png"` |
+| `backslash_escaped` | `/home/you/My\ Project/it\'s\ here.png` |
+
 ## A worked example
 
 Say you have a CLI called `myagent` that you launch interactively with no extra
@@ -66,7 +75,9 @@ install_hint = "see https://example.com/install"
 # mouse-aware child, otherwise dux host scrollback).
 # web_dragdrop_paste left absent: "bare", the do-nothing form. If dropping a
 # file on this agent in the browser leaves the path as plain text instead of
-# attaching it, the CLI probably wants the path quoted; try "single_quoted".
+# attaching it, the CLI probably wants the path quoted; try "single_quoted". If
+# the path arrives visibly mangled, with stray quote or backslash characters in
+# it, the CLI wants it bare and you are already there.
 ```
 
 Save the config, and `myagent` is now a provider you can pick when creating an

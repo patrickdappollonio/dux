@@ -103,18 +103,13 @@ your project's name.
 
 ## What the path looks like when it lands
 
-The thing on the other end is not a shell, and the agent CLIs do not agree with
-each other about how they read a pasted path. One takes the whole string and only
-strips quotes off it. Another lexes it with shell rules and throws it away unless
-it comes out as a single word. So there is no one shape that is right everywhere,
-and dux makes it **a per-provider setting** rather than a rule baked into the
-code.
+Whether a dropped file is picked up automatically depends on the exact shape of
+the path in the prompt, and the agent CLIs do not agree with each other about
+what that shape should be. So it is **a per-provider setting**, `web_dragdrop_paste`,
+in the provider's own block in `config.toml` next to `command` and `resume_args`.
 
-The key is `web_dragdrop_paste`, and it lives in the provider's own block in
-`config.toml` next to `command` and `resume_args`. The `web_` prefix is there to
-be obvious about scope: this affects the browser and nothing else. In the terminal
-UI, dropping a file onto the window is your terminal emulator's job and dux is not
-involved at all.
+You almost certainly do not need to touch it. dux ships the value it measured for
+each CLI it knows about.
 
 ```toml
 [providers.codex]
@@ -122,14 +117,16 @@ command = "codex"
 web_dragdrop_paste = "single_quoted"
 ```
 
-### The four forms
+### The four values
 
-| Value | What goes out for `/home/p/Web App/it's.png` |
+A file at `/home/you/My Project/it's here.png` goes out as:
+
+| Value | What is written into the prompt |
 |---|---|
-| `bare` | `/home/p/Web App/it's.png` |
-| `single_quoted` | `'/home/p/Web App/it'\''s.png'` |
-| `double_quoted` | `"/home/p/Web App/it's.png"` |
-| `backslash_escaped` | `/home/p/Web\ App/it\'s.png` |
+| `bare` | `/home/you/My Project/it's here.png` |
+| `single_quoted` | `'/home/you/My Project/it'\''s here.png'` |
+| `double_quoted` | `"/home/you/My Project/it's here.png"` |
+| `backslash_escaped` | `/home/you/My\ Project/it\'s\ here.png` |
 
 `bare` sends the path exactly as it is on disk. `single_quoted` and
 `double_quoted` wrap it so that a shell lexer reads the whole thing as one word,
@@ -137,12 +134,17 @@ escaping whatever would otherwise end the quoting. `backslash_escaped` skips the
 quotes and protects the significant characters one at a time, which is what
 several real terminal emulators do when you drop a file on them.
 
+**Which one do you want?** If a dropped file arrives as plain text instead of
+attaching, the CLI probably wants the path quoted, so try `single_quoted`. If the
+path arrives visibly mangled, with stray quote or backslash characters in it, the
+CLI probably wants it `bare`.
+
 ### Which CLI needs which, and why
 
 Every row here was produced by running that CLI's own path handling over the exact
 bytes dux sends, not by reading the code and summarising it.
 
-| CLI | What it does with a pasted path | Form it needs |
+| CLI | What it does with a pasted path | Value |
 |---|---|---|
 | Claude Code | Trims the whole string, strips one surrounding pair of matching quotes, undoes backslash escapes, then asks whether what is left looks like an image. Never splits on whitespace. | `bare` |
 | OpenCode | Strips quote characters off both ends, resolves a `file://` URL, undoes backslash escapes. No shell splitting, so a space is harmless. | `bare` |
@@ -154,35 +156,58 @@ otherwise. An absent key means `bare`, and so does a value dux does not recognis
 (it says so once in `dux.log` and carries on rather than refusing to load your
 config).
 
+The `web_` prefix is there to be obvious about scope: this affects the browser and
+nothing else. In the terminal UI, dropping a file onto the window is your terminal
+emulator's job and dux is not involved at all.
+
 ### What is known to fail
 
-This is the more useful half of the table, and neither of these is something dux
-can fix from its side. dux sends the correct bytes; the receiving tool rewrites
-them.
+This is the more useful half of the table, and none of it is something dux can fix
+from its side. dux sends the correct bytes; the receiving tool rewrites them.
 
 - **Single-quoting a path that contains an apostrophe breaks Claude Code.** POSIX
   quoting writes an embedded apostrophe by closing the quote, escaping it and
   reopening, and Claude Code's own unescaping step then collapses that into three
   apostrophes in a row. A file in a folder called `Bob's app` comes out naming
-  nothing. This is why Claude's default is `bare` and why an earlier version of
-  dux that quoted everything was wrong.
+  nothing. This is why Claude's value is `bare` and why an earlier version of dux
+  that quoted everything was wrong.
 - **Any form carrying a backslash is mangled by Claude Code's unescaping step.**
   That covers `backslash_escaped` outright, and it also covers a path that simply
   has a backslash in its name, whatever form you send it in. Backslashes in file
   and folder names are rare on macOS and Linux, but when they happen there is no
   form that survives.
+- **OpenCode eats a trailing quote character, and unescapes backslashes.** It
+  strips quote characters from *both ends* rather than one matching pair, so a
+  file whose own name ends in a quote loses that character. And like Claude Code
+  it undoes backslash escapes, so a path holding a backslash is mangled there too.
+- **Codex ignores a paste that is too long before it ever looks for a path.**
+  Anything over 1000 characters is filed away as generic pasted content, and the
+  quoting dux adds counts toward that. dux measures the finished paste rather than
+  the file's own path, and when it would go over the limit it does not send it at
+  all: the toast tells you the file was saved, gives you its full path, and says
+  the agent will not pick it up automatically.
 
-One form is deliberately **not** offered: a `file://` URL. Codex and OpenCode both
-resolve one, but whether Claude Code does on its paste path has not been measured,
-and a form should not ship on an assumption. If you measure it, it is a small
-addition.
+A `file://` URL is deliberately **not** one of the four values. Codex and OpenCode
+both resolve one, but whether Claude Code does on its paste path has not been
+measured. It is not a rejected idea, it is a candidate: measure it against a CLI,
+and it can be added as a fifth value for that provider.
 
 ### Getting it wrong is not usually a breakage
 
-If the form is wrong for your CLI, the normal symptom is that the file is not
+If the value is wrong for your CLI, the normal symptom is that the file is not
 attached automatically and its path is left sitting in the prompt as ordinary
 text. You can still work with that, and you can still refer to the file by the
 path you are looking at. Nothing is lost and nothing is overwritten.
+
+## Dropping onto a terminal
+
+A terminal is not an agent, and it does not read `web_dragdrop_paste` at all. Its
+dropped paths are **always quoted**, because a terminal runs a shell, and a shell
+is precisely the thing that would split a path on its spaces, expand a `$` in it
+and run a command substitution the moment you press Enter on the line the path
+landed in. dux permits all of those characters in a destination path, so the
+quoting is what makes them inert. The path is pasted at your cursor as one
+literal word and nothing is submitted for you.
 
 ## Several files at once
 
