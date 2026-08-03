@@ -162,7 +162,9 @@ export interface Bootstrap {
    * gates its whole drag surface on this, so a disabled feature offers nothing
    * rather than advertising a drop target and collecting a server refusal after
    * the fact (the server refusal remains the real enforcement). Older servers
-   * omit it, so consumers fall back to treating file drop as ON. */
+   * omit it, and this document also arrives after the first render, so
+   * consumers treat an absent value as OFF: nothing is offered until dux has
+   * said the feature exists. */
   file_drop_max_bytes?: number
 }
 
