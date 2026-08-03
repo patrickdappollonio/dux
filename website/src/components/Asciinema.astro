@@ -43,7 +43,10 @@ const scriptId = `asciicast-${castId}`;
       This is the terminal UI, recorded live. The same workspace runs in a browser too, and you can flip between the two in the section below.
     </p>
 
-    <div class="term relative">
+    {/* `.term` carries no margin of its own, so without this the caption above
+        sits flush against the frame. `mt-6` is the site's spacing for a block
+        that follows text (see ConfigPeek). */}
+    <div class="term relative mt-6">
       <div class="term-bar">
         <span class="term-dot" style="background:#ff5f56"></span>
         <span class="term-dot" style="background:#febc2e"></span>
