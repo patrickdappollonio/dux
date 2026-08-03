@@ -1049,13 +1049,6 @@ impl Engine {
         }
     }
 
-    /// Clear every runtime map keyed by ONE tab id (`providers`,
-    /// `running_provider_pins`, `resume_fallback_candidates`, `pty_activity`,
-    /// `pty_input`, and the in-flight `AgentLaunch` key). The SINGLE source of
-    /// truth for the per-tab teardown map list: both `close_tab` (a single
-    /// extra tab) and `clear_session_tab_runtime` (a whole session, looped)
-    /// call this, so adding a new tab-keyed map is a one-line change here rather
-    /// than a comment-enforced convention across two files.
     /// Remember the drag-and-drop paste form a tab LAUNCHED with, so the web
     /// bootstrap can still answer for that provider name after the user renames
     /// or removes its `[providers.<name>]` block. Taken from the exact
@@ -1077,6 +1070,17 @@ impl Engine {
         );
     }
 
+    /// Clear every runtime map keyed by ONE tab id: the body below is the list,
+    /// and it is the SINGLE source of truth for it. Three callers rely on that:
+    /// `close_tab` (a single extra tab), `clear_session_tab_runtime` (a whole
+    /// session, looped) and `retry_resume_fallback` (a stale resume attempt
+    /// about to be relaunched). Adding a new tab-keyed map is therefore a
+    /// one-line change here rather than a comment-enforced convention spread
+    /// across three files.
+    ///
+    /// `retry_resume_fallback` used to name three of these maps itself, and
+    /// every other one leaked whenever the relaunch it dispatched then failed.
+    /// Do not go back to naming maps at a call site.
     pub fn clear_tab_runtime(&mut self, tab_id: &str) {
         self.providers.remove(tab_id);
         self.running_provider_pins.remove(tab_id);

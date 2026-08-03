@@ -241,10 +241,20 @@ impl Engine {
         // BEFORE tearing down the pin, so the fresh relaunch reuses it.
         let is_session_slot = tab_id == session.id;
         let provider = self.tab_running_provider(&session, tab_id);
-        // 4. Tear down the stale resume attempt (all keyed by tab id).
-        self.resume_fallback_candidates.remove(tab_id);
-        self.providers.remove(tab_id);
-        self.running_provider_pins.remove(tab_id);
+        // 4. Tear down the stale resume attempt, through the ONE function that
+        //    knows every map keyed by a tab id. This used to remove the three
+        //    maps this path could name (`resume_fallback_candidates`,
+        //    `providers`, `running_provider_pins`) and nothing else, so every
+        //    other tab-keyed map survived a relaunch that then failed: the
+        //    launched drop-paste form kept being published in bootstrap for a
+        //    process that was gone, and `pty_progress` could leave a spinner on.
+        //    Routing it here means the next map added to `clear_tab_runtime`
+        //    does not have to remember this site as well.
+        //
+        //    Safe to call now rather than piecemeal: the in-flight pre-check at
+        //    step 1 already returned, so clearing the `AgentLaunch` key is a
+        //    no-op, and the provider that was running has been captured above.
+        self.clear_tab_runtime(tab_id);
         // 5. Build a fresh, non-resume launch request. The session-slot tab goes
         //    through the session-slot path (ResumeFallback view drives its status
         //    line); an extra tab rebuilds its own provider as a Tab launch so the
@@ -739,6 +749,72 @@ mod tests {
         assert!(!engine.is_in_flight(&InFlightKey::AgentLaunch("s1".to_string())));
         // The extra tab's row survives (a fresh relaunch, not a close).
         assert!(engine.agent_tabs.contains_key("tab-1"));
+    }
+
+    #[test]
+    fn a_failed_fallback_relaunch_leaves_no_tab_keyed_state_behind() {
+        // The retry tears the stale attempt down BEFORE it dispatches the fresh
+        // one, and the fresh one can fail (here: a provider binary that does not
+        // exist). Nothing repopulates a tab-keyed map on that path, so anything
+        // the teardown missed stays in memory until some later teardown or a
+        // restart. `launched_dragdrop_paste` was exactly that: the process was
+        // gone and its drop-paste form was still being published in bootstrap.
+        //
+        // The teardown therefore goes through `clear_tab_runtime`, the one
+        // function that knows the whole tab-keyed map list, so the next map
+        // added there does not have to remember this site too.
+        let (mut engine, tmp) = test_engine();
+        let mut session = sample_session("s1", "p1", "feat/x");
+        session.worktree_path = tmp.path().to_string_lossy().to_string();
+        session.provider = ProviderKind::new("dux-test-nonexistent-provider-zzz");
+        engine.sessions.push(session);
+        engine
+            .resume_fallback_candidates
+            .insert("s1".to_string(), Instant::now());
+        engine
+            .running_provider_pins
+            .insert("s1".to_string(), ProviderKind::new("codex"));
+        // Everything the launch that just died had left keyed by this tab id.
+        engine.launched_dragdrop_paste.insert(
+            "s1".to_string(),
+            (
+                "codex".to_string(),
+                crate::config::WebDragDropPaste::SingleQuoted,
+            ),
+        );
+        engine.needs_attention.insert("s1".to_string());
+        engine.agent_viewed.insert("s1".to_string(), Instant::now());
+
+        let outcome = engine.retry_resume_fallback("s1", (24, 80), "fresh".to_string());
+        assert!(matches!(outcome, ResumeFallbackOutcome::Retried { .. }));
+
+        // Drive the launch to its FAILURE through the real event path, so this
+        // asserts on the state a user is actually left holding.
+        let mut saw_failed = false;
+        for _ in 0..200 {
+            if let Ok(event) = engine.worker_rx.try_recv() {
+                if matches!(&event, crate::worker::WorkerEvent::AgentLaunchFailed(_)) {
+                    saw_failed = true;
+                }
+                engine.process_worker_event(event);
+                if saw_failed {
+                    break;
+                }
+                continue;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(saw_failed, "the launch job never reported failure in time");
+
+        assert!(
+            !engine.launched_dragdrop_paste.contains_key("s1"),
+            "a dead process must not keep publishing its drop-paste form"
+        );
+        assert!(!engine.running_provider_pins.contains_key("s1"));
+        assert!(!engine.resume_fallback_candidates.contains_key("s1"));
+        assert!(!engine.needs_attention.contains("s1"));
+        assert!(!engine.agent_viewed.contains_key("s1"));
+        assert!(!engine.pty_progress.contains_key("s1"));
     }
 
     #[test]
