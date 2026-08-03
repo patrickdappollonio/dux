@@ -2806,6 +2806,16 @@ mod tests {
             ])
             .output()
             .unwrap();
+        // The exit status is asserted FIRST, and it is what makes the emptiness
+        // below mean anything. A git command that fails to run at all prints
+        // nothing on stdout, so an emptiness assertion on its own passes for the
+        // one reason it must never pass for.
+        assert!(
+            out.status.success(),
+            "the fixture's git command must succeed, got status {} and stderr:\n{}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
         assert!(
             String::from_utf8_lossy(&out.stdout).trim().is_empty(),
             "a git command built by the fixture helper must see no global git \
