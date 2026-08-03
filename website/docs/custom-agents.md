@@ -42,6 +42,13 @@ install_hint = "curl -fsSL https://claude.ai/install.sh | bash"
 # own host scrollback. Set true to always forward to the child, or false to
 # never forward (always use dux scrollback).
 # forward_scroll = true
+# What a dragged-and-dropped file's path looks like when the WEB UI writes it
+# into this provider's prompt. Web only, which is what the "web_" prefix says:
+# in the terminal UI, dropping a file on the window is your terminal emulator's
+# job. One of "bare", "single_quoted", "double_quoted" or "backslash_escaped";
+# absent means "bare". See Dropping files onto an agent for which CLI needs
+# which, and why.
+web_dragdrop_paste = "bare"
 ```
 
 ## A worked example
@@ -57,6 +64,9 @@ resume_args = ["--continue"]
 install_hint = "see https://example.com/install"
 # forward_scroll left absent: auto-detect (forward only to a fullscreen,
 # mouse-aware child, otherwise dux host scrollback).
+# web_dragdrop_paste left absent: "bare", the do-nothing form. If dropping a
+# file on this agent in the browser leaves the path as plain text instead of
+# attaching it, the CLI probably wants the path quoted; try "single_quoted".
 ```
 
 Save the config, and `myagent` is now a provider you can pick when creating an

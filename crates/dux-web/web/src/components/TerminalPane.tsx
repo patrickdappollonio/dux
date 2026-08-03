@@ -16,6 +16,7 @@ import {
   type DropContext,
   type DropOutcome,
   dropToastFor,
+  dragDropPasteFormFor,
   pastePayload,
 } from "@/lib/fileDrop"
 import { FileDropApiError, uploadDroppedFile } from "@/lib/fileDropApi"
@@ -1526,9 +1527,25 @@ export function TerminalPane(props: TerminalPaneProps) {
   // also the order the paths are sent, which must not become whichever order the
   // uploads happen to finish in. One toast reports the whole drop at the end, so
   // a handful of files does not bury the screen.
+  //
+  // The FORM each path takes is per-provider, because the agent CLIs do not agree
+  // on how they read a pasted path (see `pastePayload`). The server publishes the
+  // configured form for every provider in the bootstrap document, so this reads it
+  // there rather than opening a channel of its own, and a config reload refreshes
+  // it through the same `config.changed` refetch as every other config value.
+  //
+  // A TERMINAL runs a plain shell rather than a provider, so it has no configured
+  // form and resolves to `bare`, which is what it did before this setting existed.
+  // The owning session's provider is deliberately NOT consulted: a companion
+  // terminal is not that agent, and reading its CLI's preference here would quote
+  // paths for a program that is not the one receiving them.
   async function handleDroppedFiles(files: File[]) {
     if (files.length === 0) return
     const outcomes: DropOutcome[] = []
+    const dragDropPasteForm = dragDropPasteFormFor(
+      bootstrap?.provider_web_dragdrop_paste,
+      kind === "agent" ? providerName : undefined,
+    )
 
     for (const file of files) {
       let saved
@@ -1591,7 +1608,7 @@ export function TerminalPane(props: TerminalPaneProps) {
       // paste. That rule exists because compose text has to keep a soft line
       // break and a submitting Enter distinct on the wire. A dropped path
       // contains neither, so the reason does not apply here.
-      term.paste(pastePayload(saved.path))
+      term.paste(pastePayload(saved.path, dragDropPasteForm))
       // SENT, not "arrived". This is a socket write like any keystroke and
       // nothing acknowledges it: a take-over landing between the upload's
       // courtesy check and this frame reaching the server makes the server drop

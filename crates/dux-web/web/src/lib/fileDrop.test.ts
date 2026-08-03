@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 
 import {
   MAX_NAMED_FILES,
+  dragDropPasteFormFor,
   dropToastFor,
   pastePayload,
   type DropOutcome,
@@ -40,31 +41,295 @@ function notSent(
   }
 }
 
-describe("pastePayload", () => {
-  it("is the BARE path, one trailing space, and NO newline", () => {
-    // A newline submits in these tools, so a file arriving with an automatic
-    // submit would fire a half-written prompt. This is the assertion that
-    // pins it.
-    const payload = pastePayload("/home/p/shot.png")
-    expect(payload).toBe("/home/p/shot.png ")
-    expect(payload).not.toContain("\n")
-    expect(payload).not.toContain("\r")
-    expect(payload.endsWith(" ")).toBe(true)
+/// The awkward inputs every form is measured against: a plain path, a space, an
+/// apostrophe, a double quote, a dollar, a backtick and a backslash. One constant
+/// so no form is quietly tested on an easier set than another.
+const AWKWARD = {
+  plain: "/home/p/shot.png",
+  space: "/home/p/Web App/shot.png",
+  apostrophe: "/home/p/Bob's app/shot.png",
+  doubleQuote: '/home/p/it"s/shot.png',
+  dollar: "/home/p/$(rm -rf ~)/shot.png",
+  backtick: "/home/p/`whoami`/shot.png",
+  backslash: "/home/p/a\\b/shot.png",
+}
+
+/// A hand-written POSIX shell lexer, just enough to answer the ONE question the
+/// receiving CLI actually asks: does this text come out as exactly one word?
+///
+/// Written here rather than pulled in as a dependency, because the property under
+/// test is small and a dependency would move the thing being tested out of the
+/// repository. It implements the POSIX token-recognition rules a lexer uses (which
+/// is all Codex's shlex does): unquoted whitespace separates words; a backslash
+/// outside quotes escapes the next character; single quotes make everything
+/// literal until the next single quote; inside double quotes a backslash escapes
+/// only `"`, `\`, `$` and a backtick, and everything else, INCLUDING `$` and a
+/// backtick on their own, is an ordinary character. It deliberately does NOT
+/// expand anything: a lexer counts words, it does not run them.
+///
+/// Returns the tokens, so a test can assert both the count AND that the one token
+/// is the original path rather than merely some single word.
+function posixLex(input: string): string[] {
+  const tokens: string[] = []
+  let token = ""
+  let started = false
+  let i = 0
+  while (i < input.length) {
+    const c = input[i]
+    if (/\s/.test(c)) {
+      if (started) {
+        tokens.push(token)
+        token = ""
+        started = false
+      }
+      i += 1
+    } else if (c === "\\") {
+      if (i + 1 >= input.length) throw new Error("trailing backslash")
+      token += input[i + 1]
+      started = true
+      i += 2
+    } else if (c === "'") {
+      const close = input.indexOf("'", i + 1)
+      if (close === -1) throw new Error("unterminated single quote")
+      token += input.slice(i + 1, close)
+      started = true
+      i = close + 1
+    } else if (c === '"') {
+      i += 1
+      started = true
+      for (;;) {
+        if (i >= input.length) throw new Error("unterminated double quote")
+        if (input[i] === '"') {
+          i += 1
+          break
+        }
+        if (input[i] === "\\" && '"\\$`'.includes(input[i + 1] ?? "")) {
+          token += input[i + 1]
+          i += 2
+          continue
+        }
+        token += input[i]
+        i += 1
+      }
+    } else {
+      token += c
+      started = true
+      i += 1
+    }
+  }
+  if (started) tokens.push(token)
+  return tokens
+}
+
+describe("posixLex (the check the quoting tests lean on)", () => {
+  // A checker nobody checks proves nothing about the thing it checks, so pin its
+  // behaviour on cases whose answer is not in doubt.
+  it("splits on unquoted whitespace and keeps quoted runs whole", () => {
+    expect(posixLex("a b")).toEqual(["a", "b"])
+    expect(posixLex("'a b'")).toEqual(["a b"])
+    expect(posixLex('"a b"')).toEqual(["a b"])
+    expect(posixLex("a\\ b")).toEqual(["a b"])
   })
 
-  it("adds nothing at all to an awkward path", () => {
-    // The whole point of the reversal: whatever is on disk is what goes out.
-    // The byte-for-byte proof lives in the pane's own tests, at the socket;
-    // this is the same rule stated where the payload is built.
-    for (const path of [
-      "/home/p/Web App/shot.png",
-      "/home/p/Bob's app/shot.png",
-      "/tmp/$(rm -rf ~)/x.png",
-      "/tmp/`whoami`/x.png",
-      '/tmp/it"s/x.png',
-      "/tmp/スクリーンショット.png",
-    ]) {
-      expect(pastePayload(path)).toBe(`${path} `)
+  it("treats a dollar and a backtick as ordinary characters, because it lexes", () => {
+    expect(posixLex('"$x`y`"')).toEqual(["$x`y`"])
+    expect(posixLex("'$x`y`'")).toEqual(["$x`y`"])
+  })
+
+  it("unescapes only the four characters a double quote gives meaning to", () => {
+    expect(posixLex('"a\\"b"')).toEqual(['a"b'])
+    expect(posixLex('"a\\\\b"')).toEqual(["a\\b"])
+    expect(posixLex('"a\\nb"')).toEqual(["a\\nb"])
+  })
+})
+
+describe("pastePayload", () => {
+  /// Every form ends the same way, and that ending is load-bearing: a newline
+  /// SUBMITS in these tools, so a file arriving with an automatic submit would
+  /// fire a half-written prompt.
+  function expectTrailer(payload: string) {
+    expect(payload.endsWith(" ")).toBe(true)
+    expect(payload).not.toContain("\n")
+    expect(payload).not.toContain("\r")
+  }
+
+  describe("bare", () => {
+    it("adds nothing at all, to anything", () => {
+      for (const path of Object.values(AWKWARD)) {
+        expect(pastePayload(path, "bare")).toBe(`${path} `)
+      }
+    })
+
+    it("keeps the one trailing space and no newline", () => {
+      expectTrailer(pastePayload(AWKWARD.space, "bare"))
+    })
+  })
+
+  describe("single_quoted", () => {
+    it("produces the exact expected string for each awkward input", () => {
+      // Inside POSIX single quotes nothing is special, so the dollar, the
+      // backtick, the double quote and the backslash all come out untouched.
+      // Only the apostrophe is handled, by closing, escaping and reopening.
+      expect(pastePayload(AWKWARD.plain, "single_quoted")).toBe(
+        "'/home/p/shot.png' ",
+      )
+      expect(pastePayload(AWKWARD.space, "single_quoted")).toBe(
+        "'/home/p/Web App/shot.png' ",
+      )
+      expect(pastePayload(AWKWARD.apostrophe, "single_quoted")).toBe(
+        "'/home/p/Bob'\\''s app/shot.png' ",
+      )
+      expect(pastePayload(AWKWARD.doubleQuote, "single_quoted")).toBe(
+        `'/home/p/it"s/shot.png' `,
+      )
+      expect(pastePayload(AWKWARD.dollar, "single_quoted")).toBe(
+        "'/home/p/$(rm -rf ~)/shot.png' ",
+      )
+      expect(pastePayload(AWKWARD.backtick, "single_quoted")).toBe(
+        "'/home/p/`whoami`/shot.png' ",
+      )
+      expect(pastePayload(AWKWARD.backslash, "single_quoted")).toBe(
+        "'/home/p/a\\b/shot.png' ",
+      )
+    })
+
+    it("lexes to exactly ONE token, which is the path, for every input", () => {
+      // This is the property Codex actually requires: it accepts a pasted path
+      // only when POSIX lexing yields a single token. Asserted on the payload
+      // MINUS its trailing space, since that space is the separator dux adds
+      // after the path and is not part of it.
+      for (const path of Object.values(AWKWARD)) {
+        const quoted = pastePayload(path, "single_quoted").slice(0, -1)
+        expect(posixLex(quoted)).toEqual([path])
+      }
+    })
+
+    it("keeps the one trailing space and no newline", () => {
+      expectTrailer(pastePayload(AWKWARD.apostrophe, "single_quoted"))
+    })
+  })
+
+  describe("double_quoted", () => {
+    it("produces the exact expected string for each awkward input", () => {
+      // Only the double quote and the backslash are escaped. A dollar and a
+      // backtick are left alone deliberately: the receiving end is a LEXER
+      // counting words, not an evaluator expanding them.
+      expect(pastePayload(AWKWARD.plain, "double_quoted")).toBe(
+        `"/home/p/shot.png" `,
+      )
+      expect(pastePayload(AWKWARD.space, "double_quoted")).toBe(
+        `"/home/p/Web App/shot.png" `,
+      )
+      expect(pastePayload(AWKWARD.apostrophe, "double_quoted")).toBe(
+        `"/home/p/Bob's app/shot.png" `,
+      )
+      expect(pastePayload(AWKWARD.doubleQuote, "double_quoted")).toBe(
+        `"/home/p/it\\"s/shot.png" `,
+      )
+      expect(pastePayload(AWKWARD.dollar, "double_quoted")).toBe(
+        `"/home/p/$(rm -rf ~)/shot.png" `,
+      )
+      expect(pastePayload(AWKWARD.backtick, "double_quoted")).toBe(
+        '"/home/p/`whoami`/shot.png" ',
+      )
+      expect(pastePayload(AWKWARD.backslash, "double_quoted")).toBe(
+        `"/home/p/a\\\\b/shot.png" `,
+      )
+    })
+
+    it("lexes to exactly ONE token, which is the path, for every input", () => {
+      for (const path of Object.values(AWKWARD)) {
+        const quoted = pastePayload(path, "double_quoted").slice(0, -1)
+        expect(posixLex(quoted)).toEqual([path])
+      }
+    })
+
+    it("keeps the one trailing space and no newline", () => {
+      expectTrailer(pastePayload(AWKWARD.doubleQuote, "double_quoted"))
+    })
+  })
+
+  describe("backslash_escaped", () => {
+    it("produces the exact expected string for each awkward input", () => {
+      expect(pastePayload(AWKWARD.plain, "backslash_escaped")).toBe(
+        "/home/p/shot.png ",
+      )
+      expect(pastePayload(AWKWARD.space, "backslash_escaped")).toBe(
+        "/home/p/Web\\ App/shot.png ",
+      )
+      expect(pastePayload(AWKWARD.apostrophe, "backslash_escaped")).toBe(
+        "/home/p/Bob\\'s\\ app/shot.png ",
+      )
+      expect(pastePayload(AWKWARD.doubleQuote, "backslash_escaped")).toBe(
+        '/home/p/it\\"s/shot.png ',
+      )
+      expect(pastePayload(AWKWARD.dollar, "backslash_escaped")).toBe(
+        "/home/p/\\$\\(rm\\ -rf\\ \\~\\)/shot.png ",
+      )
+      expect(pastePayload(AWKWARD.backtick, "backslash_escaped")).toBe(
+        "/home/p/\\`whoami\\`/shot.png ",
+      )
+      expect(pastePayload(AWKWARD.backslash, "backslash_escaped")).toBe(
+        "/home/p/a\\\\b/shot.png ",
+      )
+    })
+
+    it("lexes to exactly ONE token, which is the path, for every input", () => {
+      // Not required by the brief for this form, but it is the same property
+      // and it is the reason Codex accepts this form at all.
+      for (const path of Object.values(AWKWARD)) {
+        const escaped = pastePayload(path, "backslash_escaped").slice(0, -1)
+        expect(posixLex(escaped)).toEqual([path])
+      }
+    })
+
+    it("leaves a non-ASCII path alone rather than escaping every codepoint", () => {
+      // Over-escaping is a no-op to a lexer but not to a reader, and the users
+      // most likely to have such a path are exactly the ones it would hurt.
+      expect(pastePayload("/tmp/スクリーンショット.png", "backslash_escaped")).toBe(
+        "/tmp/スクリーンショット.png ",
+      )
+    })
+
+    it("keeps the one trailing space and no newline", () => {
+      expectTrailer(pastePayload(AWKWARD.space, "backslash_escaped"))
+    })
+  })
+})
+
+describe("dragDropPasteFormFor", () => {
+  const forms = { claude: "bare", codex: "single_quoted", opencode: "bare" }
+
+  it("uses the form the server published for the running provider", () => {
+    expect(dragDropPasteFormFor(forms, "codex")).toBe("single_quoted")
+    expect(dragDropPasteFormFor(forms, "claude")).toBe("bare")
+  })
+
+  it("falls back to bare for a provider the server said nothing about", () => {
+    // A provider the user added themselves, an older server that does not send
+    // the map at all, and a pane with no provider (a plain terminal). Bare is
+    // the do-nothing option.
+    expect(dragDropPasteFormFor(forms, "myagent")).toBe("bare")
+    expect(dragDropPasteFormFor(undefined, "codex")).toBe("bare")
+    expect(dragDropPasteFormFor(forms, undefined)).toBe("bare")
+  })
+
+  it("falls back to bare for a form name it does not recognize", () => {
+    // The server normalizes and warns once at config load, so this should not
+    // arise; a client that trusted the string blindly would still be one config
+    // typo from pasting the literal word into somebody's prompt.
+    expect(dragDropPasteFormFor({ codex: "single-quoted" }, "codex")).toBe("bare")
+    expect(dragDropPasteFormFor({ codex: "file_url" }, "codex")).toBe("bare")
+  })
+
+  it("recognizes all four shipped forms", () => {
+    for (const form of [
+      "bare",
+      "single_quoted",
+      "double_quoted",
+      "backslash_escaped",
+    ] as const) {
+      expect(dragDropPasteFormFor({ p: form }, "p")).toBe(form)
     }
   })
 })

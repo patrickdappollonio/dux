@@ -676,6 +676,17 @@ fn patch_providers(doc: &mut DocumentMut, providers: &ProvidersConfig) {
                 tbl.remove("forward_scroll");
             }
         }
+
+        // The drag-and-drop paste form for the WEB UI. Every provider dux ships
+        // carries one (`ensure_defaults` fills it in), so in practice this writes;
+        // a provider the user added themselves has none and an absent key means
+        // `bare`, so omit it rather than inventing a value they did not choose.
+        match &config.web_dragdrop_paste {
+            Some(value) => tbl["web_dragdrop_paste"] = toml_edit::value(value.as_str()),
+            None => {
+                tbl.remove("web_dragdrop_paste");
+            }
+        }
     }
 }
 
@@ -1725,6 +1736,64 @@ mod tests {
         assert!(
             !claude_section.contains("forward_scroll"),
             "None must omit forward_scroll; got: {claude_section}"
+        );
+    }
+
+    #[test]
+    fn patch_round_trips_web_dragdrop_paste_and_omits_it_when_unset() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        fs::write(&config_path, "[defaults]\nprovider = \"claude\"\n").expect("write initial");
+
+        let mut config = Config::default();
+        // A provider the user added themselves: no form of its own, so the key
+        // must not appear at all rather than be invented as "bare".
+        config.providers.commands.insert(
+            "myagent".to_string(),
+            crate::config::ProviderCommandConfig {
+                command: "myagent".to_string(),
+                ..Default::default()
+            },
+        );
+        config
+            .providers
+            .commands
+            .get_mut("opencode")
+            .expect("opencode provider exists")
+            .web_dragdrop_paste = Some("backslash_escaped".to_string());
+
+        patch_config_file(&config_path, &config).expect("patch");
+        let saved = fs::read_to_string(&config_path).expect("read back");
+
+        let parsed: Config = toml::from_str(&saved).expect("reparse");
+        assert_eq!(
+            parsed.providers.commands["codex"].resolved_web_dragdrop_paste(),
+            crate::config::WebDragDropPaste::SingleQuoted,
+            "the shipped form must survive a save: {saved}"
+        );
+        assert_eq!(
+            parsed.providers.commands["opencode"].resolved_web_dragdrop_paste(),
+            crate::config::WebDragDropPaste::BackslashEscaped,
+            "an explicit user value must survive a save: {saved}"
+        );
+        assert_eq!(
+            parsed.providers.commands["myagent"].web_dragdrop_paste, None,
+            "a provider with no form must not gain one: {saved}"
+        );
+        assert_eq!(
+            parsed.providers.commands["myagent"].resolved_web_dragdrop_paste(),
+            crate::config::WebDragDropPaste::Bare,
+            "and an absent key resolves to bare"
+        );
+
+        let myagent_section = saved
+            .split("[providers.myagent]")
+            .nth(1)
+            .and_then(|s| s.split("[providers.").next())
+            .unwrap_or("");
+        assert!(
+            !myagent_section.contains("web_dragdrop_paste"),
+            "None must omit the key; got: {myagent_section}"
         );
     }
 

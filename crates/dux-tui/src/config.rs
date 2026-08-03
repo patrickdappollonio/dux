@@ -1369,6 +1369,46 @@ fn render_provider_config(out: &mut String, name: &str, config: &ProviderCommand
         Some(value) => out.push_str(&format!("forward_scroll = {value}\n")),
         None => out.push_str("# forward_scroll = true\n"),
     }
+    out.push_str(
+        "# What a DRAGGED AND DROPPED file's path looks like when the web UI writes\n\
+         # it into this provider's prompt. This affects the browser and nothing else,\n\
+         # which is what the \"web_\" prefix is here to say: in the terminal UI,\n\
+         # dropping a file onto the window is your terminal emulator's job and dux is\n\
+         # not involved at all.\n\
+         # Four forms:\n\
+         #   bare              = the path exactly as it is on disk. Nothing added,\n\
+         #                       nothing escaped.\n\
+         #   single_quoted     = wrapped in 'single quotes', with an apostrophe\n\
+         #                       inside it escaped the POSIX way.\n\
+         #   double_quoted     = wrapped in \"double quotes\", with a double quote\n\
+         #                       or backslash inside it escaped.\n\
+         #   backslash_escaped = no quotes, with shell-significant characters\n\
+         #                       escaped one by one, so My File.png goes out as\n\
+         #                       My\\ File.png. This is what several terminal\n\
+         #                       emulators emit when you drop a file on them.\n\
+         # Which one is right depends on how this CLI reads a pasted path, and the\n\
+         # CLIs genuinely differ. Some take the whole pasted string and only strip\n\
+         # quotes off it, so quoting buys nothing and actively corrupts a path\n\
+         # containing an apostrophe. Others lex the text with shell rules and accept\n\
+         # it only if it comes out as a single word, so a path with a space in it is\n\
+         # quietly ignored unless it is quoted or escaped. The values dux ships were\n\
+         # measured against each CLI rather than guessed.\n\
+         # Two combinations are known to fail, and neither is fixable from dux's\n\
+         # side: single-quoting a path that contains an apostrophe breaks Claude\n\
+         # Code, and any form carrying a backslash is mangled by the same CLI's own\n\
+         # unescaping step.\n\
+         # Getting it wrong is not usually a breakage: the normal symptom is that the\n\
+         # file is not attached automatically and its path is left sitting in the\n\
+         # prompt as ordinary text, which you can still work with.\n\
+         # An absent key, or a value dux does not recognize, means bare.\n",
+    );
+    match &config.web_dragdrop_paste {
+        Some(value) => out.push_str(&format!(
+            "web_dragdrop_paste = \"{}\"\n",
+            escape_toml_string(value)
+        )),
+        None => out.push_str("# web_dragdrop_paste = \"bare\"\n"),
+    }
     out.push('\n');
 }
 
@@ -2303,6 +2343,7 @@ agent_scrollback_lines = 10000
             resume_wait_timeout_ms: Some(2_000),
             install_hint: None,
             forward_scroll: None,
+            web_dragdrop_paste: None,
         };
         assert_eq!(cfg.interactive_args(false), ["--interactive"]);
         assert_eq!(
@@ -2317,6 +2358,7 @@ agent_scrollback_lines = 10000
             resume_wait_timeout_ms: None,
             install_hint: None,
             forward_scroll: None,
+            web_dragdrop_paste: None,
         };
         assert_eq!(unsupported.interactive_args(true), ["--interactive"]);
         assert!(!unsupported.supports_session_resume());
@@ -2334,6 +2376,7 @@ agent_scrollback_lines = 10000
                     resume_wait_timeout_ms: None,
                     install_hint: None,
                     forward_scroll: None,
+                    web_dragdrop_paste: None,
                 },
             )]),
         };
@@ -2361,6 +2404,7 @@ agent_scrollback_lines = 10000
                     resume_wait_timeout_ms: None,
                     install_hint: None,
                     forward_scroll: None,
+                    web_dragdrop_paste: None,
                 },
             )]),
         };
@@ -2533,6 +2577,7 @@ oneshot_output = "stdout"
                     resume_wait_timeout_ms: None,
                     install_hint: None,
                     forward_scroll: None,
+                    web_dragdrop_paste: None,
                 },
             )]),
         };
@@ -2901,6 +2946,7 @@ args = [\"-l\"]
             resume_wait_timeout_ms: None,
             install_hint: Some("brew install gemini-cli".to_string()),
             forward_scroll: None,
+            web_dragdrop_paste: None,
         };
         let mut body = render_default_config();
         render_provider_config(&mut body, "gemini", &stock_gemini);
@@ -2927,6 +2973,64 @@ args = [\"-l\"]
         assert!(
             config.providers.get("claude").is_some(),
             "other providers must survive the prune"
+        );
+    }
+}
+
+#[cfg(test)]
+mod web_dragdrop_paste_render_tests {
+    use super::*;
+
+    /// The generated config must SHOW the setting with its shipped value and
+    /// explain itself in place, per the "config file is the documentation" tenet.
+    /// Rendered and parsed back rather than asserted from the format string, so a
+    /// broken escape shows up as a failing test instead of an unparseable config.
+    #[test]
+    fn generated_config_documents_and_carries_web_dragdrop_paste() {
+        let config = Config::default();
+        let rendered = render_config_documented(&config);
+
+        // The value dux ships for each provider, written out rather than implied.
+        assert!(
+            rendered.contains("web_dragdrop_paste = \"bare\""),
+            "the bare providers must render their value"
+        );
+        assert!(
+            rendered.contains("web_dragdrop_paste = \"single_quoted\""),
+            "codex must render its measured value"
+        );
+        // All four forms are named in the comment, so a user picking one never
+        // has to leave the file to find out what the options are.
+        for form in [
+            "bare",
+            "single_quoted",
+            "double_quoted",
+            "backslash_escaped",
+        ] {
+            assert!(
+                rendered.contains(&format!("#   {form}")),
+                "the comment must list the {form} form"
+            );
+        }
+        // The web-only reason, which is why the key carries a `web_` prefix.
+        assert!(
+            rendered.contains("terminal emulator's job"),
+            "the comment must say why this is web-only"
+        );
+        // What a wrong value costs, so nobody reads it as dangerous.
+        assert!(
+            rendered.contains("not attached automatically"),
+            "the comment must say what getting it wrong looks like"
+        );
+
+        let parsed: Config = toml::from_str(&rendered).expect("rendered config must parse");
+        assert_eq!(
+            parsed.providers.commands["codex"].resolved_web_dragdrop_paste(),
+            dux_core::config::WebDragDropPaste::SingleQuoted
+        );
+        assert_eq!(
+            parsed.providers.commands["claude"].resolved_web_dragdrop_paste(),
+            dux_core::config::WebDragDropPaste::Bare
         );
     }
 }

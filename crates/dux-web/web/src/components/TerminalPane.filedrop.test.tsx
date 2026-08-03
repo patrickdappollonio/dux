@@ -316,12 +316,14 @@ describe("dropping a file onto an agent", () => {
   })
 
   it("sends an awkward path byte for byte as it is on disk", async () => {
-    // The cases that motivated dropping the quoting. The receiving CLIs do not
-    // tokenise a pasted path the way a shell does: they trim the whole string,
-    // strip ONE surrounding pair of matching quotes, and unescape backslash
-    // sequences. So quoting buys nothing on an ordinary path and actively
-    // CORRUPTS one holding an apostrophe, because POSIX single-quoting writes
-    // an embedded quote as '\'' and that unescape step turns it into '''.
+    // This agent runs claude, whose configured form is `bare`, so nothing is
+    // added to any of these. The receiving CLI does not tokenise a pasted path
+    // the way a shell does: it trims the whole string, strips ONE surrounding
+    // pair of matching quotes, and unescapes backslash sequences. So quoting
+    // buys nothing on an ordinary path and actively CORRUPTS one holding an
+    // apostrophe, because POSIX single-quoting writes an embedded quote as
+    // close-escape-reopen and that unescape step collapses it. The per-provider
+    // forms themselves are exercised below.
     //
     // Asserted at the SOCKET rather than on the payload helper, so what is
     // pinned is the byte stream the agent would actually receive, after
@@ -382,6 +384,109 @@ describe("dropping a file onto an agent", () => {
     act(() => FakePtySocket.instances.at(-1)!.onConnected("42"))
     await drop([file("shot.png")])
     expect(uploadDroppedFile.mock.calls[0][1]).toEqual({ pty: "s1", conn: "42" })
+  })
+})
+
+describe("the paste form follows the provider running in the pane", () => {
+  // The whole point of making this a setting: the same dropped file, on two
+  // panes running two different CLIs, has to leave the browser in two different
+  // shapes. Both halves are asserted at the SOCKET, because a call to
+  // `term.paste` proves nothing about what the agent receives.
+
+  /// A workspace whose one agent runs `provider`, with the server publishing the
+  /// forms it publishes in a real deployment.
+  function stateRunning(provider: string): DuxState {
+    const s = makeState()
+    const session = s.spine!.sessions[0]
+    session.provider = provider
+    session.tabs[0].provider = provider
+    s.bootstrap!.provider_web_dragdrop_paste = {
+      claude: "bare",
+      codex: "single_quoted",
+      opencode: "bare",
+      copilot: "bare",
+    }
+    return s
+  }
+
+  async function dropOnAgentRunning(provider: string, path: string) {
+    cleanup()
+    FakePtySocket.instances = []
+    TermStub.instances = []
+    TermStub.pastes = []
+    uploadDroppedFile.mockReset()
+    uploadDroppedFile.mockResolvedValue({
+      path,
+      saved_name: "shot.png",
+      requested_name: "shot.png",
+      folder: "/tmp/p1",
+      folder_label: "~/p1",
+      renamed: false,
+    })
+    mockState = stateRunning(provider)
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    await drop([file("shot.png")])
+    return sentToSocket()
+  }
+
+  it("sends the BARE path to a pane running claude", async () => {
+    // Measured: Claude Code takes the whole pasted string and never splits on a
+    // space, and its own unescape step corrupts a quoted apostrophe. So nothing
+    // is added, not even for a path that a shell would need protected.
+    expect(await dropOnAgentRunning("claude", "/tmp/p1/Web App/shot.png")).toEqual([
+      "/tmp/p1/Web App/shot.png ",
+    ])
+    expect(await dropOnAgentRunning("claude", "/tmp/p1/Bob's app/shot.png")).toEqual([
+      "/tmp/p1/Bob's app/shot.png ",
+    ])
+  })
+
+  it("sends the SINGLE-QUOTED path to a pane running codex", async () => {
+    // Measured: Codex lexes the pasted text with POSIX shell rules and accepts
+    // it only if it comes out as exactly one token, so the bare form above is
+    // silently ignored for a path with a space in it.
+    expect(await dropOnAgentRunning("codex", "/tmp/p1/Web App/shot.png")).toEqual([
+      "'/tmp/p1/Web App/shot.png' ",
+    ])
+    expect(await dropOnAgentRunning("codex", "/tmp/p1/Bob's app/shot.png")).toEqual([
+      "'/tmp/p1/Bob'\\''s app/shot.png' ",
+    ])
+  })
+
+  it("sends the bare path for a provider the server published no form for", async () => {
+    // A provider the user added themselves. Bare is the do-nothing option.
+    expect(
+      await dropOnAgentRunning("myagent", "/tmp/p1/Web App/shot.png"),
+    ).toEqual(["/tmp/p1/Web App/shot.png "])
+  })
+
+  it("sends the bare path to a TERMINAL, whatever its owning agent runs", async () => {
+    // A companion terminal runs a plain shell, not the agent's CLI, so the
+    // owning session's configured form must not reach it. This is a terminal
+    // owned by a codex agent, and it still gets the untouched path.
+    cleanup()
+    FakePtySocket.instances = []
+    TermStub.instances = []
+    TermStub.pastes = []
+    uploadDroppedFile.mockReset()
+    uploadDroppedFile.mockResolvedValue({
+      path: "/tmp/p1/Web App/shot.png",
+      saved_name: "shot.png",
+      requested_name: "shot.png",
+      folder: "/tmp/p1",
+      folder_label: "~/p1",
+      renamed: false,
+    })
+    mockState = stateRunning("codex")
+    render(
+      <TerminalPane
+        kind="terminal"
+        id="t1"
+        owner={{ kind: "session", session_id: "s1" }}
+      />,
+    )
+    await drop([file("shot.png")])
+    expect(sentToSocket()).toEqual(["/tmp/p1/Web App/shot.png "])
   })
 })
 

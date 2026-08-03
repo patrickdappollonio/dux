@@ -66,45 +66,120 @@ export type DropToast = {
   message: string
 }
 
-/// What to paste for one saved file: the BARE path, one trailing space, and NO
-/// newline.
+/// The form a dropped file's path takes when it is written into the prompt.
 ///
-/// The path is sent exactly as it is on disk. Nothing is quoted and nothing is
-/// escaped, and that is deliberate, because an earlier version of this file DID
-/// quote the whole path as one POSIX shell token and that was measured to be
-/// wrong. Do not put the quoting back.
+/// Mirrors `dux_core::config::WebDragDropPaste`, and the names are the exact
+/// strings the server publishes in `provider_web_dragdrop_paste`, so nothing has
+/// to translate between the two.
+export type DragDropPasteForm =
+  | "bare"
+  | "single_quoted"
+  | "double_quoted"
+  | "backslash_escaped"
+
+const DRAG_DROP_PASTE_FORMS: readonly DragDropPasteForm[] = [
+  "bare",
+  "single_quoted",
+  "double_quoted",
+  "backslash_escaped",
+]
+
+/// Which form to use for the provider running in the pane being dropped on.
 ///
-/// The reason is that the receiving end is not a shell. The agent CLIs that
-/// turn a pasted path into an attached image do not tokenise the paste the way
-/// a shell does; they take the WHOLE pasted string and test it. Measured
-/// against the installed Claude Code binary (2.1.220), its detection is: trim,
-/// then strip ONE surrounding pair of matching quotes, then unescape backslash
-/// sequences, then test the result against `/\.(png|jpe?g|gif|webp)$/i`. So:
+/// `forms` is the server's `bootstrap.provider_web_dragdrop_paste` map, keyed by
+/// provider name. `bare` is the answer for everything the map does not cover: a
+/// provider the user added themselves, a server too old to send the map, a pane
+/// with no provider at all (a plain terminal), and, defensively, a form name this
+/// client does not know. The server already normalizes and already warned about a
+/// misspelling once at config load, so the last case should not arise; a client
+/// that trusted the string blindly would still be one config typo away from
+/// pasting the literal word into somebody's prompt.
+export function dragDropPasteFormFor(
+  forms: Record<string, string> | undefined,
+  provider: string | undefined,
+): DragDropPasteForm {
+  const named = provider === undefined ? undefined : forms?.[provider]
+  return DRAG_DROP_PASTE_FORMS.find((f) => f === named) ?? "bare"
+}
+
+/// The characters `backslashEscaped` protects: whitespace, the quoting and
+/// expansion characters, the shell's own operators, and the glob characters.
 ///
-///   - a bare path containing SPACES is read correctly, because nothing ever
-///     splits on a space;
-///   - a quoted path is also read correctly in the ordinary case, because the
-///     quote-stripping step undoes the quoting, so quoting bought nothing;
-///   - but a path containing an APOSTROPHE is read WRONGLY when quoted. POSIX
-///     single-quoting escapes an embedded quote as `'\''`, and that unescape
-///     step turns it into `'''`. Running those two functions against exactly
-///     what dux used to produce, a real `/home/p/Bob's app/shot.png` came back
-///     as `/home/p/Bob'''s app/shot.png`, which names nothing.
+/// Deliberately ASCII-only and deliberately not "everything that is not a letter".
+/// A backslash before an ordinary character is a no-op in POSIX lexing, so
+/// over-escaping is harmless to the LEXER, but it is not harmless to a reader, and
+/// escaping every CJK codepoint in a path would make the prompt unreadable for the
+/// exact users most likely to have one.
+const SHELL_SIGNIFICANT = /[\s"#$&'()*;<>?[\\\]`{|}~]/g
+
+/// Wrap in single quotes, closing and reopening around each embedded apostrophe.
 ///
-/// So quoting cannot help and can hurt, and the bare path is what goes out.
+/// Inside POSIX single quotes NOTHING is special, not `$`, not a backtick, not a
+/// backslash, so the apostrophe is the only character that needs handling and the
+/// only way to include one is to leave the quotes, escape it, and go back in.
+/// Escaping anything else here would be quoting for a shell that does not exist.
+function singleQuoted(path: string): string {
+  return `'${path.replaceAll("'", `'\\''`)}'`
+}
+
+/// Wrap in double quotes, escaping the two characters that would otherwise end or
+/// alter the quoting.
+///
+/// A shell EVALUATOR also expands `$` and a backtick inside double quotes, but the
+/// thing on the receiving end is a LEXER deciding how many words it is looking at,
+/// and a lexer leaves both alone. Escaping them would change the bytes the CLI
+/// finally sees for no gain.
+function doubleQuoted(path: string): string {
+  return `"${path.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`
+}
+
+/// No quotes; escape each shell-significant character on its own.
+function backslashEscaped(path: string): string {
+  return path.replace(SHELL_SIGNIFICANT, (c) => `\\${c}`)
+}
+
+/// What to paste for one saved file: the path in the form this provider needs,
+/// one trailing space, and NO newline.
+///
+/// Pure, and takes the form rather than reading it, so every case is testable
+/// without mounting a terminal.
+///
+/// WHY THIS IS PER-PROVIDER. The receiving end is an agent CLI, not a shell, and
+/// the CLIs do not agree on how they read a pasted path. `dux_core::config::
+/// WebDragDropPaste` carries the measured table of what each one does and which
+/// form it therefore needs, along with the two combinations known to FAIL. In
+/// short, and measured rather than assumed:
+///
+///   - Claude Code and OpenCode take the WHOLE pasted string and never split on
+///     whitespace, so `bare` is right and a space is harmless. Single-quoting a
+///     path with an APOSTROPHE actively breaks Claude Code, because POSIX writes
+///     that apostrophe as a close-escape-reopen and Claude Code's own unescape
+///     step collapses it into three apostrophes.
+///   - Codex lexes the text with POSIX shell rules and accepts it only if it comes
+///     out as exactly ONE token, so a bare path containing a space is silently
+///     ignored and `single_quoted` is what it needs.
 ///
 /// KNOWN LIMITATION, stated rather than worked around: a path containing a
-/// BACKSLASH is still mangled by that CLI's unescape step, bare or quoted,
-/// because the unescape eats the backslash. dux cannot prevent that from its
-/// side; it is a property of the receiving tool.
+/// BACKSLASH is mangled by Claude Code's unescape step in EVERY form, because the
+/// unescape eats the backslash. That is a property of the receiving tool and dux
+/// cannot fix it from this side.
 ///
-/// One file per paste. In these tools a newline SUBMITS, so a file arriving
-/// with an automatic submit would fire a half-written prompt. Several files
-/// means several pastes in sequence, because these tools only treat a pasted
-/// path as an attachment when the whole pasted string is that one path, so two
-/// paths in one paste become plain text.
-export function pastePayload(path: string): string {
-  return `${path} `
+/// One file per paste. In these tools a newline SUBMITS, so a file arriving with
+/// an automatic submit would fire a half-written prompt. Several files means
+/// several pastes in sequence, because these tools only treat a pasted path as an
+/// attachment when the whole pasted string is that one path, so two paths in one
+/// paste become plain text.
+export function pastePayload(path: string, form: DragDropPasteForm): string {
+  switch (form) {
+    case "single_quoted":
+      return `${singleQuoted(path)} `
+    case "double_quoted":
+      return `${doubleQuoted(path)} `
+    case "backslash_escaped":
+      return `${backslashEscaped(path)} `
+    case "bare":
+      return `${path} `
+  }
 }
 
 /// Every distinct folder the saved files landed in, in the order they were hit.

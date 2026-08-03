@@ -21,6 +21,13 @@ import type { MacroView } from "./types"
 export interface Bootstrap {
   /** Configured agent providers (the new-agent / change-provider pickers). */
   available_providers: string[]
+  /** Each configured provider's `web_dragdrop_paste` form, normalized server-side
+   * to one of the names `DragDropPasteForm` knows. This is how the terminal pane
+   * learns what shape to give a DROPPED file's path for the provider running in
+   * it, since the agent CLIs do not agree on how they read a pasted path. Keyed by
+   * provider name; a name absent from the map means "bare", as does the whole
+   * field being absent on an older server (see `dragDropPasteFormFor`). */
+  provider_web_dragdrop_paste?: Record<string, string>
   /** Text macros from `[macros]` in config order (the macro popover/editor). */
   macros: MacroView[]
   /** The rotating welcome tips shown on the empty-state screen. */

@@ -5,6 +5,8 @@
 
 use serde::Serialize;
 
+use std::collections::BTreeMap;
+
 use crate::engine::Engine;
 use crate::model::{AgentSession, PrInfo, PrState, Project, ProjectBranchStatus, ProviderKind};
 use crate::worker::{ResourceKind, ResourceStats};
@@ -46,6 +48,18 @@ pub struct BootstrapView {
     /// Configured provider command names, sorted. Surfaced so a client can
     /// populate a per-project default-provider picker.
     pub available_providers: Vec<String>,
+    /// Each configured provider's `web_dragdrop_paste` form, NORMALIZED to a name
+    /// [`crate::config::WebDragDropPaste`] recognizes (a misspelled config value
+    /// resolves to `"bare"` here, having already been warned about once at load).
+    ///
+    /// This is how the browser learns which form to use for the provider running
+    /// in the pane a file was dropped on. It rides the bootstrap document with
+    /// every other config-derived value rather than on a channel of its own, so a
+    /// config reload refreshes it through the same `config.changed` refetch.
+    ///
+    /// Keyed by provider name. A name absent from the map means `"bare"`, which is
+    /// also what a provider dux does not ship resolves to.
+    pub provider_web_dragdrop_paste: BTreeMap<String, String>,
     /// Text macros from `[macros]` in `config.toml`, in config (IndexMap) order.
     /// The web surfaces these two ways: the terminal-pane quick-picker filters
     /// by the focused target's surface and runs one via `RunMacro`, and the
@@ -971,8 +985,21 @@ impl Engine {
         let mut available_providers: Vec<String> =
             self.config.providers.commands.keys().cloned().collect();
         available_providers.sort();
+        let provider_web_dragdrop_paste = self
+            .config
+            .providers
+            .commands
+            .iter()
+            .map(|(name, provider)| {
+                (
+                    name.clone(),
+                    provider.resolved_web_dragdrop_paste().as_str().to_string(),
+                )
+            })
+            .collect();
         BootstrapView {
             available_providers,
+            provider_web_dragdrop_paste,
             macros: self
                 .config
                 .macros
@@ -1945,6 +1972,7 @@ mod tests {
         let json = serde_json::to_string(&engine.bootstrap()).expect("serialize");
         for field in [
             "available_providers",
+            "provider_web_dragdrop_paste",
             "macros",
             "welcome_tips",
             "dux_version",
