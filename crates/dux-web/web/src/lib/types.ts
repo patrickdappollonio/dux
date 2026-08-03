@@ -7,6 +7,7 @@
 // I/O rides the dedicated per-PTY sockets (`/ws/sessions/:id/pty` and
 // `/ws/sessions/:id/terminals/:tid/pty`) — see `lib/ptySocket.ts`.
 
+import type { DropPasteProfile } from "@/lib/fileDrop"
 import type { TerminalOwnerWire } from "@/lib/terminalOwner"
 
 export type SessionStatus = "active" | "detached" | "exited"
@@ -78,6 +79,18 @@ export interface AgentTabView {
   needs_attention: boolean
   has_output: boolean
   has_live_process: boolean
+  /** What this tab's LIVE process launched with, for a file dropped onto its
+   * pane: the paste form and the command that identifies the receiving CLI.
+   * Absent when no process is live (a dormant tab), and absent on an older
+   * server; both fall back to `bootstrap.provider_drop_paste` by provider name.
+   *
+   * It rides the SPINE rather than the bootstrap document because it changes
+   * when a process LAUNCHES or TERMINATES, and the spine is what those refresh
+   * (`sessions.changed`). Published on the bootstrap document (refreshed by
+   * `config.changed`) the browser's copy went stale for the whole life of a
+   * process, so a tab relaunched under a different provider was still quoted for
+   * the previous one until a reconnect. See `dragDropPasteFormFor`. */
+  drop_paste?: DropPasteProfile
 }
 
 export interface TerminalView {

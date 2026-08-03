@@ -133,6 +133,66 @@ describe("bootstrap slice", () => {
     expect(bootstrapFetches).toBe(before + 1)
   })
 
+  it("ignores a bootstrap response that a newer one has overtaken", async () => {
+    // Two `config.changed` events in quick succession fire two GETs, and nothing
+    // makes the replies come back in order. Without a generation guard the FIRST
+    // reply, landing last, overwrites the second, and every client keeps applying
+    // config the server has already replaced until the next edit. The spine load
+    // has had this guard since it caused a visible focus flicker; the bootstrap
+    // load did not.
+    const gates: (() => void)[] = []
+    let call = 0
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (!String(url).includes("/api/v1/bootstrap")) {
+          return {
+            status: 200,
+            json: async () => ({}),
+            text: async () => "",
+            headers: { get: () => null },
+          } as unknown as Response
+        }
+        // The body as it stands WHEN THE REQUEST GOES OUT, which is what the
+        // server would have answered with.
+        const body = bootstrapBody
+        const which = call++
+        return {
+          ok: true,
+          status: 200,
+          text: async () => "",
+          headers: { get: () => null },
+          json: async () => {
+            // The boot fetch resolves at once; the refetches are held open so
+            // the test can land them in the wrong order on purpose.
+            if (which > 0) await new Promise<void>((r) => gates.push(r))
+            return body
+          },
+        } as unknown as Response
+      }),
+    )
+    const mod = await loadStore()
+
+    bootstrapBody = makeBootstrap({ welcome_tips: ["older"] })
+    mod.eventsSocket.onEvent({ event: "config.changed" })
+    await vi.waitFor(() => expect(gates).toHaveLength(1))
+
+    bootstrapBody = makeBootstrap({ welcome_tips: ["newer"] })
+    mod.eventsSocket.onEvent({ event: "config.changed" })
+    await vi.waitFor(() => expect(gates).toHaveLength(2))
+
+    // The newer request answers first, and the client applies it.
+    gates[1]()
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().bootstrap?.welcome_tips).toEqual(["newer"])
+    })
+
+    // Then the older one finally answers. It must change nothing.
+    gates[0]()
+    await new Promise((r) => setTimeout(r, 0))
+    expect(mod.getSnapshot().bootstrap?.welcome_tips).toEqual(["newer"])
+  })
+
   it("an unrelated event does not refetch bootstrap", async () => {
     const mod = await loadStore()
     const before = bootstrapFetches

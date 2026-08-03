@@ -66,31 +66,350 @@ export type DropToast = {
   message: string
 }
 
-/// Quote `path` as exactly ONE shell token.
+/// The form a dropped file's path takes when it is written into the prompt.
 ///
-/// The whole path is quoted, not just the filename. An earlier design claimed
-/// that validating the filename removed the need to quote; that was wrong,
-/// because the filename is only the last part. The DIRECTORY routinely contains
-/// spaces, since a worktree path is built from the project's name.
+/// Mirrors `dux_core::config::WebDragDropPaste`, and the names are the exact
+/// strings the server publishes in `DropPasteView::form`, so nothing has to
+/// translate between the two.
+export type DragDropPasteForm =
+  | "bare"
+  | "single_quoted"
+  | "double_quoted"
+  | "backslash_escaped"
+
+const DRAG_DROP_PASTE_FORMS: readonly DragDropPasteForm[] = [
+  "bare",
+  "single_quoted",
+  "double_quoted",
+  "backslash_escaped",
+]
+
+/// Everything needed to write ONE pane's dropped path: the form the path takes,
+/// and the CLI that will read it. Mirrors `dux_core::viewmodel::DropPasteView`,
+/// field names included, so nothing has to translate.
 ///
-/// Single quotes, because inside them every character is literal; the one
-/// escape needed is for a single quote itself, which closes, escapes and
-/// reopens. Codex's source unquotes both quote styles, and GNOME Terminal and
-/// Konsole both quote dropped paths this way.
-export function quoteShellToken(path: string): string {
-  return `'${path.replaceAll("'", "'\\''")}'`
+/// The two travel together and are resolved together, never separately, because
+/// they answer the same question (which CLI is on the other end of this paste).
+/// Taking the form off a live process while taking the limit off current config
+/// would describe a CLI that is not running.
+export type DropPasteProfile = {
+  /// One of the `DragDropPasteForm` names, normalized server-side. Typed as a
+  /// plain string because it arrives off the wire, and validated on use.
+  form: string
+  /// The FILE NAME of the command being run. This, and not the provider's block
+  /// name, is what identifies the CLI: a provider's name is free text, so
+  /// `[providers.myagent] command = "codex"` is a real Codex and
+  /// `[providers.codex] command = "something-else"` is not.
+  command_name: string
 }
 
-/// What to paste for one saved file: the quoted path, one trailing space, and
-/// NO newline.
+/// `bootstrap.provider_drop_paste`, keyed by PROVIDER NAME: what CONFIG says
+/// right now. `undefined` on an older server.
+///
+/// The FALLBACK, used only for a pane with no live process to read from. What a
+/// live process launched with rides the SPINE, on the tab itself, because that is
+/// what a launch and a termination refresh; this rides the bootstrap document,
+/// which is refreshed by `config.changed`, the event that can change it.
+export type ConfiguredDropPaste = Record<string, DropPasteProfile> | undefined
+
+/// What a drop is landing on. An agent pane runs a provider in a tab, so it has
+/// both a launched profile (`undefined` when nothing is live) and a configured
+/// fallback; a terminal has no provider FIELD and no launched profile at all,
+/// which is what makes it impossible for the terminal branches below to read
+/// either.
+export type DropPasteTarget =
+  | {
+      kind: "agent"
+      /// `AgentTabView.drop_paste`: what THIS tab's live process launched with.
+      launched: DropPasteProfile | undefined
+      /// The tab's effective provider NAME, used only to look up the configured
+      /// fallback when nothing is live.
+      provider: string | undefined
+    }
+  | { kind: "terminal" }
+
+/// The form a plain terminal always gets, whatever provider its owner runs and
+/// whatever anybody configured.
+///
+/// A terminal runs a SHELL, and that is the reason it must be quoted, not a
+/// reason it can go bare. The first version of this feature had that exactly
+/// backwards: it sent a terminal's path `bare` "because a terminal runs a shell,
+/// not that CLI". But dux deliberately permits `$`, a backtick, a space, a
+/// semicolon, a quote and parentheses in a destination path, and a bare path
+/// carrying any of those is pasted onto a command line the user is about to
+/// press Enter on. The shell then splits it into several arguments, substitutes a
+/// variable, or runs a command substitution. Quoting is what makes those
+/// characters inert, so a shell needs MORE protection than an agent CLI, not
+/// less.
+///
+/// `single_quoted` is the form that provides it: inside POSIX single quotes
+/// nothing is special at all, so the whole path is one literal word.
+///
+/// Note that the shell in question is POSIX. dux's `[terminal] command` is
+/// configurable, so a user can point it at a shell with different quoting rules
+/// (PowerShell, for instance, does not treat a single-quoted `$` the same way,
+/// and fish differs on `\` inside single quotes). That is not handled here and
+/// deliberately gets no setting of its own: dux targets macOS and Linux, where
+/// the default shell is POSIX, and a form for a non-POSIX shell should be added
+/// only once someone has MEASURED one, the same rule the provider forms follow.
+export const TERMINAL_PASTE_FORM: DragDropPasteForm = "single_quoted"
+
+/// The one profile that applies to a pane, or `undefined` when nothing names it.
+///
+/// The order is the whole design, and both steps are load-bearing:
+///
+///   1. What THIS TAB's live process launched with. It WINS rather than merely
+///      filling a gap. If the current config value won, two sibling tabs
+///      launched either side of a config edit would resolve to the same answer
+///      again and publishing per tab would buy nothing. A config edit therefore
+///      takes effect on that tab's next launch. It rides the spine, so it
+///      appears and disappears with the process rather than going stale in the
+///      browser until the next config refetch.
+///   2. What CONFIG says for the tab's provider NAME. The right answer for a
+///      tab with nothing live: it will launch with exactly this.
+///
+/// A TERMINAL has neither, by construction: it runs a SHELL, and the provider
+/// settings describe how an agent CLI reads a paste. See `TERMINAL_PASTE_FORM`.
+function dropPasteProfileFor(
+  configured: ConfiguredDropPaste,
+  target: DropPasteTarget,
+): DropPasteProfile | undefined {
+  if (target.kind === "terminal") return undefined
+  if (target.launched !== undefined) return target.launched
+  if (target.provider === undefined) return undefined
+  return configured?.[target.provider]
+}
+
+/// Which form to use for the pane being dropped on.
+///
+/// A TERMINAL is decided first and reads nothing else. See `TERMINAL_PASTE_FORM`.
+///
+/// Everything the resolution above does not name falls back to `bare`: a
+/// provider the user added themselves, a server too old to send the map, a tab
+/// whose provider is not known yet, and, defensively, a form name this client
+/// does not know. The server already normalizes and already warned about a
+/// misspelling once at config load, so the last case should not arise; a client
+/// that trusted the string blindly would still be one config typo away from
+/// pasting the literal word into somebody's prompt.
+export function dragDropPasteFormFor(
+  configured: ConfiguredDropPaste,
+  target: DropPasteTarget,
+): DragDropPasteForm {
+  if (target.kind === "terminal") return TERMINAL_PASTE_FORM
+  const name = dropPasteProfileFor(configured, target)?.form
+  return DRAG_DROP_PASTE_FORMS.find((f) => f === name) ?? "bare"
+}
+
+/// How many characters of pasted text a CLI will still look at as a possible
+/// file path, keyed by the COMMAND'S FILE NAME.
+///
+/// Only one entry is real. Codex's composer compares the pasted text's character
+/// count against `LARGE_PASTE_CHAR_THRESHOLD` (1000) and, when it is over, files
+/// the paste away as generic large content BEFORE it ever tries to recognize an
+/// image path. So a long enough path is never attached, however correctly it is
+/// quoted, and the quoting itself adds characters that can push one over.
+///
+/// KEYED BY THE COMMAND, DELIBERATELY. NOT BY FORM, AND NOT BY PROVIDER NAME.
+///
+/// Not by form, because the threshold belongs to the receiving CLI, which is the
+/// same thing the form is chosen for; deriving one from the other was wrong in
+/// both directions at once (a TERMINAL always uses the shell-safe form and so
+/// inherited codex's composer limit, which a shell does not have, and codex
+/// configured with any of the other three forms escaped the limit entirely).
+///
+/// Not by provider NAME, because a provider's name and the command it runs are
+/// independent: `[providers.myagent] command = "codex"` is a real Codex and
+/// `[providers.codex] command = "something-else"` is not. Keyed by the name this
+/// was wrong in both directions too: a real Codex under any other name got no
+/// limit and was handed oversized paths it silently ignores, and an unrelated
+/// CLI merely named codex had valid long paths withheld from it. The server
+/// compares on the command's FILE NAME and publishes that, so a full path
+/// (`/usr/local/bin/codex`) resolves like a bare one.
+///
+/// A command absent from this table has NO limit. Guessing one would withhold
+/// files a CLI would have taken; a new entry belongs here only once someone has
+/// MEASURED it, the same rule the forms themselves follow.
+///
+/// Considered and NOT done: making this a declared per-provider config setting
+/// beside `web_dragdrop_paste`. It is a MEASUREMENT of a third-party CLI's
+/// internals, not a preference, so the user has nothing to base a value on; a
+/// wrong value silently strands files or sends payloads that are silently
+/// ignored, and neither failure names itself. The command key already covers the
+/// alias and the wrapper cases without asking anyone to configure anything.
+const COMMAND_ATTACHMENT_CHAR_LIMITS: Record<string, number> = {
+  codex: 1000,
+}
+
+/// The character limit that applies to a drop target, or `null` when none does.
+///
+/// A terminal has none: it is a shell, and a shell has no composer that files a
+/// long paste away somewhere else.
+export function attachmentCharLimitFor(
+  configured: ConfiguredDropPaste,
+  target: DropPasteTarget,
+): number | null {
+  const command = dropPasteProfileFor(configured, target)?.command_name
+  if (command === undefined) return null
+  return COMMAND_ATTACHMENT_CHAR_LIMITS[command] ?? null
+}
+
+/// Everything a pane needs to turn one saved file into one paste: the FORM and
+/// the CLI's character LIMIT, resolved together because they answer to the same
+/// thing (which CLI is receiving this) and must not be derived from each other.
+export type DropPastePlan = {
+  form: DragDropPasteForm
+  /// `null` means unlimited, not "zero".
+  charLimit: number | null
+}
+
+/// Resolve both halves for one drop target, from the ONE profile that applies to
+/// it, so they can never come from two different CLIs.
+export function dragDropPasteFor(
+  configured: ConfiguredDropPaste,
+  target: DropPasteTarget,
+): DropPastePlan {
+  return {
+    form: dragDropPasteFormFor(configured, target),
+    charLimit: attachmentCharLimitFor(configured, target),
+  }
+}
+
+/// Whether this PAYLOAD is too long for the receiving CLI to read as a file path.
+///
+/// Takes the payload rather than the path on purpose: the quotes and the trailing
+/// space are pasted too, so a path comfortably under the limit can produce a
+/// payload over it, and counting the file's own path would miss exactly the cases
+/// this exists to catch.
+///
+/// Takes the LIMIT rather than the form, for the reason spelled out on
+/// `PROVIDER_ATTACHMENT_CHAR_LIMITS`. A `null` limit refuses nothing.
+///
+/// Counts CHARACTERS, because that is what the CLI counts. JavaScript's `.length`
+/// counts UTF-16 code units, so a path full of emoji would look twice as long as
+/// it is and be refused when the CLI would have accepted it.
+export function pasteExceedsAttachmentLimit(
+  payload: string,
+  limit: number | null,
+): boolean {
+  // Strictly greater, matching `char_count > LARGE_PASTE_CHAR_THRESHOLD`: a
+  // payload of exactly the limit still gets looked at.
+  return limit !== null && [...payload].length > limit
+}
+
+/// Why a saved file's path was held back rather than pasted, in the words the
+/// stranded-file toast will show after "the path was not sent: ".
+///
+/// The path IS still reported, in full, by that same toast, so the user can hand
+/// it to the agent themselves. Pasting it anyway would be worse than not: over
+/// the limit the CLI swaps the text out for a placeholder, so the path would not
+/// even be readable in the prompt, and the toast would have claimed the file was
+/// attached when it was not.
+export function tooLongToAttachReason(limit: number): string {
+  return (
+    `the path is longer than this agent reads as a file path ` +
+    `(${limit} characters, counting the quoting dux adds), so it would have been ` +
+    `taken as ordinary pasted text rather than attached`
+  )
+}
+
+/// The characters `backslashEscaped` protects: whitespace, the quoting and
+/// expansion characters, the shell's own operators, and the glob characters.
+///
+/// Deliberately ASCII-only and deliberately not "everything that is not a letter".
+/// A backslash before an ordinary character is a no-op in POSIX lexing, so
+/// over-escaping is harmless to the LEXER, but it is not harmless to a reader, and
+/// escaping every CJK codepoint in a path would make the prompt unreadable for the
+/// exact users most likely to have one.
+const SHELL_SIGNIFICANT = /[\s"#$&'()*;<>?[\\\]`{|}~]/g
+
+/// Wrap in single quotes, closing and reopening around each embedded apostrophe.
+///
+/// Inside POSIX single quotes NOTHING is special, not `$`, not a backtick, not a
+/// backslash, so the apostrophe is the only character that needs handling and the
+/// only way to include one is to leave the quotes, escape it, and go back in.
+/// Escaping anything else here would be quoting for a shell that does not exist.
+function singleQuoted(path: string): string {
+  return `'${path.replaceAll("'", `'\\''`)}'`
+}
+
+/// Wrap in double quotes, escaping all four characters a double-quoted string
+/// gives meaning to: `"`, `\`, `$` and a backtick.
+///
+/// AN EARLIER VERSION ESCAPED ONLY THE FIRST TWO, AND THE REASON GIVEN FOR IT WAS
+/// WRONG. That reason was that the receiving end is a LEXER counting words rather
+/// than an evaluator expanding them, so escaping `$` and a backtick would change
+/// the bytes the CLI finally sees for no gain. The premise is right and the
+/// conclusion does not follow: shell lexing REMOVES the backslash from `\$` and
+/// from the backslash-backtick pair, handing back the literal characters, so the
+/// escape costs nothing at all. (`shlex` 1.3.0's `parse_double` is explicit about
+/// it: `$`, a backtick, `"` and `\` after a backslash each yield just that
+/// character.) It is lossless, and it is what makes this form safe if it ever
+/// reaches something that EVALUATES what it reads instead of merely lexing it.
+/// Current Codex is safe either way; the next reader of a double-quoted path may
+/// not be.
+function doubleQuoted(path: string): string {
+  return `"${path.replaceAll(/[\\"$`]/g, (c) => `\\${c}`)}"`
+}
+
+/// No quotes; escape each shell-significant character on its own.
+function backslashEscaped(path: string): string {
+  return path.replace(SHELL_SIGNIFICANT, (c) => `\\${c}`)
+}
+
+/// What to paste for one saved file: the path in the form this provider needs,
+/// one trailing space, and NO newline.
+///
+/// Pure, and takes the form rather than reading it, so every case is testable
+/// without mounting a terminal.
+///
+/// WHY THIS IS PER-PROVIDER. The receiving end is an agent CLI, not a shell, and
+/// the CLIs do not agree on how they read a pasted path. `dux_core::config::
+/// WebDragDropPaste` carries the measured table of what each one does and which
+/// form it therefore needs, along with the two combinations known to FAIL. In
+/// short, and measured rather than assumed:
+///
+///   - Claude Code and OpenCode take the WHOLE pasted string and never split on
+///     whitespace, so `bare` is right and a space is harmless. Single-quoting a
+///     path with an APOSTROPHE actively breaks Claude Code, because POSIX writes
+///     that apostrophe as a close-escape-reopen and Claude Code's own unescape
+///     step collapses it into three apostrophes.
+///   - Codex lexes the text with POSIX shell rules and accepts it only if it comes
+///     out as exactly ONE token, so a bare path containing a space is silently
+///     ignored and `single_quoted` is what it needs.
+///
+/// A TERMINAL is not one of these cases and does not consult the setting at all:
+/// it runs a shell, which is why it always gets the shell-safe form. See
+/// `TERMINAL_PASTE_FORM`.
+///
+/// KNOWN LIMITATIONS, stated rather than worked around:
+///
+///   - A path containing a BACKSLASH is mangled by Claude Code's unescape step in
+///     EVERY form, because the unescape eats the backslash. That is a property of
+///     the receiving tool and dux cannot fix it from this side.
+///   - OpenCode strips quote characters off BOTH ENDS rather than one matching
+///     pair, so a path whose own last character is a quote loses it, and it
+///     unescapes backslash sequences, so a path holding a backslash is mangled
+///     there too.
+///   - Length is a separate question this function does not answer: a payload can
+///     be perfectly formed and still be too long for the CLI to look at. See
+///     `pasteExceedsAttachmentLimit`.
 ///
 /// One file per paste. In these tools a newline SUBMITS, so a file arriving with
 /// an automatic submit would fire a half-written prompt. Several files means
-/// several pastes in sequence, because Codex only treats a pasted path as an
-/// attachment when it parses as exactly one token, so two paths in one paste
-/// become plain text.
-export function pastePayload(path: string): string {
-  return `${quoteShellToken(path)} `
+/// several pastes in sequence, because these tools only treat a pasted path as an
+/// attachment when the whole pasted string is that one path, so two paths in one
+/// paste become plain text.
+export function pastePayload(path: string, form: DragDropPasteForm): string {
+  switch (form) {
+    case "single_quoted":
+      return `${singleQuoted(path)} `
+    case "double_quoted":
+      return `${doubleQuoted(path)} `
+    case "backslash_escaped":
+      return `${backslashEscaped(path)} `
+    case "bare":
+      return `${path} `
+  }
 }
 
 /// Every distinct folder the saved files landed in, in the order they were hit.

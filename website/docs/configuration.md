@@ -19,6 +19,14 @@ dux writes a fully annotated `config.toml` the first time it launches:
 Themes are preselected, keybindings are ready to remap, and the default providers
 are already wired in. Open it, read the comments, change what you like.
 
+Each provider block carries its own settings, including `web_dragdrop_paste`,
+which decides what a dragged and dropped file's path looks like when the web UI
+writes it into that agent's prompt. dux ships a measured value for every CLI it
+knows about, so it is not something you normally set; see
+[Custom agents and providers](/docs/custom-agents) for the anatomy of a provider
+block and [Dropping files onto an agent](/docs/dropping-files) for what each value
+sends and which CLI wants which.
+
 ## Managing the config
 
 A handful of subcommands handle the file without you having to hunt for it:

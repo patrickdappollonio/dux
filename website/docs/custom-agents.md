@@ -42,7 +42,23 @@ install_hint = "curl -fsSL https://claude.ai/install.sh | bash"
 # own host scrollback. Set true to always forward to the child, or false to
 # never forward (always use dux scrollback).
 # forward_scroll = true
+# What a dragged-and-dropped file's path looks like when the WEB UI writes it
+# into this provider's prompt. Web only, which is what the "web_" prefix says:
+# in the terminal UI, dropping a file on the window is your terminal emulator's
+# job. One of "bare", "single_quoted", "double_quoted" or "backslash_escaped";
+# absent means "bare". See Dropping files onto an agent for which CLI needs
+# which, and why.
+web_dragdrop_paste = "bare"
 ```
+
+A file at `/home/you/My Project/it's here.png` goes out as:
+
+| Value | What is written into the prompt |
+|---|---|
+| `bare` | `/home/you/My Project/it's here.png` |
+| `single_quoted` | `'/home/you/My Project/it'\''s here.png'` |
+| `double_quoted` | `"/home/you/My Project/it's here.png"` |
+| `backslash_escaped` | `/home/you/My\ Project/it\'s\ here.png` |
 
 ## A worked example
 
@@ -57,6 +73,11 @@ resume_args = ["--continue"]
 install_hint = "see https://example.com/install"
 # forward_scroll left absent: auto-detect (forward only to a fullscreen,
 # mouse-aware child, otherwise dux host scrollback).
+# web_dragdrop_paste left absent: "bare", the do-nothing form. If dropping a
+# file on this agent in the browser leaves the path as plain text instead of
+# attaching it, the CLI probably wants the path quoted; try "single_quoted". If
+# the path arrives visibly mangled, with stray quote or backslash characters in
+# it, the CLI wants it bare and you are already there.
 ```
 
 Save the config, and `myagent` is now a provider you can pick when creating an

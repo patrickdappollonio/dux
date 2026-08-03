@@ -13,10 +13,14 @@ import {
   composeSendWrites,
 } from "@/lib/composebar"
 import {
+  type ConfiguredDropPaste,
   type DropContext,
   type DropOutcome,
   dropToastFor,
+  dragDropPasteFor,
+  pasteExceedsAttachmentLimit,
   pastePayload,
+  tooLongToAttachReason,
 } from "@/lib/fileDrop"
 import { FileDropApiError, uploadDroppedFile } from "@/lib/fileDropApi"
 import { showFinalToast } from "@/lib/finalToast"
@@ -304,6 +308,19 @@ export function TerminalPane(props: TerminalPaneProps) {
   // overlay and still uploaded. There is nothing to lose by waiting, because
   // the window closes in one fetch and the drag surface simply appears then.
   const fileDropEnabled = (bootstrap?.file_drop_max_bytes ?? 0) > 0
+  // The per-provider drop-paste config, mirrored into a ref so the drop loop can
+  // read the CURRENT map rather than the one that happened to be in the closure
+  // when the drag landed. A drop's uploads run one at a time and a multi-file
+  // drop is not quick, so a `config.changed` refetch really can land in the
+  // middle of one; the plan is resolved immediately before each paste, so a
+  // reload takes effect from the next file onward instead of being ignored for
+  // the rest of the drop.
+  const configuredDropPasteRef = useRef<ConfiguredDropPaste>(
+    bootstrap?.provider_drop_paste,
+  )
+  useEffect(() => {
+    configuredDropPasteRef.current = bootstrap?.provider_drop_paste
+  }, [bootstrap?.provider_drop_paste])
   // Retire any in-flight drag the moment the feature stops being available.
   // The gate refuses events for a disabled feature, so once it closes there is
   // no matching `dragleave` or `drop` left to clear the overlay, and it would
@@ -425,6 +442,21 @@ export function TerminalPane(props: TerminalPaneProps) {
       : (ownedTerminals?.find((t) => t.id === id)?.has_output ?? false)
   const providerName =
     kind === "agent" ? (focusedTab?.provider ?? session?.provider) : session?.provider
+  // Mirrored for the same reason as the configured map: the drop loop is async
+  // and its closure would otherwise pin whichever provider was running when the
+  // drag landed, so a retarget or a relaunch mid-drop would be missed.
+  const providerNameRef = useRef(providerName)
+  useEffect(() => {
+    providerNameRef.current = providerName
+  }, [providerName])
+  // What the focused tab's LIVE process launched with, off the SPINE, so it
+  // tracks launches and terminations rather than going stale until the next
+  // config refetch. `undefined` for a dormant tab and for a terminal, both of
+  // which fall back to the configured map above.
+  const launchedDropPasteRef = useRef(focusedTab?.drop_paste)
+  useEffect(() => {
+    launchedDropPasteRef.current = focusedTab?.drop_paste
+  }, [focusedTab?.drop_paste])
   // Kept current for the mount effect's PTY-gone check (an extra tab's socket
   // must stop reconnecting once its tab is no longer in the spine — see
   // `isTabGone`) WITHOUT being a dependency of that effect, which would tear
@@ -1526,6 +1558,23 @@ export function TerminalPane(props: TerminalPaneProps) {
   // also the order the paths are sent, which must not become whichever order the
   // uploads happen to finish in. One toast reports the whole drop at the end, so
   // a handful of files does not bury the screen.
+  //
+  // The FORM each path takes is per-CLI, because the agent CLIs do not agree on
+  // how they read a pasted path (see `pastePayload`), and so is the length limit
+  // beside it. Both come out of ONE resolved profile: what the focused tab's live
+  // process launched with, off the spine (so a launch or a termination refreshes
+  // it), falling back to what config says for its provider, off the bootstrap
+  // document (so a `config.changed` refetch refreshes that).
+  //
+  // A TERMINAL is not a provider pane and never reads that setting: it runs a
+  // SHELL, which is exactly why its path is always quoted rather than left bare
+  // (see `TERMINAL_PASTE_FORM`). The owning session's provider is not consulted
+  // either, for the separate reason that a companion terminal is not that agent.
+  //
+  // The form is resolved IMMEDIATELY BEFORE EACH PASTE, out of refs, for the same
+  // reason the ownership and socket checks are: a drop's uploads are sequential,
+  // so a config reload or a provider retarget can land between two files, and a
+  // form snapshotted once at the top of the drop would silently outlive it.
   async function handleDroppedFiles(files: File[]) {
     if (files.length === 0) return
     const outcomes: DropOutcome[] = []
@@ -1582,6 +1631,37 @@ export function TerminalPane(props: TerminalPaneProps) {
         continue
       }
 
+      // Resolved here, per file, rather than once per drop: see the note above.
+      // The FORM and the CLI's character LIMIT come out together, keyed by the
+      // same target, so neither can be derived from the other: a terminal is a
+      // shell and has no limit whatever form it uses, and codex has its limit on
+      // every form it can be configured with.
+      const { form, charLimit } = dragDropPasteFor(
+        configuredDropPasteRef.current,
+        kind === "agent"
+          ? {
+              kind: "agent",
+              launched: launchedDropPasteRef.current,
+              provider: providerNameRef.current,
+            }
+          : { kind: "terminal" },
+      )
+      const payload = pastePayload(where.path, form)
+      // Too long for the receiving CLI to look at as a path. Codex files any
+      // paste over its threshold away as generic large content before it tries
+      // to recognize a path at all, so pasting this would put a placeholder in
+      // the prompt and attach nothing, while the toast claimed success. Report
+      // it as the stranded file it is: saved, here is the full path, go and
+      // reference it yourself.
+      if (charLimit !== null && pasteExceedsAttachmentLimit(payload, charLimit)) {
+        outcomes.push({
+          kind: "saved-not-sent",
+          ...where,
+          reason: tooLongToAttachReason(charLimit),
+        })
+        continue
+      }
+
       // xterm's own paste, which applies bracketed paste (DECSET 2004) when the
       // running program asked for it and sends plain text when it did not.
       // Building the bracket markers by hand here would be a second
@@ -1591,7 +1671,7 @@ export function TerminalPane(props: TerminalPaneProps) {
       // paste. That rule exists because compose text has to keep a soft line
       // break and a submitting Enter distinct on the wire. A dropped path
       // contains neither, so the reason does not apply here.
-      term.paste(pastePayload(saved.path))
+      term.paste(payload)
       // SENT, not "arrived". This is a socket write like any keystroke and
       // nothing acknowledges it: a take-over landing between the upload's
       // courtesy check and this frame reaching the server makes the server drop

@@ -214,6 +214,9 @@ fn retired_stock_gemini() -> ProviderCommandConfig {
         resume_wait_timeout_ms: Some(0),
         install_hint: Some("brew install gemini-cli".to_string()),
         forward_scroll: None,
+        // gemini was retired before `web_dragdrop_paste` existed, so the stock
+        // block dux shipped never carried the key.
+        web_dragdrop_paste: None,
     }
 }
 
@@ -268,6 +271,7 @@ fn table_matches_provider_config(table: &Table, stock: &ProviderCommandConfig) -
         && user.resume_wait_timeout_ms.unwrap_or(0) == stock.resume_wait_timeout_ms.unwrap_or(0)
         && user.install_hint == stock.install_hint
         && user.forward_scroll == stock.forward_scroll
+        && user.web_dragdrop_paste == stock.web_dragdrop_paste
 }
 
 #[cfg(test)]

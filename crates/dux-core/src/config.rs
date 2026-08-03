@@ -485,6 +485,162 @@ pub struct ProviderCommandConfig {
     /// - `Some(true)` — always forward scroll and page keys to the child.
     /// - `Some(false)` — never forward; always use dux host scrollback.
     pub forward_scroll: Option<bool>,
+    /// How the WEB UI writes a dropped file's path into this provider's prompt.
+    /// The raw config string, parsed at use through [`WebDragDropPaste`] so a typo
+    /// degrades gracefully instead of failing the whole config load (the
+    /// `capabilities.clipboard_passthrough` convention). `None` (key absent)
+    /// resolves to [`WebDragDropPaste::Bare`].
+    ///
+    /// See [`WebDragDropPaste`] for what each form means and which CLI needs which.
+    pub web_dragdrop_paste: Option<String>,
+}
+
+/// The form a DRAGGED AND DROPPED file's path takes when the WEB UI writes it
+/// into a provider's prompt.
+///
+/// The `web_` prefix on the config key is load-bearing: this affects the browser
+/// and nothing else. The terminal UI needs none of it, because dropping a file
+/// onto a terminal window there is the host terminal emulator's job, and the file
+/// is already on the machine the agent runs on.
+///
+/// This exists because the receiving end is an agent CLI, not a shell, and the
+/// CLIs do not agree on how they read a pasted path. Each one takes the whole
+/// pasted string and normalizes it its own way before deciding whether it names
+/// a file. The right form is therefore a property of the CLI, which is why it is
+/// a per-provider setting a maintainer can extend rather than a rule baked in
+/// here.
+///
+/// WHAT WAS MEASURED. Every row below was produced by RUNNING the CLI's own
+/// normalizer over the exact bytes dux sends, not by reading and summarizing it.
+/// The measurements are what makes this a table of evidence rather than opinion,
+/// so a new row belongs here only once someone has run the new CLI the same way.
+///
+/// | CLI                 | What it does to a pasted path                                           | Form it needs   |
+/// |---------------------|-------------------------------------------------------------------------|-----------------|
+/// | Claude Code 2.1.220 | Trims, strips ONE surrounding matching quote pair, unescapes `\X`, then  | `bare`          |
+/// |                     | matches the extension. Never splits on whitespace, so a space is        |                 |
+/// |                     | harmless bare.                                                          |                 |
+/// | OpenCode            | Strips ALL leading and trailing quote characters, resolves `file://`,   | `bare`          |
+/// |                     | unescapes `\X`. No shell splitting, so a space is harmless bare.        |                 |
+/// | Codex (shlex 1.3.0) | Strips one matching quote pair, resolves `file://`, otherwise runs the   | `single_quoted` |
+/// |                     | text through POSIX shell lexing and accepts it ONLY if it comes out as  |                 |
+/// |                     | exactly one token. A bare path containing a space is silently ignored.  |                 |
+/// | Copilot CLI         | Closed source. NOT verified. Defaulted to `bare`, the do-nothing option | `bare` (guess)  |
+/// |                     | and what two of the three verified CLIs want.                           |                 |
+///
+/// Anything dux does not ship, including a provider a user adds themselves, gets
+/// `bare` for the same reason.
+///
+/// WHAT IS KNOWN TO FAIL, which is the more useful half of the table:
+///
+/// - `single_quoted` on a path containing an APOSTROPHE breaks Claude Code. POSIX
+///   writes an embedded apostrophe as close-escape-reopen, and Claude Code's
+///   unescape step then collapses that into three consecutive apostrophes. Run
+///   against exactly what dux produced, a real `/home/p/Bob's app/shot.png` came
+///   back with three apostrophes in the middle of it, naming nothing.
+/// - ANY form carrying a BACKSLASH is mangled by Claude Code's unescape step. That
+///   covers `backslash_escaped` outright, and also a path that simply has a
+///   backslash in its name, whatever form it is sent in. The unescape eats it.
+///
+/// Both are properties of the receiving tool, not bugs in dux, and no workaround
+/// should be attempted from this side: dux sends the correct bytes and the CLI
+/// rewrites them.
+///
+/// GETTING IT WRONG IS NOT USUALLY A BREAKAGE. The normal symptom is that the file
+/// is not attached automatically and its path is left in the prompt as ordinary
+/// text, which the user can still work with.
+///
+/// ADDING A FORM. The set is open by construction: a new form is one more variant
+/// plus one more arm in [`WebDragDropPaste::parse`], [`WebDragDropPaste::as_str`]
+/// and the web's `pastePayload`, with no rework anywhere else. One candidate is
+/// deliberately ABSENT: a `file://` URL. Codex and OpenCode both resolve one, but
+/// whether Claude Code does on its paste path is UNVERIFIED, and a form should not
+/// ship on an unmeasured assumption. Measure it and it can be added.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WebDragDropPaste {
+    /// The path exactly as it is on disk: nothing added, nothing escaped.
+    ///
+    /// What Claude Code and OpenCode want. Both take the whole pasted string and
+    /// never split on whitespace, so a space needs no protection. This is the
+    /// default for every provider not listed otherwise.
+    #[default]
+    Bare,
+    /// Wrapped in single quotes, with an embedded apostrophe escaped the POSIX way
+    /// (close the quote, escape the apostrophe, reopen the quote).
+    ///
+    /// What Codex wants. It lexes the pasted text with POSIX shell rules and
+    /// accepts it only if it comes out as exactly one token, so a bare path
+    /// containing a space is silently ignored.
+    SingleQuoted,
+    /// Wrapped in double quotes, with an embedded double quote and backslash
+    /// escaped.
+    ///
+    /// Also lexes to one token for Codex, and both other CLIs strip a surrounding
+    /// pair. Offered because a future CLI may prefer it, and because a path full of
+    /// apostrophes is cleaner this way than through the close-escape-reopen dance.
+    DoubleQuoted,
+    /// No quotes, with shell-significant characters escaped by a backslash, so
+    /// `My File.png` goes out as `My\ File.png`.
+    ///
+    /// Codex accepts it (it lexes to one token) and OpenCode unescapes it back. It
+    /// is also what several real terminal emulators emit when you drop a file on
+    /// them, so it is the closest thing here to "what a normal terminal does".
+    /// Note the failure above: Claude Code's unescape step mangles it.
+    BackslashEscaped,
+}
+
+impl WebDragDropPaste {
+    /// Parse a config string into a mode, returning `None` for an unrecognized
+    /// value so the caller decides whether to warn. Never warns itself, so a
+    /// per-paste path can call it freely.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "bare" => Some(Self::Bare),
+            "single_quoted" => Some(Self::SingleQuoted),
+            "double_quoted" => Some(Self::DoubleQuoted),
+            "backslash_escaped" => Some(Self::BackslashEscaped),
+            _ => None,
+        }
+    }
+
+    /// The warning text for one unrecognized value, or `None` when the value is a
+    /// form dux knows.
+    ///
+    /// Returned rather than logged so the message itself is testable: a warning
+    /// that only ever reaches a file cannot be asserted on without racing the
+    /// process-wide logger, and "warns once per load" is exactly the property
+    /// worth pinning.
+    pub fn unknown_value_warning(provider: &str, s: &str) -> Option<String> {
+        if Self::parse(s).is_some() {
+            return None;
+        }
+        Some(format!(
+            "unknown providers.{provider}.web_dragdrop_paste value {s:?}; falling back to \
+             \"bare\" (valid: bare, single_quoted, double_quoted, backslash_escaped)"
+        ))
+    }
+
+    /// Parse a config string, falling back to [`WebDragDropPaste::Bare`] with a logged
+    /// warning on an unrecognized value. Call this at config load/reload (once),
+    /// not per paste, so a typo is surfaced without spamming the log; the paste
+    /// path uses the non-warning [`WebDragDropPaste::parse`].
+    pub fn from_config_str(provider: &str, s: &str) -> Self {
+        if let Some(warning) = Self::unknown_value_warning(provider, s) {
+            crate::logger::warn(&warning);
+        }
+        Self::parse(s).unwrap_or(Self::Bare)
+    }
+
+    /// The canonical lowercase name. This is what goes in `config.toml` and what
+    /// is projected into the web bootstrap document, so both surfaces agree.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Bare => "bare",
+            Self::SingleQuoted => "single_quoted",
+            Self::DoubleQuoted => "double_quoted",
+            Self::BackslashEscaped => "backslash_escaped",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -747,6 +903,46 @@ impl ProviderCommandConfig {
             .map(|args| !args.is_empty())
             .unwrap_or(false)
     }
+
+    /// The effective [`WebDragDropPaste`] for this provider: the configured value when
+    /// it names a form dux knows, and [`WebDragDropPaste::Bare`] when the key is absent
+    /// or misspelled. Silent, because a warning belongs at config load and not on
+    /// every paste; `load_config` emits it once (see `warn_on_unknown_web_dragdrop_paste_forms`).
+    pub fn resolved_web_dragdrop_paste(&self) -> WebDragDropPaste {
+        self.web_dragdrop_paste
+            .as_deref()
+            .and_then(WebDragDropPaste::parse)
+            .unwrap_or_default()
+    }
+
+    /// The FILE NAME of the command this provider runs, which is the only thing
+    /// in a `[providers.<name>]` block that identifies which CLI is on the other
+    /// end of a paste.
+    ///
+    /// The block's NAME does not, and treating it as though it did was a real
+    /// defect: a provider's name is free text the user chooses, so
+    /// `[providers.myagent] command = "codex"` is a real Codex and
+    /// `[providers.codex] command = "something-else"` is not. Anything keyed by
+    /// the name therefore answered for the wrong CLI in both directions at once.
+    /// The web's per-CLI paste-length table is keyed by this instead.
+    ///
+    /// The FILE NAME rather than the whole string, because `command` may be a
+    /// full path (`/usr/local/bin/codex`), a `~`-relative one, or a bare name
+    /// found on `PATH`, and all three name the same CLI. Argument-carrying
+    /// wrappers (`command = "npx"`, `command = "mise"`) are deliberately NOT
+    /// unwrapped: what they finally exec is not knowable from config, so they
+    /// resolve to the wrapper and fall into the "no entry, no limit" case, which
+    /// withholds nothing.
+    ///
+    /// Falls back to the whole string when there is no file name to take (an
+    /// empty command, or one that is nothing but separators), so the answer is
+    /// never silently empty.
+    pub fn command_file_name(&self) -> String {
+        std::path::Path::new(&self.command)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.command.clone())
+    }
 }
 
 impl Default for LoggingConfig {
@@ -862,6 +1058,14 @@ impl ProvidersConfig {
                     if entry.get().resume_wait_timeout_ms.is_none() {
                         entry.get_mut().resume_wait_timeout_ms = config.resume_wait_timeout_ms;
                     }
+                    // A config written before `web_dragdrop_paste` existed has the key
+                    // absent, and absent resolves to `bare`. That is wrong for
+                    // codex, so fill in the shipped form here rather than letting
+                    // an old config silently keep the do-nothing one. An explicit
+                    // value is left alone: config wins for explicit preferences.
+                    if entry.get().web_dragdrop_paste.is_none() {
+                        entry.get_mut().web_dragdrop_paste = config.web_dragdrop_paste;
+                    }
                 }
             }
         }
@@ -882,6 +1086,12 @@ pub fn default_terminal_args() -> Vec<String> {
     vec!["-l".to_string()]
 }
 
+/// The providers dux ships, and every default that goes with them.
+///
+/// `web_dragdrop_paste` here is the MEASURED result of running each CLI's own path
+/// normalizer over the bytes dux sends. The table of what each one does, and the
+/// caveat that Copilot's value is a guess because it is closed source, lives on
+/// [`WebDragDropPaste`]. Read it before changing a value here.
 pub fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 4] {
     [
         (
@@ -893,6 +1103,9 @@ pub fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 4]
                 resume_wait_timeout_ms: None,
                 install_hint: Some("curl -fsSL https://claude.ai/install.sh | bash".to_string()),
                 forward_scroll: None,
+                // Measured: strips one quote pair then unescapes, so quoting
+                // buys nothing and corrupts an apostrophe.
+                web_dragdrop_paste: Some(WebDragDropPaste::Bare.as_str().to_string()),
             },
         ),
         (
@@ -904,6 +1117,9 @@ pub fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 4]
                 resume_wait_timeout_ms: None,
                 install_hint: Some("brew install --cask codex".to_string()),
                 forward_scroll: None,
+                // Measured: falls back to POSIX shell lexing and accepts only a
+                // single token, so a bare path with a space fails silently.
+                web_dragdrop_paste: Some(WebDragDropPaste::SingleQuoted.as_str().to_string()),
             },
         ),
         (
@@ -915,6 +1131,8 @@ pub fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 4]
                 resume_wait_timeout_ms: Some(3_000),
                 install_hint: Some("curl -fsSL https://opencode.ai/install | bash".to_string()),
                 forward_scroll: None,
+                // Measured: strips quote characters and never splits on a space.
+                web_dragdrop_paste: Some(WebDragDropPaste::Bare.as_str().to_string()),
             },
         ),
         (
@@ -930,6 +1148,9 @@ pub fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 4]
                 resume_wait_timeout_ms: None,
                 install_hint: Some("curl -fsSL https://gh.io/copilot-install | bash".to_string()),
                 forward_scroll: None,
+                // NOT measured: Copilot CLI is closed source. `bare` is the
+                // do-nothing option and what two of the three verified CLIs want.
+                web_dragdrop_paste: Some(WebDragDropPaste::Bare.as_str().to_string()),
             },
         ),
     ]
@@ -1510,7 +1731,39 @@ pub fn load_config(paths: &DuxPaths) -> Config {
     // per-tick forward path can parse without warning (see FIX-F5). from_config_str
     // logs the warning as a side effect and returns the fallback we discard.
     let _ = ClipboardPassthroughMode::from_config_str(&config.capabilities.clipboard_passthrough);
+    // Same idea for a misspelled provider drag-and-drop paste form: warn ONCE here
+    // rather than on every dropped file, and let the resolution itself stay silent.
+    warn_on_unknown_web_dragdrop_paste_forms(&config.providers);
     config
+}
+
+/// Warn once per unrecognized `providers.<name>.web_dragdrop_paste` value, at load.
+/// The value degrades to `bare` rather than failing the config load, exactly as an
+/// unrecognized `capabilities.clipboard_passthrough` does; without this the
+/// degradation would be silent and a user who typed `single-quoted` would never
+/// learn why their dropped path stopped being quoted.
+fn warn_on_unknown_web_dragdrop_paste_forms(providers: &ProvidersConfig) {
+    for warning in web_dragdrop_paste_warnings(providers) {
+        crate::logger::warn(&warning);
+    }
+}
+
+/// Every warning a load would emit for an unrecognized
+/// `providers.<name>.web_dragdrop_paste`, in config order: exactly one per
+/// misspelled provider, and none at all for a config that is clean.
+///
+/// Split out from the logging so the messages can be asserted directly. The
+/// per-paste resolution ([`ProviderCommandConfig::resolved_web_dragdrop_paste`])
+/// deliberately does not go through this, which is what keeps the warning to once
+/// per load rather than once per dropped file.
+pub fn web_dragdrop_paste_warnings(providers: &ProvidersConfig) -> Vec<String> {
+    providers
+        .commands
+        .iter()
+        .filter_map(|(name, provider)| {
+            WebDragDropPaste::unknown_value_warning(name, provider.web_dragdrop_paste.as_deref()?)
+        })
+        .collect()
 }
 
 /// Warn once when a `config.toml` still carries the removed
@@ -2608,5 +2861,234 @@ mod agent_tabs_cap_tests {
             normalized_pr_poll_interval(MAX_PR_POLL_INTERVAL_SECONDS),
             MAX_PR_POLL_INTERVAL_SECONDS
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // providers.<name>.web_dragdrop_paste
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn shipped_providers_get_their_documented_web_dragdrop_paste() {
+        let providers = ProvidersConfig::default();
+        for (name, expected) in [
+            ("claude", WebDragDropPaste::Bare),
+            ("opencode", WebDragDropPaste::Bare),
+            ("codex", WebDragDropPaste::SingleQuoted),
+            ("copilot", WebDragDropPaste::Bare),
+        ] {
+            assert_eq!(
+                providers
+                    .get(name)
+                    .expect("shipped provider present")
+                    .resolved_web_dragdrop_paste(),
+                expected,
+                "{name} must ship with the measured paste form"
+            );
+        }
+    }
+
+    #[test]
+    fn a_user_defined_provider_pastes_bare() {
+        let config: Config =
+            toml::from_str("[providers.myagent]\ncommand = \"myagent\"\n").expect("parse config");
+        assert_eq!(
+            config.providers.commands["myagent"].resolved_web_dragdrop_paste(),
+            WebDragDropPaste::Bare,
+            "a provider dux knows nothing about gets the do-nothing form"
+        );
+    }
+
+    #[test]
+    fn ensure_defaults_fills_a_missing_web_dragdrop_paste_for_a_shipped_provider() {
+        let mut config: Config =
+            toml::from_str("[providers.codex]\ncommand = \"codex\"\n").expect("parse config");
+        assert_eq!(config.providers.commands["codex"].web_dragdrop_paste, None);
+        config.providers.ensure_defaults();
+        assert_eq!(
+            config.providers.commands["codex"].resolved_web_dragdrop_paste(),
+            WebDragDropPaste::SingleQuoted,
+            "a config predating the setting must still get codex's measured form"
+        );
+    }
+
+    #[test]
+    fn an_explicit_web_dragdrop_paste_wins_over_the_shipped_default() {
+        let mut config: Config = toml::from_str(
+            "[providers.codex]\ncommand = \"codex\"\nweb_dragdrop_paste = \"bare\"\n",
+        )
+        .expect("parse config");
+        config.providers.ensure_defaults();
+        assert_eq!(
+            config.providers.commands["codex"].resolved_web_dragdrop_paste(),
+            WebDragDropPaste::Bare,
+            "config wins for an explicit preference"
+        );
+    }
+
+    #[test]
+    fn a_provider_is_identified_by_its_command_file_name_not_its_block_name() {
+        // The two are independent, and the per-CLI paste-length table used to be
+        // keyed by the BLOCK NAME, which is free text. Both directions were
+        // wrong: a real Codex under any other name escaped its limit and was
+        // handed oversized paths it silently ignores, and an unrelated CLI
+        // merely NAMED codex had valid long paths withheld from it.
+        let config: Config = toml::from_str(
+            "[providers.myagent]\ncommand = \"codex\"\n\
+             [providers.codex]\ncommand = \"something-else\"\n",
+        )
+        .expect("parse config");
+        assert_eq!(
+            config.providers.commands["myagent"].command_file_name(),
+            "codex",
+            "an aliased block still runs codex, and must be identified as codex"
+        );
+        assert_eq!(
+            config.providers.commands["codex"].command_file_name(),
+            "something-else",
+            "a block merely NAMED codex runs whatever its command says"
+        );
+    }
+
+    #[test]
+    fn a_full_path_command_is_identified_by_its_file_name() {
+        // `command` may be an absolute path, and it names the same CLI as the
+        // bare name does, so the comparison is on the file name.
+        for command in ["/usr/local/bin/codex", "./codex", "codex"] {
+            let config: Config =
+                toml::from_str(&format!("[providers.p]\ncommand = \"{command}\"\n"))
+                    .expect("parse config");
+            assert_eq!(
+                config.providers.commands["p"].command_file_name(),
+                "codex",
+                "{command} names codex"
+            );
+        }
+    }
+
+    #[test]
+    fn a_command_with_no_file_name_falls_back_to_itself() {
+        // Degenerate, but it must never resolve to an empty string, which would
+        // key into a table as a real value.
+        for command in ["", "/", ".."] {
+            let config: Config =
+                toml::from_str(&format!("[providers.p]\ncommand = \"{command}\"\n"))
+                    .expect("parse config");
+            let resolved = config.providers.commands["p"].command_file_name();
+            assert_eq!(
+                resolved, command,
+                "a command with no file name answers with itself"
+            );
+        }
+    }
+
+    #[test]
+    fn web_dragdrop_paste_parses_case_and_whitespace_insensitively() {
+        assert_eq!(
+            WebDragDropPaste::parse("  BARE "),
+            Some(WebDragDropPaste::Bare)
+        );
+        assert_eq!(
+            WebDragDropPaste::parse("Single_Quoted"),
+            Some(WebDragDropPaste::SingleQuoted)
+        );
+        assert_eq!(
+            WebDragDropPaste::parse("Double_Quoted"),
+            Some(WebDragDropPaste::DoubleQuoted)
+        );
+        assert_eq!(
+            WebDragDropPaste::parse(" backslash_escaped\n"),
+            Some(WebDragDropPaste::BackslashEscaped)
+        );
+        assert_eq!(WebDragDropPaste::parse("shell"), None);
+        assert_eq!(WebDragDropPaste::parse("file_url"), None);
+    }
+
+    #[test]
+    fn a_misspelled_web_dragdrop_paste_falls_back_to_bare() {
+        // Same shape as `capabilities.clipboard_passthrough`: an unrecognized
+        // value degrades to the safe default rather than failing the load.
+        let config: Config = toml::from_str(
+            "[providers.codex]\ncommand = \"codex\"\nweb_dragdrop_paste = \"single-quoted\"\n",
+        )
+        .expect("a typo must not fail the whole config load");
+        assert_eq!(
+            config.providers.commands["codex"].resolved_web_dragdrop_paste(),
+            WebDragDropPaste::Bare
+        );
+        assert_eq!(
+            WebDragDropPaste::from_config_str("codex", "single-quoted"),
+            WebDragDropPaste::Bare
+        );
+    }
+
+    #[test]
+    fn a_misspelled_web_dragdrop_paste_warns_once_per_load_and_says_what_is_valid() {
+        // The test above asserts only the FALLBACK, and the fallback is the
+        // silent half. Nothing looked at the warning at all, so a degradation
+        // that told the user nothing would have passed just as happily, which is
+        // the failure mode the warning exists to prevent: a typed
+        // `single-quoted` stops quoting paths and nothing anywhere says why.
+        //
+        // The message is asserted directly rather than read back out of the log
+        // file: `logger::init` sets a process-wide `OnceLock`, so whichever test
+        // runs first owns it, and a test that read the file would pass or fail on
+        // ordering. `web_dragdrop_paste_warnings` returns the exact strings
+        // `load_config` hands to the logger, so this pins the text AND the count.
+        let config: Config = toml::from_str(
+            "[providers.claude]\ncommand = \"claude\"\nweb_dragdrop_paste = \"bare\"\n\
+             [providers.codex]\ncommand = \"codex\"\nweb_dragdrop_paste = \"single-quoted\"\n\
+             [providers.opencode]\ncommand = \"opencode\"\nweb_dragdrop_paste = \"file_url\"\n",
+        )
+        .expect("a typo must not fail the whole config load");
+
+        let warnings = web_dragdrop_paste_warnings(&config.providers);
+        // ONE per misspelled provider. Not one per provider, and not one per
+        // dropped file.
+        assert_eq!(
+            warnings.len(),
+            2,
+            "expected exactly one warning per misspelled provider, got {warnings:?}"
+        );
+        let joined = warnings.join("\n");
+        assert!(joined.contains("providers.codex.web_dragdrop_paste"));
+        assert!(joined.contains("\"single-quoted\""));
+        assert!(joined.contains("providers.opencode.web_dragdrop_paste"));
+        assert!(joined.contains("\"file_url\""));
+        // The correctly spelled provider is not mentioned at all.
+        assert!(!joined.contains("providers.claude"));
+        // And each warning says what happens instead and what would have worked,
+        // because a warning that only says "unknown" leaves the user guessing.
+        for warning in &warnings {
+            assert!(warning.contains("falling back to \"bare\""), "{warning}");
+            assert!(warning.contains("single_quoted"), "{warning}");
+            assert!(warning.contains("double_quoted"), "{warning}");
+            assert!(warning.contains("backslash_escaped"), "{warning}");
+        }
+
+        // The per-paste path resolves the same value as often as it likes and
+        // produces no warning, which is what "once per load" means: the count is
+        // a function of the config, not of how often the value has been read.
+        for _ in 0..5 {
+            assert_eq!(
+                config.providers.commands["codex"].resolved_web_dragdrop_paste(),
+                WebDragDropPaste::Bare
+            );
+        }
+        assert_eq!(web_dragdrop_paste_warnings(&config.providers).len(), 2);
+
+        // A clean config says nothing at all.
+        assert!(web_dragdrop_paste_warnings(&ProvidersConfig::default()).is_empty());
+    }
+
+    #[test]
+    fn web_dragdrop_paste_as_str_round_trips() {
+        for mode in [
+            WebDragDropPaste::Bare,
+            WebDragDropPaste::SingleQuoted,
+            WebDragDropPaste::DoubleQuoted,
+            WebDragDropPaste::BackslashEscaped,
+        ] {
+            assert_eq!(WebDragDropPaste::parse(mode.as_str()), Some(mode));
+        }
     }
 }

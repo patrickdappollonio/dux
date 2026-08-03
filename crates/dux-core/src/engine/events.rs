@@ -747,6 +747,7 @@ impl Engine {
             let detached =
                 self.detach_conflicting_worktree_session(&session.worktree_path, &session.id);
             self.providers.insert(tab_id.clone(), client);
+            self.record_launched_drop_paste(&tab_id, &request.provider, &request.provider_config);
             self.sessions.insert(0, session.clone());
             // Correlate this create op with the session it just produced so a REST
             // create handler holding the op id (from `WireCommandOutcome.created_op_id`)
@@ -842,6 +843,7 @@ impl Engine {
         let detached =
             self.detach_conflicting_worktree_session(&session.worktree_path, &session.id);
         self.providers.insert(tab_id.clone(), client);
+        self.record_launched_drop_paste(&tab_id, &request.provider, &request.provider_config);
         if request.resume {
             self.resume_fallback_candidates
                 .insert(tab_id.clone(), Instant::now());
@@ -1043,16 +1045,46 @@ impl Engine {
         }
     }
 
-    /// Clear every runtime map keyed by ONE tab id (`providers`,
-    /// `running_provider_pins`, `resume_fallback_candidates`, `pty_activity`,
-    /// `pty_input`, and the in-flight `AgentLaunch` key). The SINGLE source of
-    /// truth for the per-tab teardown map list: both `close_tab` (a single
-    /// extra tab) and `clear_session_tab_runtime` (a whole session, looped)
-    /// call this, so adding a new tab-keyed map is a one-line change here rather
-    /// than a comment-enforced convention across two files.
+    /// Remember what a tab LAUNCHED with, so the spine can answer for that TAB
+    /// rather than for its provider's name: two live tabs of one provider
+    /// launched either side of a config edit need the two forms they each
+    /// started with, and one name cannot carry both. It is also what still
+    /// answers after the user renames or removes the tab's `[providers.<name>]`
+    /// block. Both halves come from the exact [`ProviderCommandConfig`] the
+    /// launch used rather than being re-read from the current config, because
+    /// the whole point is to survive a later edit.
+    /// Retired by [`Engine::clear_tab_runtime`] when the process goes.
+    fn record_launched_drop_paste(
+        &mut self,
+        tab_id: &str,
+        provider: &ProviderKind,
+        provider_config: &crate::config::ProviderCommandConfig,
+    ) {
+        self.launched_drop_paste.insert(
+            tab_id.to_string(),
+            crate::engine::LaunchedDropPaste {
+                provider: provider.as_str().to_string(),
+                form: provider_config.resolved_web_dragdrop_paste(),
+                command_name: provider_config.command_file_name(),
+            },
+        );
+    }
+
+    /// Clear every runtime map keyed by ONE tab id: the body below is the list,
+    /// and it is the SINGLE source of truth for it. Three callers rely on that:
+    /// `close_tab` (a single extra tab), `clear_session_tab_runtime` (a whole
+    /// session, looped) and `retry_resume_fallback` (a stale resume attempt
+    /// about to be relaunched). Adding a new tab-keyed map is therefore a
+    /// one-line change here rather than a comment-enforced convention spread
+    /// across three files.
+    ///
+    /// `retry_resume_fallback` used to name three of these maps itself, and
+    /// every other one leaked whenever the relaunch it dispatched then failed.
+    /// Do not go back to naming maps at a call site.
     pub fn clear_tab_runtime(&mut self, tab_id: &str) {
         self.providers.remove(tab_id);
         self.running_provider_pins.remove(tab_id);
+        self.launched_drop_paste.remove(tab_id);
         self.resume_fallback_candidates.remove(tab_id);
         self.pty_activity.remove(tab_id);
         self.pty_input.remove(tab_id);
@@ -2704,6 +2736,30 @@ mod tests {
         );
         // The delete aborted, so the session record survives.
         assert!(engine.sessions.iter().any(|s| s.id == "s1"));
+    }
+
+    #[test]
+    fn clearing_a_tab_retires_the_form_it_launched_with() {
+        // The sticky launched form is what lets a live tab keep its quoting after
+        // its provider is renamed out of config. It must RETIRE with the process:
+        // an entry that outlived its tab would keep publishing a provider name the
+        // workspace no longer runs, and a later tab launching under that same name
+        // would inherit a form nobody configured.
+        let (mut engine, _tmp) = test_engine();
+        engine.launched_drop_paste.insert(
+            "s1".to_string(),
+            crate::engine::LaunchedDropPaste {
+                provider: "codex".to_string(),
+                form: crate::config::WebDragDropPaste::SingleQuoted,
+                command_name: "codex".to_string(),
+            },
+        );
+        engine.clear_tab_runtime("s1");
+        assert!(
+            !engine.launched_drop_paste.contains_key("s1"),
+            "the launched paste profile must be torn down with the tab, like \
+             every other tab-keyed runtime map"
+        );
     }
 
     #[test]

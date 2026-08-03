@@ -102,12 +102,129 @@ prompt, so the folders above it are held to the same standard. dux refuses a dro
 into a folder whose own path could not survive the trip to your terminal: one
 holding a line feed (which arrives as a submit rather than as text), one holding
 an escape character (which the program reading your terminal simply obeys), or
-one whose name is not valid text at all. Quoting does not help with any of those,
-because none of them is a shell problem.
+one whose name is not valid text at all. Those are the only refusals, and none
+of them is something a different way of writing the path could rescue.
 
-Everything that *is* only a quoting problem still works. Spaces, dollars,
-backticks, quotes and semicolons in a folder name are all fine, which matters
-because a worktree path is built from your project's name.
+Everything else works. Spaces, dollars, backticks, quotes and semicolons in a
+folder name are all fine, which matters because a worktree path is built from
+your project's name.
+
+## What the path looks like when it lands
+
+Whether a dropped file is picked up automatically depends on the exact shape of
+the path in the prompt, and the agent CLIs do not agree with each other about
+what that shape should be. So it is **a per-provider setting**, `web_dragdrop_paste`,
+in the provider's own block in `config.toml` next to `command` and `resume_args`.
+
+You almost certainly do not need to touch it. dux ships the value it measured for
+each CLI it knows about.
+
+```toml
+[providers.codex]
+command = "codex"
+web_dragdrop_paste = "single_quoted"
+```
+
+### The four values
+
+A file at `/home/you/My Project/it's here.png` goes out as:
+
+| Value | What is written into the prompt |
+|---|---|
+| `bare` | `/home/you/My Project/it's here.png` |
+| `single_quoted` | `'/home/you/My Project/it'\''s here.png'` |
+| `double_quoted` | `"/home/you/My Project/it's here.png"` |
+| `backslash_escaped` | `/home/you/My\ Project/it\'s\ here.png` |
+
+`bare` sends the path exactly as it is on disk. `single_quoted` and
+`double_quoted` wrap it so that a shell lexer reads the whole thing as one word,
+escaping whatever would otherwise end the quoting. `backslash_escaped` skips the
+quotes and protects the significant characters one at a time, which is what
+several real terminal emulators do when you drop a file on them.
+
+**Which one do you want?** If a dropped file arrives as plain text instead of
+attaching, the CLI probably wants the path quoted, so try `single_quoted`. If the
+path arrives visibly mangled, with stray quote or backslash characters in it, the
+CLI probably wants it `bare`.
+
+### Which CLI needs which, and why
+
+Every row here was produced by running that CLI's own path handling over the exact
+bytes dux sends, not by reading the code and summarising it.
+
+| CLI | What it does with a pasted path | Value |
+|---|---|---|
+| Claude Code | Trims the whole string, strips one surrounding pair of matching quotes, undoes backslash escapes, then asks whether what is left looks like an image. Never splits on whitespace. | `bare` |
+| OpenCode | Strips quote characters off both ends, resolves a `file://` URL, undoes backslash escapes. No shell splitting, so a space is harmless. | `bare` |
+| Codex | Strips one matching quote pair, resolves a `file://` URL, and otherwise lexes the text with POSIX shell rules, accepting it only if it comes out as exactly one token. | `single_quoted` |
+| Copilot CLI | Closed source, so this one is **not verified**. It is defaulted to `bare`, the do-nothing option and what two of the three CLIs above want. | `bare` (a guess) |
+
+Anything else, including a provider you add yourself, gets `bare` unless you say
+otherwise. An absent key means `bare`, and so does a value dux does not recognise
+(it says so once in `dux.log` and carries on rather than refusing to load your
+config).
+
+The `web_` prefix is there to be obvious about scope: this affects the browser and
+nothing else. In the terminal UI, dropping a file onto the window is your terminal
+emulator's job and dux is not involved at all.
+
+### What is known to fail
+
+This is the more useful half of the table, and none of it is something dux can fix
+from its side. dux sends the correct bytes; the receiving tool rewrites them.
+
+- **Single-quoting a path that contains an apostrophe breaks Claude Code.** POSIX
+  quoting writes an embedded apostrophe by closing the quote, escaping it and
+  reopening, and Claude Code's own unescaping step then collapses that into three
+  apostrophes in a row. A file in a folder called `Bob's app` comes out naming
+  nothing. This is why Claude's value is `bare` and why an earlier version of dux
+  that quoted everything was wrong.
+- **Any form carrying a backslash is mangled by Claude Code's unescaping step.**
+  That covers `backslash_escaped` outright, and it also covers a path that simply
+  has a backslash in its name, whatever form you send it in. Backslashes in file
+  and folder names are rare on macOS and Linux, but when they happen there is no
+  form that survives.
+- **OpenCode eats a trailing quote character, and unescapes backslashes.** It
+  strips quote characters from *both ends* rather than one matching pair, so a
+  file whose own name ends in a quote loses that character. And like Claude Code
+  it undoes backslash escapes, so a path holding a backslash is mangled there too.
+- **Codex ignores a paste that is too long before it ever looks for a path.**
+  Anything over 1000 characters is filed away as generic pasted content, and the
+  quoting dux adds counts toward that. dux measures the finished paste rather than
+  the file's own path, and when it would go over the limit it does not send it at
+  all: the toast tells you the file was saved, gives you its full path, and says
+  the agent will not pick it up automatically. The limit belongs to Codex itself,
+  not to a quoting style and not to what you called the provider block: it applies
+  whichever `web_dragdrop_paste` value you give Codex, it follows Codex under any
+  block name you like (`[providers.myagent] command = "codex"` still gets it), and
+  a block you happened to name `codex` that runs something else does not. dux
+  decides by the `command` you configured, comparing on its file name, so a full
+  path such as `/usr/local/bin/codex` counts the same as the bare name. No other
+  CLI has been measured to have a limit, and a terminal has none at all.
+
+A `file://` URL is deliberately **not** one of the four values. Codex and OpenCode
+both resolve one, but whether Claude Code does on its paste path has not been
+measured. It is not a rejected idea, it is a candidate: measure it against a CLI,
+and it can be added as a fifth value for that provider.
+
+### Getting it wrong is not usually a breakage
+
+If the value is wrong for your CLI, the normal symptom is that the file is not
+attached automatically and its path is left sitting in the prompt as ordinary
+text. You can still work with that, and you can still refer to the file by the
+path you are looking at. Nothing is lost and nothing is overwritten.
+
+## Dropping onto a terminal
+
+A terminal is not an agent, and it does not read `web_dragdrop_paste` at all. Its
+dropped paths are **always quoted**, because a terminal runs a shell, and a shell
+is precisely the thing that would split a path on its spaces, expand a `$` in it
+and run a command substitution the moment you press Enter on the line the path
+landed in. dux permits all of those characters in a destination path, so the
+quoting is what makes them inert. The path is pasted at your cursor as one
+literal word and nothing is submitted for you. There is no length limit either:
+that limit is a property of Codex's composer, and a shell does not have one, so a
+very long path is sent to a terminal rather than held back.
 
 ## Several files at once
 
@@ -115,8 +232,8 @@ Drop a handful and they are saved one after another, and their paths are pasted
 **in the order you dropped them**, not in whatever order the uploads happened to
 finish. Each path is pasted on its own, followed by a single space and no
 newline, because a newline would submit your half-written prompt, and because
-these tools only treat a pasted path as an attachment when it is a single token
-on its own.
+these tools only treat a pasted path as an attachment when the whole paste is
+that one path.
 
 You get **one** toast for the whole drop rather than one per file.
 

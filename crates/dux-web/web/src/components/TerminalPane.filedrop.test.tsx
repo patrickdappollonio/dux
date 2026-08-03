@@ -230,6 +230,36 @@ function makeState(): DuxState {
   } as unknown as DuxState
 }
 
+/// A workspace whose one agent has `sessionProvider` as its own provider and is
+/// FOCUSED on a tab running `tabProvider`, with the server publishing the forms
+/// it publishes in a real deployment.
+///
+/// The two are kept DIFFERENT by every caller, and that is the point. An earlier
+/// version set both to the same value, so it would have passed unchanged if
+/// resolution had regressed from the focused tab's provider to the session's. A
+/// session and its focused tab genuinely differ whenever a tab is retargeted or
+/// added with another provider, which is the ordinary case this has to get right.
+function stateRunning(sessionProvider: string, tabProvider: string): DuxState {
+  const s = makeState()
+  const session = s.spine!.sessions[0]
+  session.provider = sessionProvider
+  session.tabs[0].provider = tabProvider
+  s.bootstrap!.provider_drop_paste = {
+    claude: { form: "bare", command_name: "claude" },
+    codex: { form: "single_quoted", command_name: "codex" },
+    opencode: { form: "bare", command_name: "opencode" },
+    copilot: { form: "bare", command_name: "copilot" },
+  }
+  return s
+}
+
+/// A workspace focused on a tab running `tabProvider`, with the AGENT's own
+/// provider set to one that wants a different form, so reading the wrong one
+/// cannot produce the right bytes by luck.
+function stateForFocusedTabProvider(tabProvider: string): DuxState {
+  return stateRunning(tabProvider === "codex" ? "claude" : "codex", tabProvider)
+}
+
 /// A `DataTransfer` stand-in. jsdom does not construct one with files, and the
 /// pane only ever reads `types` and `files`.
 function fileTransfer(files: File[]) {
@@ -297,22 +327,61 @@ afterEach(() => {
 })
 
 describe("dropping a file onto an agent", () => {
-  it("uploads it and the quoted path reaches the socket with nothing that submits", async () => {
+  it("uploads it and the bare path reaches the socket with nothing that submits", async () => {
     uploadDroppedFile.mockResolvedValue(saved("shot.png"))
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     await drop([file("shot.png")])
 
     expect(uploadDroppedFile).toHaveBeenCalledTimes(1)
-    expect(TermStub.pastes).toEqual(["'/tmp/p1/shot.png' "])
+    expect(TermStub.pastes).toEqual(["/tmp/p1/shot.png "])
     // Asserted after xterm's real preparation and after the pane's own gate, so
     // this is the byte stream the agent would receive rather than a call that
     // was merely made. A newline SUBMITS in these tools, and xterm turns one
     // into a CARRIAGE RETURN on the way through, so both are checked here where
     // the rewriting has actually happened.
-    expect(sentToSocket()).toEqual(["'/tmp/p1/shot.png' "])
+    expect(sentToSocket()).toEqual(["/tmp/p1/shot.png "])
     expect(sentToSocket()[0]).not.toContain("\n")
     expect(sentToSocket()[0]).not.toContain("\r")
     expect(vi.mocked(toast.success)).toHaveBeenCalled()
+  })
+
+  it("sends an awkward path byte for byte as it is on disk", async () => {
+    // This agent runs claude, whose configured form is `bare`, so nothing is
+    // added to any of these. The receiving CLI does not tokenise a pasted path
+    // the way a shell does: it trims the whole string, strips ONE surrounding
+    // pair of matching quotes, and unescapes backslash sequences. So quoting
+    // buys nothing on an ordinary path and actively CORRUPTS one holding an
+    // apostrophe, because POSIX single-quoting writes an embedded quote as
+    // close-escape-reopen and that unescape step collapses it. The per-provider
+    // forms themselves are exercised below.
+    //
+    // Asserted at the SOCKET rather than on the payload helper, so what is
+    // pinned is the byte stream the agent would actually receive, after
+    // xterm's own preparation and the pane's ownership gate.
+    for (const path of [
+      "/tmp/p1/Web App/shot.png",
+      "/tmp/p1/Bob's app/shot.png",
+      "/tmp/p1/$(rm -rf ~)/shot.png",
+      "/tmp/p1/`whoami`/shot.png",
+      '/tmp/p1/it"s a dir/shot.png',
+    ]) {
+      cleanup()
+      FakePtySocket.instances = []
+      TermStub.instances = []
+      TermStub.pastes = []
+      uploadDroppedFile.mockReset()
+      uploadDroppedFile.mockResolvedValue({
+        path,
+        saved_name: "shot.png",
+        requested_name: "shot.png",
+        folder: "/tmp/p1",
+        folder_label: "~/p1",
+        renamed: false,
+      })
+      render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+      await drop([file("shot.png")])
+      expect(sentToSocket()).toEqual([`${path} `])
+    }
   })
 
   it("brackets the path when the running program asked for bracketed paste", async () => {
@@ -324,7 +393,7 @@ describe("dropping a file onto an agent", () => {
     await drop([file("shot.png")])
 
     expect(sentToSocket()).toEqual([
-      "\x1b[200~'/tmp/p1/shot.png' \x1b[201~",
+      "\x1b[200~/tmp/p1/shot.png \x1b[201~",
     ])
   })
 
@@ -336,7 +405,7 @@ describe("dropping a file onto an agent", () => {
     const message = vi.mocked(toast.success).mock.calls[0][0] as string
     expect(message).toContain("shot.png")
     expect(message).toContain("shot-S-1.png")
-    expect(sentToSocket()).toEqual(["'/tmp/p1/shot-S-1.png' "])
+    expect(sentToSocket()).toEqual(["/tmp/p1/shot-S-1.png "])
   })
 
   it("carries the terminal socket's own connection id, not the events one", async () => {
@@ -345,6 +414,406 @@ describe("dropping a file onto an agent", () => {
     act(() => FakePtySocket.instances.at(-1)!.onConnected("42"))
     await drop([file("shot.png")])
     expect(uploadDroppedFile.mock.calls[0][1]).toEqual({ pty: "s1", conn: "42" })
+  })
+})
+
+describe("the paste form follows the provider running in the pane", () => {
+  // The whole point of making this a setting: the same dropped file, on two
+  // panes running two different CLIs, has to leave the browser in two different
+  // shapes. Both halves are asserted at the SOCKET, because a call to
+  // `term.paste` proves nothing about what the agent receives.
+
+  /// Drops onto a pane whose FOCUSED TAB runs `provider`, inside an agent whose
+  /// own provider is deliberately something else.
+  async function dropOnAgentRunning(provider: string, path: string) {
+    cleanup()
+    FakePtySocket.instances = []
+    TermStub.instances = []
+    TermStub.pastes = []
+    uploadDroppedFile.mockReset()
+    uploadDroppedFile.mockResolvedValue({
+      path,
+      saved_name: "shot.png",
+      requested_name: "shot.png",
+      folder: "/tmp/p1",
+      folder_label: "~/p1",
+      renamed: false,
+    })
+    mockState = stateForFocusedTabProvider(provider)
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    await drop([file("shot.png")])
+    return sentToSocket()
+  }
+
+  it("sends the BARE path to a pane running claude", async () => {
+    // Measured: Claude Code takes the whole pasted string and never splits on a
+    // space, and its own unescape step corrupts a quoted apostrophe. So nothing
+    // is added, not even for a path that a shell would need protected.
+    expect(await dropOnAgentRunning("claude", "/tmp/p1/Web App/shot.png")).toEqual([
+      "/tmp/p1/Web App/shot.png ",
+    ])
+    expect(await dropOnAgentRunning("claude", "/tmp/p1/Bob's app/shot.png")).toEqual([
+      "/tmp/p1/Bob's app/shot.png ",
+    ])
+  })
+
+  it("sends the SINGLE-QUOTED path to a pane running codex", async () => {
+    // Measured: Codex lexes the pasted text with POSIX shell rules and accepts
+    // it only if it comes out as exactly one token, so the bare form above is
+    // silently ignored for a path with a space in it.
+    expect(await dropOnAgentRunning("codex", "/tmp/p1/Web App/shot.png")).toEqual([
+      "'/tmp/p1/Web App/shot.png' ",
+    ])
+    expect(await dropOnAgentRunning("codex", "/tmp/p1/Bob's app/shot.png")).toEqual([
+      "'/tmp/p1/Bob'\\''s app/shot.png' ",
+    ])
+  })
+
+  it("sends the bare path for a provider the server published no form for", async () => {
+    // A provider the user added themselves. Bare is the do-nothing option.
+    expect(
+      await dropOnAgentRunning("myagent", "/tmp/p1/Web App/shot.png"),
+    ).toEqual(["/tmp/p1/Web App/shot.png "])
+  })
+
+  /// Drops onto a companion terminal owned by an agent whose provider is
+  /// `ownerProvider`.
+  async function dropOnTerminalOwnedBy(ownerProvider: string, path: string) {
+    cleanup()
+    FakePtySocket.instances = []
+    TermStub.instances = []
+    TermStub.pastes = []
+    uploadDroppedFile.mockReset()
+    uploadDroppedFile.mockResolvedValue({
+      path,
+      saved_name: "shot.png",
+      requested_name: "shot.png",
+      folder: "/tmp/p1",
+      folder_label: "~/p1",
+      renamed: false,
+    })
+    mockState = stateRunning(ownerProvider, ownerProvider)
+    render(
+      <TerminalPane
+        kind="terminal"
+        id="t1"
+        owner={{ kind: "session", session_id: "s1" }}
+      />,
+    )
+    await drop([file("shot.png")])
+    return sentToSocket()
+  }
+
+  it("gives a TERMINAL the shell-safe path, whatever its owning agent runs", async () => {
+    // This test used to pin the opposite, and pinning it was the whole problem:
+    // a terminal got the path BARE, on the reasoning that it runs a shell rather
+    // than that CLI. That reasoning is inverted. Running a shell is exactly why
+    // the path must be quoted, because the shell is what would split a space,
+    // expand a `$` and RUN a command substitution the moment the user presses
+    // Enter on the line the path was pasted into.
+    //
+    // So the answer is `single_quoted` for both owners below, and it does not
+    // move when the owning agent's provider does, because the terminal branch
+    // never reads that setting at all.
+    for (const owner of ["claude", "codex"]) {
+      expect(
+        await dropOnTerminalOwnedBy(owner, "/tmp/p1/Web App/shot.png"),
+      ).toEqual(["'/tmp/p1/Web App/shot.png' "])
+    }
+  })
+
+  it("makes a hostile path inert in a TERMINAL: a dollar, a backtick and a space", async () => {
+    // The case the bare form shipped wrong. Bare, this line reads as three
+    // words, one of them a command substitution that DELETES A DIRECTORY and
+    // one a substitution that runs `whoami`, and the shell would act on all of
+    // it. Quoted, the whole thing is one literal argument.
+    const path = "/tmp/p1/$(rm -rf ~) `whoami`/shot.png"
+    expect(await dropOnTerminalOwnedBy("claude", path)).toEqual([
+      "'/tmp/p1/$(rm -rf ~) `whoami`/shot.png' ",
+    ])
+  })
+
+  it("keeps a terminal path with an apostrophe one word", async () => {
+    // The one character single-quoting has to work for, closed and reopened
+    // around, so the payload still lexes as a single argument.
+    expect(
+      await dropOnTerminalOwnedBy("claude", "/tmp/p1/Bob's app/shot.png"),
+    ).toEqual(["'/tmp/p1/Bob'\\''s app/shot.png' "])
+  })
+
+  it("sends a very long path to a TERMINAL, because a shell has no such limit", async () => {
+    // The paste-length limit used to be keyed by FORM, and a terminal always
+    // uses the shell-safe form, so a terminal inherited codex's composer limit.
+    // dux withheld a perfectly good path from a shell and told the user it was
+    // too long for "this agent", which is not even what it was talking to.
+    //
+    // 2000 characters, comfortably past codex's threshold, and it goes out.
+    const longPath = `/tmp/p1/${"a".repeat(1_992)}`
+    expect(longPath.length).toBe(2000)
+    vi.mocked(toast.warning).mockClear()
+    expect(await dropOnTerminalOwnedBy("codex", longPath)).toEqual([
+      `'${longPath}' `,
+    ])
+    expect(vi.mocked(toast.warning)).not.toHaveBeenCalled()
+  })
+
+  it("holds a long path back from codex on EVERY form it can be configured with", async () => {
+    // The other direction of the same mistake. `bare`, `double_quoted` and
+    // `backslash_escaped` are all valid choices for codex, and with the limit
+    // keyed by form they escaped it entirely: dux sent an over-limit payload
+    // codex silently ignores while the toast claimed the file was attached.
+    for (const form of ["bare", "double_quoted", "backslash_escaped"]) {
+      cleanup()
+      FakePtySocket.instances = []
+      TermStub.instances = []
+      TermStub.pastes = []
+      uploadDroppedFile.mockReset()
+      vi.mocked(toast.warning).mockClear()
+      const longPath = `/tmp/p1/${"a".repeat(1_992)}`
+      uploadDroppedFile.mockResolvedValue({
+        path: longPath,
+        saved_name: "shot.png",
+        requested_name: "shot.png",
+        folder: "/tmp/p1",
+        folder_label: "~/p1",
+        renamed: false,
+      })
+      mockState = stateForFocusedTabProvider("codex")
+      mockState.bootstrap!.provider_drop_paste = {
+        codex: { form, command_name: "codex" },
+      }
+      render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+      await drop([file("shot.png")])
+      expect(sentToSocket(), `codex configured as ${form}`).toEqual([])
+      const message = vi.mocked(toast.warning).mock.calls[0][0] as string
+      expect(message).toContain("1000 characters")
+    }
+  })
+})
+
+describe("which CLI a pane is actually talking to", () => {
+  // A provider's BLOCK NAME is free text the user picks; the `command` is what
+  // says which CLI runs. The measured paste-length limit used to be keyed by the
+  // name, so it answered for the wrong tool in both directions: a real Codex
+  // under any other name got no limit and was handed oversized paths it silently
+  // ignores, and an unrelated CLI merely NAMED codex had valid long paths
+  // withheld from it. Both directions are asserted on the bytes.
+
+  const longPath = `/tmp/p1/${"a".repeat(1_992)}`
+
+  async function dropLongPathOn(provider: string, command_name: string) {
+    cleanup()
+    FakePtySocket.instances = []
+    TermStub.instances = []
+    TermStub.pastes = []
+    uploadDroppedFile.mockReset()
+    vi.mocked(toast.warning).mockClear()
+    uploadDroppedFile.mockResolvedValue({
+      path: longPath,
+      saved_name: "shot.png",
+      requested_name: "shot.png",
+      folder: "/tmp/p1",
+      folder_label: "~/p1",
+      renamed: false,
+    })
+    mockState = stateRunning("claude", provider)
+    mockState.bootstrap!.provider_drop_paste = {
+      [provider]: { form: "bare", command_name },
+    }
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    await drop([file("shot.png")])
+    return sentToSocket()
+  }
+
+  it("holds a long path back from a real codex running under another name", async () => {
+    // `[providers.myagent] command = "codex"` IS codex, and codex files any
+    // paste over 1000 characters away as generic large content before it looks
+    // for a path at all. Sending this would put a placeholder in the prompt,
+    // attach nothing, and report success.
+    expect(longPath.length).toBe(2000)
+    expect(await dropLongPathOn("myagent", "codex")).toEqual([])
+    const message = vi.mocked(toast.warning).mock.calls[0][0] as string
+    expect(message).toContain("1000 characters")
+  })
+
+  it("sends a long path to a different CLI that merely happens to be named codex", async () => {
+    // `[providers.codex] command = "something-else"` is NOT codex, and nothing
+    // has been measured about it, so withholding the file would be dux refusing
+    // on a guess.
+    expect(await dropLongPathOn("codex", "something-else")).toEqual([
+      `${longPath} `,
+    ])
+    expect(vi.mocked(toast.warning)).not.toHaveBeenCalled()
+  })
+})
+
+describe("two live tabs of one provider that launched with different forms", () => {
+  // The case a map keyed by provider NAME cannot answer, and the reason the
+  // server publishes the launched forms keyed by TAB ID.
+  //
+  // Launch a codex tab, edit `[providers.codex] web_dragdrop_paste`, launch a
+  // second codex tab. Both processes are live, both report the provider name
+  // `codex`, and each needs the form it started with. Folded onto one provider
+  // key there is one slot for two answers, so one of the two panes got the
+  // other's form, and which one depended on server-side map iteration order.
+
+  /// Two live codex tabs whose LAUNCHED forms differ, over a current config
+  /// value that matches NEITHER, so a pane reading the provider map instead of
+  /// its own tab shows up in the bytes rather than passing by luck.
+  function stateWithTwoLaunchedTabs(): DuxState {
+    const s = stateRunning("codex", "codex")
+    const session = s.spine!.sessions[0]
+    session.tabs = [
+      { ...session.tabs[0], id: "s1", provider: "codex" },
+      { ...session.tabs[0], id: "tab-b", provider: "codex" },
+    ]
+    s.bootstrap!.provider_drop_paste = {
+      codex: { form: "bare", command_name: "codex" },
+    }
+    session.tabs[0].drop_paste = { form: "single_quoted", command_name: "codex" }
+    session.tabs[1].drop_paste = {
+      form: "backslash_escaped",
+      command_name: "codex",
+    }
+    return s
+  }
+
+  async function dropOnTab(tabId: string, path: string) {
+    cleanup()
+    FakePtySocket.instances = []
+    TermStub.instances = []
+    TermStub.pastes = []
+    uploadDroppedFile.mockReset()
+    uploadDroppedFile.mockResolvedValue({
+      path,
+      saved_name: "shot.png",
+      requested_name: "shot.png",
+      folder: "/tmp/p1",
+      folder_label: "~/p1",
+      renamed: false,
+    })
+    mockState = stateWithTwoLaunchedTabs()
+    render(<TerminalPane kind="agent" id={tabId} sessionId="s1" />)
+    await drop([file("shot.png")])
+    return sentToSocket()
+  }
+
+  it("gives each pane the form its OWN tab launched with", async () => {
+    const path = "/tmp/p1/Web App/shot.png"
+    expect(await dropOnTab("s1", path)).toEqual(["'/tmp/p1/Web App/shot.png' "])
+    expect(await dropOnTab("tab-b", path)).toEqual([
+      "/tmp/p1/Web\\ App/shot.png ",
+    ])
+    // And neither pane got the CURRENT config value, which is the single answer
+    // a provider-keyed map would have handed both of them.
+    expect(await dropOnTab("s1", path)).not.toEqual([`${path} `])
+  })
+})
+
+describe("a tab whose live process is replaced under the pane", () => {
+  // THE STALENESS DEFECT, end to end, in the bytes.
+  //
+  // What a tab launched with used to ride the BOOTSTRAP document, which the
+  // browser refetches only on `config.changed`. A launch and a termination
+  // refresh the SPINE (`sessions.changed`) instead, so a client that had
+  // refetched config before a relaunch kept resolving the OLD entry for the
+  // whole life of the new process: nothing but a reconnect or a restart
+  // corrected it. Both sequences below therefore START from a stale copy and
+  // are corrected by the relaunch, rather than being handed a correct one.
+
+  /// One drop against whatever `mockState` currently says, returning the bytes.
+  async function dropAgain(path: string) {
+    cleanup()
+    FakePtySocket.instances = []
+    TermStub.instances = []
+    TermStub.pastes = []
+    uploadDroppedFile.mockReset()
+    vi.mocked(toast.warning).mockClear()
+    uploadDroppedFile.mockResolvedValue({
+      path,
+      saved_name: "shot.png",
+      requested_name: "shot.png",
+      folder: "/tmp/p1",
+      folder_label: "~/p1",
+      renamed: false,
+    })
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    await drop([file("shot.png")])
+    return sentToSocket()
+  }
+
+  const path = "/tmp/p1/Web App/shot.png"
+
+  it("keeps the running form after a config edit, then takes the new one on relaunch", async () => {
+    // SEQUENCE ONE. A live codex tab launched single-quoted. The user edits
+    // `[providers.codex] web_dragdrop_paste` to bare and a config refetch lands,
+    // so the pane's configured map now disagrees with the running process.
+    mockState = stateRunning("codex", "codex")
+    mockState.bootstrap!.provider_drop_paste = {
+      codex: { form: "bare", command_name: "codex" },
+    }
+    mockState.spine!.sessions[0].tabs[0].drop_paste = {
+      form: "single_quoted",
+      command_name: "codex",
+    }
+    // The running process still wants what it started with, and gets it.
+    expect(await dropAgain(path)).toEqual(["'/tmp/p1/Web App/shot.png' "])
+
+    // The relaunch. It arrives on the spine, on the tab, so the pane sees it.
+    mockState = stateRunning("codex", "codex")
+    mockState.bootstrap!.provider_drop_paste = {
+      codex: { form: "bare", command_name: "codex" },
+    }
+    mockState.spine!.sessions[0].tabs[0].drop_paste = {
+      form: "bare",
+      command_name: "codex",
+    }
+    expect(await dropAgain(path)).toEqual(["/tmp/p1/Web App/shot.png "])
+  })
+
+  it("drops the dead process's form when the tab goes dormant and relaunches elsewhere", async () => {
+    // SEQUENCE TWO. The codex process exits, the user retargets the tab to
+    // claude, and it relaunches. The stale codex entry must survive neither
+    // step: it must not outlive the process, and it must not win over the
+    // claude one that replaces it.
+    //
+    // At every step the CONFIGURED map is set to disagree with the answer being
+    // asserted, so a pane that ignored the tab and read config would produce
+    // different bytes rather than passing by luck.
+    const config = {
+      codex: { form: "bare", command_name: "codex" },
+      claude: { form: "backslash_escaped", command_name: "claude" },
+    }
+    mockState = stateRunning("codex", "codex")
+    mockState.bootstrap!.provider_drop_paste = config
+    mockState.spine!.sessions[0].tabs[0].drop_paste = {
+      form: "single_quoted",
+      command_name: "codex",
+    }
+    expect(await dropAgain(path)).toEqual(["'/tmp/p1/Web App/shot.png' "])
+
+    // Dormant, and retargeted. No live process, so the pane falls back to what
+    // config says this tab will launch with, which is now claude's form. The
+    // dead codex process's single-quoting must not survive here.
+    mockState = stateRunning("codex", "claude")
+    mockState.bootstrap!.provider_drop_paste = config
+    mockState.spine!.sessions[0].tabs[0].has_live_process = false
+    expect(await dropAgain(path)).toEqual(["/tmp/p1/Web\\ App/shot.png "])
+
+    // Relaunched as claude, which launched BARE even though config now says
+    // otherwise. And the codex length limit goes with the codex process: a
+    // 2000-character path codex would have had withheld goes out, because
+    // claude is what is reading it.
+    const longPath = `/tmp/p1/${"a".repeat(1_992)}`
+    expect(longPath.length).toBe(2000)
+    mockState = stateRunning("codex", "claude")
+    mockState.bootstrap!.provider_drop_paste = config
+    mockState.spine!.sessions[0].tabs[0].drop_paste = {
+      form: "bare",
+      command_name: "claude",
+    }
+    expect(await dropAgain(longPath)).toEqual([`${longPath} `])
+    expect(vi.mocked(toast.warning)).not.toHaveBeenCalled()
   })
 })
 
@@ -396,7 +865,7 @@ describe("dropping several files", () => {
       expect(sentToSocket()).toEqual(
         ["a.png", "b.png", "c.png"]
           .slice(0, i + 1)
-          .map((n) => `'/tmp/p1/${n}' `),
+          .map((n) => `/tmp/p1/${n} `),
       )
       expect(started).toEqual(
         ["a.png", "b.png", "c.png"].slice(0, Math.min(i + 2, 3)),
@@ -444,6 +913,61 @@ describe("when a file cannot be pasted", () => {
     const message = vi.mocked(toast.warning).mock.calls[0][0] as string
     expect(message).toContain("/tmp/p1/shot.png")
     expect(message).toContain("the connection dropped")
+  })
+
+  it("holds back a path too long for the CLI to read as one, and says so", async () => {
+    // Codex classifies any paste over 1000 characters as generic large content
+    // BEFORE it looks for a path, so a long enough path is never attached
+    // however well it is quoted. Sending it anyway would put a placeholder in
+    // the prompt and let the toast claim a success that did not happen.
+    //
+    // The path here is 998 characters, comfortably under the limit; the quotes
+    // and the trailing space take the PAYLOAD to 1001, which is over. That is
+    // the boundary the check has to measure, and it is why counting the file's
+    // own path would miss this.
+    const longPath = `/tmp/p1/${"a".repeat(990)}`
+    expect(longPath.length).toBe(998)
+    uploadDroppedFile.mockResolvedValue({
+      path: longPath,
+      saved_name: "shot.png",
+      requested_name: "shot.png",
+      folder: "/tmp/p1",
+      folder_label: "~/p1",
+      renamed: false,
+    })
+    mockState = stateForFocusedTabProvider("codex")
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    await drop([file("shot.png")])
+
+    expect(TermStub.pastes).toEqual([])
+    expect(sentToSocket()).toEqual([])
+    expect(vi.mocked(toast.success)).not.toHaveBeenCalled()
+    const message = vi.mocked(toast.warning).mock.calls[0][0] as string
+    expect(message).toContain("not sent")
+    expect(message).toContain("1000 characters")
+    expect(message).toContain(longPath)
+  })
+
+  it("still sends a path that only just fits", async () => {
+    // One character shorter, so the payload is exactly 1000 and the CLI still
+    // looks at it. The refusal must not creep inward: a file dux could have
+    // attached and did not is a regression in the other direction.
+    const longPath = `/tmp/p1/${"a".repeat(989)}`
+    uploadDroppedFile.mockResolvedValue({
+      path: longPath,
+      saved_name: "shot.png",
+      requested_name: "shot.png",
+      folder: "/tmp/p1",
+      folder_label: "~/p1",
+      renamed: false,
+    })
+    mockState = stateForFocusedTabProvider("codex")
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    await drop([file("shot.png")])
+
+    expect(sentToSocket()).toEqual([`'${longPath}' `])
+    expect(sentToSocket()[0]).toHaveLength(1000)
+    expect(vi.mocked(toast.success)).toHaveBeenCalled()
   })
 
   it("reports a refusal with the server's own reason and writes nothing", async () => {

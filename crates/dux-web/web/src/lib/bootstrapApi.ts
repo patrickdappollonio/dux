@@ -10,6 +10,7 @@
 // into this single document. A non-2xx is thrown as a `BootstrapFetchError`
 // carrying the HTTP status so the caller can branch.
 
+import type { DropPasteProfile } from "./fileDrop"
 import type { FlatSortKey } from "./flatList"
 import type { MacroView } from "./types"
 
@@ -21,6 +22,19 @@ import type { MacroView } from "./types"
 export interface Bootstrap {
   /** Configured agent providers (the new-agent / change-provider pickers). */
   available_providers: string[]
+  /** What CONFIG currently says a DROPPED file's path should look like for each
+   * configured provider: the paste form (normalized server-side to one of the
+   * names `DragDropPasteForm` knows) and the file name of the command the block
+   * runs, which is what identifies the receiving CLI. Keyed by provider name.
+   *
+   * This is the FALLBACK, used only for a pane with no live process to read
+   * from. What a live process launched with rides the SPINE, on the tab itself
+   * (`AgentTabView.drop_paste`), because that is what a launch and a termination
+   * refresh; this document is refreshed by `config.changed`, which is what can
+   * change IT. A provider absent from this map, and the whole field being absent
+   * on an older server, both resolve to "bare" with no length limit (see
+   * `dragDropPasteFormFor`). */
+  provider_drop_paste?: Record<string, DropPasteProfile>
   /** Text macros from `[macros]` in config order (the macro popover/editor). */
   macros: MacroView[]
   /** The rotating welcome tips shown on the empty-state screen. */

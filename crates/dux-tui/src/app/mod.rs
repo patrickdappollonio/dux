@@ -2681,6 +2681,7 @@ impl App {
             reload_guard: None,
             providers: HashMap::new(),
             running_provider_pins: HashMap::new(),
+            launched_drop_paste: Default::default(),
             companion_terminals: HashMap::new(),
             agent_tabs: agent_tabs.into_iter().map(|t| (t.id.clone(), t)).collect(),
             terminating_ptys: Vec::new(),
