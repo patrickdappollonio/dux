@@ -13,7 +13,7 @@ import {
   composeSendWrites,
 } from "@/lib/composebar"
 import {
-  type DragDropPasteForms,
+  type ConfiguredDropPaste,
   type DropContext,
   type DropOutcome,
   dropToastFor,
@@ -308,23 +308,19 @@ export function TerminalPane(props: TerminalPaneProps) {
   // overlay and still uploaded. There is nothing to lose by waiting, because
   // the window closes in one fetch and the drag surface simply appears then.
   const fileDropEnabled = (bootstrap?.file_drop_max_bytes ?? 0) > 0
-  // The per-provider drop-paste forms, mirrored into a ref so the drop loop can
+  // The per-provider drop-paste config, mirrored into a ref so the drop loop can
   // read the CURRENT map rather than the one that happened to be in the closure
   // when the drag landed. A drop's uploads run one at a time and a multi-file
   // drop is not quick, so a `config.changed` refetch really can land in the
-  // middle of one; the form is resolved immediately before each paste, so a
+  // middle of one; the plan is resolved immediately before each paste, so a
   // reload takes effect from the next file onward instead of being ignored for
   // the rest of the drop.
-  const dragDropPasteFormsRef = useRef<DragDropPasteForms>({
-    byTab: bootstrap?.tab_web_dragdrop_paste,
-    byProvider: bootstrap?.provider_web_dragdrop_paste,
-  })
+  const configuredDropPasteRef = useRef<ConfiguredDropPaste>(
+    bootstrap?.provider_drop_paste,
+  )
   useEffect(() => {
-    dragDropPasteFormsRef.current = {
-      byTab: bootstrap?.tab_web_dragdrop_paste,
-      byProvider: bootstrap?.provider_web_dragdrop_paste,
-    }
-  }, [bootstrap?.tab_web_dragdrop_paste, bootstrap?.provider_web_dragdrop_paste])
+    configuredDropPasteRef.current = bootstrap?.provider_drop_paste
+  }, [bootstrap?.provider_drop_paste])
   // Retire any in-flight drag the moment the feature stops being available.
   // The gate refuses events for a disabled feature, so once it closes there is
   // no matching `dragleave` or `drop` left to clear the overlay, and it would
@@ -446,13 +442,21 @@ export function TerminalPane(props: TerminalPaneProps) {
       : (ownedTerminals?.find((t) => t.id === id)?.has_output ?? false)
   const providerName =
     kind === "agent" ? (focusedTab?.provider ?? session?.provider) : session?.provider
-  // Mirrored for the same reason as the paste-form map: the drop loop is async
+  // Mirrored for the same reason as the configured map: the drop loop is async
   // and its closure would otherwise pin whichever provider was running when the
   // drag landed, so a retarget or a relaunch mid-drop would be missed.
   const providerNameRef = useRef(providerName)
   useEffect(() => {
     providerNameRef.current = providerName
   }, [providerName])
+  // What the focused tab's LIVE process launched with, off the SPINE, so it
+  // tracks launches and terminations rather than going stale until the next
+  // config refetch. `undefined` for a dormant tab and for a terminal, both of
+  // which fall back to the configured map above.
+  const launchedDropPasteRef = useRef(focusedTab?.drop_paste)
+  useEffect(() => {
+    launchedDropPasteRef.current = focusedTab?.drop_paste
+  }, [focusedTab?.drop_paste])
   // Kept current for the mount effect's PTY-gone check (an extra tab's socket
   // must stop reconnecting once its tab is no longer in the spine — see
   // `isTabGone`) WITHOUT being a dependency of that effect, which would tear
@@ -1555,11 +1559,12 @@ export function TerminalPane(props: TerminalPaneProps) {
   // uploads happen to finish in. One toast reports the whole drop at the end, so
   // a handful of files does not bury the screen.
   //
-  // The FORM each path takes is per-provider, because the agent CLIs do not agree
-  // on how they read a pasted path (see `pastePayload`). The server publishes the
-  // configured form for every provider in the bootstrap document, so this reads it
-  // there rather than opening a channel of its own, and a config reload refreshes
-  // it through the same `config.changed` refetch as every other config value.
+  // The FORM each path takes is per-CLI, because the agent CLIs do not agree on
+  // how they read a pasted path (see `pastePayload`), and so is the length limit
+  // beside it. Both come out of ONE resolved profile: what the focused tab's live
+  // process launched with, off the spine (so a launch or a termination refreshes
+  // it), falling back to what config says for its provider, off the bootstrap
+  // document (so a `config.changed` refetch refreshes that).
   //
   // A TERMINAL is not a provider pane and never reads that setting: it runs a
   // SHELL, which is exactly why its path is always quoted rather than left bare
@@ -1632,9 +1637,13 @@ export function TerminalPane(props: TerminalPaneProps) {
       // shell and has no limit whatever form it uses, and codex has its limit on
       // every form it can be configured with.
       const { form, charLimit } = dragDropPasteFor(
-        dragDropPasteFormsRef.current,
+        configuredDropPasteRef.current,
         kind === "agent"
-          ? { kind: "agent", tabId: id, provider: providerNameRef.current }
+          ? {
+              kind: "agent",
+              launched: launchedDropPasteRef.current,
+              provider: providerNameRef.current,
+            }
           : { kind: "terminal" },
       )
       const payload = pastePayload(where.path, form)

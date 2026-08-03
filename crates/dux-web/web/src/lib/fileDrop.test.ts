@@ -9,9 +9,10 @@ import {
   dropToastFor,
   pasteExceedsAttachmentLimit,
   pastePayload,
+  type ConfiguredDropPaste,
   type DragDropPasteForm,
-  type DragDropPasteForms,
   type DropOutcome,
+  type DropPasteProfile,
 } from "./fileDrop"
 
 const ALL_FORMS: readonly DragDropPasteForm[] = [
@@ -21,12 +22,25 @@ const ALL_FORMS: readonly DragDropPasteForm[] = [
   "backslash_escaped",
 ]
 
-/// The two maps the server publishes, as the client bundles them.
+/// What the server publishes for CONFIG, keyed by provider name, written the
+/// short way: a form name, or a `[form, command]` pair when the test cares which
+/// CLI the block runs.
 function published(
-  byProvider: Record<string, string> | undefined,
-  byTab?: Record<string, string>,
-): DragDropPasteForms {
-  return { byProvider, byTab }
+  byProvider: Record<string, string | [string, string]> | undefined,
+): ConfiguredDropPaste {
+  if (byProvider === undefined) return undefined
+  return Object.fromEntries(
+    Object.entries(byProvider).map(([name, v]) =>
+      typeof v === "string"
+        ? [name, { form: v, command_name: name }]
+        : [name, { form: v[0], command_name: v[1] }],
+    ),
+  )
+}
+
+/// What a LIVE tab launched with, as the spine carries it on the tab.
+function launched(form: string, command_name = "codex"): DropPasteProfile {
+  return { form, command_name }
 }
 
 const agent = { kind: "agent" as const }
@@ -447,7 +461,7 @@ describe("dragDropPasteFormFor", () => {
     opencode: "bare",
   })
   const running = (provider: string | undefined) =>
-    ({ kind: "agent", tabId: "tab-1", provider }) as const
+    ({ kind: "agent", launched: undefined, provider }) as const
 
   it("uses the form the server published for the running provider", () => {
     expect(dragDropPasteFormFor(forms, running("codex"))).toBe("single_quoted")
@@ -457,28 +471,25 @@ describe("dragDropPasteFormFor", () => {
   it("prefers the form THIS TAB launched with over the provider's current one", () => {
     // The scenario a provider-keyed answer cannot serve. Two live tabs of one
     // provider, launched either side of a config edit: they report the same
-    // provider name and need different forms. The server publishes what each
-    // one launched with, keyed by tab, and the pane resolves by its own tab.
+    // provider name and need different forms. Each tab carries what it launched
+    // with on the spine, and the pane resolves from its own tab.
     //
     // This is also why the launched form WINS rather than merely filling a gap.
     // If the current config value won, both tabs would resolve to it again and
     // publishing per tab would buy nothing. A config edit takes effect on the
     // tab's next launch.
-    const live = published(
-      { codex: "backslash_escaped" },
-      { "tab-a": "single_quoted", "tab-b": "backslash_escaped" },
-    )
+    const config = published({ codex: "backslash_escaped" })
     expect(
-      dragDropPasteFormFor(live, {
+      dragDropPasteFormFor(config, {
         kind: "agent",
-        tabId: "tab-a",
+        launched: launched("single_quoted"),
         provider: "codex",
       }),
     ).toBe("single_quoted")
     expect(
-      dragDropPasteFormFor(live, {
+      dragDropPasteFormFor(config, {
         kind: "agent",
-        tabId: "tab-b",
+        launched: launched("backslash_escaped"),
         provider: "codex",
       }),
     ).toBe("backslash_escaped")
@@ -489,21 +500,21 @@ describe("dragDropPasteFormFor", () => {
     // still running it. The provider map cannot answer and `bare` is the form
     // codex silently ignores, so the launched entry is the only truth left.
     expect(
-      dragDropPasteFormFor(published({}, { "tab-a": "single_quoted" }), {
+      dragDropPasteFormFor(published({}), {
         kind: "agent",
-        tabId: "tab-a",
+        launched: launched("single_quoted"),
         provider: "codex-nightly",
       }),
     ).toBe("single_quoted")
   })
 
-  it("falls back to the provider map for a tab with no launched entry", () => {
-    // A tab launched since the last bootstrap fetch. Nothing has changed since
-    // it launched, so the current config value is the right answer for it.
+  it("falls back to the provider map for a tab with no live process", () => {
+    // A dormant tab, or one whose launch has not reached this client yet. It
+    // will launch with whatever config says now, so that is the right answer.
     expect(
-      dragDropPasteFormFor(published({ codex: "single_quoted" }, { other: "bare" }), {
+      dragDropPasteFormFor(published({ codex: "single_quoted" }), {
         kind: "agent",
-        tabId: "tab-new",
+        launched: undefined,
         provider: "codex",
       }),
     ).toBe("single_quoted")
@@ -511,9 +522,9 @@ describe("dragDropPasteFormFor", () => {
 
   it("falls back to bare for a launched form name it does not recognize", () => {
     expect(
-      dragDropPasteFormFor(published({ codex: "single_quoted" }, { "tab-a": "nonsense" }), {
+      dragDropPasteFormFor(published({ codex: "single_quoted" }), {
         kind: "agent",
-        tabId: "tab-a",
+        launched: launched("nonsense"),
         provider: "codex",
       }),
     ).toBe("bare")
@@ -558,8 +569,8 @@ describe("dragDropPasteFormFor", () => {
     expect(dragDropPasteFormFor(forms, { kind: "terminal" })).toBe(
       "single_quoted",
     )
-    // The target type gives a terminal no provider FIELD and no tab id, so no
-    // configuration of either map can change this answer.
+    // The target type gives a terminal no provider FIELD and no launched
+    // profile, so no configuration of either can change this answer.
     expect(dragDropPasteFormFor(published({}), { kind: "terminal" })).toBe(
       "single_quoted",
     )
@@ -595,7 +606,11 @@ describe("the attachment length limit", () => {
   // it ever looks for an image path. So a long enough path is never attached,
   // and quoting, which adds characters, is what can push one over.
 
-  const codexTab = { kind: "agent", tabId: "tab-1", provider: "codex" } as const
+  const codexTab = {
+    kind: "agent",
+    launched: launched("single_quoted", "codex"),
+    provider: "codex",
+  } as const
 
   it("belongs to the CLI, so it follows codex onto every form", () => {
     // It used to be keyed by FORM, which was wrong in both directions, and both
@@ -603,9 +618,69 @@ describe("the attachment length limit", () => {
     // escaped the limit entirely and dux would send an over-limit payload codex
     // silently ignores.
     for (const form of ALL_FORMS) {
-      const plan = dragDropPasteFor(published({ codex: form }), codexTab)
+      const plan = dragDropPasteFor(published({ codex: form }), {
+        kind: "agent",
+        launched: undefined,
+        provider: "codex",
+      })
       expect(plan.form).toBe(form)
       expect(plan.charLimit).toBe(1000)
+    }
+  })
+
+  it("follows the COMMAND, not the block name, in both directions", () => {
+    // A provider's name is free text the user chooses, and the command it runs
+    // is independent of it. Keyed by the NAME (which it was) the limit answered
+    // for the wrong CLI both ways round: a real Codex under an alias got no
+    // limit and was handed oversized paths it silently ignores, and an
+    // unrelated CLI merely NAMED codex had valid long paths withheld from it.
+    //
+    // `[providers.myagent] command = "codex"` IS codex.
+    expect(
+      attachmentCharLimitFor(published({ myagent: ["bare", "codex"] }), {
+        kind: "agent",
+        launched: undefined,
+        provider: "myagent",
+      }),
+    ).toBe(1000)
+    // `[providers.codex] command = "something-else"` is NOT.
+    expect(
+      attachmentCharLimitFor(
+        published({ codex: ["single_quoted", "something-else"] }),
+        { kind: "agent", launched: undefined, provider: "codex" },
+      ),
+    ).toBe(null)
+    // And the same holds for what a LIVE tab launched with, which is the
+    // answer that actually applies to a running process.
+    expect(
+      attachmentCharLimitFor(published({}), {
+        kind: "agent",
+        launched: launched("bare", "codex"),
+        provider: "myagent",
+      }),
+    ).toBe(1000)
+    expect(
+      attachmentCharLimitFor(published({}), {
+        kind: "agent",
+        launched: launched("single_quoted", "something-else"),
+        provider: "codex",
+      }),
+    ).toBe(null)
+  })
+
+  it("identifies the CLI by its command's FILE NAME, so a full path works", () => {
+    // `command` may be an absolute path, a relative one, or a bare name found
+    // on PATH, and all three name the same CLI. The server compares on the file
+    // name and publishes that, so this holds whichever way it is configured.
+    for (const command of ["codex", "./codex", "/usr/local/bin/codex"]) {
+      expect(
+        attachmentCharLimitFor(published({ p: ["bare", command] }), {
+          kind: "agent",
+          launched: undefined,
+          provider: "p",
+        }),
+        command,
+      ).toBe(command === "codex" ? 1000 : null)
     }
   })
 
@@ -623,24 +698,36 @@ describe("the attachment length limit", () => {
     expect(pasteExceedsAttachmentLimit(huge, plan.charLimit)).toBe(false)
   })
 
-  it("gives a provider with no measured limit none", () => {
-    // Only codex has been measured. A provider dux ships that has not, and one
-    // the user added themselves, both get no limit: guessing one would withhold
+  it("gives a CLI with no measured limit none", () => {
+    // Only codex has been measured. A CLI dux ships that has not, and one the
+    // user added themselves, both get no limit: guessing one would withhold
     // files a CLI would have taken.
     for (const provider of ["claude", "opencode", "copilot", "myagent"]) {
       expect(
-        attachmentCharLimitFor({ kind: "agent", tabId: "tab-1", provider }),
+        attachmentCharLimitFor(published({ [provider]: "bare" }), {
+          kind: "agent",
+          launched: undefined,
+          provider,
+        }),
       ).toBe(null)
     }
-    // ...as does a tab whose provider is not known yet.
+    // ...as does a tab with no live process whose provider the server said
+    // nothing about, and one whose provider is not known yet.
     expect(
-      attachmentCharLimitFor({
+      attachmentCharLimitFor(published({}), {
         kind: "agent",
-        tabId: "tab-1",
+        launched: undefined,
+        provider: "codex",
+      }),
+    ).toBe(null)
+    expect(
+      attachmentCharLimitFor(published({ codex: "single_quoted" }), {
+        kind: "agent",
+        launched: undefined,
         provider: undefined,
       }),
     ).toBe(null)
-    expect(attachmentCharLimitFor(codexTab)).toBe(1000)
+    expect(attachmentCharLimitFor(published({}), codexTab)).toBe(1000)
   })
 
   it("measures the FINAL payload, not the path on disk", () => {

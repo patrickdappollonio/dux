@@ -1073,8 +1073,8 @@ export function refreshChanges(): void {
 // response resolving last overwrites a newer one, and every client keeps applying
 // config the server has already replaced until the next edit happens to come back
 // in order. Every value the document carries is exposed to that; the one that
-// prompted the guard is `provider_web_dragdrop_paste`, where the stale answer
-// decides how a dropped file's path is quoted.
+// prompted the guard is `provider_drop_paste`, where the stale answer decides how
+// a dropped file's path is quoted.
 let loadBootstrapSeq = 0
 
 // Fetch the bootstrap document and fold it into state. Errors are swallowed: on

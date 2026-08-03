@@ -102,6 +102,31 @@ impl Default for GhProbeState {
     }
 }
 
+/// What ONE live tab's process launched with, as far as a dropped file's path
+/// is concerned. Held per tab in [`Engine::launched_drop_paste`] and projected
+/// into [`crate::viewmodel::AgentTabView::drop_paste`].
+///
+/// The two fields travel together and are resolved together, because they answer
+/// to the same question (which CLI is on the other end of this paste) and each is
+/// wrong when taken from a different source: reading the form off a live process
+/// while reading the length limit off current config would describe a CLI that is
+/// not running.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaunchedDropPaste {
+    /// The provider NAME the tab launched as. Diagnostic only and deliberately
+    /// NOT published: the browser already knows which tab a pane is showing, and
+    /// the name would only invite folding these entries back onto a provider key,
+    /// which is the collapse this map exists to avoid.
+    pub provider: String,
+    /// The form the path takes when pasted.
+    pub form: crate::config::WebDragDropPaste,
+    /// The FILE NAME of the command that was spawned, which is the only thing
+    /// that identifies WHICH CLI is receiving the paste (see
+    /// [`crate::config::ProviderCommandConfig::command_file_name`]). The
+    /// provider's block name does not: it is free text.
+    pub command_name: String,
+}
+
 pub struct Engine {
     pub config: Config,
     pub paths: DuxPaths,
@@ -164,16 +189,17 @@ pub struct Engine {
     /// showing what's actually running until the user exits and relaunches
     /// the agent. Cleared whenever the PTY is torn down.
     pub running_provider_pins: HashMap<String, ProviderKind>,
-    /// The web drag-and-drop paste form each LIVE tab launched with, keyed by tab
-    /// id, carrying the provider NAME it launched as alongside the form.
+    /// What each LIVE tab's process launched with, as far as a dropped file's
+    /// path is concerned: the paste FORM and the COMMAND that identifies the CLI
+    /// receiving it. Keyed by tab id.
     ///
     /// Keyed by TAB, not by provider name, because a provider name cannot carry
     /// the answer. Launch a tab, edit that provider's `web_dragdrop_paste`,
     /// launch another: both processes are live, both report the same provider
     /// name, and each needs the form it started with. It is published per tab in
-    /// [`crate::viewmodel::BootstrapView::tab_web_dragdrop_paste`] and the browser
-    /// resolves it by the pane's own tab, so the LAUNCHED form wins for a live tab
-    /// and a config edit takes effect on that tab's next launch.
+    /// [`crate::viewmodel::AgentTabView::drop_paste`] and the browser resolves it
+    /// from the pane's own tab, so the LAUNCHED profile wins for a live tab and a
+    /// config edit takes effect on that tab's next launch.
     ///
     /// It also covers the case it was first written for: the user renames or
     /// deletes a `[providers.<name>]` block while a tab is still running that
@@ -181,20 +207,15 @@ pub struct Engine {
     /// actually on screen), so a browser looking that name up in the configured
     /// map would find nothing and fall back to `bare`, changing how a dropped path
     /// is quoted under a running agent that never changed. Keeping the launched
-    /// form with the PROCESS is the fix, and it retires when the process does,
+    /// profile with the PROCESS is the fix, and it retires when the process does,
     /// through `clear_tab_runtime`.
-    ///
-    /// The provider NAME rides along in the value but is deliberately NOT
-    /// published: it is diagnostic, and publishing it would only invite folding
-    /// these entries back onto a provider key, which is the collapse this map
-    /// exists to avoid.
     ///
     /// The alternative considered was to refuse a rename or a removal while a
     /// process is live. It was rejected because `config.toml` is a file the user
     /// edits in their own editor and dux reloads: there is no point at which a
     /// refusal could be delivered, and the reload would either have to be
     /// abandoned wholesale or silently keep a block the file no longer contains.
-    pub launched_dragdrop_paste: HashMap<String, (String, crate::config::WebDragDropPaste)>,
+    pub launched_drop_paste: HashMap<String, LaunchedDropPaste>,
     pub companion_terminals: HashMap<String, CompanionTerminal>,
     /// Persisted **extra tabs** (secondary provider tabs), keyed by tab id with
     /// the owning `session_id` carried in the value (mirrors `companion_terminals`

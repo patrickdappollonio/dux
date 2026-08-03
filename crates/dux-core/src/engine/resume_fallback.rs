@@ -757,7 +757,7 @@ mod tests {
         // one, and the fresh one can fail (here: a provider binary that does not
         // exist). Nothing repopulates a tab-keyed map on that path, so anything
         // the teardown missed stays in memory until some later teardown or a
-        // restart. `launched_dragdrop_paste` was exactly that: the process was
+        // restart. `launched_drop_paste` was exactly that: the process was
         // gone and its drop-paste form was still being published in bootstrap.
         //
         // The teardown therefore goes through `clear_tab_runtime`, the one
@@ -775,12 +775,13 @@ mod tests {
             .running_provider_pins
             .insert("s1".to_string(), ProviderKind::new("codex"));
         // Everything the launch that just died had left keyed by this tab id.
-        engine.launched_dragdrop_paste.insert(
+        engine.launched_drop_paste.insert(
             "s1".to_string(),
-            (
-                "codex".to_string(),
-                crate::config::WebDragDropPaste::SingleQuoted,
-            ),
+            crate::engine::LaunchedDropPaste {
+                provider: "codex".to_string(),
+                form: crate::config::WebDragDropPaste::SingleQuoted,
+                command_name: "codex".to_string(),
+            },
         );
         engine.needs_attention.insert("s1".to_string());
         engine.agent_viewed.insert("s1".to_string(), Instant::now());
@@ -807,7 +808,7 @@ mod tests {
         assert!(saw_failed, "the launch job never reported failure in time");
 
         assert!(
-            !engine.launched_dragdrop_paste.contains_key("s1"),
+            !engine.launched_drop_paste.contains_key("s1"),
             "a dead process must not keep publishing its drop-paste form"
         );
         assert!(!engine.running_provider_pins.contains_key("s1"));

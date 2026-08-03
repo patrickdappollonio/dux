@@ -48,59 +48,23 @@ pub struct BootstrapView {
     /// Configured provider command names, sorted. Surfaced so a client can
     /// populate a per-project default-provider picker.
     pub available_providers: Vec<String>,
-    /// Each configured provider's `web_dragdrop_paste` form, NORMALIZED to a name
-    /// [`crate::config::WebDragDropPaste`] recognizes (a misspelled config value
-    /// resolves to `"bare"` here, having already been warned about once at load).
+    /// What CONFIG currently says a dropped file's path should look like for each
+    /// configured provider, keyed by PROVIDER NAME (the `[providers.<name>]`
+    /// block).
     ///
-    /// This is how the browser learns which form to use for the provider running
-    /// in the pane a file was dropped on. It rides the bootstrap document with
-    /// every other config-derived value rather than on a channel of its own, so a
-    /// config reload refreshes it through the same `config.changed` refetch.
+    /// This is the FALLBACK the browser uses for a pane with no live process to
+    /// read from: a dormant tab, a tab whose launch has not reached the client
+    /// yet, or an older server. It rides the bootstrap document with every other
+    /// config-derived value rather than on a channel of its own, so a config
+    /// reload refreshes it through the same `config.changed` refetch, which is
+    /// exactly the event that can change it.
     ///
-    /// Keyed by provider name, and PURELY a projection of config: a live process
-    /// never writes into it (see `tab_web_dragdrop_paste`, which is where a
-    /// launched form lives). A name absent from the map means `"bare"`, which is
-    /// also what a provider dux does not ship resolves to.
-    ///
-    /// This is the FALLBACK the browser uses for a pane with no launched entry:
-    /// a tab launched since the last bootstrap fetch, a terminal's owner, or an
-    /// older server.
-    pub provider_web_dragdrop_paste: BTreeMap<String, String>,
-    /// The `web_dragdrop_paste` form each LIVE tab actually launched with, keyed
-    /// by TAB ID, normalized the same way as `provider_web_dragdrop_paste`.
-    ///
-    /// Keyed by tab rather than by provider name because two live tabs of ONE
-    /// provider can need two different answers: launch a tab, edit
-    /// `[providers.<name>] web_dragdrop_paste`, launch a second tab, and both
-    /// processes report the same provider name while needing the forms they
-    /// each started with. Folding them into the provider-name map gave one of
-    /// the two panes the other's form, and which one won depended on `HashMap`
-    /// iteration order.
-    ///
-    /// It also answers the case the provider map cannot: a user who renames or
-    /// removes a `[providers.<name>]` block while a tab is still running it. The
-    /// tab keeps reporting the name it launched as, which config no longer has,
-    /// so without this a live codex tab would drop to `bare` mid-session and
-    /// codex would silently ignore every dropped path. The alternative was to
-    /// refuse the rename, and a config file the user edits in their own editor
-    /// cannot be refused.
-    ///
-    /// The browser resolves a pane's form as: this map by tab id, then
-    /// `provider_web_dragdrop_paste` by provider name, then `bare`. So the
-    /// LAUNCHED form wins for a live tab, which is the only precedence under
-    /// which two sibling tabs can differ at all; a config edit takes effect on
-    /// that tab's next launch.
-    ///
-    /// Rides the bootstrap document rather than the broadcast ViewModel, so it
-    /// is refreshed by the `config.changed` refetch. That is not merely
-    /// tolerable but well matched: the only thing that makes a launched form
-    /// differ from the configured one is a config edit, and a config edit is
-    /// exactly what triggers the refetch. A tab launched since the last fetch
-    /// has no entry here and falls back to the provider map, which is the right
-    /// answer for it (nothing has changed since it launched).
-    ///
-    /// Retired with the process by [`crate::engine::Engine::clear_tab_runtime`].
-    pub tab_web_dragdrop_paste: BTreeMap<String, String>,
+    /// PURELY a projection of config: a live process never writes into it. What
+    /// a live process launched with is published per tab on the SPINE, in
+    /// [`AgentTabView::drop_paste`], because that is what a launch and a
+    /// termination refresh. A provider name absent from this map resolves to the
+    /// default form (`bare`) and no length limit.
+    pub provider_drop_paste: BTreeMap<String, DropPasteView>,
     /// Text macros from `[macros]` in `config.toml`, in config (IndexMap) order.
     /// The web surfaces these two ways: the terminal-pane quick-picker filters
     /// by the focused target's surface and runs one via `RunMacro`, and the
@@ -595,6 +559,63 @@ pub struct AgentTabView {
     /// dormant card from this flag *without* subscribing, because subscribing
     /// would force-launch the provider.
     pub has_live_process: bool,
+    /// What this tab's LIVE process launched with, for a file dropped onto its
+    /// pane; `None` when no process is live.
+    ///
+    /// It rides the SPINE rather than the bootstrap document, and that is the
+    /// whole point of where it lives. It changes when a process LAUNCHES or
+    /// TERMINATES, and the spine is what a launch and a termination refresh
+    /// (`sessions.changed`); the bootstrap document is refreshed by
+    /// `config.changed`, which is a different event entirely. Published there it
+    /// went stale in the browser for the whole life of a process: a client that
+    /// had refetched config before a relaunch kept resolving the OLD entry, so a
+    /// tab relaunched under a different provider was still quoted for the
+    /// previous one until a reconnect or a restart.
+    ///
+    /// Per TAB rather than per provider name because a provider name cannot carry
+    /// the answer: launch a tab, edit `[providers.<name>] web_dragdrop_paste`,
+    /// launch a second tab, and both processes report the same provider name
+    /// while each needs the form it started with. It also answers after the user
+    /// renames or removes that block while the tab is still running, which the
+    /// config-keyed map cannot.
+    ///
+    /// The browser resolves a pane as: this, then
+    /// [`BootstrapView::provider_drop_paste`] by provider name, then the
+    /// defaults. So the LAUNCHED profile wins for a live tab and a config edit
+    /// takes effect on that tab's next launch.
+    ///
+    /// Retired with the process by [`crate::engine::Engine::clear_tab_runtime`].
+    pub drop_paste: Option<DropPasteView>,
+}
+
+/// Everything the browser needs to write a DROPPED file's path into one pane:
+/// the form the path takes, and the CLI that will read it.
+///
+/// The two are published together, never separately, because they answer to the
+/// same question (which CLI is on the other end of this paste) and mixing sources
+/// would describe a CLI that is not there. A pane resolves ONE of these and reads
+/// both halves out of it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DropPasteView {
+    /// The paste form, normalized to a name [`crate::config::WebDragDropPaste`]
+    /// recognizes (a misspelled config value resolves to `"bare"` here, having
+    /// already been warned about once at load).
+    pub form: String,
+    /// The FILE NAME of the command being run, which is what identifies the CLI
+    /// receiving the paste, and which the browser keys its measured per-CLI
+    /// paste-length table by.
+    ///
+    /// The provider's BLOCK NAME is deliberately not what travels here. A
+    /// provider's name and the command it runs are independent, so
+    /// `[providers.myagent] command = "codex"` is a real Codex and
+    /// `[providers.codex] command = "something-else"` is not. Keying the table by
+    /// the name (which it was) was wrong in both directions at once: a real Codex
+    /// under any other name got no limit and was handed oversized paths it
+    /// silently ignores, and an unrelated CLI merely named codex had valid long
+    /// paths withheld from it. See
+    /// [`crate::config::ProviderCommandConfig::command_file_name`] for why it is
+    /// the file name and not the whole string.
+    pub command_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -1002,6 +1023,15 @@ impl Engine {
                 .map(|p| p.has_output())
                 .unwrap_or(false),
             has_live_process: self.providers.contains_key(id),
+            // Read off the LIVE process's launch, so it appears when the tab
+            // launches and disappears when it is torn down. Both halves come out
+            // of the one recorded entry; neither is topped up from current
+            // config, because a live process is not affected by an edit made
+            // after it started.
+            drop_paste: self.launched_drop_paste.get(id).map(|l| DropPasteView {
+                form: l.form.as_str().to_string(),
+                command_name: l.command_name.clone(),
+            }),
         }
     }
 
@@ -1026,13 +1056,13 @@ impl Engine {
         let mut available_providers: Vec<String> =
             self.config.providers.commands.keys().cloned().collect();
         available_providers.sort();
-        // What CONFIG says, and nothing else. The forms live tabs launched with
-        // used to be folded in here for any provider name config no longer
-        // carried; that collapsed a per-tab answer onto a per-provider key and
-        // two sibling tabs of one provider could not both be right. They are
-        // published separately below, keyed by the tab that launched them. See
-        // `BootstrapView::tab_web_dragdrop_paste`.
-        let provider_web_dragdrop_paste: BTreeMap<String, String> = self
+        // What CONFIG says, and nothing else. A live process never writes here:
+        // what a tab launched with is published on the SPINE, per tab, because
+        // that is what a launch and a termination refresh. Folding launched
+        // entries in here collapsed a per-tab answer onto a per-provider key
+        // (two sibling tabs of one provider could not both be right) AND left
+        // the browser's copy stale for the life of the process.
+        let provider_drop_paste: BTreeMap<String, DropPasteView> = self
             .config
             .providers
             .commands
@@ -1040,22 +1070,16 @@ impl Engine {
             .map(|(name, provider)| {
                 (
                     name.clone(),
-                    provider.resolved_web_dragdrop_paste().as_str().to_string(),
+                    DropPasteView {
+                        form: provider.resolved_web_dragdrop_paste().as_str().to_string(),
+                        command_name: provider.command_file_name(),
+                    },
                 )
             })
             .collect();
-        // The provider NAME each entry carries is deliberately not published:
-        // the browser already knows which tab a pane is showing, and the name
-        // would only invite folding these back onto it.
-        let tab_web_dragdrop_paste: BTreeMap<String, String> = self
-            .launched_dragdrop_paste
-            .iter()
-            .map(|(tab_id, (_provider, form))| (tab_id.clone(), form.as_str().to_string()))
-            .collect();
         BootstrapView {
             available_providers,
-            provider_web_dragdrop_paste,
-            tab_web_dragdrop_paste,
+            provider_drop_paste,
             macros: self
                 .config
                 .macros
@@ -2022,8 +2046,51 @@ mod tests {
         assert_eq!(engine.bootstrap().file_drop_max_bytes, 4242);
     }
 
+    /// One launched entry, spelled out rather than defaulted, so a test that
+    /// cares about the command says so and a test that cares about the form says
+    /// so.
+    fn launched(
+        provider: &str,
+        form: crate::config::WebDragDropPaste,
+        command_name: &str,
+    ) -> crate::engine::LaunchedDropPaste {
+        crate::engine::LaunchedDropPaste {
+            provider: provider.to_string(),
+            form,
+            command_name: command_name.to_string(),
+        }
+    }
+
+    /// A session with an extra tab, both of which the spine will project.
+    fn engine_with_two_tabs() -> (Engine, tempfile::TempDir) {
+        let (mut engine, tmp) = test_engine();
+        engine.sessions.push(sample_session("s1", "p1", "feat/x"));
+        engine.agent_tabs.insert(
+            "tab-b".to_string(),
+            crate::model::AgentTab {
+                id: "tab-b".to_string(),
+                session_id: "s1".to_string(),
+                provider: ProviderKind::new("codex"),
+                sort_order: 1,
+                created_at: chrono::Utc::now(),
+            },
+        );
+        (engine, tmp)
+    }
+
+    fn tab_drop_paste(engine: &Engine, tab_id: &str) -> Option<DropPasteView> {
+        engine
+            .session_view("s1")
+            .expect("session projects")
+            .tabs
+            .into_iter()
+            .find(|t| t.id == tab_id)
+            .expect("tab projects")
+            .drop_paste
+    }
+
     #[test]
-    fn bootstrap_answers_per_tab_when_two_tabs_of_one_provider_launched_differently() {
+    fn the_spine_answers_per_tab_when_two_tabs_of_one_provider_launched_differently() {
         // THE CASE A PROVIDER-KEYED MAP CANNOT ANSWER. Launch a tab under
         // `codex`, edit `[providers.codex] web_dragdrop_paste`, launch a second
         // tab. Both processes are live, both report the provider name `codex`,
@@ -2032,68 +2099,106 @@ mod tests {
         // the wrong form, and which one won depended on `HashMap` iteration
         // order: nondeterministic, and wrong either way.
         //
-        // So the launched forms are published keyed by TAB ID, which is what the
-        // browser actually has when a file lands on a pane.
-        let (mut engine, _tmp) = test_engine();
-        engine.launched_dragdrop_paste.insert(
-            "tab-a".to_string(),
-            (
-                "codex".to_string(),
+        // So the launched profile is published per TAB, on the tab the browser
+        // already has when a file lands on a pane.
+        let (mut engine, _tmp) = engine_with_two_tabs();
+        engine.launched_drop_paste.insert(
+            "s1".to_string(),
+            launched(
+                "codex",
                 crate::config::WebDragDropPaste::SingleQuoted,
+                "codex",
             ),
         );
-        engine.launched_dragdrop_paste.insert(
+        engine.launched_drop_paste.insert(
             "tab-b".to_string(),
-            (
-                "codex".to_string(),
+            launched(
+                "codex",
                 crate::config::WebDragDropPaste::BackslashEscaped,
+                "codex",
             ),
         );
-        let by_tab = engine.bootstrap().tab_web_dragdrop_paste;
         assert_eq!(
-            by_tab.get("tab-a").map(String::as_str),
-            Some("single_quoted"),
+            tab_drop_paste(&engine, "s1").map(|d| d.form),
+            Some("single_quoted".to_string()),
             "each live tab keeps the form its own process launched with"
         );
         assert_eq!(
-            by_tab.get("tab-b").map(String::as_str),
-            Some("backslash_escaped"),
+            tab_drop_paste(&engine, "tab-b").map(|d| d.form),
+            Some("backslash_escaped".to_string()),
             "...including a sibling tab of the same provider that launched later"
         );
     }
 
     #[test]
-    fn bootstrap_keeps_a_renamed_providers_form_while_its_process_lives() {
-        // A user renames or deletes a `[providers.<name>]` block while a tab is
-        // still running that provider. The tab's own `provider` string does not
-        // change (it is what actually launched), so the browser looks that name
-        // up in the provider map and finds nothing, falling back to `bare`: a
-        // live codex tab would start receiving unquoted paths mid-session, which
-        // is precisely the case codex silently ignores.
-        //
-        // The launched form is therefore kept with the PROCESS and retires with
-        // it. The alternative was to refuse the rename, and a config file the
-        // user edits in their own editor cannot be refused.
-        let (mut engine, _tmp) = test_engine();
-        engine.launched_dragdrop_paste.insert(
+    fn a_tabs_launched_profile_appears_and_retires_with_its_process() {
+        // WHY IT RIDES THE SPINE. The entry appears when a process launches and
+        // goes when it is torn down, and the spine is what a launch and a
+        // termination refresh. On the bootstrap document (refreshed only by
+        // `config.changed`) the browser's copy went stale for the whole life of
+        // a process: a client that had refetched config before a relaunch kept
+        // resolving the OLD entry.
+        let (mut engine, _tmp) = engine_with_two_tabs();
+        assert_eq!(
+            tab_drop_paste(&engine, "s1"),
+            None,
+            "a tab with no live process has no launched profile"
+        );
+        engine.launched_drop_paste.insert(
             "s1".to_string(),
-            (
-                "codex-nightly".to_string(),
+            launched(
+                "codex",
                 crate::config::WebDragDropPaste::SingleQuoted,
+                "codex",
             ),
         );
-        let boot = engine.bootstrap();
         assert_eq!(
-            boot.tab_web_dragdrop_paste.get("s1").map(String::as_str),
-            Some("single_quoted"),
-            "a live process keeps the form it launched with, even once config no \
+            tab_drop_paste(&engine, "s1").map(|d| d.form),
+            Some("single_quoted".to_string()),
+            "a launch publishes it on the same spine the launch refreshes"
+        );
+        engine.clear_tab_runtime("s1");
+        assert_eq!(
+            tab_drop_paste(&engine, "s1"),
+            None,
+            "and a termination retires it on that same spine"
+        );
+    }
+
+    #[test]
+    fn a_live_tab_keeps_its_profile_after_its_provider_block_is_renamed() {
+        // A user renames or deletes a `[providers.<name>]` block while a tab is
+        // still running that provider. The tab's own `provider` string does not
+        // change (it is what actually launched), so a browser looking that name
+        // up in the config-derived map finds nothing and falls back to the
+        // default: a live codex tab would start receiving unquoted paths
+        // mid-session, which is precisely the case codex silently ignores.
+        //
+        // The launched profile is therefore kept with the PROCESS. The
+        // alternative was to refuse the rename, and a config file the user edits
+        // in their own editor cannot be refused.
+        let (mut engine, _tmp) = engine_with_two_tabs();
+        engine.launched_drop_paste.insert(
+            "s1".to_string(),
+            launched(
+                "codex-nightly",
+                crate::config::WebDragDropPaste::SingleQuoted,
+                "codex",
+            ),
+        );
+        assert_eq!(
+            tab_drop_paste(&engine, "s1").map(|d| d.form),
+            Some("single_quoted".to_string()),
+            "a live process keeps what it launched with, even once config no \
              longer names its provider"
         );
-        // And it is NOT smuggled into the provider map, which stays a plain
-        // projection of config. Two different questions, two different keys.
+        // And it is NOT smuggled into the config-derived map, which stays a
+        // plain projection of config. Two different questions, two different
+        // places.
         assert!(
-            !boot
-                .provider_web_dragdrop_paste
+            !engine
+                .bootstrap()
+                .provider_drop_paste
                 .contains_key("codex-nightly"),
             "the provider map answers for CONFIG, never for a live process"
         );
@@ -2101,23 +2206,69 @@ mod tests {
 
     #[test]
     fn bootstrap_provider_map_is_purely_config_derived() {
-        // The provider map is the fallback for a pane with no launched entry
-        // (a tab launched since the last bootstrap fetch), so it must always
-        // report what config says right now rather than what some process
-        // started with.
+        // The provider map is the fallback for a pane with no live process, so
+        // it must always report what config says right now rather than what
+        // some process started with.
         let (mut engine, _tmp) = test_engine();
-        engine.launched_dragdrop_paste.insert(
+        engine.launched_drop_paste.insert(
             "s2".to_string(),
-            (
-                "claude".to_string(),
+            launched(
+                "claude",
                 crate::config::WebDragDropPaste::BackslashEscaped,
+                "claude",
             ),
         );
-        let forms = engine.bootstrap().provider_web_dragdrop_paste;
+        let forms = engine.bootstrap().provider_drop_paste;
         assert_eq!(
-            forms.get("claude").map(String::as_str),
+            forms.get("claude").map(|d| d.form.as_str()),
             Some("bare"),
             "config is what the provider map reports"
+        );
+    }
+
+    #[test]
+    fn a_provider_is_published_by_the_command_it_runs_not_by_its_block_name() {
+        // The browser's measured per-CLI paste-length table is keyed by the CLI,
+        // and the only thing in a provider block that names the CLI is its
+        // `command`. Keyed by the BLOCK NAME (which it was) it answered for the
+        // wrong tool in both directions: a real Codex under an alias got no
+        // limit and was handed oversized paths it silently ignores, and an
+        // unrelated CLI merely NAMED codex had valid long paths withheld.
+        let (mut engine, _tmp) = test_engine();
+        engine.config.providers.commands.insert(
+            "myagent".to_string(),
+            crate::config::ProviderCommandConfig {
+                command: "/usr/local/bin/codex".to_string(),
+                args: Vec::new(),
+                resume_args: None,
+                resume_wait_timeout_ms: None,
+                install_hint: None,
+                forward_scroll: None,
+                web_dragdrop_paste: None,
+            },
+        );
+        engine.config.providers.commands.insert(
+            "codex".to_string(),
+            crate::config::ProviderCommandConfig {
+                command: "something-else".to_string(),
+                args: Vec::new(),
+                resume_args: None,
+                resume_wait_timeout_ms: None,
+                install_hint: None,
+                forward_scroll: None,
+                web_dragdrop_paste: None,
+            },
+        );
+        let forms = engine.bootstrap().provider_drop_paste;
+        assert_eq!(
+            forms.get("myagent").map(|d| d.command_name.as_str()),
+            Some("codex"),
+            "an aliased block running codex is published as codex, by file name"
+        );
+        assert_eq!(
+            forms.get("codex").map(|d| d.command_name.as_str()),
+            Some("something-else"),
+            "a block merely NAMED codex is published as whatever it runs"
         );
     }
 
@@ -2127,8 +2278,7 @@ mod tests {
         let json = serde_json::to_string(&engine.bootstrap()).expect("serialize");
         for field in [
             "available_providers",
-            "provider_web_dragdrop_paste",
-            "tab_web_dragdrop_paste",
+            "provider_drop_paste",
             "macros",
             "welcome_tips",
             "dux_version",

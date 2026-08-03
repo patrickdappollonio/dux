@@ -185,10 +185,14 @@ from its side. dux sends the correct bytes; the receiving tool rewrites them.
   quoting dux adds counts toward that. dux measures the finished paste rather than
   the file's own path, and when it would go over the limit it does not send it at
   all: the toast tells you the file was saved, gives you its full path, and says
-  the agent will not pick it up automatically. The limit belongs to Codex, not to
-  a quoting style, so it applies whichever `web_dragdrop_paste` value you give
-  Codex, and it applies to nothing else. No other CLI has been measured to have
-  one, and a terminal has none at all.
+  the agent will not pick it up automatically. The limit belongs to Codex itself,
+  not to a quoting style and not to what you called the provider block: it applies
+  whichever `web_dragdrop_paste` value you give Codex, it follows Codex under any
+  block name you like (`[providers.myagent] command = "codex"` still gets it), and
+  a block you happened to name `codex` that runs something else does not. dux
+  decides by the `command` you configured, comparing on its file name, so a full
+  path such as `/usr/local/bin/codex` counts the same as the bare name. No other
+  CLI has been measured to have a limit, and a terminal has none at all.
 
 A `file://` URL is deliberately **not** one of the four values. Codex and OpenCode
 both resolve one, but whether Claude Code does on its paste path has not been

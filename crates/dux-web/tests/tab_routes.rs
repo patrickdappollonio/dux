@@ -263,6 +263,88 @@ fn tab_has_live_process(session: &serde_json::Value, tab_id: &str) -> bool {
         .any(|t| t["id"].as_str() == Some(tab_id) && t["has_live_process"] == true)
 }
 
+/// The drop-paste profile a tab launched with rides the SPINE, per tab, and
+/// retires with the process.
+///
+/// It used to ride the BOOTSTRAP document, which a browser refetches only on a
+/// config change, so a client's copy went stale for the whole life of a process:
+/// a tab relaunched under a different provider was still quoted for the previous
+/// one until a reconnect. A launch and a termination both refresh the spine, so
+/// that is where it belongs, and this drives a REAL launch and a REAL close to
+/// say so.
+///
+/// It also pins the identity half. This harness's `[providers.claude]` block runs
+/// the command `cat`, and the published profile must say `cat`: the block NAME is
+/// free text and the COMMAND is what says which CLI is reading the paste.
+#[tokio::test]
+async fn a_launched_tab_publishes_its_drop_paste_profile_on_the_spine() {
+    let (addr, _tmp) = boot().await;
+    let client = reqwest::Client::new();
+    let support = create_support_tab(&client, addr, "s1").await;
+    let session =
+        wait_for_session(&client, addr, "s1", |s| tab_has_live_process(s, &support)).await;
+
+    let tab = session["tabs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"].as_str() == Some(&support))
+        .unwrap_or_else(|| panic!("the launched tab is missing from the spine: {session}"));
+    assert_eq!(
+        tab["drop_paste"]["form"], "bare",
+        "a live tab publishes the form it launched with: {session}"
+    );
+    assert_eq!(
+        tab["drop_paste"]["command_name"], "cat",
+        "the CLI is named by the COMMAND the block runs, not by the block's own \
+         name (this provider is called claude and runs cat): {session}"
+    );
+
+    // The config-derived fallback says the same thing about the command, and it
+    // is keyed by the block name because that is what a tab with nothing live
+    // has to look itself up by.
+    let bootstrap: serde_json::Value = client
+        .get(format!("http://{addr}/api/v1/bootstrap"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        bootstrap["provider_drop_paste"]["claude"]["command_name"], "cat",
+        "config publishes the command's file name, not the block name: {bootstrap}"
+    );
+    assert!(
+        bootstrap.get("tab_web_dragdrop_paste").is_none(),
+        "the per-tab map must not be back on the bootstrap document: {bootstrap}"
+    );
+
+    // Close the tab. The process goes, and so does the profile.
+    let resp = client
+        .delete(format!("http://{addr}/api/v1/sessions/s1/tabs/{support}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let session = wait_for_session(&client, addr, "s1", |s| {
+        !s["tabs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["id"].as_str() == Some(&support))
+    })
+    .await;
+    assert!(
+        !session["tabs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["id"].as_str() == Some(&support)),
+        "the closed tab is gone from the spine, and its profile with it: {session}"
+    );
+}
+
 #[tokio::test]
 async fn delete_main_tab_detaches_when_no_other_tab_is_live() {
     let (addr, _tmp) = boot().await;

@@ -10,6 +10,7 @@
 // into this single document. A non-2xx is thrown as a `BootstrapFetchError`
 // carrying the HTTP status so the caller can branch.
 
+import type { DropPasteProfile } from "./fileDrop"
 import type { FlatSortKey } from "./flatList"
 import type { MacroView } from "./types"
 
@@ -21,26 +22,19 @@ import type { MacroView } from "./types"
 export interface Bootstrap {
   /** Configured agent providers (the new-agent / change-provider pickers). */
   available_providers: string[]
-  /** Each configured provider's `web_dragdrop_paste` form, normalized server-side
-   * to one of the names `DragDropPasteForm` knows. This is how the terminal pane
-   * learns what shape to give a DROPPED file's path for the provider running in
-   * it, since the agent CLIs do not agree on how they read a pasted path. Keyed by
-   * provider name; a name absent from the map means "bare", as does the whole
-   * field being absent on an older server (see `dragDropPasteFormFor`). This is
-   * a plain projection of config; what a live process launched with is in
-   * `tab_web_dragdrop_paste`, and the pane prefers that. */
-  provider_web_dragdrop_paste?: Record<string, string>
-  /** The form each LIVE tab actually launched with, keyed by TAB ID (same
-   * normalized names as `provider_web_dragdrop_paste`). The terminal pane
-   * prefers this over the provider map, because two live tabs of one provider
-   * can need different forms: launch a tab, edit that provider's
-   * `web_dragdrop_paste`, launch another, and both processes report the same
-   * provider name, so a provider-keyed map has one slot for two answers. It
-   * also covers a tab whose `[providers.<name>]` block the user has since
-   * renamed or deleted. A tab absent here (one launched since the last
-   * bootstrap fetch) falls back to the provider map, then to "bare"; older
-   * servers omit the field entirely, which is the same fallback. */
-  tab_web_dragdrop_paste?: Record<string, string>
+  /** What CONFIG currently says a DROPPED file's path should look like for each
+   * configured provider: the paste form (normalized server-side to one of the
+   * names `DragDropPasteForm` knows) and the file name of the command the block
+   * runs, which is what identifies the receiving CLI. Keyed by provider name.
+   *
+   * This is the FALLBACK, used only for a pane with no live process to read
+   * from. What a live process launched with rides the SPINE, on the tab itself
+   * (`AgentTabView.drop_paste`), because that is what a launch and a termination
+   * refresh; this document is refreshed by `config.changed`, which is what can
+   * change IT. A provider absent from this map, and the whole field being absent
+   * on an older server, both resolve to "bare" with no length limit (see
+   * `dragDropPasteFormFor`). */
+  provider_drop_paste?: Record<string, DropPasteProfile>
   /** Text macros from `[macros]` in config order (the macro popover/editor). */
   macros: MacroView[]
   /** The rotating welcome tips shown on the empty-state screen. */

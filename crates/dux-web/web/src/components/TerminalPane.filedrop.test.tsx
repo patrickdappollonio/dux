@@ -244,11 +244,11 @@ function stateRunning(sessionProvider: string, tabProvider: string): DuxState {
   const session = s.spine!.sessions[0]
   session.provider = sessionProvider
   session.tabs[0].provider = tabProvider
-  s.bootstrap!.provider_web_dragdrop_paste = {
-    claude: "bare",
-    codex: "single_quoted",
-    opencode: "bare",
-    copilot: "bare",
+  s.bootstrap!.provider_drop_paste = {
+    claude: { form: "bare", command_name: "claude" },
+    codex: { form: "single_quoted", command_name: "codex" },
+    opencode: { form: "bare", command_name: "opencode" },
+    copilot: { form: "bare", command_name: "copilot" },
   }
   return s
 }
@@ -579,13 +579,71 @@ describe("the paste form follows the provider running in the pane", () => {
         renamed: false,
       })
       mockState = stateForFocusedTabProvider("codex")
-      mockState.bootstrap!.provider_web_dragdrop_paste = { codex: form }
+      mockState.bootstrap!.provider_drop_paste = {
+        codex: { form, command_name: "codex" },
+      }
       render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
       await drop([file("shot.png")])
       expect(sentToSocket(), `codex configured as ${form}`).toEqual([])
       const message = vi.mocked(toast.warning).mock.calls[0][0] as string
       expect(message).toContain("1000 characters")
     }
+  })
+})
+
+describe("which CLI a pane is actually talking to", () => {
+  // A provider's BLOCK NAME is free text the user picks; the `command` is what
+  // says which CLI runs. The measured paste-length limit used to be keyed by the
+  // name, so it answered for the wrong tool in both directions: a real Codex
+  // under any other name got no limit and was handed oversized paths it silently
+  // ignores, and an unrelated CLI merely NAMED codex had valid long paths
+  // withheld from it. Both directions are asserted on the bytes.
+
+  const longPath = `/tmp/p1/${"a".repeat(1_992)}`
+
+  async function dropLongPathOn(provider: string, command_name: string) {
+    cleanup()
+    FakePtySocket.instances = []
+    TermStub.instances = []
+    TermStub.pastes = []
+    uploadDroppedFile.mockReset()
+    vi.mocked(toast.warning).mockClear()
+    uploadDroppedFile.mockResolvedValue({
+      path: longPath,
+      saved_name: "shot.png",
+      requested_name: "shot.png",
+      folder: "/tmp/p1",
+      folder_label: "~/p1",
+      renamed: false,
+    })
+    mockState = stateRunning("claude", provider)
+    mockState.bootstrap!.provider_drop_paste = {
+      [provider]: { form: "bare", command_name },
+    }
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    await drop([file("shot.png")])
+    return sentToSocket()
+  }
+
+  it("holds a long path back from a real codex running under another name", async () => {
+    // `[providers.myagent] command = "codex"` IS codex, and codex files any
+    // paste over 1000 characters away as generic large content before it looks
+    // for a path at all. Sending this would put a placeholder in the prompt,
+    // attach nothing, and report success.
+    expect(longPath.length).toBe(2000)
+    expect(await dropLongPathOn("myagent", "codex")).toEqual([])
+    const message = vi.mocked(toast.warning).mock.calls[0][0] as string
+    expect(message).toContain("1000 characters")
+  })
+
+  it("sends a long path to a different CLI that merely happens to be named codex", async () => {
+    // `[providers.codex] command = "something-else"` is NOT codex, and nothing
+    // has been measured about it, so withholding the file would be dux refusing
+    // on a guess.
+    expect(await dropLongPathOn("codex", "something-else")).toEqual([
+      `${longPath} `,
+    ])
+    expect(vi.mocked(toast.warning)).not.toHaveBeenCalled()
   })
 })
 
@@ -609,10 +667,13 @@ describe("two live tabs of one provider that launched with different forms", () 
       { ...session.tabs[0], id: "s1", provider: "codex" },
       { ...session.tabs[0], id: "tab-b", provider: "codex" },
     ]
-    s.bootstrap!.provider_web_dragdrop_paste = { codex: "bare" }
-    s.bootstrap!.tab_web_dragdrop_paste = {
-      s1: "single_quoted",
-      "tab-b": "backslash_escaped",
+    s.bootstrap!.provider_drop_paste = {
+      codex: { form: "bare", command_name: "codex" },
+    }
+    session.tabs[0].drop_paste = { form: "single_quoted", command_name: "codex" }
+    session.tabs[1].drop_paste = {
+      form: "backslash_escaped",
+      command_name: "codex",
     }
     return s
   }
@@ -646,6 +707,113 @@ describe("two live tabs of one provider that launched with different forms", () 
     // And neither pane got the CURRENT config value, which is the single answer
     // a provider-keyed map would have handed both of them.
     expect(await dropOnTab("s1", path)).not.toEqual([`${path} `])
+  })
+})
+
+describe("a tab whose live process is replaced under the pane", () => {
+  // THE STALENESS DEFECT, end to end, in the bytes.
+  //
+  // What a tab launched with used to ride the BOOTSTRAP document, which the
+  // browser refetches only on `config.changed`. A launch and a termination
+  // refresh the SPINE (`sessions.changed`) instead, so a client that had
+  // refetched config before a relaunch kept resolving the OLD entry for the
+  // whole life of the new process: nothing but a reconnect or a restart
+  // corrected it. Both sequences below therefore START from a stale copy and
+  // are corrected by the relaunch, rather than being handed a correct one.
+
+  /// One drop against whatever `mockState` currently says, returning the bytes.
+  async function dropAgain(path: string) {
+    cleanup()
+    FakePtySocket.instances = []
+    TermStub.instances = []
+    TermStub.pastes = []
+    uploadDroppedFile.mockReset()
+    vi.mocked(toast.warning).mockClear()
+    uploadDroppedFile.mockResolvedValue({
+      path,
+      saved_name: "shot.png",
+      requested_name: "shot.png",
+      folder: "/tmp/p1",
+      folder_label: "~/p1",
+      renamed: false,
+    })
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    await drop([file("shot.png")])
+    return sentToSocket()
+  }
+
+  const path = "/tmp/p1/Web App/shot.png"
+
+  it("keeps the running form after a config edit, then takes the new one on relaunch", async () => {
+    // SEQUENCE ONE. A live codex tab launched single-quoted. The user edits
+    // `[providers.codex] web_dragdrop_paste` to bare and a config refetch lands,
+    // so the pane's configured map now disagrees with the running process.
+    mockState = stateRunning("codex", "codex")
+    mockState.bootstrap!.provider_drop_paste = {
+      codex: { form: "bare", command_name: "codex" },
+    }
+    mockState.spine!.sessions[0].tabs[0].drop_paste = {
+      form: "single_quoted",
+      command_name: "codex",
+    }
+    // The running process still wants what it started with, and gets it.
+    expect(await dropAgain(path)).toEqual(["'/tmp/p1/Web App/shot.png' "])
+
+    // The relaunch. It arrives on the spine, on the tab, so the pane sees it.
+    mockState = stateRunning("codex", "codex")
+    mockState.bootstrap!.provider_drop_paste = {
+      codex: { form: "bare", command_name: "codex" },
+    }
+    mockState.spine!.sessions[0].tabs[0].drop_paste = {
+      form: "bare",
+      command_name: "codex",
+    }
+    expect(await dropAgain(path)).toEqual(["/tmp/p1/Web App/shot.png "])
+  })
+
+  it("drops the dead process's form when the tab goes dormant and relaunches elsewhere", async () => {
+    // SEQUENCE TWO. The codex process exits, the user retargets the tab to
+    // claude, and it relaunches. The stale codex entry must survive neither
+    // step: it must not outlive the process, and it must not win over the
+    // claude one that replaces it.
+    //
+    // At every step the CONFIGURED map is set to disagree with the answer being
+    // asserted, so a pane that ignored the tab and read config would produce
+    // different bytes rather than passing by luck.
+    const config = {
+      codex: { form: "bare", command_name: "codex" },
+      claude: { form: "backslash_escaped", command_name: "claude" },
+    }
+    mockState = stateRunning("codex", "codex")
+    mockState.bootstrap!.provider_drop_paste = config
+    mockState.spine!.sessions[0].tabs[0].drop_paste = {
+      form: "single_quoted",
+      command_name: "codex",
+    }
+    expect(await dropAgain(path)).toEqual(["'/tmp/p1/Web App/shot.png' "])
+
+    // Dormant, and retargeted. No live process, so the pane falls back to what
+    // config says this tab will launch with, which is now claude's form. The
+    // dead codex process's single-quoting must not survive here.
+    mockState = stateRunning("codex", "claude")
+    mockState.bootstrap!.provider_drop_paste = config
+    mockState.spine!.sessions[0].tabs[0].has_live_process = false
+    expect(await dropAgain(path)).toEqual(["/tmp/p1/Web\\ App/shot.png "])
+
+    // Relaunched as claude, which launched BARE even though config now says
+    // otherwise. And the codex length limit goes with the codex process: a
+    // 2000-character path codex would have had withheld goes out, because
+    // claude is what is reading it.
+    const longPath = `/tmp/p1/${"a".repeat(1_992)}`
+    expect(longPath.length).toBe(2000)
+    mockState = stateRunning("codex", "claude")
+    mockState.bootstrap!.provider_drop_paste = config
+    mockState.spine!.sessions[0].tabs[0].drop_paste = {
+      form: "bare",
+      command_name: "claude",
+    }
+    expect(await dropAgain(longPath)).toEqual([`${longPath} `])
+    expect(vi.mocked(toast.warning)).not.toHaveBeenCalled()
   })
 })
 

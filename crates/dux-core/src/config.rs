@@ -914,6 +914,35 @@ impl ProviderCommandConfig {
             .and_then(WebDragDropPaste::parse)
             .unwrap_or_default()
     }
+
+    /// The FILE NAME of the command this provider runs, which is the only thing
+    /// in a `[providers.<name>]` block that identifies which CLI is on the other
+    /// end of a paste.
+    ///
+    /// The block's NAME does not, and treating it as though it did was a real
+    /// defect: a provider's name is free text the user chooses, so
+    /// `[providers.myagent] command = "codex"` is a real Codex and
+    /// `[providers.codex] command = "something-else"` is not. Anything keyed by
+    /// the name therefore answered for the wrong CLI in both directions at once.
+    /// The web's per-CLI paste-length table is keyed by this instead.
+    ///
+    /// The FILE NAME rather than the whole string, because `command` may be a
+    /// full path (`/usr/local/bin/codex`), a `~`-relative one, or a bare name
+    /// found on `PATH`, and all three name the same CLI. Argument-carrying
+    /// wrappers (`command = "npx"`, `command = "mise"`) are deliberately NOT
+    /// unwrapped: what they finally exec is not knowable from config, so they
+    /// resolve to the wrapper and fall into the "no entry, no limit" case, which
+    /// withholds nothing.
+    ///
+    /// Falls back to the whole string when there is no file name to take (an
+    /// empty command, or one that is nothing but separators), so the answer is
+    /// never silently empty.
+    pub fn command_file_name(&self) -> String {
+        std::path::Path::new(&self.command)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.command.clone())
+    }
 }
 
 impl Default for LoggingConfig {
@@ -2894,6 +2923,62 @@ mod agent_tabs_cap_tests {
             WebDragDropPaste::Bare,
             "config wins for an explicit preference"
         );
+    }
+
+    #[test]
+    fn a_provider_is_identified_by_its_command_file_name_not_its_block_name() {
+        // The two are independent, and the per-CLI paste-length table used to be
+        // keyed by the BLOCK NAME, which is free text. Both directions were
+        // wrong: a real Codex under any other name escaped its limit and was
+        // handed oversized paths it silently ignores, and an unrelated CLI
+        // merely NAMED codex had valid long paths withheld from it.
+        let config: Config = toml::from_str(
+            "[providers.myagent]\ncommand = \"codex\"\n\
+             [providers.codex]\ncommand = \"something-else\"\n",
+        )
+        .expect("parse config");
+        assert_eq!(
+            config.providers.commands["myagent"].command_file_name(),
+            "codex",
+            "an aliased block still runs codex, and must be identified as codex"
+        );
+        assert_eq!(
+            config.providers.commands["codex"].command_file_name(),
+            "something-else",
+            "a block merely NAMED codex runs whatever its command says"
+        );
+    }
+
+    #[test]
+    fn a_full_path_command_is_identified_by_its_file_name() {
+        // `command` may be an absolute path, and it names the same CLI as the
+        // bare name does, so the comparison is on the file name.
+        for command in ["/usr/local/bin/codex", "./codex", "codex"] {
+            let config: Config =
+                toml::from_str(&format!("[providers.p]\ncommand = \"{command}\"\n"))
+                    .expect("parse config");
+            assert_eq!(
+                config.providers.commands["p"].command_file_name(),
+                "codex",
+                "{command} names codex"
+            );
+        }
+    }
+
+    #[test]
+    fn a_command_with_no_file_name_falls_back_to_itself() {
+        // Degenerate, but it must never resolve to an empty string, which would
+        // key into a table as a real value.
+        for command in ["", "/", ".."] {
+            let config: Config =
+                toml::from_str(&format!("[providers.p]\ncommand = \"{command}\"\n"))
+                    .expect("parse config");
+            let resolved = config.providers.commands["p"].command_file_name();
+            assert_eq!(
+                resolved, command,
+                "a command with no file name answers with itself"
+            );
+        }
     }
 
     #[test]

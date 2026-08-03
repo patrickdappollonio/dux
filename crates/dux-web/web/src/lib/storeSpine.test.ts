@@ -171,6 +171,97 @@ describe("spine slice", () => {
     expect(spineFetches).toBe(before + 1)
   })
 
+  describe("a tab's launched drop-paste profile", () => {
+    // WHY IT LIVES ON THE SPINE. The profile says how a file dropped onto a tab
+    // has its path quoted, and which CLI's length limit applies. It changes when
+    // a process LAUNCHES or TERMINATES, and `sessions.changed` is the event that
+    // fires for both. It used to be published on the BOOTSTRAP document, which
+    // the browser refetches only on `config.changed`, so a client's copy went
+    // stale for the whole life of a process and nothing corrected it short of a
+    // reconnect or a restart.
+    //
+    // Both tests below start from a copy that IS stale and drive the correction
+    // through the real event path, rather than injecting an already-correct one.
+
+    function tabbed(
+      dropPaste: { form: string; command_name: string } | undefined,
+      provider = "codex",
+    ): Spine {
+      return makeSpine({
+        sessions: [
+          {
+            id: "s1",
+            project_id: "p1",
+            provider,
+            tabs: [
+              {
+                id: "s1",
+                provider,
+                order: 0,
+                has_live_process: dropPaste !== undefined,
+                drop_paste: dropPaste,
+              },
+            ],
+          } as unknown as Spine["sessions"][number],
+        ],
+      })
+    }
+
+    const tabProfile = (mod: Awaited<ReturnType<typeof loadStore>>) =>
+      mod.getSnapshot().spine?.sessions[0]?.tabs?.[0]?.drop_paste
+
+    it("is corrected by the relaunch, after a config edit made it stale", async () => {
+      // SEQUENCE ONE. A live codex tab launched single-quoted. The user edits
+      // `[providers.codex] web_dragdrop_paste` to bare; a `config.changed`
+      // refetch lands, and the browser is still holding the tab's OLD profile
+      // because a config refetch cannot change it. Then the tab is relaunched
+      // and picks the new form up.
+      spineBody = tabbed({ form: "single_quoted", command_name: "codex" })
+      const mod = await loadStore()
+      expect(tabProfile(mod)?.form).toBe("single_quoted")
+
+      // The config edit. It refreshes the bootstrap document and nothing else:
+      // the spine is not refetched at all, which is exactly why the profile
+      // cannot live on a document that event refreshes. The browser is still
+      // holding what the live process launched with, which is correct, because
+      // that process has not been replaced yet.
+      const spineFetchesBefore = spineFetches
+      spineBody = tabbed({ form: "bare", command_name: "codex" })
+      mod.eventsSocket.onEvent({ event: "config.changed" })
+      await new Promise((r) => setTimeout(r, 0))
+      expect(spineFetches).toBe(spineFetchesBefore)
+      expect(tabProfile(mod)?.form).toBe("single_quoted")
+
+      // The relaunch. This is the event the profile now travels on.
+      await pushSpine(mod, tabbed({ form: "bare", command_name: "codex" }))
+      expect(tabProfile(mod)?.form).toBe("bare")
+    })
+
+    it("is corrected when a dormant tab relaunches under a different provider", async () => {
+      // SEQUENCE TWO. The tab goes dormant (its process exits), the user
+      // retargets it to claude, and it relaunches. Every step is a
+      // `sessions.changed`, and the profile follows all three: the stale codex
+      // entry must not survive the tab going dormant, and it must not win over
+      // the claude one that replaces it.
+      spineBody = tabbed({ form: "single_quoted", command_name: "codex" })
+      const mod = await loadStore()
+      expect(tabProfile(mod)?.command_name).toBe("codex")
+
+      // Dormant: no live process, so no profile at all. A pane now falls back
+      // to what config says the tab WILL launch with.
+      await pushSpine(mod, tabbed(undefined))
+      expect(tabProfile(mod)).toBeUndefined()
+
+      // Relaunched under claude, which wants a different form and has no
+      // length limit.
+      await pushSpine(
+        mod,
+        tabbed({ form: "bare", command_name: "claude" }, "claude"),
+      )
+      expect(tabProfile(mod)).toEqual({ form: "bare", command_name: "claude" })
+    })
+  })
+
   it("a projects.changed event triggers a refetch that replaces the slice", async () => {
     const mod = await loadStore()
     const before = spineFetches
