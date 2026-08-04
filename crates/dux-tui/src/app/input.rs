@@ -333,6 +333,37 @@ pub(super) fn contains_point(rect: Rect, column: u16, row: u16) -> bool {
 ///
 /// `None` = auto (forward only when the child owns the alt screen and asked for
 /// mouse); `Some(true)` = always forward; `Some(false)` = never forward.
+/// What kinds of user input a raw-input batch actually delivered to the focused
+/// PTY. Two flags rather than one boolean, because the engine keeps two windows
+/// with opposite membership rules: a keystroke is typing and suppresses its own
+/// echo, while a forwarded pointer report is NOT typing (design tenet:
+/// selecting or scrolling a terminal is not typing) but still has to suppress
+/// the repaint the child answers it with. Tracking one boolean is exactly how
+/// scrolling an alt-screen agent came to read as Typing.
+///
+/// The classification itself lives in `dux_core::pty`, so this cannot drift
+/// from what the web decides about the same bytes.
+#[derive(Default)]
+struct ForwardedInput {
+    typing: bool,
+    pointer: bool,
+}
+
+impl ForwardedInput {
+    /// Fold one batch of bytes that reached the PTY into the accumulator.
+    fn note(&mut self, bytes: &[u8]) {
+        match dux_core::pty::classify_pty_write(bytes) {
+            dux_core::pty::PtyWriteKind::Typing => self.typing = true,
+            dux_core::pty::PtyWriteKind::Pointer => self.pointer = true,
+            dux_core::pty::PtyWriteKind::Ignored => {}
+        }
+    }
+
+    fn any(&self) -> bool {
+        self.typing || self.pointer
+    }
+}
+
 fn should_forward_wheel(forward_scroll: Option<bool>, alt_screen: bool, mouse_mode: bool) -> bool {
     match forward_scroll {
         Some(v) => v,
@@ -2152,7 +2183,7 @@ impl App {
             batch: &mut Vec<u8>,
             is_scrolled_back: bool,
             needs_selection_clear: &mut bool,
-            forwarded: &mut bool,
+            forwarded: &mut ForwardedInput,
             provider: Option<&crate::pty::PtyClient>,
         ) {
             if batch.is_empty() {
@@ -2161,7 +2192,7 @@ impl App {
             *needs_selection_clear = true;
             if !is_scrolled_back && let Some(p) = provider {
                 let _ = p.write_bytes(batch);
-                *forwarded = true;
+                forwarded.note(batch);
             }
             batch.clear();
         }
@@ -2171,12 +2202,11 @@ impl App {
         // borrow-mut conflicts inside the loop.
         let mut needs_selection_clear = false;
 
-        // Track whether any user input actually reached the focused PTY this
-        // batch (typing, arrow-key passthrough, mouse forwarding). If it did and
-        // the focus is an agent, we record it so the terminal echo of the user's
-        // own input does not light the "working" indicator. Agent-only —
-        // companion-terminal output never feeds the agent's working state.
-        let mut forwarded_to_pty = false;
+        // Track WHAT reached the focused PTY this batch, not merely whether
+        // anything did. Keystrokes and forwarded pointer reports both provoke
+        // output that must not light the "working" indicator, but only one of
+        // them is the user typing, so they are recorded separately.
+        let mut forwarded_to_pty = ForwardedInput::default();
 
         for action in actions {
             match action {
@@ -2235,7 +2265,7 @@ impl App {
                     if should_forward_page(fs, alt) {
                         if let Some(provider) = self.selected_terminal_surface_client() {
                             let _ = provider.write_bytes(&raw);
-                            forwarded_to_pty = true;
+                            forwarded_to_pty.note(&raw);
                         }
                     } else if self.last_pty_size.0 > 0 {
                         self.scroll_pty(ScrollDirection::Up, self.last_pty_size.0 as usize);
@@ -2256,7 +2286,7 @@ impl App {
                     if should_forward_page(fs, alt) {
                         if let Some(provider) = self.selected_terminal_surface_client() {
                             let _ = provider.write_bytes(&raw);
-                            forwarded_to_pty = true;
+                            forwarded_to_pty.note(&raw);
                         }
                     } else if self.last_pty_size.0 > 0 {
                         self.scroll_pty(ScrollDirection::Down, self.last_pty_size.0 as usize);
@@ -2370,7 +2400,7 @@ impl App {
                             self.terminal_selection = None;
                             if let Some(provider) = self.selected_terminal_surface_client() {
                                 let _ = provider.write_bytes(&raw);
-                                forwarded_to_pty = true;
+                                forwarded_to_pty.note(&raw);
                             }
                         } else if self.handle_mouse(mouse_ev) {
                             return Ok(true);
@@ -2418,7 +2448,7 @@ impl App {
                                 )
                             {
                                 let _ = provider.write_bytes(&translated);
-                                forwarded_to_pty = true;
+                                forwarded_to_pty.note(&translated);
                             }
                         }
                     }
@@ -2445,29 +2475,33 @@ impl App {
             self.terminal_selection = None;
         }
 
-        // Record input that actually reached the focused PTY so its terminal echo
-        // isn't mistaken for the PTY "working". See [`Engine::note_pty_input`].
-        // Tab and terminal ids are disjoint and both key `pty_input`.
-        if forwarded_to_pty {
-            match self.input_target {
-                InputTarget::Agent => {
-                    if let Some(session_id) = self.selected_session().map(|s| s.id.clone()) {
-                        // Stamp the FOCUSED tab (where the bytes actually went),
-                        // not the session/Main id — otherwise typing into an extra
-                        // tab bumps the wrong tab's suppression window.
-                        let tab_id = self.focused_tab_id(&session_id);
-                        self.engine.note_pty_input(&tab_id);
-                    }
+        // Record input that actually reached the focused PTY so the output it
+        // provokes isn't mistaken for the PTY "working". Typing and pointer
+        // input stamp DIFFERENT windows (see [`Engine::note_pty_input`] and
+        // [`Engine::note_pty_pointer`]) because only one of them is the user
+        // typing. Tab and terminal ids are disjoint and both key those maps.
+        if forwarded_to_pty.any() {
+            let id = match self.input_target {
+                // Stamp the FOCUSED tab (where the bytes actually went), not the
+                // session/Main id — otherwise typing into an extra tab bumps the
+                // wrong tab's suppression window.
+                InputTarget::Agent => self
+                    .selected_session()
+                    .map(|s| s.id.clone())
+                    .map(|session_id| self.focused_tab_id(&session_id)),
+                // A terminal keystroke stamps under the terminal id, exactly as
+                // an agent keystroke does, so its echo isn't read as the
+                // terminal "working".
+                InputTarget::Terminal => self.active_terminal_id.clone(),
+                _ => None,
+            };
+            if let Some(id) = id {
+                if forwarded_to_pty.typing {
+                    self.engine.note_pty_input(&id);
                 }
-                InputTarget::Terminal => {
-                    // A terminal keystroke stamps under the terminal id, exactly
-                    // as an agent keystroke does, so its echo isn't read as the
-                    // terminal "working".
-                    if let Some(terminal_id) = self.active_terminal_id.clone() {
-                        self.engine.note_pty_input(&terminal_id);
-                    }
+                if forwarded_to_pty.pointer {
+                    self.engine.note_pty_pointer(&id);
                 }
-                _ => {}
             }
         }
 
@@ -7562,12 +7596,24 @@ impl App {
             };
             let screen_seq =
                 format!("\x1b[<{cb};{};{}M", mouse.column + 1, mouse.row + 1).into_bytes();
-            if let Some(term_area) = self.mouse_layout.agent_term
+            let forwarded = if let Some(term_area) = self.mouse_layout.agent_term
                 && let Some(translated) =
                     crate::raw_input::translate_sgr_mouse(&screen_seq, term_area.x, term_area.y)
                 && let Some(provider) = self.selected_terminal_surface_client()
             {
                 let _ = provider.write_bytes(&translated);
+                true
+            } else {
+                false
+            };
+            if forwarded {
+                // The child repaints its grid in answer to the wheel. That is
+                // output the USER caused, so it must not read as the agent
+                // working, exactly as on the interactive path. This is the same
+                // byte reaching the same PTY; only the route here differs.
+                if let Some(id) = self.selected_terminal_surface_id() {
+                    self.engine.note_pty_pointer(&id);
+                }
                 return;
             }
         }
@@ -20202,6 +20248,82 @@ cyan = "#00ffff"
         assert!(
             !app.engine.pty_input.contains_key(&session_id),
             "a terminal keystroke must never stamp the owning agent's id"
+        );
+    }
+
+    /// A forwarded wheel is not a keystroke. It used to stamp the same window
+    /// typing does, purely because the forward path tracked "did anything reach
+    /// the PTY" as one boolean, so scrolling an alt-screen agent read as Typing.
+    /// It must stamp the POINTER window instead, which suppresses the repaint it
+    /// provokes without ever claiming the user typed.
+    #[test]
+    fn a_forwarded_wheel_stamps_the_pointer_window_not_the_typing_one() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+        fill_and_select_l30(&mut app);
+        set_forward_scroll(&mut app, true);
+        app.input_target = InputTarget::Agent;
+        let session_id = app.engine.sessions[0].id.clone();
+
+        app.process_raw_input_bytes(WHEEL_UP_IN_PANE)
+            .expect("raw input");
+
+        assert!(
+            !app.engine.pty_input.contains_key(&session_id),
+            "scrolling is not typing, so a forwarded wheel must not stamp the \
+             typing window"
+        );
+        assert!(
+            app.engine.recent_pointer_input(&session_id),
+            "it must stamp the pointer window, so the child's repaint is not \
+             read as the agent working"
+        );
+    }
+
+    /// The non-interactive wheel path forwards the same SGR report through a
+    /// different function, and stamped nothing at all. Same byte, same
+    /// consequence, so it needs the same stamp.
+    #[test]
+    fn a_wheel_forwarded_outside_interactive_mode_stamps_the_pointer_window() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+        fill_and_select_l30(&mut app);
+        set_forward_scroll(&mut app, true);
+        let session_id = app.engine.sessions[0].id.clone();
+
+        app.handle_center_mouse_wheel(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 30,
+            row: 5,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        });
+
+        assert!(
+            !app.engine.pty_input.contains_key(&session_id),
+            "a wheel is never typing, on any path"
+        );
+        assert!(
+            app.engine.recent_pointer_input(&session_id),
+            "the non-interactive wheel path must stamp the pointer window too"
+        );
+    }
+
+    /// Typing keeps its old meaning exactly: the same forward path that now
+    /// splits pointer input off must still stamp the typing window for a real
+    /// keystroke, and must leave the pointer window alone.
+    #[test]
+    fn typing_still_stamps_only_the_typing_window() {
+        let (mut app, session_id) = app_with_live_agent_pty();
+
+        app.process_raw_input_bytes(b"x").unwrap();
+
+        assert!(
+            app.engine.pty_input.contains_key(&session_id),
+            "a real keystroke still records input for echo suppression"
+        );
+        assert!(
+            !app.engine.recent_pointer_input(&session_id),
+            "and it must not stamp the pointer window"
         );
     }
 
