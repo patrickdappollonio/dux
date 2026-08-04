@@ -2197,19 +2197,22 @@ fn handle_request(
         EngineRequest::WritePty(id, bytes) => {
             let wrote =
                 pty_for(engine, &id).is_some_and(|client| client.write_bytes(&bytes).is_ok());
-            // Record keystrokes that actually reached a PTY (agent tab or
-            // companion terminal) so the user's own echoed typing doesn't read as
-            // the PTY "working". `write_counts_as_typing` excludes empty frames
-            // and the terminal's own focus/mouse reports (which xterm forwards on
-            // select/scroll) so merely selecting a terminal does not light
-            // "Typing". Tab and terminal ids are disjoint and both key
-            // `pty_input`, so one predicate covers both.
+            // Record what actually reached a PTY (agent tab or companion
+            // terminal) so output the USER caused isn't read as the PTY
+            // working. The engine classifies the bytes and picks the window:
+            // keystrokes stamp the typing window, a forwarded MOUSE report
+            // stamps the pointer window (scrolling is not typing, but the
+            // repaint it provokes is not the agent working either), and an
+            // empty frame or a focus report stamps nothing. Tab and terminal
+            // ids are disjoint and both key those maps, so one call covers
+            // both. Gating this on `write_counts_as_typing` was the bug: it
+            // dropped the wheel entirely, so scrolling an alt-screen agent
+            // showed it Working for as long as the user scrolled.
             if wrote
-                && dux_core::pty::write_counts_as_typing(&bytes)
                 && (engine.providers.contains_key(&id)
                     || engine.companion_terminals.contains_key(&id))
             {
-                engine.note_pty_input(&id);
+                engine.note_pty_write(&id, &bytes);
             }
         }
         EngineRequest::ResizePty(id, rows, cols) => {
@@ -3784,6 +3787,116 @@ mod tests {
         assert!(
             await_start_dir(&handle, dir_b.path().to_string_lossy().as_ref()).await,
             "reconcile must adopt the saved config"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // WritePty input classification
+    // -----------------------------------------------------------------------
+
+    /// Drive one `EngineRequest` straight through `handle_request`, the way the
+    /// actor loop does, with throwaway channels. Nothing here reads the status
+    /// or reload plumbing; it exists so the request handler can be exercised
+    /// without spawning the actor thread.
+    fn run_request(engine: &mut Engine, req: EngineRequest) {
+        let (tx, _rx) = broadcast::channel(8);
+        let (clear_tx, _clear_rx) = broadcast::channel(8);
+        let (snapshot_tx, _snapshot_rx) = watch::channel(Vec::new());
+        let mut status = StatusEmitter::new(tx, clear_tx, snapshot_tx, Duration::from_secs(6));
+        let (config_reload_tx, _config_rx) = broadcast::channel(8);
+        let mut disk_ahead = false;
+        handle_request(engine, req, &mut status, &config_reload_tx, &mut disk_ahead);
+    }
+
+    /// A `cat`-backed companion terminal on a bootstrapped engine, so a
+    /// `WritePty` actually reaches a live PTY.
+    fn engine_with_terminal() -> (tempfile::TempDir, Engine, String) {
+        let (tmp, paths) = temp_paths();
+        {
+            let store = dux_core::storage::SessionStore::open(&paths.sessions_db_path).unwrap();
+            store
+                .upsert_session(&sample_session(
+                    "s1",
+                    "p1",
+                    "feat",
+                    paths.root.to_string_lossy().as_ref(),
+                ))
+                .unwrap();
+        }
+        let mut engine = bootstrap_engine(&paths).expect("bootstrap");
+        engine.config.terminal.command = "cat".to_string();
+        engine.config.terminal.args = vec![];
+        let (id, _) = engine
+            .create_companion_terminal("s1", 24, 80)
+            .expect("create companion terminal");
+        (tmp, engine, id)
+    }
+
+    /// The browser forwards a wheel notch to a child that owns the mouse. The
+    /// handler used to drop it on the floor (it only stamped writes that count
+    /// as typing), so the repaint the child answered with read as the agent
+    /// working, and an idle agent showed Working for as long as you scrolled.
+    #[test]
+    fn a_forwarded_wheel_stamps_the_pointer_window() {
+        let (_tmp, mut engine, id) = engine_with_terminal();
+
+        run_request(
+            &mut engine,
+            EngineRequest::WritePty(id.clone(), b"\x1b[<64;10;5M".to_vec()),
+        );
+
+        assert!(
+            engine.recent_pointer_input(&id),
+            "a forwarded wheel must stamp the pointer window so the repaint it \
+             causes is not read as working"
+        );
+        assert!(!engine.is_typing(&id), "and it must never read as typing");
+    }
+
+    #[test]
+    fn a_real_keystroke_still_stamps_only_the_typing_window() {
+        let (_tmp, mut engine, id) = engine_with_terminal();
+
+        run_request(
+            &mut engine,
+            EngineRequest::WritePty(id.clone(), b"x".to_vec()),
+        );
+
+        assert!(engine.is_typing(&id), "a keystroke still lights Typing");
+        assert!(
+            !engine.recent_pointer_input(&id),
+            "and it must not stamp the pointer window"
+        );
+    }
+
+    #[test]
+    fn a_focus_report_stamps_neither_window() {
+        let (_tmp, mut engine, id) = engine_with_terminal();
+
+        run_request(
+            &mut engine,
+            EngineRequest::WritePty(id.clone(), b"\x1b[I".to_vec()),
+        );
+
+        assert!(!engine.is_typing(&id));
+        assert!(
+            !engine.recent_pointer_input(&id),
+            "merely focusing a terminal is not pointer input either"
+        );
+    }
+
+    #[test]
+    fn a_write_to_an_unknown_id_stamps_nothing() {
+        let (_tmp, mut engine, _id) = engine_with_terminal();
+
+        run_request(
+            &mut engine,
+            EngineRequest::WritePty("nobody".to_string(), b"\x1b[<64;10;5M".to_vec()),
+        );
+
+        assert!(
+            !engine.recent_pointer_input("nobody"),
+            "a write that reached no PTY must not accumulate a stamp"
         );
     }
 
