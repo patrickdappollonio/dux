@@ -431,6 +431,64 @@ mod tests {
         assert!(!engine.terminal_is_working("term-nope"));
     }
 
+    /// Scrolling a terminal must behave the way scrolling an agent does for the
+    /// half that is an INFERENCE (output text), and must not touch the half that
+    /// is a FACT (a foreground app is running). A `vim` that repaints because the
+    /// user scrolled it is still `vim` running, so the row keeps saying Running;
+    /// the point of the pointer window is only to stop reading the repaint itself
+    /// as evidence.
+    #[test]
+    fn scrolling_a_terminal_suppresses_the_repaint_but_not_a_running_app() {
+        let (mut engine, _tmp) = test_engine();
+
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "feature");
+        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        engine.sessions.push(session);
+        engine.config.terminal.command = "cat".to_string();
+        engine.config.terminal.args = vec![];
+
+        let (id, _) = engine
+            .create_companion_terminal("s1", 24, 80)
+            .expect("terminal");
+
+        // An idle shell that repaints because the user scrolled it: no app, no
+        // progress report, so the repaint is not evidence of anything.
+        engine
+            .companion_terminals
+            .get_mut(&id)
+            .unwrap()
+            .foreground_cmd = None;
+        engine.note_pty_write(&id, b"\x1b[<64;10;5M");
+        engine
+            .pty_activity
+            .insert(id.clone(), std::time::Instant::now());
+        assert!(
+            !engine.terminal_is_working(&id),
+            "a repaint caused by the user's own scroll must not read as Running"
+        );
+        assert!(
+            !engine.is_typing(&id),
+            "and scrolling must never read as Typing"
+        );
+
+        // Now a real app is running in it. Scrolling changes nothing about that.
+        engine
+            .companion_terminals
+            .get_mut(&id)
+            .unwrap()
+            .foreground_cmd = Some("vim".to_string());
+        assert!(
+            engine.terminal_is_working(&id),
+            "a running foreground app is a fact, not an inference from output, \
+             so scrolling must not hide it"
+        );
+    }
+
     #[test]
     fn create_companion_terminal_unknown_session_errors() {
         let (mut engine, _tmp) = test_engine();

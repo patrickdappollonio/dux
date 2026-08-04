@@ -2711,6 +2711,7 @@ impl App {
             branch_sync_worker_started: AtomicBool::new(false),
             pty_activity: HashMap::new(),
             pty_input: HashMap::new(),
+            pty_pointer: HashMap::new(),
             needs_attention: HashSet::new(),
             pty_progress: HashMap::new(),
             agent_viewed: HashMap::new(),

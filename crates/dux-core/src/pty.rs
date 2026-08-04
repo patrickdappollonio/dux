@@ -1581,25 +1581,55 @@ fn valid_pgid(raw: libc::pid_t) -> Option<u32> {
     (raw > 0).then_some(raw as u32)
 }
 
+/// What a batch of bytes written to a PTY represents, as far as the engine's
+/// two input-tracking windows are concerned. One classification, in core, so
+/// the TUI and the web never disagree about what a wheel report is.
+///
+/// The three kinds exist because the two windows have OPPOSITE membership
+/// rules for a pointer report: it must not light "Typing" (scrolling is not
+/// typing), but it DOES cause the child to repaint, so the repaint it provokes
+/// must not be read as the agent working.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PtyWriteKind {
+    /// A genuine keystroke or paste. Drives the Typing state and the echo
+    /// suppression window ([`crate::engine::Engine::note_pty_input`]).
+    Typing,
+    /// A forwarded POINTER report: a mouse click or a wheel notch the viewer
+    /// sends because the child has mouse reporting on. Never Typing, but it
+    /// makes the child repaint, so it stamps the pointer window
+    /// ([`crate::engine::Engine::note_pty_pointer`]).
+    Pointer,
+    /// Neither: an empty frame (a no-op / keepalive write) or a FOCUS REPORT
+    /// (`CSI I` focus-in / `CSI O` focus-out), which xterm.js emits when the
+    /// viewer gains or loses focus while the child has focus tracking (DECSET
+    /// 1004) on. Selecting a terminal focuses it, so a plain focus change must
+    /// stamp nothing at all.
+    Ignored,
+}
+
+/// Classify a batch of bytes written to a PTY. See [`PtyWriteKind`].
+///
+/// The bytes are still written to the PTY whatever this returns (the child
+/// receives its focus/mouse event); the classification only decides which
+/// engine window, if any, gets stamped. No printable key or cursor key encodes
+/// as a focus or mouse report, so genuine input is never misread.
+pub fn classify_pty_write(bytes: &[u8]) -> PtyWriteKind {
+    if bytes.is_empty() || is_focus_report(bytes) {
+        PtyWriteKind::Ignored
+    } else if is_mouse_report(bytes) {
+        PtyWriteKind::Pointer
+    } else {
+        PtyWriteKind::Typing
+    }
+}
+
 /// Whether a batch of bytes written to a PTY should count as the user "typing"
 /// for the Typing-state / working-suppression window (see
-/// [`crate::engine::Engine::note_pty_input`]). Genuine keystrokes and pastes
-/// count; three things do not, because they are the terminal reporting an event
-/// to the child rather than the user entering text:
-///   - an empty frame (a no-op / keepalive write),
-///   - a FOCUS REPORT (`CSI I` focus-in / `CSI O` focus-out), which xterm.js
-///     emits when the viewer gains or loses focus while the child app has focus
-///     tracking (DECSET 1004) on. Selecting a terminal focuses it, so without
-///     this a plain focus change would light "Typing" with nothing typed, and
-///   - a MOUSE REPORT (SGR `CSI < ...` or legacy `CSI M ...`), which the viewer
-///     sends when the child has mouse reporting on and the user clicks or
-///     scrolls. Scrolling and clicking are not typing.
-///
-/// The bytes are still written to the PTY (the child receives its focus/mouse
-/// event); they simply do not stamp the input window. No printable key or cursor
-/// key encodes as one of these sequences, so genuine input is never dropped.
+/// [`crate::engine::Engine::note_pty_input`]). Thin sugar over
+/// [`classify_pty_write`], kept because several call sites only ask this
+/// question.
 pub fn write_counts_as_typing(bytes: &[u8]) -> bool {
-    !bytes.is_empty() && !is_focus_report(bytes) && !is_mouse_report(bytes)
+    matches!(classify_pty_write(bytes), PtyWriteKind::Typing)
 }
 
 fn is_focus_report(bytes: &[u8]) -> bool {

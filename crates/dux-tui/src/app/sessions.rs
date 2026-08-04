@@ -1841,6 +1841,7 @@ impl App {
         // View-side cleanup the engine couldn't do.
         self.engine.pty_activity.remove(session_id);
         self.engine.pty_input.remove(session_id);
+        self.engine.pty_pointer.remove(session_id);
         self.clear_companion_terminals_for_session(session_id);
         self.clear_focused_tab_for_session(session_id);
 
@@ -3934,6 +3935,7 @@ mod tests {
             branch_sync_worker_started: AtomicBool::new(false),
             pty_activity: std::collections::HashMap::new(),
             pty_input: std::collections::HashMap::new(),
+            pty_pointer: std::collections::HashMap::new(),
             needs_attention: std::collections::HashSet::new(),
             pty_progress: std::collections::HashMap::new(),
             agent_viewed: std::collections::HashMap::new(),
@@ -4164,6 +4166,7 @@ mod tests {
             branch_sync_worker_started: AtomicBool::new(false),
             pty_activity: std::collections::HashMap::new(),
             pty_input: std::collections::HashMap::new(),
+            pty_pointer: std::collections::HashMap::new(),
             needs_attention: std::collections::HashSet::new(),
             pty_progress: std::collections::HashMap::new(),
             agent_viewed: std::collections::HashMap::new(),

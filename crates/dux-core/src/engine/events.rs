@@ -1088,6 +1088,7 @@ impl Engine {
         self.resume_fallback_candidates.remove(tab_id);
         self.pty_activity.remove(tab_id);
         self.pty_input.remove(tab_id);
+        self.pty_pointer.remove(tab_id);
         // Attention/progress runtime state is torn down with the tab so a
         // detach/relaunch/delete can never leave a stale flag or a stuck
         // "working" progress override behind.
@@ -1098,7 +1099,7 @@ impl Engine {
     }
 
     /// Drop the activity/input runtime entries for a companion terminal being
-    /// torn down. Terminals share `pty_activity`/`pty_input` with agent tabs
+    /// torn down. Terminals share `pty_activity`/`pty_input`/`pty_pointer` with agent tabs
     /// (keyed by the disjoint `term-N` id), so a removed terminal must clear both
     /// or a later recycled `term-N` id could inherit stale activity and read as
     /// working/typing before it has emitted a byte. The terminal analogue of
@@ -1107,6 +1108,7 @@ impl Engine {
     pub fn clear_terminal_runtime(&mut self, terminal_id: &str) {
         self.pty_activity.remove(terminal_id);
         self.pty_input.remove(terminal_id);
+        self.pty_pointer.remove(terminal_id);
     }
 
     pub fn finish_delete_session(
