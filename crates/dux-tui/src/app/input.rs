@@ -2483,7 +2483,7 @@ impl App {
         if forwarded_to_pty.any() {
             let id = match self.input_target {
                 // Stamp the FOCUSED tab (where the bytes actually went), not the
-                // session/Main id — otherwise typing into an extra tab bumps the
+                // session/Main id, otherwise typing into an extra tab bumps the
                 // wrong tab's suppression window.
                 InputTarget::Agent => self
                     .selected_session()
