@@ -1594,17 +1594,39 @@ pub enum PtyWriteKind {
     /// A genuine keystroke or paste. Drives the Typing state and the echo
     /// suppression window ([`crate::engine::Engine::note_pty_input`]).
     Typing,
-    /// A forwarded POINTER report: a mouse click or a wheel notch the viewer
-    /// sends because the child has mouse reporting on. Never Typing, but it
-    /// makes the child repaint, so it stamps the pointer window
-    /// ([`crate::engine::Engine::note_pty_pointer`]).
-    Pointer,
+    /// A forwarded POINTER report the viewer sends because the child has mouse
+    /// reporting on. Never Typing, but it makes the child repaint, so it may
+    /// stamp the pointer window ([`crate::engine::Engine::note_pty_pointer`]).
+    /// WHICH gesture it was decides for how long, or whether at all: see
+    /// [`PointerReport`].
+    Pointer(PointerReport),
     /// Neither: an empty frame (a no-op / keepalive write) or a FOCUS REPORT
     /// (`CSI I` focus-in / `CSI O` focus-out), which xterm.js emits when the
     /// viewer gains or loses focus while the child has focus tracking (DECSET
     /// 1004) on. Selecting a terminal focuses it, so a plain focus change must
-    /// stamp nothing at all.
+    /// stamp nothing at all. A mouse report dux could not DECODE lands here
+    /// too: it is certainly not typing, and a report we cannot read is no basis
+    /// for suppressing anything.
     Ignored,
+}
+
+/// Which pointer gesture a forwarded mouse report encodes. The three are kept
+/// apart because they suppress the working inference for very different lengths
+/// of time (see `dux_core::engine::pointer_suppression_window`), and lumping
+/// them together made a single click blank the Working cue for as long as a
+/// whole scroll does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointerReport {
+    /// One wheel notch (buttons 4..7). Scrolling is continuous by nature: the
+    /// notches keep arriving and the child keeps repainting, so this arms the
+    /// long window.
+    Wheel,
+    /// A button press or release: a click, a phone tap, the start or the end of
+    /// a selection drag. One discrete act producing one repaint, so this arms a
+    /// SHORT window.
+    Button,
+    /// The pointer moved, with or without a button held (bit 32). Arms NOTHING.
+    Motion,
 }
 
 /// Classify a batch of bytes written to a PTY. See [`PtyWriteKind`].
@@ -1613,31 +1635,104 @@ pub enum PtyWriteKind {
 /// receives its focus/mouse event); the classification only decides which
 /// engine window, if any, gets stamped. No printable key or cursor key encodes
 /// as a focus or mouse report, so genuine input is never misread.
+///
+/// A batch that STARTS with a mouse report is classified by that report and
+/// whatever follows it is not inspected. That matches how these bytes actually
+/// arrive (one report per write on both surfaces) and preserves the behavior
+/// the prefix test had before the button decoding was added.
 pub fn classify_pty_write(bytes: &[u8]) -> PtyWriteKind {
     if bytes.is_empty() || is_focus_report(bytes) {
-        PtyWriteKind::Ignored
-    } else if is_mouse_report(bytes) {
-        PtyWriteKind::Pointer
-    } else {
-        PtyWriteKind::Typing
+        return PtyWriteKind::Ignored;
     }
-}
-
-/// Whether a batch of bytes written to a PTY should count as the user "typing"
-/// for the Typing-state / working-suppression window (see
-/// [`crate::engine::Engine::note_pty_input`]). Thin sugar over
-/// [`classify_pty_write`], kept because several call sites only ask this
-/// question.
-pub fn write_counts_as_typing(bytes: &[u8]) -> bool {
-    matches!(classify_pty_write(bytes), PtyWriteKind::Typing)
+    if !looks_like_mouse_report(bytes) {
+        return PtyWriteKind::Typing;
+    }
+    match decode_mouse_report(bytes) {
+        Some(report) => PtyWriteKind::Pointer(report),
+        // Truncated or malformed. Never Typing (it is unmistakably a mouse
+        // report by its introducer), and it suppresses nothing, because we do
+        // not know what it was.
+        None => PtyWriteKind::Ignored,
+    }
 }
 
 fn is_focus_report(bytes: &[u8]) -> bool {
     bytes == b"\x1b[I" || bytes == b"\x1b[O"
 }
 
-fn is_mouse_report(bytes: &[u8]) -> bool {
+/// Whether the batch opens with a mouse-report introducer: SGR/1006
+/// (`CSI < …`) or the legacy X10 form (`CSI M …`). Cheap enough to run on every
+/// write; the full decode only happens when this says yes.
+fn looks_like_mouse_report(bytes: &[u8]) -> bool {
     bytes.starts_with(b"\x1b[<") || bytes.starts_with(b"\x1b[M")
+}
+
+/// Decode a leading mouse report into the gesture it encodes, or `None` if it
+/// is truncated or malformed. Pure, total, and panic-free on any input.
+pub fn decode_mouse_report(bytes: &[u8]) -> Option<PointerReport> {
+    decode_sgr_mouse_report(bytes).or_else(|| decode_legacy_mouse_report(bytes))
+}
+
+/// SGR (1006) form: `CSI < cb ; col ; row (M|m)`, where `M` is a press and `m`
+/// a release. The coordinates are read only to prove the report is well formed.
+fn decode_sgr_mouse_report(bytes: &[u8]) -> Option<PointerReport> {
+    let rest = bytes.strip_prefix(b"\x1b[<")?;
+    let (cb, rest) = take_decimal(rest)?;
+    let (_col, rest) = take_decimal(rest.strip_prefix(b";")?)?;
+    let (_row, rest) = take_decimal(rest.strip_prefix(b";")?)?;
+    match rest.first() {
+        Some(b'M' | b'm') => Some(pointer_from_button_bits(cb)),
+        _ => None,
+    }
+}
+
+/// Legacy X10 form: `CSI M` then exactly three bytes, each biased by 32 (the
+/// button byte and the two coordinates). A byte under 32 means the report was
+/// truncated or corrupted, since the bias makes 32 the smallest legal value.
+fn decode_legacy_mouse_report(bytes: &[u8]) -> Option<PointerReport> {
+    let rest = bytes.strip_prefix(b"\x1b[M")?;
+    let fields = rest.get(..3)?;
+    if fields.iter().any(|b| *b < 32) {
+        return None;
+    }
+    Some(pointer_from_button_bits(u32::from(fields[0] - 32)))
+}
+
+/// Read an ASCII decimal number off the front of `bytes`, returning it and the
+/// remainder. Rejects an empty run and an absurdly long one, so no parse can
+/// overflow or wander.
+fn take_decimal(bytes: &[u8]) -> Option<(u32, &[u8])> {
+    let end = bytes
+        .iter()
+        .position(|b| !b.is_ascii_digit())
+        .unwrap_or(bytes.len());
+    if end == 0 || end > 9 {
+        return None;
+    }
+    let value = std::str::from_utf8(&bytes[..end]).ok()?.parse().ok()?;
+    Some((value, &bytes[end..]))
+}
+
+/// Interpret a mouse report's button field. The bit layout is shared by the SGR
+/// and legacy forms (the legacy byte is the same value biased by 32), which is
+/// why one function serves both.
+///
+/// Bits 0-1 hold the low button number, bit 2/3/4 are shift/meta/ctrl, bit 5
+/// (32) marks MOTION, bit 6 (64) lifts the button number into 4..7 (the wheel),
+/// and bit 7 (128) lifts it into 8..11 (ordinary extra buttons, not a wheel).
+/// Motion is tested first because bit 5 is definitionally "this event is a
+/// move", whatever button is held down with it.
+fn pointer_from_button_bits(cb: u32) -> PointerReport {
+    const MOTION: u32 = 0x20;
+    const WHEEL_RANGE: u32 = 0x40;
+    const HIGH_BUTTON_RANGE: u32 = 0x80;
+    if cb & MOTION != 0 {
+        PointerReport::Motion
+    } else if cb & WHEEL_RANGE != 0 && cb & HIGH_BUTTON_RANGE == 0 {
+        PointerReport::Wheel
+    } else {
+        PointerReport::Button
+    }
 }
 
 impl Drop for PtyClient {
@@ -2638,23 +2733,145 @@ mod tests {
         assert_eq!(valid_pgid(43210), Some(43210));
     }
 
+    /// The old `write_counts_as_typing` cases, folded into the classifier they
+    /// were always a thin wrapper over: genuine input is Typing, and an empty
+    /// frame, a focus report and every shape of mouse report are not.
     #[test]
-    fn write_counts_as_typing_excludes_empty_focus_and_mouse_reports() {
-        // Genuine input counts.
-        assert!(write_counts_as_typing(b"a"));
-        assert!(write_counts_as_typing(b"hello"));
-        assert!(write_counts_as_typing(b"\r")); // Enter
-        assert!(write_counts_as_typing(b"\x7f")); // Backspace
-        assert!(write_counts_as_typing(b"\x1b[A")); // Up arrow is real input
-        assert!(write_counts_as_typing(b"\x1b[Z")); // Shift-Tab is real input
+    fn classify_pty_write_calls_only_genuine_input_typing() {
+        for bytes in [
+            &b"a"[..],
+            b"hello",
+            b"\r",     // Enter
+            b"\x7f",   // Backspace
+            b"\x1b[A", // Up arrow is real input
+            b"\x1b[Z", // Shift-Tab is real input
+        ] {
+            assert_eq!(
+                classify_pty_write(bytes),
+                PtyWriteKind::Typing,
+                "{bytes:?} is genuine input"
+            );
+        }
 
-        // Non-typing writes do not.
-        assert!(!write_counts_as_typing(b"")); // empty frame
-        assert!(!write_counts_as_typing(b"\x1b[I")); // focus in
-        assert!(!write_counts_as_typing(b"\x1b[O")); // focus out
-        assert!(!write_counts_as_typing(b"\x1b[<0;10;5M")); // SGR mouse press
-        assert!(!write_counts_as_typing(b"\x1b[<64;10;5M")); // SGR wheel scroll
-        assert!(!write_counts_as_typing(b"\x1b[M !!")); // legacy mouse
+        assert_eq!(classify_pty_write(b""), PtyWriteKind::Ignored); // empty frame
+        assert_eq!(classify_pty_write(b"\x1b[I"), PtyWriteKind::Ignored); // focus in
+        assert_eq!(classify_pty_write(b"\x1b[O"), PtyWriteKind::Ignored); // focus out
+        for bytes in [
+            &b"\x1b[<0;10;5M"[..], // SGR press
+            b"\x1b[<0;10;5m",      // SGR release
+            b"\x1b[<64;10;5M",     // SGR wheel
+            b"\x1b[<35;10;5M",     // SGR motion
+            b"\x1b[M !!",          // legacy press
+        ] {
+            assert!(
+                !matches!(classify_pty_write(bytes), PtyWriteKind::Typing),
+                "{bytes:?} is a mouse report, never typing"
+            );
+        }
+    }
+
+    /// Every gesture the button field can encode, decoded rather than guessed
+    /// at from the report's prefix. A wheel, a click and a move all start
+    /// `ESC [ <` and mean three different things to the suppression windows.
+    #[test]
+    fn decode_mouse_report_tells_wheel_click_and_motion_apart() {
+        // Wheel: buttons 4..7, i.e. bit 64 set with bit 128 clear.
+        for cb in [64, 65, 66, 67] {
+            let bytes = format!("\x1b[<{cb};10;5M").into_bytes();
+            assert_eq!(
+                decode_mouse_report(&bytes),
+                Some(PointerReport::Wheel),
+                "cb {cb} is a wheel notch"
+            );
+        }
+
+        // Buttons: left/middle/right, pressed (M) and released (m).
+        for cb in [0, 1, 2] {
+            for terminator in ['M', 'm'] {
+                let bytes = format!("\x1b[<{cb};10;5{terminator}").into_bytes();
+                assert_eq!(
+                    decode_mouse_report(&bytes),
+                    Some(PointerReport::Button),
+                    "cb {cb}{terminator} is a button press or release"
+                );
+            }
+        }
+
+        // A modifier held during a click does not change the gesture: shift (4),
+        // meta (8) and ctrl (16) sit above the button bits.
+        assert_eq!(
+            decode_mouse_report(b"\x1b[<20;10;5M"),
+            Some(PointerReport::Button),
+            "ctrl+shift+left-click is still a click"
+        );
+
+        // High buttons (8..11) set bit 128 as well as bit 64 and are ordinary
+        // buttons, not a wheel.
+        assert_eq!(
+            decode_mouse_report(b"\x1b[<128;10;5M"),
+            Some(PointerReport::Button)
+        );
+
+        // Motion, with no button held (35 = 32 + "no button") and with the left
+        // button held (32), i.e. a selection drag.
+        assert_eq!(
+            decode_mouse_report(b"\x1b[<35;10;5M"),
+            Some(PointerReport::Motion),
+            "a bare pointer move"
+        );
+        assert_eq!(
+            decode_mouse_report(b"\x1b[<32;10;5M"),
+            Some(PointerReport::Motion),
+            "drag-motion is still motion"
+        );
+    }
+
+    /// The legacy X10 form carries the same button bits, biased by 32.
+    #[test]
+    fn decode_mouse_report_reads_the_legacy_x10_form() {
+        // 0x20 = button 0 pressed; coordinates are the two bytes after it.
+        assert_eq!(
+            decode_mouse_report(b"\x1b[M\x20\x21\x21"),
+            Some(PointerReport::Button)
+        );
+        // 0x60 = 0x20 + 64: a wheel notch.
+        assert_eq!(
+            decode_mouse_report(b"\x1b[M\x60\x21\x21"),
+            Some(PointerReport::Wheel)
+        );
+        // 0x40 = 0x20 + 32: motion.
+        assert_eq!(
+            decode_mouse_report(b"\x1b[M\x40\x21\x21"),
+            Some(PointerReport::Motion)
+        );
+    }
+
+    /// Nothing here may panic, and a report dux cannot read must classify as
+    /// Ignored: not typing (it is plainly a mouse report) and no suppression
+    /// (we do not know what gesture it was).
+    #[test]
+    fn a_malformed_mouse_report_is_ignored_and_never_panics() {
+        for bytes in [
+            &b"\x1b[<"[..],           // introducer only
+            b"\x1b[<64",              // no coordinates
+            b"\x1b[<64;10",           // one coordinate
+            b"\x1b[<64;10;5",         // no terminator
+            b"\x1b[<64;10;5X",        // wrong terminator
+            b"\x1b[<;10;5M",          // empty button field
+            b"\x1b[<9999999999;1;1M", // absurdly long number
+            b"\x1b[<64;10;5;7M",      // too many fields
+            b"\x1b[M",                // legacy introducer only
+            b"\x1b[M\x20",            // legacy, truncated
+            b"\x1b[M\x20\x21",        // legacy, still truncated
+            b"\x1b[M\x01\x21\x21",    // legacy, byte below the 32 bias
+        ] {
+            assert_eq!(
+                classify_pty_write(bytes),
+                PtyWriteKind::Ignored,
+                "{bytes:?} is unreadable and must stamp nothing"
+            );
+            assert_eq!(decode_mouse_report(bytes), None);
+        }
     }
 
     fn viewport_lines(snapshot: &TerminalSnapshot) -> Vec<String> {
