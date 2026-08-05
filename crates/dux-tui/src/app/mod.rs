@@ -6703,30 +6703,10 @@ leading_branch = "main"
 
     /// Write a harmless executable stand-in for `gh`, so a test that trips an
     /// off-to-on transition spawns the probe against it rather than shelling out
-    /// to the real `gh` (which would need a network call and a real login).
+    /// to the real `gh` (which would need a network call and a real login). The
+    /// script itself is dux-core's one shared builder; only the body is ours.
     fn stand_in_gh(dir: &std::path::Path) -> std::ffi::OsString {
-        let script = dir.join("fake-gh");
-        std::fs::write(&script, "#!/bin/sh\nexit 0\n").expect("write stand-in gh");
-        std::fs::set_permissions(
-            &script,
-            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
-        )
-        .expect("chmod stand-in gh");
-        // Exec it once here: a freshly written executable can be refused with
-        // ETXTBSY ("Text file busy") when another test forks while this write's
-        // file descriptor is open and inherits it. Observed as a real flake in
-        // dux-core's equivalent helper. This body has no side effects, so no
-        // warmup argument is needed.
-        for _ in 0..200 {
-            match std::process::Command::new(&script).status() {
-                Ok(_) => return script.into(),
-                Err(err) if err.raw_os_error() == Some(26) => {
-                    std::thread::sleep(std::time::Duration::from_millis(5));
-                }
-                Err(err) => panic!("stand-in gh is not runnable: {err}"),
-            }
-        }
-        panic!("stand-in gh stayed busy for a second; something is holding it open");
+        dux_core::gh::probe_test_support::stand_in_gh(dir, "exit 0").into()
     }
 
     /// The palette toggle is one of the four off-to-on transitions that must

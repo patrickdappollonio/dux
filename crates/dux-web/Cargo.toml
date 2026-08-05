@@ -37,6 +37,10 @@ flate2 = "1"
 flate2 = "1"
 
 [dev-dependencies]
+# The stand-in `gh` builders live in dux-core behind `test-support`, so the
+# tests here drive the real probe code path against a script whose answer they
+# choose. Dev-only: a normal build of this crate leaves the feature off.
+dux-core = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
 tokio-tungstenite = { workspace = true }
 tower = { version = "0.5", features = ["util"] }

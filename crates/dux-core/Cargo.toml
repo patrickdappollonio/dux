@@ -3,6 +3,12 @@ name = "dux-core"
 version.workspace = true
 edition = "2024"
 
+[features]
+# Exposes the stand-in `gh` builders (`gh::probe_test_support`) to other crates'
+# test targets. `dux-tui` and `dux-web` enable it as a DEV-dependency only, so it
+# is off in a normal build and none of it ships in a release binary.
+test-support = []
+
 [dependencies]
 notify.workspace = true
 anyhow.workspace = true

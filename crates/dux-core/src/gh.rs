@@ -1314,8 +1314,14 @@ fn parse_resolved_pull_request_json(
 /// tests on both surfaces. A stand-in is preferred over mocking dux's internals:
 /// it exercises the real two-call protocol, and it needs neither the network,
 /// nor a real login, nor a mutation of the test process's `PATH`.
-#[cfg(test)]
-pub(crate) mod probe_test_support {
+///
+/// This is the ONE copy. It is reachable from another crate's integration tests
+/// (which are external crates, so `pub(crate)` and a plain `#[cfg(test)]` would
+/// hide it) through the `test-support` cargo feature, which `dux-tui` and
+/// `dux-web` turn on as a dev-dependency only. A normal `cargo build` of either
+/// surface leaves the feature off, so none of this reaches a shipped binary.
+#[cfg(any(test, feature = "test-support"))]
+pub mod probe_test_support {
     use std::path::{Path, PathBuf};
 
     /// The first argument the stand-in answers to, before its body runs. See
@@ -1332,7 +1338,7 @@ pub(crate) mod probe_test_support {
     /// real, observed flake, not a theoretical one. The warmup swallows the
     /// window, and it answers [`WARMUP_ARG`] by exiting before the body so a
     /// stand-in that records its calls does not record this one.
-    pub(crate) fn stand_in_gh(dir: &Path, body: &str) -> PathBuf {
+    pub fn stand_in_gh(dir: &Path, body: &str) -> PathBuf {
         let script = dir.join("fake-gh");
         std::fs::write(
             &script,
@@ -1360,7 +1366,7 @@ pub(crate) mod probe_test_support {
     /// A stand-in whose machine-readable answer reports each of `hosts` with a
     /// successful active account, and which fails the plain call (so a test can
     /// tell the two modes apart).
-    pub(crate) fn stand_in_gh_serving(dir: &Path, hosts: &[&str]) -> PathBuf {
+    pub fn stand_in_gh_serving(dir: &Path, hosts: &[&str]) -> PathBuf {
         let entries: Vec<String> = hosts
             .iter()
             .map(|h| format!(r#""{h}":[{{"state":"success","active":true,"host":"{h}"}}]"#))

@@ -30,6 +30,10 @@ notify.workspace = true
 opaline = { version = "0.4", features = ["ratatui", "builtin-themes"] }
 
 [dev-dependencies]
+# The stand-in `gh` builders live in dux-core behind `test-support`, so the
+# tests here drive the real probe code path against a script whose answer they
+# choose. Dev-only: a normal build of this crate leaves the feature off.
+dux-core = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
 # Used only by the signal-disposition regression tests to raise a signal and to
 # reproduce the `SIG_DFL` reset the web server deliberately no longer performs.
