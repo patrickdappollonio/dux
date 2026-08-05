@@ -14,6 +14,7 @@ use std::path::Path;
 use axum::Router;
 use dux_core::config::{DuxPaths, ProjectConfig};
 use dux_core::gh::GithubHostPolicy;
+use dux_core::gh::probe_test_support::stand_in_gh_serving;
 use dux_core::model::GhStatus;
 use dux_core::storage::SessionStore;
 use dux_web::bootstrap::bootstrap_engine;
@@ -78,10 +79,16 @@ async fn boot(projects: &[(&str, &str, &str)], hosts: &[&str]) -> (SocketAddr, t
     }
 
     let mut engine = bootstrap_engine(&paths).unwrap();
-    // Stand in for a settled `gh auth status` probe. The probe itself has its
-    // own tests in dux-core against a stand-in `gh`; what is under test here is
-    // resolution, so the answer is placed rather than raced for.
     engine.github_integration_enabled = true;
+    // Point the probe at a stand-in `gh` that reports exactly `hosts`. Starting
+    // the engine thread starts the REAL host probe, so placing an answer here
+    // and hoping is not enough: on a machine with no authenticated `gh` the
+    // probe overwrites the placed answer mid-test and every resolve is refused.
+    // With the stand-in, the production probe code path runs unchanged and the
+    // answer it gets is the one this test wrote.
+    engine.gh_probe.program = stand_in_gh_serving(&root, hosts).into();
+    // The placed pair covers the window BEFORE the probe reports, so the answer
+    // is the same at every instant of the test rather than only after it lands.
     engine.gh_status = GhStatus::Available;
     engine.set_github_host_policy(GithubHostPolicy::Hosts(
         hosts.iter().map(|h| (*h).to_string()).collect(),
