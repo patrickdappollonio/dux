@@ -2683,10 +2683,15 @@ mod tests {
             .pty_activity
             .insert("tab-2".to_string(), Instant::now());
         engine.pty_input.insert("tab-2".to_string(), Instant::now());
+        // `pty_pointer` is asserted below alongside the others because its field
+        // doc claims it is cleared wherever `pty_activity` is, and a claim
+        // nothing pins is a claim that quietly stops being true.
+        engine.note_pty_pointer("tab-2", crate::pty::PointerReport::Wheel);
         engine
             .resume_fallback_candidates
             .insert("tab-2".to_string(), Instant::now());
         engine.pty_activity.insert("s1".to_string(), Instant::now());
+        engine.note_pty_pointer("s1", crate::pty::PointerReport::Wheel);
 
         engine
             .finish_delete_session("s1")
@@ -2698,6 +2703,7 @@ mod tests {
         for key in ["s1", "tab-2"] {
             assert!(!engine.pty_activity.contains_key(key));
             assert!(!engine.pty_input.contains_key(key));
+            assert!(!engine.pty_pointer.contains_key(key));
             assert!(!engine.running_provider_pins.contains_key(key));
             assert!(!engine.resume_fallback_candidates.contains_key(key));
         }

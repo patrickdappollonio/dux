@@ -464,9 +464,12 @@ mod tests {
             .unwrap()
             .foreground_cmd = None;
         engine.note_pty_write(&id, b"\x1b[<64;10;5M");
-        engine
-            .pty_activity
-            .insert(id.clone(), std::time::Instant::now());
+        // Stamp the activity at the pointer stamp's OWN instant rather than
+        // reading the clock again. The activity window outlives the pointer one,
+        // so two adjacent `Instant::now()` calls would make the assertion depend
+        // on how long the gap between these lines happened to be.
+        let scrolled_at = engine.pty_pointer[&id].at;
+        engine.pty_activity.insert(id.clone(), scrolled_at);
         assert!(
             !engine.terminal_is_working(&id),
             "a repaint caused by the user's own scroll must not read as Running"

@@ -370,18 +370,22 @@ pub struct Engine {
     /// `pty_activity` is cleared (session teardown, detach, forced relaunch) so
     /// the two never drift; a new teardown path must drop both entries.
     pub pty_input: HashMap<String, Instant>,
-    /// Tracks when a POINTER report (a mouse click or a wheel notch) was last
-    /// forwarded to each PTY. Separate from `pty_input` because the two answer
-    /// opposite questions about the same byte: a forwarded wheel must NEVER
-    /// read as the user typing (design tenet: selecting or scrolling a terminal
-    /// is not typing), but it DOES make the child repaint, and a repaint the
-    /// user asked for is not the agent working. While an entry here is fresh
-    /// ([`POINTER_REPAINT_WINDOW`]) [`Engine::is_agent_streaming`] stops
-    /// inferring "working" from output text and defers to the agent's own
-    /// `OSC 9;4` report. Stamped through [`Engine::note_pty_write`] by both
-    /// surfaces. Invariant, exactly as for `pty_input`: cleared wherever
-    /// `pty_activity` is cleared, so the maps never drift.
-    pub pty_pointer: HashMap<String, Instant>,
+    /// Tracks when a POINTER report (a wheel notch or a click) was last
+    /// forwarded to each PTY, and for how long it suppresses. Separate from
+    /// `pty_input` because the two answer opposite questions about the same
+    /// byte: a forwarded wheel must NEVER read as the user typing (design
+    /// tenet: selecting or scrolling a terminal is not typing), but it DOES
+    /// make the child repaint, and a repaint the user asked for is not the
+    /// agent working. While an entry here is fresh
+    /// [`Engine::is_agent_streaming`] stops inferring "working" from output
+    /// text and defers to the agent's own `OSC 9;4` report. The window is
+    /// carried per entry rather than being one constant because a scroll and a
+    /// click suppress for very different lengths of time (see
+    /// [`pointer_suppression_window`]). Stamped through
+    /// [`Engine::note_pty_write`] by both surfaces. Invariant, exactly as for
+    /// `pty_input`: cleared wherever `pty_activity` is cleared, so the maps
+    /// never drift; the teardown tests pin it.
+    pub pty_pointer: HashMap<String, PointerStamp>,
     /// Tabs (keyed by tab id) that have raised a "needs attention" signal that
     /// has not yet been looked at. Memory-only runtime state, never persisted —
     /// like `working`/`has_output`, it does not survive a restart, by tenet.
@@ -647,21 +651,79 @@ pub const AGENT_STREAMING_WINDOW: Duration = Duration::from_secs(1);
 /// [`Engine::is_agent_streaming`].
 pub const AGENT_INPUT_SUPPRESSION_WINDOW: Duration = Duration::from_millis(1250);
 
-/// How long after a POINTER report (a mouse click or a wheel notch) is
-/// forwarded to a PTY the output-activity heuristic stays suppressed for it.
-/// A child with mouse reporting on repaints its whole grid in response, and
-/// that repaint is output the USER caused, not work the agent started, so
-/// reading it as "working" lights the indicator for the entire time somebody
-/// scrolls. While this window is open the working decision defers to the
-/// agent's own `OSC 9;4` progress report instead (see
-/// [`Engine::is_agent_streaming`]), so an agent that really is busy keeps
-/// saying so and one that is idle stays idle.
+/// How long after a WHEEL notch is forwarded to a PTY the output-activity
+/// heuristic stays suppressed for it. A child with mouse reporting on repaints
+/// its whole grid in response, and that repaint is output the USER caused, not
+/// work the agent started, so reading it as "working" lights the indicator for
+/// the entire time somebody scrolls. While this window is open the working
+/// decision defers to the agent's own `OSC 9;4` progress report instead (see
+/// [`Engine::is_agent_streaming`]).
+///
+/// Be precise about what that deferral buys, because only some providers can
+/// answer: Claude Code and Copilot emit `OSC 9;4` progress, and Codex and
+/// OpenCode do not (see `website/docs/attention-indicators.md`). For the
+/// providers that report, a busy agent keeps reading busy while it is
+/// scrolled. For the ones that do not, a genuinely busy agent reads IDLE for
+/// the length of this window, which is the price of not lighting the indicator
+/// every time somebody scrolls an idle one.
 ///
 /// Same length as [`AGENT_INPUT_SUPPRESSION_WINDOW`] and for the same reason:
 /// it must comfortably outlast the trailing repaint of the last notch, while a
 /// scroll that has stopped hands the heuristic back promptly. Wall-clock, per
 /// the design tenet.
 pub const POINTER_REPAINT_WINDOW: Duration = Duration::from_millis(1250);
+
+/// The same suppression after a BUTTON press or release (a click, a phone tap,
+/// the start or end of a selection drag), and deliberately much shorter than
+/// [`POINTER_REPAINT_WINDOW`].
+///
+/// A scroll is continuous: notches keep arriving and the child keeps repainting,
+/// so its window has to outlast the gap between notches. A click is one
+/// discrete act that causes one repaint and is over. It is also the gesture
+/// most likely to START work (clicking a menu entry, confirming a prompt), and
+/// a user who clicks and then watches for the Working cue should see it appear
+/// promptly rather than after more than a second of a blank row. Half a second
+/// covers the repaint a click provokes with room to spare while keeping that
+/// wait short. Wall-clock, per the design tenet.
+pub const POINTER_CLICK_REPAINT_WINDOW: Duration = Duration::from_millis(500);
+
+/// How long a forwarded pointer report suppresses the output-activity
+/// heuristic, or `None` if it suppresses nothing at all.
+///
+/// MOTION suppresses nothing, and that is a deliberate choice rather than a
+/// user instruction, so it should be easy to reverse if it proves wrong: a move
+/// is not a discrete user action, an app using any-event tracking (DECSET 1003)
+/// emits one for every cell the pointer crosses, and arming a window on each of
+/// them would keep a genuinely busy agent reading idle for as long as somebody
+/// drifted the mouse across its pane. Nobody asked for that.
+///
+/// Pure, so both surfaces and the tests agree without an engine.
+pub fn pointer_suppression_window(report: crate::pty::PointerReport) -> Option<Duration> {
+    match report {
+        crate::pty::PointerReport::Wheel => Some(POINTER_REPAINT_WINDOW),
+        crate::pty::PointerReport::Button => Some(POINTER_CLICK_REPAINT_WINDOW),
+        crate::pty::PointerReport::Motion => None,
+    }
+}
+
+/// A forwarded pointer report: when it reached the PTY, and for how long it
+/// suppresses the working inference. The window travels with the stamp because
+/// a wheel notch and a click suppress for different lengths of time and the
+/// map holds both kinds (see [`pointer_suppression_window`]).
+#[derive(Debug, Clone, Copy)]
+pub struct PointerStamp {
+    /// When the report was forwarded.
+    pub at: Instant,
+    /// How long from `at` the suppression lasts.
+    pub window: Duration,
+}
+
+impl PointerStamp {
+    /// Whether the suppression this stamp armed is still in force.
+    pub fn is_fresh(&self) -> bool {
+        self.at.elapsed() < self.window
+    }
+}
 
 /// How long an `OSC 9;4` progress report stays authoritative for the "working"
 /// indicator before [`Engine::is_agent_streaming`] falls back to the
@@ -963,13 +1025,31 @@ impl Engine {
         self.pty_input.insert(tab_id.to_string(), Instant::now());
     }
 
-    /// Record that a forwarded POINTER report (a mouse click or a wheel notch)
-    /// just reached this PTY. This is deliberately NOT `note_pty_input`: a
-    /// pointer report must never light the Typing state, but it does make the
-    /// child repaint, and that repaint must not be mistaken for the agent
-    /// working. See [`Engine::is_agent_streaming`].
-    pub fn note_pty_pointer(&mut self, id: &str) {
-        self.pty_pointer.insert(id.to_string(), Instant::now());
+    /// Record that a forwarded POINTER report just reached this PTY. This is
+    /// deliberately NOT `note_pty_input`: a pointer report must never light the
+    /// Typing state, but it does make the child repaint, and that repaint must
+    /// not be mistaken for the agent working. See [`Engine::is_agent_streaming`].
+    ///
+    /// How long it suppresses depends on the gesture, and motion suppresses
+    /// nothing, so a `Motion` report stamps no entry at all (see
+    /// [`pointer_suppression_window`]).
+    pub fn note_pty_pointer(&mut self, id: &str, report: crate::pty::PointerReport) {
+        if let Some(window) = pointer_suppression_window(report) {
+            self.note_pty_pointer_window(id, window);
+        }
+    }
+
+    /// Stamp the pointer window directly, for a caller that already resolved
+    /// the window (the TUI folds several reports from one input drain into the
+    /// longest of their windows before stamping once).
+    pub fn note_pty_pointer_window(&mut self, id: &str, window: Duration) {
+        self.pty_pointer.insert(
+            id.to_string(),
+            PointerStamp {
+                at: Instant::now(),
+                window,
+            },
+        );
     }
 
     /// Classify a batch of bytes a surface just wrote to a PTY and stamp the
@@ -980,7 +1060,7 @@ impl Engine {
         let kind = crate::pty::classify_pty_write(bytes);
         match kind {
             crate::pty::PtyWriteKind::Typing => self.note_pty_input(id),
-            crate::pty::PtyWriteKind::Pointer => self.note_pty_pointer(id),
+            crate::pty::PtyWriteKind::Pointer(report) => self.note_pty_pointer(id, report),
             crate::pty::PtyWriteKind::Ignored => {}
         }
         kind
@@ -990,10 +1070,12 @@ impl Engine {
     /// any output it provoked is a REPAINT the user asked for, not the agent
     /// producing work. While this is true the working decision stops inferring
     /// anything from output text and defers to the agent's own progress report.
+    ///
+    /// "Recently enough" is per stamp, not one constant: a wheel notch holds
+    /// this true for [`POINTER_REPAINT_WINDOW`] and a click for the much
+    /// shorter [`POINTER_CLICK_REPAINT_WINDOW`].
     pub fn recent_pointer_input(&self, id: &str) -> bool {
-        self.pty_pointer
-            .get(id)
-            .is_some_and(|t| t.elapsed() < POINTER_REPAINT_WINDOW)
+        self.pty_pointer.get(id).is_some_and(PointerStamp::is_fresh)
     }
 
     /// Returns whether the tab's agent should read as "working". Priority: real
@@ -1010,11 +1092,14 @@ impl Engine {
     ///   "idle" (or stopped reporting) while still printing must still read as
     ///   working. There are two exceptions, and both are output the USER caused:
     ///   the terminal echoing keystrokes within [`AGENT_INPUT_SUPPRESSION_WINDOW`],
-    ///   and the REPAINT a child answers a forwarded pointer report with, within
-    ///   [`POINTER_REPAINT_WINDOW`]. A child that owns the mouse redraws its whole
-    ///   grid for every wheel notch, so without the second exception the mere act
-    ///   of scrolling an idle agent lit the working indicator for as long as the
-    ///   user scrolled.
+    ///   and the REPAINT a child answers a forwarded pointer report with. A child
+    ///   that owns the mouse redraws its whole grid for every wheel notch, so
+    ///   without the second exception the mere act of scrolling an idle agent lit
+    ///   the working indicator for as long as the user scrolled. How long that
+    ///   second exception lasts depends on the gesture: [`POINTER_REPAINT_WINDOW`]
+    ///   for a wheel notch, the much shorter [`POINTER_CLICK_REPAINT_WINDOW`] for a
+    ///   click or tap, and nothing at all for pointer motion (see
+    ///   [`pointer_suppression_window`]).
     /// - No fresh (non-echo) output → fall back to a fresh OSC 9;4 progress report,
     ///   if any. A stale report (older than [`PROGRESS_AUTHORITY_WINDOW`]) grants no
     ///   authority, so a crashed agent that stopped reporting can't stick it on.
@@ -3995,13 +4080,36 @@ mod tests {
     /// reporting on. One notch of scroll, at an arbitrary cell.
     const WHEEL_REPORT: &[u8] = b"\x1b[<64;10;5M";
 
+    /// An SGR MOTION report: the pointer moved with no button held (bit 32 set,
+    /// button bits 3 = "no button"). An app using any-event tracking gets one of
+    /// these for every cell the pointer crosses.
+    const MOTION_REPORT: &[u8] = b"\x1b[<35;10;5M";
+
+    #[test]
+    fn moving_the_pointer_arms_no_suppression_at_all() {
+        let (mut engine, _tmp) = test_engine();
+
+        engine.note_pty_write("s1", MOTION_REPORT);
+
+        assert!(!engine.is_typing("s1"), "moving the pointer is not typing");
+        assert!(
+            !engine.recent_pointer_input("s1"),
+            "motion is not a discrete user action and fires continuously, so it \
+             must not suppress the working inference at all"
+        );
+    }
+
+    /// An SGR BUTTON report: the left button pressed, the shape of a click or a
+    /// phone tap.
+    const CLICK_REPORT: &[u8] = b"\x1b[<0;10;5M";
+
     #[test]
     fn a_forwarded_pointer_report_is_never_typing() {
         let (mut engine, _tmp) = test_engine();
 
         assert_eq!(
             engine.note_pty_write("s1", WHEEL_REPORT),
-            crate::pty::PtyWriteKind::Pointer
+            crate::pty::PtyWriteKind::Pointer(crate::pty::PointerReport::Wheel)
         );
         assert!(
             !engine.is_typing("s1"),
@@ -4017,6 +4125,66 @@ mod tests {
         );
     }
 
+    /// A click causes one repaint and is over, so it must hand the heuristic
+    /// back promptly: a user who clicks something that STARTS work should see
+    /// the Working cue appear within a moment, not after a second and a quarter.
+    /// A scroll is continuous and keeps its long window.
+    #[test]
+    fn a_click_stops_suppressing_long_before_a_scroll_does() {
+        assert!(
+            POINTER_CLICK_REPAINT_WINDOW < POINTER_REPAINT_WINDOW,
+            "a click is one discrete act; a scroll keeps going"
+        );
+
+        let (mut engine, _tmp) = test_engine();
+        engine.note_pty_write("click", CLICK_REPORT);
+        engine.note_pty_write("wheel", WHEEL_REPORT);
+
+        // Both suppress right away.
+        assert!(engine.recent_pointer_input("click"));
+        assert!(engine.recent_pointer_input("wheel"));
+
+        // Age both by a hair over the click window, without sleeping.
+        let aged = POINTER_CLICK_REPAINT_WINDOW + Duration::from_millis(50);
+        for id in ["click", "wheel"] {
+            let stamp = engine.pty_pointer.get_mut(id).expect("stamp");
+            stamp.at -= aged;
+        }
+
+        assert!(
+            !engine.recent_pointer_input("click"),
+            "the click's short window has lapsed"
+        );
+        assert!(
+            engine.recent_pointer_input("wheel"),
+            "the wheel's long window has not"
+        );
+    }
+
+    /// Motion arms nothing, so it can never blank a working agent no matter how
+    /// many reports an any-event-tracking app sends.
+    #[test]
+    fn a_busy_agent_stays_working_while_the_pointer_moves_over_it() {
+        let (mut engine, _tmp) = test_engine();
+
+        for _ in 0..20 {
+            assert_eq!(
+                engine.note_pty_write("s1", MOTION_REPORT),
+                crate::pty::PtyWriteKind::Pointer(crate::pty::PointerReport::Motion)
+            );
+        }
+        engine.pty_activity.insert("s1".to_string(), Instant::now());
+
+        assert!(
+            !engine.pty_pointer.contains_key("s1"),
+            "motion must not even create a pointer entry"
+        );
+        assert!(
+            engine.is_agent_streaming("s1"),
+            "moving the mouse across a busy agent's pane must not read as idle"
+        );
+    }
+
     #[test]
     fn a_repaint_after_a_forwarded_wheel_is_not_working_without_a_progress_report() {
         let (mut engine, _tmp) = test_engine();
@@ -4025,7 +4193,13 @@ mod tests {
         // grid, so `pty_activity` is stamped, but that output is the user's own
         // scroll coming back, not the agent starting work.
         engine.note_pty_write("s1", WHEEL_REPORT);
-        engine.pty_activity.insert("s1".to_string(), Instant::now());
+        // Reuse the pointer stamp's OWN instant for the activity stamp rather
+        // than reading the clock a second time. Two adjacent `Instant::now()`
+        // calls make the assertion depend on how long the gap between these two
+        // lines happened to be: the activity window outlives the pointer one, so
+        // a slow enough gap would lapse the suppression and invert the result.
+        let scrolled_at = engine.pty_pointer["s1"].at;
+        engine.pty_activity.insert("s1".to_string(), scrolled_at);
 
         assert!(
             !engine.is_agent_streaming("s1"),
@@ -4033,25 +4207,34 @@ mod tests {
         );
     }
 
+    /// While the heuristic is suppressed the agent's own report decides, in BOTH
+    /// directions. The `false` half is what gives this test teeth: with fresh
+    /// activity and no suppression the streaming branch would return true, so
+    /// removing the suppression fails it. (The `true` half alone could not: the
+    /// old code returned true through the streaming branch anyway.)
     #[test]
-    fn a_scrolled_agent_that_reports_progress_stays_working() {
-        let (mut engine, _tmp) = test_engine();
+    fn a_scrolled_agent_defers_to_its_own_progress_report_in_both_directions() {
+        for (reported, expected) in [(true, true), (false, false)] {
+            let (mut engine, _tmp) = test_engine();
 
-        engine.note_pty_write("s1", WHEEL_REPORT);
-        engine.pty_activity.insert("s1".to_string(), Instant::now());
-        engine.pty_progress.insert(
-            "s1".to_string(),
-            ProgressReport {
-                working: true,
-                at: Instant::now(),
-            },
-        );
+            engine.note_pty_write("s1", WHEEL_REPORT);
+            let scrolled_at = engine.pty_pointer["s1"].at;
+            engine.pty_activity.insert("s1".to_string(), scrolled_at);
+            engine.pty_progress.insert(
+                "s1".to_string(),
+                ProgressReport {
+                    working: reported,
+                    at: scrolled_at,
+                },
+            );
 
-        assert!(
-            engine.is_agent_streaming("s1"),
-            "with the heuristic suppressed, the agent's own report is authoritative \
-             and a busy agent must not flicker to idle while it is scrolled"
-        );
+            assert_eq!(
+                engine.is_agent_streaming("s1"),
+                expected,
+                "a scrolled agent reporting working={reported} must read as {expected}, \
+                 whatever the repaint text says"
+            );
+        }
     }
 
     #[test]
@@ -4061,7 +4244,10 @@ mod tests {
         engine.pty_activity.insert("s1".to_string(), Instant::now());
         engine.pty_pointer.insert(
             "s1".to_string(),
-            Instant::now() - (POINTER_REPAINT_WINDOW + Duration::from_millis(50)),
+            PointerStamp {
+                at: Instant::now() - (POINTER_REPAINT_WINDOW + Duration::from_millis(50)),
+                window: POINTER_REPAINT_WINDOW,
+            },
         );
 
         assert!(

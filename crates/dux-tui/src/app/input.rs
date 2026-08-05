@@ -328,13 +328,8 @@ pub(super) fn contains_point(rect: Rect, column: u16, row: u16) -> bool {
         && row < rect.y.saturating_add(rect.height)
 }
 
-/// Decide whether a mouse-wheel event should be forwarded to the embedded
-/// child process instead of scrolling dux's own host scrollback.
-///
-/// `None` = auto (forward only when the child owns the alt screen and asked for
-/// mouse); `Some(true)` = always forward; `Some(false)` = never forward.
 /// What kinds of user input a raw-input batch actually delivered to the focused
-/// PTY. Two flags rather than one boolean, because the engine keeps two windows
+/// PTY. Two fields rather than one boolean, because the engine keeps two windows
 /// with opposite membership rules: a keystroke is typing and suppresses its own
 /// echo, while a forwarded pointer report is NOT typing (design tenet:
 /// selecting or scrolling a terminal is not typing) but still has to suppress
@@ -346,7 +341,12 @@ pub(super) fn contains_point(rect: Rect, column: u16, row: u16) -> bool {
 #[derive(Default)]
 struct ForwardedInput {
     typing: bool,
-    pointer: bool,
+    /// The longest suppression window any pointer report in this batch asked
+    /// for, or `None` if there were none (or only motion, which asks for
+    /// nothing). One drain can carry a click and a wheel notch together and the
+    /// batch stamps once, so the longer window has to win: taking the last one
+    /// would let a trailing click cut a scroll's suppression short.
+    pointer_window: Option<Duration>,
 }
 
 impl ForwardedInput {
@@ -354,16 +354,26 @@ impl ForwardedInput {
     fn note(&mut self, bytes: &[u8]) {
         match dux_core::pty::classify_pty_write(bytes) {
             dux_core::pty::PtyWriteKind::Typing => self.typing = true,
-            dux_core::pty::PtyWriteKind::Pointer => self.pointer = true,
+            dux_core::pty::PtyWriteKind::Pointer(report) => {
+                if let Some(window) = dux_core::engine::pointer_suppression_window(report) {
+                    self.pointer_window =
+                        Some(self.pointer_window.map_or(window, |prev| prev.max(window)));
+                }
+            }
             dux_core::pty::PtyWriteKind::Ignored => {}
         }
     }
 
     fn any(&self) -> bool {
-        self.typing || self.pointer
+        self.typing || self.pointer_window.is_some()
     }
 }
 
+/// Decide whether a mouse-wheel event should be forwarded to the embedded
+/// child process instead of scrolling dux's own host scrollback.
+///
+/// `None` = auto (forward only when the child owns the alt screen and asked for
+/// mouse); `Some(true)` = always forward; `Some(false)` = never forward.
 fn should_forward_wheel(forward_scroll: Option<bool>, alt_screen: bool, mouse_mode: bool) -> bool {
     match forward_scroll {
         Some(v) => v,
@@ -2218,6 +2228,10 @@ impl App {
                         &mut forwarded_to_pty,
                         self.selected_terminal_surface_client(),
                     );
+                    // Stamp now, before `input_target` moves below: this arm can
+                    // leave the function without reaching the tail stamp, and
+                    // the id is resolved from `input_target`.
+                    self.stamp_forwarded_input(&mut forwarded_to_pty);
                     if is_scrolled_back {
                         continue;
                     }
@@ -2247,6 +2261,9 @@ impl App {
                         &mut forwarded_to_pty,
                         self.selected_terminal_surface_client(),
                     );
+                    // Stamp before leaving interactive mode: that moves
+                    // `input_target`, which is what resolves the id.
+                    self.stamp_forwarded_input(&mut forwarded_to_pty);
                     self.exit_interactive_mode();
                     return Ok(false);
                 }
@@ -2475,37 +2492,50 @@ impl App {
             self.terminal_selection = None;
         }
 
-        // Record input that actually reached the focused PTY so the output it
-        // provokes isn't mistaken for the PTY "working". Typing and pointer
-        // input stamp DIFFERENT windows (see [`Engine::note_pty_input`] and
-        // [`Engine::note_pty_pointer`]) because only one of them is the user
-        // typing. Tab and terminal ids are disjoint and both key those maps.
-        if forwarded_to_pty.any() {
-            let id = match self.input_target {
-                // Stamp the FOCUSED tab (where the bytes actually went), not the
-                // session/Main id, otherwise typing into an extra tab bumps the
-                // wrong tab's suppression window.
-                InputTarget::Agent => self
-                    .selected_session()
-                    .map(|s| s.id.clone())
-                    .map(|session_id| self.focused_tab_id(&session_id)),
-                // A terminal keystroke stamps under the terminal id, exactly as
-                // an agent keystroke does, so its echo isn't read as the
-                // terminal "working".
-                InputTarget::Terminal => self.active_terminal_id.clone(),
-                _ => None,
-            };
-            if let Some(id) = id {
-                if forwarded_to_pty.typing {
-                    self.engine.note_pty_input(&id);
-                }
-                if forwarded_to_pty.pointer {
-                    self.engine.note_pty_pointer(&id);
-                }
-            }
-        }
+        self.stamp_forwarded_input(&mut forwarded_to_pty);
 
         Ok(false)
+    }
+
+    /// Record input that actually reached the focused PTY so the output it
+    /// provokes isn't mistaken for the PTY "working". Typing and pointer input
+    /// stamp DIFFERENT windows (see [`Engine::note_pty_input`] and
+    /// [`Engine::note_pty_pointer`]) because only one of them is the user
+    /// typing. Tab and terminal ids are disjoint and both key those maps.
+    ///
+    /// The accumulator is CONSUMED, so this is safe to call more than once in a
+    /// drain. That is what the early-return paths in `process_raw_input_bytes`
+    /// need: they flush pending bytes to the PTY and then leave the function
+    /// before its tail, and they must stamp BEFORE they move `input_target`,
+    /// since the id below is resolved from it. Bytes flushed on those paths used
+    /// to stamp nothing at all.
+    fn stamp_forwarded_input(&mut self, forwarded: &mut ForwardedInput) {
+        if !forwarded.any() {
+            return;
+        }
+        let id = match self.input_target {
+            // Stamp the FOCUSED tab (where the bytes actually went), not the
+            // session/Main id, otherwise typing into an extra tab bumps the
+            // wrong tab's suppression window.
+            InputTarget::Agent => self
+                .selected_session()
+                .map(|s| s.id.clone())
+                .map(|session_id| self.focused_tab_id(&session_id)),
+            // A terminal keystroke stamps under the terminal id, exactly as
+            // an agent keystroke does, so its echo isn't read as the
+            // terminal "working".
+            InputTarget::Terminal => self.active_terminal_id.clone(),
+            _ => None,
+        };
+        if let Some(id) = id {
+            if forwarded.typing {
+                self.engine.note_pty_input(&id);
+            }
+            if let Some(window) = forwarded.pointer_window {
+                self.engine.note_pty_pointer_window(&id, window);
+            }
+        }
+        *forwarded = ForwardedInput::default();
     }
 
     /// Clear (and suppress) the attention flag on the agent tab the user is
@@ -7612,7 +7642,8 @@ impl App {
                 // working, exactly as on the interactive path. This is the same
                 // byte reaching the same PTY; only the route here differs.
                 if let Some(id) = self.selected_terminal_surface_id() {
-                    self.engine.note_pty_pointer(&id);
+                    self.engine
+                        .note_pty_pointer(&id, dux_core::pty::PointerReport::Wheel);
                 }
                 return;
             }
@@ -20184,6 +20215,24 @@ cyan = "#00ffff"
             app.engine.pty_input.contains_key(&session_id),
             "typing into the focused agent must record input so the echo isn't \
              mistaken for the agent working"
+        );
+    }
+
+    /// A batch that ends in an intercepted action which LEAVES the function
+    /// early still has to stamp the bytes it flushed on the way out. The
+    /// ExitInteractive arm flushes the pending forward batch to the PTY and then
+    /// returns before the tail, so without an explicit stamp those keystrokes
+    /// reached the child and recorded nothing, and their echo read as the agent
+    /// working. ExitInteractive's default binding is Ctrl-g (0x07).
+    #[test]
+    fn input_flushed_on_the_exit_interactive_path_still_records_pty_input() {
+        let (mut app, session_id) = app_with_live_agent_pty();
+
+        app.process_raw_input_bytes(b"x\x07").unwrap();
+
+        assert!(
+            app.engine.pty_input.contains_key(&session_id),
+            "bytes flushed to the PTY on an early-return path must still record input"
         );
     }
 

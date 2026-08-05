@@ -2203,11 +2203,14 @@ fn handle_request(
             // keystrokes stamp the typing window, a forwarded MOUSE report
             // stamps the pointer window (scrolling is not typing, but the
             // repaint it provokes is not the agent working either), and an
-            // empty frame or a focus report stamps nothing. Tab and terminal
-            // ids are disjoint and both key those maps, so one call covers
-            // both. Gating this on `write_counts_as_typing` was the bug: it
-            // dropped the wheel entirely, so scrolling an alt-screen agent
-            // showed it Working for as long as the user scrolled.
+            // empty frame or a focus report stamps nothing. How long a pointer
+            // report suppresses depends on the gesture: a wheel notch arms the
+            // long window, a click a much shorter one, and mere motion arms
+            // nothing. Tab and terminal ids are disjoint and both key those
+            // maps, so one call covers both. Treating every write as either
+            // typing or nothing was the bug: it dropped the wheel entirely, so
+            // scrolling an alt-screen agent showed it Working for as long as
+            // the user scrolled.
             if wrote
                 && (engine.providers.contains_key(&id)
                     || engine.companion_terminals.contains_key(&id))

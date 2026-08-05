@@ -2426,10 +2426,15 @@ mod tests {
             .create_companion_terminal("s1", 24, 80)
             .expect("create companion terminal");
 
-        // A recycled `term-N` id must not inherit stale activity/typing, so both
-        // entries must be gone once the terminal leaves the live map.
+        // A recycled `term-N` id must not inherit stale activity/typing/pointer
+        // state, so every entry must be gone once the terminal leaves the live
+        // map. `pty_pointer` is asserted here and not only documented: its field
+        // doc claims it is cleared wherever `pty_activity` is, and a claim
+        // nothing pins is a claim that quietly stops being true.
         engine.pty_activity.insert(tid.clone(), Instant::now());
         engine.pty_input.insert(tid.clone(), Instant::now());
+        engine.note_pty_pointer(&tid, crate::pty::PointerReport::Wheel);
+        assert!(engine.pty_pointer.contains_key(&tid), "armed for the test");
 
         engine.begin_close_companion_terminal(&tid);
 
@@ -2440,6 +2445,10 @@ mod tests {
         assert!(
             !engine.pty_input.contains_key(&tid),
             "teardown must clear the terminal's input entry"
+        );
+        assert!(
+            !engine.pty_pointer.contains_key(&tid),
+            "teardown must clear the terminal's pointer entry too"
         );
     }
 
