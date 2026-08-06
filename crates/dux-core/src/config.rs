@@ -777,10 +777,11 @@ pub struct CapabilitiesConfig {
     /// `kitty`, `iterm2`, or `none` (inherit dux's own env unchanged).
     pub terminal_identity: String,
     /// Master switch for forwarding an agent's notification/progress/clipboard
-    /// sequences OUTWARD, on BOTH surfaces: to the host terminal in the TUI, and
-    /// to the browser in server mode. Set it false and nothing an agent emits
-    /// leaves dux, whatever `web_notifications` and `clipboard_passthrough` say.
-    /// Those two narrow what passes when this is true; they cannot re-open it.
+    /// sequences OUTWARD of dux. In the TUI that is the whole host forward:
+    /// false sends the host terminal nothing. On the web the only thing an agent
+    /// forwards outward is the OSC 52 clipboard write, so false seals that.
+    /// It does NOT govern browser desktop notifications; `web_notifications`
+    /// alone does.
     pub passthrough: bool,
     /// Which agents' OSC 52 clipboard-SET sequences reach the clipboard, on BOTH
     /// surfaces: `focused` (only the tab you are viewing), `always` (any tab), or
@@ -790,9 +791,9 @@ pub struct CapabilitiesConfig {
     /// Render OSC 8 hyperlinks as clickable (TUI host embed and web click handler).
     pub hyperlinks: bool,
     /// Bridge agent notification sequences to a browser Notification (WEB only).
-    /// No effect on the TUI, whose host-terminal notifications are governed by
-    /// `passthrough` alone. Requires `passthrough = true`: this narrows what the
-    /// master switch lets out, it does not re-open it.
+    /// The only switch over those: `passthrough` does not gate them, so sealing
+    /// the clipboard leaves browser notifications working. No effect on the TUI,
+    /// whose host-terminal notifications are governed by `passthrough` alone.
     pub web_notifications: bool,
 }
 

@@ -261,38 +261,44 @@ describe("registerAgentNotifications", () => {
     expect(writeText).toHaveBeenCalledWith("hello")
   })
 
-  // `capabilities.passthrough` is the master switch over everything an agent
-  // forwards outward. It used to govern the TUI host forward only, so a browser
-  // still fired notifications for an operator who had turned it off. Off now
-  // means off on this surface too, whatever the per-kind switches say.
-  it("the master passthrough switch suppresses notifications regardless of web_notifications", () => {
+  // `capabilities.passthrough` reaches this surface ONLY as the resolved
+  // clipboard mode the server publishes: with the master switch off the server
+  // sends "off" here, and the write is suppressed. Notifications are not its
+  // business, so they are not tested through it.
+  it("a master-off server publishes off, which suppresses the clipboard write", () => {
+    const { term, handlers } = stubTerm()
+    docState.hasFocus = true
+    registerAgentNotifications(term, baseOpts({ clipboardMode: () => "off" }))
+    expect(handlers[52]("c;aGVsbG8=")).toBe(true) // still consumed
+    expect(writeText).not.toHaveBeenCalled()
+  })
+
+  // `web_notifications` is the ONLY switch over browser desktop notifications.
+  // A server with the clipboard sealed (`passthrough = false`, published here as
+  // clipboardMode "off") must still fire them when the operator left them on:
+  // having notifications answer to two switches was one switch too many.
+  it("notifications fire with the clipboard sealed, because web_notifications owns them", () => {
     const { term, handlers } = stubTerm()
     registerAgentNotifications(
       term,
-      baseOpts({ enabled: () => true, passthrough: () => false }),
+      baseOpts({ enabled: () => true, clipboardMode: () => "off" }),
+    )
+    expect(handlers[9]("Build finished")).toBe(true)
+    expect(FakeNotification.instances).toHaveLength(1)
+  })
+
+  // And the case an operator actually reaches for: turning notifications off
+  // suppresses them whatever the clipboard is set to.
+  it("web_notifications off suppresses notifications whatever the clipboard mode is", () => {
+    const { term, handlers } = stubTerm()
+    registerAgentNotifications(
+      term,
+      baseOpts({ enabled: () => false, clipboardMode: () => "always" }),
     )
     expect(handlers[9]("Build finished")).toBe(true) // still consumed
     expect(handlers[99](";Done")).toBe(true)
     expect(handlers[777]("notify;T;B")).toBe(true)
     expect(FakeNotification.instances).toHaveLength(0)
-  })
-
-  it("the master passthrough switch suppresses the clipboard write", () => {
-    const { term, handlers } = stubTerm()
-    docState.hasFocus = true
-    registerAgentNotifications(
-      term,
-      baseOpts({ clipboardMode: () => "always", passthrough: () => false }),
-    )
-    expect(handlers[52]("c;aGVsbG8=")).toBe(true) // still consumed
-    expect(writeText).not.toHaveBeenCalled()
-  })
-
-  it("an omitted master switch defaults to on, for an older bootstrap", () => {
-    const { term, handlers } = stubTerm()
-    registerAgentNotifications(term, baseOpts({ passthrough: undefined }))
-    expect(handlers[9]("Build finished")).toBe(true)
-    expect(FakeNotification.instances).toHaveLength(1)
   })
 
   it("OSC 52 read query is consumed without a clipboard write", () => {

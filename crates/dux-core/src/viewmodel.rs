@@ -125,19 +125,19 @@ pub struct BootstrapView {
     /// OSC 8 hyperlinks as clickable (http/https only). Older servers omit it
     /// (treated as true).
     pub hyperlinks: bool,
-    /// Mirrors `config.capabilities.passthrough`, the master switch over
-    /// everything an agent forwards outward. It gates the TUI host forward and,
-    /// through this field, the web surface too: with it false the browser fires
-    /// no agent notification and writes no clipboard, whatever `web_notifications`
-    /// and `clipboard_passthrough` say. Older servers omit it (treated as true).
-    pub passthrough: bool,
     /// The normalized `config.capabilities.clipboard_passthrough` mode ("focused",
     /// "always", or "off"), governing whether an agent's OSC 52 clipboard SET
     /// reaches the visitor's browser clipboard. Serialized as its canonical string
-    /// (an unrecognized config value normalizes to "focused"). The master switch
-    /// is already folded in here, so `passthrough = false` publishes "off" and the
-    /// client needs no second check for the clipboard. Older servers omit it, so
-    /// the web client falls back to "focused".
+    /// (an unrecognized config value normalizes to "focused").
+    ///
+    /// `config.capabilities.passthrough` is resolved INTO this value rather than
+    /// published beside it: the clipboard write is the only thing an agent
+    /// forwards outward on this surface, so the master switch has exactly one
+    /// web consequence and the browser reads one answer instead of combining
+    /// two. `passthrough = false` publishes "off" here. It deliberately does not
+    /// touch `web_notifications`, which is the only switch over browser desktop
+    /// notifications. Older servers omit this field, so the web client falls back
+    /// to "focused".
     pub clipboard_passthrough: String,
     /// Mirrors `config.ui.pr_banner_position` ("top" | "bottom"). Desktop web
     /// places the PR banner lane above the terminal when "top" and below it when
@@ -1118,10 +1118,12 @@ impl Engine {
             attention_grace_seconds: self.config.ui.attention_grace_seconds,
             web_notifications: self.config.capabilities.web_notifications,
             hyperlinks: self.config.capabilities.hyperlinks,
-            passthrough: self.config.capabilities.passthrough,
-            // Fold the master switch in here rather than making the client AND
-            // two fields: with passthrough off there is one answer for the
-            // clipboard, and it is "off".
+            // Resolve the `passthrough` master switch here rather than publishing
+            // it beside this field: the clipboard write is the only thing an agent
+            // forwards outward on the web, so the switch has one web consequence
+            // and the browser gets one answer instead of two to combine. Browser
+            // notifications are NOT one of its consequences; `web_notifications`
+            // is the only switch over those and is published untouched above.
             clipboard_passthrough: if self.config.capabilities.passthrough {
                 crate::config::ClipboardPassthroughMode::parse(
                     &self.config.capabilities.clipboard_passthrough,
@@ -2293,25 +2295,39 @@ mod tests {
         );
     }
 
-    /// `capabilities.passthrough` reads as a master switch over everything an
-    /// agent forwards outward. It governed the TUI host forward only, so the
-    /// browser kept receiving clipboard writes and notifications from an
-    /// operator who had turned passthrough off. The bootstrap document now
-    /// carries the master switch, and folds it into the clipboard mode so the
-    /// web has one value to read for the clipboard rather than two to AND.
+    /// `capabilities.passthrough` governs what an agent forwards OUTWARD, and on
+    /// the web the only such thing is the OSC 52 clipboard write. It is resolved
+    /// here, into the published clipboard mode, so the browser reads one answer
+    /// rather than combining two. It deliberately does NOT reach browser desktop
+    /// notifications: `web_notifications` is the only switch for those.
     #[test]
-    fn bootstrap_master_passthrough_off_seals_the_web_surface() {
+    fn bootstrap_master_passthrough_off_seals_the_clipboard_only() {
         let (mut engine, _tmp) = test_engine();
         engine.config.capabilities.passthrough = false;
         engine.config.capabilities.clipboard_passthrough = "always".to_string();
         engine.config.capabilities.web_notifications = true;
 
         let b = engine.bootstrap();
-        assert!(!b.passthrough, "master switch must reach the browser");
         assert_eq!(
             b.clipboard_passthrough, "off",
             "master off must normalize the clipboard mode to off"
         );
+        assert!(
+            b.web_notifications,
+            "passthrough must not silence browser notifications; web_notifications owns those"
+        );
+    }
+
+    /// The operator-facing case for the other switch: turning notifications off
+    /// suppresses them whatever `passthrough` says.
+    #[test]
+    fn bootstrap_web_notifications_off_is_independent_of_passthrough() {
+        let (mut engine, _tmp) = test_engine();
+        engine.config.capabilities.passthrough = true;
+        engine.config.capabilities.web_notifications = false;
+
+        let b = engine.bootstrap();
+        assert!(!b.web_notifications);
     }
 
     #[test]
@@ -2321,8 +2337,21 @@ mod tests {
         engine.config.capabilities.clipboard_passthrough = "always".to_string();
 
         let b = engine.bootstrap();
-        assert!(b.passthrough);
         assert_eq!(b.clipboard_passthrough, "always");
+    }
+
+    /// The resolved clipboard mode is the ONLY thing the master switch publishes
+    /// to the browser. A second raw `passthrough` field would be a value the
+    /// client had to combine, and the only web consumer already has its answer.
+    #[test]
+    fn bootstrap_does_not_publish_the_raw_master_switch() {
+        let (engine, _tmp) = test_engine();
+        let v = serde_json::to_value(engine.bootstrap()).expect("serialize");
+        let obj = v.as_object().expect("object");
+        assert!(
+            !obj.contains_key("passthrough"),
+            "the master switch is resolved into clipboard_passthrough, not published raw"
+        );
     }
 
     #[test]
@@ -2344,7 +2373,6 @@ mod tests {
             "attention_grace_seconds",
             "web_notifications",
             "hyperlinks",
-            "passthrough",
             "clipboard_passthrough",
             "pr_banner_position",
             "agent_scrollback_lines",

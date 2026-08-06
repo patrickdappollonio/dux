@@ -500,10 +500,12 @@ fn config_schema() -> Vec<ConfigEntry> {
             key: "passthrough",
             comment: Some(CommentSource::Static(
                 "# The master switch for forwarding an agent's notification, progress, and\n\
-                 # clipboard escape sequences OUTWARD: to your host terminal in the TUI,\n\
-                 # and to the browser in server mode. Set it false to keep everything the\n\
-                 # agent emits inside dux, on both surfaces. The two settings below narrow\n\
-                 # what gets through while this is true; neither can re-open it.",
+                 # clipboard escape sequences OUT of dux. In the TUI it covers the whole\n\
+                 # host-terminal forward: set it false and your terminal receives nothing\n\
+                 # the agent emits. In the web UI the only thing forwarded outward is the\n\
+                 # OSC 52 clipboard write, so false seals that. It does NOT switch off\n\
+                 # browser desktop notifications; web_notifications below is the only\n\
+                 # setting for those.",
             )),
             value_fn: |c| FieldValue::Bool(c.capabilities.passthrough),
         },
@@ -534,9 +536,10 @@ fn config_schema() -> Vec<ConfigEntry> {
             comment: Some(CommentSource::Static(
                 "# WEB ONLY: bridge an agent's notification sequences to a browser desktop\n\
                  # notification. Fires only when the tab is in the background and only after\n\
-                 # you grant permission from the web UI (dux never auto-prompts), and only\n\
-                 # while passthrough above is true. No effect on the TUI, whose host-terminal\n\
-                 # notifications are governed by passthrough alone.",
+                 # you grant permission from the web UI (dux never auto-prompts). This is\n\
+                 # the only setting for browser notifications: passthrough above does not\n\
+                 # gate them, so sealing the clipboard leaves these working. No effect on\n\
+                 # the TUI, whose host-terminal notifications are governed by passthrough.",
             )),
             value_fn: |c| FieldValue::Bool(c.capabilities.web_notifications),
         },

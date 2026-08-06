@@ -91,12 +91,13 @@ passthrough = true
 clipboard_passthrough = "focused"
 ```
 
-- **`passthrough`** is the master switch, on **both surfaces**, for sending an
-  agent's notification, progress, and clipboard escape sequences onward: to your
-  host terminal in the TUI, and to your browser in server mode. Turn it off and
-  everything the agent emits stays sealed inside dux, whatever the two settings
-  below say. Those two narrow what gets through while it is on; neither can
-  re-open it.
+- **`passthrough`** is the master switch for sending an agent's notification,
+  progress, and clipboard escape sequences **out of dux**. In the TUI that is the
+  whole host forward: turn it off and your terminal receives nothing the agent
+  emits. In the web UI the only thing an agent forwards outward is the `OSC 52`
+  clipboard write, so turning it off seals that. It does **not** switch off
+  browser desktop notifications; `web_notifications` below is the only setting
+  for those.
 - **`clipboard_passthrough`** governs the touchy one, `OSC 52` clipboard writes, on
   **both surfaces**: `"focused"` (only the agent tab you are actually looking at can
   write your clipboard, the safe default), `"always"` (any agent, even a background
@@ -132,10 +133,10 @@ web_notifications = true
 
 In the web UI there is no host terminal to forward to, so dux bridges an agent's
 notifications into real browser desktop notifications instead. `web_notifications`
-is the **web-only** switch for this; it has no effect on the TUI, whose
-host-terminal notifications are governed by `passthrough` above. It also sits
-under `passthrough`: with the master switch off, no browser notification fires
-however this is set. Two more things gate them, on purpose:
+is the **web-only** switch for this, and the only one: `passthrough` above does
+not gate browser notifications, so sealing the clipboard leaves these working.
+It has no effect on the TUI, whose host-terminal notifications are governed by
+`passthrough` alone. Two things gate them, on purpose:
 
 1. **The dux browser window has to be backgrounded.** dux never pops a desktop
    notification while you are looking at dux itself. The gate is the browser
@@ -183,13 +184,14 @@ prints one of these escape codes can, in principle, forge a notification or a
 clipboard write. The blast radius is small (one notification, one clipboard write),
 every switch above can narrow or close it, and the clipboard default already limits
 writes to the agent you are focused on. If you would rather keep everything sealed
-inside dux, `passthrough = false` is on its own enough to do it on both surfaces.
-The rest of the fully-closed set is belt and braces:
+inside dux, close each one; no single switch closes them all, because each governs
+a different way out:
 
 ```toml
 [capabilities]
 terminal_identity = "none"       # inherit dux's own environment, present nothing
-passthrough = false              # both surfaces: forward nothing the agent emits
+passthrough = false              # TUI: forward nothing to the host terminal
+                                 # web: never mirror OSC 52 clipboard writes
 clipboard_passthrough = "off"    # both surfaces: never mirror OSC 52 clipboard writes
 hyperlinks = false               # both surfaces: render OSC 8 links as inert text
 web_notifications = false        # web: no browser desktop notifications
