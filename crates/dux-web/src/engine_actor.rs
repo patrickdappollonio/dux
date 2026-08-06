@@ -122,6 +122,15 @@ pub enum EngineRequest {
         String,
         oneshot::Sender<Option<dux_core::file_drop::FileDropDestination>>,
     ),
+    /// The agent pane a drop on this pty id could affect: its session id and its
+    /// worktree. `None` when there is no agent behind the pane (a terminal owned
+    /// by a project or by nothing). Ownership only: whether the file actually
+    /// landed inside that worktree is checked on the FINAL path, off this
+    /// thread.
+    FileDropRefreshTarget(
+        String,
+        oneshot::Sender<Option<(String, std::path::PathBuf)>>,
+    ),
     /// Resolve a project's repo-root path (instant lookup). Lets the project
     /// terminal routes and the project-nested PTY socket 404 an unknown project
     /// before acting, mirroring how `SessionWorktree` gates the session routes.
@@ -820,6 +829,25 @@ impl EngineHandle {
         rx.await.unwrap_or(None)
     }
 
+    /// The agent pane whose changed files a drop on `pty_id` could affect, as
+    /// `(session id, worktree)`. `None` when no agent is behind the pane or the
+    /// engine thread is gone.
+    pub async fn file_drop_refresh_target(
+        &self,
+        pty_id: String,
+    ) -> Option<(String, std::path::PathBuf)> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .req_tx
+            .send(EngineRequest::FileDropRefreshTarget(pty_id, tx))
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.unwrap_or(None)
+    }
+
     pub async fn session_worktree(&self, session_id: String) -> Option<String> {
         let (tx, rx) = oneshot::channel();
         if self
@@ -1340,6 +1368,7 @@ fn request_mutates_spine(req: &EngineRequest) -> bool {
         | EngineRequest::TabSession(..)
         | EngineRequest::SessionWorktree(..)
         | EngineRequest::FileDropDestination(..)
+        | EngineRequest::FileDropRefreshTarget(..)
         | EngineRequest::ProjectPath(..)
         | EngineRequest::ProjectWorktreeInputs(..)
         | EngineRequest::SessionStartupLogContext(..)
@@ -2320,6 +2349,9 @@ fn handle_request(
         }
         EngineRequest::FileDropDestination(pty_id, reply) => {
             let _ = reply.send(engine.file_drop_destination(&pty_id));
+        }
+        EngineRequest::FileDropRefreshTarget(pty_id, reply) => {
+            let _ = reply.send(engine.file_drop_refresh_target(&pty_id));
         }
         EngineRequest::SessionWorktree(session_id, reply) => {
             let worktree = engine
@@ -4042,6 +4074,11 @@ mod tests {
                 false,
             ),
             (
+                "FileDropRefreshTarget",
+                EngineRequest::FileDropRefreshTarget("s1".into(), dead_reply()),
+                false,
+            ),
+            (
                 "ProjectPath",
                 EngineRequest::ProjectPath("p1".into(), dead_reply()),
                 false,
@@ -4222,7 +4259,7 @@ mod tests {
         // through with a copied-from-its-neighbour `false` that nothing reads.
         assert_eq!(
             request_kind_answers().len(),
-            36,
+            37,
             "every EngineRequest kind needs a row in request_kind_answers; \
              update the count deliberately when adding one"
         );

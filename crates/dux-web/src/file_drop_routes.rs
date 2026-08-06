@@ -31,6 +31,24 @@
 //! live because a shell's directory changes the moment someone types `cd`. Both
 //! resolve through `Engine::file_drop_destination`; the probing and the writing
 //! run on a blocking pool, like every other filesystem call in this crate.
+//!
+//! # A saved file tells the Changes pane, when git can see it
+//!
+//! dux has no file watcher, so a file written outside the git and editor routes
+//! is invisible in the Changes pane until the next poll, up to ten seconds. A
+//! successful drop therefore ends with the same
+//! [`crate::git_routes::refresh_changed_files_now`] every mutating git route
+//! calls, on one condition: the file has to have landed inside the owning
+//! agent's worktree, because that is the only tree git is watching.
+//!
+//! The condition is a real check, not a formality. An agent drop always lands
+//! at the worktree root, so it is trivially inside. A TERMINAL's directory comes
+//! from a live process and the shell may have been `cd`'d anywhere, including to
+//! a sibling directory whose path merely starts with the worktree's, so the
+//! check is made on the FINAL path written, with both sides resolved and
+//! compared component-wise. A terminal owned by a project or by nothing has no
+//! agent pane at all and refreshes nothing, and neither does a refusal or a
+//! failed write.
 
 use axum::Router;
 use axum::body::Bytes;
@@ -180,6 +198,15 @@ async fn upload_dropped_file(
         return (StatusCode::NOT_FOUND, "unknown terminal or agent").into_response();
     };
 
+    // Which agent, if any, would want to hear that its files changed. Asked
+    // BEFORE the write so the containment check can run inside the same blocking
+    // task as the write itself, rather than costing the response a second hop.
+    let refresh_target = state
+        .engine
+        .file_drop_refresh_target(query.pty.clone())
+        .await;
+    let worktree = refresh_target.as_ref().map(|(_, w)| w.clone());
+
     let filename = query.filename.clone();
     // Everything from here is filesystem work: pinning the directory (a /proc
     // read, or an `lsof` process on macOS) and writing the file. Off the async
@@ -195,12 +222,26 @@ async fn upload_dropped_file(
         let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
         let saved = dux_core::file_drop::save_drop(&dir, &filename, &bytes, &stamp)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
-        Ok::<_, std::io::Error>((saved, dir.path().to_path_buf()))
+        // On the FINAL path, once it exists, and resolved on both sides. An
+        // agent drop always lands at the worktree root so this is trivially
+        // true; a terminal's shell may have been `cd`'d anywhere, including to a
+        // sibling directory whose path merely starts with the worktree's.
+        let inside = worktree
+            .as_deref()
+            .is_some_and(|w| dux_core::file_drop::saved_file_is_within(w, &saved.path));
+        Ok::<_, std::io::Error>((saved, dir.path().to_path_buf(), inside))
     })
     .await;
 
     match saved {
-        Ok(Ok((saved, folder))) => {
+        Ok(Ok((saved, folder, inside_worktree))) => {
+            // dux has no file watcher, so a file written outside the git routes
+            // is invisible in the Changes pane until the next poll (up to ten
+            // seconds). Tell the pane now. A drop that landed outside the
+            // worktree changes nothing git is watching, so it says nothing.
+            if inside_worktree && let Some((session_id, worktree)) = refresh_target {
+                crate::git_routes::refresh_changed_files_now(&state, session_id, &worktree);
+            }
             let body = SavedDropBody {
                 path: saved.path.to_string_lossy().into_owned(),
                 saved_name: saved.saved_name,
@@ -316,6 +357,321 @@ mod tests {
 
     async fn body_text(resp: axum::response::Response) -> String {
         String::from_utf8_lossy(&to_bytes(resp.into_body(), 1 << 20).await.unwrap()).into_owned()
+    }
+
+    /// A workspace with agent `s1` at `<root>/wt`, project `p1` at `<root>`, and
+    /// a live engine, plus the `AppState` the router is actually serving so a
+    /// test can read the two refresh observers (the changed-files cache's
+    /// invalidation generation and the engine handle's refresh tally).
+    struct DropWorld {
+        _tmp: tempfile::TempDir,
+        _join: std::thread::JoinHandle<()>,
+        root: std::path::PathBuf,
+        wt: std::path::PathBuf,
+        handle: crate::engine_actor::EngineHandle,
+        app: axum::Router,
+        state: AppState,
+    }
+
+    impl DropWorld {
+        /// Both halves of "the changed files were refreshed": the cache
+        /// generation, and the worktrees the engine was asked to recompute.
+        fn refreshes(&self) -> (u64, Vec<String>) {
+            (
+                self.state.changes.invalidation_generation(),
+                self.state.engine.refresh_requests(),
+            )
+        }
+
+        async fn create_terminal(&self, path: &str) -> String {
+            let created = self
+                .app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(path)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(created.status(), StatusCode::CREATED, "creating {path}");
+            let created: serde_json::Value =
+                serde_json::from_str(&body_text(created).await).unwrap();
+            created["terminal_id"].as_str().unwrap().to_string()
+        }
+
+        /// Type a `cd` into the terminal and wait until the shell has actually
+        /// arrived, by watching the directory dux would drop into. Watching the
+        /// state under test is deterministic in a way a fixed sleep is not.
+        async fn cd(&self, terminal_id: &str, dir: &std::path::Path) {
+            self.handle.write_pty(
+                terminal_id.to_string(),
+                format!("cd '{}'\n", dir.display()).into_bytes(),
+            );
+            let want = std::fs::canonicalize(dir).unwrap();
+            for _ in 0..300 {
+                if let Some(dest) = self
+                    .handle
+                    .file_drop_destination(terminal_id.to_string())
+                    .await
+                    && let Ok(pinned) = dest.open()
+                    && std::fs::canonicalize(pinned.path()).ok() == Some(want.clone())
+                {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            panic!("the shell never reported {}", dir.display());
+        }
+
+        async fn drop_on(&self, pty: &str, filename: &str) -> axum::response::Response {
+            self.app
+                .clone()
+                .oneshot(drop_req(
+                    &format!("pty={pty}&filename={filename}"),
+                    b"png".to_vec(),
+                ))
+                .await
+                .unwrap()
+        }
+    }
+
+    async fn drop_world() -> DropWorld {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let wt = root.join("wt");
+        std::fs::create_dir_all(&wt).unwrap();
+
+        let paths = DuxPaths {
+            root: root.clone(),
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            worktrees_root: root.join("worktrees"),
+            lock_path: root.join("dux.lock"),
+        };
+        std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+        {
+            let store = SessionStore::open(&paths.sessions_db_path).unwrap();
+            store
+                .upsert_project(&ProjectConfig {
+                    id: "p1".to_string(),
+                    path: root.to_string_lossy().into_owned(),
+                    name: Some("p1".to_string()),
+                    default_provider: None,
+                    leading_branch: None,
+                    auto_reopen_agents: None,
+                    startup_command: None,
+                    env: Default::default(),
+                })
+                .unwrap();
+            store
+                .upsert_session(&sample_session("s1", wt.to_string_lossy().as_ref()))
+                .unwrap();
+        }
+        let mut engine = crate::bootstrap::bootstrap_engine(&paths).unwrap();
+        // A plain, always-present shell, so the test does not depend on whatever
+        // the machine's own terminal setting happens to be.
+        engine.config.terminal.command = "/bin/sh".to_string();
+        engine.config.terminal.args = vec![];
+        let (handle, join) = crate::engine_actor::spawn_engine_thread(engine);
+
+        // The router owns its state, so a probe route hands a clone back out.
+        let slot: std::sync::Arc<std::sync::Mutex<Option<AppState>>> = Default::default();
+        let captured = std::sync::Arc::clone(&slot);
+        let probe = Router::new().route(
+            "/test/state",
+            axum::routing::get(move |State(state): State<AppState>| {
+                let captured = std::sync::Arc::clone(&captured);
+                async move {
+                    *captured.lock().unwrap() = Some(state);
+                    "ok"
+                }
+            }),
+        );
+        let app = crate::server::build_app(
+            handle.clone(),
+            probe,
+            crate::server::RouterParams::plain_http(),
+        );
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/test/state")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let state = slot.lock().unwrap().take().unwrap();
+
+        DropWorld {
+            _tmp: tmp,
+            _join: join,
+            root,
+            wt,
+            handle,
+            app,
+            state,
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_on_an_agent_refreshes_that_agent_s_changed_files() {
+        // The gap this closes: without it a dropped screenshot is invisible in
+        // the Changes pane until the next poll, up to ten seconds later.
+        let world = drop_world().await;
+        let (generation, refreshes) = world.refreshes();
+        assert!(refreshes.is_empty(), "nothing has refreshed yet");
+
+        let resp = world.drop_on("s1", "shot.png").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let (generation_after, refreshes) = world.refreshes();
+        assert!(
+            generation_after > generation,
+            "the REST changed-files cache must be invalidated, or the next GET \
+             serves the pre-drop answer"
+        );
+        assert_eq!(
+            refreshes.len(),
+            1,
+            "the engine must be asked to recompute exactly once, got {refreshes:?}"
+        );
+        assert_eq!(
+            std::fs::canonicalize(&refreshes[0]).unwrap(),
+            std::fs::canonicalize(&world.wt).unwrap(),
+            "the refresh must name the agent's own worktree"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_on_the_agent_s_own_terminal_inside_the_worktree_refreshes_the_agent() {
+        // A companion terminal of an agent, sitting in that agent's worktree: the
+        // file lands where git can see it, so the pane has to hear about it.
+        let world = drop_world().await;
+        let terminal = world.create_terminal("/api/v1/sessions/s1/terminals").await;
+        let deep = world.wt.join("deep");
+        std::fs::create_dir_all(&deep).unwrap();
+        world.cd(&terminal, &deep).await;
+        let (generation, _) = world.refreshes();
+
+        let resp = world.drop_on(&terminal, "shot.png").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let (generation_after, refreshes) = world.refreshes();
+        assert!(
+            generation_after > generation,
+            "the cache must be invalidated"
+        );
+        assert_eq!(refreshes.len(), 1, "got {refreshes:?}");
+        assert_eq!(
+            std::fs::canonicalize(&refreshes[0]).unwrap(),
+            std::fs::canonicalize(&world.wt).unwrap(),
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_on_the_agent_s_terminal_outside_the_worktree_refreshes_nothing() {
+        // The shell was `cd`'d out of the worktree, so the file landed somewhere
+        // git is not looking. Refreshing would be a lie about what changed.
+        let world = drop_world().await;
+        let terminal = world.create_terminal("/api/v1/sessions/s1/terminals").await;
+        let outside = world.root.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        world.cd(&terminal, &outside).await;
+        let (generation, _) = world.refreshes();
+
+        let resp = world.drop_on(&terminal, "shot.png").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let (generation_after, refreshes) = world.refreshes();
+        assert_eq!(generation_after, generation, "nothing to invalidate");
+        assert!(refreshes.is_empty(), "got {refreshes:?}");
+    }
+
+    #[tokio::test]
+    async fn a_sibling_whose_path_starts_with_the_worktree_s_is_not_inside_the_worktree() {
+        // `/w/wt-extra` starts with `/w/wt` as TEXT and is not inside it. A string
+        // prefix check passes this and refreshes an agent whose worktree never
+        // changed.
+        let world = drop_world().await;
+        let terminal = world.create_terminal("/api/v1/sessions/s1/terminals").await;
+        let sibling = world.root.join("wt-extra");
+        std::fs::create_dir_all(&sibling).unwrap();
+        assert!(
+            sibling
+                .to_string_lossy()
+                .starts_with(world.wt.to_string_lossy().as_ref()),
+            "the fixture must actually set the trap"
+        );
+        world.cd(&terminal, &sibling).await;
+        let (generation, _) = world.refreshes();
+
+        let resp = world.drop_on(&terminal, "shot.png").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let (generation_after, refreshes) = world.refreshes();
+        assert_eq!(generation_after, generation);
+        assert!(
+            refreshes.is_empty(),
+            "a sibling directory is not containment, got {refreshes:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_on_a_project_terminal_refreshes_nothing_even_inside_a_worktree() {
+        // A project terminal has no agent pane behind it, so there is nothing to
+        // refresh, and that stays true when the shell happens to sit inside an
+        // agent's worktree.
+        let world = drop_world().await;
+        let terminal = world.create_terminal("/api/v1/projects/p1/terminals").await;
+        world.cd(&terminal, &world.wt).await;
+        let (generation, _) = world.refreshes();
+
+        let resp = world.drop_on(&terminal, "shot.png").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let (generation_after, refreshes) = world.refreshes();
+        assert_eq!(generation_after, generation);
+        assert!(refreshes.is_empty(), "got {refreshes:?}");
+    }
+
+    #[tokio::test]
+    async fn dropping_on_a_standalone_terminal_refreshes_nothing_even_inside_a_worktree() {
+        // A standalone terminal is owned by nothing at all. Same answer, and the
+        // `cd` into the worktree is what makes the test about OWNERSHIP rather
+        // than about the directory it happened to open in.
+        let world = drop_world().await;
+        let terminal = world.create_terminal("/api/v1/terminals").await;
+        world.cd(&terminal, &world.wt).await;
+        let (generation, _) = world.refreshes();
+
+        let resp = world.drop_on(&terminal, "shot.png").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let (generation_after, refreshes) = world.refreshes();
+        assert_eq!(generation_after, generation);
+        assert!(refreshes.is_empty(), "got {refreshes:?}");
+    }
+
+    #[tokio::test]
+    async fn a_refused_drop_refreshes_nothing() {
+        // Nothing was written, so there is nothing to tell the Changes pane
+        // about.
+        let world = drop_world().await;
+        let (generation, _) = world.refreshes();
+
+        let resp = world.drop_on("s1", "..%2F..%2Fescaped.png").await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let (generation_after, refreshes) = world.refreshes();
+        assert_eq!(generation_after, generation);
+        assert!(refreshes.is_empty(), "got {refreshes:?}");
     }
 
     #[tokio::test]

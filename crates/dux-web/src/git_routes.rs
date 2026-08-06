@@ -11,8 +11,9 @@
 //! only that post-mutation refresh, so a change dux did not make through one of
 //! these routes (a file the user changed from a terminal, or an agent writing in
 //! its worktree) can be picked up now instead of on the next poll. See
-//! [`refresh_changed_files_now`], which every handler in this module and in
-//! [`crate::file_routes`] shares so the pair can never drift apart.
+//! [`refresh_changed_files_now`], which every handler in this module, every
+//! handler in [`crate::file_routes`], and the file-drop upload in
+//! [`crate::file_drop_routes`] share so they can never drift apart.
 //!
 //! Safety: every handler runs git OFF the engine actor thread AND off the async
 //! reactor (`spawn_blocking`), so a slow/locked repo never stalls other clients.
@@ -87,12 +88,12 @@ pub fn routes() -> Router<AppState> {
 /// mutating handler in this module makes after it touches a file.
 ///
 /// dux has no file watcher: the cached answer is dropped by the routes that
-/// change a file, which is every handler here and in [`crate::file_routes`], and
-/// by nothing else. So anything dux did not do through one of them only catches
-/// up on the next poll (2s while any agent or terminal in the workspace is
-/// running, 10s while none is), and that includes one thing dux does itself, the
-/// file-drop upload, which writes into a live process's working directory rather
-/// than through these routes.
+/// change a file, which is every handler here, every handler in
+/// [`crate::file_routes`], and the file-drop upload in
+/// [`crate::file_drop_routes`] when the dropped file lands inside the agent's
+/// worktree. Anything dux did not do through one of them only catches up on the
+/// next poll (2s while any agent or terminal in the workspace is running, 10s
+/// while none is).
 ///
 /// Both halves are needed and neither is redundant: the engine call refreshes
 /// the lists the engine itself serves, and the invalidate drops the REST cache
