@@ -538,13 +538,11 @@ pub enum TuiCheckoutInspectOutcome {
 
 /// The one in-flight `refresh-changes` command (see
 /// [`App::pending_changed_files_refresh`]). It carries what the final status
-/// needs and what tells this refresh's answer apart from any other
-/// `ChangedFilesReady`: the `worktree` the read was asked for, and the
-/// `session_id` that must still be the watched one for the counts to be worth
-/// reporting.
+/// needs, and the `worktree` the read was asked for, which is both what tells
+/// this refresh's answer apart from any other `ChangedFilesReady` and what has
+/// to still be watched for the answer to have been applied at all.
 pub struct PendingChangedFilesRefresh {
     pub key: String,
-    pub session_id: String,
     pub label: String,
     pub worktree: PathBuf,
 }
@@ -4453,7 +4451,6 @@ impl App {
         );
         self.pending_changed_files_refresh = Some(PendingChangedFilesRefresh {
             key,
-            session_id: session_id.clone(),
             label: name,
             worktree: worktree.clone(),
         });
@@ -4473,7 +4470,11 @@ impl App {
     ///
     /// The lists themselves were already applied (or, on failure, deliberately
     /// left alone) by the engine before this runs, so the counts reported here
-    /// are the ones the pane is showing.
+    /// are the ones the pane is showing. That is only true while the watch is
+    /// still on the worktree this refresh asked about, which is the same
+    /// condition the engine applies the lists under, so it is checked with the
+    /// same rule rather than an approximation of it: reporting counts from lists
+    /// the engine had just dropped as stale would be a made-up number.
     pub(crate) fn apply_changed_files_refresh_outcome(
         &mut self,
         worktree: &Path,
@@ -4490,10 +4491,17 @@ impl App {
             .take()
             .expect("checked just above");
         let name = pending.label;
-        // The user moved on while git was reading. The engine dropped the lists
-        // as stale, so there are no counts to report and claiming any would name
-        // the wrong agent. Retire the busy with no replacement.
-        if self.engine.watched_session_id.as_deref() != Some(pending.session_id.as_str()) {
+        // The user moved on while git was reading. The engine dropped this
+        // answer as stale, so there is nothing to report and claiming anything
+        // would describe another agent. Retire the busy with no replacement.
+        let still_watched = self
+            .engine
+            .watched_worktree
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+            .is_some_and(|current| current == pending.worktree);
+        if !still_watched {
             self.status.clear(&pending.key, None);
             return;
         }
@@ -4504,7 +4512,7 @@ impl App {
                 Some(pending.key),
                 StatusTone::Error,
                 format!(
-                    "Could not read the changed files for \"{}\": {}. The pane still shows whatever dux last managed to read.",
+                    "Could not read the changed files for \"{}\": {}. The list stays empty until a read succeeds; dux retries every few seconds.",
                     name,
                     err.trim().trim_end_matches('.')
                     ),

@@ -11741,6 +11741,36 @@ not_a_real_action = ["x"]
         );
     }
 
+    /// A refresh whose watch moved while git was reading has nothing to report:
+    /// the engine drops that answer as stale, so the lists never took it, and
+    /// counting them would report the previous agent's numbers under this
+    /// agent's name. The busy still has to go.
+    #[test]
+    fn refresh_changes_that_lost_its_watch_retires_the_busy_without_reporting() {
+        let mut app = test_app(default_bindings());
+        init_git_repo_with_modified_file(&app, "tracked.txt", "before\n", "after\n");
+
+        app.execute_command("refresh-changes".to_string())
+            .expect("refresh changes");
+        // The user moves on before the answer lands.
+        *app.engine.watched_worktree.lock().expect("watch lock") =
+            Some(std::path::PathBuf::from("/tmp/dux-some-other-worktree"));
+        drain_until(&mut app, |app| app.pending_changed_files_refresh.is_none());
+
+        assert!(
+            !app.status.message().contains("refreshed"),
+            "a dropped answer must not be reported, got: {}",
+            app.status.message()
+        );
+        assert!(
+            app.status
+                .snapshot()
+                .iter()
+                .all(|s| s.tone != crate::statusline::StatusTone::Busy.as_wire()),
+            "no keyed busy may be left open"
+        );
+    }
+
     /// A git that could not answer is not an empty answer. Swallowing the error
     /// reports "0 staged, 0 unstaged", which tells the user their worktree is
     /// clean when dux has no idea what is in it.
