@@ -21,9 +21,13 @@ use toml_edit::{Array, Decor, DocumentMut, Formatted, InlineTable, Item, Key, Ta
 
 /// Permission bits for `config.toml`: owner read/write only (`0600`). The file
 /// may hold secrets such as tokens under `[env]`, so it must not be group/world
-/// readable. Unix-only — the project targets macOS and Linux (CLAUDE.md), so no
-/// `cfg(windows)` branch is needed.
-const CONFIG_FILE_MODE: u32 = 0o600;
+/// readable.
+///
+/// This is the ONE rule for every file dux keeps for itself, not a rule about
+/// the config file in particular. It lives in [`crate::file_modes`] alongside
+/// the directory mode and the tightening pass, so the database, its sidecars,
+/// and the log get the same answer rather than three separate decisions.
+use crate::file_modes::PRIVATE_FILE_MODE as CONFIG_FILE_MODE;
 
 /// Whether an atomic write fsyncs the file before the rename. Eager (critical)
 /// writes use `Fsync` for power-loss durability of the file's data; lazy writes

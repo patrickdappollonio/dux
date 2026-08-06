@@ -2622,11 +2622,43 @@ impl Engine {
                 let pr = pr.as_ref();
                 // Seed the head branch as the name when no custom name was sent,
                 // matching the TUI prompt's default (`Some(head_ref_name)`).
-                let custom_name = Some(
-                    pr.custom_name
-                        .clone()
-                        .unwrap_or_else(|| pr.head_ref_name.clone()),
-                );
+                // An EXPLICIT name was already validated where the request was
+                // built; the fallback was not, and a head branch is the remote's
+                // string rather than dux's, so it gets the same validator the
+                // TUI applies when the user confirms that seeded prompt. Refuse
+                // rather than sanitise: a name dux invented is one the user
+                // cannot predict and did not ask for, and it would become a
+                // branch and a directory on disk.
+                let custom_name = match &pr.custom_name {
+                    Some(name) => Some(name.clone()),
+                    None if crate::git::is_valid_agent_name(&pr.head_ref_name) => {
+                        Some(pr.head_ref_name.clone())
+                    }
+                    None => {
+                        let mut clear_keys = Vec::new();
+                        if let Some(id) = status_op_id
+                            && let Some(op) = self.pending_web_pr_lookup_ops.remove(id)
+                        {
+                            let resolved =
+                                op.resolve(&crate::engine::WebPrLookupOutcome::HandedOff);
+                            if let EventReaction::ClearStatus(key) = resolved.into_reaction() {
+                                clear_keys.push(key);
+                            }
+                        }
+                        return WebFollowupStatuses {
+                            statuses: vec![WireStatus::new(
+                                "error",
+                                format!(
+                                    "PR #{} has head branch \"{}\", which is not a usable agent \
+                                     name. Create the agent again and type a name using only \
+                                     letters, digits, dashes, underscores and slashes.",
+                                    pr.number, pr.head_ref_name
+                                ),
+                            )],
+                            clear_keys,
+                        };
+                    }
+                };
                 let resolved_name = custom_name.clone().unwrap_or_default();
                 // Busy copy mirrors the TUI's PR create message (input.rs
                 // NameNewAgent confirm, PullRequest arm).
@@ -8408,12 +8440,18 @@ mod tests {
     /// busy status onto the worker channel (not the returned reaction), so the
     /// create dispatch's busy copy surfaces there.
     fn first_command_busy_message(engine: &Engine) -> String {
+        first_command_busy_message_opt(engine)
+            .expect("expected a CommandWorkerStarted busy event on the worker channel")
+    }
+
+    /// The same drain, for a test asserting that NO worker was started.
+    fn first_command_busy_message_opt(engine: &Engine) -> Option<String> {
         while let Ok(event) = engine.worker_rx.try_recv() {
             if let WorkerEvent::CommandWorkerStarted(status) = event {
-                return status.message;
+                return Some(status.message);
             }
         }
-        panic!("expected a CommandWorkerStarted busy event on the worker channel");
+        None
     }
 
     /// A resolved PR with a `custom_name` drives the create dispatch directly
@@ -8466,8 +8504,15 @@ mod tests {
 
     /// When the resolved PR carries no custom name (the TUI path), the follow-up
     /// seeds the head branch as the name, matching the TUI prompt default.
+    ///
+    /// The fallback is now VALIDATED, so this test's meaning has narrowed: it
+    /// pins that a head branch which IS a valid agent name still seeds the name
+    /// exactly as before. `feature/head` was already such a name, so the
+    /// assertions are unchanged; the sibling test below covers the branch that
+    /// is not. Keeping both is the point, since validating the fallback must not
+    /// cost the ordinary case its no-typing path.
     #[test]
-    fn drive_pr_lookup_followup_seeds_head_branch_when_name_absent() {
+    fn drive_pr_lookup_followup_seeds_a_valid_head_branch_when_name_absent() {
         let repo = init_repo_with_commit();
         let (mut engine, _tmp) = test_engine();
         let mut project = sample_project("p1", &repo.path().to_string_lossy());
@@ -8492,6 +8537,58 @@ mod tests {
         assert!(
             busy.contains("feature/head"),
             "head branch should seed the name: {busy}"
+        );
+    }
+
+    /// The web's explicit PR name is already validated where the request is
+    /// built, but the FALLBACK was not: with no name sent, the PR's head branch
+    /// went straight through as the agent name. A head branch is a remote's
+    /// string, not dux's, and a branch may legally hold characters
+    /// `is_valid_agent_name` refuses. Refuse it and say what to do instead,
+    /// rather than sanitising it into a name the user never chose and cannot
+    /// predict.
+    #[test]
+    fn drive_pr_lookup_followup_refuses_a_head_branch_that_is_not_a_valid_agent_name() {
+        let repo = init_repo_with_commit();
+        let (mut engine, _tmp) = test_engine();
+        let mut project = sample_project("p1", &repo.path().to_string_lossy());
+        project.path_missing = false;
+        engine.projects.push(project.clone());
+
+        let reaction = EventReaction::OpenNewAgentPromptForPr {
+            pr: Box::new(crate::worker::ResolvedPullRequest {
+                project,
+                host: "github.com".to_string(),
+                owner_repo: "octocat/Hello-World".to_string(),
+                number: 7,
+                title: "Add feature".to_string(),
+                state: "OPEN".to_string(),
+                // Legal on the remote, not a legal agent name here.
+                head_ref_name: "feature/add colons: & spaces".to_string(),
+                custom_name: None,
+            }),
+            status_op_id: None,
+        };
+        let followup = engine.drive_pr_lookup_followup(&reaction);
+
+        let error = followup
+            .statuses
+            .iter()
+            .find(|s| s.tone == "error")
+            .unwrap_or_else(|| panic!("expected a refusal: {:?}", followup.statuses));
+        assert!(
+            error.message.contains("feature/add colons: & spaces"),
+            "the refusal must name the branch it refused: {}",
+            error.message
+        );
+        assert!(
+            error.message.contains("name"),
+            "the refusal must say a name is what to supply: {}",
+            error.message
+        );
+        assert!(
+            first_command_busy_message_opt(&engine).is_none(),
+            "no create should have been dispatched"
         );
     }
 

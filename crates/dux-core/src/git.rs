@@ -722,6 +722,10 @@ pub fn switch_branch(repo_path: &Path, branch_name: &str) -> Result<()> {
             "-C",
             repo_path.to_string_lossy().as_ref(),
             "switch",
+            // `--` so the branch is read as a REF and never as an option.
+            // Without it `git switch --detach` detaches HEAD instead of
+            // failing. Measured on git 2.55.
+            "--",
             branch_name,
         ])
         .output()?;
@@ -805,6 +809,10 @@ pub fn create_worktree_existing_branch(
             "worktree",
             "add",
             worktree.as_ref(),
+            // `--` so the commit-ish is read as a REF and never as an option.
+            // Without it `git worktree add <path> --force` obeys the flag and
+            // checks out HEAD instead. Measured on git 2.55.
+            "--",
             branch_name,
         ])
         .output()?;
@@ -1152,6 +1160,10 @@ pub fn remove_worktree(
             repo_path.to_string_lossy().as_ref(),
             "branch",
             "-D",
+            // `--` so the name is read as a REF and never as an option. Without
+            // it a ref plumbing created as `--delete` is parsed as the flag and
+            // survives the cleanup. Measured on git 2.55.
+            "--",
             branch_name,
         ])
         .output()?;
@@ -1786,7 +1798,10 @@ pub fn push(worktree_path: &Path) -> Result<String> {
         }
     };
     let output = Command::new("git")
-        .args(["-C", wt.as_ref(), "push", "-u", "origin", &branch])
+        // `--` so the branch is read as a REFSPEC and never as an option.
+        // Without it, a checkout whose HEAD points at a ref named `--all`
+        // pushes EVERY branch to the remote. Measured on git 2.55.
+        .args(["-C", wt.as_ref(), "push", "-u", "origin", "--", &branch])
         .output()?;
     if !output.status.success() {
         return Err(anyhow!(
@@ -4187,6 +4202,115 @@ mod tests {
         assert_eq!(name, "reuse-me");
         assert!(path.exists());
         assert_eq!(current_branch(&path).unwrap(), "reuse-me");
+    }
+
+    // ── refnames are positionals, not options ────────────────
+    //
+    // Every git subcommand below takes a refname in a positional slot. Without a
+    // `--` separator git reads a leading-dash argument as an option, so a
+    // refname that looks like one is silently obeyed as a flag instead of being
+    // rejected as the ref it is. Git's own `check-ref-format` blocks a
+    // dash-LEADING branch through `git branch`, but plumbing (`update-ref`)
+    // creates such a ref outright, and a non-leading component may begin with a
+    // dash (`foo/-bar`) through the porcelain, so these names do reach dux.
+    // Each test below pins the corrected reading: the argument is a REF.
+
+    /// Unlike the three below, this one passed before the `--` was added, and
+    /// the reason is worth writing down rather than leaving for someone to
+    /// rediscover. In isolation `git worktree add <path> --force` really does
+    /// obey the flag and check out HEAD. At THIS call shape it cannot, because
+    /// the worktree path is derived from the same string, so the branch git
+    /// then infers from the path's last component is itself `--force`, which
+    /// `check-ref-format` refuses. Every option-looking name was measured
+    /// against this shape and all of them fail one way or another. The `--` is
+    /// therefore defence in depth here, and this test pins the reading so a
+    /// later change that decouples the path from the branch cannot quietly
+    /// re-open the door.
+    #[test]
+    fn create_worktree_existing_branch_reads_an_option_looking_branch_as_a_ref() {
+        let repo = init_test_repo();
+        let worktrees_root = repo.path().join("wt-root");
+        let result =
+            create_worktree_existing_branch(repo.path(), &worktrees_root, "proj", "--force");
+        assert!(
+            result.is_err(),
+            "an option-looking branch must be refused, not obeyed as a flag: {result:?}"
+        );
+        assert!(
+            !worktrees_root.join("proj").join("--force").exists(),
+            "no worktree should have been created"
+        );
+    }
+
+    #[test]
+    fn switch_branch_reads_an_option_looking_branch_as_a_ref() {
+        let repo = init_test_repo();
+        // Without `--`, `git switch --detach` detaches HEAD instead of failing.
+        let result = switch_branch(repo.path(), "--detach");
+        assert!(result.is_err(), "expected a refused switch: {result:?}");
+        assert_eq!(
+            current_branch(repo.path()).unwrap(),
+            "main",
+            "HEAD must not have been detached"
+        );
+    }
+
+    #[test]
+    fn remove_worktree_deletes_a_branch_whose_name_looks_like_an_option() {
+        let repo = init_test_repo();
+        // `git branch` refuses to create a dash-leading name, but plumbing does
+        // not, and such a ref is what dux would then be asked to clean up.
+        run_git(repo.path(), &["update-ref", "refs/heads/--delete", "HEAD"]);
+        let result = remove_worktree(repo.path(), &repo.path().join("gone"), "--delete").unwrap();
+        assert!(
+            !result.branch_already_deleted,
+            "the branch should have been deleted, not read as the --delete flag"
+        );
+        let listed = std::process::Command::new("git")
+            .args(["-C", repo.path().to_string_lossy().as_ref(), "branch"])
+            .output()
+            .unwrap();
+        assert!(
+            !String::from_utf8_lossy(&listed.stdout).contains("--delete"),
+            "the ref should be gone"
+        );
+    }
+
+    #[test]
+    fn push_reads_an_option_looking_branch_as_a_ref_and_pushes_nothing_else() {
+        let repo = init_test_repo();
+        let remote = repo.path().join("remote.git");
+        run_git(
+            repo.path(),
+            &["init", "--bare", remote.to_string_lossy().as_ref()],
+        );
+        run_git(
+            repo.path(),
+            &["remote", "add", "origin", remote.to_string_lossy().as_ref()],
+        );
+        run_git(repo.path(), &["branch", "unrelated"]);
+        // A branch named `--all` reaches `push` through current_branch_opt, and
+        // without `--` git reads it as the flag that pushes EVERY branch.
+        run_git(repo.path(), &["update-ref", "refs/heads/--all", "HEAD"]);
+        run_git(repo.path(), &["symbolic-ref", "HEAD", "refs/heads/--all"]);
+
+        let _ = push(repo.path());
+
+        let heads = std::process::Command::new("git")
+            .args([
+                "-C",
+                remote.to_string_lossy().as_ref(),
+                "for-each-ref",
+                "--format=%(refname)",
+                "refs/heads",
+            ])
+            .output()
+            .unwrap();
+        let heads = String::from_utf8_lossy(&heads.stdout);
+        assert!(
+            !heads.contains("unrelated"),
+            "push must not have fanned out to every branch: {heads}"
+        );
     }
 
     #[test]

@@ -82,11 +82,18 @@ export interface Bootstrap {
    * OSC 8 hyperlinks as clickable (http/https only). Older servers omit it, so
    * consumers fall back to true. */
   hyperlinks?: boolean
+  /** Mirrors `config.capabilities.passthrough`, the master switch over everything
+   * an agent forwards outward. False means this surface fires no agent
+   * notification and writes no clipboard, whatever `web_notifications` and
+   * `clipboard_passthrough` say. Older servers omit it, so consumers fall back
+   * to true. */
+  passthrough?: boolean
   /** Mirrors `config.capabilities.clipboard_passthrough` (normalized): whether an
    * agent's OSC 52 clipboard SET reaches the visitor's browser clipboard:
    * "focused"/"always" write it (the browser still requires the tab to have
-   * focus), "off" never does. Older servers omit it, so consumers fall back to
-   * "focused". */
+   * focus), "off" never does. The server folds `passthrough` in before sending,
+   * so a master-off server publishes "off" here. Older servers omit it, so
+   * consumers fall back to "focused". */
   clipboard_passthrough?: "focused" | "always" | "off"
   /** Mirrors `config.ui.pr_banner_position`: "bottom" places the PR lane below
    * the terminal, anything else above. (Server sends a free string; the two

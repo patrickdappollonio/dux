@@ -47,7 +47,7 @@ pub fn init(config: &LoggingConfig, paths: &DuxPaths) {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    if let Ok(file) = OpenOptions::new().create(true).append(true).open(&path) {
+    if let Ok(file) = open_log_file(&path) {
         let logger = Logger {
             level: LogLevel::from_str(&config.level),
             file: Mutex::new(file),
@@ -127,6 +127,22 @@ fn log(level: LogLevel, message: &str) {
     }
 }
 
+/// Open the log for appending, creating it if absent, and restrict it to its
+/// owner. The log records the user's project paths, agent names, and error text,
+/// so it gets the same treatment as the rest of the config directory; see
+/// [`crate::file_modes`] for why the directory's own mode is what really settles
+/// this. Tightening runs on every open, so a log left `0644` by an older
+/// installation is corrected rather than left as it was.
+///
+/// Separate from [`init`] because `init` installs a process-global logger and a
+/// panic hook, neither of which a test can do twice; this is the part with
+/// on-disk behaviour worth pinning.
+fn open_log_file(path: &PathBuf) -> std::io::Result<std::fs::File> {
+    let file = OpenOptions::new().create(true).append(true).open(path)?;
+    crate::file_modes::restrict_to_owner(path)?;
+    Ok(file)
+}
+
 pub fn resolve_log_path(config: &LoggingConfig, paths: &DuxPaths) -> PathBuf {
     let configured = PathBuf::from(&config.path);
     if configured.as_os_str().is_empty() {
@@ -136,5 +152,44 @@ pub fn resolve_log_path(config: &LoggingConfig, paths: &DuxPaths) -> PathBuf {
         configured
     } else {
         paths.root.join(configured)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// `dux.log` records paths, project names, and error text from the user's
+    /// own work, so it gets the same owner-only treatment as the rest of the
+    /// config directory. `init` installs a process-global logger and so cannot
+    /// be called from a test; the open is the seam.
+    #[test]
+    fn open_log_file_leaves_it_owner_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dux.log");
+        drop(open_log_file(&path).unwrap());
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode & 0o077, 0, "expected owner-only, got {mode:o}");
+    }
+
+    #[test]
+    fn open_log_file_tightens_a_log_left_world_readable_by_an_older_install() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dux.log");
+        fs::write(&path, "old\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        drop(open_log_file(&path).unwrap());
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "expected 0600, got {mode:o}");
+    }
+
+    #[test]
+    fn open_log_file_appends_rather_than_truncating() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dux.log");
+        fs::write(&path, "old\n").unwrap();
+        drop(open_log_file(&path).unwrap());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "old\n");
     }
 }

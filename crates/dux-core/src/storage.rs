@@ -27,6 +27,16 @@ pub struct SessionStore {
     conn: Connection,
 }
 
+/// SQLite names its journal sidecars by APPENDING to the database's file name,
+/// so `sessions.sqlite3` gets `sessions.sqlite3-wal`. That is a suffix on the
+/// whole name, not a new extension, which is why this appends to the OS string
+/// rather than going through `set_extension`.
+fn sidecar_path(db: &std::path::Path, suffix: &str) -> std::path::PathBuf {
+    let mut name = db.as_os_str().to_os_string();
+    name.push(suffix);
+    std::path::PathBuf::from(name)
+}
+
 impl SessionStore {
     pub fn open(path: &std::path::Path) -> Result<Self> {
         let conn =
@@ -41,6 +51,23 @@ impl SessionStore {
         // that tolerates it (a `:memory:` DB stays in "memory" mode — a harmless
         // no-op). `execute_batch` ignores the returned row.
         conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+        // The database mirrors the same per-project `env` map that made
+        // `config.toml` 0600, so it gets the same mode. SQLite creates the file
+        // (and, after the WAL pragma, its `-wal`/`-shm` sidecars) itself at the
+        // umask default and offers no API to choose their mode, so the only
+        // thing dux can do here is tighten afterwards. The sidecars can also be
+        // recreated at any later point, which is why the owner-only CONFIG
+        // DIRECTORY, not this, is what actually closes the gap; see
+        // `crate::file_modes`. Tightening runs on every open so a database left
+        // 0644 by an older installation is corrected. A failure is not fatal:
+        // an unwritable mode must not stop dux from reading its own sessions.
+        for path in [
+            path.to_path_buf(),
+            sidecar_path(path, "-wal"),
+            sidecar_path(path, "-shm"),
+        ] {
+            let _ = crate::file_modes::restrict_to_owner(&path);
+        }
         let store = Self { conn };
         store.migrate()?;
         Ok(store)
@@ -1214,6 +1241,52 @@ fn test_tab(id: &str, session_id: &str, sort_order: i64) -> crate::model::AgentT
 mod tests {
     use super::*;
     use chrono::Duration;
+
+    /// The database mirrors the same per-project `env` map that made
+    /// `config.toml` `0600`, and SQLite's `-wal`/`-shm` sidecars carry the same
+    /// content. All three are created by SQLite at the umask default, so dux
+    /// tightens them itself after the connection is up.
+    #[test]
+    fn open_leaves_the_database_and_its_sidecars_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("sessions.sqlite3");
+        let store = SessionStore::open(&db).unwrap();
+        // Force a WAL write so the sidecars definitely exist.
+        store
+            .conn
+            .execute_batch("create table if not exists probe (x);")
+            .unwrap();
+
+        for path in [
+            db.clone(),
+            dir.path().join("sessions.sqlite3-wal"),
+            dir.path().join("sessions.sqlite3-shm"),
+        ] {
+            if let Ok(meta) = std::fs::metadata(&path) {
+                let mode = meta.permissions().mode() & 0o777;
+                assert_eq!(
+                    mode & 0o077,
+                    0,
+                    "{} should not be group/world readable, got {mode:o}",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn open_tightens_a_database_left_world_readable_by_an_older_install() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("sessions.sqlite3");
+        drop(SessionStore::open(&db).unwrap());
+        std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let _store = SessionStore::open(&db).unwrap();
+        let mode = std::fs::metadata(&db).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "expected 0600, got {mode:o}");
+    }
 
     #[test]
     fn agent_tabs_table_is_idempotent_and_empty_on_fresh_db() {
