@@ -121,7 +121,8 @@ pub fn routes(state: &AppState) -> Router<AppState> {
             // buffered in full before the handler's first line runs, so a permit
             // taken inside the handler would be taken after the memory was
             // already spent. Taken here, it bounds how much upload exists at
-            // once. A request beyond the limit WAITS rather than being refused.
+            // once. A request beyond the limit WAITS, but only up to
+            // `PERMIT_WAIT`, and is then refused.
             .layer(axum::middleware::from_fn_with_state(
                 state.clone(),
                 hold_a_file_drop_permit,
@@ -129,16 +130,57 @@ pub fn routes(state: &AppState) -> Router<AppState> {
     )
 }
 
+/// How long a drop waits for a free upload slot before it is refused.
+///
+/// The wait exists because the slots turn over: two uploads finish and the third
+/// proceeds, which is nicer than refusing a drop that only arrived a moment too
+/// early. What it must not do is wait FOREVER. The permit is held across the
+/// whole body read, the default concurrency is 2, and a client is free to
+/// trickle its body, so an unbounded wait lets two slow requests hold both slots
+/// for as long as they like and every later drop queues behind them with no
+/// answer at all.
+///
+/// 30 seconds is chosen against what a slot-holder is doing: uploading at most
+/// `[server] file_drop_max_bytes` (100 MB by default) to a server that is
+/// usually on the same machine and otherwise on a LAN or a Tailscale link. A
+/// legitimate transfer of that size finishes well inside the window, so the
+/// timeout is reached by a stalled peer rather than a busy one.
+const PERMIT_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Hold one file-drop permit for the whole request, body included.
 ///
 /// The binding must be NAMED (not `_`), or the permit would be dropped
 /// immediately and the layer would bound nothing at all.
+///
+/// A wait that expires answers 503 and says to try again, which is the same
+/// shape the websocket connection caps use when they are full (see
+/// `acquire_ws_permit` in [`crate::server`]); that path refuses immediately
+/// because a socket is long-lived, where an upload is not.
 async fn hold_a_file_drop_permit(
     State(state): State<AppState>,
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
-    let _permit = state.file_drop_semaphore.clone().acquire_owned().await;
+    let permit = tokio::time::timeout(
+        PERMIT_WAIT,
+        state.file_drop_semaphore.clone().acquire_owned(),
+    )
+    .await;
+    let _permit = match permit {
+        Ok(permit) => permit,
+        Err(_) => {
+            dux_core::logger::warn(
+                "[server] /api/v1/file-drop refused: no upload slot came free within \
+                 the wait (file_drop_max_concurrency)",
+            );
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "The server is already handling as many dropped files as it \
+                 allows at once. Try the drop again shortly.",
+            )
+                .into_response();
+        }
+    };
     next.run(req).await
 }
 
@@ -976,6 +1018,54 @@ mod tests {
         assert!(
             polled.load(Ordering::SeqCst),
             "the second upload should have run once the permit freed"
+        );
+    }
+
+    /// A drop that never gets a slot is REFUSED, not queued forever.
+    ///
+    /// Same hold as the test above: the first upload's body yields a chunk and
+    /// then parks, so its handler sits in the buffering step with the only
+    /// permit. Here the blocker is simply never released. The clock is paused,
+    /// so the runtime fast-forwards past the permit wait the moment every task
+    /// is idle, which is what makes this instant rather than a 30-second test.
+    #[tokio::test(start_paused = true)]
+    async fn an_upload_that_never_gets_a_slot_is_refused_rather_than_queued() {
+        let (_tmp, _wt, app) = router_with_limits(1024 * 1024, 1).await;
+
+        let (holding_tx, holding_rx) = tokio::sync::oneshot::channel::<()>();
+        let (_blocker_tx, blocker_rx) = tokio::sync::oneshot::channel::<()>();
+        let first_body = axum::body::Body::from_stream(futures_util::stream::once(async move {
+            let _ = holding_tx.send(());
+            let _ = blocker_rx.await;
+            Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"never finishes"))
+        }));
+        let _first = tokio::spawn(
+            app.clone().oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/file-drop?pty=s1&filename=slow.png")
+                    .body(first_body)
+                    .unwrap(),
+            ),
+        );
+        holding_rx
+            .await
+            .expect("the first upload must reach its body, which means it holds the permit");
+
+        let second = app
+            .oneshot(drop_req("pty=s1&filename=second.png", b"second".to_vec()))
+            .await
+            .unwrap();
+        assert_eq!(
+            second.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "a drop with no slot available must be refused once the wait expires, \
+             not held open indefinitely"
+        );
+        let body = body_text(second).await;
+        assert!(
+            body.contains("Try the drop again"),
+            "the refusal must tell the user what to do: {body}"
         );
     }
 }

@@ -28,7 +28,7 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::{Path as ApiPath, Query, State},
+    extract::{DefaultBodyLimit, Path as ApiPath, Query, State, rejection::JsonRejection},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -116,6 +116,28 @@ struct OpenedEditor {
     editor: String,
 }
 
+/// Largest request body the editor's save route accepts.
+///
+/// It exists because the read and the write disagreed. The reader opens
+/// anything up to `MAX_EDITABLE_BYTES` (5 MB), while the save route inherited
+/// the framework's 2 MB default, so a 3 MB file opened in the editor and then
+/// could not be saved, failing with the framework's terse length message that
+/// names no cause. That is a functional bug, not a memory one.
+///
+/// It is not simply the read cap, because the content travels as a JSON STRING
+/// and escaping grows it. serde_json escapes a quote, a backslash and the
+/// newline/carriage-return/tab controls to two bytes each and passes every other
+/// non-ASCII byte through untouched, so twice the read cap covers any text file,
+/// even one made entirely of quotes. The extra 64 KB is room for the envelope
+/// and the path.
+///
+/// The remaining case that does not fit is a file made largely of OTHER control
+/// characters, which each escape to a six-character u-escape. Such a file is valid
+/// UTF-8, so the reader will open it, but it is not a thing anybody edits, and
+/// the refusal now says what the limit is instead of failing opaquely.
+const MAX_EDIT_WRITE_BYTES: usize =
+    2 * dux_core::worktree_file::MAX_EDITABLE_BYTES as usize + 64 * 1024;
+
 /// The editor file routes. These
 /// are path-keyed: the session id is the `:id` path segment under
 /// `/api/v1/sessions/:id/files/*`, validated by `id_within_bound` and resolved to
@@ -129,7 +151,14 @@ pub fn routes() -> Router<AppState> {
         .route(&format!("{prefix}/read"), post(read_file))
         .route(&format!("{prefix}/diff"), post(diff_contents))
         .route(&format!("{prefix}/raw"), get(read_raw))
-        .route(&format!("{prefix}/write"), post(write_file))
+        .route(
+            &format!("{prefix}/write"),
+            // Set EXPLICITLY, or the framework's 2 MB default applies and a file
+            // the editor was willing to OPEN cannot be saved. See
+            // [`MAX_EDIT_WRITE_BYTES`] for the size and why it is not simply the
+            // read cap.
+            post(write_file).layer(DefaultBodyLimit::max(MAX_EDIT_WRITE_BYTES)),
+        )
         .route(&format!("{prefix}/create-file"), post(create_file))
         .route(&format!("{prefix}/create-dir"), post(create_dir))
         .route(&format!("{prefix}/rename"), post(rename_entry))
@@ -423,8 +452,16 @@ fn mime_for_path(path: &str) -> &'static str {
 async fn write_file(
     State(state): State<AppState>,
     ApiPath(id): ApiPath<String>,
-    Json(op): Json<WriteOp>,
+    op: Result<Json<WriteOp>, JsonRejection>,
 ) -> Response {
+    // Taken as a Result so the OVER-SIZE case can say what happened. Left to the
+    // framework it is a bare "length limit exceeded" with no number in it and no
+    // hint that the file is simply too big to save, which is the one rejection a
+    // user can actually provoke by opening a large file and typing in it.
+    let Json(op) = match op {
+        Ok(op) => op,
+        Err(rejection) => return write_rejection(rejection),
+    };
     if !id_within_bound(&id) {
         return unknown_session();
     }
@@ -455,6 +492,30 @@ async fn write_file(
     }
     crate::git_routes::refresh_changed_files_now(&state, session_id, &worktree);
     StatusCode::OK.into_response()
+}
+
+/// Turn a save-route body rejection into a response the user can act on.
+///
+/// Only the size case is reworded; everything else (a malformed body, a wrong
+/// content type) keeps the framework's own wording, which is already accurate
+/// and is not something a user provokes. The size case reports the cap in MB and
+/// says the two things that are true: the file is too large to save through the
+/// editor, and it can still be edited outside dux.
+fn write_rejection(rejection: JsonRejection) -> Response {
+    let too_large = matches!(rejection, JsonRejection::BytesRejection(_))
+        || rejection.status() == StatusCode::PAYLOAD_TOO_LARGE;
+    if too_large {
+        let limit_mb = MAX_EDIT_WRITE_BYTES / (1024 * 1024);
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!(
+                "This file is too large for the editor to save: the request body \
+                 is over the {limit_mb} MB limit. Edit it outside dux instead."
+            ),
+        )
+            .into_response();
+    }
+    (rejection.status(), rejection.body_text()).into_response()
 }
 
 /// Create a new empty file at `op.path`. Refuses an already-existing entry and
@@ -1186,6 +1247,62 @@ mod tests {
             assert_eq!(resp.status(), StatusCode::OK);
             let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
             assert!(bytes.is_empty());
+        }
+
+        /// The save route must accept a file the read route was willing to open.
+        /// The default limit is 2 MB and the read cap is 5 MB, so a 3 MB file
+        /// used to open and then fail to save.
+        #[tokio::test]
+        async fn a_file_larger_than_the_framework_default_still_saves() {
+            let (_tmp, wt, app) = router_with_session().await;
+            let content = "a".repeat(3 * 1024 * 1024);
+            let resp = app
+                .oneshot(json_req(
+                    "/api/v1/sessions/s1/files/write",
+                    serde_json::json!({ "path": "big.txt", "content": content }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "a 3 MB save is inside the editor's read cap and must go through"
+            );
+            assert_eq!(
+                std::fs::metadata(wt.join("big.txt")).unwrap().len(),
+                3 * 1024 * 1024
+            );
+        }
+
+        /// Past the cap the refusal must SAY it is a size problem and name the
+        /// limit, rather than the framework's bare length message.
+        #[tokio::test]
+        async fn an_over_limit_save_is_refused_with_a_message_naming_the_limit() {
+            let (_tmp, wt, app) = router_with_session().await;
+            let content = "a".repeat(crate::file_routes::MAX_EDIT_WRITE_BYTES + 1);
+            let resp = app
+                .oneshot(json_req(
+                    "/api/v1/sessions/s1/files/write",
+                    serde_json::json!({ "path": "huge.txt", "content": content }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+            let body = String::from_utf8(
+                to_bytes(resp.into_body(), usize::MAX)
+                    .await
+                    .unwrap()
+                    .to_vec(),
+            )
+            .unwrap();
+            assert!(
+                body.contains("too large") && body.contains("10 MB"),
+                "the refusal must name the cause and the limit: {body}"
+            );
+            assert!(
+                !wt.join("huge.txt").exists(),
+                "a refused save must write nothing"
+            );
         }
     }
 }

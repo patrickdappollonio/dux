@@ -844,6 +844,25 @@ fn run_chunk(host: &str, planned: &[Planned], chunk: &[usize]) -> ChunkOutcome {
         // GraphQL error) from a generic network/gh failure so the status message
         // can say which. Scan gh's stderr and the GraphQL errors payload.
         rate_limited = looks_rate_limited(&stderr) || looks_rate_limited(&errors);
+        // Both `stderr` and `errors` go to the log VERBATIM, deliberately.
+        //
+        // What can appear in them is GitHub's own error text, which for a
+        // failure on a private repository names that repository and its owner.
+        // That is worth writing down once so the next reader does not have to
+        // work out whether it matters.
+        //
+        // It does not, for three reasons that hold together. The line is
+        // `debug`, and the default level is `info`, so it is not even written
+        // unless somebody turned debugging on to investigate exactly this. The
+        // destination is a local file in the user's own dux directory, not a
+        // network sink. And dux never handles a GitHub token: `gh` authenticates
+        // itself from its own keyring, so a credential is not among the things
+        // that can land here.
+        //
+        // Against that, the text is the whole value of the line. A stuck PR
+        // badge is diagnosed from what GitHub actually said, and a summarised or
+        // truncated version would routinely drop the sentence that explains it.
+        // So: verbatim, and a reason rather than a redaction.
         logger::debug(&format!(
             "[gh-integration] gh api graphql failed for host {host} ({} session(s), rate_limited={rate_limited}): {stderr}{}",
             chunk.len(),

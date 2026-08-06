@@ -176,7 +176,11 @@ impl AppState {
 /// the whole request channel every tick, and link bandwidth caps how many large
 /// frames can even arrive per tick. 16 MiB is far above any realistic terminal
 /// paste, so legitimate input is never truncated.
-const MAX_WS_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
+///
+/// Public so the integration test that proves the cap is enforced can name the
+/// same number the sockets are configured with, rather than restating 16 MiB and
+/// silently passing if the two ever drift.
+pub const MAX_WS_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
 
 /// Upper bound (in characters) on a captured `User-Agent` before it is stamped on a
 /// `pty.owner` handover. The raw header is attacker-controllable and re-broadcast to

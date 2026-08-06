@@ -42,6 +42,11 @@ flate2 = "1"
 # choose. Dev-only: a normal build of this crate leaves the feature off.
 dux-core = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
+# `test-util` for the paused clock. The file-drop permit waits up to 30s for a
+# slot; a test that proves the wait EXPIRES has to reach the end of it, and
+# fast-forwarding an idle runtime is the way to do that without a 30-second
+# test or a sleep. Dev-only: the feature is off in a normal build.
+tokio = { workspace = true, features = ["test-util"] }
 tokio-tungstenite = { workspace = true }
 tower = { version = "0.5", features = ["util"] }
 reqwest = { version = "0.12", default-features = false, features = ["cookies", "json"] }

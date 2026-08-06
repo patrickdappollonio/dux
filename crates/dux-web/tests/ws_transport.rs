@@ -672,9 +672,11 @@ async fn nested_agent_pty_socket_streams_bytes() {
     ws.send(Message::Text(r#"{"rows":24,"cols":80}"#.into()))
         .await
         .unwrap();
-    ws.send(Message::Binary(b"dux-nested-agent-marker\n".to_vec()))
-        .await
-        .unwrap();
+    ws.send(Message::Binary(
+        b"dux-nested-agent-marker\n".to_vec().into(),
+    ))
+    .await
+    .unwrap();
 
     let mut acc = Vec::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
@@ -695,6 +697,60 @@ async fn nested_agent_pty_socket_streams_bytes() {
     );
 }
 
+/// A frame past `MAX_WS_MESSAGE_SIZE` is refused by the socket, not delivered.
+///
+/// Nothing covered the message cap before, so it could have been silently
+/// dropped from every socket without a test noticing. The provider override in
+/// `boot` is `cat`, which echoes whatever reaches the PTY, so the assertion is
+/// direct: the marker inside the oversized frame must NEVER come back, and the
+/// socket must end rather than stay open having quietly ignored the frame.
+#[tokio::test]
+async fn an_oversized_frame_is_refused_and_never_reaches_the_pty() {
+    let (addr, _tmp) = boot().await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/sessions/s1/pty"))
+        .await
+        .expect("connect agent pty socket");
+
+    // Claim ownership first, so a dropped write could only be the size cap and
+    // not the non-owner rule.
+    ws.send(Message::Text(r#"{"rows":24,"cols":80}"#.into()))
+        .await
+        .unwrap();
+
+    // One byte over the cap, ending in the marker so an echo would be visible.
+    let marker = b"dux-oversize-marker\n";
+    let mut payload = vec![b'x'; dux_web::server::MAX_WS_MESSAGE_SIZE + 1 - marker.len()];
+    payload.extend_from_slice(marker);
+    assert_eq!(payload.len(), dux_web::server::MAX_WS_MESSAGE_SIZE + 1);
+    // The send itself may fail if the server has already torn the socket down,
+    // which is just as good an answer as a later close.
+    let _ = ws.send(Message::Binary(payload.into())).await;
+
+    let mut acc = Vec::new();
+    let mut ended = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(300), ws.next()).await {
+            Ok(Some(Ok(Message::Binary(b)))) => acc.extend_from_slice(&b),
+            Ok(Some(Ok(Message::Close(_)))) | Ok(None) | Ok(Some(Err(_))) => {
+                ended = true;
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    assert!(
+        !String::from_utf8_lossy(&acc).contains("dux-oversize-marker"),
+        "an over-cap frame was written to the PTY and echoed back"
+    );
+    assert!(
+        ended,
+        "the socket stayed open after an over-cap frame; the cap must refuse it, \
+         not ignore it"
+    );
+}
+
 /// A Text frame `{"rows":R,"cols":C}` on a PTY socket is routed to resize, NOT
 /// written to the PTY as stdin: the `cat` provider echoes stdin, so if the resize
 /// JSON were mistakenly written it would echo back. We assert the resize JSON never
@@ -711,9 +767,11 @@ async fn nested_pty_socket_resize_text_frame_is_not_stdin() {
     ws.send(Message::Text(r#"{"rows":40,"cols":120}"#.into()))
         .await
         .unwrap();
-    ws.send(Message::Binary(b"dux-after-resize-marker\n".to_vec()))
-        .await
-        .unwrap();
+    ws.send(Message::Binary(
+        b"dux-after-resize-marker\n".to_vec().into(),
+    ))
+    .await
+    .unwrap();
 
     let mut acc = Vec::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
@@ -758,9 +816,11 @@ async fn nested_terminal_pty_socket_enforces_session_ownership() {
     ws.send(Message::Text(r#"{"rows":24,"cols":80}"#.into()))
         .await
         .unwrap();
-    ws.send(Message::Binary(b"dux-owned-terminal-marker\n".to_vec()))
-        .await
-        .unwrap();
+    ws.send(Message::Binary(
+        b"dux-owned-terminal-marker\n".to_vec().into(),
+    ))
+    .await
+    .unwrap();
     let mut acc = Vec::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
     while tokio::time::Instant::now() < deadline {
@@ -1059,7 +1119,7 @@ async fn a_standalone_terminal_opens_streams_and_closes_at_un_nested_addresses()
     ws.send(Message::Text(r#"{"rows":24,"cols":80}"#.into()))
         .await
         .unwrap();
-    ws.send(Message::Binary(b"dux-standalone-marker\n".to_vec()))
+    ws.send(Message::Binary(b"dux-standalone-marker\n".to_vec().into()))
         .await
         .unwrap();
     let mut acc = Vec::new();
@@ -1246,9 +1306,11 @@ async fn nested_project_terminal_pty_socket_enforces_project_ownership() {
     ws.send(Message::Text(r#"{"rows":24,"cols":80}"#.into()))
         .await
         .unwrap();
-    ws.send(Message::Binary(b"dux-project-terminal-marker\n".to_vec()))
-        .await
-        .unwrap();
+    ws.send(Message::Binary(
+        b"dux-project-terminal-marker\n".to_vec().into(),
+    ))
+    .await
+    .unwrap();
     let mut acc = Vec::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
     while tokio::time::Instant::now() < deadline {
@@ -1318,7 +1380,7 @@ async fn tearing_down_agent_pty_closes_its_attached_socket() {
     ws.send(Message::Text(r#"{"rows":24,"cols":80}"#.into()))
         .await
         .unwrap();
-    ws.send(Message::Binary(b"dux-kill-marker\n".to_vec()))
+    ws.send(Message::Binary(b"dux-kill-marker\n".to_vec().into()))
         .await
         .unwrap();
     let up_deadline = tokio::time::Instant::now() + Duration::from_secs(8);
