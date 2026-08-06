@@ -17,6 +17,11 @@
 //! depth for the case where a file is copied out of the directory, or the
 //! directory's mode is later loosened by hand.
 //!
+//! Two rules hold everywhere in here. Tightening is **best effort**: a mode dux
+//! cannot set is a warning, never a reason to stop logging, stop opening the
+//! database, or refuse to start. And dux **never chmods through a symlink**,
+//! because the mode it would change belongs to somebody else's file.
+//!
 //! Unix-only, deliberately. dux targets macOS and Linux (see CLAUDE.md), so
 //! there is no `cfg(windows)` branch here.
 
@@ -48,18 +53,68 @@ const GROUP_AND_OTHER: u32 = 0o077;
 /// A missing path is NOT an error: the caller often lists every file dux might
 /// keep (the sqlite sidecars in particular exist only sometimes), and a path
 /// that is not there needs no tightening. Any other error is returned.
+///
+/// A SYMLINK is skipped, with a warning, and that is deliberate. Both
+/// `fs::metadata` and `fs::set_permissions` follow links, so tightening a
+/// symlinked path changed the mode of whatever it pointed at: measured, a
+/// config directory symlinked to a shared directory left the TARGET at `0700`,
+/// and a `config.toml` symlinked into a dotfiles repository had dux changing
+/// the mode of a file inside that repository. That is a common setup. The
+/// reasoning is the same one [`create_private_dir_all`] already gives for
+/// parents: quietly making somebody else's file owner-only is a surprising
+/// thing for dux to do, and the surprise is just as available at the root
+/// itself as it is one level up. Skipping is the right answer rather than
+/// following-and-tightening or refusing to start, because the user who made
+/// the link is the one who chose where the file really lives, and dux's actual
+/// enforcement is the config directory's own mode either way.
+///
+/// The check and the chmod are two syscalls, so a path swapped for a symlink
+/// between them would still be followed. That is not defended against: dux is
+/// single-tenant and this is the user's own config directory, so the case
+/// requires an attacker who already has the access the mode is protecting.
 pub fn restrict_to_owner(path: &Path) -> io::Result<()> {
-    let meta = match fs::metadata(path) {
+    // `symlink_metadata` does NOT follow, which is the whole point; for a
+    // non-symlink it answers exactly what `metadata` would.
+    let meta = match fs::symlink_metadata(path) {
         Ok(meta) => meta,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(err) => return Err(err),
     };
+    if meta.file_type().is_symlink() {
+        crate::logger::warn(&format!(
+            "{} is a symlink, so its permissions were left alone; \
+             dux does not change the mode of a link's target",
+            path.display()
+        ));
+        return Ok(());
+    }
     let current = meta.permissions().mode();
     let tightened = current & !GROUP_AND_OTHER;
     if tightened == current {
         return Ok(());
     }
     fs::set_permissions(path, fs::Permissions::from_mode(tightened))
+}
+
+/// Tighten `path` if it can be tightened, and warn rather than fail if it
+/// cannot.
+///
+/// Permissions are a hardening measure, never a precondition for dux working.
+/// A path dux can write to but cannot `chmod` is reachable through ordinary
+/// configuration (a `logging.path` under `/var/log` owned by an admin, a
+/// Windows-mounted path under WSL2, a FAT or NFS volume), and on every one of
+/// those the alternative is worse than a loose mode: propagating the error
+/// turned "dux logs to a slightly loose file" into "dux does not log at all and
+/// says nothing", and turned an existing, working config directory into a
+/// refusal to start. `what` names the thing for the warning.
+pub fn restrict_to_owner_best_effort(path: &Path, what: &str) {
+    if let Err(err) = restrict_to_owner(path) {
+        crate::logger::warn(&format!(
+            "could not restrict permissions on the {what} at {}: {err}. \
+             dux will carry on; tighten it by hand if the mode matters to you",
+            path.display()
+        ));
+    }
 }
 
 /// Create `path` and any missing parents, then tighten `path` itself to
@@ -70,9 +125,15 @@ pub fn restrict_to_owner(path: &Path) -> io::Result<()> {
 /// not own (a `~/.config` shared with every other tool), and quietly making one
 /// of those owner-only would be a surprising thing for dux to do to somebody
 /// else's directory.
+///
+/// Creation is fatal; the tightening is not. A directory that already exists
+/// and works must not become a startup failure because its mode could not be
+/// changed, and reporting that as `failed to create <path>` named the wrong
+/// thing entirely: the directory was there the whole time.
 pub fn create_private_dir_all(path: &Path) -> io::Result<()> {
     fs::create_dir_all(path)?;
-    restrict_to_owner(path)
+    restrict_to_owner_best_effort(path, "directory");
+    Ok(())
 }
 
 #[cfg(test)]
@@ -139,6 +200,78 @@ mod tests {
         let leaf = dir.path().join("a").join("b");
         create_private_dir_all(&leaf).unwrap();
         assert_eq!(mode_of(&leaf), PRIVATE_DIR_MODE);
+    }
+
+    /// `fs::metadata` and `fs::set_permissions` both FOLLOW symlinks, so
+    /// tightening a symlinked path changed the mode of whatever it pointed at.
+    /// A `config.toml` symlinked into a dotfiles repository is a common setup,
+    /// and dux silently making a file inside that repository owner-only is
+    /// exactly the surprise this module already declines to inflict on parent
+    /// directories.
+    #[test]
+    fn restrict_does_not_chmod_through_a_symlink_to_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("dotfiles-config.toml");
+        fs::write(&target, "x").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o644)).unwrap();
+        let link = dir.path().join("config.toml");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        restrict_to_owner(&link).unwrap();
+
+        assert_eq!(
+            mode_of(&target),
+            0o644,
+            "the symlink TARGET must not have been tightened"
+        );
+    }
+
+    #[test]
+    fn restrict_does_not_chmod_through_a_symlink_to_a_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("shared");
+        fs::create_dir(&target).unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
+        let link = dir.path().join("dux");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        restrict_to_owner(&link).unwrap();
+
+        assert_eq!(
+            mode_of(&target),
+            0o755,
+            "the symlink TARGET must not have been tightened"
+        );
+    }
+
+    /// The config-root case: `create_dir_all` succeeds because the directory is
+    /// already there through the link, and the tightening is then skipped. dux
+    /// must still start.
+    #[test]
+    fn create_private_dir_all_through_a_symlink_succeeds_and_leaves_the_target_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("shared");
+        fs::create_dir(&target).unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
+        let link = dir.path().join("dux");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        create_private_dir_all(&link).expect("a directory dux cannot tighten must not be fatal");
+
+        assert_eq!(mode_of(&target), 0o755);
+    }
+
+    /// Permissions are best-effort, but CREATION is not: a directory that
+    /// genuinely could not be made must still fail, and must fail about that.
+    #[test]
+    fn create_private_dir_all_still_fails_when_the_directory_cannot_be_created() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("in-the-way");
+        fs::write(&blocker, "not a directory").unwrap();
+        assert!(
+            create_private_dir_all(&blocker.join("child")).is_err(),
+            "a real creation failure must still be reported"
+        );
     }
 
     #[test]

@@ -1204,9 +1204,18 @@ impl DuxPaths {
     /// and other bits, so it is idempotent and cannot lock the owner out.
     ///
     /// The WORKTREES directory is deliberately left at the umask default. Those
-    /// are the user's own checkouts, opened in their own editor and possibly
-    /// shared on purpose; they sit inside the owner-only root, which is where
-    /// the protection belongs.
+    /// are the user's own checkouts, opened in their own editor, and the mode
+    /// dux found is the mode dux leaves.
+    ///
+    /// Do not repeat the older reason for this, that the checkouts may be
+    /// "shared on purpose". They sit inside a `0700` root now, so another local
+    /// user cannot search their way in whatever the worktrees directory itself
+    /// says, and on-purpose sharing through this path is no longer possible.
+    /// Anyone who really was sharing a worktree with another local account lost
+    /// that when the root was tightened, and the way back is to put the
+    /// worktrees somewhere outside the config root rather than to loosen the
+    /// root. The mode is still preserved, for the honest reason that it is the
+    /// user's own checkout and not dux's file to relabel.
     pub fn ensure_dirs(&self) -> Result<()> {
         crate::file_modes::create_private_dir_all(&self.root)
             .with_context(|| format!("failed to create {}", self.root.display()))?;
@@ -2335,21 +2344,69 @@ mod tests {
     }
 
     /// The worktrees directory holds the user's own checkouts, which they open
-    /// in their own editor and may deliberately share. dux does not tighten it;
-    /// it sits inside the now-`0700` root, which is protection enough.
+    /// in their own editor. dux does not tighten it; it sits inside the
+    /// now-`0700` root, which is where the protection belongs.
+    ///
+    /// The GROUP AND OTHER bits are what this test is actually about. It used
+    /// to assert `mode & 0o700 == 0o700`, which is equally true of `0755` and
+    /// `0700`, so tightening the worktrees directory left it passing and the
+    /// tenet it exists to defend was unprotected. The directory is pre-created
+    /// at a known `0755` so the assertion does not depend on the test runner's
+    /// umask.
     #[test]
-    fn ensure_dirs_leaves_the_worktrees_directory_at_the_umask_default() {
+    fn ensure_dirs_leaves_the_worktrees_directory_untightened() {
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("dux");
         let paths = test_paths(&root);
+        fs::create_dir_all(&paths.worktrees_root).unwrap();
+        fs::set_permissions(&paths.worktrees_root, fs::Permissions::from_mode(0o755)).unwrap();
+
         paths.ensure_dirs().unwrap();
+
         let mode = fs::metadata(&paths.worktrees_root)
             .unwrap()
             .permissions()
             .mode()
             & 0o777;
-        assert_eq!(mode & 0o700, 0o700, "the owner must retain full access");
+        assert_eq!(
+            mode, 0o755,
+            "the worktrees directory must be left exactly as it was, got {mode:o}"
+        );
+        assert_ne!(
+            mode & 0o077,
+            0,
+            "the group and other bits must survive; dux does not tighten the user's checkouts"
+        );
+    }
+
+    /// The companion to the above: a freshly created worktrees directory is not
+    /// tightened either. Asserted against the process umask so it stays true
+    /// wherever it runs, and it still fails outright if dux starts forcing
+    /// `0700` here.
+    #[test]
+    fn ensure_dirs_creates_the_worktrees_directory_without_tightening_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("dux");
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+
+        // What the umask alone would leave on a new directory, measured by
+        // making one right here rather than assumed.
+        let reference = tmp.path().join("reference");
+        fs::create_dir(&reference).unwrap();
+        let expected = fs::metadata(&reference).unwrap().permissions().mode() & 0o777;
+
+        let mode = fs::metadata(&paths.worktrees_root)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, expected,
+            "expected the umask default {expected:o}, got {mode:o}"
+        );
     }
 
     fn test_paths(root: &std::path::Path) -> DuxPaths {

@@ -81,13 +81,28 @@ Inside you'll find `config.toml` (your settings), `sessions.sqlite3` (session
 state), `dux.log` (logs, the first place to look when something misbehaves), and a
 `themes/` directory for any themes you write yourself.
 
-That directory is **yours alone**: dux makes it `0700` on every startup, and the
-files it writes inside `0600`. Both `config.toml` and the session database can
-hold environment variables you set for a project, which is exactly where an API
-token tends to live, so no other user on the machine gets to read them. If you
-are upgrading and your directory is currently world-readable, the next start
-tightens it for you. dux only ever removes group and world access, never your
-own, so a config file you have deliberately made read-only stays that way.
+That directory is **yours alone**: dux makes it `0700` on every startup. The
+directory's own mode is what does the real work here, since another user who
+cannot search it cannot reach anything inside whatever that file's mode says.
+On top of that, dux sets `0600` on the files it manages, `config.toml`, the
+session database and its SQLite sidecars, and `dux.log`. Both `config.toml` and
+the session database can hold environment variables you set for a project, which
+is exactly where an API token tends to live, so no other user on the machine gets
+to read them.
+
+A few things inside are deliberately left alone. The `worktrees/` directory holds
+your own checkouts, which you open in your own editor, so dux never changes its
+mode; the same goes for `dux.lock` and for a `themes/` directory you create
+yourself. They are all covered by the `0700` on the directory above them.
+
+If you are upgrading and your directory is currently world-readable, the next
+start tightens it for you. dux only ever removes group and world access, never
+your own, so a config file you have deliberately made read-only stays that way.
+Two things it will never do: it does not follow a **symlink** when setting a
+mode, so if your `config.toml` is a link into a dotfiles repository the file in
+that repository is left exactly as it is, and it treats a mode it cannot set as a
+**warning rather than an error**, so a log or a directory on a volume that does
+not support `chmod` still works and dux still starts.
 
 ## Where to go next
 

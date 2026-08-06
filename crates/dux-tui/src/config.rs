@@ -176,6 +176,23 @@ fn config_schema() -> Vec<ConfigEntry> {
         ConfigEntry::Comment(
             "# Every value is materialized here so the file doubles as documentation.",
         ),
+        ConfigEntry::Comment("#"),
+        ConfigEntry::Comment(
+            "# A note on file permissions, because dux changes them on EVERY start and\n\
+             # you should not have to discover that by noticing. The config directory is\n\
+             # made owner-only (0700), and the files dux manages inside it are made 0600:\n\
+             # this file, sessions.sqlite3 and its SQLite sidecars, and dux.log. That is\n\
+             # because this file and the database can hold [env] values, which is where an\n\
+             # API token tends to live.\n\
+             #\n\
+             # dux only ever REMOVES group and world access, never your own, so a config\n\
+             # you have deliberately made read-only (0400) stays read-only. It leaves the\n\
+             # worktrees/ directory, dux.lock, and a themes/ directory you create alone;\n\
+             # they are covered by the 0700 on the directory above them. It never follows\n\
+             # a symlink when setting a mode, so if this file is a link into a dotfiles\n\
+             # repository the file in that repository is untouched. And a mode it cannot\n\
+             # set is a warning in dux.log, not an error: dux still starts.",
+        ),
         ConfigEntry::Blank,
         ConfigEntry::Field {
             key: "shutdown_timeout_seconds",
