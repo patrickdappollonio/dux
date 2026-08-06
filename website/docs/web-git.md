@@ -56,10 +56,9 @@ The pane header's `⋯` **Actions** menu carries the rest:
   submits.
 - **Push** and **Pull** are one click each, with a progress toast that reports
   back to the browser tab you triggered them from.
-- **Refresh changes** asks git again on the spot. dux notices its own file
-  changes immediately, but a file you delete or edit from a companion terminal is
-  invisible to it, so the pane otherwise catches up on its next poll. This is the
-  "I just did that in a shell, look again" button.
+- **Refresh changes** asks git again on the spot and reports what it found. dux
+  has no file watcher, so a change dux did not make itself is only picked up by
+  the next poll. This is the "I just did that, look again" button.
 - **Hide Changes pane** tucks the whole pane away when you want the terminal full
   width. Bring it back from the **Show the Changes pane** row in **Preferences**:
   hiding the pane takes this menu with it.
@@ -78,16 +77,23 @@ fresh agent, on the other hand, is something the web UI does do, covered in
 
 ## Staying in sync
 
-The Changes pane refreshes itself whenever the engine reports that a file
-changed, so what you see keeps pace with the agent without a manual refresh. What
-it cannot see is what you do outside dux: delete a file from a companion terminal
-and the pane catches up on its next poll, every couple of seconds while something
-is running and every ten seconds while nothing is. **Refresh changes** in the
-header menu skips that wait, and the terminal UI's command palette carries the
-same action. If a git operation collides with a lock, the background poller keeps
-retrying on its own, so a single blip usually clears itself before you notice. If
-it does not, dux shows a "Couldn't load changes" card with a Refresh button, and
-a warning toast fires once the failures persist across several attempts, so you are never left
-guessing why the pane went quiet. All of this rides the same engine and the same
-worktrees the terminal UI uses, so a commit you make in the browser is simply a commit,
-visible everywhere.
+There is no file watcher behind the Changes pane, and knowing that explains
+everything it does. The pane updates the moment dux itself changes a file: a
+stage, an unstage, a discard, a commit, a file saved in the editor. Everything
+else is found by a background poll, an agent writing files in its worktree just
+as much as a file you delete from a companion terminal, and a file you drop onto
+a terminal is the one thing dux does that it does not notice this way. The poll
+runs every couple of seconds while any agent or terminal in the workspace is
+running, and every ten seconds while none is, so a change dux did not make is
+never invisible, it is just up to ten seconds late.
+
+**Refresh changes** in the header menu skips that wait and says what it found.
+The terminal UI has the same action as its `refresh-changes` command.
+
+If a git operation collides with a lock, the background poller keeps retrying on
+its own, so a single blip usually clears itself before you notice. If it does
+not, dux shows a "Couldn't load changes" card with a Refresh button, and a
+warning toast fires once the failures persist across several attempts, so you
+are never left guessing why the pane went quiet. All of this rides the same
+engine and the same worktrees the terminal UI uses, so a commit you make in the
+browser is simply a commit, visible everywhere.

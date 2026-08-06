@@ -4412,9 +4412,10 @@ impl App {
     /// The `refresh-changes` palette command: recompute the selected agent's
     /// changed files immediately.
     ///
-    /// dux drops its cached answer whenever dux itself changes a file, but it
-    /// cannot see a file the user changed from a terminal, so those only show up
-    /// on the next poll. This is how the user says "look again" instead of
+    /// dux has no file watcher. It refreshes when dux itself changes a file
+    /// through one of its own actions, and anything else, a file the user
+    /// changed from a terminal or an agent writing in its worktree, only shows
+    /// up on the next poll. This is how the user says "look again" instead of
     /// waiting.
     ///
     /// The git read goes to a WORKER, never to this thread. That is the general

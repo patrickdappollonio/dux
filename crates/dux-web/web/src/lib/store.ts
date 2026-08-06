@@ -1065,8 +1065,9 @@ function applyChangesError(sessionId: string, err: unknown): void {
 // button). No-op when nothing is selected.
 //
 // This only RE-READS. The server answers a GET from its per-session cache, which
-// it drops whenever dux itself changes a file, so this is the right call after an
-// error (nothing is cached) or an event (the cache was already dropped). It is
+// it drops when one of its own git or editor routes changes a file, so this is
+// the right call after an error (nothing is cached) or an event (the cache was
+// already dropped). It is
 // the WRONG call for a user-driven "refresh now": the server would hand back the
 // same cached answer and nothing would appear to change. Use
 // `forceRefreshChanges` for that.
@@ -1078,9 +1079,11 @@ export function refreshChanges(): void {
 }
 
 // The Changes pane's "Refresh changes" action: force the server to ask git
-// again, then re-read. dux cannot see a file the user changed from a terminal,
-// so without the POST the answer is only as fresh as the last poll (2s while
-// something is running, 10s while nothing is).
+// again, then re-read. dux has no file watcher, so a change it did not make
+// through one of its own routes (a file the user changed from a terminal, an
+// agent writing in its worktree, a file dropped onto a terminal) is only as
+// fresh as the last poll: 2s while any agent or terminal in the workspace is
+// running, 10s while none is.
 //
 // Rejects when the forcing POST fails so the caller can report it the way the
 // pane's other quick actions do; the re-read still happens either way, since a

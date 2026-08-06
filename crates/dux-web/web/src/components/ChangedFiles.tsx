@@ -393,15 +393,16 @@ export function ChangedFiles() {
                   <ArrowDownToLine />
                   Pull
                 </DropdownMenuItem>
-                {/* Ask git again NOW. dux drops its cached answer whenever dux
-                    itself changes a file, but it cannot see a file the user
-                    changed from a terminal, so those only appear on the next
-                    poll. Deliberately `forceRefreshChanges` and not the store's
-                    `refreshChanges`: that one only re-GETs, and the server would
-                    answer from the same cache, so the item would look like it
-                    worked and change nothing. No trailing ellipsis: it opens
-                    nothing and needs no confirmation. Reports failures only,
-                    like Push/Pull and the per-file stage/unstage beside it. */}
+                {/* Ask git again NOW. dux has no file watcher: it drops its
+                    cached answer when one of its own git or editor routes
+                    changes a file, and anything else (a file the user changed
+                    from a terminal, an agent writing in its worktree) only
+                    appears on the next poll. Deliberately `forceRefreshChanges`
+                    and not the store's `refreshChanges`: that one only re-GETs,
+                    and the server would answer from the same cache, so the item
+                    would look like it worked and change nothing. No trailing
+                    ellipsis: it opens nothing and needs no confirmation. The
+                    store reports both the failure and the counts it found. */}
                 <DropdownMenuItem
                   onClick={() => {
                     void forceRefreshChanges().catch((e) =>

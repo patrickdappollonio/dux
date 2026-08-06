@@ -8,10 +8,11 @@
 //! so subscribed clients refetch `GET /api/v1/sessions/:id/changes`.
 //!
 //! `refresh-changes` is the one route here that mutates nothing: it performs
-//! only that post-mutation refresh, so a user who changed a file from a terminal
-//! (which dux cannot observe) can force the recompute instead of waiting out the
-//! poll interval. See [`refresh_changed_files_now`], which every handler in this
-//! module and in [`crate::file_routes`] shares so the pair can never drift apart.
+//! only that post-mutation refresh, so a change dux did not make through one of
+//! these routes (a file the user changed from a terminal, or an agent writing in
+//! its worktree) can be picked up now instead of on the next poll. See
+//! [`refresh_changed_files_now`], which every handler in this module and in
+//! [`crate::file_routes`] shares so the pair can never drift apart.
 //!
 //! Safety: every handler runs git OFF the engine actor thread AND off the async
 //! reactor (`spawn_blocking`), so a slow/locked repo never stalls other clients.
@@ -85,12 +86,18 @@ pub fn routes() -> Router<AppState> {
 /// Recompute a session's changed files NOW: the exact pair of calls every
 /// mutating handler in this module makes after it touches a file.
 ///
-/// dux drops its cached answer whenever DUX changes a file, but a file the user
-/// changes from a terminal is invisible to it, so the lists only catch up on the
-/// next poll (2s while something is running, 10s while nothing is). Both halves
-/// are needed and neither is redundant: the engine call refreshes the lists the
-/// engine itself serves, and the invalidate drops the REST cache entry so the
-/// next GET recomputes rather than re-serving the pre-edit snapshot.
+/// dux has no file watcher: the cached answer is dropped by the routes that
+/// change a file, which is every handler here and in [`crate::file_routes`], and
+/// by nothing else. So anything dux did not do through one of them only catches
+/// up on the next poll (2s while any agent or terminal in the workspace is
+/// running, 10s while none is), and that includes one thing dux does itself, the
+/// file-drop upload, which writes into a live process's working directory rather
+/// than through these routes.
+///
+/// Both halves are needed and neither is redundant: the engine call refreshes
+/// the lists the engine itself serves, and the invalidate drops the REST cache
+/// entry so the next GET recomputes rather than re-serving the pre-edit
+/// snapshot.
 pub(crate) fn refresh_changed_files_now(state: &AppState, session_id: String, worktree: &Path) {
     state
         .engine
