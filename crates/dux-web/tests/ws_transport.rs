@@ -697,13 +697,25 @@ async fn nested_agent_pty_socket_streams_bytes() {
     );
 }
 
-/// A frame past `MAX_WS_MESSAGE_SIZE` is refused by the socket, not delivered.
+/// A single frame past `MAX_WS_MESSAGE_SIZE` is refused by the socket, not
+/// delivered.
 ///
-/// Nothing covered the message cap before, so it could have been silently
-/// dropped from every socket without a test noticing. The provider override in
-/// `boot` is `cat`, which echoes whatever reaches the PTY, so the assertion is
-/// direct: the marker inside the oversized frame must NEVER come back, and the
-/// socket must end rather than stay open having quietly ignored the frame.
+/// Be precise about what this pins and what it does NOT. `MAX_WS_MESSAGE_SIZE`
+/// is 16 MiB, which is exactly tungstenite's DEFAULT `max_frame_size`, so an
+/// unfragmented frame this large is refused by the frame cap dux never
+/// configures, and this test keeps passing with dux's own
+/// `.max_message_size(..)` calls deleted or raised. It was measured: raising
+/// every socket to 64 MiB leaves this test green and an identical trace. So it
+/// proves the end-to-end refusal is real (an over-cap frame never reaches the
+/// PTY and the socket ends rather than quietly ignoring it), and nothing about
+/// dux's constant.
+///
+/// `a_fragmented_message_past_the_message_cap_is_refused` is the one that pins
+/// the configured number; keep them together.
+///
+/// The provider override in `boot` is `cat`, which echoes whatever reaches the
+/// PTY, so the assertion is direct: the marker inside the oversized frame must
+/// NEVER come back.
 #[tokio::test]
 async fn an_oversized_frame_is_refused_and_never_reaches_the_pty() {
     let (addr, _tmp) = boot().await;
@@ -748,6 +760,98 @@ async fn an_oversized_frame_is_refused_and_never_reaches_the_pty() {
         ended,
         "the socket stayed open after an over-cap frame; the cap must refuse it, \
          not ignore it"
+    );
+}
+
+/// A FRAGMENTED message past `MAX_WS_MESSAGE_SIZE` is refused, which is what
+/// actually pins dux's configured cap.
+///
+/// The WebSocket protocol has two independent limits and dux only sets one of
+/// them. `max_frame_size` bounds a single frame and dux leaves it at
+/// tungstenite's 16 MiB default; `max_message_size` bounds the REASSEMBLED
+/// message across a continuation chain, defaults to 64 MiB, and is the one dux
+/// lowers to `MAX_WS_MESSAGE_SIZE`. Because the two numbers coincide at 16 MiB,
+/// no single frame can tell them apart, which is how the sibling test above
+/// stayed green through a 64 MiB mutation.
+///
+/// So this sends the payload as two continuation frames of roughly 8 MiB each.
+/// Every frame is comfortably under the frame cap, and only the message cap can
+/// refuse the total. Mutation proof: raise `MAX_WS_MESSAGE_SIZE` (or delete the
+/// `.max_message_size(..)` call from the agent PTY socket) and the 16 MiB the
+/// default allows through echoes back off `cat`, failing on the marker.
+#[tokio::test]
+async fn a_fragmented_message_past_the_message_cap_is_refused() {
+    use tokio_tungstenite::tungstenite::protocol::frame::Frame;
+    use tokio_tungstenite::tungstenite::protocol::frame::coding::{Data, OpCode};
+
+    let (addr, _tmp) = boot().await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/sessions/s1/pty"))
+        .await
+        .expect("connect agent pty socket");
+
+    // Claim ownership first, so a dropped write could only be the size cap and
+    // not the non-owner rule.
+    ws.send(Message::Text(r#"{"rows":24,"cols":80}"#.into()))
+        .await
+        .unwrap();
+
+    // One byte over the MESSAGE cap in total, chopped into fragments far below
+    // the frame cap. The fragment size is fixed rather than "half the payload"
+    // so this keeps testing the message cap if the constant is ever raised: a
+    // half-and-half split of a 64 MiB payload would be two 32 MiB frames, which
+    // the frame cap would refuse, and the test would pass for the wrong reason.
+    const FRAGMENT: usize = 4 * 1024 * 1024;
+    let marker = b"dux-fragmented-oversize-marker\n";
+    let total = dux_web::server::MAX_WS_MESSAGE_SIZE + 1;
+    let mut payload = vec![b'x'; total - marker.len()];
+    payload.extend_from_slice(marker);
+    assert_eq!(payload.len(), total);
+
+    // A Binary opener that is not final, then Continue frames with only the last
+    // one final: one logical message assembled server-side, which is where
+    // `max_message_size` is checked.
+    let chunks: Vec<&[u8]> = payload.chunks(FRAGMENT).collect();
+    let last = chunks.len() - 1;
+    for (i, chunk) in chunks.iter().enumerate() {
+        let opcode = if i == 0 {
+            OpCode::Data(Data::Binary)
+        } else {
+            OpCode::Data(Data::Continue)
+        };
+        // A send may fail once the server has already torn the socket down,
+        // which is just as good an answer as a later close.
+        let _ = ws
+            .send(Message::Frame(Frame::message(
+                chunk.to_vec(),
+                opcode,
+                i == last,
+            )))
+            .await;
+    }
+
+    let mut acc = Vec::new();
+    let mut ended = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(300), ws.next()).await {
+            Ok(Some(Ok(Message::Binary(b)))) => acc.extend_from_slice(&b),
+            Ok(Some(Ok(Message::Close(_)))) | Ok(None) | Ok(Some(Err(_))) => {
+                ended = true;
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    assert!(
+        !String::from_utf8_lossy(&acc).contains("dux-fragmented-oversize-marker"),
+        "a fragmented message past MAX_WS_MESSAGE_SIZE reached the PTY and echoed \
+         back; the configured message cap is not being applied"
+    );
+    assert!(
+        ended,
+        "the socket stayed open after an over-cap fragmented message; the cap must \
+         refuse it, not ignore it"
     );
 }
 
