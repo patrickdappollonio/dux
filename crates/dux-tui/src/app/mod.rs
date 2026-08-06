@@ -4728,10 +4728,6 @@ impl App {
         }
     }
 
-    pub(crate) fn running_process_count(&self) -> usize {
-        self.engine.providers.len() + self.engine.companion_terminals.len()
-    }
-
     pub(crate) fn running_companion_terminal_count(&self) -> usize {
         self.engine.companion_terminals.len()
     }

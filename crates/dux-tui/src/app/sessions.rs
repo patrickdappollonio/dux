@@ -3723,9 +3723,9 @@ impl App {
         }
 
         self.clamp_terminal_cursor();
-        self.engine
-            .has_active_processes
-            .store(self.running_process_count() > 0, Ordering::Relaxed);
+        // The kill just removed PTYs; keep the poll-cadence flag honest right
+        // away rather than waiting for the next tick.
+        self.engine.sync_has_active_processes();
 
         (killed_agents, killed_terminals)
     }

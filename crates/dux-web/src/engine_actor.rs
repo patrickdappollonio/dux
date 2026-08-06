@@ -1815,6 +1815,14 @@ pub(crate) fn run_engine_loop(
         if disconnected {
             break;
         }
+        // Keep the changed-files poller's cadence flag in step with the live PTY
+        // count. Placed at the END of the iteration deliberately: both the halves
+        // that move the count run above it, the exit prune that drops PTYs whose
+        // child died and the request drain that launches new ones, so one call
+        // here sees both directions. The TUI does the same thing once per tick
+        // from its own run loop.
+        engine.sync_has_active_processes();
+
         // Expire a timed-out transient status and broadcast the cleared state to
         // every connected client. Busy/warning/error are left untouched.
         thread_status_tx.tick(Instant::now());
@@ -4098,6 +4106,86 @@ mod tests {
                 request_mutates_spine(&req),
                 expected,
                 "request_mutates_spine({name}) must answer {expected}"
+            );
+        }
+    }
+
+    /// Run exactly one iteration of the real actor loop and hand the engine back.
+    /// `control` is consulted at the TOP of each iteration, so answering
+    /// `Continue` once and `Exit` afterwards runs the body exactly once. The
+    /// handle is kept alive for the duration so the request channel does not read
+    /// as disconnected.
+    fn one_loop_iteration(engine: Engine) -> Engine {
+        let (handle, ends) = build_actor_channels(&engine);
+        let mut ran = false;
+        let engine = run_engine_loop(engine, ends, move || {
+            if ran {
+                LoopControl::Exit
+            } else {
+                ran = true;
+                LoopControl::Continue
+            }
+        });
+        drop(handle);
+        engine
+    }
+
+    /// The changed-files poll cadence (2s busy / 10s idle) is picked from
+    /// `Engine::has_active_processes`, and the web surface has to keep that flag
+    /// true while any PTY is alive. It never stored to the flag at all, so
+    /// `dux server` polled on the 10-second idle cadence however many agents and
+    /// terminals were running. Both directions matter: the flag must rise when a
+    /// process appears and fall when it exits.
+    #[test]
+    fn the_loop_keeps_has_active_processes_in_step_with_live_ptys() {
+        use std::sync::atomic::Ordering;
+
+        let (_tmp, paths) = temp_paths();
+        let mut engine = bootstrap_engine(&paths).expect("engine");
+        let flag = Arc::clone(&engine.has_active_processes);
+
+        engine = one_loop_iteration(engine);
+        assert!(
+            !flag.load(Ordering::Relaxed),
+            "with no PTYs alive the workspace is idle"
+        );
+
+        // `read` blocks on stdin, so this child stays up until the test feeds it a
+        // line. No polling, no load: it simply waits.
+        let client = PtyClient::spawn_with_env(
+            "sh",
+            &["-c".to_string(), "read line".to_string()],
+            &paths.root,
+            24,
+            80,
+            100,
+            &[],
+        )
+        .expect("spawn sh");
+        engine.providers.insert("s1".to_string(), client);
+        engine = one_loop_iteration(engine);
+        assert!(
+            flag.load(Ordering::Relaxed),
+            "a live provider PTY must mark the workspace active"
+        );
+
+        // Let the child finish. The loop's own exit prune drops it from
+        // `providers`, and the flag has to follow it back down.
+        engine
+            .providers
+            .get("s1")
+            .expect("provider")
+            .write_bytes(b"\n")
+            .expect("write to pty");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            engine = one_loop_iteration(engine);
+            if !flag.load(Ordering::Relaxed) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the flag never fell back to false after the last PTY exited"
             );
         }
     }

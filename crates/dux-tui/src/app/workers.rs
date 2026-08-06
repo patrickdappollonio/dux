@@ -375,10 +375,10 @@ impl App {
             self.engine.spawn_resource_stats_worker();
         }
 
-        // Keep the poller's interval flag in sync with whether any runtime PTY is alive.
-        self.engine
-            .has_active_processes
-            .store(self.running_process_count() > 0, Ordering::Relaxed);
+        // Keep the poller's interval flag in sync with whether any runtime PTY is
+        // alive. The rule itself lives in the engine so the web loop keeps the
+        // flag by exactly the same definition.
+        self.engine.sync_has_active_processes();
     }
 
     pub(super) fn apply_reaction(&mut self, reaction: EventReaction) {

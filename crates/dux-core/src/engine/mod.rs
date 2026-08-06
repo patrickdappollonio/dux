@@ -1931,6 +1931,27 @@ impl Engine {
         worktree
     }
 
+    /// How many runtime PTYs are alive: one per launched provider tab plus one
+    /// per companion terminal. This is the definition of "something is running"
+    /// for the whole app, and it lives here so both surfaces answer it the same
+    /// way instead of each re-deriving the expression.
+    pub fn running_process_count(&self) -> usize {
+        self.providers.len() + self.companion_terminals.len()
+    }
+
+    /// Keep [`Self::has_active_processes`] in step with the live PTY count.
+    ///
+    /// That flag is what [`Self::spawn_changed_files_poller`] reads to pick its
+    /// cadence (2s while something runs, 10s while nothing does), so whichever
+    /// surface owns the loop has to call this once per iteration, AFTER the work
+    /// that starts and ends processes. Only the TUI used to do it; `dux server`
+    /// never stored to the flag at all and so polled on the idle cadence with
+    /// every agent in the workspace running.
+    pub fn sync_has_active_processes(&self) {
+        self.has_active_processes
+            .store(self.running_process_count() > 0, Ordering::Relaxed);
+    }
+
     /// Compute the changed files for `worktree` OFF the engine actor thread and
     /// post them back as a `ChangedFilesReady` event. The one-shot worker mirrors
     /// `spawn_pr_check_for_session`'s spawn shape and the changed-files poller's
@@ -6529,6 +6550,48 @@ mod resource_monitor_targets_tests {
         assert_eq!(targets.len(), 1, "the project terminal must be sampled");
         assert_eq!(targets[0].id, terminal_id);
         assert_eq!(targets[0].kind, ResourceKind::Terminal);
+    }
+
+    /// `has_active_processes` picks the changed-files poll cadence, and both
+    /// surfaces now keep it through this one method. Provider tabs and companion
+    /// terminals both count: a workspace with only a terminal open is still busy.
+    #[test]
+    fn sync_has_active_processes_counts_tabs_and_terminals() {
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+
+        engine.sync_has_active_processes();
+        assert_eq!(engine.running_process_count(), 0);
+        assert!(!engine.has_active_processes.load(Ordering::Relaxed));
+
+        engine.companion_terminals.insert(
+            "term-1".to_string(),
+            CompanionTerminal {
+                owner: crate::model::TerminalOwner::Standalone,
+                label: "shell".to_string(),
+                foreground_cmd: None,
+                client: spawn_cat(worktree.path()),
+                sort_order: 1,
+                created_at: chrono::Utc::now(),
+            },
+        );
+        engine.sync_has_active_processes();
+        assert_eq!(engine.running_process_count(), 1);
+        assert!(engine.has_active_processes.load(Ordering::Relaxed));
+
+        engine
+            .providers
+            .insert("s1".to_string(), spawn_cat(worktree.path()));
+        engine.sync_has_active_processes();
+        assert_eq!(engine.running_process_count(), 2);
+
+        engine.providers.clear();
+        engine.companion_terminals.clear();
+        engine.sync_has_active_processes();
+        assert!(
+            !engine.has_active_processes.load(Ordering::Relaxed),
+            "the flag must fall back once the last PTY is gone"
+        );
     }
 
     #[test]
