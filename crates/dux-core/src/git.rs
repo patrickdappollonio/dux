@@ -1836,16 +1836,71 @@ pub fn commit_preflight(worktree_path: &Path, message: &str) -> CommitPreflight 
 /// and drops the part that is not. The full untouched text still goes to
 /// `dux.log` for the operator.
 ///
-/// Deliberately a plain literal replacement rather than anything cleverer: it
-/// is the same string git was handed as `-C`, so it matches what git echoes
-/// back, and a miss degrades to showing a path rather than to hiding the
-/// reason.
+/// The match is LITERAL but must land on a path BOUNDARY, meaning the prefix is
+/// followed by a separator or by the end of the path. A plain `str::replace`
+/// was not enough, and the case is not hypothetical: agent worktrees are
+/// siblings under one project root, so `.../proj/agent` and `.../proj/agent-2`
+/// coexist by construction, and a mention of the second one rendered as
+/// `.-2/f.rs`. That is a WRONG path rather than a hidden one, which is worse,
+/// because nothing tells the reader it is not real. A path this function
+/// declines to shorten is still shown in full, which is the same harmless
+/// degradation a miss always had.
+///
+/// The string compared is the one git was handed as `-C`, so it matches what
+/// git echoes back. A trailing separator on it is ignored rather than producing
+/// a doubled slash.
+///
+/// What counts as a boundary depends on whether the path is QUOTED, and it has
+/// to, which was found by a `dux-web` test rather than reasoned about: git
+/// writes `fatal: cannot change to '/wt/proj/agent': No such file or
+/// directory`, a message that names the server's path and nothing else, and a
+/// rule accepting only a separator or the end of the text would leave it in
+/// full. So when the match is immediately preceded by `'` or `"`, the matching
+/// quote closes the path too.
+///
+/// The boundary set is deliberately no wider than that. A space or a comma
+/// cannot join it, because a filename may contain either: with a sibling
+/// worktree named `agent 2`, treating a space as a boundary would shorten
+/// `/wt/proj/agent 2/f.rs` to `./2/f.rs`, which is the exact class of invented
+/// path this rule exists to prevent. Inside a quoted run the quote is safe for
+/// the same reason it is safe to git, since the opening quote is what says a
+/// quoted path is being read at all.
 pub fn redact_worktree_path(text: &str, worktree_path: &Path) -> String {
     let wt = worktree_path.to_string_lossy();
+    let wt = wt.strip_suffix('/').unwrap_or(wt.as_ref());
     if wt.is_empty() || wt == "/" {
         return text.to_string();
     }
-    text.replace(wt.as_ref(), ".")
+
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(wt) {
+        let after = &rest[at + wt.len()..];
+        // The quote that OPENED this path, if any, closes it too.
+        let opening_quote = rest[..at]
+            .chars()
+            .next_back()
+            .filter(|c| *c == '\'' || *c == '"');
+        let next = after.chars().next();
+        // A boundary is a separator, the closing quote, or the end of the text.
+        // Anything else means this is a DIFFERENT path that merely starts with
+        // the same characters, and shortening it would invent one that does not
+        // exist.
+        let at_boundary = match next {
+            None => true,
+            Some('/') => true,
+            Some(c) => Some(c) == opening_quote,
+        };
+        if at_boundary {
+            out.push_str(&rest[..at]);
+            out.push('.');
+        } else {
+            out.push_str(&rest[..at + wt.len()]);
+        }
+        rest = after;
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Build the error for a failed git subprocess, carrying BOTH streams.
@@ -3622,6 +3677,104 @@ mod tests {
         let out = redact_worktree_path(text, wt);
         assert_eq!(out, "error: './src/a.rs' is unmerged");
         assert!(!out.contains("/home/someone"));
+    }
+
+    /// A SIBLING worktree's path must not be half-eaten. Agent worktrees are
+    /// literally siblings under one project root, so `.../proj/agent` and
+    /// `.../proj/agent-2` coexist by construction, and a plain substring
+    /// replacement rendered a mention of the second one as `./-2/f.rs`: not a
+    /// hidden path but a WRONG path, which is worse, because the reader has no
+    /// way to tell it apart from a real one.
+    #[test]
+    fn redact_worktree_path_leaves_a_sibling_worktree_whole() {
+        let wt = Path::new("/home/someone/.config/dux/worktrees/proj/agent");
+        let text = "error: '/home/someone/.config/dux/worktrees/proj/agent-2/f.rs' is unmerged";
+        let out = redact_worktree_path(text, wt);
+        assert!(
+            !out.contains("./-2/"),
+            "a sibling worktree must not be mangled into a path that does not exist: {out}"
+        );
+        assert_eq!(out, text, "a different worktree is not this one's to strip");
+    }
+
+    /// The same defect with a SPACE in the sibling's name, which is why the
+    /// boundary cannot be widened to "whatever usually ends a path in prose".
+    /// A space is a legal filename character, so treating it as a boundary
+    /// would render this as `./2/f.rs`.
+    #[test]
+    fn redact_worktree_path_leaves_a_sibling_worktree_with_a_space_whole() {
+        let wt = Path::new("/wt/proj/agent");
+        let text = "error: '/wt/proj/agent 2/f.rs' is unmerged";
+        assert_eq!(redact_worktree_path(text, wt), text);
+    }
+
+    /// The boundary is a path SEPARATOR or the end of the path, so the worktree
+    /// mentioned bare (the common `cd`-into-it or hook-cwd shape) still
+    /// collapses to `.`.
+    #[test]
+    fn redact_worktree_path_strips_the_worktree_mentioned_on_its_own() {
+        let wt = Path::new("/home/someone/.config/dux/worktrees/proj/agent");
+        let out = redact_worktree_path(
+            "fatal: cannot run in /home/someone/.config/dux/worktrees/proj/agent",
+            wt,
+        );
+        assert_eq!(out, "fatal: cannot run in .");
+    }
+
+    /// git's own shape for a worktree that has gone missing names the server's
+    /// path QUOTED and followed by nothing path-like, so the closing quote has
+    /// to count as a boundary or the whole message is a server path. Found by
+    /// `discard_strips_the_server_path_from_a_classify_refusal` in `dux-web`,
+    /// not by reasoning.
+    #[test]
+    fn redact_worktree_path_strips_a_quoted_worktree() {
+        let wt = Path::new("/home/someone/.config/dux/worktrees/proj/agent");
+        let out = redact_worktree_path(
+            "git status failed: fatal: cannot change to \
+             '/home/someone/.config/dux/worktrees/proj/agent': No such file or directory",
+            wt,
+        );
+        assert_eq!(
+            out,
+            "git status failed: fatal: cannot change to '.': No such file or directory"
+        );
+        assert!(!out.contains("/home/someone"));
+    }
+
+    /// The quote closes the path only for the quote that OPENED it, so a
+    /// double-quoted mention works the same way and a stray apostrophe after an
+    /// unquoted path is not mistaken for a terminator.
+    #[test]
+    fn redact_worktree_path_honours_the_quote_that_opened_the_path() {
+        let wt = Path::new("/wt/agent");
+        assert_eq!(
+            redact_worktree_path("cannot change to \"/wt/agent\": gone", wt),
+            "cannot change to \".\": gone"
+        );
+        assert_eq!(
+            redact_worktree_path("cannot change to /wt/agent's parent", wt),
+            "cannot change to /wt/agent's parent"
+        );
+    }
+
+    /// A trailing separator on the worktree path must not change the answer,
+    /// and must not leave a doubled slash behind.
+    #[test]
+    fn redact_worktree_path_ignores_a_trailing_separator_on_the_worktree() {
+        let text = "error: '/wt/proj/agent/src/a.rs' is unmerged";
+        assert_eq!(
+            redact_worktree_path(text, Path::new("/wt/proj/agent/")),
+            "error: './src/a.rs' is unmerged"
+        );
+    }
+
+    /// Every occurrence, not just the first: git names two paths in a rename
+    /// diagnostic routinely.
+    #[test]
+    fn redact_worktree_path_replaces_every_occurrence() {
+        let wt = Path::new("/wt/agent");
+        let out = redact_worktree_path("from /wt/agent/a.rs to /wt/agent/b.rs", wt);
+        assert_eq!(out, "from ./a.rs to ./b.rs");
     }
 
     /// A degenerate worktree path must not turn the message into punctuation
