@@ -1204,9 +1204,18 @@ impl DuxPaths {
     /// and other bits, so it is idempotent and cannot lock the owner out.
     ///
     /// The WORKTREES directory is deliberately left at the umask default. Those
-    /// are the user's own checkouts, opened in their own editor and possibly
-    /// shared on purpose; they sit inside the owner-only root, which is where
-    /// the protection belongs.
+    /// are the user's own checkouts, opened in their own editor, and the mode
+    /// dux found is the mode dux leaves.
+    ///
+    /// Do not repeat the older reason for this, that the checkouts may be
+    /// "shared on purpose". They sit inside a `0700` root now, so another local
+    /// user cannot search their way in whatever the worktrees directory itself
+    /// says, and on-purpose sharing through this path is no longer possible.
+    /// Anyone who really was sharing a worktree with another local account lost
+    /// that when the root was tightened, and the way back is to put the
+    /// worktrees somewhere outside the config root rather than to loosen the
+    /// root. The mode is still preserved, for the honest reason that it is the
+    /// user's own checkout and not dux's file to relabel.
     pub fn ensure_dirs(&self) -> Result<()> {
         crate::file_modes::create_private_dir_all(&self.root)
             .with_context(|| format!("failed to create {}", self.root.display()))?;
