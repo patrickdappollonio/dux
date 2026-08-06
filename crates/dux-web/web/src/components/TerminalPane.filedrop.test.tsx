@@ -1005,7 +1005,18 @@ describe("when a file cannot be pasted", () => {
 
     const message = vi.mocked(toast.error).mock.calls[0][0] as string
     expect(message).toContain("shot.png")
-    expect(message).toContain("try the drop again in a moment")
+    // The server's own words carry the advice, so dux does not add a second
+    // copy of it. The whole sentence is asserted, because the bug this replaces
+    // was a wording defect that every looser assertion passed: dux used to weld
+    // ", so it was not saved; try the drop again in a moment" onto the end of
+    // the server's already-finished sentence.
+    expect(message).toBe(
+      "Could not save shot.png: The server is already handling as many dropped " +
+        "files as it allows at once. Try the drop again shortly.",
+    )
+    expect(message.toLowerCase().match(/\btry\b[^.!?]*\bagain\b/g)).toHaveLength(
+      1,
+    )
     expect(message).not.toContain("..")
   })
 })
