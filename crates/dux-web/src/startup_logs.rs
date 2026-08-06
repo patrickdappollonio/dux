@@ -221,6 +221,34 @@ async fn read_project_startup_log(
     }
 }
 
+/// The two failures these reads can hit, worded for the client and stripped of
+/// the server's own filesystem layout.
+///
+/// Every error arriving here is annotated with an ABSOLUTE path:
+/// `dux_core::startup` wraps each `read_dir`/`read_to_string` in
+/// `with_context(|| format!("failed to read {}", path.display()))`, and those
+/// paths are under the dux config root, which is a place the browser has no
+/// business learning about (the user's home directory is in it). Formatting the
+/// whole anyhow chain with `{e:#}` put all of it in the response body.
+///
+/// So we keep only `root_cause()`, which is the OS error ("Is a directory",
+/// "Permission denied") and is the part that actually tells the user something,
+/// and prefix it with what dux was trying to do. This is the pattern already set
+/// by the config write in [`crate::engine_actor`]; these three sites were the
+/// ones that had not adopted it. Nothing is lost to the operator: the full
+/// chain is still what `dux.log` gets from the code that logs these failures.
+fn listing_failed(e: anyhow::Error) -> String {
+    format!(
+        "Could not list this project's startup command logs: {}",
+        e.root_cause()
+    )
+}
+
+/// The read half of [`listing_failed`], for one log file. See its docs.
+fn read_failed(e: anyhow::Error) -> String {
+    format!("Could not read the startup command log: {}", e.root_cause())
+}
+
 /// List `scope`'s startup-command logs (newest first) and pre-load the newest
 /// file's contents. Returns a user-facing error string when the directory listing
 /// or the newest file's read fails.
@@ -228,12 +256,11 @@ fn collect_logs(
     paths: &DuxPaths,
     scope: StartupCommandLogScope,
 ) -> Result<StartupLogsReply, String> {
-    let entries =
-        dux_core::startup::list_logs_for_scope(paths, scope).map_err(|e| format!("{e:#}"))?;
+    let entries = dux_core::startup::list_logs_for_scope(paths, scope).map_err(listing_failed)?;
     let selected = match entries.first() {
         Some(entry) => Some(StartupLogContentView {
             name: entry.display_name.clone(),
-            content: dux_core::startup::read_log(&entry.path).map_err(|e| format!("{e:#}"))?,
+            content: dux_core::startup::read_log(&entry.path).map_err(read_failed)?,
         }),
         None => None,
     };
@@ -262,8 +289,7 @@ fn read_named_log(
     scope: StartupCommandLogScope,
     name: &str,
 ) -> Result<Option<StartupLogContentView>, String> {
-    let entries =
-        dux_core::startup::list_logs_for_scope(paths, scope).map_err(|e| format!("{e:#}"))?;
+    let entries = dux_core::startup::list_logs_for_scope(paths, scope).map_err(listing_failed)?;
     let entry = if name.is_empty() {
         entries.first()
     } else {
@@ -273,7 +299,7 @@ fn read_named_log(
         None => Ok(None),
         Some(entry) => Ok(Some(StartupLogContentView {
             name: entry.display_name.clone(),
-            content: dux_core::startup::read_log(&entry.path).map_err(|e| format!("{e:#}"))?,
+            content: dux_core::startup::read_log(&entry.path).map_err(read_failed)?,
         })),
     }
 }
@@ -602,5 +628,39 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         // Drain the body so the response is fully consumed.
         let _ = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    }
+
+    /// A read failure must not hand the client the absolute path it failed on.
+    /// The failing read is forced with a DIRECTORY named `*.log`: the listing
+    /// selects it by extension and `read_log` then fails with `EISDIR`, which is
+    /// a path-annotated `anyhow` context in `dux_core::startup`.
+    #[test]
+    fn a_failed_read_reports_the_cause_without_the_server_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let dir = dux_core::startup::agent_log_dir(&paths, "p1", "s1");
+        std::fs::create_dir_all(dir.join("20260101T000000Z-feat.log")).unwrap();
+
+        let err = match collect_logs(&paths, agent_scope("s1")) {
+            Err(e) => e,
+            Ok(_) => panic!("reading a directory as a log file must fail"),
+        };
+        let root = tmp.path().to_string_lossy().into_owned();
+        assert!(
+            !err.contains(&root),
+            "the message must not carry the dux root: {err}"
+        );
+        assert!(
+            !err.contains("20260101T000000Z-feat.log"),
+            "nor the full path it failed on: {err}"
+        );
+        assert!(
+            err.starts_with("Could not read the startup command log: "),
+            "but it must still say what dux was doing: {err}"
+        );
+        assert!(
+            err.len() > "Could not read the startup command log: ".len(),
+            "and keep the OS error as the cause: {err}"
+        );
     }
 }
