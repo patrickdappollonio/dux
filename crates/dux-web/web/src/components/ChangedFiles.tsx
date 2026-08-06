@@ -54,6 +54,7 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { Separator } from "@/components/ui/separator"
 import { fileStatusMeta, filterChangedFiles } from "@/lib/changedFiles"
 import {
+  forceRefreshChanges,
   openCommit,
   openDiscard,
   openEditor,
@@ -391,6 +392,27 @@ export function ChangedFiles() {
                 >
                   <ArrowDownToLine />
                   Pull
+                </DropdownMenuItem>
+                {/* Ask git again NOW. dux drops its cached answer whenever dux
+                    itself changes a file, but it cannot see a file the user
+                    changed from a terminal, so those only appear on the next
+                    poll. Deliberately `forceRefreshChanges` and not the store's
+                    `refreshChanges`: that one only re-GETs, and the server would
+                    answer from the same cache, so the item would look like it
+                    worked and change nothing. No trailing ellipsis: it opens
+                    nothing and needs no confirmation. Reports failures only,
+                    like Push/Pull and the per-file stage/unstage beside it. */}
+                <DropdownMenuItem
+                  onClick={() => {
+                    void forceRefreshChanges().catch((e) =>
+                      toast.error(
+                        e instanceof Error ? e.message : "refresh failed"
+                      )
+                    )
+                  }}
+                >
+                  <RefreshCw />
+                  Refresh changes
                 </DropdownMenuItem>
                 {/* Hide the Changes pane entirely (desktop only), mirroring the
                     TUI's remove-git-pane command. The persisted default lives in

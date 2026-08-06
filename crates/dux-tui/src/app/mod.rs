@@ -3665,6 +3665,7 @@ impl App {
             "kill-running" => self.open_kill_running(),
             "reconnect-agent" => self.reconnect_selected_session(),
             "force-reconnect-agent" => self.force_reconnect_agent(),
+            "refresh-changes" => self.refresh_changed_files_now(),
             "move-agent-up" => {
                 self.move_selected_agent(reorder::MoveDir::Up);
                 Ok(())
@@ -4384,6 +4385,50 @@ impl App {
                     .spawn_pr_check_for_session(&sid, dux_core::engine::PR_CHECK_MIN_INTERVAL);
             }
         }
+    }
+
+    /// The `refresh-changes` palette command: recompute the selected agent's
+    /// changed files immediately.
+    ///
+    /// dux drops its cached answer whenever dux itself changes a file, but it
+    /// cannot see a file the user changed from a terminal, so those only show up
+    /// on the next poll. This is how the user says "look again" instead of
+    /// waiting.
+    ///
+    /// The compute is [`Self::reload_changed_files`], which reads git inline: the
+    /// TUI is a single user on its own App thread, and every other caller of it
+    /// does the same. So the pending status is momentary. It is still emitted,
+    /// keyed, and still resolved by a final in every branch, because a pending
+    /// nothing replaces is exactly the stuck spinner the status contract exists
+    /// to prevent, and because moving this compute onto a worker later must not
+    /// have to invent the status pair.
+    pub(crate) fn refresh_changed_files_now(&mut self) -> Result<()> {
+        let Some(session) = self.selected_session() else {
+            self.set_warning(
+                "Select an agent first: refreshing changed files needs a worktree to read.",
+            );
+            return Ok(());
+        };
+        let key = format!("refresh-changes:{}", session.id);
+        let name = self.session_label(session);
+        self.status.set(
+            Instant::now(),
+            Some(key.clone()),
+            StatusTone::Busy,
+            format!("Reading changed files for \"{name}\"\u{2026}"),
+        );
+        self.reload_changed_files();
+        let staged = self.engine.staged_files.len();
+        let unstaged = self.engine.unstaged_files.len();
+        self.status.set(
+            Instant::now(),
+            Some(key),
+            StatusTone::Info,
+            format!(
+                "Changed files for \"{name}\" refreshed: {staged} staged, {unstaged} unstaged."
+            ),
+        );
+        Ok(())
     }
 
     pub(crate) fn selected_changed_file(&self) -> Option<&ChangedFile> {

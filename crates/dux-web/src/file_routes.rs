@@ -453,12 +453,7 @@ async fn write_file(
                 .into_response();
         }
     }
-    state
-        .engine
-        .refresh_changed_files(worktree.to_string_lossy().into_owned());
-    // Refresh the REST changed-files cache too so subscribed `/ws/events` clients
-    // re-GET the editor's new state immediately.
-    state.changes.invalidate(session_id);
+    crate::git_routes::refresh_changed_files_now(&state, session_id, &worktree);
     StatusCode::OK.into_response()
 }
 
@@ -493,10 +488,7 @@ async fn create_file(
                 .into_response();
         }
     }
-    state
-        .engine
-        .refresh_changed_files(worktree.to_string_lossy().into_owned());
-    state.changes.invalidate(session_id);
+    crate::git_routes::refresh_changed_files_now(&state, session_id, &worktree);
     StatusCode::OK.into_response()
 }
 
@@ -529,10 +521,7 @@ async fn create_dir(
                 .into_response();
         }
     }
-    state
-        .engine
-        .refresh_changed_files(worktree.to_string_lossy().into_owned());
-    state.changes.invalidate(session_id);
+    crate::git_routes::refresh_changed_files_now(&state, session_id, &worktree);
     StatusCode::OK.into_response()
 }
 
@@ -569,10 +558,7 @@ async fn rename_entry(
                 .into_response();
         }
     }
-    state
-        .engine
-        .refresh_changed_files(worktree.to_string_lossy().into_owned());
-    state.changes.invalidate(session_id);
+    crate::git_routes::refresh_changed_files_now(&state, session_id, &worktree);
     StatusCode::OK.into_response()
 }
 
@@ -606,10 +592,7 @@ async fn delete_entry(
                 .into_response();
         }
     }
-    state
-        .engine
-        .refresh_changed_files(worktree.to_string_lossy().into_owned());
-    state.changes.invalidate(session_id);
+    crate::git_routes::refresh_changed_files_now(&state, session_id, &worktree);
     StatusCode::OK.into_response()
 }
 

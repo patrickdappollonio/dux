@@ -7,6 +7,12 @@
 //! the changed-files cache, which emits a `session.changes` event on `/ws/events`
 //! so subscribed clients refetch `GET /api/v1/sessions/:id/changes`.
 //!
+//! `refresh-changes` is the one route here that mutates nothing: it performs
+//! only that post-mutation refresh, so a user who changed a file from a terminal
+//! (which dux cannot observe) can force the recompute instead of waiting out the
+//! poll interval. See [`refresh_changed_files_now`], which every handler in this
+//! module and in [`crate::file_routes`] shares so the pair can never drift apart.
+//!
 //! Safety: every handler runs git OFF the engine actor thread AND off the async
 //! reactor (`spawn_blocking`), so a slow/locked repo never stalls other clients.
 //! File-path ops PRE-VALIDATE that the path is a file git actually tracks in the
@@ -73,6 +79,25 @@ pub fn routes() -> Router<AppState> {
         .route(&format!("{prefix}/commit"), post(commit))
         .route(&format!("{prefix}/push"), post(push))
         .route(&format!("{prefix}/pull"), post(pull))
+        .route(&format!("{prefix}/refresh-changes"), post(refresh_changes))
+}
+
+/// Recompute a session's changed files NOW: the exact pair of calls every
+/// mutating handler in this module makes after it touches a file.
+///
+/// dux drops its cached answer whenever DUX changes a file, but a file the user
+/// changes from a terminal is invisible to it, so the lists only catch up on the
+/// next poll (2s while something is running, 10s while nothing is). Both halves
+/// are needed and neither is redundant: the engine call refreshes the lists the
+/// engine itself serves, and the invalidate drops the REST cache entry so the
+/// next GET recomputes rather than re-serving the pre-edit snapshot.
+pub(crate) fn refresh_changed_files_now(state: &AppState, session_id: String, worktree: &Path) {
+    state
+        .engine
+        .refresh_changed_files(worktree.to_string_lossy().into_owned());
+    // Emits `session.changes` so subscribed `/ws/events` clients re-GET without
+    // waiting for the poll interval.
+    state.changes.invalidate(session_id);
 }
 
 pub(crate) async fn resolve_worktree(
@@ -191,10 +216,7 @@ async fn discard(
     if let Err(r) = run_git(move || dux_core::git::discard_file(&wt, &path, untracked)).await {
         return r;
     }
-    state
-        .engine
-        .refresh_changed_files(worktree.to_string_lossy().into_owned());
-    state.changes.invalidate(session_id);
+    refresh_changed_files_now(&state, session_id, &worktree);
     StatusCode::OK.into_response()
 }
 
@@ -213,13 +235,7 @@ where
     if let Err(r) = run_git(move || op(wt, path)).await {
         return r;
     }
-    state
-        .engine
-        .refresh_changed_files(worktree.to_string_lossy().into_owned());
-    // Refresh the REST changed-files cache (new path) immediately too, emitting
-    // `session.changes` so subscribed `/ws/events` clients re-GET without waiting
-    // for the poll interval.
-    state.changes.invalidate(session_id);
+    refresh_changed_files_now(&state, session_id, &worktree);
     StatusCode::OK.into_response()
 }
 
@@ -280,10 +296,27 @@ async fn commit(
     if let Err(r) = run_git(move || dux_core::git::commit(&wt, &message).map(|_| ())).await {
         return r;
     }
-    state
-        .engine
-        .refresh_changed_files(worktree.to_string_lossy().into_owned());
-    state.changes.invalidate(session_id);
+    refresh_changed_files_now(&state, session_id, &worktree);
+    StatusCode::OK.into_response()
+}
+
+/// `POST /api/v1/sessions/:id/git/refresh-changes` — recompute this session's
+/// changed files now.
+///
+/// dux invalidates its cached answer whenever DUX changes a file, but it cannot
+/// see a file the user changed from a terminal, so this is how the user says
+/// "look again" instead of waiting out the poll interval. It changes nothing on
+/// disk; it only forces the read that every mutating handler here forces.
+async fn refresh_changes(State(state): State<AppState>, ApiPath(id): ApiPath<String>) -> Response {
+    if !id_within_bound(&id) {
+        return unknown_session();
+    }
+    let session_id = id.clone();
+    let worktree = match resolve_worktree(&state, id).await {
+        Ok(w) => w,
+        Err(r) => return r,
+    };
+    refresh_changed_files_now(&state, session_id, &worktree);
     StatusCode::OK.into_response()
 }
 
@@ -358,6 +391,204 @@ mod tests {
             .header("content-type", "application/json")
             .body(axum::body::Body::from(body.to_string()))
             .unwrap()
+    }
+
+    /// A router whose session `s1` points at a real git repo, plus a clone of the
+    /// live [`AppState`]. The state is captured through a probe route (the
+    /// `extra_gated` hook `build_app` exposes for exactly this), which is the only
+    /// way to reach the changes cache and the engine handle a real request sees.
+    async fn router_with_session_and_state() -> (tempfile::TempDir, Router, AppState) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        // The git repo lives in its own subdir so the dux runtime files at `root`
+        // never show up as untracked changes.
+        let wt = root.join("wt");
+        std::fs::create_dir_all(&wt).unwrap();
+        run_git(&wt, &["init", "-q"]);
+        run_git(&wt, &["config", "user.email", "t@example.com"]);
+        run_git(&wt, &["config", "user.name", "t"]);
+        std::fs::write(wt.join("f.txt"), "line1\n").unwrap();
+        run_git(&wt, &["add", "f.txt"]);
+        run_git(&wt, &["commit", "-q", "-m", "init"]);
+
+        let paths = dux_core::config::DuxPaths {
+            root: root.clone(),
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            worktrees_root: root.join("worktrees"),
+            lock_path: root.join("dux.lock"),
+        };
+        std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+        {
+            let store = dux_core::storage::SessionStore::open(&paths.sessions_db_path).unwrap();
+            store
+                .upsert_project(&dux_core::config::ProjectConfig {
+                    id: "p1".to_string(),
+                    path: root.to_string_lossy().into_owned(),
+                    name: Some("p1".to_string()),
+                    default_provider: None,
+                    leading_branch: None,
+                    auto_reopen_agents: None,
+                    startup_command: None,
+                    env: Default::default(),
+                })
+                .unwrap();
+            store
+                .upsert_session(&sample_session("s1", wt.to_string_lossy().as_ref()))
+                .unwrap();
+        }
+        let engine = crate::bootstrap::bootstrap_engine(&paths).unwrap();
+        let (handle, _join) = crate::engine_actor::spawn_engine_thread(engine);
+
+        let slot: std::sync::Arc<std::sync::Mutex<Option<AppState>>> = Default::default();
+        let captured = std::sync::Arc::clone(&slot);
+        let probe = Router::new().route(
+            "/test/state",
+            axum::routing::get(move |State(state): State<AppState>| {
+                let captured = std::sync::Arc::clone(&captured);
+                async move {
+                    *captured.lock().unwrap() = Some(state);
+                    "ok"
+                }
+            }),
+        );
+        let app =
+            crate::server::build_app(handle, probe, crate::server::RouterParams::plain_http());
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/test/state")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let state = slot.lock().unwrap().take().expect("probe captured state");
+        (tmp, app, state)
+    }
+
+    fn run_git(cwd: &Path, args: &[&str]) {
+        let ok = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .status()
+            .expect("spawn git")
+            .success();
+        assert!(ok, "git {args:?} failed");
+    }
+
+    fn sample_session(id: &str, worktree: &str) -> dux_core::model::AgentSession {
+        let now = chrono::Utc::now();
+        dux_core::model::AgentSession {
+            id: id.to_string(),
+            project_id: "p1".to_string(),
+            project_path: None,
+            provider: dux_core::model::ProviderKind::new("claude"),
+            source_branch: "main".to_string(),
+            branch_name: "feat".to_string(),
+            initial_branch: "feat".to_string(),
+            worktree_path: worktree.to_string(),
+            title: None,
+            started_providers: Vec::new(),
+            desired_running: true,
+            auto_reopen_enabled: false,
+            status: dux_core::model::SessionStatus::Detached,
+            created_at: now,
+            updated_at: now,
+            last_focused_tab: None,
+        }
+    }
+
+    /// The refresh route has to do BOTH halves of what every mutating handler
+    /// above does after it touches a file: ask the engine to recompute its own
+    /// lists, and drop the REST cache entry so the next GET recomputes instead of
+    /// re-serving the answer from before the user edited anything in a terminal.
+    /// Doing only one of them looks like it worked and changes nothing.
+    #[tokio::test]
+    async fn refresh_changes_invalidates_the_cache_and_asks_the_engine_to_refresh() {
+        let (_tmp, app, state) = router_with_session_and_state().await;
+
+        // Prime the cache so there is a stale entry to drop.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/sessions/s1/changes")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let generation_before = state.changes.invalidation_generation();
+        assert!(
+            state.engine.refresh_requests().is_empty(),
+            "nothing has asked the engine to refresh yet"
+        );
+
+        let resp = app
+            .clone()
+            .oneshot(json_req(
+                "POST",
+                "/api/v1/sessions/s1/git/refresh-changes",
+                "{}",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        assert!(
+            state.changes.invalidation_generation() > generation_before,
+            "the REST changed-files cache must be invalidated, or the next GET \
+             serves the same stale answer"
+        );
+        let refreshes = state.engine.refresh_requests();
+        assert_eq!(
+            refreshes.len(),
+            1,
+            "the engine must be asked to recompute exactly once, got {refreshes:?}"
+        );
+        assert!(
+            refreshes[0].ends_with("wt"),
+            "the refresh must name the session's own worktree, got {:?}",
+            refreshes[0]
+        );
+    }
+
+    /// Same unknown-session behaviour as its neighbours in this module: a 404 from
+    /// the shared worktree resolver.
+    #[tokio::test]
+    async fn refresh_changes_unknown_session_is_404() {
+        let (_tmp, app) = router_no_auth();
+        let resp = app
+            .oneshot(json_req(
+                "POST",
+                "/api/v1/sessions/does-not-exist/git/refresh-changes",
+                "{}",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// An over-long id is refused before any lookup, exactly like stage/unstage.
+    #[tokio::test]
+    async fn refresh_changes_over_long_id_is_404() {
+        let (_tmp, app) = router_no_auth();
+        let id = "a".repeat(crate::rest_common::MAX_ID_LEN + 1);
+        let resp = app
+            .oneshot(json_req(
+                "POST",
+                &format!("/api/v1/sessions/{id}/git/refresh-changes"),
+                "{}",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

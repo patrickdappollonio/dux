@@ -1302,6 +1302,15 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         help: None,
         hint_contexts: &[],
     },
+    BindingDef {
+        // Palette-only: forces a changed-files recompute for the selected agent.
+        // No default key.
+        action: Action::RefreshChanges,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+    },
     // Manual reordering: palette-only (no default keys, no help section), the TUI
     // equivalent of the web's drag-to-reorder.
     BindingDef {
@@ -2578,6 +2587,7 @@ mod tests {
             "pull-project",
             "read-startup-command-logs",
             "reconnect-agent",
+            "refresh-changes",
             "reload-config",
             "remove-project",
             "rename-agent",

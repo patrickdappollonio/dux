@@ -429,6 +429,8 @@ pub(crate) fn build_actor_channels(engine: &Engine) -> (EngineHandle, ActorLoopE
             spine_change_tx: spine_change_tx.clone(),
             shutdown_flag: Arc::clone(&shutdown_flag),
             has_active_processes: Arc::clone(&engine.has_active_processes),
+            #[cfg(test)]
+            refresh_requests: Arc::new(std::sync::Mutex::new(Vec::new())),
         },
         ActorLoopEnds {
             req_rx,
@@ -496,6 +498,13 @@ pub struct EngineHandle {
     /// atomic load (deciding its 2s-vs-10s cadence) instead of an actor
     /// round-trip. The engine writes it; the handle only reads it.
     has_active_processes: Arc<AtomicBool>,
+    /// Test-only tally of the worktrees [`Self::refresh_changed_files`] was asked
+    /// to recompute, newest last. That call is fire-and-forget into the actor
+    /// channel, so a route test has no other way to prove the request was made,
+    /// and "asked the engine to refresh" is exactly half of what a refresh-now
+    /// route must get right.
+    #[cfg(test)]
+    refresh_requests: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 // Axum state must be `Send + Sync`; prove the handle satisfies that here so a future
@@ -988,11 +997,26 @@ impl EngineHandle {
     /// (after an HTTP git mutation). The refreshed lists are served by the REST
     /// changed-files read; nothing to await here.
     pub fn refresh_changed_files(&self, worktree: String) {
+        #[cfg(test)]
+        self.refresh_requests
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(worktree.clone());
         // `try_send`: a dropped refresh under overload self-heals — the periodic
         // changed-files poller recomputes the lists on its next pass regardless.
         let _ = self
             .req_tx
             .try_send(EngineRequest::RefreshChangedFiles(worktree));
+    }
+
+    /// The worktrees this handle was asked to recompute, in call order.
+    /// Test-only (see the field).
+    #[cfg(test)]
+    pub(crate) fn refresh_requests(&self) -> Vec<String> {
+        self.refresh_requests
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Snapshot the inputs to classify a project's managed worktrees (project,

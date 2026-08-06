@@ -430,6 +430,14 @@ impl ChangesService {
         }
     }
 
+    /// The current invalidation generation. Test-only: a route that must drop the
+    /// cache has no other observable proof it did, since the invalidate also
+    /// spawns a recompute that repopulates the entry.
+    #[cfg(test)]
+    pub(crate) fn invalidation_generation(&self) -> u64 {
+        self.invalidation_gen.load(Ordering::SeqCst)
+    }
+
     /// Seed the cache with a known `rev` for `session_id`. Test-only: lets
     /// server-level unit tests assert subscribe catch-up behaviour without
     /// spinning up a git repo or a real poller compute.

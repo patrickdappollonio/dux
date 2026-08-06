@@ -11616,6 +11616,42 @@ not_a_real_action = ["x"]
         );
     }
 
+    /// The `refresh-changes` palette command has to be listed by the palette and
+    /// has to leave the status line on a FINAL state. A `Busy` that nothing
+    /// replaces would sit there as a spinner forever.
+    #[test]
+    fn refresh_changes_command_is_listed_and_resolves_its_busy() {
+        let mut app = test_app(default_bindings());
+        assert!(
+            app.filtered_palette_commands("refresh-changes")
+                .iter()
+                .any(|b| b.action == dux_core::action::Action::RefreshChanges),
+            "the palette must offer refresh-changes"
+        );
+
+        app.execute_command("refresh-changes".to_string())
+            .expect("refresh changes");
+
+        assert_ne!(
+            app.status.tone(),
+            crate::statusline::StatusTone::Busy,
+            "the busy must be replaced by a final, got: {}",
+            app.status.message()
+        );
+        assert!(
+            app.status
+                .snapshot()
+                .iter()
+                .all(|s| s.tone != crate::statusline::StatusTone::Busy.as_wire()),
+            "no keyed busy may be left open"
+        );
+        assert!(
+            app.status.message().contains("Changed files"),
+            "the final must say what happened, got: {}",
+            app.status.message()
+        );
+    }
+
     #[test]
     fn esc_closes_the_project_chooser() {
         let mut app = test_app(default_bindings());

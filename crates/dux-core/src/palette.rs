@@ -505,6 +505,14 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         // Per-session: web exposes "Force recreate agent…" in the agent menu,
         // gated by a confirmation dialog.
     },
+    PaletteCommand {
+        action: Action::RefreshChanges,
+        name: "refresh-changes",
+        description: "Recompute the selected agent's changed files right now",
+        // Per-session, and the web has the same action in the Changes pane's
+        // `⋯` menu rather than in the app menu, since it acts on whichever
+        // agent that pane is showing.
+    },
     // ── Manual reordering ─────────────────────────────────────────
     // The TUI equivalent of the web's drag-to-reorder. The web has no palette; it
     // reorders by dragging, over one flat agent list rather than within project

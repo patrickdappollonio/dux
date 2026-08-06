@@ -53,6 +53,12 @@ export const git = {
     postGit(gitUrl(sessionId, "discard"), { path }),
   commit: (sessionId: string, message: string) =>
     postGit(gitUrl(sessionId, "commit"), { message }),
+  // Force a changed-files recompute. Mutates nothing: it makes the server do
+  // the same refresh every mutating route above does, so a file the user changed
+  // from a terminal (which dux cannot observe) shows up now instead of on the
+  // next poll. Bodiless; the session is in the path.
+  refreshChanges: (sessionId: string) =>
+    postGit(gitUrl(sessionId, "refresh-changes"), {}),
   // push/pull are bodiless; the session is in the path.
   push: (sessionId: string) =>
     postGit(gitUrl(sessionId, "push"), {}, { scopeToConnection: true }),

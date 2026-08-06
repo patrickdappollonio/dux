@@ -150,6 +150,11 @@ pub enum Action {
     ToggleRandomizedPetNameDefault,
     TogglePrBannerPosition,
     ForceReconnectAgent,
+    /// Palette-only: recompute the selected agent's changed files right now.
+    /// dux polls for changes a user makes outside it (from a terminal, say),
+    /// so this is the way to stop waiting for the next poll. No default
+    /// keybinding.
+    RefreshChanges,
     ChangeTheme,
     ReloadConfig,
     StartWebServer,
@@ -293,6 +298,7 @@ impl Action {
             Action::ToggleRandomizedPetNameDefault => "toggle_randomized_pet_name_default",
             Action::TogglePrBannerPosition => "toggle_pr_banner_position",
             Action::ForceReconnectAgent => "force_reconnect_agent",
+            Action::RefreshChanges => "refresh_changes",
             Action::ChangeTheme => "change_theme",
             Action::ReloadConfig => "reload_config",
             Action::StartWebServer => "start_web_server",
@@ -467,6 +473,9 @@ impl Action {
                 "Move PR banner between top and bottom of agent pane."
             }
             Action::ForceReconnectAgent => "Restart the agent without resuming the prior session.",
+            Action::RefreshChanges => {
+                "Recompute the selected agent's changed files without waiting for the next poll."
+            }
             Action::ChangeTheme => "Open a picker to switch the dux color theme.",
             Action::ReloadConfig => "Reload the configuration file.",
             Action::StartWebServer => {
@@ -615,6 +624,7 @@ impl Action {
             | Action::ToggleRandomizedPetNameDefault
             | Action::TogglePrBannerPosition
             | Action::ForceReconnectAgent
+            | Action::RefreshChanges
             | Action::ChangeDefaultProvider
             | Action::ChangeProjectDefaultProvider
             | Action::ChangeTheme
