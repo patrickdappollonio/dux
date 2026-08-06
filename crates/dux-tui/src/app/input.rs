@@ -11652,6 +11652,51 @@ not_a_real_action = ["x"]
         );
     }
 
+    /// The `refresh-changes` palette command has to actually ASK GIT AGAIN. The
+    /// test seeds a bogus changed file that only a real recompute can dislodge,
+    /// and pins the counts the final status reports, so deleting the refresh
+    /// leaves the ghost in place and the message wrong.
+    #[test]
+    fn refresh_changes_command_recomputes_the_lists_and_reports_the_counts() {
+        let mut app = test_app(default_bindings());
+        init_git_repo_with_modified_file(&app, "tracked.txt", "before\n", "after\n");
+        let ghost = dux_core::model::ChangedFile {
+            status: " M".to_string(),
+            path: "ghost.txt".to_string(),
+            additions: 0,
+            deletions: 0,
+            binary: false,
+        };
+        app.engine.staged_files = vec![ghost.clone()];
+        app.engine.unstaged_files = vec![ghost];
+
+        app.execute_command("refresh-changes".to_string())
+            .expect("refresh changes");
+        drain_until(&mut app, |app| {
+            app.status.tone() != crate::statusline::StatusTone::Busy
+        });
+
+        assert!(
+            app.engine.staged_files.is_empty(),
+            "the seeded staged ghost must be gone, got: {:?}",
+            app.engine.staged_files
+        );
+        assert_eq!(
+            app.engine
+                .unstaged_files
+                .iter()
+                .map(|f| f.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["tracked.txt"],
+            "the recompute must report what git actually says"
+        );
+        assert!(
+            app.status.message().contains("0 staged, 1 unstaged"),
+            "the final must report the counts it just computed, got: {}",
+            app.status.message()
+        );
+    }
+
     #[test]
     fn esc_closes_the_project_chooser() {
         let mut app = test_app(default_bindings());
