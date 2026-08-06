@@ -8,14 +8,19 @@
 // alongside the store's, the store now routes its non-busy tones through this
 // one too, so there is exactly one implementation to keep honest.
 //
-// Busy deliberately does NOT live here. A busy toast is a different animal: it
-// is normally replaced in place by its keyed final, sonner refuses to retire it
-// on its own, and the store therefore schedules and cancels its own leak guard
-// against ids it is tracking. That bookkeeping belongs with the store's status
-// map, not in a general-purpose raiser.
+// Raising a busy toast lives next door in `busyToast.ts`, because a busy toast
+// is a different animal: sonner refuses to retire one on its own, so it needs a
+// leak guard, and the user's auto-clear window does not apply to a state that is
+// not final. What DOES belong here is retiring that guard. A busy toast is
+// normally replaced in place by its final on the same id, so this raiser
+// disarms whatever was armed for that id: otherwise a guard could fire later and
+// dismiss the FINAL it was never armed for. That also means a caller can raise a
+// busy and then a final on one id without knowing the guard exists, which is how
+// the file-drop report works.
 
 import { toast } from "sonner"
 
+import { cancelBusyToastGuard } from "./busyToast"
 import { statusToastDuration } from "./statusToast"
 
 /// Tones that are a FINAL state. `busy` is excluded on purpose (see above).
@@ -33,6 +38,9 @@ export function showFinalToast(
   opts: { id: string; statusClearSeconds: number | null | undefined },
 ): void {
   if (!message) return
+  // This toast supersedes anything on the id, including a spinner whose guard is
+  // still pending.
+  cancelBusyToastGuard(opts.id)
   const options = {
     id: opts.id,
     duration: statusToastDuration(tone, opts.statusClearSeconds),

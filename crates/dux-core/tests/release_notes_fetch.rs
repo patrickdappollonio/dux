@@ -124,13 +124,29 @@ fn read_request(stream: &mut TcpStream) -> Option<Recorded> {
     })
 }
 
-/// A port with nothing listening on it: bind to grab a free one, then drop the
-/// listener. Any connection attempt is refused immediately.
+/// An address nothing can be listening on. Any connection attempt is refused
+/// immediately, which is the fail-fast property
+/// `a_refused_connection_is_an_error_with_no_hang` depends on.
+///
+/// This used to bind `127.0.0.1:0`, drop the listener, and hand back the
+/// now-free ephemeral port, and that RACED with the other tests in this file.
+/// Freeing a port makes it available again, the kernel hands out ephemeral ports
+/// from a small range and reuses recently freed ones readily (12% of 500 fresh
+/// binds landed on a just-released port when this was measured), and `TestServer`
+/// is one-shot: its thread does exactly one `accept()` and exits. So a test using
+/// the dead URL could connect to a CONCURRENT test's server that had just been
+/// handed the same port and eat its single `accept()`. That server's own fetch
+/// was then refused, a refusal is a TRANSIENT error, and transient plus a stale
+/// cache returns the stale entry, so
+/// `a_definitive_404_does_not_fall_back_to_a_stale_entry` failed on its
+/// `expect_err`.
+///
+/// Port 1 cannot be caught up in that. It is privileged, so nothing in the test
+/// suite can bind it, and it sits far below the ephemeral range the kernel
+/// allocates from (`net.ipv4.ip_local_port_range` is 32768-60999 on the machine
+/// this was measured on), so no `TestServer` can ever be handed it.
 fn dead_base_url() -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-    let addr = listener.local_addr().expect("local addr");
-    drop(listener);
-    format!("http://{addr}")
+    "http://127.0.0.1:1".to_string()
 }
 
 fn cache_file(dir: &Path) -> std::path::PathBuf {

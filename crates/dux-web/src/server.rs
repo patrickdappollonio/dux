@@ -168,18 +168,28 @@ impl AppState {
     }
 }
 
-/// Maximum size of a single inbound WebSocket message (text or binary). This
-/// bounds ONE frame — down from axum's untuned 64 MiB default — so a client
-/// cannot push an arbitrarily large message; it is NOT a total-memory cap (the
-/// theoretical worst case is `REQ_CHANNEL_CAPACITY` queued frames of this size).
-/// In practice in-flight memory stays far below that product: the engine drains
-/// the whole request channel every tick, and link bandwidth caps how many large
-/// frames can even arrive per tick. 16 MiB is far above any realistic terminal
+/// Maximum size of a single inbound WebSocket MESSAGE (text or binary), down
+/// from tungstenite's untuned 64 MiB default, so a client cannot push an
+/// arbitrarily large message. It is NOT a total-memory cap (the theoretical
+/// worst case is `REQ_CHANNEL_CAPACITY` queued messages of this size). In
+/// practice in-flight memory stays far below that product: the engine drains the
+/// whole request channel every tick, and link bandwidth caps how many large
+/// messages can even arrive per tick. 16 MiB is far above any realistic terminal
 /// paste, so legitimate input is never truncated.
 ///
-/// Public so the integration test that proves the cap is enforced can name the
-/// same number the sockets are configured with, rather than restating 16 MiB and
-/// silently passing if the two ever drift.
+/// A message is not a frame, and the difference matters when reading the tests.
+/// A message may arrive as a continuation chain of frames, each separately
+/// bounded by `max_frame_size`, which dux leaves at tungstenite's default. That
+/// default is ALSO 16 MiB, so for an unfragmented payload the two limits are
+/// indistinguishable and the frame cap is what fires. Only a fragmented message
+/// can observe this constant, which is why
+/// `a_fragmented_message_past_the_message_cap_is_refused` exists and why the
+/// single-frame test beside it documents that it pins the library's default
+/// rather than this number.
+///
+/// Public so the integration tests can name the same number the sockets are
+/// configured with, rather than restating 16 MiB and silently passing if the two
+/// ever drift.
 pub const MAX_WS_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
 
 /// Upper bound (in characters) on a captured `User-Agent` before it is stamped on a

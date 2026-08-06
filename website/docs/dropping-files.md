@@ -242,7 +242,10 @@ newline, because a newline would submit your half-written prompt, and because
 these tools only treat a pasted path as an attachment when the whole paste is
 that one path.
 
-You get **one** toast for the whole drop rather than one per file.
+While the uploads are running you get a spinner naming the file being sent and
+counting through the drop, so a large file or a busy server never looks like
+nothing happened. It is replaced, in place, by **one** toast reporting the whole
+drop rather than one per file.
 
 ## Who can drop
 
@@ -264,7 +267,7 @@ restart. See [Server mode overview](/docs/server-mode) for the rest of them.
 | Key | Default | What it does |
 |---|---|---|
 | `file_drop_max_bytes` | `104857600` (100 MiB) | Largest single dropped file. A file over it is refused with a message saying so, and nothing is written. Set to `0` to switch file drop off entirely: the pane stops offering a drop target, and the server refuses any upload that reaches it anyway. |
-| `file_drop_max_concurrency` | `2` | How many uploads are accepted at once. This bounds how much upload dux holds in memory, not just how much work it does at a time. An upload beyond the limit waits its turn rather than being refused. `0` clamps to `1`. |
+| `file_drop_max_concurrency` | `2` | How many uploads are accepted at once. This bounds how much upload dux holds in memory, not just how much work it does at a time. An upload beyond the limit waits up to 30 seconds for a slot; if none comes free it is refused with a `503` saying the server is busy, and the browser tells you to try the drop again in a moment. `0` clamps to `1`. |
 
 The size default is generous on purpose. Screenshots from a high-resolution
 display are routinely several megabytes, and a stingier limit would reject the
