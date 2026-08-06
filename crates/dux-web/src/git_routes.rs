@@ -145,34 +145,48 @@ async fn validate_changed_path(worktree: &Path, path: &str) -> Result<(), Respon
 /// error (the success arm is left to the caller, which may also refresh state).
 ///
 /// `action` names what was attempted, in a form that reads inside a sentence
-/// ("could not stage the file"), and is the ONLY part of the failure the client
-/// is told about. The git helpers here build their error by interpolating the
-/// subprocess's raw stderr (`git::stage_file` and friends do
-/// `anyhow!("git add failed: {stderr}")`), and that text can carry absolute
-/// worktree paths and whatever a commit hook chose to print, so it goes to
-/// `dux.log` instead of into the response. Same reasoning as the config-write
-/// path in [`crate::engine_actor`], which returns only the root cause rather
-/// than its path-annotated context; `root_cause()` cannot help here, because
-/// the stderr IS the root cause.
+/// ("could not stage the file"), and PREFIXES git's own message rather than
+/// replacing it. The client is told both.
 ///
-/// This is not a leak with a remote attacker behind it. dux is single-tenant and
-/// loopback by default; the point is that the browser has no use for a server
-/// path, and the operator reading `dux.log` gets the full text unchanged.
+/// An earlier version returned the action alone and sent the reader to
+/// `dux.log`. That was wrong twice over. It is not actionable: the preflight
+/// upstream covers exactly two cases (empty message, nothing staged), and
+/// everything else arrives here with the explanation the user needs and nothing
+/// to do with it, including a `pre-commit` or `commit-msg` hook's report (the
+/// entire reason a hook prints anything), `gpg failed to sign the data`,
+/// "Committing is not possible because you have unmerged files" which carries
+/// its own fix instruction, and a held `index.lock` whose message literally
+/// says how to clear it. And on a remote browser `dux.log` is on a machine the
+/// reader may have no way to reach. It was also inconsistent: push and pull
+/// deliver git's full text to this same browser through the status toast, so a
+/// failed push explained itself and a failed commit did not. The project's own
+/// rule is that messages are verbose and actionable.
+///
+/// The server's worktree path is stripped by
+/// [`dux_core::git::redact_worktree_path`], which is the part of the old
+/// reasoning that was worth keeping: the browser may be on another machine
+/// entirely, where the server's directory layout is noise. That is a tidiness
+/// measure, not a security boundary. dux is single-tenant and loopback by
+/// default, and the same redaction is applied at the source for commit, push
+/// and pull so all three read the same way on both surfaces. The full,
+/// unredacted chain still goes to `dux.log` for the operator.
 ///
 /// The ordinary refusals a user actually hits do not come through here: the
 /// empty-message and nothing-staged commit cases are caught by
 /// `git::commit_preflight` and answered as a 400 with their own wording.
-async fn run_git<F>(action: &'static str, op: F) -> Result<(), Response>
+async fn run_git<F>(action: &'static str, worktree: &Path, op: F) -> Result<(), Response>
 where
     F: FnOnce() -> anyhow::Result<()> + Send + 'static,
 {
+    let worktree = worktree.to_path_buf();
     match tokio::task::spawn_blocking(op).await {
         Ok(Ok(())) => Ok(()),
         Ok(Err(e)) => {
             dux_core::logger::warn(&format!("[web] could not {action}: {e:#}"));
+            let detail = dux_core::git::redact_worktree_path(&format!("{e:#}"), &worktree);
             Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Could not {action}. Git reported an error; see dux.log for what it said."),
+                format!("Could not {action}. {detail}"),
             )
                 .into_response())
         }
@@ -236,7 +250,17 @@ async fn discard(
     let untracked =
         match tokio::task::spawn_blocking(move || dux_core::git::discard_classify(&wt, &p)).await {
             Ok(Ok(u)) => u,
-            Ok(Err(e)) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+            // `discard_classify`'s refusals are written to be read ("unstage
+            // first", "nothing to discard"), so they go to the client as they
+            // always have; the path redaction is applied for the same reason
+            // `run_git` applies it.
+            Ok(Err(e)) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    dux_core::git::redact_worktree_path(&e.to_string(), &worktree),
+                )
+                    .into_response();
+            }
             Err(e) => {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -247,7 +271,7 @@ async fn discard(
         };
     let wt = worktree.clone();
     let path = op.path;
-    if let Err(r) = run_git("discard the file's changes", move || {
+    if let Err(r) = run_git("discard the file's changes", &worktree, move || {
         dux_core::git::discard_file(&wt, &path, untracked)
     })
     .await
@@ -276,7 +300,7 @@ where
         return r;
     }
     let wt = worktree.clone();
-    if let Err(r) = run_git(action, move || op(wt, path)).await {
+    if let Err(r) = run_git(action, &worktree, move || op(wt, path)).await {
         return r;
     }
     refresh_changed_files_now(&state, session_id, &worktree);
@@ -337,7 +361,7 @@ async fn commit(
     }
     let wt = worktree.clone();
     let message = op.message;
-    if let Err(r) = run_git("commit the staged changes", move || {
+    if let Err(r) = run_git("commit the staged changes", &worktree, move || {
         dux_core::git::commit(&wt, &message).map(|_| ())
     })
     .await
@@ -704,15 +728,17 @@ mod tests {
         );
     }
 
-    /// A failing git helper must not put its subprocess stderr in the response.
-    /// The helpers build their error as `anyhow!("git add failed: {stderr}")`, so
-    /// echoing it hands the browser the server's own worktree path and whatever a
-    /// hook printed. The client gets the action and a pointer to `dux.log`.
+    /// A failing git helper must tell the browser WHY. The action alone plus a
+    /// pointer to `dux.log` is not actionable, and on a remote browser that log
+    /// is on a machine the reader may not be able to reach. The server's
+    /// worktree path is still stripped, because the browser has no use for it.
     #[tokio::test]
-    async fn run_git_reports_the_action_without_gits_stderr() {
-        let stderr = "fatal: unable to access '/home/someone/.config/dux/worktrees/wt': denied";
-        let err = super::run_git("stage the file", move || {
-            Err(anyhow::anyhow!("git add failed: {stderr}"))
+    async fn run_git_reports_gits_reason_with_the_action_and_without_the_server_path() {
+        let worktree = PathBuf::from("/home/someone/.config/dux/worktrees/proj/agent");
+        let stderr = "error: 'trailing-whitespace' hook failed; \
+                      see /home/someone/.config/dux/worktrees/proj/agent/out.log";
+        let err = super::run_git("commit the staged changes", &worktree, move || {
+            Err(anyhow::anyhow!("git commit failed: {stderr}"))
         })
         .await
         .expect_err("a failing git op must produce a response");
@@ -726,20 +752,20 @@ mod tests {
         )
         .unwrap();
         assert!(
+            body.contains("commit the staged changes"),
+            "the response must still name what failed: {body}"
+        );
+        assert!(
+            body.contains("'trailing-whitespace' hook failed"),
+            "the response must carry git's reason: {body}"
+        );
+        assert!(
             !body.contains("/home/someone"),
             "the response must not carry a server path: {body}"
         );
         assert!(
-            !body.contains("fatal:"),
-            "the response must not carry git's stderr: {body}"
-        );
-        assert!(
-            body.contains("stage the file"),
-            "the response must still name what failed: {body}"
-        );
-        assert!(
-            body.contains("dux.log"),
-            "the response must point at where the detail went: {body}"
+            body.contains("./out.log"),
+            "the path should be relative to the worktree, not dropped: {body}"
         );
     }
 }

@@ -705,10 +705,7 @@ fn pull_origin_branch(repo_path: &Path, branch: &str) -> Result<()> {
         ])
         .output()?;
     if !output.status.success() {
-        return Err(anyhow!(
-            "git pull failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
+        return Err(git_failure("git pull", repo_path, &output));
     }
     Ok(())
 }
@@ -1804,16 +1801,73 @@ pub fn commit_preflight(worktree_path: &Path, message: &str) -> CommitPreflight 
     }
 }
 
+/// Replace the worktree's absolute path with `.` wherever it appears in text
+/// bound for a user-facing message.
+///
+/// git names files by absolute path in a lot of its diagnostics, and on the web
+/// the reader is a browser that may be on a different machine entirely, where
+/// the server's directory layout is noise at best. Stripping the prefix keeps
+/// the part that is actually actionable (which file, which hook, what it said)
+/// and drops the part that is not. The full untouched text still goes to
+/// `dux.log` for the operator.
+///
+/// Deliberately a plain literal replacement rather than anything cleverer: it
+/// is the same string git was handed as `-C`, so it matches what git echoes
+/// back, and a miss degrades to showing a path rather than to hiding the
+/// reason.
+pub fn redact_worktree_path(text: &str, worktree_path: &Path) -> String {
+    let wt = worktree_path.to_string_lossy();
+    if wt.is_empty() || wt == "/" {
+        return text.to_string();
+    }
+    text.replace(wt.as_ref(), ".")
+}
+
+/// Build the error for a failed git subprocess, carrying BOTH streams.
+///
+/// stderr alone is not enough, and the reason is worth writing down because the
+/// obvious reason is wrong. It is often said that hook frameworks like
+/// `pre-commit` and `lint-staged` print their reports to stdout and are
+/// therefore lost by an stderr-only capture. That was MEASURED on git 2.55 and
+/// is NOT what happens: git redirects a hook's stdout onto its own stderr, so a
+/// rejecting hook's report arrives on stderr either way.
+///
+/// What IS lost is git's own reporting. Measured on git 2.55, `git commit`
+/// writes "nothing to commit, working tree clean" and "no changes added to
+/// commit (use \"git add\"...)" to STDOUT with stderr completely EMPTY, exiting
+/// 1, so an stderr-only capture produced the error "git commit failed: " with
+/// no reason in it at all. The unmerged-files case splits across both streams
+/// (`error: Committing is not possible...` on stderr, `U <file>` on stdout).
+/// Taking both is the only capture that always carries the reason.
+fn git_failure(what: &str, worktree_path: &Path, output: &std::process::Output) -> anyhow::Error {
+    let mut detail = String::new();
+    for stream in [&output.stdout, &output.stderr] {
+        let text = String::from_utf8_lossy(stream);
+        let text = text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        if !detail.is_empty() {
+            detail.push('\n');
+        }
+        detail.push_str(text);
+    }
+    if detail.is_empty() {
+        detail.push_str("no output");
+    }
+    anyhow!(
+        "{what} failed: {}",
+        redact_worktree_path(&detail, worktree_path)
+    )
+}
+
 pub fn commit(worktree_path: &Path, message: &str) -> Result<String> {
     let wt = worktree_path.to_string_lossy();
     let output = Command::new("git")
         .args(["-C", wt.as_ref(), "commit", "-m", message])
         .output()?;
     if !output.status.success() {
-        return Err(anyhow!(
-            "git commit failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
+        return Err(git_failure("git commit", worktree_path, &output));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
@@ -1835,10 +1889,7 @@ pub fn push(worktree_path: &Path) -> Result<String> {
         .args(["-C", wt.as_ref(), "push", "-u", "origin", "--", &branch])
         .output()?;
     if !output.status.success() {
-        return Err(anyhow!(
-            "git push failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
+        return Err(git_failure("git push", worktree_path, &output));
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
@@ -3487,6 +3538,74 @@ mod tests {
     fn commit_all(cwd: &Path, message: &str) {
         run_git(cwd, &["add", "-A"]);
         run_git(cwd, &["commit", "-m", message]);
+    }
+
+    /// MEASURED on git 2.55: `git commit` with nothing staged writes its whole
+    /// explanation to STDOUT and leaves stderr EMPTY, exiting 1. An
+    /// stderr-only capture therefore produced the error "git commit failed: "
+    /// with no reason in it whatsoever.
+    #[test]
+    fn commit_failure_carries_a_reason_git_wrote_only_to_stdout() {
+        let repo = init_test_repo();
+        // Call `commit` directly: the web route's preflight would normally
+        // catch this case, but the capture must not depend on that.
+        let err = commit(repo.path(), "a message").expect_err("nothing is staged");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("nothing to commit"),
+            "git wrote the reason to stdout and it must survive, got: {text}"
+        );
+    }
+
+    /// A rejecting hook's report must reach the user. It arrives on stderr,
+    /// because git redirects a hook's stdout onto its own stderr (measured on
+    /// git 2.55), so this pins the hook path independently of which stream it
+    /// happens to travel on.
+    #[test]
+    fn commit_failure_carries_a_rejecting_hooks_report() {
+        let repo = init_test_repo();
+        let hooks = repo.path().join(".git").join("hooks");
+        fs::create_dir_all(&hooks).unwrap();
+        let hook = hooks.join("pre-commit");
+        fs::write(
+            &hook,
+            "#!/bin/sh\necho 'trailing-whitespace....Failed'\nexit 1\n",
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        fs::write(repo.path().join("f.txt"), "x\n").unwrap();
+        run_git(repo.path(), &["add", "f.txt"]);
+
+        let err = commit(repo.path(), "a message").expect_err("the hook must reject the commit");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("trailing-whitespace....Failed"),
+            "the hook's report must reach the user, got: {text}"
+        );
+    }
+
+    /// The worktree path is stripped from user-facing git text: on the web the
+    /// reader may be on a different machine, where the server's layout is
+    /// noise. The REASON must survive the stripping.
+    #[test]
+    fn redact_worktree_path_removes_the_prefix_and_keeps_the_reason() {
+        let wt = Path::new("/home/someone/.config/dux/worktrees/proj/agent");
+        let text = "error: '/home/someone/.config/dux/worktrees/proj/agent/src/a.rs' is unmerged";
+        let out = redact_worktree_path(text, wt);
+        assert_eq!(out, "error: './src/a.rs' is unmerged");
+        assert!(!out.contains("/home/someone"));
+    }
+
+    /// A degenerate worktree path must not turn the message into punctuation
+    /// soup by replacing every slash in it.
+    #[test]
+    fn redact_worktree_path_leaves_text_alone_for_a_root_or_empty_worktree() {
+        let text = "error: /a/b/c is unmerged";
+        assert_eq!(redact_worktree_path(text, Path::new("/")), text);
+        assert_eq!(redact_worktree_path(text, Path::new("")), text);
     }
 
     #[test]
