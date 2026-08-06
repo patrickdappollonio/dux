@@ -95,6 +95,50 @@ describe("forceRefreshChanges", () => {
     expect(calls[1].method).toBe("GET")
   })
 
+  // The `await` in front of the POST is the whole point of the function, and
+  // asserting the ORDER the two requests were STARTED cannot see it: a
+  // fire-and-forget POST starts in exactly the same order. So hold the POST open
+  // and prove the re-read has not begun, which is the property that matters. A
+  // GET issued while the recompute is still running is answered from the very
+  // cache this action exists to bypass, and hands back the stale answer.
+  it("does not re-read until the forcing POST has answered", async () => {
+    const mod = await loadStore()
+    mod.selectSession("s1")
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().changes.phase).toBe("loaded")
+    })
+    calls = []
+
+    let releasePost: () => void = () => {}
+    const postAnswered = new Promise<void>((resolve) => {
+      releasePost = resolve
+    })
+    fetchMock.mockImplementationOnce(async (url: string) => {
+      calls.push({ url: String(url), method: "POST" })
+      await postAnswered
+      return {
+        ok: true,
+        status: 200,
+        text: async () => "",
+      } as unknown as Response
+    })
+
+    const inFlight = mod.forceRefreshChanges()
+    // Drain the microtask queue and one macrotask turn. A fire-and-forget
+    // implementation has issued its GET well before this point.
+    await Promise.resolve()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(calls.map((c) => c.url)).toEqual([
+      "/api/v1/sessions/s1/git/refresh-changes",
+    ])
+
+    releasePost()
+    await inFlight
+    await vi.waitFor(() => {
+      expect(calls.some((c) => c.url.endsWith("/changes"))).toBe(true)
+    })
+  })
+
   it("does nothing when no session is selected", async () => {
     const mod = await loadStore()
     mod.selectSession(null)
