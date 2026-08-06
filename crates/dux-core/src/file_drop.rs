@@ -666,6 +666,41 @@ impl FileDropDestination {
     }
 }
 
+/// Is `path` the directory `root` itself, or something inside it, with BOTH
+/// sides taken as already resolved?
+///
+/// Component-wise, never as text. A string prefix is not containment:
+/// `/w/agent2` starts with `/w/agent` and is a different directory entirely,
+/// and answering yes there refreshes an agent whose worktree never changed.
+/// `Path::starts_with` compares whole components, so it says no.
+pub fn resolved_path_is_within(root: &Path, path: &Path) -> bool {
+    path.starts_with(root)
+}
+
+/// Did a dropped file land inside `root`?
+///
+/// Both sides are resolved first, because neither one arrives trustworthy: a
+/// worktree path is whatever was stored for the session, and a terminal's
+/// directory is discovered from a live process that may be sitting behind a
+/// symlink. Comparing the strings dux happens to hold would answer a different
+/// question than "is this file in that tree".
+///
+/// Blocking (two `realpath` calls), so it belongs on the same blocking pool as
+/// the write itself. A side that cannot be resolved is NOT containment: the
+/// caller's next step is telling a pane its files changed, and a guess is worse
+/// than not saying anything.
+pub fn saved_file_is_within(root: &Path, saved: &Path) -> bool {
+    match (
+        std::fs::canonicalize(root),
+        // The file, not its directory: the FINAL path is the thing that has to
+        // be inside the tree, and it exists by the time this is asked.
+        std::fs::canonicalize(saved),
+    ) {
+        (Ok(root), Ok(saved)) => resolved_path_is_within(&root, &saved),
+        _ => false,
+    }
+}
+
 /// The plan for finding the directory a terminal is ACTUALLY in.
 ///
 /// Built by [`crate::pty::PtyClient::working_directory`], which owns the policy;
@@ -1159,6 +1194,69 @@ mod tests {
 
     fn tmp() -> tempfile::TempDir {
         tempfile::tempdir().expect("temp dir")
+    }
+
+    // ── Containment: did the file land in the tree git is watching? ──────────
+
+    #[test]
+    fn a_sibling_directory_sharing_a_text_prefix_is_not_inside_the_tree() {
+        // The trap a string comparison walks into: `/w/agent2` starts with
+        // `/w/agent` and is somewhere else entirely.
+        let root = Path::new("/w/agent");
+        assert!(!resolved_path_is_within(
+            root,
+            Path::new("/w/agent2/shot.png")
+        ));
+        assert!(!resolved_path_is_within(
+            root,
+            Path::new("/w/agent-extra/shot.png")
+        ));
+        assert!(resolved_path_is_within(
+            root,
+            Path::new("/w/agent/shot.png")
+        ));
+        assert!(resolved_path_is_within(
+            root,
+            Path::new("/w/agent/deep/nested/shot.png")
+        ));
+        // The directory itself counts as inside itself, which is what an agent
+        // drop at the worktree root relies on.
+        assert!(resolved_path_is_within(root, root));
+    }
+
+    #[test]
+    fn containment_follows_symlinks_on_both_sides() {
+        // A worktree reached through a symlink, and a file written through
+        // another one, are the same tree. Comparing the strings dux holds would
+        // say no to both.
+        let dir = tmp();
+        let real = dir.path().join("real");
+        std::fs::create_dir_all(real.join("inner")).expect("inner");
+        std::fs::write(real.join("inner").join("shot.png"), b"x").expect("write");
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+
+        assert!(saved_file_is_within(
+            &link,
+            &real.join("inner").join("shot.png")
+        ));
+        assert!(saved_file_is_within(
+            &real,
+            &link.join("inner").join("shot.png")
+        ));
+    }
+
+    #[test]
+    fn a_path_that_cannot_be_resolved_is_not_containment() {
+        let dir = tmp();
+        assert!(!saved_file_is_within(
+            dir.path(),
+            &dir.path().join("never-written.png")
+        ));
+        assert!(!saved_file_is_within(
+            &dir.path().join("no-such-tree"),
+            dir.path()
+        ));
     }
 
     // ── Name validation: kept as given, or refused with a reason ─────────────

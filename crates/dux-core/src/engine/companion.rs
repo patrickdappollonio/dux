@@ -9,7 +9,7 @@
 //! headless callers (the web server) and adds the project-owned and standalone
 //! flavors.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
@@ -199,14 +199,49 @@ impl Engine {
                 terminal.client.working_directory(),
             ));
         }
+        let session = self.session_behind_pty(pty_id)?;
+        Some(crate::file_drop::FileDropDestination::Worktree(
+            session.worktree_path.clone().into(),
+        ))
+    }
+
+    /// The agent pane whose changed files a drop on `pty_id` could affect: its
+    /// session id and its worktree, or `None` when there is no agent behind the
+    /// pane at all.
+    ///
+    /// This answers OWNERSHIP only, never whether the file actually landed in
+    /// that worktree. A terminal's directory is discovered from a live process
+    /// and the shell may have been `cd`'d anywhere, so containment is checked by
+    /// the caller against the FINAL path, once the file exists.
+    ///
+    /// A terminal owned by a PROJECT or by NOTHING answers `None`, because
+    /// neither has an agent pane listing changed files. The match is exhaustive
+    /// so a fourth kind of owner has to be answered for here.
+    pub fn file_drop_refresh_target(&self, pty_id: &str) -> Option<(String, PathBuf)> {
+        let session_id = match self.companion_terminals.get(pty_id) {
+            Some(terminal) => match terminal.owner.as_ref() {
+                crate::model::TerminalOwnerRef::Session(id) => id,
+                crate::model::TerminalOwnerRef::Project(_)
+                | crate::model::TerminalOwnerRef::Standalone => return None,
+            },
+            None => pty_id,
+        };
+        let session = self.session_behind_pty(session_id)?;
+        Some((
+            session.id.clone(),
+            PathBuf::from(session.worktree_path.clone()),
+        ))
+    }
+
+    /// The agent session a pane's pty id belongs to: the session itself, or the
+    /// session owning that extra tab.
+    fn session_behind_pty(&self, pty_id: &str) -> Option<&crate::model::AgentSession> {
         let session_id = if self.sessions.iter().any(|s| s.id == pty_id) {
             pty_id
         } else {
             self.agent_tabs.get(pty_id)?.session_id.as_str()
         };
-        self.sessions.iter().find(|s| s.id == session_id).map(|s| {
-            crate::file_drop::FileDropDestination::Worktree(s.worktree_path.clone().into())
-        })
+        self.sessions.iter().find(|s| s.id == session_id)
     }
 }
 
@@ -290,6 +325,64 @@ mod tests {
                 );
             }
             other => panic!("a terminal resolved to {other:?}, not a live lookup"),
+        }
+    }
+
+    #[test]
+    fn only_a_pane_with_an_agent_behind_it_has_changed_files_to_refresh() {
+        // A dropped file is invisible in the Changes pane until something asks
+        // for a recompute, and only an agent HAS a changes pane. A terminal
+        // owned by a project, or by nothing at all, has no agent behind it, so
+        // there is nothing to refresh however useful the file may be.
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "feature");
+        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        engine.sessions.push(session);
+        engine.agent_tabs.insert(
+            "tab-9".to_string(),
+            crate::model::AgentTab {
+                id: "tab-9".to_string(),
+                session_id: "s1".to_string(),
+                provider: crate::model::ProviderKind::new("claude"),
+                sort_order: 1,
+                created_at: chrono::Utc::now(),
+            },
+        );
+        engine.config.terminal.command = "cat".to_string();
+        engine.config.terminal.args = vec![];
+
+        let (session_terminal, _) = engine
+            .create_companion_terminal("s1", 24, 80)
+            .expect("session terminal");
+        let (project_terminal, _) = engine
+            .create_project_terminal("p1", 24, 80)
+            .expect("project terminal");
+        let (standalone_terminal, _) = engine
+            .create_standalone_terminal(24, 80)
+            .expect("standalone terminal");
+
+        for pty_id in ["s1", "tab-9", session_terminal.as_str()] {
+            assert_eq!(
+                engine.file_drop_refresh_target(pty_id),
+                Some(("s1".to_string(), std::path::PathBuf::from(worktree.path()))),
+                "{pty_id} belongs to agent s1"
+            );
+        }
+        for pty_id in [
+            project_terminal.as_str(),
+            standalone_terminal.as_str(),
+            "nobody",
+        ] {
+            assert_eq!(
+                engine.file_drop_refresh_target(pty_id),
+                None,
+                "{pty_id} has no agent pane behind it"
+            );
         }
     }
 
