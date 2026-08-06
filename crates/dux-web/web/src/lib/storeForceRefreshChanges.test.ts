@@ -6,12 +6,28 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 // changed from a terminal would not appear and the menu item would look like it
 // worked while changing nothing.
 
+const toastSuccess = vi.fn()
+vi.mock("sonner", () => ({
+  toast: Object.assign(vi.fn(), {
+    success: (...args: unknown[]) => toastSuccess(...args),
+    error: vi.fn(),
+    warning: vi.fn(),
+    info: vi.fn(),
+    loading: vi.fn(),
+    dismiss: vi.fn(),
+  }),
+}))
+
 interface Recorded {
   url: string
   method: string
 }
 
 let calls: Recorded[] = []
+
+function changedFile(path: string) {
+  return { status: " M", path, additions: 1, deletions: 0, binary: false }
+}
 
 function okJson(body: unknown) {
   return {
@@ -137,6 +153,66 @@ describe("forceRefreshChanges", () => {
     await vi.waitFor(() => {
       expect(calls.some((c) => c.url.endsWith("/changes"))).toBe(true)
     })
+  })
+
+  // On the common case (nothing changed) the pane flickers and comes back
+  // identical, which is the wrong amount of evidence for an action whose entire
+  // purpose is proving dux looked again. Push and pull report themselves through
+  // the engine's status stream; this route emits no status, so the browser says
+  // it, with the same counts the terminal UI's command reports.
+  it("reports the counts it just read", async () => {
+    const mod = await loadStore()
+    mod.selectSession("s1")
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().changes.phase).toBe("loaded")
+    })
+    calls = []
+    toastSuccess.mockClear()
+    fetchMock.mockImplementationOnce(async (url: string) => {
+      calls.push({ url: String(url), method: "POST" })
+      return {
+        ok: true,
+        status: 200,
+        text: async () => "",
+      } as unknown as Response
+    })
+    fetchMock.mockImplementationOnce(async (url: string) => {
+      calls.push({ url: String(url), method: "GET" })
+      return okJson({
+        rev: 8,
+        staged: [changedFile("a.txt")],
+        unstaged: [changedFile("b.txt"), changedFile("c.txt")],
+      }) as unknown as Response
+    })
+
+    await mod.forceRefreshChanges()
+
+    await vi.waitFor(() => {
+      expect(toastSuccess).toHaveBeenCalledTimes(1)
+    })
+    expect(String(toastSuccess.mock.calls[0][0])).toContain(
+      "1 staged, 2 unstaged"
+    )
+  })
+
+  it("says nothing when the forcing POST failed", async () => {
+    const mod = await loadStore()
+    mod.selectSession("s1")
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().changes.phase).toBe("loaded")
+    })
+    toastSuccess.mockClear()
+    fetchMock.mockImplementationOnce(async () => {
+      return {
+        ok: false,
+        status: 500,
+        text: async () => "git exploded",
+      } as unknown as Response
+    })
+
+    await expect(mod.forceRefreshChanges()).rejects.toThrow(/git exploded/)
+
+    expect(toastSuccess).not.toHaveBeenCalled()
   })
 
   it("does nothing when no session is selected", async () => {

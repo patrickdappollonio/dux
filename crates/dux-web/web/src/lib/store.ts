@@ -1002,8 +1002,12 @@ function switchChangesSubscription(
 // Fire a changed-files fetch for `sessionId` and route the outcome through the
 // guarded apply/error handlers. Errors are caught here so a failed fetch can
 // never surface as an unhandled rejection.
-function loadChanges(sessionId: string): void {
-  fetchChanges(sessionId)
+// Returns the fetch's promise so a caller that must report on the result (the
+// forced refresh, which names the counts it just read) can wait for it. Every
+// other caller ignores it: errors are already handled here, so nothing it
+// returns can reject.
+function loadChanges(sessionId: string): Promise<void> {
+  return fetchChanges(sessionId)
     .then((resp) => applyChangesResponse(sessionId, resp))
     .catch((err) => applyChangesError(sessionId, err))
 }
@@ -1081,6 +1085,16 @@ export function refreshChanges(): void {
 // Rejects when the forcing POST fails so the caller can report it the way the
 // pane's other quick actions do; the re-read still happens either way, since a
 // pane left in `loading` after a failed force would be worse than a stale one.
+//
+// A success is announced, with the counts, because the common case is that
+// nothing changed: the pane flickers and comes back identical, which is the
+// wrong amount of evidence for an action whose whole purpose is proving dux
+// looked again. Push and pull report themselves through the engine's keyed
+// status stream, but this route emits no status (it mutates nothing), so the
+// browser says it, in the same words the terminal UI's `refresh-changes`
+// command uses. Nothing is said when the re-read did not land: a lost race or a
+// failed GET has already told the pane what it needs to show, and claiming
+// counts from a slice this refresh did not fill would be a made-up number.
 export async function forceRefreshChanges(): Promise<void> {
   const id = state.selectedSessionId
   if (id === null) return
@@ -1088,8 +1102,14 @@ export async function forceRefreshChanges(): Promise<void> {
   try {
     await git.refreshChanges(id)
   } finally {
-    loadChanges(id)
+    await loadChanges(id)
   }
+  const slice = state.changes
+  if (slice.sessionId !== id || slice.phase !== "loaded") return
+  toast.success(
+    `Changed files refreshed: ${slice.staged.length} staged, ` +
+      `${slice.unstaged.length} unstaged.`
+  )
 }
 
 // Monotonic sequence for bootstrap loads, mirroring `loadSpineSeq` exactly. Two
