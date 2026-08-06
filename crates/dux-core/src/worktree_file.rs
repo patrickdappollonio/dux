@@ -232,12 +232,54 @@ pub fn read_file(worktree: &Path, rel_path: &str) -> anyhow::Result<WorktreeFile
     })
 }
 
+/// Write `content` to `abs_path` with `O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW`,
+/// the write-side counterpart of [`read_nofollow`]. The single open is what
+/// enforces the no-symlink rule: an ordinary truncating write follows a symlink
+/// at the leaf, so a stat that says "regular file" is worthless by the time the
+/// write runs if the entry can be replaced in between. With `O_NOFOLLOW` a
+/// symlink leaf fails the open with `ELOOP` and nothing is written, whether the
+/// link was there all along or appeared a microsecond ago.
+///
+/// The permission bits match `std::fs::write` (0o666, masked by the process
+/// umask); they apply only when the file is created.
+pub fn write_nofollow(abs_path: &Path, content: &str) -> anyhow::Result<()> {
+    use rustix::fs::{Mode, OFlags, open as rustix_open};
+    use std::io::Write;
+    use std::os::unix::io::{FromRawFd, IntoRawFd};
+
+    let fd = rustix_open(
+        abs_path,
+        OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC | OFlags::NOFOLLOW,
+        Mode::from_raw_mode(0o666),
+    )
+    .map_err(|e| {
+        if e == rustix::io::Errno::LOOP {
+            anyhow::anyhow!(
+                "refusing to write through a symlink: {}",
+                abs_path.display()
+            )
+        } else {
+            anyhow::anyhow!("open {} for writing: {e}", abs_path.display())
+        }
+    })?;
+
+    // SAFETY: we own the fd returned by rustix_open; it is valid and open.
+    let mut f = unsafe { std::fs::File::from_raw_fd(fd.into_raw_fd()) };
+    f.write_all(content.as_bytes())?;
+    Ok(())
+}
+
 /// Write text to a worktree file, creating it if it does not exist (the editor
 /// can save brand-new, uncommitted files). The only constraint is containment:
 /// the target — and, when creating, its parent directory — must stay inside the
 /// worktree. Refuses to write THROUGH a symlink (an existing one, or a dangling
 /// one whose target could appear between the boundary's existence check and the
 /// write) and refuses to write to a directory/fifo/device.
+///
+/// The stat below is what produces the readable per-case error messages; it is
+/// NOT what enforces the symlink rule, because an entry can be replaced between
+/// the stat and the write. The [`write_nofollow`] open is the enforcement, and
+/// it refuses a symlink leaf no matter when the link appeared.
 pub fn write_file(worktree: &Path, rel_path: &str, content: &str) -> anyhow::Result<()> {
     let path = resolve_worktree_path(worktree, rel_path)?;
     // No-follow stat tells existing-file kind apart from "does not exist".
@@ -268,8 +310,7 @@ pub fn write_file(worktree: &Path, rel_path: &str, content: &str) -> anyhow::Res
             }
         }
     }
-    std::fs::write(&path, content)?;
-    Ok(())
+    write_nofollow(&path, content).map_err(|e| anyhow::anyhow!("{e} (writing {rel_path})"))
 }
 
 /// Create a new EMPTY file at `rel_path`. Refuses to overwrite an existing entry
@@ -670,6 +711,45 @@ mod tests {
             std::fs::read_to_string(outside.path().join("secret.txt")).unwrap(),
             "top secret\n"
         );
+    }
+
+    /// The stat in `write_file` cannot be trusted by the time the write runs:
+    /// a symlink swapped in behind it would be followed by an ordinary
+    /// truncating write, clobbering whatever it points at. The writer itself
+    /// must refuse, so this drives it directly with the state the race would
+    /// leave behind, with no stat in front of it.
+    #[test]
+    fn write_nofollow_refuses_a_symlink_and_leaves_its_target_untouched() {
+        let dir = worktree();
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("secret.txt");
+        std::fs::write(&secret, "top secret\n").unwrap();
+        let target = dir.path().join("hello.txt");
+        std::fs::remove_file(&target).unwrap();
+        std::os::unix::fs::symlink(&secret, &target).unwrap();
+
+        let err = write_nofollow(&target, "pwned").unwrap_err().to_string();
+        assert!(
+            err.contains("symlink"),
+            "error should name the symlink: {err}"
+        );
+        assert_eq!(std::fs::read_to_string(&secret).unwrap(), "top secret\n");
+    }
+
+    #[test]
+    fn write_nofollow_writes_and_truncates_a_regular_file() {
+        let dir = worktree();
+        let target = dir.path().join("hello.txt");
+        write_nofollow(&target, "short\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "short\n");
+    }
+
+    #[test]
+    fn write_nofollow_creates_a_missing_file() {
+        let dir = worktree();
+        let target = dir.path().join("brand-new.txt");
+        write_nofollow(&target, "hello\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "hello\n");
     }
 
     /// Previously named `symlink_escaping_worktree_is_rejected`. Under the new
