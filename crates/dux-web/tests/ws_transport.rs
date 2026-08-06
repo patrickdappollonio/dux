@@ -697,21 +697,56 @@ async fn nested_agent_pty_socket_streams_bytes() {
     );
 }
 
-/// A single frame past `MAX_WS_MESSAGE_SIZE` is refused by the socket, not
-/// delivered.
+/// One byte past the 16 MiB message cap dux is expected to configure, written
+/// as a LITERAL and deliberately NOT derived from
+/// `dux_web::server::MAX_WS_MESSAGE_SIZE`.
 ///
-/// Be precise about what this pins and what it does NOT. `MAX_WS_MESSAGE_SIZE`
-/// is 16 MiB, which is exactly tungstenite's DEFAULT `max_frame_size`, so an
-/// unfragmented frame this large is refused by the frame cap dux never
-/// configures, and this test keeps passing with dux's own
-/// `.max_message_size(..)` calls deleted or raised. It was measured: raising
-/// every socket to 64 MiB leaves this test green and an identical trace. So it
-/// proves the end-to-end refusal is real (an over-cap frame never reaches the
-/// PTY and the socket ends rather than quietly ignoring it), and nothing about
-/// dux's constant.
+/// Deriving it is what made the cap tests self-referential: a payload sized
+/// `MAX_WS_MESSAGE_SIZE + 1` grows with the constant, so raising the constant
+/// raised the payload too and the socket refused it at the new value just as
+/// happily. Both tests stayed green through a measured 64 MiB mutation. A fixed
+/// size cannot do that: raise the constant and this payload becomes an ordinary
+/// under-cap message that the server accepts and `cat` echoes back.
+///
+/// The pair is completed by `the_configured_message_cap_is_16_mib`, which pins
+/// the constant itself, so a drift between the literal here and the value in
+/// `server.rs` fails loudly rather than silently making these tests vacuous.
+const OVER_MESSAGE_CAP_BYTES: usize = 16 * 1024 * 1024 + 1;
+
+/// The configured cap is the 16 MiB that `OVER_MESSAGE_CAP_BYTES` is one byte
+/// past. Keep the two in step: if the cap is ever deliberately changed, this
+/// assertion is the one that must be updated, and updating it forces a look at
+/// the literal the refusal tests send.
+#[test]
+fn the_configured_message_cap_is_16_mib() {
+    assert_eq!(
+        dux_web::server::MAX_WS_MESSAGE_SIZE,
+        16 * 1024 * 1024,
+        "MAX_WS_MESSAGE_SIZE moved; the fixed over-cap payload the refusal tests \
+         send is no longer over the cap"
+    );
+    assert_eq!(
+        OVER_MESSAGE_CAP_BYTES,
+        dux_web::server::MAX_WS_MESSAGE_SIZE + 1
+    );
+}
+
+/// A single frame past the message cap is refused by the socket, not delivered.
+///
+/// Be precise about what this pins and what it does NOT. The cap is 16 MiB,
+/// which is exactly tungstenite's DEFAULT `max_frame_size`, so an unfragmented
+/// frame this large is refused by the frame cap dux never configures, and this
+/// test keeps passing with dux's own `.max_message_size(..)` calls deleted or
+/// raised. It was measured: raising every socket to 64 MiB leaves this test
+/// green and an identical trace, and that stays true now the payload is a fixed
+/// size, because the frame cap is unmoved at 16 MiB either way. So it proves the
+/// end-to-end refusal is real (an over-cap frame never reaches the PTY and the
+/// socket ends rather than quietly ignoring it), and nothing about dux's
+/// constant.
 ///
 /// `a_fragmented_message_past_the_message_cap_is_refused` is the one that pins
-/// the configured number; keep them together.
+/// the configured number, and it can only do so because its payload is the fixed
+/// `OVER_MESSAGE_CAP_BYTES`; keep them together.
 ///
 /// The provider override in `boot` is `cat`, which echoes whatever reaches the
 /// PTY, so the assertion is direct: the marker inside the oversized frame must
@@ -729,11 +764,14 @@ async fn an_oversized_frame_is_refused_and_never_reaches_the_pty() {
         .await
         .unwrap();
 
-    // One byte over the cap, ending in the marker so an echo would be visible.
+    // One byte over the cap, STARTING with the marker so an echo shows up in the
+    // first bytes `cat` sends back rather than after 16 MiB have travelled: on a
+    // slow machine a trailing marker might not arrive inside the deadline, and
+    // an accepted payload would look like a refused one.
     let marker = b"dux-oversize-marker\n";
-    let mut payload = vec![b'x'; dux_web::server::MAX_WS_MESSAGE_SIZE + 1 - marker.len()];
-    payload.extend_from_slice(marker);
-    assert_eq!(payload.len(), dux_web::server::MAX_WS_MESSAGE_SIZE + 1);
+    let mut payload = marker.to_vec();
+    payload.resize(OVER_MESSAGE_CAP_BYTES, b'x');
+    assert_eq!(payload.len(), OVER_MESSAGE_CAP_BYTES);
     // The send itself may fail if the server has already torn the socket down,
     // which is just as good an answer as a later close.
     let _ = ws.send(Message::Binary(payload.into())).await;
@@ -749,6 +787,12 @@ async fn an_oversized_frame_is_refused_and_never_reaches_the_pty() {
                 break;
             }
             _ => {}
+        }
+        // As in the fragmented sibling: the marker leads the payload, so an
+        // accepted frame is visible immediately and there is nothing to gain by
+        // reading the rest of it.
+        if String::from_utf8_lossy(&acc).contains("dux-oversize-marker") {
+            break;
         }
     }
 
@@ -774,11 +818,17 @@ async fn an_oversized_frame_is_refused_and_never_reaches_the_pty() {
 /// no single frame can tell them apart, which is how the sibling test above
 /// stayed green through a 64 MiB mutation.
 ///
-/// So this sends the payload as two continuation frames of roughly 8 MiB each.
-/// Every frame is comfortably under the frame cap, and only the message cap can
-/// refuse the total. Mutation proof: raise `MAX_WS_MESSAGE_SIZE` (or delete the
-/// `.max_message_size(..)` call from the agent PTY socket) and the 16 MiB the
-/// default allows through echoes back off `cat`, failing on the marker.
+/// So this sends the payload as continuation frames of 4 MiB each. Every frame
+/// is comfortably under the frame cap, and only the message cap can refuse the
+/// total. The payload is the FIXED `OVER_MESSAGE_CAP_BYTES` and not
+/// `MAX_WS_MESSAGE_SIZE + 1`: derived from the constant it grew with any
+/// mutation and the test pinned nothing, which was measured, twice, at 64 MiB.
+///
+/// Mutation proof, both halves measured: raise `MAX_WS_MESSAGE_SIZE` and the now
+/// under-cap message is accepted and echoes back off `cat`, failing on the
+/// marker (and `the_configured_message_cap_is_16_mib` fails alongside it);
+/// delete the `.max_message_size(..)` call from the agent PTY socket and the
+/// 64 MiB default lets the same message through, failing the same way.
 #[tokio::test]
 async fn a_fragmented_message_past_the_message_cap_is_refused() {
     use tokio_tungstenite::tungstenite::protocol::frame::Frame;
@@ -797,15 +847,18 @@ async fn a_fragmented_message_past_the_message_cap_is_refused() {
 
     // One byte over the MESSAGE cap in total, chopped into fragments far below
     // the frame cap. The fragment size is fixed rather than "half the payload"
-    // so this keeps testing the message cap if the constant is ever raised: a
-    // half-and-half split of a 64 MiB payload would be two 32 MiB frames, which
-    // the frame cap would refuse, and the test would pass for the wrong reason.
+    // so every frame stays under the frame cap regardless of the total.
+    //
+    // The marker leads the payload rather than trailing it: it therefore rides
+    // the FIRST fragment, so an accepted message starts echoing immediately
+    // instead of after 16 MiB have travelled. A trailing marker made the failure
+    // path take 8.4s against an 8s deadline under mutation, one slow machine away
+    // from an accepted payload being scored as a refusal.
     const FRAGMENT: usize = 4 * 1024 * 1024;
     let marker = b"dux-fragmented-oversize-marker\n";
-    let total = dux_web::server::MAX_WS_MESSAGE_SIZE + 1;
-    let mut payload = vec![b'x'; total - marker.len()];
-    payload.extend_from_slice(marker);
-    assert_eq!(payload.len(), total);
+    let mut payload = marker.to_vec();
+    payload.resize(OVER_MESSAGE_CAP_BYTES, b'x');
+    assert_eq!(payload.len(), OVER_MESSAGE_CAP_BYTES);
 
     // A Binary opener that is not final, then Continue frames with only the last
     // one final: one logical message assembled server-side, which is where
@@ -840,6 +893,12 @@ async fn a_fragmented_message_past_the_message_cap_is_refused() {
                 break;
             }
             _ => {}
+        }
+        // A leading marker means an accepted payload is identifiable from the
+        // first bytes back, so stop rather than spending the whole deadline
+        // reading 16 MiB of `x` to reach a conclusion already reached.
+        if String::from_utf8_lossy(&acc).contains("dux-fragmented-oversize-marker") {
+            break;
         }
     }
 

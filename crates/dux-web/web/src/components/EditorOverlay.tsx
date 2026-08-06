@@ -711,7 +711,7 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
         // the user can shorten the file, or copy the buffer out, and save
         // again. It matters most for the size refusal, which is the one
         // failure a user can reach by editing rather than by something going
-        // wrong (the read cap is 5 MB and the write cap roughly 10 MB, so it
+        // wrong (the read cap is 5 MiB and the write cap roughly 10 MiB, so it
         // takes more than doubling a file's escaped size in one sitting). A
         // pre-flight size check is deliberately NOT built for that: it would
         // need a size on every tree entry and an escaped-length estimate on

@@ -51,6 +51,11 @@ export type DropOutcome =
   /// Never saved. The reason is the server's own words, not a generic one.
   | { kind: "refused"; requestedName: string; reason: string }
 
+/// Does the server's own text already tell the user to try again? Matched
+/// within one sentence so "try ... again" cannot be assembled out of two
+/// unrelated ones.
+const ADVISES_RETRY = /\btry\b[^.!?]*\bagain\b/i
+
 /// Why an upload was refused, in words the user can act on, from the failure's
 /// HTTP status and whatever the server said.
 ///
@@ -64,7 +69,8 @@ export type DropOutcome =
 /// The server's own words are PREFERRED wherever it has any, because the server
 /// knows things the browser does not (which name was unusable, which limit was
 /// hit). This only supplies the sentence for statuses where the browser has
-/// something to add, or where there is no body to quote.
+/// something to add, or where there is no body to quote. It never appends
+/// advice the server has already given.
 export function dropRefusalReason(status: number, detail: string): string {
   const said = detail.trim()
   // 0 is the transport failure `uploadDroppedFile` reports when `fetch` itself
@@ -75,9 +81,23 @@ export function dropRefusalReason(status: number, detail: string): string {
   if (status === 503) {
     // The wait is bounded server-side, so this is the answer that arrives when
     // no upload slot came free in time. Say that it is temporary.
-    return said
-      ? `${asClause(said)}, so it was not saved; try the drop again in a moment`
-      : "the server was busy with other uploads, so it was not saved; try the drop again in a moment"
+    if (!said) {
+      return "the server was busy with other uploads, so it was not saved; try the drop again in a moment"
+    }
+    // The local tail is only worth adding when the server has not already said
+    // it. dux's own 503 body is two COMPLETE sentences ending in "Try the drop
+    // again shortly.", and welding the tail onto that produced "...Try the drop
+    // again shortly, so it was not saved; try the drop again in a moment": the
+    // advice twice, the second copy comma-spliced into the middle of the
+    // server's own second sentence.
+    if (ADVISES_RETRY.test(said)) return asClause(said)
+    // A body that is already a finished sentence cannot take a comma-spliced
+    // clause either, for the same reason, so the tail becomes its own sentence.
+    // Only a FRAGMENT gets the comma.
+    if (/[.!?]$/.test(said)) {
+      return `${said} It was not saved; try the drop again in a moment`
+    }
+    return `${asClause(said)}, so it was not saved; try the drop again in a moment`
   }
   return said || `the server refused the upload (${status})`
 }

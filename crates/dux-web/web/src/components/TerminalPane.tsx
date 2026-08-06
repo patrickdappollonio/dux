@@ -149,12 +149,24 @@ const DRAG_THRESHOLD_PX = 4
 // The touch drag path (dragScrollLines) is finger-proportional and unaffected.
 const WHEEL_SCROLL_SENSITIVITY = 3
 
-// The one sonner id a whole file drop lives on: the per-file spinner and the
-// single report at the end. One id is what makes the final REPLACE the spinner
-// in place instead of stacking a second toast beneath it, and it is what lets
-// the final retire the spinner's leak guard without either side knowing about
-// the other.
-const FILE_DROP_TOAST_ID = "file-drop"
+// The sonner id ONE file drop lives on: its per-file spinners and its single
+// report at the end. One id per drop is what makes the final REPLACE that
+// drop's spinner in place instead of stacking a second toast beneath it, and it
+// is what lets the final retire that spinner's leak guard without either side
+// knowing about the other.
+//
+// It is minted per drop rather than being a module constant. Uploads within one
+// drop are sequential, but a drop is not atomic, so two quick drops overlap:
+// with a shared id, drop A's final landed on the id and was then painted over by
+// drop B's next per-file spinner, and the user lost A's report entirely. That
+// report is often the error naming which files were refused, which is the one
+// the user most needs. A counter rather than a random id, so the ordering stays
+// legible.
+let fileDropSeq = 0
+function nextFileDropToastId(): string {
+  fileDropSeq += 1
+  return `file-drop-${fileDropSeq}`
+}
 
 // Copy the terminal's current selection to the clipboard and toast the result.
 // `copyToClipboard` writes via the async Clipboard API in a secure context and
@@ -1586,7 +1598,11 @@ export function TerminalPane(props: TerminalPaneProps) {
   // reason the ownership and socket checks are: a drop's uploads are sequential,
   // so a config reload or a provider retarget can land between two files, and a
   // form snapshotted once at the top of the drop would silently outlive it.
-  async function handleDroppedFiles(files: File[]) {
+  //
+  // `toastId` is THIS drop's own sonner id, minted by `runDrop`. See
+  // `nextFileDropToastId`: two quick drops sharing one id lose the first one's
+  // report under the second one's spinner.
+  async function handleDroppedFiles(files: File[], toastId: string) {
     if (files.length === 0) return
     const outcomes: DropOutcome[] = []
 
@@ -1598,13 +1614,14 @@ export function TerminalPane(props: TerminalPaneProps) {
       // normal and nothing visibly happens. Uploads are sequential, so a
       // multi-file drop counts through them rather than sitting on one message.
       //
-      // Same sonner id as the report at the end of the drop, so the final
-      // REPLACES the spinner in place rather than stacking a second toast.
+      // Same sonner id as the report at the end of THIS drop, so the final
+      // REPLACES the spinner in place rather than stacking a second toast, and
+      // a concurrent drop cannot paint over either of them.
       showBusyToast(
         files.length === 1
           ? `Uploading ${file.name}...`
           : `Uploading ${file.name} (${i + 1} of ${files.length})...`,
-        { id: FILE_DROP_TOAST_ID },
+        { id: toastId },
       )
       let saved
       try {
@@ -1718,7 +1735,7 @@ export function TerminalPane(props: TerminalPaneProps) {
     // window applies. A bare sonner call would silently use the library default.
     // It also retires the spinner's leak guard, since it lands on the same id.
     showFinalToast(report.tone, report.message, {
-      id: FILE_DROP_TOAST_ID,
+      id: toastId,
       statusClearSeconds: bootstrap?.status_clear_seconds,
     })
   }
@@ -1730,15 +1747,20 @@ export function TerminalPane(props: TerminalPaneProps) {
   /// with `void`, so that throw would become an unhandled rejection and leave
   /// the spinner on screen until its leak guard expires a minute later, still
   /// claiming the upload is running.
+  ///
+  /// The id is minted HERE, once per drop, and handed to both halves, so a
+  /// second drop starting while this one is still uploading cannot land its
+  /// spinner on this drop's report.
   async function runDrop(files: File[]) {
+    const toastId = nextFileDropToastId()
     try {
-      await handleDroppedFiles(files)
+      await handleDroppedFiles(files, toastId)
     } catch (e) {
       showFinalToast(
         "error",
         `The drop failed unexpectedly: ${e instanceof Error ? e.message : String(e)}`,
         {
-          id: FILE_DROP_TOAST_ID,
+          id: toastId,
           statusClearSeconds: bootstrap?.status_clear_seconds,
         },
       )

@@ -1099,14 +1099,23 @@ mod tests {
         // concern; here we prove the bound set excludes the failed address.
         //
         // 127.0.0.2 stands in for the Tailscale IP (all of 127.0.0.0/8 is loopback
-        // on Linux), held on an ephemeral port; 127.0.0.1 on a separate free port
-        // is the required leg. The bind-failure path doesn't care that it's not a
-        // real Tailscale address — only that the entry is best-effort.
+        // on Linux), held on an ephemeral port for the whole test so the leg is
+        // genuinely busy. The bind-failure path doesn't care that it's not a real
+        // Tailscale address, only that the entry is best-effort.
         let held = std::net::TcpListener::bind("127.0.0.2:0").expect("hold a best-effort addr");
         let held_addr = held.local_addr().expect("held addr");
-        let free = std::net::TcpListener::bind("127.0.0.1:0").expect("probe a free port");
-        let required_addr = free.local_addr().expect("free addr");
-        drop(free); // release it so bind_plan_addrs can take it
+
+        // The required leg asks for port 0 and lets the KERNEL pick a free port
+        // at bind time. It previously probe-bound `127.0.0.1:0`, read the port
+        // back and dropped the listener so `bind_plan_addrs` could re-take it,
+        // which hands the port to the whole machine for the length of that gap
+        // and races anything else that wants an ephemeral port. That is the same
+        // pattern removed from `dead_base_url()` in
+        // `crates/dux-core/tests/release_notes_fetch.rs` for causing a real race,
+        // and this one flaked too. Port 0 closes the window entirely: there is no
+        // moment where the port is free and unclaimed.
+        let required_addr: std::net::SocketAddr =
+            "127.0.0.1:0".parse().expect("a literal loopback addr");
 
         let plan = vec![
             PlanAddr::required(required_addr),
@@ -1120,6 +1129,16 @@ mod tests {
         assert_eq!(
             bound[0].addr, required_addr,
             "the bound leg is the required one"
+        );
+        // `BoundListener::addr` echoes what was ASKED for, so with port 0 the
+        // assertion above cannot tell a real listener from a recorded intention.
+        // The listener's own address is the proof that a port was actually taken.
+        let listening_on = bound[0].listener.local_addr().expect("a bound listener");
+        assert_eq!(listening_on.ip(), required_addr.ip());
+        assert_ne!(
+            listening_on.port(),
+            0,
+            "the kernel assigned a real port to the required leg"
         );
         assert!(
             bound.iter().all(|b| b.addr.ip().is_loopback()),

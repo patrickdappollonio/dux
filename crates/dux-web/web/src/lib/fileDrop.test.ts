@@ -1143,12 +1143,45 @@ describe("what a refused upload is reported as", () => {
 
   it("says a busy server is temporary and worth retrying", () => {
     const reason = dropRefusalReason(503, busyBody)
-    expect(reason).toContain("try the drop again")
+    expect(reason.toLowerCase()).toContain("try the drop again")
     // The server's own words are kept: it knows which limit it hit.
     expect(reason).toContain("as many dropped files as it allows at once")
     // Embedded as a clause, so the template that terminates it cannot double
     // the period.
     expect(reason).not.toMatch(/\.$/)
+  })
+
+  // The old version appended its own tail unconditionally, and the server's
+  // body already ends in "Try the drop again shortly.", so the user was told
+  // twice and the second copy was comma-spliced into the middle of the server's
+  // own sentence: "...Try the drop again shortly, so it was not saved; try the
+  // drop again in a moment". The previous assertions did not catch it: they
+  // only checked that the advice was present at all and that no period was
+  // doubled.
+  it("does not tell the user to retry twice when the server already said so", () => {
+    const reason = dropRefusalReason(503, busyBody)
+    const retries = reason.toLowerCase().match(/\btry\b[^.!?]*\bagain\b/g) ?? []
+    expect(retries).toHaveLength(1)
+    // And nothing is welded onto the end of the server's own advice.
+    expect(reason).not.toContain("shortly,")
+    expect(reason.trim()).toMatch(/try the drop again shortly$/i)
+  })
+
+  it("does not comma-splice its tail into a server sentence that is finished", () => {
+    // A 503 body that does NOT carry the advice still must not be welded to,
+    // because it is a complete sentence: the tail becomes its own sentence.
+    const reason = dropRefusalReason(503, "The upload queue is full.")
+    expect(reason).toContain("The upload queue is full. It was not saved;")
+    expect(reason.toLowerCase()).toContain("try the drop again in a moment")
+    expect(reason).not.toContain("full., so")
+    expect(reason).not.toContain("full, so")
+  })
+
+  it("still welds its tail onto a fragment, where a comma is right", () => {
+    const reason = dropRefusalReason(503, "no upload slot came free")
+    expect(reason).toBe(
+      "no upload slot came free, so it was not saved; try the drop again in a moment",
+    )
   })
 
   it("still says a busy server is temporary when it sent no body", () => {
@@ -1191,7 +1224,15 @@ describe("what a refused upload is reported as", () => {
       terminal,
     )
     expect(t.tone).toBe("error")
-    expect(t.message).toContain("try the drop again in a moment.")
+    expect(t.message).toContain("Could not save shot.png:")
     expect(t.message).not.toContain("..")
+    // The whole composed sentence, which is what the user actually reads. The
+    // mangled form was "Could not save shot.png: The server is already handling
+    // as many dropped files as it allows at once. Try the drop again shortly,
+    // so it was not saved; try the drop again in a moment."
+    expect(t.message).toBe(
+      "Could not save shot.png: The server is already handling as many dropped " +
+        "files as it allows at once. Try the drop again shortly.",
+    )
   })
 })
