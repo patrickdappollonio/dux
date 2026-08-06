@@ -32,7 +32,11 @@ url = "2.5"
 percent-encoding = "2.3"
 axum = { version = "0.8", features = ["ws"] }
 futures-util = "0.3"
-tokio-tungstenite = "0.24"
+# The websocket CLIENT the integration tests connect with. Held at the version
+# axum itself depends on, so a test speaks to the server through the same
+# protocol implementation the server is running rather than a second, older one.
+# Bump it whenever axum's does: `cargo tree -p tokio-tungstenite` names both.
+tokio-tungstenite = "0.29"
 
 [profile.release]
 opt-level = "z"   # Optimize for size.

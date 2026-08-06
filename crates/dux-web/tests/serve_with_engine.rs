@@ -333,10 +333,10 @@ async fn return_to_tui_does_not_hang_with_a_subscribed_pty() {
     // non-owner is dropped (the per-PTY active-owner model), and a freshly
     // attached socket owns nothing until it sends its size, exactly as the real
     // client does on a foreground attach.
-    ws.send(Message::Text(r#"{"rows":24,"cols":80}"#.to_string()))
+    ws.send(Message::Text(r#"{"rows":24,"cols":80}"#.into()))
         .await
         .expect("send resize claim");
-    ws.send(Message::Binary(b"dux-flip-marker\n".to_vec()))
+    ws.send(Message::Binary(b"dux-flip-marker\n".to_vec().into()))
         .await
         .expect("send pty input");
 
