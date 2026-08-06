@@ -134,12 +134,25 @@ fn log(level: LogLevel, message: &str) {
 /// this. Tightening runs on every open, so a log left `0644` by an older
 /// installation is corrected rather than left as it was.
 ///
+/// The tightening is BEST EFFORT and its failure is not this function's
+/// failure. `logging.path` accepts any absolute path, so a log under `/var/log`
+/// owned by an admin, on a Windows mount under WSL2, or on a FAT or NFS volume
+/// is a path dux can append to but cannot `chmod`. Propagating that error was
+/// swallowed whole by `init`'s `if let Ok(file)`, so the outcome was no logging
+/// at all and no message anywhere, from a configuration change alone. A
+/// slightly loose log is better than no log. This now matches what
+/// [`crate::storage`] has always done deliberately for the database.
+///
 /// Separate from [`init`] because `init` installs a process-global logger and a
 /// panic hook, neither of which a test can do twice; this is the part with
 /// on-disk behaviour worth pinning.
 fn open_log_file(path: &PathBuf) -> std::io::Result<std::fs::File> {
     let file = OpenOptions::new().create(true).append(true).open(path)?;
-    crate::file_modes::restrict_to_owner(path)?;
+    // A warning about the log file itself may have nowhere to go, since the
+    // logger this warns through is installed by `init` just after this returns.
+    // That is inherent, and it is still better than the silent no-op it
+    // replaces: the mode is applied, or dux keeps logging.
+    crate::file_modes::restrict_to_owner_best_effort(path, "log file");
     Ok(file)
 }
 
@@ -182,6 +195,36 @@ mod tests {
         drop(open_log_file(&path).unwrap());
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "expected 0600, got {mode:o}");
+    }
+
+    /// A log dux can append to but cannot tighten must still be OPENED.
+    /// `open_log_file`'s error was swallowed whole by `init`'s
+    /// `if let Ok(file)`, so a `logging.path` dux could not `chmod` (under
+    /// `/var/log`, on a Windows mount under WSL2, on FAT or NFS) meant no
+    /// logging at all and no message anywhere. A symlinked log is the case that
+    /// can be built here: the tightening is deliberately skipped and the open
+    /// must still hand back a usable, appendable file.
+    #[test]
+    fn open_log_file_still_opens_when_the_mode_cannot_be_applied() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("real.log");
+        fs::write(&target, "old\n").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o644)).unwrap();
+        let path = dir.path().join("dux.log");
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+
+        {
+            use std::io::Write;
+            let mut file = open_log_file(&path).expect("the log must still open");
+            file.write_all(b"new\n").unwrap();
+        }
+
+        assert_eq!(fs::read_to_string(&target).unwrap(), "old\nnew\n");
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o644,
+            "the symlink target's mode must have been left alone"
+        );
     }
 
     #[test]

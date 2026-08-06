@@ -66,7 +66,7 @@ impl SessionStore {
             sidecar_path(path, "-wal"),
             sidecar_path(path, "-shm"),
         ] {
-            let _ = crate::file_modes::restrict_to_owner(&path);
+            crate::file_modes::restrict_to_owner_best_effort(&path, "session database");
         }
         let store = Self { conn };
         store.migrate()?;
@@ -1244,10 +1244,22 @@ mod tests {
 
     /// The database mirrors the same per-project `env` map that made
     /// `config.toml` `0600`, and SQLite's `-wal`/`-shm` sidecars carry the same
-    /// content. All three are created by SQLite at the umask default, so dux
-    /// tightens them itself after the connection is up.
+    /// content.
+    ///
+    /// Be precise about what this proves, because the name it used to carry
+    /// promised more than it delivered. On a FIRST open the sidecars do not yet
+    /// exist when the tightening loop runs, so the loop cannot be what makes
+    /// them owner-only: SQLite creates them afterwards and they INHERIT the
+    /// database file's mode. Removing `-wal` and `-shm` from that loop left the
+    /// old test green, which is why it is named for inheritance now. The loop
+    /// entries are covered by the reopen test below, which is where they are
+    /// actually load-bearing.
+    ///
+    /// The `if let Ok(meta)` this used to wrap each check in is gone: a sidecar
+    /// that was not there passed silently, so the test could prove nothing at
+    /// all and still succeed.
     #[test]
-    fn open_leaves_the_database_and_its_sidecars_owner_only() {
+    fn sidecars_created_after_the_open_inherit_the_databases_owner_only_mode() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("sessions.sqlite3");
@@ -1260,18 +1272,54 @@ mod tests {
 
         for path in [
             db.clone(),
-            dir.path().join("sessions.sqlite3-wal"),
-            dir.path().join("sessions.sqlite3-shm"),
+            sidecar_path(&db, "-wal"),
+            sidecar_path(&db, "-shm"),
         ] {
-            if let Ok(meta) = std::fs::metadata(&path) {
-                let mode = meta.permissions().mode() & 0o777;
-                assert_eq!(
-                    mode & 0o077,
-                    0,
-                    "{} should not be group/world readable, got {mode:o}",
-                    path.display()
-                );
-            }
+            let meta = std::fs::metadata(&path)
+                .unwrap_or_else(|e| panic!("{} must exist to be checked: {e}", path.display()));
+            let mode = meta.permissions().mode() & 0o777;
+            assert_eq!(
+                mode & 0o077,
+                0,
+                "{} should not be group/world readable, got {mode:o}",
+                path.display()
+            );
+        }
+    }
+
+    /// This is what the `-wal`/`-shm` entries in the tightening loop are FOR: a
+    /// sidecar that already exists at a loose mode when dux opens the database,
+    /// as an older installation would have left it. The sidecars only exist
+    /// while a connection is open (SQLite removes them when the last one
+    /// closes), so the first store is held open across the second open.
+    #[test]
+    fn open_tightens_sidecars_left_world_readable_by_an_older_install() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("sessions.sqlite3");
+        let holder = SessionStore::open(&db).unwrap();
+        holder
+            .conn
+            .execute_batch("create table if not exists probe (x);")
+            .unwrap();
+
+        let wal = sidecar_path(&db, "-wal");
+        let shm = sidecar_path(&db, "-shm");
+        for path in [&wal, &shm] {
+            assert!(path.exists(), "{} must exist for this test", path.display());
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+
+        let _second = SessionStore::open(&db).unwrap();
+
+        for path in [&wal, &shm] {
+            let mode = std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode,
+                0o600,
+                "{} should have been tightened on open, got {mode:o}",
+                path.display()
+            );
         }
     }
 
