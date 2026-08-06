@@ -1021,15 +1021,41 @@ mod tests {
         );
     }
 
-    /// A drop that never gets a slot is REFUSED, not queued forever.
+    /// A drop that never gets a slot is REFUSED, not queued forever, and it is
+    /// refused after a wait a person would actually sit through.
     ///
     /// Same hold as the test above: the first upload's body yields a chunk and
     /// then parks, so its handler sits in the buffering step with the only
     /// permit. Here the blocker is simply never released. The clock is paused,
     /// so the runtime fast-forwards past the permit wait the moment every task
     /// is idle, which is what makes this instant rather than a 30-second test.
+    ///
+    /// That fast-forward is also the trap this test used to fall into, and both
+    /// halves of it were measured. Asking only "did the call return" passes with
+    /// `PERMIT_WAIT` set to 30 DAYS, in under two seconds, because a paused
+    /// clock skips any finite duration just as cheaply. And deleting the timeout
+    /// altogether made the test HANG rather than fail, which in CI is a job
+    /// timeout nobody reads rather than a red test.
+    ///
+    /// So the wait is measured on the virtual clock and bounded from both sides.
+    /// The lower bound says the refusal came from `PERMIT_WAIT` and not from
+    /// something else answering early; the upper bounds say the constant is
+    /// still a number a human tolerates. `TOLERABLE_WAIT` doubles as the outer
+    /// deadline, so an unbounded wait fails on an assertion instead of hanging.
     #[tokio::test(start_paused = true)]
     async fn an_upload_that_never_gets_a_slot_is_refused_rather_than_queued() {
+        /// The longest a dropped file may sit with no answer before this is a
+        /// defect regardless of what the code intended. A person who drops a
+        /// file and sees nothing has given up well before a minute.
+        const TOLERABLE_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+        assert!(
+            PERMIT_WAIT <= TOLERABLE_WAIT,
+            "PERMIT_WAIT is {PERMIT_WAIT:?}, longer than the {TOLERABLE_WAIT:?} a \
+             user will wait for a dropped file. A paused clock will skip any \
+             duration you write here, so this bound is the only thing standing \
+             between the constant and a wait nobody would sit through."
+        );
+
         let (_tmp, _wt, app) = router_with_limits(1024 * 1024, 1).await;
 
         let (holding_tx, holding_rx) = tokio::sync::oneshot::channel::<()>();
@@ -1052,15 +1078,40 @@ mod tests {
             .await
             .expect("the first upload must reach its body, which means it holds the permit");
 
-        let second = app
-            .oneshot(drop_req("pty=s1&filename=second.png", b"second".to_vec()))
-            .await
-            .unwrap();
+        // The outer deadline is what turns "waits forever" into a failed
+        // assertion. Without it, removing the timeout from the permit layer
+        // parks this test until the harness or CI kills the job.
+        let started = tokio::time::Instant::now();
+        let second = tokio::time::timeout(
+            TOLERABLE_WAIT,
+            app.oneshot(drop_req("pty=s1&filename=second.png", b"second".to_vec())),
+        )
+        .await
+        .expect(
+            "the drop never answered within the tolerable wait: the permit wait is \
+             either unbounded or far longer than a user will sit through",
+        )
+        .unwrap();
+        let waited = started.elapsed();
+
         assert_eq!(
             second.status(),
             StatusCode::SERVICE_UNAVAILABLE,
             "a drop with no slot available must be refused once the wait expires, \
              not held open indefinitely"
+        );
+        // Pin the refusal to PERMIT_WAIT itself. Virtual time, so this costs
+        // nothing, but it still fails if the constant drifts or if the answer
+        // came from somewhere other than the permit timeout.
+        assert!(
+            waited >= PERMIT_WAIT,
+            "the drop was refused after {waited:?}, before PERMIT_WAIT ({PERMIT_WAIT:?}) \
+             could have expired, so the refusal came from somewhere else"
+        );
+        assert!(
+            waited < PERMIT_WAIT + std::time::Duration::from_secs(1),
+            "the drop took {waited:?}, well past PERMIT_WAIT ({PERMIT_WAIT:?}): \
+             something is waiting longer than the permit layer intends"
         );
         let body = body_text(second).await;
         assert!(
