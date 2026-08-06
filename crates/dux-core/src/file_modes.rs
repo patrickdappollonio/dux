@@ -247,6 +247,12 @@ mod tests {
     /// The config-root case: `create_dir_all` succeeds because the directory is
     /// already there through the link, and the tightening is then skipped. dux
     /// must still start.
+    ///
+    /// This is NOT the best-effort test, though it reads like one: the symlink
+    /// branch returns `Ok(())` before any chmod is attempted, so a fatal
+    /// version of the tightening would pass here too. The chmod-actually-fails
+    /// case is pinned by
+    /// `create_private_dir_all_still_succeeds_when_the_leaf_cannot_be_tightened`.
     #[test]
     fn create_private_dir_all_through_a_symlink_succeeds_and_leaves_the_target_alone() {
         let dir = tempfile::tempdir().unwrap();
@@ -272,6 +278,82 @@ mod tests {
             create_private_dir_all(&blocker.join("child")).is_err(),
             "a real creation failure must still be reported"
         );
+    }
+
+    /// The strict form must REPORT a chmod it could not do, or the best-effort
+    /// wrapper below has nothing to swallow and its whole existence is
+    /// untested. This is the shape that builds it unprivileged, MEASURED:
+    /// `symlink_metadata` on a path under a REGULAR FILE answers
+    /// `NotADirectory` (os error 20), which is not `NotFound` and so must
+    /// surface.
+    #[test]
+    fn restrict_to_owner_reports_a_failure_that_is_not_a_missing_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let regular = dir.path().join("regular");
+        fs::write(&regular, "x").unwrap();
+
+        let err = restrict_to_owner(&regular.join("child"))
+            .expect_err("a path that is not merely missing must surface");
+        assert_eq!(
+            err.kind(),
+            io::ErrorKind::NotADirectory,
+            "expected the real errno, got {err:?}"
+        );
+    }
+
+    /// And the best-effort wrapper must swallow exactly that error. Nothing
+    /// else in this module pins it: the two symlink tests look like coverage
+    /// but return `Ok(())` before any chmod is attempted, so there is no error
+    /// on those paths for a fatal version to propagate.
+    #[test]
+    fn restrict_to_owner_best_effort_swallows_an_error_the_strict_form_returns() {
+        let dir = tempfile::tempdir().unwrap();
+        let regular = dir.path().join("regular");
+        fs::write(&regular, "x").unwrap();
+        let unreachable = regular.join("child");
+        assert!(
+            restrict_to_owner(&unreachable).is_err(),
+            "the test is only meaningful while the strict form fails here"
+        );
+
+        // No return value to assert on: not panicking and not propagating IS
+        // the behaviour. A fatal version could not compile at this call.
+        restrict_to_owner_best_effort(&unreachable, "test path");
+    }
+
+    /// The headline guarantee at the call site: a directory that EXISTS and
+    /// works must not become a startup failure because dux cannot change its
+    /// mode. Making the tightening fatal here breaks this test and nothing
+    /// else in the crate, which is why it is written.
+    ///
+    /// MEASURED shape: `/proc/self/fdinfo` is a real directory at mode `0555`,
+    /// so `create_dir_all` succeeds and the tightening is attempted, and procfs
+    /// refuses a mode change with `EPERM` for EVERY caller including root
+    /// (`proc_setattr` rejects `ATTR_MODE` outright), so the test neither needs
+    /// a privilege gate nor risks changing anything. Linux-only, hence the
+    /// stated skip rather than a silent pass.
+    #[test]
+    fn create_private_dir_all_still_succeeds_when_the_leaf_cannot_be_tightened() {
+        let path = Path::new("/proc/self/fdinfo");
+        if !path.is_dir() {
+            eprintln!("SKIPPED: no procfs here, so an un-chmod-able directory cannot be built");
+            return;
+        }
+        let before = mode_of(path);
+        assert_ne!(
+            before & GROUP_AND_OTHER,
+            0,
+            "the test is only meaningful while a tightening is actually attempted"
+        );
+        assert!(
+            restrict_to_owner(path).is_err(),
+            "the test is only meaningful while the chmod really fails"
+        );
+
+        create_private_dir_all(path)
+            .expect("a directory dux cannot tighten must not be a startup failure");
+
+        assert_eq!(mode_of(path), before, "nothing should have been changed");
     }
 
     #[test]

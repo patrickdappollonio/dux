@@ -96,8 +96,16 @@ mode; the same goes for `dux.lock` and for a `themes/` directory you create
 yourself. They are all covered by the `0700` on the directory above them.
 
 If you are upgrading and your directory is currently world-readable, the next
-start tightens it for you. dux only ever removes group and world access, never
-your own, so a config file you have deliberately made read-only stays that way.
+start tightens it for you. That pass only ever removes group and world access,
+never your own, so a config file you have made read-only at `0400` keeps its
+`0400`.
+
+Be clear about what read-only does **not** buy you, though: it does not stop dux
+saving. A save writes a new file and renames it over the old one, and a rename
+needs write permission on the *directory*, not on the file, so a `0400`
+`config.toml` is replaced anyway and comes back at `0600`. If you need a config
+dux cannot touch, keep it somewhere dux does not write to.
+
 Two things it will never do: it does not follow a **symlink** when setting a
 mode, so if your `config.toml` is a link into a dotfiles repository the file in
 that repository is left exactly as it is, and it treats a mode it cannot set as a

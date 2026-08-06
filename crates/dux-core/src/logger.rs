@@ -201,9 +201,13 @@ mod tests {
     /// `open_log_file`'s error was swallowed whole by `init`'s
     /// `if let Ok(file)`, so a `logging.path` dux could not `chmod` (under
     /// `/var/log`, on a Windows mount under WSL2, on FAT or NFS) meant no
-    /// logging at all and no message anywhere. A symlinked log is the case that
-    /// can be built here: the tightening is deliberately skipped and the open
-    /// must still hand back a usable, appendable file.
+    /// logging at all and no message anywhere.
+    ///
+    /// Note what this test does NOT cover, because it reads as though it does:
+    /// on a symlink the tightening is SKIPPED, returning `Ok(())` before any
+    /// chmod is attempted, so there is no error here for a fatal version to
+    /// propagate and this test passes either way. The chmod-actually-fails
+    /// case is pinned separately below.
     #[test]
     fn open_log_file_still_opens_when_the_mode_cannot_be_applied() {
         let dir = tempfile::tempdir().unwrap();
@@ -224,6 +228,52 @@ mod tests {
             fs::metadata(&target).unwrap().permissions().mode() & 0o777,
             0o644,
             "the symlink target's mode must have been left alone"
+        );
+    }
+
+    /// The real one: a log dux can APPEND to but genuinely cannot `chmod` must
+    /// still open. It was claimed this case could not be built unprivileged.
+    /// It can, and this is the MEASURED shape: `/dev/null` is mode `0666`, so
+    /// the tightening is attempted, and the chmod is refused with
+    /// `PermissionDenied` for a non-root caller while the append itself
+    /// succeeds. Making `open_log_file`'s tightening fatal fails this test and
+    /// nothing else in the crate.
+    ///
+    /// Root is the one caller for whom that chmod would SUCCEED, and would
+    /// change the mode of `/dev/null` system-wide, so root is skipped out loud
+    /// rather than allowed to pass meaninglessly.
+    #[test]
+    fn open_log_file_still_opens_when_the_chmod_itself_fails() {
+        if rustix::process::geteuid().is_root() {
+            eprintln!("SKIPPED: running as root, so the chmod would succeed and change /dev/null");
+            return;
+        }
+        let path = PathBuf::from("/dev/null");
+        if !path.exists() {
+            eprintln!("SKIPPED: no /dev/null here");
+            return;
+        }
+        let before = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_ne!(
+            before & 0o077,
+            0,
+            "the test is only meaningful while a tightening is actually attempted"
+        );
+        assert!(
+            crate::file_modes::restrict_to_owner(&path).is_err(),
+            "the test is only meaningful while the chmod really fails"
+        );
+
+        {
+            use std::io::Write;
+            let mut file = open_log_file(&path).expect("the log must still open");
+            file.write_all(b"a line that goes nowhere\n").unwrap();
+        }
+
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            before,
+            "nothing should have been changed"
         );
     }
 

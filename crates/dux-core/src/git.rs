@@ -690,7 +690,34 @@ pub fn has_origin_remote(repo_path: &Path) -> Result<bool> {
     Ok(status.success())
 }
 
+/// Fast-forwards `branch` from `origin`.
+///
+/// The refspec is FULLY QUALIFIED (`refs/heads/<branch>`) and that is what
+/// makes an option-looking branch name safe here. A `--` separator does NOT,
+/// which was MEASURED on git 2.55 with `GIT_TRACE=1`:
+///
+/// ```text
+/// $ git pull --ff-only origin -- --force
+/// trace: run_command: git fetch --update-head-ok origin --force
+/// ```
+///
+/// `pull` consumes the separator and forwards the refspec to an internal
+/// `fetch` carrying none of its own, the same mechanism `git worktree add`
+/// uses on its start point. So `--force`/`--prune`/`--all` are read as flags
+/// and the branch is silently never pulled, and `--depth=1` writes
+/// `.git/shallow` into the user's source checkout and converts it to a shallow
+/// clone. A `refs/heads/`-prefixed refspec cannot lead with a dash, so the
+/// internal fetch reads it as a ref no matter what the branch is called
+/// (measured: `git pull --ff-only origin -- refs/heads/--force` fetches and
+/// fast-forwards correctly).
+///
+/// Resolving the name to an object id first, the way
+/// `create_worktree_from_start_point` does, is not an option here: the refspec
+/// names a ref on the REMOTE, and an object id is not something `origin` can
+/// be asked for. The `--` is kept as defence in depth for the `origin`
+/// argument's sake.
 fn pull_origin_branch(repo_path: &Path, branch: &str) -> Result<()> {
+    let refspec = format!("refs/heads/{branch}");
     let output = Command::new("git")
         .args([
             "-C",
@@ -698,10 +725,8 @@ fn pull_origin_branch(repo_path: &Path, branch: &str) -> Result<()> {
             "pull",
             "--ff-only",
             "origin",
-            // `--` so the refspec is read as a REF and never as an option.
-            // Measured accepted in this position on git 2.55.
             "--",
-            branch,
+            &refspec,
         ])
         .output()?;
     if !output.status.success() {
@@ -1811,16 +1836,71 @@ pub fn commit_preflight(worktree_path: &Path, message: &str) -> CommitPreflight 
 /// and drops the part that is not. The full untouched text still goes to
 /// `dux.log` for the operator.
 ///
-/// Deliberately a plain literal replacement rather than anything cleverer: it
-/// is the same string git was handed as `-C`, so it matches what git echoes
-/// back, and a miss degrades to showing a path rather than to hiding the
-/// reason.
+/// The match is LITERAL but must land on a path BOUNDARY, meaning the prefix is
+/// followed by a separator or by the end of the path. A plain `str::replace`
+/// was not enough, and the case is not hypothetical: agent worktrees are
+/// siblings under one project root, so `.../proj/agent` and `.../proj/agent-2`
+/// coexist by construction, and a mention of the second one rendered as
+/// `.-2/f.rs`. That is a WRONG path rather than a hidden one, which is worse,
+/// because nothing tells the reader it is not real. A path this function
+/// declines to shorten is still shown in full, which is the same harmless
+/// degradation a miss always had.
+///
+/// The string compared is the one git was handed as `-C`, so it matches what
+/// git echoes back. A trailing separator on it is ignored rather than producing
+/// a doubled slash.
+///
+/// What counts as a boundary depends on whether the path is QUOTED, and it has
+/// to, which was found by a `dux-web` test rather than reasoned about: git
+/// writes `fatal: cannot change to '/wt/proj/agent': No such file or
+/// directory`, a message that names the server's path and nothing else, and a
+/// rule accepting only a separator or the end of the text would leave it in
+/// full. So when the match is immediately preceded by `'` or `"`, the matching
+/// quote closes the path too.
+///
+/// The boundary set is deliberately no wider than that. A space or a comma
+/// cannot join it, because a filename may contain either: with a sibling
+/// worktree named `agent 2`, treating a space as a boundary would shorten
+/// `/wt/proj/agent 2/f.rs` to `./2/f.rs`, which is the exact class of invented
+/// path this rule exists to prevent. Inside a quoted run the quote is safe for
+/// the same reason it is safe to git, since the opening quote is what says a
+/// quoted path is being read at all.
 pub fn redact_worktree_path(text: &str, worktree_path: &Path) -> String {
     let wt = worktree_path.to_string_lossy();
+    let wt = wt.strip_suffix('/').unwrap_or(wt.as_ref());
     if wt.is_empty() || wt == "/" {
         return text.to_string();
     }
-    text.replace(wt.as_ref(), ".")
+
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(wt) {
+        let after = &rest[at + wt.len()..];
+        // The quote that OPENED this path, if any, closes it too.
+        let opening_quote = rest[..at]
+            .chars()
+            .next_back()
+            .filter(|c| *c == '\'' || *c == '"');
+        let next = after.chars().next();
+        // A boundary is a separator, the closing quote, or the end of the text.
+        // Anything else means this is a DIFFERENT path that merely starts with
+        // the same characters, and shortening it would invent one that does not
+        // exist.
+        let at_boundary = match next {
+            None => true,
+            Some('/') => true,
+            Some(c) => Some(c) == opening_quote,
+        };
+        if at_boundary {
+            out.push_str(&rest[..at]);
+            out.push('.');
+        } else {
+            out.push_str(&rest[..at + wt.len()]);
+        }
+        rest = after;
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Build the error for a failed git subprocess, carrying BOTH streams.
@@ -3599,6 +3679,104 @@ mod tests {
         assert!(!out.contains("/home/someone"));
     }
 
+    /// A SIBLING worktree's path must not be half-eaten. Agent worktrees are
+    /// literally siblings under one project root, so `.../proj/agent` and
+    /// `.../proj/agent-2` coexist by construction, and a plain substring
+    /// replacement rendered a mention of the second one as `./-2/f.rs`: not a
+    /// hidden path but a WRONG path, which is worse, because the reader has no
+    /// way to tell it apart from a real one.
+    #[test]
+    fn redact_worktree_path_leaves_a_sibling_worktree_whole() {
+        let wt = Path::new("/home/someone/.config/dux/worktrees/proj/agent");
+        let text = "error: '/home/someone/.config/dux/worktrees/proj/agent-2/f.rs' is unmerged";
+        let out = redact_worktree_path(text, wt);
+        assert!(
+            !out.contains("./-2/"),
+            "a sibling worktree must not be mangled into a path that does not exist: {out}"
+        );
+        assert_eq!(out, text, "a different worktree is not this one's to strip");
+    }
+
+    /// The same defect with a SPACE in the sibling's name, which is why the
+    /// boundary cannot be widened to "whatever usually ends a path in prose".
+    /// A space is a legal filename character, so treating it as a boundary
+    /// would render this as `./2/f.rs`.
+    #[test]
+    fn redact_worktree_path_leaves_a_sibling_worktree_with_a_space_whole() {
+        let wt = Path::new("/wt/proj/agent");
+        let text = "error: '/wt/proj/agent 2/f.rs' is unmerged";
+        assert_eq!(redact_worktree_path(text, wt), text);
+    }
+
+    /// The boundary is a path SEPARATOR or the end of the path, so the worktree
+    /// mentioned bare (the common `cd`-into-it or hook-cwd shape) still
+    /// collapses to `.`.
+    #[test]
+    fn redact_worktree_path_strips_the_worktree_mentioned_on_its_own() {
+        let wt = Path::new("/home/someone/.config/dux/worktrees/proj/agent");
+        let out = redact_worktree_path(
+            "fatal: cannot run in /home/someone/.config/dux/worktrees/proj/agent",
+            wt,
+        );
+        assert_eq!(out, "fatal: cannot run in .");
+    }
+
+    /// git's own shape for a worktree that has gone missing names the server's
+    /// path QUOTED and followed by nothing path-like, so the closing quote has
+    /// to count as a boundary or the whole message is a server path. Found by
+    /// `discard_strips_the_server_path_from_a_classify_refusal` in `dux-web`,
+    /// not by reasoning.
+    #[test]
+    fn redact_worktree_path_strips_a_quoted_worktree() {
+        let wt = Path::new("/home/someone/.config/dux/worktrees/proj/agent");
+        let out = redact_worktree_path(
+            "git status failed: fatal: cannot change to \
+             '/home/someone/.config/dux/worktrees/proj/agent': No such file or directory",
+            wt,
+        );
+        assert_eq!(
+            out,
+            "git status failed: fatal: cannot change to '.': No such file or directory"
+        );
+        assert!(!out.contains("/home/someone"));
+    }
+
+    /// The quote closes the path only for the quote that OPENED it, so a
+    /// double-quoted mention works the same way and a stray apostrophe after an
+    /// unquoted path is not mistaken for a terminator.
+    #[test]
+    fn redact_worktree_path_honours_the_quote_that_opened_the_path() {
+        let wt = Path::new("/wt/agent");
+        assert_eq!(
+            redact_worktree_path("cannot change to \"/wt/agent\": gone", wt),
+            "cannot change to \".\": gone"
+        );
+        assert_eq!(
+            redact_worktree_path("cannot change to /wt/agent's parent", wt),
+            "cannot change to /wt/agent's parent"
+        );
+    }
+
+    /// A trailing separator on the worktree path must not change the answer,
+    /// and must not leave a doubled slash behind.
+    #[test]
+    fn redact_worktree_path_ignores_a_trailing_separator_on_the_worktree() {
+        let text = "error: '/wt/proj/agent/src/a.rs' is unmerged";
+        assert_eq!(
+            redact_worktree_path(text, Path::new("/wt/proj/agent/")),
+            "error: './src/a.rs' is unmerged"
+        );
+    }
+
+    /// Every occurrence, not just the first: git names two paths in a rename
+    /// diagnostic routinely.
+    #[test]
+    fn redact_worktree_path_replaces_every_occurrence() {
+        let wt = Path::new("/wt/agent");
+        let out = redact_worktree_path("from /wt/agent/a.rs to /wt/agent/b.rs", wt);
+        assert_eq!(out, "from ./a.rs to ./b.rs");
+    }
+
     /// A degenerate worktree path must not turn the message into punctuation
     /// soup by replacing every slash in it.
     #[test]
@@ -4577,6 +4755,108 @@ mod tests {
             !refs.contains("refs/heads/--force"),
             "the requested branch should have been renamed away, got: {refs}",
         );
+    }
+
+    /// `git pull` is the one shape in this family where a `--` separator buys
+    /// NOTHING. MEASURED on git 2.55 with `GIT_TRACE=1`:
+    ///
+    /// ```text
+    /// $ git pull --ff-only origin -- --force
+    /// trace: run_command: git fetch --update-head-ok origin --force
+    /// ```
+    ///
+    /// The separator is consumed by `pull` and the refspec is forwarded to an
+    /// internal `fetch` carrying none of its own, exactly the mechanism this
+    /// file already documents for `git worktree add`. So a branch named
+    /// `--force` is fetched as a FLAG: nothing is fetched, nothing is merged,
+    /// git exits 0 and dux reports a successful refresh of a branch it never
+    /// touched. `--depth=1` is worse: it writes `.git/shallow` into the user's
+    /// source checkout and converts it to a shallow clone.
+    ///
+    /// Both names reach here from real state (`pull_branch` takes the project's
+    /// branch, `pull_current_branch` takes `current_branch_opt`), so this pins
+    /// the fully-qualified refspec that actually closes it.
+    #[test]
+    fn pull_reads_an_option_looking_branch_as_a_ref() {
+        for name in ["--force", "--depth=1"] {
+            let repo = init_test_repo();
+            let first = head_commit(repo.path()).unwrap();
+            // `git branch` refuses a dash-leading name but plumbing does not,
+            // and a ref like this is what dux is then handed to pull.
+            run_git(
+                repo.path(),
+                &["update-ref", &format!("refs/heads/{name}"), &first],
+            );
+            // A second empty commit: same tree, so switching HEAD onto the
+            // older commit below still leaves a clean worktree.
+            run_git(repo.path(), &["commit", "--allow-empty", "-m", "ahead"]);
+            let ahead = head_commit(repo.path()).unwrap();
+            assert_ne!(first, ahead, "test setup must separate the two commits");
+
+            let remote = repo.path().join("remote.git");
+            run_git(
+                repo.path(),
+                &["init", "--bare", remote.to_string_lossy().as_ref()],
+            );
+            run_git(
+                repo.path(),
+                &["remote", "add", "origin", remote.to_string_lossy().as_ref()],
+            );
+            run_git(
+                repo.path(),
+                &[
+                    "push",
+                    "origin",
+                    &format!("refs/heads/main:refs/heads/{name}"),
+                ],
+            );
+            // Park HEAD on the option-looking branch, one commit behind origin.
+            run_git(
+                repo.path(),
+                &["symbolic-ref", "HEAD", &format!("refs/heads/{name}")],
+            );
+            run_git(repo.path(), &["reset", "--mixed", "--quiet"]);
+            assert_eq!(head_commit(repo.path()).unwrap(), first);
+
+            let result = pull_origin_branch(repo.path(), name);
+
+            assert!(
+                !repo.path().join(".git").join("shallow").exists(),
+                "pulling branch '{name}' must not have shallowed the user's checkout",
+            );
+            assert_eq!(
+                head_commit(repo.path()).unwrap(),
+                ahead,
+                "branch '{name}' was obeyed as a flag: it was never fetched \
+                 and never merged ({result:?})",
+            );
+        }
+    }
+
+    #[test]
+    fn pull_still_fast_forwards_an_ordinary_branch_name() {
+        let repo = init_test_repo();
+        let first = head_commit(repo.path()).unwrap();
+        run_git(repo.path(), &["commit", "--allow-empty", "-m", "ahead"]);
+        let ahead = head_commit(repo.path()).unwrap();
+
+        let remote = repo.path().join("remote.git");
+        run_git(
+            repo.path(),
+            &["init", "--bare", remote.to_string_lossy().as_ref()],
+        );
+        run_git(
+            repo.path(),
+            &["remote", "add", "origin", remote.to_string_lossy().as_ref()],
+        );
+        run_git(
+            repo.path(),
+            &["push", "origin", "refs/heads/main:refs/heads/main"],
+        );
+        run_git(repo.path(), &["reset", "--hard", "--quiet", &first]);
+
+        pull_origin_branch(repo.path(), "main").unwrap();
+        assert_eq!(head_commit(repo.path()).unwrap(), ahead);
     }
 
     #[test]

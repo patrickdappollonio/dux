@@ -728,6 +728,48 @@ mod tests {
         );
     }
 
+    /// The discard route classifies the file itself, BEFORE `run_git`, so its
+    /// error arm carries its own redaction rather than inheriting one. Removing
+    /// that call left the whole `dux-web` suite green, which is why this test
+    /// exists.
+    ///
+    /// The failure is built by deleting the worktree out from under the route:
+    /// `git status -C <gone>` names the missing directory by absolute path on
+    /// stderr, and `changed_files` passes that text through, so the server's
+    /// layout would reach a browser that may be on another machine entirely.
+    #[tokio::test]
+    async fn discard_strips_the_server_path_from_a_classify_refusal() {
+        let (tmp, app, _state) = router_with_session_and_state().await;
+        let worktree = tmp.path().join("wt");
+        std::fs::remove_dir_all(&worktree).unwrap();
+
+        let resp = app
+            .oneshot(json_req(
+                "POST",
+                "/api/v1/sessions/s1/git/discard",
+                r#"{"path":"f.txt"}"#,
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = String::from_utf8(
+            axum::body::to_bytes(resp.into_body(), 64 * 1024)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(
+            body.contains("git status failed"),
+            "the reason must survive the redaction: {body}"
+        );
+        assert!(
+            !body.contains(worktree.to_string_lossy().as_ref()),
+            "the response must not carry the server's worktree path: {body}"
+        );
+    }
+
     /// A failing git helper must tell the browser WHY. The action alone plus a
     /// pointer to `dux.log` is not actionable, and on a remote browser that log
     /// is on a machine the reader may not be able to reach. The server's
