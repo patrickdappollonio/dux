@@ -4411,10 +4411,12 @@ impl App {
     /// changed files immediately.
     ///
     /// dux has no file watcher. It refreshes when dux itself changes a file
-    /// through one of its own actions, and anything else, a file the user
-    /// changed from a terminal or an agent writing in its worktree, only shows
-    /// up on the next poll. This is how the user says "look again" instead of
-    /// waiting.
+    /// through one of its own actions (which on the web includes a file dropped
+    /// onto a pane, a surface the TUI deliberately does not have, since a real
+    /// terminal emulator already types a dropped path in for you), and anything
+    /// else, a file the user changed from a terminal or an agent writing in its
+    /// worktree, only shows up on the next poll. This is how the user says "look
+    /// again" instead of waiting.
     ///
     /// The git read goes to a WORKER, never to this thread. That is the general
     /// rule for anything that shells out, and this command is the worst possible

@@ -1081,9 +1081,10 @@ export function refreshChanges(): void {
 // The Changes pane's "Refresh changes" action: force the server to ask git
 // again, then re-read. dux has no file watcher, so a change it did not make
 // through one of its own routes (a file the user changed from a terminal, an
-// agent writing in its worktree, a file dropped onto a terminal) is only as
-// fresh as the last poll: 2s while any agent or terminal in the workspace is
-// running, 10s while none is.
+// agent writing in its worktree) is only as fresh as the last poll: 2s while
+// any agent or terminal in the workspace is running, 10s while none is. A file
+// dropped onto a pane is not one of those: the upload refreshes the pane itself
+// whenever the file lands in the agent's worktree.
 //
 // Rejects when the forcing POST fails so the caller can report it the way the
 // pane's other quick actions do; the re-read still happens either way, since a

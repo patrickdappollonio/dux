@@ -54,10 +54,11 @@ export const git = {
   commit: (sessionId: string, message: string) =>
     postGit(gitUrl(sessionId, "commit"), { message }),
   // Force a changed-files recompute. Mutates nothing: it makes the server do
-  // the same refresh every mutating route above does, so a change dux did not
-  // make through one of its own routes (a file the user changed from a terminal,
-  // say) shows up now instead of on the next poll. Bodiless; the session is in
-  // the path.
+  // the same refresh every mutating route above does, and the file-drop upload
+  // does for a file landing in the worktree, so a change dux did not make
+  // through one of its own routes (a file the user changed from a terminal, say)
+  // shows up now instead of on the next poll. Bodiless; the session is in the
+  // path.
   refreshChanges: (sessionId: string) =>
     postGit(gitUrl(sessionId, "refresh-changes"), {}),
   // push/pull are bodiless; the session is in the path.

@@ -79,10 +79,10 @@ fresh agent, on the other hand, is something the web UI does do, covered in
 
 There is no file watcher behind the Changes pane, and knowing that explains
 everything it does. The pane updates the moment dux itself changes a file: a
-stage, an unstage, a discard, a commit, a file saved in the editor. Everything
-else is found by a background poll, an agent writing files in its worktree just
-as much as a file you delete from a companion terminal, and a file you drop onto
-a terminal is the one thing dux does that it does not notice this way. The poll
+stage, an unstage, a discard, a commit, a file saved in the editor, and a file
+you drop onto a pane once it lands somewhere git is watching. Everything else is
+found by a background poll, an agent writing files in its worktree just as much
+as a file you delete from a companion terminal. The poll
 runs every couple of seconds while any agent or terminal in the workspace is
 running, and every ten seconds while none is, so a change dux did not make is
 never invisible, it is just up to ten seconds late.

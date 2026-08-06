@@ -64,6 +64,13 @@ The toast that appears afterwards names the folder for each file, so you never
 have to guess. Drop several onto a terminal, type `cd` in the middle, and they
 genuinely do land in different folders; the toast says which went where.
 
+If the file landed inside an agent's worktree, that agent's Changes pane picks
+it up straight away rather than on its next poll, so your screenshot is sitting
+there as an untracked file before you have finished typing the sentence about
+it. A file that landed somewhere else, a terminal you had `cd`'d out of the
+worktree, or a project or standalone terminal with no agent behind it, changes
+nothing git is watching, so nothing claims otherwise.
+
 ## Nothing is ever overwritten
 
 Drop `screenshot.png` twice and you get two files. The second one is saved under

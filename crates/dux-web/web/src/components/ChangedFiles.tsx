@@ -395,9 +395,9 @@ export function ChangedFiles() {
                 </DropdownMenuItem>
                 {/* Ask git again NOW. dux has no file watcher: it drops its
                     cached answer when one of its own git or editor routes
-                    changes a file, and anything else (a file the user changed
-                    from a terminal, an agent writing in its worktree) only
-                    appears on the next poll. Deliberately `forceRefreshChanges`
+                    changes a file, or a dropped file lands in the worktree, and
+                    anything else (a file the user changed from a terminal, an
+                    agent writing in its worktree) only appears on the next poll. Deliberately `forceRefreshChanges`
                     and not the store's `refreshChanges`: that one only re-GETs,
                     and the server would answer from the same cache, so the item
                     would look like it worked and change nothing. No trailing
