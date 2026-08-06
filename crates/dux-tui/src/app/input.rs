@@ -11631,6 +11631,10 @@ not_a_real_action = ["x"]
 
         app.execute_command("refresh-changes".to_string())
             .expect("refresh changes");
+        // The read runs on a worker, so the final lands on a later drain.
+        drain_until(&mut app, |app| {
+            app.status.tone() != crate::statusline::StatusTone::Busy
+        });
 
         assert_ne!(
             app.status.tone(),
@@ -11694,6 +11698,87 @@ not_a_real_action = ["x"]
             app.status.message().contains("0 staged, 1 unstaged"),
             "the final must report the counts it just computed, got: {}",
             app.status.message()
+        );
+    }
+
+    /// The git read must happen on a worker, never on the interface thread: a
+    /// repository another process has locked would otherwise freeze the whole
+    /// TUI, and this command exists precisely for "I just did something in a
+    /// shell", which is when a lock is most likely. The observable contract is
+    /// that the call RETURNS with its busy still open and the lists untouched;
+    /// only a later drain carries the answer.
+    #[test]
+    fn refresh_changes_command_reads_git_on_a_worker_not_on_the_ui_thread() {
+        let mut app = test_app(default_bindings());
+        init_git_repo_with_modified_file(&app, "tracked.txt", "before\n", "after\n");
+
+        app.execute_command("refresh-changes".to_string())
+            .expect("refresh changes");
+
+        assert_eq!(
+            app.status.tone(),
+            crate::statusline::StatusTone::Busy,
+            "the command must return while the read is still in flight, got: {}",
+            app.status.message()
+        );
+        assert!(
+            app.engine.unstaged_files.is_empty(),
+            "nothing may be computed inline, got: {:?}",
+            app.engine.unstaged_files
+        );
+
+        drain_until(&mut app, |app| {
+            app.status.tone() != crate::statusline::StatusTone::Busy
+        });
+        assert_eq!(
+            app.engine
+                .unstaged_files
+                .iter()
+                .map(|f| f.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["tracked.txt"],
+            "the worker's answer must land on the drain"
+        );
+    }
+
+    /// A git that could not answer is not an empty answer. Swallowing the error
+    /// reports "0 staged, 0 unstaged", which tells the user their worktree is
+    /// clean when dux has no idea what is in it.
+    #[test]
+    fn refresh_changes_command_reports_a_git_failure_as_a_failure() {
+        let mut app = test_app(default_bindings());
+        let missing = app
+            .engine
+            .paths
+            .root
+            .join("no-such-worktree")
+            .to_string_lossy()
+            .into_owned();
+        app.engine.sessions[0].worktree_path = missing;
+
+        app.execute_command("refresh-changes".to_string())
+            .expect("refresh changes");
+        drain_until(&mut app, |app| {
+            app.status.tone() != crate::statusline::StatusTone::Busy
+        });
+
+        assert_eq!(
+            app.status.tone(),
+            crate::statusline::StatusTone::Error,
+            "a git failure must read as a failure, got: {}",
+            app.status.message()
+        );
+        assert!(
+            !app.status.message().contains("0 staged, 0 unstaged"),
+            "a failure must never be reported as a clean worktree, got: {}",
+            app.status.message()
+        );
+        assert!(
+            app.status
+                .snapshot()
+                .iter()
+                .all(|s| s.tone != crate::statusline::StatusTone::Busy.as_wire()),
+            "no keyed busy may be left open"
         );
     }
 

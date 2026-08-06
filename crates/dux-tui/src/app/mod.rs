@@ -450,6 +450,14 @@ pub struct App {
     ///    resolved when that worker's `NonDefaultBranchCheckoutCompleted` returns.
     pub(crate) pending_checkout_inspect_ops:
         HashMap<String, dux_core::engine::HandlerStatusOp<TuiCheckoutInspectOutcome>>,
+    /// The one in-flight `refresh-changes` command, if any. The command hands
+    /// the git read to [`dux_core::engine::Engine::spawn_changed_files_refresh`]
+    /// (git must never run on the interface thread) and its keyed busy is
+    /// resolved when that worker's `ChangedFilesReady` drains. A second
+    /// invocation replaces this: the older answer then finds no pending record
+    /// and resolves nothing, which is right, its status entry was already
+    /// overwritten by the newer busy on the same key.
+    pub(crate) pending_changed_files_refresh: Option<PendingChangedFilesRefresh>,
     /// In-flight server-flip status op (the "Starting the web server …" busy). A
     /// flip is terminal — guarded so only one can be in flight — so a single
     /// `Option` is the natural home rather than a map. `start_web_server` mints a
@@ -526,6 +534,19 @@ pub enum TuiConfigReloadOutcome {
 /// job is to dismiss its keyed busy once that final is in place.
 pub enum TuiCheckoutInspectOutcome {
     Done,
+}
+
+/// The one in-flight `refresh-changes` command (see
+/// [`App::pending_changed_files_refresh`]). It carries what the final status
+/// needs and what tells this refresh's answer apart from any other
+/// `ChangedFilesReady`: the `worktree` the read was asked for, and the
+/// `session_id` that must still be the watched one for the counts to be worth
+/// reporting.
+pub struct PendingChangedFilesRefresh {
+    pub key: String,
+    pub session_id: String,
+    pub label: String,
+    pub worktree: PathBuf,
 }
 
 // The reconnect / fresh-restart status-op outcome is the CORE-owned
@@ -2868,6 +2889,7 @@ impl App {
             pending_delete_ops: HashMap::new(),
             pending_reconnect_ops: HashMap::new(),
             pending_checkout_inspect_ops: HashMap::new(),
+            pending_changed_files_refresh: None,
             pending_server_flip_op: None,
             pending_config_reload_op: None,
             project_chooser_context: None,
@@ -4395,13 +4417,14 @@ impl App {
     /// on the next poll. This is how the user says "look again" instead of
     /// waiting.
     ///
-    /// The compute is [`Self::reload_changed_files`], which reads git inline: the
-    /// TUI is a single user on its own App thread, and every other caller of it
-    /// does the same. So the pending status is momentary. It is still emitted,
-    /// keyed, and still resolved by a final in every branch, because a pending
-    /// nothing replaces is exactly the stuck spinner the status contract exists
-    /// to prevent, and because moving this compute onto a worker later must not
-    /// have to invent the status pair.
+    /// The git read goes to a WORKER, never to this thread. That is the general
+    /// rule for anything that shells out, and this command is the worst possible
+    /// place to break it: it exists for "I just did something in a shell", which
+    /// is exactly when another process may still hold `.git/index.lock`, and an
+    /// inline read would freeze the whole interface with no spinner to show for
+    /// it. [`Self::apply_changed_files_refresh_outcome`] resolves the keyed busy
+    /// when the worker's `ChangedFilesReady` drains, in both the success and the
+    /// failure branch, so the busy always reaches a final.
     pub(crate) fn refresh_changed_files_now(&mut self) -> Result<()> {
         let Some(session) = self.selected_session() else {
             self.set_warning(
@@ -4409,26 +4432,96 @@ impl App {
             );
             return Ok(());
         };
-        let key = format!("refresh-changes:{}", session.id);
+        let session_id = session.id.clone();
+        let key = format!("refresh-changes:{session_id}");
         let name = self.session_label(session);
+        // The cheap half: point the watch at the session and empty the lists. No
+        // git runs here.
+        let Some(worktree) = self.engine.set_watched_session(Some(&session_id)) else {
+            self.set_warning(format!(
+                "Could not refresh the changed files for \"{name}\": that agent has no worktree to read."
+            ));
+            return Ok(());
+        };
+        self.clamp_files_cursor();
         self.status.set(
             Instant::now(),
             Some(key.clone()),
             StatusTone::Busy,
             format!("Reading changed files for \"{name}\"\u{2026}"),
         );
-        self.reload_changed_files();
-        let staged = self.engine.staged_files.len();
-        let unstaged = self.engine.unstaged_files.len();
-        self.status.set(
-            Instant::now(),
-            Some(key),
-            StatusTone::Info,
-            format!(
-                "Changed files for \"{name}\" refreshed: {staged} staged, {unstaged} unstaged."
-            ),
-        );
+        self.pending_changed_files_refresh = Some(PendingChangedFilesRefresh {
+            key,
+            session_id: session_id.clone(),
+            label: name,
+            worktree: worktree.clone(),
+        });
+        self.engine.spawn_changed_files_refresh(worktree);
+        // The pull-request state is refreshed on its normal background spacing,
+        // exactly as an incidental `reload_changed_files` would, so asking for
+        // changed files does not over-poll `gh`.
+        self.engine
+            .spawn_pr_check_for_session(&session_id, dux_core::engine::PR_CHECK_MIN_INTERVAL);
         Ok(())
+    }
+
+    /// Resolve the `refresh-changes` command's keyed busy from the worker's
+    /// answer. Called from the drain for every `ChangedFilesReady`, so it has to
+    /// recognise its own: an event for a different worktree belongs to the
+    /// poller or to a selection change and resolves nothing.
+    ///
+    /// The lists themselves were already applied (or, on failure, deliberately
+    /// left alone) by the engine before this runs, so the counts reported here
+    /// are the ones the pane is showing.
+    pub(crate) fn apply_changed_files_refresh_outcome(
+        &mut self,
+        worktree: &Path,
+        error: Option<String>,
+    ) {
+        let Some(pending) = self.pending_changed_files_refresh.as_ref() else {
+            return;
+        };
+        if pending.worktree != worktree {
+            return;
+        }
+        let pending = self
+            .pending_changed_files_refresh
+            .take()
+            .expect("checked just above");
+        let name = pending.label;
+        // The user moved on while git was reading. The engine dropped the lists
+        // as stale, so there are no counts to report and claiming any would name
+        // the wrong agent. Retire the busy with no replacement.
+        if self.engine.watched_session_id.as_deref() != Some(pending.session_id.as_str()) {
+            self.status.clear(&pending.key, None);
+            return;
+        }
+        match error {
+            Some(err) => {
+                self.status.set(
+                Instant::now(),
+                Some(pending.key),
+                StatusTone::Error,
+                format!(
+                    "Could not read the changed files for \"{}\": {}. The pane still shows whatever dux last managed to read.",
+                    name,
+                    err.trim().trim_end_matches('.')
+                    ),
+                );
+            }
+            None => {
+                let staged = self.engine.staged_files.len();
+                let unstaged = self.engine.unstaged_files.len();
+                self.status.set(
+                    Instant::now(),
+                    Some(pending.key),
+                    StatusTone::Info,
+                    format!(
+                        "Changed files for \"{name}\" refreshed: {staged} staged, {unstaged} unstaged."
+                    ),
+                );
+            }
+        }
     }
 
     pub(crate) fn selected_changed_file(&self) -> Option<&ChangedFile> {

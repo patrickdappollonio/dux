@@ -1905,7 +1905,9 @@ impl Engine {
     /// be done on the engine actor thread — it shells out to several git
     /// subprocesses and would freeze every web client on a slow repo / git-lock
     /// stall. The web path follows this call with `spawn_changed_files_refresh`
-    /// (off-thread); the single-user TUI computes inline on its own App thread.
+    /// (off-thread), and so does the TUI's `refresh-changes` command, which a
+    /// locked repository would otherwise freeze; the TUI's selection-driven
+    /// `reload_changed_files` still computes inline on its own App thread.
     ///
     /// - `None` (or an UNKNOWN id) → clear the watch and the lists, return `None`.
     /// - `Some(id)` for a known session → watch its worktree, record the id, empty
@@ -1959,17 +1961,17 @@ impl Engine {
     /// `ChangedFilesReady` drain in `process_worker_event` automatically drops a
     /// result whose watch has since moved (the 4faf872 stale-poll guard).
     ///
-    /// A `git::changed_files` error yields empty lists (matching the TUI's
-    /// `unwrap_or_default`) so the pane resolves to "no changes" rather than
-    /// hanging. The web layer calls this right after `set_watched_session`; the
-    /// TUI does NOT (it computes inline — single user, single thread).
+    /// A `git::changed_files` error rides along as `Err`: the drain leaves the
+    /// lists untouched rather than emptying them, so a locked or unreadable
+    /// repository never renders as a clean worktree, and a surface waiting on
+    /// this refresh (the TUI's `refresh-changes` command) can report the failure
+    /// as a failure. Both surfaces call this right after `set_watched_session`.
     pub fn spawn_changed_files_refresh(&self, worktree: PathBuf) {
         let label = format!("changed-files-refresh:{}", worktree.display());
         self.spawn_loop_worker(LoopWorkerSpec { label }, move |tx| {
-            let (staged, unstaged) = crate::git::changed_files(&worktree).unwrap_or_default();
+            let outcome = crate::git::changed_files(&worktree).map_err(|e| e.to_string());
             let _ = tx.send(WorkerEvent::ChangedFilesReady {
-                staged,
-                unstaged,
+                outcome,
                 worktree: worktree.clone(),
             });
             // One-shot: compute once and stop. The drain side is race-safe
@@ -2006,8 +2008,10 @@ impl Engine {
                     && let Ok((staged, unstaged)) = crate::git::changed_files(&worktree_path)
                     && tx
                         .send(WorkerEvent::ChangedFilesReady {
-                            staged,
-                            unstaged,
+                            // The poller only sends what it managed to read: a
+                            // transient failure is skipped entirely (the `let
+                            // Ok` above), so it never reports one.
+                            outcome: Ok((staged, unstaged)),
                             // Tag the event with the worktree it was computed for so a
                             // poll that finished after the watch moved gets dropped
                             // instead of clobbering the current session's files.

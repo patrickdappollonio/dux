@@ -1872,11 +1872,14 @@ impl Engine {
                     create_final,
                 )
             }
-            WorkerEvent::ChangedFilesReady {
-                staged,
-                unstaged,
-                worktree,
-            } => {
+            WorkerEvent::ChangedFilesReady { outcome, worktree } => {
+                // A read git could not answer leaves the lists exactly as they
+                // are. Emptying them would render an unreadable worktree as a
+                // clean one, and the surface that asked for this refresh reports
+                // the failure from the same event.
+                let Ok((staged, unstaged)) = outcome else {
+                    return EventReaction::Nothing;
+                };
                 // Stale-poll race / CF1 watched_session_id invariant: the poller
                 // snapshots the watched worktree, releases the lock, then computes
                 // `git::changed_files` off-thread. If the watch moved to a
@@ -3456,8 +3459,10 @@ mod tests {
         *engine.watched_worktree.lock().unwrap() = Some(worktree.clone());
 
         let reaction = engine.process_worker_event(WorkerEvent::ChangedFilesReady {
-            staged: vec![sample_changed_file("staged.txt")],
-            unstaged: vec![sample_changed_file("unstaged.txt")],
+            outcome: Ok((
+                vec![sample_changed_file("staged.txt")],
+                vec![sample_changed_file("unstaged.txt")],
+            )),
             worktree,
         });
 
@@ -3467,6 +3472,27 @@ mod tests {
         assert_eq!(engine.staged_files[0].path, "staged.txt");
         assert_eq!(engine.unstaged_files.len(), 1);
         assert_eq!(engine.unstaged_files[0].path, "unstaged.txt");
+    }
+
+    /// A read git could not answer must not be flattened into "no changes":
+    /// blanking the pane would tell the user their worktree is clean when dux
+    /// has no idea what is in it.
+    #[test]
+    fn changed_files_ready_failure_leaves_the_lists_alone() {
+        let (mut engine, _tmp) = test_engine();
+        let worktree = PathBuf::from("/tmp/wt-current");
+        *engine.watched_worktree.lock().unwrap() = Some(worktree.clone());
+        engine.staged_files = vec![sample_changed_file("keep-staged.txt")];
+        engine.unstaged_files = vec![sample_changed_file("keep-unstaged.txt")];
+
+        let reaction = engine.process_worker_event(WorkerEvent::ChangedFilesReady {
+            outcome: Err("git status failed: index.lock exists".to_string()),
+            worktree,
+        });
+
+        assert!(matches!(reaction, EventReaction::Nothing));
+        assert_eq!(engine.staged_files[0].path, "keep-staged.txt");
+        assert_eq!(engine.unstaged_files[0].path, "keep-unstaged.txt");
     }
 
     #[test]
@@ -3479,8 +3505,10 @@ mod tests {
         engine.unstaged_files = vec![sample_changed_file("keep-unstaged.txt")];
 
         let reaction = engine.process_worker_event(WorkerEvent::ChangedFilesReady {
-            staged: vec![sample_changed_file("stale-staged.txt")],
-            unstaged: vec![sample_changed_file("stale-unstaged.txt")],
+            outcome: Ok((
+                vec![sample_changed_file("stale-staged.txt")],
+                vec![sample_changed_file("stale-unstaged.txt")],
+            )),
             // Computed for the worktree we have since stopped watching.
             worktree: PathBuf::from("/tmp/wt-stale"),
         });
@@ -3501,8 +3529,10 @@ mod tests {
         engine.staged_files = vec![sample_changed_file("keep.txt")];
 
         let reaction = engine.process_worker_event(WorkerEvent::ChangedFilesReady {
-            staged: vec![sample_changed_file("stale.txt")],
-            unstaged: vec![sample_changed_file("stale.txt")],
+            outcome: Ok((
+                vec![sample_changed_file("stale.txt")],
+                vec![sample_changed_file("stale.txt")],
+            )),
             worktree: PathBuf::from("/tmp/wt-stale"),
         });
 

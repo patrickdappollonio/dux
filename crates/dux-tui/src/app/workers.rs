@@ -76,12 +76,26 @@ impl App {
                 )),
                 _ => None,
             };
+            // A changed-files answer may be the one the `refresh-changes`
+            // command is waiting on. Take the worktree it was computed for and
+            // git's error (if any) off the event before it is consumed, so the
+            // command's keyed busy can be resolved once the engine has applied
+            // the lists.
+            let changed_files_answer = match &event {
+                WorkerEvent::ChangedFilesReady { outcome, worktree } => {
+                    Some((worktree.clone(), outcome.as_ref().err().cloned()))
+                }
+                _ => None,
+            };
             let reaction = self.engine.process_worker_event(event);
             let chains_forward = matches!(
                 reaction,
                 EventReaction::DispatchProjectDefaultBranchCheckout { .. }
             );
             self.apply_reaction(reaction);
+            if let Some((worktree, error)) = changed_files_answer {
+                self.apply_changed_files_refresh_outcome(&worktree, error);
+            }
             if let Some((raw_input, repository, result, status_op_id)) = reference_resolution {
                 // The generation guard. `pending_pr_reference_op` names the ONE
                 // resolution this screen is still waiting for, and a reply that

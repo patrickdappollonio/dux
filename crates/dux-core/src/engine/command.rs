@@ -2456,11 +2456,8 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("ChangedFilesReady");
         match event {
-            WorkerEvent::ChangedFilesReady {
-                staged,
-                unstaged,
-                worktree,
-            } => {
+            WorkerEvent::ChangedFilesReady { outcome, worktree } => {
+                let (staged, unstaged) = outcome.expect("git read the worktree");
                 assert_eq!(worktree.as_path(), repo.path());
                 assert!(staged.iter().any(|f| f.path == "staged.txt"), "{staged:?}");
                 assert!(

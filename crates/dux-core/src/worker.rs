@@ -360,8 +360,12 @@ pub enum WorkerEvent {
     AgentLaunchReady(Box<AgentLaunchReadyData>),
     AgentLaunchFailed(Box<AgentLaunchFailedData>),
     ChangedFilesReady {
-        staged: Vec<ChangedFile>,
-        unstaged: Vec<ChangedFile>,
+        /// The computed (staged, unstaged) lists, or the message git failed
+        /// with. The error is carried rather than flattened into empty lists:
+        /// "git could not answer" and "the worktree is clean" are different
+        /// facts, and reporting the first as the second tells the user nothing
+        /// has changed when dux has no idea what is in the tree.
+        outcome: Result<(Vec<ChangedFile>, Vec<ChangedFile>), String>,
         /// The worktree these lists were computed for. The poller snapshots the
         /// watched worktree, releases the lock, then runs `git::changed_files`
         /// off-thread; by the time this event lands the watch may have moved to
