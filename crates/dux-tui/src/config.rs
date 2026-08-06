@@ -185,13 +185,18 @@ fn config_schema() -> Vec<ConfigEntry> {
              # because this file and the database can hold [env] values, which is where an\n\
              # API token tends to live.\n\
              #\n\
-             # dux only ever REMOVES group and world access, never your own, so a config\n\
-             # you have deliberately made read-only (0400) stays read-only. It leaves the\n\
-             # worktrees/ directory, dux.lock, and a themes/ directory you create alone;\n\
-             # they are covered by the 0700 on the directory above them. It never follows\n\
-             # a symlink when setting a mode, so if this file is a link into a dotfiles\n\
-             # repository the file in that repository is untouched. And a mode it cannot\n\
-             # set is a warning in dux.log, not an error: dux still starts.",
+             # That pass only ever REMOVES group and world access, never your own, so a\n\
+             # config you have made read-only (0400) keeps its 0400. Note what that does\n\
+             # NOT mean: read-only does not stop dux SAVING. A save replaces this file by\n\
+             # renaming a new one over it, which needs write permission on the directory\n\
+             # and not on the file, so your edits are overwritten and the mode comes back\n\
+             # 0600. Put the file somewhere dux does not write if you need it immutable.\n\
+             #\n\
+             # dux leaves the worktrees/ directory, dux.lock, and a themes/ directory you\n\
+             # create alone; they are covered by the 0700 on the directory above them.\n\
+             # It never follows a symlink when setting a mode, so if this file is a link\n\
+             # into a dotfiles repository the file in that repository is untouched. And a\n\
+             # mode it cannot set is a warning in dux.log, not an error: dux still starts.",
         ),
         ConfigEntry::Blank,
         ConfigEntry::Field {

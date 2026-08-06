@@ -1219,6 +1219,16 @@ impl DuxPaths {
     pub fn ensure_dirs(&self) -> Result<()> {
         crate::file_modes::create_private_dir_all(&self.root)
             .with_context(|| format!("failed to create {}", self.root.display()))?;
+        // `config.toml` too, and it is the file the promise mattered most for
+        // since it holds `[env]` tokens. Nothing used to tighten it. It reached
+        // `0600` only because `write_config_atomic` creates its temp at `0600`
+        // and renames over the original, and that runs on first creation or on
+        // a save that actually changed the document, so a config chmod'd to
+        // `0644` by hand stayed `0644` for good while the log and the database
+        // were corrected on every open. A missing file is not an error here and
+        // is not created, and the pass only ever clears group and other bits, so
+        // a deliberate `0400` survives.
+        crate::file_modes::restrict_to_owner_best_effort(&self.config_path, "config file");
         fs::create_dir_all(&self.worktrees_root)
             .with_context(|| format!("failed to create {}", self.worktrees_root.display()))?;
         Ok(())
@@ -2341,6 +2351,68 @@ mod tests {
         paths.ensure_dirs().unwrap();
         let mode = fs::metadata(&root).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o700, "expected 0700, got {mode:o}");
+    }
+
+    /// The config file is what the shipped template comment promises is made
+    /// `0600` on EVERY start, and it was the one file nothing tightened.
+    /// `write_config_atomic` creates its temp at `0600` and renames over the
+    /// original, which is why a fresh install looks correct, but that only runs
+    /// on first creation or when a save actually changes the document, so a
+    /// `config.toml` chmod'd to `0644` by hand stayed `0644` forever while the
+    /// log and the database were corrected on every open. It holds `[env]`
+    /// tokens, so it is the file the promise mattered most for.
+    #[test]
+    fn ensure_dirs_tightens_a_config_file_left_world_readable() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("dux");
+        fs::create_dir_all(&root).unwrap();
+        let paths = test_paths(&root);
+        fs::write(&paths.config_path, "[env]\nTOKEN = \"secret\"\n").unwrap();
+        fs::set_permissions(&paths.config_path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        paths.ensure_dirs().unwrap();
+
+        let mode = fs::metadata(&paths.config_path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "expected 0600, got {mode:o}");
+    }
+
+    /// And the other half of the same promise: dux only ever REMOVES group and
+    /// world access, so a config deliberately left read-only at `0400` keeps
+    /// its owner bits through the tightening pass.
+    #[test]
+    fn ensure_dirs_leaves_a_read_only_config_read_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("dux");
+        fs::create_dir_all(&root).unwrap();
+        let paths = test_paths(&root);
+        fs::write(&paths.config_path, "[env]\n").unwrap();
+        fs::set_permissions(&paths.config_path, fs::Permissions::from_mode(0o400)).unwrap();
+
+        paths.ensure_dirs().unwrap();
+
+        let mode = fs::metadata(&paths.config_path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o400, "expected 0400, got {mode:o}");
+    }
+
+    /// A config that is not there yet must not be an error, and must not be
+    /// conjured into existence by the tightening pass.
+    #[test]
+    fn ensure_dirs_does_not_create_a_config_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("dux");
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+        assert!(!paths.config_path.exists());
     }
 
     /// The worktrees directory holds the user's own checkouts, which they open

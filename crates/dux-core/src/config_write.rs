@@ -1333,6 +1333,43 @@ mod tests {
         assert!(leftovers.is_empty(), "temp file leaked: {leftovers:?}");
     }
 
+    /// A REPLACE, not an edit in place, and the mode of the destination does
+    /// not survive it. The write goes to a fresh `0600` temp file which is then
+    /// `rename`d over the original, and a rename needs write permission on the
+    /// DIRECTORY, not on the file, so a `config.toml` the user deliberately
+    /// made read-only at `0400` is replaced anyway and comes back `0600`.
+    ///
+    /// This is pinned because the shipped template comment used to promise the
+    /// opposite. "dux only ever removes group and world access, so a `0400`
+    /// config stays read-only" is true of the tightening pass in
+    /// [`crate::file_modes`] and false of this function, and the comment did
+    /// not say which one it was talking about.
+    ///
+    /// Preserving the destination mode instead was considered and deliberately
+    /// NOT done. It would carry a `0644` forward on every save, undoing the
+    /// startup tightening for a file that holds `[env]` tokens, and preserving
+    /// `0400` would make dux look as though it had honoured the read-only file
+    /// while having replaced its contents regardless, which is the more
+    /// misleading of the two outcomes. The honest fix was to stop claiming it.
+    #[test]
+    fn write_config_atomic_replaces_a_read_only_config_and_resets_its_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "[env]\nOLD = \"1\"\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o400)).unwrap();
+
+        write_config_atomic(&path, "[env]\nNEW = \"2\"\n", Durability::Fsync).expect("write");
+
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "[env]\nNEW = \"2\"\n",
+            "the read-only file was replaced; nothing here refuses the write"
+        );
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "owner write comes back, got {mode:o}");
+    }
+
     #[test]
     fn root_key_renders_before_tables_and_round_trips() {
         let rendered = render_config_plain(&Config::default());
