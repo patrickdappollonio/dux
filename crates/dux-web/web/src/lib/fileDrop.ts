@@ -51,6 +51,37 @@ export type DropOutcome =
   /// Never saved. The reason is the server's own words, not a generic one.
   | { kind: "refused"; requestedName: string; reason: string }
 
+/// Why an upload was refused, in words the user can act on, from the failure's
+/// HTTP status and whatever the server said.
+///
+/// The status was carried on `FileDropApiError` from the start and read nowhere,
+/// so every failure arrived as the same shape of sentence and a 503 was
+/// indistinguishable from a 500 or a socket that never connected. It matters
+/// most for the busy refusal, which is the one case that is not the user's fault
+/// and not permanent: the right advice is to drop the file again in a moment,
+/// and nothing else in this list carries that advice.
+///
+/// The server's own words are PREFERRED wherever it has any, because the server
+/// knows things the browser does not (which name was unusable, which limit was
+/// hit). This only supplies the sentence for statuses where the browser has
+/// something to add, or where there is no body to quote.
+export function dropRefusalReason(status: number, detail: string): string {
+  const said = detail.trim()
+  // 0 is the transport failure `uploadDroppedFile` reports when `fetch` itself
+  // rejected: no response, so no status and nothing the server said.
+  if (status === 0) {
+    return said || "the server could not be reached"
+  }
+  if (status === 503) {
+    // The wait is bounded server-side, so this is the answer that arrives when
+    // no upload slot came free in time. Say that it is temporary.
+    return said
+      ? `${asClause(said)}, so it was not saved; try the drop again in a moment`
+      : "the server was busy with other uploads, so it was not saved; try the drop again in a moment"
+  }
+  return said || `the server refused the upload (${status})`
+}
+
 /// How the destination should be DESCRIBED, which is the one thing that is a
 /// property of the whole drop rather than of a file.
 export type DropContext = {
@@ -499,11 +530,33 @@ function strandedList(files: SavedFile[]): string {
     : named
 }
 
+/// End a sentence with exactly one terminator.
+///
+/// A refusal reason is the SERVER's own words, and the server writes whole
+/// sentences: the busy refusal ends "Try the drop again shortly." So a template
+/// that appends its own period produced "Try the drop again shortly..". The
+/// reasons dux writes itself do not end in one, and both have to read correctly
+/// through the same templates.
+export function endSentence(text: string): string {
+  const trimmed = text.trimEnd()
+  if (trimmed === "") return trimmed
+  return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`
+}
+
+/// Drop a trailing terminator from a reason that is about to be embedded inside
+/// a clause or a pair of parentheses, where a full stop would land mid-sentence.
+export function asClause(text: string): string {
+  return text.trimEnd().replace(/\.+$/, "")
+}
+
+/// The refused files, named with their reasons. Deliberately does NOT end in a
+/// period: every caller embeds this differently, and one of them continues the
+/// sentence afterwards.
 function reasonList(items: { requestedName: string; reason: string }[]): string {
   if (items.length > MAX_NAMED_FILES) {
-    return `${items.length} files were refused; the first was ${items[0].requestedName} (${items[0].reason}).`
+    return `${items.length} files were refused; the first was ${items[0].requestedName} (${asClause(items[0].reason)})`
   }
-  return items.map((r) => `${r.requestedName} (${r.reason})`).join(", ")
+  return items.map((r) => `${r.requestedName} (${asClause(r.reason)})`).join(", ")
 }
 
 /// The renamed-file note, applied to EVERY saved file at EVERY rung.
@@ -557,12 +610,16 @@ export function dropToastFor(
     if (refused.length === 1) {
       return {
         tone: "error",
-        message: `Could not save ${refused[0].requestedName}: ${refused[0].reason}.`,
+        message: endSentence(
+          `Could not save ${refused[0].requestedName}: ${refused[0].reason}`,
+        ),
       }
     }
     return {
       tone: "error",
-      message: `Could not save any of the ${refused.length} dropped files. ${reasonList(refused)}`,
+      message: endSentence(
+        `Could not save any of the ${refused.length} dropped files. ${reasonList(refused)}`,
+      ),
     }
   }
 
@@ -585,11 +642,11 @@ export function dropToastFor(
     // stranded file's reason and applying it to every one of them.
     const head =
       groups.length === 1
-        ? `Saved${toPhrase(savedFiles, ctx)}, but the path was not sent: ${groups[0].reason}. ` +
+        ? `Saved${toPhrase(savedFiles, ctx)}, but the path was not sent: ${endSentence(groups[0].reason)} ` +
           `The file is at ${strandedList(groups[0].files)}.`
         : `Saved${toPhrase(savedFiles, ctx)}, but ${notSent.length} paths were not sent: ` +
           `${groups
-            .map((g) => `${strandedList(g.files)} because ${g.reason}`)
+            .map((g) => `${strandedList(g.files)} because ${asClause(g.reason)}`)
             .join("; ")}.`
     return {
       tone: "warning",
@@ -608,7 +665,7 @@ export function dropToastFor(
       tone: "warning",
       message:
         `Saved ${savedFiles.length} of ${total} files${toPhrase(savedFiles, ctx)} and sent their paths. ` +
-        `Refused: ${reasonList(refused)}.` +
+        `Refused: ${endSentence(reasonList(refused))}` +
         renameNote(savedFiles, ctx) +
         folderBreakdown(savedFiles, ctx),
     }

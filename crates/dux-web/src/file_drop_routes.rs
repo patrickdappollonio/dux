@@ -140,11 +140,26 @@ pub fn routes(state: &AppState) -> Router<AppState> {
 /// for as long as they like and every later drop queues behind them with no
 /// answer at all.
 ///
-/// 30 seconds is chosen against what a slot-holder is doing: uploading at most
-/// `[server] file_drop_max_bytes` (100 MB by default) to a server that is
-/// usually on the same machine and otherwise on a LAN or a Tailscale link. A
-/// legitimate transfer of that size finishes well inside the window, so the
-/// timeout is reached by a stalled peer rather than a busy one.
+/// **The window has to cover somebody ELSE'S transfer, not your own**, and the
+/// earlier version of this comment had that backwards. It justified 30 seconds
+/// by saying a legitimate 100 MB upload finishes well inside it, which is a
+/// claim about the request being timed. Nothing here times a transfer: the
+/// `DefaultBodyLimit` layer inside this one bounds the SIZE of a body and the
+/// server puts no deadline on reading it at all. This bounds only how long a
+/// waiter sits before it is told no, and what it is waiting on is every
+/// slot-holder ahead of it finishing. A drop arriving behind a genuinely slow
+/// 100 MB upload can therefore be refused while nothing is stalled, and calling
+/// that "a stalled peer rather than a busy one" was wrong.
+///
+/// 30 seconds is kept anyway, and the reason is a tradeoff rather than a
+/// measurement. Shorter refuses drops that would have gone through, since the
+/// wait exists precisely so a drop arriving a moment too early still works.
+/// Longer is worse than a refusal: a refusal names the problem and says to try
+/// again, where a longer wait just extends the silence. It is tolerable at all
+/// only because the browser is not silent during it. The web client raises a
+/// spinner naming the file for the whole in-flight window and turns the 503
+/// into "try the drop again in a moment", so this reads as slow rather than as
+/// broken. If that indication is ever removed, this number is too long.
 const PERMIT_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Hold one file-drop permit for the whole request, body included.

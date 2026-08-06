@@ -316,6 +316,8 @@ beforeEach(() => {
   vi.mocked(toast.success).mockClear()
   vi.mocked(toast.warning).mockClear()
   vi.mocked(toast.error).mockClear()
+  vi.mocked(toast.loading).mockClear()
+  vi.mocked(toast.dismiss).mockClear()
   mockState = makeState()
   installStubs()
   resetPtyOwnerEpochs()
@@ -986,6 +988,128 @@ describe("when a file cannot be pasted", () => {
     const message = vi.mocked(toast.error).mock.calls[0][0] as string
     expect(message).toContain("big.png")
     expect(message).toContain("over the 1024 byte limit")
+  })
+
+  it("says a busy server is temporary, which a 413 does not", async () => {
+    // The status was carried and never read, so this refusal used to be worded
+    // exactly like the permanent one above.
+    const { FileDropApiError } = await import("@/lib/fileDropApi")
+    uploadDroppedFile.mockRejectedValue(
+      new FileDropApiError(
+        "The server is already handling as many dropped files as it allows at once. Try the drop again shortly.",
+        503,
+      ),
+    )
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    await drop([file("shot.png")])
+
+    const message = vi.mocked(toast.error).mock.calls[0][0] as string
+    expect(message).toContain("shot.png")
+    expect(message).toContain("try the drop again in a moment")
+    expect(message).not.toContain("..")
+  })
+})
+
+// The drop overlay is cleared the instant the browser hands the files over, so
+// between then and the report there was nothing on screen at all. The permit
+// wait is bounded but real, uploads are sequential, and a multi-file drop
+// multiplies it, so a drop could look like nothing had happened for a long
+// time. CLAUDE.md: prefer explicit failure over silent waiting.
+describe("what the user sees while a drop is uploading", () => {
+  /// An upload the test releases by hand, so the in-flight window is a state
+  /// the assertions can stand in rather than a race to catch.
+  function heldUpload() {
+    let release: (v: unknown) => void = () => {}
+    const held = new Promise((resolve) => {
+      release = resolve
+    })
+    return { held, release: () => release(undefined) }
+  }
+
+  it("raises a spinner naming the file before the request is even answered", async () => {
+    const { held, release } = heldUpload()
+    uploadDroppedFile.mockImplementation(async () => {
+      await held
+      return saved("shot.png")
+    })
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+
+    const pane = screen.getByTestId("terminal-container").closest(".group")!
+    await act(async () => {
+      fireEvent.drop(pane, { dataTransfer: fileTransfer([file("shot.png")]) })
+      await Promise.resolve()
+    })
+
+    // In flight: the spinner is up and nothing final has been said yet.
+    expect(vi.mocked(toast.loading)).toHaveBeenCalled()
+    const busy = vi.mocked(toast.loading).mock.calls[0]
+    expect(busy[0] as string).toContain("shot.png")
+    expect(vi.mocked(toast.success)).not.toHaveBeenCalled()
+
+    await act(async () => {
+      release()
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(vi.mocked(toast.success)).toHaveBeenCalled()
+  })
+
+  it("puts the spinner and the report on ONE id, so the final replaces it", async () => {
+    // Otherwise the spinner sits under the report claiming the upload is still
+    // running, since sonner never retires a loading toast on its own.
+    uploadDroppedFile.mockResolvedValue(saved("shot.png"))
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    await drop([file("shot.png")])
+
+    const busyId = (
+      vi.mocked(toast.loading).mock.calls[0][1] as { id: string }
+    ).id
+    const finalId = (
+      vi.mocked(toast.success).mock.calls[0][1] as { id: string }
+    ).id
+    expect(busyId).toBe(finalId)
+  })
+
+  it("counts through a multi-file drop rather than sitting on one message", async () => {
+    // Uploads are sequential, so the wait multiplies. A single unchanging
+    // message cannot be told apart from a stuck one.
+    uploadDroppedFile.mockImplementation(async (f: File) => saved(f.name))
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    await drop([file("a.png"), file("b.png"), file("c.png")])
+
+    const messages = vi
+      .mocked(toast.loading)
+      .mock.calls.map((c) => c[0] as string)
+    expect(messages).toHaveLength(3)
+    expect(messages[0]).toContain("a.png")
+    expect(messages[0]).toContain("1 of 3")
+    expect(messages[2]).toContain("c.png")
+    expect(messages[2]).toContain("3 of 3")
+  })
+
+  it("still ends in a final toast when something throws unexpectedly", async () => {
+    // handleDroppedFiles is called with `void`, so an unexpected throw would
+    // otherwise be an unhandled rejection with the spinner left on screen
+    // claiming the upload is still running.
+    uploadDroppedFile.mockResolvedValue(saved("shot.png"))
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const term = TermStub.instances.at(-1)!
+    term.paste = () => {
+      throw new Error("xterm blew up")
+    }
+    await drop([file("shot.png")])
+
+    expect(vi.mocked(toast.loading)).toHaveBeenCalled()
+    const message = vi.mocked(toast.error).mock.calls[0][0] as string
+    expect(message).toContain("xterm blew up")
+    const finalId = (
+      vi.mocked(toast.error).mock.calls[0][1] as { id: string }
+    ).id
+    expect(finalId).toBe(
+      (vi.mocked(toast.loading).mock.calls[0][1] as { id: string }).id,
+    )
   })
 })
 

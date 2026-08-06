@@ -36,8 +36,12 @@ import {
   fetchBootstrap,
 } from "./bootstrapApi"
 import { firstLoadApi } from "./firstLoadApi"
+import {
+  cancelBusyToastGuard,
+  dismissBusyToast,
+  showBusyToast,
+} from "./busyToast"
 import { type FinalTone, showFinalToast } from "./finalToast"
-import { statusToastDuration } from "./statusToast"
 import { attentionCount, formatTabTitle } from "./attention"
 import { applyAttentionFavicon } from "./favicon"
 import { resolveInstanceTitle } from "./instanceTitle"
@@ -856,9 +860,8 @@ eventsSocket.onEvent = (ev: EventsServerMessage) => {
   }
   // Dismiss the toast whose id matches the cleared key (anonymous slot when null).
   if (ev.event === "status_cleared") {
-    const id = ev.key ?? ANON_TOAST_ID
-    cancelBusyToastGuard(id) // the toast is going now; the guard is moot
-    toast.dismiss(id)
+    // The toast is going now, so any guard armed for it is moot.
+    dismissBusyToast(ev.key ?? ANON_TOAST_ID)
     return
   }
   // A `config.changed` event invalidates the bootstrap document (the server's
@@ -1613,29 +1616,6 @@ function clearPendingClientIntent(): Partial<DuxState> {
 // anonymous update a new transient toast instead of an in-place update.
 const ANON_TOAST_ID = "dux-anon-status"
 
-// Pending busy-toast leak guards, by sonner id.
-//
-// sonner deliberately never auto-closes a `loading` toast: its close-timer
-// effect returns early on `toast.type === 'loading'`, so the duration passed to
-// `toast.loading` is inert, and it renders no close button and refuses the
-// swipe gesture for that type (all three pinned by tests in
-// components/ui/sonner.test.tsx). A busy toast therefore has no exit of its
-// own, and if its keyed final never arrives (the events socket dropped
-// mid-operation) the spinner sits there forever claiming work is still
-// happening. The store schedules the dismissal itself.
-//
-// The guard is always cancelled before a toast on that id changes, so it can
-// only ever dismiss the exact spinner it was armed for: never a later final,
-// and never a fresh busy that reused the key.
-const busyToastGuards = new Map<string, ReturnType<typeof setTimeout>>()
-
-function cancelBusyToastGuard(id: string): void {
-  const handle = busyToastGuards.get(id)
-  if (handle === undefined) return
-  clearTimeout(handle)
-  busyToastGuards.delete(id)
-}
-
 // Route a keyed (or anonymous) engine status to both the status bar and a
 // sonner toast. The key acts as the sonner id so updates re-render in place
 // (busy → success swaps the spinner without a new toast) and clears can dismiss
@@ -1651,21 +1631,12 @@ function showStatusToast(
 ): void {
   if (!message) return
   const id = key ?? ANON_TOAST_ID // no key → stable anonymous-slot id
-  const duration = statusToastDuration(tone, state.bootstrap?.status_clear_seconds)
-  const opts = { id, duration }
   // Whatever was armed for this id is now stale: this call replaces the toast.
   cancelBusyToastGuard(id)
   if (tone === "busy") {
-    busyToastGuards.set(
-      id,
-      setTimeout(() => {
-        busyToastGuards.delete(id)
-        toast.dismiss(id)
-      }, duration),
-    )
-  }
-  if (tone === "busy") {
-    toast.loading(message, opts)
+    // Through the ONE shared busy raiser, which owns the leak guard sonner
+    // makes necessary. The file-drop spinner uses the same one.
+    showBusyToast(message, { id })
     return
   }
   // Every other tone goes through the ONE shared final-toast raiser, so a

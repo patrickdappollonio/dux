@@ -18,11 +18,13 @@ import {
   type DropOutcome,
   dropToastFor,
   dragDropPasteFor,
+  dropRefusalReason,
   pasteExceedsAttachmentLimit,
   pastePayload,
   tooLongToAttachReason,
 } from "@/lib/fileDrop"
 import { FileDropApiError, uploadDroppedFile } from "@/lib/fileDropApi"
+import { showBusyToast } from "@/lib/busyToast"
 import { showFinalToast } from "@/lib/finalToast"
 import { MacroPopover } from "@/components/MacroPopover"
 import { Button } from "@/components/ui/button"
@@ -146,6 +148,13 @@ const DRAG_THRESHOLD_PX = 4
 // wheel event regardless of this value, so app forwarding stays 1:1 per tick.
 // The touch drag path (dragScrollLines) is finger-proportional and unaffected.
 const WHEEL_SCROLL_SENSITIVITY = 3
+
+// The one sonner id a whole file drop lives on: the per-file spinner and the
+// single report at the end. One id is what makes the final REPLACE the spinner
+// in place instead of stacking a second toast beneath it, and it is what lets
+// the final retire the spinner's leak guard without either side knowing about
+// the other.
+const FILE_DROP_TOAST_ID = "file-drop"
 
 // Copy the terminal's current selection to the clipboard and toast the result.
 // `copyToClipboard` writes via the async Clipboard API in a secure context and
@@ -1581,7 +1590,22 @@ export function TerminalPane(props: TerminalPaneProps) {
     if (files.length === 0) return
     const outcomes: DropOutcome[] = []
 
-    for (const file of files) {
+    for (const [i, file] of files.entries()) {
+      // A spinner for THIS file, before the request goes out. The drop overlay
+      // is already gone by now (`onDrop` clears it the moment the browser hands
+      // the files over), and an upload can wait a bounded but real amount of
+      // time for a server-side slot, so without this the interface returns to
+      // normal and nothing visibly happens. Uploads are sequential, so a
+      // multi-file drop counts through them rather than sitting on one message.
+      //
+      // Same sonner id as the report at the end of the drop, so the final
+      // REPLACES the spinner in place rather than stacking a second toast.
+      showBusyToast(
+        files.length === 1
+          ? `Uploading ${file.name}...`
+          : `Uploading ${file.name} (${i + 1} of ${files.length})...`,
+        { id: FILE_DROP_TOAST_ID },
+      )
       let saved
       try {
         saved = await uploadDroppedFile(file, {
@@ -1594,8 +1618,13 @@ export function TerminalPane(props: TerminalPaneProps) {
         outcomes.push({
           kind: "refused",
           requestedName: file.name,
+          // The STATUS decides the wording, not just the message: a 503 means
+          // no upload slot came free and is worth retrying in a moment, which
+          // is advice no other failure here deserves.
           reason:
-            e instanceof FileDropApiError ? e.message : "the upload failed",
+            e instanceof FileDropApiError
+              ? dropRefusalReason(e.status, e.message)
+              : "the upload failed",
         })
         continue
       }
@@ -1687,10 +1716,33 @@ export function TerminalPane(props: TerminalPaneProps) {
     const report = dropToastFor(outcomes, ctx)
     // Through the SHARED final-toast raiser, so the user's configured dismiss
     // window applies. A bare sonner call would silently use the library default.
+    // It also retires the spinner's leak guard, since it lands on the same id.
     showFinalToast(report.tone, report.message, {
-      id: "file-drop",
+      id: FILE_DROP_TOAST_ID,
       statusClearSeconds: bootstrap?.status_clear_seconds,
     })
+  }
+
+  /// Raise the drop's spinner and make sure something final always replaces it.
+  ///
+  /// The loop's per-file failures are already outcomes, so the only way out
+  /// without a report is an unexpected throw. `handleDroppedFiles` is called
+  /// with `void`, so that throw would become an unhandled rejection and leave
+  /// the spinner on screen until its leak guard expires a minute later, still
+  /// claiming the upload is running.
+  async function runDrop(files: File[]) {
+    try {
+      await handleDroppedFiles(files)
+    } catch (e) {
+      showFinalToast(
+        "error",
+        `The drop failed unexpectedly: ${e instanceof Error ? e.message : String(e)}`,
+        {
+          id: FILE_DROP_TOAST_ID,
+          statusClearSeconds: bootstrap?.status_clear_seconds,
+        },
+      )
+    }
   }
 
   // A drag from a non-owner, on a phone (where there is no drag), or while file
@@ -1966,7 +2018,7 @@ export function TerminalPane(props: TerminalPaneProps) {
         e.preventDefault()
         dragDepthRef.current = 0
         setDragActive(false)
-        void handleDroppedFiles(Array.from(e.dataTransfer.files))
+        void runDrop(Array.from(e.dataTransfer.files))
       }}
     >
       {/* The drop target. Shown only while a file is actually over the pane and

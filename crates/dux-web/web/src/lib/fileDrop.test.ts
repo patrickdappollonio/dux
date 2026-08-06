@@ -6,6 +6,7 @@ import {
   attachmentCharLimitFor,
   dragDropPasteFor,
   dragDropPasteFormFor,
+  dropRefusalReason,
   dropToastFor,
   pasteExceedsAttachmentLimit,
   pastePayload,
@@ -900,6 +901,61 @@ describe("dropToastFor", () => {
       expect(t.message).toContain(reason)
     }
   })
+
+  // A refusal reason is the SERVER's own words and the server writes whole
+  // sentences ("...Try the drop again shortly."), while dux's own reasons do
+  // not end in a terminator. Both go through the same templates, so the
+  // templates cannot assume either shape. They used to append a period
+  // unconditionally, and the busy refusal read "Try the drop again shortly..".
+  describe("punctuation around a reason that is already a sentence", () => {
+    const serverSentence =
+      "The server is already handling as many dropped files as it allows at once. Try the drop again shortly."
+
+    it("never doubles the period when the only refusal ends in one", () => {
+      const t = dropToastFor(
+        [{ kind: "refused", requestedName: "x.png", reason: serverSentence }],
+        terminal,
+      )
+      expect(t.message).not.toContain("..")
+      expect(t.message).toContain("Try the drop again shortly.")
+    })
+
+    it("never doubles the period when a refusal is listed beside a saved file", () => {
+      const t = dropToastFor(
+        [
+          sent("a.png"),
+          { kind: "refused", requestedName: "x.png", reason: serverSentence },
+        ],
+        terminal,
+      )
+      expect(t.message).not.toContain("..")
+      // A reason embedded in parentheses is a CLAUSE, so its own full stop is
+      // dropped rather than left stranded before the closing bracket: the
+      // template supplies the one that ends the sentence.
+      expect(t.message).not.toContain(".)")
+      expect(t.message).toContain("Try the drop again shortly).")
+    })
+
+    it("never doubles the period when several refusals are listed", () => {
+      const t = dropToastFor(
+        [
+          { kind: "refused", requestedName: "x.png", reason: serverSentence },
+          { kind: "refused", requestedName: "y.png", reason: serverSentence },
+        ],
+        terminal,
+      )
+      expect(t.message).not.toContain("..")
+      expect(t.message).not.toContain(".)")
+    })
+
+    it("still terminates a reason that has no terminator of its own", () => {
+      const t = dropToastFor(
+        [{ kind: "refused", requestedName: "x.png", reason: "too big" }],
+        terminal,
+      )
+      expect(t.message).toBe("Could not save x.png: too big.")
+    })
+  })
 })
 
 describe("a drop whose files did not all end the same way", () => {
@@ -1075,5 +1131,67 @@ describe("stranded files whose reasons differ", () => {
     expect(t.message).toContain(
       "z.png (/home/p/code/app/z.png) because another device took over input",
     )
+  })
+})
+
+// The status was carried on FileDropApiError and read nowhere, so a 503 (the
+// server is busy and this is worth retrying) read exactly like a 500 (it is
+// not) and like a dead socket.
+describe("what a refused upload is reported as", () => {
+  const busyBody =
+    "The server is already handling as many dropped files as it allows at once. Try the drop again shortly."
+
+  it("says a busy server is temporary and worth retrying", () => {
+    const reason = dropRefusalReason(503, busyBody)
+    expect(reason).toContain("try the drop again")
+    // The server's own words are kept: it knows which limit it hit.
+    expect(reason).toContain("as many dropped files as it allows at once")
+    // Embedded as a clause, so the template that terminates it cannot double
+    // the period.
+    expect(reason).not.toMatch(/\.$/)
+  })
+
+  it("still says a busy server is temporary when it sent no body", () => {
+    const reason = dropRefusalReason(503, "")
+    expect(reason).toContain("busy")
+    expect(reason).toContain("try the drop again")
+  })
+
+  it("does not offer a retry for a refusal that will not change", () => {
+    for (const [status, body] of [
+      [500, "something went wrong"],
+      [413, "the file is over the size limit"],
+      [400, "that name cannot be used"],
+    ] as const) {
+      expect(dropRefusalReason(status, body)).toBe(body)
+      expect(dropRefusalReason(status, body)).not.toContain("try the drop again")
+    }
+  })
+
+  it("names an unreachable server rather than inventing a status", () => {
+    expect(dropRefusalReason(0, "could not reach the server")).toBe(
+      "could not reach the server",
+    )
+    expect(dropRefusalReason(0, "")).toContain("could not be reached")
+  })
+
+  it("falls back to the status when the server sent no words at all", () => {
+    expect(dropRefusalReason(502, "")).toContain("502")
+  })
+
+  it("reads as a busy refusal all the way through to the toast", () => {
+    const t = dropToastFor(
+      [
+        {
+          kind: "refused",
+          requestedName: "shot.png",
+          reason: dropRefusalReason(503, busyBody),
+        },
+      ],
+      terminal,
+    )
+    expect(t.tone).toBe("error")
+    expect(t.message).toContain("try the drop again in a moment.")
+    expect(t.message).not.toContain("..")
   })
 })
