@@ -96,6 +96,15 @@ should not be editing: files outside the worktree, inside `.git`, or binary blob
 come back read-only or not at all, with a badge explaining why. If you try to
 close or switch away with unsaved changes, dux asks first.
 
+There are two size limits, and they are generous enough that you are unlikely to
+meet either. A file over **5 MB** does not open in the editor at all; you get the
+read-only badge saying so. A save is refused past roughly **10 MB**, measured on
+the request rather than the file, so reaching it means having more than doubled
+the file's size in one sitting. If that happens, the refusal says what the limit
+is and **your text is kept**: the tab stays dirty with everything you typed still
+in it, so you can trim it down and save again, or copy it out. Nothing is
+discarded.
+
 ## Creating, renaming, and deleting files
 
 Right-click anywhere in the file tree to manage files and folders without leaving
