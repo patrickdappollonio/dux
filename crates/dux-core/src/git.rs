@@ -698,6 +698,9 @@ fn pull_origin_branch(repo_path: &Path, branch: &str) -> Result<()> {
             "pull",
             "--ff-only",
             "origin",
+            // `--` so the refspec is read as a REF and never as an option.
+            // Measured accepted in this position on git 2.55.
+            "--",
             branch,
         ])
         .output()?;
@@ -856,6 +859,33 @@ pub fn create_worktree_from_start_point(
     let worktree_path = project_root.join(&branch_name);
     let repo = repo_path.to_string_lossy();
     let worktree = worktree_path.to_string_lossy();
+    // Resolve the start point to an object id BEFORE handing it to
+    // `worktree add`. A `--` separator is not enough at this call shape, which
+    // was measured on git 2.55: `git worktree add` consumes the separator
+    // itself and then forwards the start point to an internal
+    // `git branch <name> <start-point>` with no separator of its own, so a
+    // start point named `--force` or `--quiet` is obeyed by that inner command
+    // as a FLAG. The worktree is then branched from HEAD and git exits 0, so
+    // dux reports a successful agent creation on the wrong commit. (`--lock`
+    // additionally left a worktree that `worktree remove` refused to clean up.)
+    // An object id is 40 hex characters and can never be read as an option, so
+    // resolving first closes the door for every option-looking name rather than
+    // the handful anyone thought to test. `--end-of-options` is what protects
+    // the resolve step itself; a start point that names nothing now fails here,
+    // loudly, instead of quietly becoming a HEAD worktree.
+    let resolved_start = match start_point {
+        Some(start_point) => Some(run_git_capture(
+            repo_path,
+            &[
+                "rev-parse",
+                "--verify",
+                "--end-of-options",
+                &format!("{start_point}^{{commit}}"),
+            ],
+            &format!("resolve start point '{start_point}'"),
+        )?),
+        None => None,
+    };
     let mut command = Command::new("git");
     command.args([
         "-C",
@@ -866,8 +896,9 @@ pub fn create_worktree_from_start_point(
         &branch_name,
         worktree.as_ref(),
     ]);
-    if let Some(start_point) = start_point {
-        command.arg(start_point);
+    if let Some(resolved_start) = resolved_start.as_deref() {
+        // Defence in depth alongside the resolve above.
+        command.arg("--").arg(resolved_start);
     }
     let output = command.output()?;
     if !output.status.success() {
@@ -2076,6 +2107,11 @@ pub fn rename_branch(worktree_path: &Path, old_name: &str, new_name: &str) -> Re
             worktree_path.to_string_lossy().as_ref(),
             "branch",
             "-m",
+            // `--` so the two names are read as REFS and never as options.
+            // Measured on git 2.55: `git branch -m --force renamed` obeys the
+            // flag, renames the CURRENT branch forcibly, leaves the requested
+            // branch untouched and exits 0.
+            "--",
             old_name,
             new_name,
         ])
@@ -4273,6 +4309,154 @@ mod tests {
         assert!(
             !String::from_utf8_lossy(&listed.stdout).contains("--delete"),
             "the ref should be gone"
+        );
+    }
+
+    /// The defect this pins is the worst shape in the family: git obeys the
+    /// start point as a FLAG, builds the worktree off HEAD, and exits 0, so dux
+    /// reports a successful agent creation on a worktree branched from the
+    /// wrong commit. Unlike `create_worktree_existing_branch`, the call shape
+    /// offers no accidental protection, because the worktree path here comes
+    /// from `branch_name` and never from `start_point`.
+    ///
+    /// Note which names are covered. A `--` separator alone is NOT enough at
+    /// this call shape, which was MEASURED: `git worktree add` consumes the
+    /// separator itself and then forwards the start point to an internal
+    /// `git branch <name> <start-point>` with no separator of its own, so
+    /// `--force` and `--quiet` (names `git branch` accepts) still branch from
+    /// HEAD and still exit 0 even with `--` or `--end-of-options` in place.
+    /// Resolving the start point to an object id first is what actually closes
+    /// it, and that is what the function now does.
+    #[test]
+    fn create_worktree_from_start_point_reads_an_option_looking_start_point_as_a_ref() {
+        for name in ["--force", "--quiet", "--no-checkout", "--lock"] {
+            let repo = init_test_repo();
+            // `git branch` refuses a dash-leading name but plumbing does not,
+            // and a ref like this is what dux would then be handed as a
+            // project's leading branch.
+            run_git(
+                repo.path(),
+                &["update-ref", &format!("refs/heads/{name}"), "HEAD"],
+            );
+            // Move HEAD on past it so branching from HEAD is distinguishable
+            // from branching from the requested start point.
+            fs::write(repo.path().join("moved.txt"), "after\n").unwrap();
+            commit_all(repo.path(), "move main ahead");
+
+            let start_oid = run_git_capture(
+                repo.path(),
+                &["rev-parse", &format!("refs/heads/{name}")],
+                "resolve start point",
+            )
+            .unwrap();
+            let head_oid = head_commit(repo.path()).unwrap();
+            assert_ne!(start_oid, head_oid, "test setup must separate the two");
+
+            let worktrees_root = repo.path().join("wt-root");
+            let result = create_worktree_from_start_point(
+                repo.path(),
+                &worktrees_root,
+                "proj",
+                Some(name),
+                Some("agent-branch"),
+            );
+
+            match result {
+                Ok((_, path)) => {
+                    // Succeeding is only acceptable if it really did use the
+                    // requested start point. Branching from HEAD and reporting
+                    // success is the defect.
+                    let built = head_commit(&path).unwrap();
+                    assert_eq!(
+                        built, start_oid,
+                        "start point '{name}' was obeyed as a flag: the worktree \
+                         was branched from HEAD and dux reported success",
+                    );
+                }
+                Err(_) => {
+                    // Refusing outright is also correct: nothing was built.
+                    assert!(
+                        !worktrees_root.join("proj").join("agent-branch").exists(),
+                        "a refused start point '{name}' must leave no worktree",
+                    );
+                }
+            }
+        }
+    }
+
+    /// The ordinary path must keep working: a plain branch name as a start
+    /// point still produces a worktree at that branch's commit.
+    #[test]
+    fn create_worktree_from_start_point_still_honours_an_ordinary_branch_name() {
+        let repo = init_test_repo();
+        run_git(repo.path(), &["branch", "start-here"]);
+        fs::write(repo.path().join("moved.txt"), "after\n").unwrap();
+        commit_all(repo.path(), "move main ahead");
+        let want = run_git_capture(
+            repo.path(),
+            &["rev-parse", "refs/heads/start-here"],
+            "resolve start point",
+        )
+        .unwrap();
+
+        let worktrees_root = repo.path().join("wt-root");
+        let (_, path) = create_worktree_from_start_point(
+            repo.path(),
+            &worktrees_root,
+            "proj",
+            Some("start-here"),
+            Some("agent-branch"),
+        )
+        .unwrap();
+        assert_eq!(head_commit(&path).unwrap(), want);
+    }
+
+    /// A start point naming nothing must fail loudly rather than quietly
+    /// producing a worktree off HEAD.
+    #[test]
+    fn create_worktree_from_start_point_refuses_a_start_point_that_names_nothing() {
+        let repo = init_test_repo();
+        let worktrees_root = repo.path().join("wt-root");
+        let result = create_worktree_from_start_point(
+            repo.path(),
+            &worktrees_root,
+            "proj",
+            Some("no-such-branch"),
+            Some("agent-branch"),
+        );
+        assert!(result.is_err(), "expected a refusal, got: {result:?}");
+        assert!(
+            !worktrees_root.join("proj").join("agent-branch").exists(),
+            "no worktree should have been created"
+        );
+    }
+
+    /// `git branch -m <old> <new>` reads a dash-leading old name as an option.
+    /// MEASURED without the separator: `git branch -m --force renamed` renames
+    /// the CURRENT branch (forcibly) and leaves the requested one untouched, so
+    /// dux renames the wrong branch and reports success.
+    #[test]
+    fn rename_branch_reads_an_option_looking_old_name_as_a_ref() {
+        let repo = init_test_repo();
+        run_git(repo.path(), &["update-ref", "refs/heads/--force", "HEAD"]);
+        let before = current_branch(repo.path()).unwrap();
+
+        let _ = rename_branch(repo.path(), "--force", "renamed");
+
+        assert_eq!(
+            current_branch(repo.path()).unwrap(),
+            before,
+            "the CURRENT branch must not have been renamed",
+        );
+        let refs = run_git_capture(
+            repo.path(),
+            &["for-each-ref", "--format=%(refname)", "refs/heads"],
+            "list refs",
+        )
+        .unwrap();
+        assert!(
+            !refs.contains("refs/heads/--force"),
+            "the requested branch should have been renamed away, got: {refs}",
         );
     }
 
