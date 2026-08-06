@@ -81,6 +81,14 @@ Inside you'll find `config.toml` (your settings), `sessions.sqlite3` (session
 state), `dux.log` (logs, the first place to look when something misbehaves), and a
 `themes/` directory for any themes you write yourself.
 
+That directory is **yours alone**: dux makes it `0700` on every startup, and the
+files it writes inside `0600`. Both `config.toml` and the session database can
+hold environment variables you set for a project, which is exactly where an API
+token tends to live, so no other user on the machine gets to read them. If you
+are upgrading and your directory is currently world-readable, the next start
+tightens it for you. dux only ever removes group and world access, never your
+own, so a config file you have deliberately made read-only stays that way.
+
 ## Where to go next
 
 - [Server mode overview](/docs/server-mode): the web UI, how to start it, and the

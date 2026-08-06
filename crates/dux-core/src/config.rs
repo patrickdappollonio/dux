@@ -1188,8 +1188,26 @@ impl DuxPaths {
         })
     }
 
+    /// Create the config root and the worktrees directory.
+    ///
+    /// The ROOT is owner-only (`0700`), and that is the load-bearing part of
+    /// dux's file permissions rather than a nicety: it holds `config.toml`,
+    /// `sessions.sqlite3` (which mirrors the same per-project `env` map that
+    /// made the config file `0600`), the sqlite sidecars SQLite creates itself
+    /// at runtime with no mode dux can choose, and `dux.log`. A directory
+    /// another local user cannot search settles all of them at once.
+    ///
+    /// It TIGHTENS on every startup, not only on first creation, because every
+    /// existing installation already has a `0755` root and a change that only
+    /// applied to new ones would reach nobody. The tightening only clears group
+    /// and other bits, so it is idempotent and cannot lock the owner out.
+    ///
+    /// The WORKTREES directory is deliberately left at the umask default. Those
+    /// are the user's own checkouts, opened in their own editor and possibly
+    /// shared on purpose; they sit inside the owner-only root, which is where
+    /// the protection belongs.
     pub fn ensure_dirs(&self) -> Result<()> {
-        fs::create_dir_all(&self.root)
+        crate::file_modes::create_private_dir_all(&self.root)
             .with_context(|| format!("failed to create {}", self.root.display()))?;
         fs::create_dir_all(&self.worktrees_root)
             .with_context(|| format!("failed to create {}", self.worktrees_root.display()))?;
@@ -2282,6 +2300,65 @@ mod tests {
             err.to_string().contains("relative/path"),
             "error should contain the bad path: {err}"
         );
+    }
+
+    /// The config directory's mode is what actually protects the files inside
+    /// it, because SQLite creates its `-wal`/`-shm` sidecars itself at runtime
+    /// and offers no way to set their mode. A directory another local user
+    /// cannot search makes the files' own modes moot.
+    #[test]
+    fn ensure_dirs_makes_the_config_root_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("dux");
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+        let mode = fs::metadata(&root).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "expected 0700, got {mode:o}");
+    }
+
+    /// Everyone upgrading already has a `0755` directory, so tightening has to
+    /// happen on startup or the change reaches nobody. `ensure_dirs` runs on
+    /// every startup and the tightening is idempotent.
+    #[test]
+    fn ensure_dirs_tightens_a_config_root_left_world_readable_by_an_older_install() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("dux");
+        fs::create_dir_all(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+        let mode = fs::metadata(&root).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "expected 0700, got {mode:o}");
+    }
+
+    /// The worktrees directory holds the user's own checkouts, which they open
+    /// in their own editor and may deliberately share. dux does not tighten it;
+    /// it sits inside the now-`0700` root, which is protection enough.
+    #[test]
+    fn ensure_dirs_leaves_the_worktrees_directory_at_the_umask_default() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("dux");
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+        let mode = fs::metadata(&paths.worktrees_root)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode & 0o700, 0o700, "the owner must retain full access");
+    }
+
+    fn test_paths(root: &std::path::Path) -> DuxPaths {
+        DuxPaths {
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            worktrees_root: root.join("worktrees"),
+            lock_path: root.join("dux.lock"),
+            root: root.to_path_buf(),
+        }
     }
 
     #[test]
