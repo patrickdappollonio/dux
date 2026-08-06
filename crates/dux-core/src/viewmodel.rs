@@ -125,11 +125,19 @@ pub struct BootstrapView {
     /// OSC 8 hyperlinks as clickable (http/https only). Older servers omit it
     /// (treated as true).
     pub hyperlinks: bool,
+    /// Mirrors `config.capabilities.passthrough`, the master switch over
+    /// everything an agent forwards outward. It gates the TUI host forward and,
+    /// through this field, the web surface too: with it false the browser fires
+    /// no agent notification and writes no clipboard, whatever `web_notifications`
+    /// and `clipboard_passthrough` say. Older servers omit it (treated as true).
+    pub passthrough: bool,
     /// The normalized `config.capabilities.clipboard_passthrough` mode ("focused",
     /// "always", or "off"), governing whether an agent's OSC 52 clipboard SET
     /// reaches the visitor's browser clipboard. Serialized as its canonical string
-    /// (an unrecognized config value normalizes to "focused"). Older servers omit
-    /// it, so the web client falls back to "focused".
+    /// (an unrecognized config value normalizes to "focused"). The master switch
+    /// is already folded in here, so `passthrough = false` publishes "off" and the
+    /// client needs no second check for the clipboard. Older servers omit it, so
+    /// the web client falls back to "focused".
     pub clipboard_passthrough: String,
     /// Mirrors `config.ui.pr_banner_position` ("top" | "bottom"). Desktop web
     /// places the PR banner lane above the terminal when "top" and below it when
@@ -1110,10 +1118,18 @@ impl Engine {
             attention_grace_seconds: self.config.ui.attention_grace_seconds,
             web_notifications: self.config.capabilities.web_notifications,
             hyperlinks: self.config.capabilities.hyperlinks,
-            clipboard_passthrough: crate::config::ClipboardPassthroughMode::parse(
-                &self.config.capabilities.clipboard_passthrough,
-            )
-            .unwrap_or(crate::config::ClipboardPassthroughMode::Focused)
+            passthrough: self.config.capabilities.passthrough,
+            // Fold the master switch in here rather than making the client AND
+            // two fields: with passthrough off there is one answer for the
+            // clipboard, and it is "off".
+            clipboard_passthrough: if self.config.capabilities.passthrough {
+                crate::config::ClipboardPassthroughMode::parse(
+                    &self.config.capabilities.clipboard_passthrough,
+                )
+                .unwrap_or(crate::config::ClipboardPassthroughMode::Focused)
+            } else {
+                crate::config::ClipboardPassthroughMode::Off
+            }
             .as_str()
             .to_string(),
             pr_banner_position: self.config.ui.pr_banner_position.clone(),
@@ -2277,6 +2293,38 @@ mod tests {
         );
     }
 
+    /// `capabilities.passthrough` reads as a master switch over everything an
+    /// agent forwards outward. It governed the TUI host forward only, so the
+    /// browser kept receiving clipboard writes and notifications from an
+    /// operator who had turned passthrough off. The bootstrap document now
+    /// carries the master switch, and folds it into the clipboard mode so the
+    /// web has one value to read for the clipboard rather than two to AND.
+    #[test]
+    fn bootstrap_master_passthrough_off_seals_the_web_surface() {
+        let (mut engine, _tmp) = test_engine();
+        engine.config.capabilities.passthrough = false;
+        engine.config.capabilities.clipboard_passthrough = "always".to_string();
+        engine.config.capabilities.web_notifications = true;
+
+        let b = engine.bootstrap();
+        assert!(!b.passthrough, "master switch must reach the browser");
+        assert_eq!(
+            b.clipboard_passthrough, "off",
+            "master off must normalize the clipboard mode to off"
+        );
+    }
+
+    #[test]
+    fn bootstrap_master_passthrough_on_keeps_the_configured_clipboard_mode() {
+        let (mut engine, _tmp) = test_engine();
+        engine.config.capabilities.passthrough = true;
+        engine.config.capabilities.clipboard_passthrough = "always".to_string();
+
+        let b = engine.bootstrap();
+        assert!(b.passthrough);
+        assert_eq!(b.clipboard_passthrough, "always");
+    }
+
     #[test]
     fn bootstrap_serializes_to_json_with_expected_fields() {
         let (engine, _tmp) = test_engine();
@@ -2296,6 +2344,7 @@ mod tests {
             "attention_grace_seconds",
             "web_notifications",
             "hyperlinks",
+            "passthrough",
             "clipboard_passthrough",
             "pr_banner_position",
             "agent_scrollback_lines",

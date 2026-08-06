@@ -123,6 +123,13 @@ export function leadingEdgeAllowed(
 export interface AgentNotificationOptions {
   /** Live read of the `web_notifications` config bit. */
   enabled: () => boolean
+  /** Live read of `capabilities.passthrough`, the master switch over everything
+   * an agent forwards outward. False suppresses BOTH the notification and the
+   * clipboard write here, whatever `enabled` and `clipboardMode` say, which is
+   * what makes the switch mean the same thing on this surface as it does on the
+   * TUI host forward. Defaults to true when the caller omits it (older
+   * bootstrap), matching the field's own older-server fallback. */
+  passthrough?: () => boolean
   /** Title shown on the desktop notification (e.g. the agent's name). */
   title: () => string
   /** Live read of `capabilities.clipboard_passthrough`. Defaults to "focused"
@@ -144,7 +151,11 @@ export function registerAgentNotifications(
   // Leading-edge throttle clock for fired notifications (closure-local so two
   // panes never interfere).
   let lastNotifyAt = Number.NEGATIVE_INFINITY
+  // The master switch. Absent means on, so an older bootstrap that never learned
+  // to publish it behaves exactly as it did before.
+  const masterOn = (): boolean => opts.passthrough?.() ?? true
   const fire = (title: string, body: string) => {
+    if (!masterOn()) return
     if (typeof Notification === "undefined") return
     const ok = shouldFireNotification({
       enabled: opts.enabled(),
@@ -236,8 +247,11 @@ export function registerAgentNotifications(
     term.parser.registerOscHandler(52, (data) => {
       const text = osc52SetText(data)
       // "off" consumes the sequence but never writes; "focused"/"always" write
-      // (subject to the focus + throttle gates in writeClipboard).
-      if (text !== null && clipboardMode() !== "off") {
+      // (subject to the focus + throttle gates in writeClipboard). The master
+      // switch is already folded into the published mode, so it would be enough
+      // on its own; check it here too so this handler does not depend on that
+      // folding staying in place server-side.
+      if (text !== null && masterOn() && clipboardMode() !== "off") {
         writeClipboard(text)
       }
       // Consume so xterm never writes the HOST clipboard or answers a read query.

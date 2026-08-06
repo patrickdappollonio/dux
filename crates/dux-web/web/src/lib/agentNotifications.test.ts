@@ -261,6 +261,40 @@ describe("registerAgentNotifications", () => {
     expect(writeText).toHaveBeenCalledWith("hello")
   })
 
+  // `capabilities.passthrough` is the master switch over everything an agent
+  // forwards outward. It used to govern the TUI host forward only, so a browser
+  // still fired notifications for an operator who had turned it off. Off now
+  // means off on this surface too, whatever the per-kind switches say.
+  it("the master passthrough switch suppresses notifications regardless of web_notifications", () => {
+    const { term, handlers } = stubTerm()
+    registerAgentNotifications(
+      term,
+      baseOpts({ enabled: () => true, passthrough: () => false }),
+    )
+    expect(handlers[9]("Build finished")).toBe(true) // still consumed
+    expect(handlers[99](";Done")).toBe(true)
+    expect(handlers[777]("notify;T;B")).toBe(true)
+    expect(FakeNotification.instances).toHaveLength(0)
+  })
+
+  it("the master passthrough switch suppresses the clipboard write", () => {
+    const { term, handlers } = stubTerm()
+    docState.hasFocus = true
+    registerAgentNotifications(
+      term,
+      baseOpts({ clipboardMode: () => "always", passthrough: () => false }),
+    )
+    expect(handlers[52]("c;aGVsbG8=")).toBe(true) // still consumed
+    expect(writeText).not.toHaveBeenCalled()
+  })
+
+  it("an omitted master switch defaults to on, for an older bootstrap", () => {
+    const { term, handlers } = stubTerm()
+    registerAgentNotifications(term, baseOpts({ passthrough: undefined }))
+    expect(handlers[9]("Build finished")).toBe(true)
+    expect(FakeNotification.instances).toHaveLength(1)
+  })
+
   it("OSC 52 read query is consumed without a clipboard write", () => {
     const { term, handlers } = stubTerm()
     docState.hasFocus = true

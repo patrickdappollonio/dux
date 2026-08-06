@@ -499,11 +499,11 @@ fn config_schema() -> Vec<ConfigEntry> {
         ConfigEntry::Field {
             key: "passthrough",
             comment: Some(CommentSource::Static(
-                "# TUI ONLY: forward the agent's notification, progress, and clipboard\n\
-                 # escape sequences to your host terminal. The master switch for the TUI's\n\
-                 # outbound passthrough; set false to keep everything the agent emits\n\
-                 # inside dux. It does not affect the web UI, which uses web_notifications\n\
-                 # and clipboard_passthrough below instead.",
+                "# The master switch for forwarding an agent's notification, progress, and\n\
+                 # clipboard escape sequences OUTWARD: to your host terminal in the TUI,\n\
+                 # and to the browser in server mode. Set it false to keep everything the\n\
+                 # agent emits inside dux, on both surfaces. The two settings below narrow\n\
+                 # what gets through while this is true; neither can re-open it.",
             )),
             value_fn: |c| FieldValue::Bool(c.capabilities.passthrough),
         },
@@ -515,9 +515,8 @@ fn config_schema() -> Vec<ConfigEntry> {
                  #   \"always\"   any agent, even one running in the background,\n\
                  #   \"off\"      never.\n\
                  # Clipboard READ requests are never forwarded (a reply would be typed\n\
-                 # back into dux). On the TUI this also requires passthrough = true; on the\n\
-                 # web it gates the browser clipboard write directly (which the browser\n\
-                 # additionally only permits while the tab has focus).",
+                 # back into dux). Requires passthrough = true on both surfaces. In the\n\
+                 # browser the write additionally only happens while the tab has focus.",
             )),
             value_fn: |c| FieldValue::Str(c.capabilities.clipboard_passthrough.clone()),
         },
@@ -535,8 +534,9 @@ fn config_schema() -> Vec<ConfigEntry> {
             comment: Some(CommentSource::Static(
                 "# WEB ONLY: bridge an agent's notification sequences to a browser desktop\n\
                  # notification. Fires only when the tab is in the background and only after\n\
-                 # you grant permission from the web UI (dux never auto-prompts). No effect\n\
-                 # on the TUI, whose host-terminal notifications are governed by passthrough.",
+                 # you grant permission from the web UI (dux never auto-prompts), and only\n\
+                 # while passthrough above is true. No effect on the TUI, whose host-terminal\n\
+                 # notifications are governed by passthrough alone.",
             )),
             value_fn: |c| FieldValue::Bool(c.capabilities.web_notifications),
         },

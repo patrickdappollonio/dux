@@ -392,6 +392,13 @@ export function TerminalPane(props: TerminalPaneProps) {
   useEffect(() => {
     clipboardPassthroughRef.current = bootstrap?.clipboard_passthrough ?? "focused"
   }, [bootstrap?.clipboard_passthrough])
+  // The `capabilities.passthrough` master switch. Off means this surface fires no
+  // agent notification and writes no clipboard, whatever the per-kind switches
+  // say. Read lazily for the same reason as the two above.
+  const passthroughRef = useRef(bootstrap?.passthrough ?? true)
+  useEffect(() => {
+    passthroughRef.current = bootstrap?.passthrough ?? true
+  }, [bootstrap?.passthrough])
   // Always resolve the owning session by `sessionId` (for an agent, `id` is the
   // FOCUSED TAB id — the session-slot tab's equals the session id, but an extra
   // tab's does not, so a lookup by `id` would miss). A project terminal has no
@@ -676,6 +683,7 @@ export function TerminalPane(props: TerminalPaneProps) {
     // so both viewer hooks are armed before the first byte.
     const disposeAgentNotifications = registerAgentNotifications(term, {
       enabled: () => webNotificationsRef.current,
+      passthrough: () => passthroughRef.current,
       title: () => notifyTitleRef.current,
       clipboardMode: () => clipboardPassthroughRef.current,
       // A stable per-target tag so repeat notifications from this agent/terminal
