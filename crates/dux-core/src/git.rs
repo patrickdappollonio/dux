@@ -690,7 +690,34 @@ pub fn has_origin_remote(repo_path: &Path) -> Result<bool> {
     Ok(status.success())
 }
 
+/// Fast-forwards `branch` from `origin`.
+///
+/// The refspec is FULLY QUALIFIED (`refs/heads/<branch>`) and that is what
+/// makes an option-looking branch name safe here. A `--` separator does NOT,
+/// which was MEASURED on git 2.55 with `GIT_TRACE=1`:
+///
+/// ```text
+/// $ git pull --ff-only origin -- --force
+/// trace: run_command: git fetch --update-head-ok origin --force
+/// ```
+///
+/// `pull` consumes the separator and forwards the refspec to an internal
+/// `fetch` carrying none of its own, the same mechanism `git worktree add`
+/// uses on its start point. So `--force`/`--prune`/`--all` are read as flags
+/// and the branch is silently never pulled, and `--depth=1` writes
+/// `.git/shallow` into the user's source checkout and converts it to a shallow
+/// clone. A `refs/heads/`-prefixed refspec cannot lead with a dash, so the
+/// internal fetch reads it as a ref no matter what the branch is called
+/// (measured: `git pull --ff-only origin -- refs/heads/--force` fetches and
+/// fast-forwards correctly).
+///
+/// Resolving the name to an object id first, the way
+/// `create_worktree_from_start_point` does, is not an option here: the refspec
+/// names a ref on the REMOTE, and an object id is not something `origin` can
+/// be asked for. The `--` is kept as defence in depth for the `origin`
+/// argument's sake.
 fn pull_origin_branch(repo_path: &Path, branch: &str) -> Result<()> {
+    let refspec = format!("refs/heads/{branch}");
     let output = Command::new("git")
         .args([
             "-C",
@@ -698,10 +725,8 @@ fn pull_origin_branch(repo_path: &Path, branch: &str) -> Result<()> {
             "pull",
             "--ff-only",
             "origin",
-            // `--` so the refspec is read as a REF and never as an option.
-            // Measured accepted in this position on git 2.55.
             "--",
-            branch,
+            &refspec,
         ])
         .output()?;
     if !output.status.success() {
@@ -4577,6 +4602,108 @@ mod tests {
             !refs.contains("refs/heads/--force"),
             "the requested branch should have been renamed away, got: {refs}",
         );
+    }
+
+    /// `git pull` is the one shape in this family where a `--` separator buys
+    /// NOTHING. MEASURED on git 2.55 with `GIT_TRACE=1`:
+    ///
+    /// ```text
+    /// $ git pull --ff-only origin -- --force
+    /// trace: run_command: git fetch --update-head-ok origin --force
+    /// ```
+    ///
+    /// The separator is consumed by `pull` and the refspec is forwarded to an
+    /// internal `fetch` carrying none of its own, exactly the mechanism this
+    /// file already documents for `git worktree add`. So a branch named
+    /// `--force` is fetched as a FLAG: nothing is fetched, nothing is merged,
+    /// git exits 0 and dux reports a successful refresh of a branch it never
+    /// touched. `--depth=1` is worse: it writes `.git/shallow` into the user's
+    /// source checkout and converts it to a shallow clone.
+    ///
+    /// Both names reach here from real state (`pull_branch` takes the project's
+    /// branch, `pull_current_branch` takes `current_branch_opt`), so this pins
+    /// the fully-qualified refspec that actually closes it.
+    #[test]
+    fn pull_reads_an_option_looking_branch_as_a_ref() {
+        for name in ["--force", "--depth=1"] {
+            let repo = init_test_repo();
+            let first = head_commit(repo.path()).unwrap();
+            // `git branch` refuses a dash-leading name but plumbing does not,
+            // and a ref like this is what dux is then handed to pull.
+            run_git(
+                repo.path(),
+                &["update-ref", &format!("refs/heads/{name}"), &first],
+            );
+            // A second empty commit: same tree, so switching HEAD onto the
+            // older commit below still leaves a clean worktree.
+            run_git(repo.path(), &["commit", "--allow-empty", "-m", "ahead"]);
+            let ahead = head_commit(repo.path()).unwrap();
+            assert_ne!(first, ahead, "test setup must separate the two commits");
+
+            let remote = repo.path().join("remote.git");
+            run_git(
+                repo.path(),
+                &["init", "--bare", remote.to_string_lossy().as_ref()],
+            );
+            run_git(
+                repo.path(),
+                &["remote", "add", "origin", remote.to_string_lossy().as_ref()],
+            );
+            run_git(
+                repo.path(),
+                &[
+                    "push",
+                    "origin",
+                    &format!("refs/heads/main:refs/heads/{name}"),
+                ],
+            );
+            // Park HEAD on the option-looking branch, one commit behind origin.
+            run_git(
+                repo.path(),
+                &["symbolic-ref", "HEAD", &format!("refs/heads/{name}")],
+            );
+            run_git(repo.path(), &["reset", "--mixed", "--quiet"]);
+            assert_eq!(head_commit(repo.path()).unwrap(), first);
+
+            let result = pull_origin_branch(repo.path(), name);
+
+            assert!(
+                !repo.path().join(".git").join("shallow").exists(),
+                "pulling branch '{name}' must not have shallowed the user's checkout",
+            );
+            assert_eq!(
+                head_commit(repo.path()).unwrap(),
+                ahead,
+                "branch '{name}' was obeyed as a flag: it was never fetched \
+                 and never merged ({result:?})",
+            );
+        }
+    }
+
+    #[test]
+    fn pull_still_fast_forwards_an_ordinary_branch_name() {
+        let repo = init_test_repo();
+        let first = head_commit(repo.path()).unwrap();
+        run_git(repo.path(), &["commit", "--allow-empty", "-m", "ahead"]);
+        let ahead = head_commit(repo.path()).unwrap();
+
+        let remote = repo.path().join("remote.git");
+        run_git(
+            repo.path(),
+            &["init", "--bare", remote.to_string_lossy().as_ref()],
+        );
+        run_git(
+            repo.path(),
+            &["remote", "add", "origin", remote.to_string_lossy().as_ref()],
+        );
+        run_git(
+            repo.path(),
+            &["push", "origin", "refs/heads/main:refs/heads/main"],
+        );
+        run_git(repo.path(), &["reset", "--hard", "--quiet", &first]);
+
+        pull_origin_branch(repo.path(), "main").unwrap();
+        assert_eq!(head_commit(repo.path()).unwrap(), ahead);
     }
 
     #[test]
