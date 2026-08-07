@@ -176,6 +176,37 @@ describe("editor tabs store slice", () => {
     expect(tabs[0].mode).toBe("diff")
   })
 
+  it("an image path never opens in diff mode: openEditor coerces to file", async () => {
+    // A changed image clicked in the Changes pane asks for "diff"; there is
+    // no text to diff, so the choke point coerces and the overlay shows the
+    // picture instead of dead-ending on the binary-diff refusal.
+    const mod = await loadStore()
+    mod.openEditor("s1", "assets/logo.png", "diff")
+    expect(mod.getSnapshot().editorTarget).toEqual({
+      sessionId: "s1",
+      initialPath: "assets/logo.png",
+      initialMode: "file",
+    })
+    const tabs = mod.getSnapshot().editorTabs.s1.tabs
+    expect(tabs).toHaveLength(1)
+    expect(tabs[0]).toMatchObject({ path: "assets/logo.png", mode: "file" })
+  })
+
+  it("editorOpenFile coerces an explicit diff intent to file for an image path", async () => {
+    const mod = await loadStore()
+    mod.editorOpenFile("s1", "logo.png", { mode: "diff" })
+    expect(mod.getSnapshot().editorTabs.s1.tabs[0].mode).toBe("file")
+    // And an already-open image tab cannot be retargeted into diff either.
+    mod.editorOpenFile("s1", "logo.png", { mode: "diff" })
+    expect(mod.getSnapshot().editorTabs.s1.tabs[0].mode).toBe("file")
+  })
+
+  it("an svg path still honors diff mode (it is a text tab, not an image tab)", async () => {
+    const mod = await loadStore()
+    mod.openEditor("s1", "icons/logo.svg", "diff")
+    expect(mod.getSnapshot().editorTabs.s1.tabs[0].mode).toBe("diff")
+  })
+
   it("editorOpenFile with an explicit mode retargets an existing tab (changed-files Diff button)", async () => {
     const mod = await loadStore()
     mod.editorOpenFile("s1", "a.ts", { mode: "file", pin: true })

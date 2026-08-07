@@ -59,6 +59,7 @@ import {
   setTabMode as editorSetTabModePure,
 } from "./editorTabs"
 import type { EditorTabsState } from "./editorTabs"
+import { isImagePreviewPath } from "./editorPreview"
 import { newClientId } from "./uid"
 import { assertNever } from "./assertNever"
 import {
@@ -2928,8 +2929,18 @@ export function openEditor(
   mode: EditorViewMode = "file",
 ): void {
   if (state.selectedSessionId !== sessionId) selectSession(sessionId)
-  setState({ editorTarget: { sessionId, initialPath, initialMode: mode } })
-  if (initialPath !== null) editorOpenFile(sessionId, initialPath, { mode })
+  // An image path never opens in diff mode: there is no text to diff, so a
+  // changed image clicked in the Changes pane (which asks for "diff") must
+  // show the picture rather than dead-end on the binary-diff refusal. This
+  // is the open choke point; `editorOpenFile` coerces too, and the render
+  // keeps the image arm above the diff arm as defense in depth.
+  const effectiveMode: EditorViewMode =
+    initialPath !== null && isImagePreviewPath(initialPath) ? "file" : mode
+  setState({
+    editorTarget: { sessionId, initialPath, initialMode: effectiveMode },
+  })
+  if (initialPath !== null)
+    editorOpenFile(sessionId, initialPath, { mode: effectiveMode })
 }
 
 export function closeEditor(): void {
@@ -2970,10 +2981,15 @@ export function editorOpenFile(
   path: string,
   opts: { mode?: EditorViewMode; pin?: boolean } = {},
 ): void {
+  // An image path never opens or retargets into diff mode (see openEditor's
+  // comment); an undefined mode stays undefined so a plain activation keeps
+  // its no-intent semantics.
+  const mode =
+    opts.mode !== undefined && isImagePreviewPath(path) ? "file" : opts.mode
   setEditorTabsFor(
     sessionId,
     editorOpenFilePure(editorTabsFor(sessionId), path, {
-      mode: opts.mode,
+      mode,
       pin: opts.pin,
       newId: () => newClientId(),
     }),
