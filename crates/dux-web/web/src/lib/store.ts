@@ -395,6 +395,11 @@ export interface DuxState {
   // (mirroring the TUI's `change-agent-provider`, which never kills a running
   // agent — it changes the provider for the next reconnect).
   changeProviderTarget: string | null
+  // The session pending a manual pull-request attach (pin), or null. The
+  // dialog holds one text field for the raw reference; the draft lives here
+  // (like renameDraft) so the input stays fully store-controlled.
+  attachPullRequestTarget: string | null
+  attachPullRequestDraft: string
   // New-agent dialog state lives in the store (like `commitDraft`) so the input
   // is fully store-controlled: the server's generated-name reply fills it via an
   // event-driven callback, never a set-state-in-effect. Mirrors the TUI prompt.
@@ -699,6 +704,8 @@ let state: DuxState = {
   renameTarget: null,
   renameDraft: "",
   changeProviderTarget: null,
+  attachPullRequestTarget: null,
+  attachPullRequestDraft: "",
   createAgentDraft: "",
   createAgentRandomize: false,
   createAgentCopyChanges: true,
@@ -3131,6 +3138,49 @@ export async function submitRename(): Promise<void> {
   const id = state.renameTarget
   if (!id) return
   if (await renameSession(id, state.renameDraft.trim())) closeRename()
+}
+
+// Open the attach-pull-request dialog for a session with an empty draft. The
+// dialog body names the currently shown PR (if any) so overriding is explicit.
+export function openAttachPullRequest(sessionId: string): void {
+  setState({ attachPullRequestTarget: sessionId, attachPullRequestDraft: "" })
+}
+
+export function closeAttachPullRequest(): void {
+  setState({ attachPullRequestTarget: null, attachPullRequestDraft: "" })
+}
+
+export function setAttachPullRequestDraft(raw: string): void {
+  setState({ attachPullRequestDraft: raw })
+}
+
+// Submit the attach dialog: fire the PUT and close immediately. The request is
+// deferred server-side (202 + op id), so the outcome, the busy, the attached
+// info or the lookup error, rides the status toast stream; only a synchronous
+// HTTP refusal (gh unavailable, empty reference) is toasted here, matching the
+// sibling deferred actions (e.g. deleteSession).
+export function submitAttachPullRequest(): void {
+  const id = state.attachPullRequestTarget
+  if (!id) return
+  const pr = state.attachPullRequestDraft.trim()
+  if (!pr) return
+  closeAttachPullRequest()
+  sessionsApi.attachPullRequest(id, pr).catch((e) => {
+    toast.error(
+      e instanceof Error ? e.message : "Could not attach the pull request.",
+    )
+  })
+}
+
+// Detach a session's manually attached pull request so branch-name
+// autodetection resumes. No confirm: it is reversible (re-attach any time),
+// and the server's info status rides the toast stream.
+export function detachPullRequest(sessionId: string): void {
+  sessionsApi.detachPullRequest(sessionId).catch((e) => {
+    toast.error(
+      e instanceof Error ? e.message : "Could not detach the pull request.",
+    )
+  })
 }
 
 // Open the change-provider dialog for a session. The dialog pre-selects the

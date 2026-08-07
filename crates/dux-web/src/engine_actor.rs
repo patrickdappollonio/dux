@@ -2304,9 +2304,9 @@ fn handle_request(
                     // clients: unlike a wire command there is no outcome.status
                     // carrying it, so route it through the same shared stream
                     // the `ApplyWire` arm uses.
-                    for status in dux_core::wire::wire_statuses_from_reaction(
-                        &EventReaction::Status(pending),
-                    ) {
+                    for status in
+                        dux_core::wire::wire_statuses_from_reaction(&EventReaction::Status(pending))
+                    {
                         let _ = status_tx.send(status);
                     }
                     Ok(op_id)

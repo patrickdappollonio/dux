@@ -52,6 +52,11 @@ export interface PrView {
   state: "open" | "merged" | "closed"
   title: string
   url: string
+  /** True when this PR was manually attached (pinned) rather than autodetected
+   * from the branch name. Lives on the PR view, not the session, so
+   * "overridden without a PR" is unrepresentable. Drives the agent menu's
+   * attach-label flip and the detach item's visibility. */
+  overridden: boolean
 }
 
 // One provider tab of an agent, mirroring the Rust `AgentTabView`. Tabs are

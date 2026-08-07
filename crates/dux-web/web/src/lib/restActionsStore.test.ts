@@ -195,6 +195,39 @@ describe("store write actions route to REST", () => {
     expect(actionCalls[0].body).toEqual({ provider: "codex" })
   })
 
+  it("submitAttachPullRequest PUTs the typed reference and closes the dialog", async () => {
+    const mod = await loadStore()
+    mod.openAttachPullRequest("s1")
+    mod.setAttachPullRequestDraft("  #123  ")
+    mod.submitAttachPullRequest()
+    await vi.waitFor(() => expect(actionCalls.length).toBe(1))
+    expect(actionCalls[0].url).toBe("/api/v1/sessions/s1/pull-request")
+    expect(actionCalls[0].method).toBe("PUT")
+    // The draft is trimmed; the raw reference text rides as `pr`.
+    expect(actionCalls[0].body).toEqual({ pr: "#123" })
+    // Deferred action: the dialog closes on submit, the outcome rides the
+    // status toast stream.
+    expect(mod.getSnapshot().attachPullRequestTarget).toBeNull()
+  })
+
+  it("submitAttachPullRequest refuses an empty draft without a request", async () => {
+    const mod = await loadStore()
+    mod.openAttachPullRequest("s1")
+    mod.setAttachPullRequestDraft("   ")
+    mod.submitAttachPullRequest()
+    expect(actionCalls.length).toBe(0)
+    // The dialog stays open (nothing was submitted).
+    expect(mod.getSnapshot().attachPullRequestTarget).toBe("s1")
+  })
+
+  it("detachPullRequest DELETEs the pull-request endpoint", async () => {
+    const mod = await loadStore()
+    mod.detachPullRequest("s1")
+    await vi.waitFor(() => expect(actionCalls.length).toBe(1))
+    expect(actionCalls[0].url).toBe("/api/v1/sessions/s1/pull-request")
+    expect(actionCalls[0].method).toBe("DELETE")
+  })
+
   it("pullProject POSTs the new project pull endpoint", async () => {
     const mod = await loadStore()
     mod.pullProject("p1")
@@ -257,6 +290,28 @@ describe("store write actions surface REST errors as a toast", () => {
     mod.createAgent("p1", "feat")
     await vi.waitFor(() =>
       expect(toast.error).toHaveBeenCalledWith("the server said no"),
+    )
+  })
+
+  it("submitAttachPullRequest shows an error toast on a non-2xx", async () => {
+    const mod = await loadStore()
+    actionFails = true
+    mod.openAttachPullRequest("s1")
+    mod.setAttachPullRequestDraft("#123")
+    mod.submitAttachPullRequest()
+    await vi.waitFor(() => expect(toast.error).toHaveBeenCalled())
+    expect(vi.mocked(toast.error).mock.calls[0][0]).toContain(
+      "the server said no",
+    )
+  })
+
+  it("detachPullRequest shows an error toast on a non-2xx", async () => {
+    const mod = await loadStore()
+    actionFails = true
+    mod.detachPullRequest("s1")
+    await vi.waitFor(() => expect(toast.error).toHaveBeenCalled())
+    expect(vi.mocked(toast.error).mock.calls[0][0]).toContain(
+      "the server said no",
     )
   })
 
