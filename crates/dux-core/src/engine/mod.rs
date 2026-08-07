@@ -2912,9 +2912,11 @@ impl Engine {
             .title
             .clone()
             .unwrap_or_else(|| session.branch_name.clone());
-        // Hostnames are case-insensitive and this value becomes a `gh` argument;
-        // lowercase at the boundary like every other host dux stores.
-        let host = host.to_ascii_lowercase();
+        // Store the host exactly as the sync planner would derive it (empty
+        // means github.com, lowercased): a raw wire command can carry any
+        // spelling, and an unnormalized stored pin would never match the
+        // planner's target, so the pin would never refresh.
+        let host = crate::gh::normalized_github_host(host);
         let url = if url.trim().is_empty() {
             crate::gh::pull_request_url(&host, owner_repo, number)
         } else {

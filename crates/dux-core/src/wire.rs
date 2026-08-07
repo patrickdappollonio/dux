@@ -5677,6 +5677,38 @@ mod tests {
         );
     }
 
+    /// The stored pin's host must be byte-identical to what the sync planner
+    /// derives: empty means github.com and everything is lowercased. A raw
+    /// wire command can carry any spelling, and an unnormalized stored host
+    /// would never match the planner's query target, so the pin would never
+    /// refresh.
+    #[test]
+    fn attach_pull_request_normalizes_the_stored_host_like_the_planner() {
+        let (mut engine, _tmp) = test_engine();
+        enable_gh(&mut engine);
+        let session = sample_session("s1", "p1", "feat");
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+
+        engine
+            .apply_pr_attach("s1", "", "o/r", 1, "", "OPEN", "")
+            .expect("attach with an empty host");
+        assert_eq!(
+            engine.pr_overrides.get("s1").map(|p| p.host.as_str()),
+            Some("github.com"),
+            "an empty host stores as github.com"
+        );
+
+        engine
+            .apply_pr_attach("s1", "GitHub.Example.COM ".trim(), "o/r", 2, "", "OPEN", "")
+            .expect("attach with a capitalised host");
+        assert_eq!(
+            engine.pr_overrides.get("s1").map(|p| p.host.as_str()),
+            Some("github.example.com"),
+            "hosts store lowercased"
+        );
+    }
+
     #[test]
     fn attach_pull_request_refuses_an_unknown_session_and_an_unknown_state() {
         let (mut engine, _tmp) = test_engine();

@@ -1182,6 +1182,10 @@ impl Engine {
         // in-memory residue for an agent that no longer exists.
         self.pr_statuses.remove(&session.id);
         self.pr_last_checked.remove(&session.id);
+        // The in-memory pin goes too (its store row is deleted with the
+        // session); leaving it would ghost-gate the identity guard and the
+        // detach palette entry for a later session reusing the id.
+        self.pr_overrides.remove(&session.id);
         self.update_branch_sync_sessions();
 
         let project_still_has_sessions = self
@@ -3767,6 +3771,18 @@ mod tests {
         engine
             .pr_last_checked
             .insert(session_id.clone(), Instant::now());
+        engine.pr_overrides.insert(
+            session_id.clone(),
+            crate::storage::StoredPr {
+                session_id: session_id.clone(),
+                pr_number: 9,
+                host: "github.com".to_string(),
+                owner_repo: "o/r".to_string(),
+                state: "OPEN".to_string(),
+                title: "doomed".to_string(),
+                url: "https://example".to_string(),
+            },
+        );
 
         engine
             .finish_delete_session_memory(&session_id)
@@ -3774,6 +3790,10 @@ mod tests {
 
         assert!(!engine.pr_statuses.contains_key(&session_id));
         assert!(!engine.pr_last_checked.contains_key(&session_id));
+        assert!(
+            !engine.pr_overrides.contains_key(&session_id),
+            "the in-memory pin must not outlive its session"
+        );
     }
 
     #[test]

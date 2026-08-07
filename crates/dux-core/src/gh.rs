@@ -1254,6 +1254,15 @@ pub(crate) fn pr_view_args(host: &str, owner_repo: &str, number: u64) -> Vec<Str
     ]
 }
 
+/// The exact host spelling the sync planner produces: empty means github.com,
+/// and hostnames compare (and are stored) lowercased. `apply_pr_attach` stores
+/// pins through this so a stored pin is byte-identical to what the planner
+/// derives; an unnormalized host would never match and the pin would never
+/// refresh.
+pub(crate) fn normalized_github_host(host: &str) -> String {
+    normalize_github_host(host).to_ascii_lowercase()
+}
+
 fn normalize_github_host(host: &str) -> &str {
     if host.trim().is_empty() {
         "github.com"
