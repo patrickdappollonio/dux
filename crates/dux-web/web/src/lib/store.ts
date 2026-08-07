@@ -679,18 +679,19 @@ function loadingChanges(sessionId: string): ChangesSlice {
   }
 }
 
-// Whether this tab BOOTED on the standalone editor's whole-tab address. A
-// hoisted function (the state literal below runs before the route constants
-// exist, so it cannot call `parseRoute` yet), and a prefix probe rather than
-// the full parser on purpose: the SHELL choice must be settled at module init
-// or the ordinary shell would flash and open its sockets first, and the
-// prefix is disjoint from every other grammar (`parseStandaloneEditorRoute`
-// owns the full shape; a malformed tail still lands in the standalone shell,
-// which then renders its not-found/empty state). `applyUrlRoute` keeps the
-// flag in line with the URL from then on.
+// Whether this tab BOOTED on the standalone editor's whole-tab address. The
+// SHELL choice must be settled at module init (or the ordinary shell would
+// flash and open its sockets first), and it uses the SAME strict grammar the
+// router uses — `parseStandaloneEditorRoute`, a hoisted function with no
+// dependence on the route constants declared below, so calling it here is
+// safe. Strictness is the point: a malformed tail is not a standalone route,
+// so it boots the NORMAL shell and takes the ordinary route-correction path
+// there, instead of marooning the tab on a standalone shell whose route
+// resolves to nothing. `applyUrlRoute` keeps the flag in line with the URL
+// from then on.
 function bootIsStandaloneEditor(): boolean {
   if (typeof location === "undefined") return false
-  return /^#\/editor\/agent\//.test(location.hash ?? "")
+  return parseStandaloneEditorRoute(location.hash ?? "") !== null
 }
 
 let state: DuxState = {
@@ -1929,10 +1930,17 @@ function parseStandaloneEditorRoute(hash: string): Route | null {
   try {
     const sessionId = decodeURIComponent(m[1])
     if (!sessionId) return null
+    const editor = parseEditorSegment(m[2], m[3])
+    // STRICT, unlike the in-app suffix (which degrades a malformed path to
+    // the bare agent): a standalone route with no editor half is a shell
+    // with nothing to show, so a mangled tail is not a standalone route at
+    // all — it boots the NORMAL shell and takes the ordinary
+    // route-correction path there.
+    if (editor === null) return null
     return {
       target: { kind: "agent", sessionId, tabId: sessionId },
       changes: false,
-      editor: parseEditorSegment(m[2], m[3]),
+      editor,
       standalone: true,
     }
   } catch {
@@ -2187,9 +2195,22 @@ function applyUrlRoute(): void {
 // and the spine prune (where `pruneSelectionIfGone`'s navigation is the single
 // URL writer in the pass). Everything user-initiated goes through
 // `closeEditor`, which does write.
+// It also drops the STANDALONE SURFACE flag: every clear outside popstate
+// (the spine prune, a route resolving to a session that is gone) leaves no
+// editor for the standalone shell to show, and a shell kept up over a null
+// `editorTarget` is the boot spinner forever — the blocker this line fixes.
+// The popstate path is unaffected: `applyUrlRoute` re-syncs the flag from the
+// URL before any of this runs, so an address that really names a live
+// standalone editor keeps its shell.
 function clearEditorStateSilently(): void {
-  if (state.editorTarget === null && state.editorRoute === null) return
-  setState({ editorTarget: null, editorRoute: null })
+  if (
+    state.editorTarget === null &&
+    state.editorRoute === null &&
+    !state.standaloneEditor
+  ) {
+    return
+  }
+  setState({ editorTarget: null, editorRoute: null, standaloneEditor: false })
 }
 
 // Mirror a parsed route's editor half into state, directly and silently.
@@ -4741,6 +4762,18 @@ export function openChangesScreen(): void {
 // straight back onto it.
 export function navigateUp(): void {
   const urlMode = state.routeNotFound ? ("replace" as const) : undefined
+  // Belt and braces for the standalone shell: with no editor state left there
+  // is nothing for that surface to render but its boot spinner, so the way
+  // out must land on the ordinary shell. The clear paths already drop the
+  // flag with the editor state (`clearEditorStateSilently`); this guard makes
+  // the escape hatch safe even if a future path forgets.
+  if (
+    state.standaloneEditor &&
+    state.editorTarget === null &&
+    state.editorRoute === null
+  ) {
+    setState({ standaloneEditor: false })
+  }
   if (state.mobileScreen === "changes" && state.selectedTarget) {
     setState({ mobileScreen: "terminal" })
     syncUrl(urlMode)

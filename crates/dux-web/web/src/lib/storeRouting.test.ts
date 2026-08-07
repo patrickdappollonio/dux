@@ -1268,6 +1268,58 @@ describe("the editor rides the URL", () => {
     expect(mod.getSnapshot().editorRoute).toBeNull()
   })
 
+  it("escapes a dead standalone link onto a real surface, never the boot spinner", async () => {
+    // The blocker: a standalone tab whose agent is gone used to keep
+    // `standaloneEditor` true with `editorTarget` null, and the not-found
+    // screen's only button then landed the shell on its boot spinner forever.
+    const mod = await loadStore("#/editor/agent/missing", [
+      { id: "s1", project_id: "p1" },
+    ])
+    expect(mod.getSnapshot().routeNotFound).toEqual({
+      kind: "agent",
+      sessionId: "missing",
+    })
+    // Clearing the editor state outside popstate also clears the surface
+    // flag, so not-found already renders in the ordinary shell.
+    expect(mod.getSnapshot().standaloneEditor).toBe(false)
+    mod.navigateUp()
+    expect(mod.getSnapshot().standaloneEditor).toBe(false)
+    expect(mod.getSnapshot().routeNotFound).toBeNull()
+    expect(mod.getSnapshot().mobileScreen).toBe("home")
+    expect(loc.hash).toBe("")
+  })
+
+  it("swaps the standalone tab to the ordinary shell when its session vanishes", async () => {
+    const mod = await loadStore("#/editor/agent/s1/file/a.ts", [
+      { id: "s1", project_id: "p1" },
+      { id: "s2", project_id: "p1" },
+    ])
+    expect(mod.getSnapshot().standaloneEditor).toBe(true)
+    const depth = index
+    await pushSpine(mod, [{ id: "s2", project_id: "p1" }])
+    // The selection prune stays the single URL writer and writes the in-app
+    // grammar; the editor prune clears the state AND the surface flag, so
+    // the tab renders the workspace rather than a spinner.
+    expect(mod.getSnapshot().standaloneEditor).toBe(false)
+    expect(mod.getSnapshot().editorTarget).toBeNull()
+    expect(mod.getSnapshot().editorRoute).toBeNull()
+    expect(mod.getSnapshot().selectedSessionId).toBe("s2")
+    expect(loc.hash).toBe("#/agent/s2")
+    expect(index).toBe(depth)
+  })
+
+  it("boots the NORMAL shell on a standalone address with a malformed tail", async () => {
+    // Strict parse at boot: the surface flag comes from the same grammar the
+    // router uses, so a mangled link cannot marooon the tab on a standalone
+    // shell whose route resolves to nothing.
+    const mod = await loadStore("#/editor/agent/s1/file/%ZZ", [
+      { id: "s1", project_id: "p1" },
+    ])
+    expect(mod.getSnapshot().standaloneEditor).toBe(false)
+    expect(mod.getSnapshot().mobileScreen).toBe("home")
+    expect(mod.getSnapshot().editorTarget).toBeNull()
+  })
+
   it("renders not-found for an editor link to an agent that does not exist", async () => {
     const mod = await loadStore("#/agent/missing/editor/file/a.ts", [
       { id: "s1", project_id: "p1" },
