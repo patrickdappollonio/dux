@@ -2021,6 +2021,21 @@ export function routePushKey(route: Route): string {
   return `${routeScreen(route)}${route.editor ? "+editor" : ""}${route.standalone ? "+standalone" : ""}`
 }
 
+// The standalone editor's address for a session, optionally carrying the file
+// position the affordance should hand over. Pure, and built on `routeHash` so
+// the open-in-new-tab anchors can never drift from the parser's grammar.
+export function standaloneEditorHash(
+  sessionId: string,
+  editor: { mode: EditorViewMode; path: string | null } | null = null,
+): string {
+  return routeHash({
+    target: { kind: "agent", sessionId, tabId: sessionId },
+    changes: false,
+    editor: editor ?? { mode: "file", path: null },
+    standalone: true,
+  })
+}
+
 // The route the app currently holds in state.
 function currentRoute(): Route {
   const target = state.selectedTarget

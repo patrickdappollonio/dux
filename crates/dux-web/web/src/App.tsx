@@ -30,6 +30,7 @@ import { GlobalEnvDialog } from "@/components/GlobalEnvDialog"
 import { MacrosDialog } from "@/components/MacrosDialog"
 import { MobileShell } from "@/components/MobileShell"
 import { OfflineOverlay } from "@/components/OfflineOverlay"
+import { StandaloneEditorShell } from "@/components/StandaloneEditor"
 import { ProjectInfoDialog } from "@/components/ProjectInfoDialog"
 import { ProjectSettingsDialog } from "@/components/ProjectSettingsDialog"
 import { RemoveProjectDialog } from "@/components/RemoveProjectDialog"
@@ -54,8 +55,12 @@ import {
 } from "@/lib/store"
 import { keyboardLikelyOpen } from "@/lib/viewport"
 
-// The palette, all dialogs, and the toaster live above the shell so they stay
-// mounted in both the desktop and mobile layouts. Shared JSX — never duplicated.
+// All dialogs and the toaster, rendered ONCE by `App()` above whichever shell
+// is active — desktop, mobile, or the standalone editor. Hoisted deliberately:
+// the standalone surface needs the Toaster (save results), the OfflineOverlay,
+// and `ConfirmCloseEditorTabDialog` (without which a dirty per-tab close there
+// would be permanently inert). Everything here portals to the body, so it
+// depends on no shell-specific provider. Shared JSX — never duplicated.
 function GlobalOverlays() {
   return (
     <>
@@ -142,8 +147,6 @@ function DesktopShell() {
           </ResizablePanelGroup>
         </div>
       </SidebarInset>
-
-      <GlobalOverlays />
     </SidebarProvider>
   )
 }
@@ -196,17 +199,29 @@ function MobileApp() {
       <div className="min-h-0 flex-1">
         <MobileShell />
       </div>
-      <GlobalOverlays />
     </div>
   )
 }
 
 function App() {
+  const { standaloneEditor } = useDux()
   const isMobile = useIsMobile()
-  if (isMobile) {
-    return <MobileApp />
-  }
-  return <DesktopShell />
+  // The standalone editor is checked BEFORE isMobile, deliberately: phones
+  // must reach it (it is their one editor surface, best-effort by decision),
+  // and an isMobile-first ladder would never let them past the mobile shell.
+  const shell = standaloneEditor ? (
+    <StandaloneEditorShell />
+  ) : isMobile ? (
+    <MobileApp />
+  ) : (
+    <DesktopShell />
+  )
+  return (
+    <>
+      {shell}
+      <GlobalOverlays />
+    </>
+  )
 }
 
 export default App

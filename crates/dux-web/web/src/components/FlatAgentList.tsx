@@ -20,6 +20,7 @@ import {
   ClipboardCopy,
   Cpu,
   Ellipsis,
+  ExternalLink,
   FileCode2,
   Folder,
   GitFork,
@@ -105,6 +106,7 @@ import {
   openDelete,
   openDeleteTerminal,
   openEditor,
+  standaloneEditorHash,
   openForceReconnect,
   openForkAgent,
   openRename,
@@ -221,9 +223,25 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
         Startup command logs…
       </DropdownMenuItem>
       <DropdownMenuSeparator />
-      <DropdownMenuItem onClick={() => openEditor(session.id)}>
+      {/* Two editor entries, named to distinguish their surfaces. The in-app
+          overlay cannot open on a phone (EditorOverlay is desktop-only), so
+          its item is CSS-hidden there rather than left as a dead no-op; the
+          new-tab item, which opens the standalone surface, is the only
+          editor entry on phones. Final copy was left to PR review. */}
+      <DropdownMenuItem
+        className="max-md:hidden"
+        onClick={() => openEditor(session.id)}
+      >
         <FileCode2 />
-        Open editor
+        Open editor here
+      </DropdownMenuItem>
+      <DropdownMenuItem
+        onClick={() =>
+          window.open(standaloneEditorHash(session.id), "_blank", "noopener")
+        }
+      >
+        <ExternalLink />
+        Open editor in new tab
       </DropdownMenuItem>
       <DropdownMenuItem onClick={() => createTerminal(session.id)}>
         <SquareTerminal />
