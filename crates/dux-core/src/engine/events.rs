@@ -1182,6 +1182,10 @@ impl Engine {
         // in-memory residue for an agent that no longer exists.
         self.pr_statuses.remove(&session.id);
         self.pr_last_checked.remove(&session.id);
+        // The in-memory pin goes too (its store row is deleted with the
+        // session); leaving it would ghost-gate the identity guard and the
+        // detach palette entry for a later session reusing the id.
+        self.pr_overrides.remove(&session.id);
         self.update_branch_sync_sessions();
 
         let project_still_has_sessions = self
@@ -2157,6 +2161,13 @@ impl Engine {
                     // there, so an enable produces exactly one refresh, and
                     // `spawn_pr_sync_worker` is single-instance so it produces
                     // at most one poller however often this runs.
+                    //
+                    // Re-seed from the store FIRST: a toggle-off cleared
+                    // `pr_statuses`, and a manually attached PR must get its
+                    // badge back the moment the integration re-arms rather
+                    // than waiting for the first sync cycle. Idempotent (the
+                    // stored rows are refreshed on every accepted result).
+                    self.seed_pr_statuses_from_store();
                     self.update_pr_sync_sessions();
                     self.spawn_refs_watcher();
                     self.spawn_pr_sync_worker();
@@ -2198,18 +2209,38 @@ impl Engine {
                         continue;
                     }
                     self.pr_last_checked.insert(session_id.clone(), now);
+                    // Identity guard for pinned sessions. This is deliberately
+                    // NOT a `None`-only guard: several paths can still produce
+                    // `Some(other_pr)` for a pinned session (a one-shot check
+                    // racing the attach, or an early-return path answering
+                    // from a stale `known_pr`), and a `None` from discovery
+                    // must not clear a pin either. While an override exists,
+                    // only a result matching the pin's (host, owner_repo,
+                    // number) may touch `pr_statuses` or `upsert_pr`.
+                    if let Some(pin) = self.pr_overrides.get(&session_id) {
+                        let matches_pin = maybe_pr.as_ref().is_some_and(|pr| {
+                            pr.number == pin.pr_number
+                                && pr.owner_repo.eq_ignore_ascii_case(&pin.owner_repo)
+                                && pr.host.eq_ignore_ascii_case(&pin.host)
+                        });
+                        if !matches_pin {
+                            logger::debug(&format!(
+                                "[gh-integration] dropping PR result for pinned session \
+                                 {session_id} (does not match the pin, PR #{})",
+                                pin.pr_number,
+                            ));
+                            continue;
+                        }
+                    }
                     match maybe_pr {
                         Some(pr) => {
-                            // Persist the PR association (including state) so
-                            // it survives restarts and squash-merge branch
-                            // deletions.
                             let state_str = match pr.state {
                                 PrState::Open => "OPEN",
                                 PrState::Merged => "MERGED",
                                 PrState::Closed => "CLOSED",
                             };
                             let pr_number = pr.number;
-                            if let Err(err) = self.session_store.upsert_pr(&StoredPr {
+                            let row = StoredPr {
                                 session_id: session_id.clone(),
                                 pr_number,
                                 host: pr.host.clone(),
@@ -2217,10 +2248,30 @@ impl Engine {
                                 state: state_str.to_string(),
                                 title: pr.title.clone(),
                                 url: pr.url.clone(),
-                            }) {
-                                logger::error(&format!(
-                                    "failed to persist PR status for {session_id} (PR #{pr_number}): {err}",
-                                ));
+                            };
+                            if self.pr_overrides.contains_key(&session_id) {
+                                // A PINNED session's accepted result refreshes
+                                // the override row (its durable cache) and
+                                // deliberately NEVER touches `session_prs`: a
+                                // pin can live on a FORK, and a fork row in
+                                // `session_prs` would become the post-detach
+                                // `known_pr`, making the next cycle query the
+                                // session's OWN repo with the fork's number.
+                                if let Err(err) = self.session_store.upsert_pr_override(&row) {
+                                    logger::error(&format!(
+                                        "failed to refresh pinned PR for {session_id}: {err}",
+                                    ));
+                                }
+                                self.pr_overrides.insert(session_id.clone(), row);
+                            } else {
+                                // Persist the autodetected association
+                                // (including state) so it survives restarts
+                                // and squash-merge branch deletions.
+                                if let Err(err) = self.session_store.upsert_pr(&row) {
+                                    logger::error(&format!(
+                                        "failed to persist PR status for {session_id} (PR #{pr_number}): {err}",
+                                    ));
+                                }
                             }
                             self.pr_statuses.insert(session_id, pr);
                             changed = true;
@@ -2258,6 +2309,7 @@ impl Engine {
             WorkerEvent::PullRequestResolved {
                 result,
                 status_op_id,
+                purpose: crate::worker::PrLookupPurpose::CreateAgent,
             } => match result {
                 Ok(pr) => EventReaction::OpenNewAgentPromptForPr {
                     pr: Box::new(pr),
@@ -2278,6 +2330,72 @@ impl Engine {
                     }
                 }
             },
+            WorkerEvent::PullRequestResolved {
+                result,
+                status_op_id,
+                purpose: crate::worker::PrLookupPurpose::Attach { session_id },
+            } => {
+                // The attach application is engine-side and surface-agnostic:
+                // this arm is the real vanished-session guard for BOTH
+                // surfaces. The lookup is async, so a delete can land first,
+                // and an unguarded apply would write an override row for a
+                // dead id, exactly the orphan the storage cleanup defends
+                // against. (`apply_pr_attach` re-checks too; the explicit
+                // check here exists to say WHY nothing was attached.)
+                let outcome = match result {
+                    Ok(pr) => {
+                        if !self.sessions.iter().any(|s| s.id == session_id) {
+                            crate::engine::PrAttachOutcome::Failed {
+                                message: format!(
+                                    "The agent was deleted while PR #{} was being resolved; \
+                                     nothing was attached.",
+                                    pr.number,
+                                ),
+                            }
+                        } else {
+                            match self.apply_pr_attach(
+                                &session_id,
+                                &pr.host,
+                                &pr.owner_repo,
+                                pr.number,
+                                &pr.title,
+                                &pr.state,
+                                "",
+                            ) {
+                                Ok(message) => crate::engine::PrAttachOutcome::Attached { message },
+                                Err(err) => crate::engine::PrAttachOutcome::Failed {
+                                    message: format!("Failed to attach PR #{}: {err:#}", pr.number),
+                                },
+                            }
+                        }
+                    }
+                    Err(message) => crate::engine::PrAttachOutcome::Failed { message },
+                };
+                let attached = matches!(outcome, crate::engine::PrAttachOutcome::Attached { .. });
+                let final_reaction = if let Some(id) = status_op_id
+                    && let Some(op) = self.pending_pr_attach_ops.remove(&id)
+                {
+                    op.resolve(&outcome).into_reaction()
+                } else {
+                    // No keyed op (a defensive fallback): still surface the
+                    // outcome rather than swallowing it.
+                    match outcome {
+                        crate::engine::PrAttachOutcome::Attached { message } => {
+                            EventReaction::Status(StatusUpdate::info(message))
+                        }
+                        crate::engine::PrAttachOutcome::Failed { message } => {
+                            EventReaction::Status(StatusUpdate::error(message))
+                        }
+                    }
+                };
+                if attached {
+                    // The badge changed; the TUI sidebar re-derives from
+                    // `pr_statuses` on rebuild (the web refetches the spine).
+                    EventReaction::Multi(vec![final_reaction, EventReaction::RebuildLeftItems])
+                } else {
+                    final_reaction
+                }
+            }
             WorkerEvent::RefsChanged(session_id) => {
                 logger::debug(&format!(
                     "[gh-integration] refs watcher: triggering PR check for session {}",
@@ -3653,6 +3771,18 @@ mod tests {
         engine
             .pr_last_checked
             .insert(session_id.clone(), Instant::now());
+        engine.pr_overrides.insert(
+            session_id.clone(),
+            crate::storage::StoredPr {
+                session_id: session_id.clone(),
+                pr_number: 9,
+                host: "github.com".to_string(),
+                owner_repo: "o/r".to_string(),
+                state: "OPEN".to_string(),
+                title: "doomed".to_string(),
+                url: "https://example".to_string(),
+            },
+        );
 
         engine
             .finish_delete_session_memory(&session_id)
@@ -3660,6 +3790,10 @@ mod tests {
 
         assert!(!engine.pr_statuses.contains_key(&session_id));
         assert!(!engine.pr_last_checked.contains_key(&session_id));
+        assert!(
+            !engine.pr_overrides.contains_key(&session_id),
+            "the in-memory pin must not outlive its session"
+        );
     }
 
     #[test]
@@ -3718,6 +3852,168 @@ mod tests {
             reaction_kind(&reaction),
         );
         assert!(engine.pr_last_checked.contains_key("s1"));
+    }
+
+    /// The identity guard, in both directions. While a session is pinned, a
+    /// sync result is accepted ONLY when its (host, owner_repo, number) matches
+    /// the pin: a `Some(other_pr)` (the one-shot check racing an attach, or an
+    /// early-return path answering from a stale `known_pr`) must not overwrite
+    /// the pin, and a `None` must not clear it.
+    #[test]
+    fn pr_status_ready_identity_guard_drops_results_that_do_not_match_the_pin() {
+        let (mut engine, _tmp) = test_engine();
+        let session = sample_session("s1", "p1", "feat");
+        engine
+            .session_store
+            .upsert_session(&session)
+            .expect("seed session");
+        engine.sessions.push(session);
+        let pinned = crate::storage::StoredPr {
+            session_id: "s1".to_string(),
+            pr_number: 12,
+            host: "github.com".to_string(),
+            owner_repo: "forker/Hello-World".to_string(),
+            state: "OPEN".to_string(),
+            title: "Pinned".to_string(),
+            url: "https://github.com/forker/Hello-World/pull/12".to_string(),
+        };
+        engine.pr_statuses.insert(
+            "s1".to_string(),
+            crate::gh::reconstruct_pr_from_stored(&pinned).unwrap(),
+        );
+        engine.pr_overrides.insert("s1".to_string(), pinned);
+
+        // Direction 1: a racing one-shot answers with a DIFFERENT PR.
+        let other = PrInfo {
+            number: 50,
+            state: PrState::Open,
+            title: "Autodetected".to_string(),
+            host: "github.com".to_string(),
+            owner_repo: "octocat/Hello-World".to_string(),
+            url: "https://github.com/octocat/Hello-World/pull/50".to_string(),
+        };
+        let reaction = engine.process_worker_event(WorkerEvent::PrStatusReady(vec![(
+            "s1".to_string(),
+            Some(other),
+        )]));
+        assert!(
+            matches!(reaction, EventReaction::Nothing),
+            "a non-pin result changes nothing, got {}",
+            reaction_kind(&reaction),
+        );
+        assert_eq!(
+            engine.pr_statuses.get("s1").map(|p| p.number),
+            Some(12),
+            "the badge still shows the pin"
+        );
+        assert!(
+            engine
+                .session_store
+                .load_all_latest_prs()
+                .unwrap()
+                .is_empty(),
+            "the dropped result never reaches upsert_pr"
+        );
+
+        // Direction 2: a None (e.g. discovery finding nothing) cannot clear it.
+        let reaction =
+            engine.process_worker_event(WorkerEvent::PrStatusReady(vec![("s1".to_string(), None)]));
+        assert!(matches!(reaction, EventReaction::Nothing));
+        assert_eq!(engine.pr_statuses.get("s1").map(|p| p.number), Some(12));
+
+        // A result matching the pin IS accepted, and refreshes the override
+        // row's cached state so a restart renders the fresh state.
+        let refreshed = PrInfo {
+            number: 12,
+            state: PrState::Merged,
+            title: "Pinned".to_string(),
+            host: "github.com".to_string(),
+            owner_repo: "forker/Hello-World".to_string(),
+            url: "https://github.com/forker/Hello-World/pull/12".to_string(),
+        };
+        let reaction = engine.process_worker_event(WorkerEvent::PrStatusReady(vec![(
+            "s1".to_string(),
+            Some(refreshed),
+        )]));
+        assert!(matches!(reaction, EventReaction::RebuildLeftItems));
+        assert_eq!(
+            engine.pr_statuses.get("s1").map(|p| p.state.clone()),
+            Some(PrState::Merged)
+        );
+        let rows = engine.session_store.load_pr_overrides().unwrap();
+        assert_eq!(rows[0].state, "MERGED", "the pin's cached state refreshes");
+        assert_eq!(
+            engine.pr_overrides.get("s1").map(|p| p.state.as_str()),
+            Some("MERGED"),
+            "the in-memory pin refreshes too"
+        );
+        // An accepted PINNED result must never land in `session_prs`: the
+        // override row is the pin's durable cache, and a fork row written into
+        // `session_prs` would become the post-detach `known_pr`, making the
+        // next cycle emit the FORK's number against the session's OWN repo.
+        assert!(
+            engine
+                .session_store
+                .load_all_latest_prs()
+                .unwrap()
+                .is_empty(),
+            "a pinned cycle leaves session_prs untouched"
+        );
+    }
+
+    /// The full detach cycle from the review: pin a FORK PR, accept one pinned
+    /// sync result, detach, and the next sync snapshot must not carry the fork
+    /// row as `known_pr` (which would query the session's own repo with the
+    /// fork's number and could surface an unrelated PR).
+    #[test]
+    fn detaching_a_fork_pin_leaves_no_fork_residue_for_the_next_cycle() {
+        let (mut engine, _tmp) = test_engine();
+        engine.github_integration_enabled = true;
+        engine.gh_status = crate::model::GhStatus::Available;
+        let session = sample_session("s1", "p1", "feat");
+        engine
+            .session_store
+            .upsert_session(&session)
+            .expect("seed session");
+        engine.sessions.push(session);
+        engine
+            .apply_pr_attach(
+                "s1",
+                "github.com",
+                "forker/Hello-World",
+                12,
+                "Pinned",
+                "OPEN",
+                "",
+            )
+            .expect("attach the fork pin");
+
+        // One accepted pinned cycle (the state refresh path).
+        let refreshed = PrInfo {
+            number: 12,
+            state: PrState::Open,
+            title: "Pinned".to_string(),
+            host: "github.com".to_string(),
+            owner_repo: "forker/Hello-World".to_string(),
+            url: "https://github.com/forker/Hello-World/pull/12".to_string(),
+        };
+        engine.process_worker_event(WorkerEvent::PrStatusReady(vec![(
+            "s1".to_string(),
+            Some(refreshed),
+        )]));
+
+        engine.clear_pull_request_override("s1").expect("detach");
+
+        // The next cycle's snapshot: no pin, and no fork row smuggled in as
+        // the known PR (session_prs never learned about the fork).
+        let entries = engine.pr_sync_sessions.lock().unwrap().clone();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].pinned.is_none());
+        assert!(
+            entries[0].known_pr.is_none(),
+            "the fork pin must not survive detach as known_pr, got {:?}",
+            entries[0].known_pr,
+        );
     }
 
     // ── WorktreeRemoveCompleted ──────────────────────────────────────────

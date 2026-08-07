@@ -749,6 +749,7 @@ impl App {
                 dux_core::logger::error(&format!("pull-request-lookup worker panicked: {reason}"));
                 let _ = tx_panic.send(WorkerEvent::PullRequestResolved {
                     result: Err(format!("Worker panicked: {reason}")),
+                    purpose: dux_core::worker::PrLookupPurpose::CreateAgent,
                     status_op_id: Some(op_id_panic),
                 });
             }
@@ -3407,6 +3408,63 @@ impl App {
         Ok(())
     }
 
+    /// `attach-pull-request`: open the reference field for the selected agent.
+    /// The session fixes the project, so unlike the create-from-PR modal there
+    /// is no project to choose and the field is the only control.
+    pub(crate) fn open_attach_pull_request_prompt(&mut self) -> Result<()> {
+        if !self.github_pr_agent_command_available() {
+            self.set_error(
+                "Attaching a pull request requires GitHub integration and an authenticated gh CLI.",
+            );
+            return Ok(());
+        }
+        let Some(session) = self.selected_session().cloned() else {
+            self.set_error("No agent session selected. Select an agent to attach a pull request.");
+            return Ok(());
+        };
+        // The body names the PR currently shown so overriding it is explicit.
+        let current_pr = self.engine.pr_statuses.get(&session.id).map(|pr| {
+            let overridden = self.engine.pr_overrides.contains_key(&session.id);
+            format!(
+                "#{} ({}) {}{}",
+                pr.number,
+                super::pr_state_word(&pr.state),
+                pr.title,
+                if overridden {
+                    " (manually attached)"
+                } else {
+                    ""
+                }
+            )
+        });
+        self.input_target = InputTarget::None;
+        self.fullscreen_overlay = FullscreenOverlay::None;
+        self.prompt = PromptState::AttachPullRequestInput {
+            session_id: session.id,
+            current_pr,
+            input: TextInput::new(),
+        };
+        Ok(())
+    }
+
+    /// `detach-pull-request`: drop the selected agent's manual PR pin so
+    /// autodetection resumes. Synchronous and reversible (re-attach any time),
+    /// so no modal and no confirmation; the engine's message is honest about
+    /// the no-op case too.
+    pub(crate) fn detach_pull_request(&mut self) -> Result<()> {
+        let Some(session_id) = self.selected_session().map(|s| s.id.clone()) else {
+            self.set_error(
+                "No agent session selected. Select an agent to detach its pull request.",
+            );
+            return Ok(());
+        };
+        match self.engine.clear_pull_request_override(&session_id) {
+            Ok(message) => self.set_info(message),
+            Err(err) => self.set_error(format!("{err:#}")),
+        }
+        Ok(())
+    }
+
     pub(crate) fn open_kill_running(&mut self) -> Result<()> {
         let runtimes = self.running_runtime_snapshot();
         if runtimes.is_empty() {
@@ -3913,6 +3971,7 @@ mod tests {
             gh_status: crate::model::GhStatus::Unknown,
             gh_probe: Default::default(),
             pr_statuses: std::collections::HashMap::new(),
+            pr_overrides: std::collections::HashMap::new(),
             branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
             pr_sync_sessions: Arc::new(Mutex::new(Vec::new())),
             pr_sync: Arc::new(Default::default()),
@@ -3943,6 +4002,7 @@ mod tests {
             pending_web_checkout_ops: std::collections::HashMap::new(),
             pending_web_add_project_ops: std::collections::HashMap::new(),
             pending_web_pr_lookup_ops: std::collections::HashMap::new(),
+            pending_pr_attach_ops: std::collections::HashMap::new(),
             pending_delete_ops_web: std::collections::HashMap::new(),
             pending_create_ops: std::collections::HashMap::new(),
             pending_web_launch_ops: std::collections::HashMap::new(),
@@ -4145,6 +4205,7 @@ mod tests {
             gh_status: crate::model::GhStatus::Unknown,
             gh_probe: Default::default(),
             pr_statuses: std::collections::HashMap::new(),
+            pr_overrides: std::collections::HashMap::new(),
             branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
             pr_sync_sessions: Arc::new(Mutex::new(Vec::new())),
             pr_sync: Arc::new(Default::default()),
@@ -4175,6 +4236,7 @@ mod tests {
             pending_web_checkout_ops: std::collections::HashMap::new(),
             pending_web_add_project_ops: std::collections::HashMap::new(),
             pending_web_pr_lookup_ops: std::collections::HashMap::new(),
+            pending_pr_attach_ops: std::collections::HashMap::new(),
             pending_delete_ops_web: std::collections::HashMap::new(),
             pending_create_ops: std::collections::HashMap::new(),
             pending_web_launch_ops: std::collections::HashMap::new(),

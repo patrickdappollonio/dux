@@ -111,6 +111,54 @@ describe("AgentInfoDialog", () => {
     expect(screen.queryByText(/changed since creation/i)).toBeNull()
   })
 
+  it("shows the pull request row, naming a manual pin", () => {
+    // Pinned: the row carries the "manually attached" cue, which is where a
+    // pin says it is one (matching the TUI's Agent Info line).
+    renderDialogOpenFor({
+      title: "server-mode",
+      branch_name: "feat",
+      initial_branch: "feat",
+      source_branch: "main",
+      pr: {
+        number: 12,
+        state: "open",
+        title: "Fix the frobnicator",
+        url: "https://github.com/o/r/pull/12",
+        overridden: true,
+      },
+    })
+    expect(screen.getByText(/#12 \(open\) Fix the frobnicator/)).toBeTruthy()
+    expect(screen.getByText(/manually attached/)).toBeTruthy()
+  })
+
+  it("shows a detected pull request without the manual cue", () => {
+    renderDialogOpenFor({
+      title: "server-mode",
+      branch_name: "feat",
+      initial_branch: "feat",
+      source_branch: "main",
+      pr: {
+        number: 12,
+        state: "merged",
+        title: "Fix the frobnicator",
+        url: "https://github.com/o/r/pull/12",
+        overridden: false,
+      },
+    })
+    expect(screen.getByText(/#12 \(merged\) Fix the frobnicator/)).toBeTruthy()
+    expect(screen.queryByText(/manually attached/)).toBeNull()
+  })
+
+  it("omits the pull request row when the session has none", () => {
+    renderDialogOpenFor({
+      title: "server-mode",
+      branch_name: "feat",
+      initial_branch: "feat",
+      source_branch: "main",
+    })
+    expect(screen.queryByText(/Pull request/)).toBeNull()
+  })
+
   it("closes when the target session is no longer in the spine", () => {
     // The dialog's target points at an id absent from `spine.sessions` (the agent
     // was removed while the dialog was open). The vanished-target effect fires

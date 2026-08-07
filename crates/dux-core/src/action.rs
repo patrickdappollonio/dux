@@ -54,6 +54,8 @@ pub enum Action {
     ExitInteractive,
     OpenMacroBar,
     OpenCurrentPullRequest,
+    AttachPullRequest,
+    DetachPullRequest,
     ToggleFullscreen,
     ScrollPageUp,
     ScrollPageDown,
@@ -229,6 +231,8 @@ impl Action {
             Action::ExitInteractive => "exit_interactive",
             Action::OpenMacroBar => "open_macro_bar",
             Action::OpenCurrentPullRequest => "open_current_pull_request",
+            Action::AttachPullRequest => "attach_pull_request",
+            Action::DetachPullRequest => "detach_pull_request",
             Action::ToggleFullscreen => "toggle_fullscreen",
             Action::ScrollPageUp => "scroll_page_up",
             Action::ScrollPageDown => "scroll_page_down",
@@ -382,6 +386,12 @@ impl Action {
             Action::OpenMacroBar => "Open the macro command bar to send text macros.",
             Action::OpenCurrentPullRequest => {
                 "Open the selected agent's current pull request in the default browser."
+            }
+            Action::AttachPullRequest => {
+                "Attach a GitHub pull request to the selected agent, pausing autodetection."
+            }
+            Action::DetachPullRequest => {
+                "Detach the manually attached pull request so branch autodetection resumes."
             }
             Action::ToggleFullscreen => "Toggle fullscreen overlay for the agent terminal.",
             Action::ScrollPageUp => "Scroll up one page in the agent output.",
@@ -624,6 +634,8 @@ impl Action {
             | Action::ToggleRandomizedPetNameDefault
             | Action::TogglePrBannerPosition
             | Action::ForceReconnectAgent
+            | Action::AttachPullRequest
+            | Action::DetachPullRequest
             | Action::RefreshChanges
             | Action::ChangeDefaultProvider
             | Action::ChangeProjectDefaultProvider

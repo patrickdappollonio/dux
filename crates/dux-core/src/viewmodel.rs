@@ -651,6 +651,12 @@ pub struct PrView {
     pub state: String,
     pub title: String,
     pub url: String,
+    /// Whether this PR was manually attached (pinned) rather than autodetected.
+    /// On `PrView` and NOT on `SessionView`, so "overridden without a PR" is
+    /// unrepresentable. Also what makes a DETACH observable to the web's
+    /// sessions fingerprint in the window where the pinned PR data itself has
+    /// not changed yet; a propagation prerequisite, not a UI convenience.
+    pub overridden: bool,
 }
 
 /// A single changed file projected for web clients (used by the per-session
@@ -777,6 +783,7 @@ impl SessionView {
     fn from_session(
         s: &AgentSession,
         pr: Option<&PrInfo>,
+        pr_overridden: bool,
         tabs: Vec<AgentTabView>,
         has_output: bool,
         working: bool,
@@ -794,7 +801,7 @@ impl SessionView {
             worktree_path: s.worktree_path.clone(),
             status: s.status.as_str().to_string(),
             auto_reopen_enabled: s.auto_reopen_enabled,
-            pr: pr.map(PrView::from_pr),
+            pr: pr.map(|pr| PrView::from_pr(pr, pr_overridden)),
             tabs,
             has_output,
             working,
@@ -808,8 +815,9 @@ impl SessionView {
 }
 
 impl PrView {
-    fn from_pr(pr: &PrInfo) -> Self {
+    fn from_pr(pr: &PrInfo, overridden: bool) -> Self {
         Self {
+            overridden,
             number: pr.number,
             state: match pr.state {
                 PrState::Open => "open",
@@ -1025,6 +1033,7 @@ impl Engine {
         SessionView::from_session(
             s,
             self.pr_statuses.get(&s.id),
+            self.pr_overrides.contains_key(&s.id),
             tabs,
             has_output,
             working,
@@ -1204,6 +1213,46 @@ mod tests {
         assert_eq!(spine.sessions[0].id, "s1");
         assert_eq!(spine.sessions[0].branch_name, "feature");
         assert_eq!(spine.sessions[0].status, "detached");
+    }
+
+    /// `overridden` lives on `PrView` (so "overridden without a PR" is
+    /// unrepresentable) and flips with the engine's `pr_overrides` map, which
+    /// is also what makes a detach observable to the web's sessions fingerprint
+    /// before the PR data itself changes.
+    #[test]
+    fn session_pr_view_carries_the_overridden_flag() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/repo"));
+        engine.sessions.push(sample_session("s1", "p1", "feature"));
+        engine.pr_statuses.insert(
+            "s1".to_string(),
+            crate::model::PrInfo {
+                number: 12,
+                state: crate::model::PrState::Open,
+                title: "Pinned".to_string(),
+                host: "github.com".to_string(),
+                owner_repo: "fork/r".to_string(),
+                url: "https://github.com/fork/r/pull/12".to_string(),
+            },
+        );
+
+        let pr = engine.spine().sessions[0].pr.clone().expect("pr view");
+        assert!(!pr.overridden, "autodetected PRs are not overridden");
+
+        engine.pr_overrides.insert(
+            "s1".to_string(),
+            crate::storage::StoredPr {
+                session_id: "s1".to_string(),
+                pr_number: 12,
+                host: "github.com".to_string(),
+                owner_repo: "fork/r".to_string(),
+                state: "OPEN".to_string(),
+                title: "Pinned".to_string(),
+                url: "https://github.com/fork/r/pull/12".to_string(),
+            },
+        );
+        let pr = engine.spine().sessions[0].pr.clone().expect("pr view");
+        assert!(pr.overridden, "a pinned PR reports overridden");
     }
 
     #[test]

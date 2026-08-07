@@ -27,6 +27,7 @@ impl App {
                 WorkerEvent::PullRequestResolved {
                     status_op_id: Some(id),
                     result,
+                    purpose: dux_core::worker::PrLookupPurpose::CreateAgent,
                 } => Some((id.clone(), result.is_ok())),
                 _ => None,
             };

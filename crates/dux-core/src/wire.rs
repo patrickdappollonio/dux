@@ -195,6 +195,26 @@ pub enum WireCommand {
     /// talking to `gh`. The write is eager because the user wants to know if
     /// persisting the toggle failed.
     ToggleGithubIntegration {},
+    /// Manually attach (pin) an already-RESOLVED pull request to a session. The
+    /// fields carry what `gh pr view` answered; parsing/resolution of the raw
+    /// reference happens earlier (the attach lookup worker), so applying this is
+    /// a synchronous row + map mutation and mints no busy of its own; the
+    /// resolve→attach flow's single keyed op carries the busy and the final.
+    AttachPullRequest {
+        session_id: String,
+        host: String,
+        owner_repo: String,
+        number: u64,
+        title: String,
+        state: String,
+        url: String,
+    },
+    /// Remove a session's manual pull-request attachment so branch-name
+    /// autodetection resumes on the next sync cycle. Synchronous; the
+    /// last-known badge stays visible until that cycle re-evaluates.
+    ClearPullRequestOverride {
+        session_id: String,
+    },
     /// Flip `ui.copy_on_select` and persist it, mirroring the web
     /// `toggle-copy-on-select` palette command. The next `config.changed` refetch
     /// carries the new value so the web terminal enables or disables
@@ -1188,6 +1208,38 @@ impl Engine {
                 let status = self.toggle_github_integration();
                 return Ok(WireCommandOutcome {
                     status: Some(status),
+                    detached: None,
+                    created_op_id: None,
+                });
+            }
+            WireCommand::AttachPullRequest {
+                session_id,
+                host,
+                owner_repo,
+                number,
+                title,
+                state,
+                url,
+            } => {
+                let message = self.apply_pr_attach(
+                    &session_id,
+                    &host,
+                    &owner_repo,
+                    number,
+                    &title,
+                    &state,
+                    &url,
+                )?;
+                return Ok(WireCommandOutcome {
+                    status: Some(WireStatus::new("info", message)),
+                    detached: None,
+                    created_op_id: None,
+                });
+            }
+            WireCommand::ClearPullRequestOverride { session_id } => {
+                let message = self.clear_pull_request_override(&session_id)?;
+                return Ok(WireCommandOutcome {
+                    status: Some(WireStatus::new("info", message)),
                     detached: None,
                     created_op_id: None,
                 });
@@ -3761,6 +3813,8 @@ impl Engine {
             | WireCommand::AddProjectInitRepo { .. }
             | WireCommand::ChangeAgentProvider { .. }
             | WireCommand::CreateAgentFromPr { .. }
+            | WireCommand::AttachPullRequest { .. }
+            | WireCommand::ClearPullRequestOverride { .. }
             | WireCommand::SetChangesPaneVisible { .. }
             | WireCommand::SetInstanceIdentity { .. }
             | WireCommand::SetSettings(..)
@@ -5632,6 +5686,234 @@ mod tests {
     }
 
     #[test]
+    fn attach_pull_request_pins_and_clear_override_unpins() {
+        let (mut engine, _tmp) = test_engine();
+        enable_gh(&mut engine);
+        let session = sample_session("s1", "p1", "feat");
+        engine
+            .session_store
+            .upsert_session(&session)
+            .expect("persist session");
+        engine.sessions.push(session);
+
+        let outcome = engine
+            .apply_wire(WireCommand::AttachPullRequest {
+                session_id: "s1".to_string(),
+                host: "GitHub.com".to_string(),
+                owner_repo: "fork/r".to_string(),
+                number: 12,
+                title: "Pinned".to_string(),
+                state: "OPEN".to_string(),
+                url: "https://github.com/fork/r/pull/12".to_string(),
+            })
+            .expect("attach");
+        let status = outcome.status.expect("attach confirmation");
+        assert_eq!(status.tone, "info");
+        assert!(status.message.contains("#12"), "got {:?}", status.message);
+
+        // The pin is persisted, mirrored in memory, and drives the badge.
+        let stored = engine.session_store.load_pr_overrides().expect("load");
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].pr_number, 12);
+        assert_eq!(
+            stored[0].host, "github.com",
+            "hosts are lowercased at the boundary"
+        );
+        assert_eq!(engine.pr_overrides.get("s1").map(|p| p.pr_number), Some(12));
+        assert_eq!(engine.pr_statuses.get("s1").map(|p| p.number), Some(12));
+        // The sync snapshot now carries the pin for the worker.
+        let entries = engine.pr_sync_sessions.lock().unwrap().clone();
+        let pin = entries[0].pinned.as_ref().expect("pinned sync entry");
+        assert_eq!(pin.number, 12);
+        assert_eq!(pin.owner_repo, "fork/r");
+
+        // Detach: the row and map entry go, but the badge stays until the next
+        // sync cycle re-evaluates (no blanking).
+        let outcome = engine
+            .apply_wire(WireCommand::ClearPullRequestOverride {
+                session_id: "s1".to_string(),
+            })
+            .expect("detach");
+        assert_eq!(outcome.status.expect("detach confirmation").tone, "info");
+        assert!(engine.session_store.load_pr_overrides().unwrap().is_empty());
+        assert!(engine.pr_overrides.is_empty());
+        assert_eq!(
+            engine.pr_statuses.get("s1").map(|p| p.number),
+            Some(12),
+            "the last-known PR stays visible until autodetection re-evaluates"
+        );
+        assert!(
+            engine.pr_sync_sessions.lock().unwrap()[0].pinned.is_none(),
+            "the sync snapshot no longer carries the pin"
+        );
+    }
+
+    /// The stored pin's host must be byte-identical to what the sync planner
+    /// derives: empty means github.com and everything is lowercased. A raw
+    /// wire command can carry any spelling, and an unnormalized stored host
+    /// would never match the planner's query target, so the pin would never
+    /// refresh.
+    #[test]
+    fn attach_pull_request_normalizes_the_stored_host_like_the_planner() {
+        let (mut engine, _tmp) = test_engine();
+        enable_gh(&mut engine);
+        let session = sample_session("s1", "p1", "feat");
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+
+        engine
+            .apply_pr_attach("s1", "", "o/r", 1, "", "OPEN", "")
+            .expect("attach with an empty host");
+        assert_eq!(
+            engine.pr_overrides.get("s1").map(|p| p.host.as_str()),
+            Some("github.com"),
+            "an empty host stores as github.com"
+        );
+
+        engine
+            .apply_pr_attach("s1", "GitHub.Example.COM ".trim(), "o/r", 2, "", "OPEN", "")
+            .expect("attach with a capitalised host");
+        assert_eq!(
+            engine.pr_overrides.get("s1").map(|p| p.host.as_str()),
+            Some("github.example.com"),
+            "hosts store lowercased"
+        );
+    }
+
+    #[test]
+    fn attach_pull_request_refuses_an_unknown_session_and_an_unknown_state() {
+        let (mut engine, _tmp) = test_engine();
+        enable_gh(&mut engine);
+        let err = engine
+            .apply_wire(WireCommand::AttachPullRequest {
+                session_id: "ghost".to_string(),
+                host: "github.com".to_string(),
+                owner_repo: "o/r".to_string(),
+                number: 1,
+                title: String::new(),
+                state: "OPEN".to_string(),
+                url: String::new(),
+            })
+            .expect_err("a vanished session must refuse the attach");
+        assert!(err.to_string().contains("ghost"), "got {err:#}");
+
+        let session = sample_session("s1", "p1", "feat");
+        engine
+            .session_store
+            .upsert_session(&session)
+            .expect("persist session");
+        engine.sessions.push(session);
+        let err = engine
+            .apply_wire(WireCommand::AttachPullRequest {
+                session_id: "s1".to_string(),
+                host: "github.com".to_string(),
+                owner_repo: "o/r".to_string(),
+                number: 1,
+                title: String::new(),
+                state: "DRAFT".to_string(),
+                url: String::new(),
+            })
+            .expect_err("only OPEN/MERGED/CLOSED are storable states");
+        assert!(err.to_string().contains("DRAFT"), "got {err:#}");
+        assert!(engine.pr_overrides.is_empty());
+    }
+
+    #[test]
+    fn dispatch_attach_pull_request_mints_one_keyed_op_spanning_resolve_and_attach() {
+        let (mut engine, _tmp) = test_engine();
+        enable_gh(&mut engine);
+        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        let session = sample_session("s1", "p1", "feat");
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+
+        let (op_id, pending) = engine
+            .dispatch_attach_pull_request("s1", "#42")
+            .expect("dispatch");
+        assert_eq!(pending.tone, StatusTone::Busy);
+        assert_eq!(pending.key.as_deref(), Some(op_id.as_str()));
+        assert!(engine.pending_pr_attach_ops.contains_key(&op_id));
+
+        // Gated exactly like the new-agent-from-PR flow.
+        engine.gh_status = crate::model::GhStatus::NotInstalled;
+        let err = engine
+            .dispatch_attach_pull_request("s1", "#42")
+            .expect_err("no gh, no attach");
+        assert!(err.to_string().contains("gh CLI"), "got {err:#}");
+    }
+
+    /// The engine-side attach arm: a resolved lookup applies the pin and the
+    /// SAME keyed op carries the final; a session deleted mid-lookup attaches
+    /// nothing (the real vanished-session guard for both surfaces).
+    #[test]
+    fn pr_attach_resolution_applies_the_pin_or_refuses_a_vanished_session() {
+        let (mut engine, _tmp) = test_engine();
+        enable_gh(&mut engine);
+        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        let session = sample_session("s1", "p1", "feat");
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+        let (op_id, _) = engine
+            .dispatch_attach_pull_request("s1", "#12")
+            .expect("dispatch");
+
+        let resolved = crate::worker::ResolvedPullRequest {
+            project: sample_project("p1", "/tmp/p1"),
+            host: "github.com".to_string(),
+            owner_repo: "forker/Hello-World".to_string(),
+            number: 12,
+            title: "Pinned".to_string(),
+            state: "OPEN".to_string(),
+            head_ref_name: "feat".to_string(),
+            custom_name: None,
+        };
+        let reaction =
+            engine.process_worker_event(crate::worker::WorkerEvent::PullRequestResolved {
+                result: Ok(resolved.clone()),
+                purpose: crate::worker::PrLookupPurpose::Attach {
+                    session_id: "s1".to_string(),
+                },
+                status_op_id: Some(op_id.clone()),
+            });
+        let statuses = wire_statuses_from_reaction(&reaction);
+        let final_status = statuses.last().expect("keyed final");
+        assert_eq!(final_status.tone, "info");
+        assert_eq!(final_status.key.as_deref(), Some(op_id.as_str()));
+        assert!(final_status.message.contains("#12"), "{final_status:?}");
+        assert!(!engine.pending_pr_attach_ops.contains_key(&op_id));
+        assert_eq!(engine.pr_overrides.get("s1").map(|p| p.pr_number), Some(12));
+        assert_eq!(engine.pr_statuses.get("s1").map(|p| p.number), Some(12));
+        assert_eq!(engine.session_store.load_pr_overrides().unwrap().len(), 1);
+
+        // Session deleted mid-lookup: nothing is attached, the keyed final is
+        // an error, and no orphan row is written for the dead id.
+        engine.pr_overrides.clear();
+        engine.pr_statuses.clear();
+        engine.session_store.delete_pr_override("s1").unwrap();
+        let (op_id, _) = engine
+            .dispatch_attach_pull_request("s1", "#12")
+            .expect("dispatch");
+        engine.sessions.clear();
+        let reaction =
+            engine.process_worker_event(crate::worker::WorkerEvent::PullRequestResolved {
+                result: Ok(resolved),
+                purpose: crate::worker::PrLookupPurpose::Attach {
+                    session_id: "s1".to_string(),
+                },
+                status_op_id: Some(op_id.clone()),
+            });
+        let statuses = wire_statuses_from_reaction(&reaction);
+        let final_status = statuses.last().expect("keyed final");
+        assert_eq!(final_status.tone, "error");
+        assert!(final_status.message.contains("deleted"), "{final_status:?}");
+        assert!(engine.pr_overrides.is_empty());
+        assert!(
+            engine.session_store.load_pr_overrides().unwrap().is_empty(),
+            "no override row is written for a dead session id"
+        );
+    }
+
+    #[test]
     fn create_agent_from_pr_busy_is_keyed() {
         // When gh is available and the project exists, the synchronous busy
         // returned by `CreateAgentFromPr` must carry `pr-lookup:{project_id}`.
@@ -5694,6 +5976,7 @@ mod tests {
         let reaction =
             engine.process_worker_event(crate::worker::WorkerEvent::PullRequestResolved {
                 result: Err("gh pr view failed".to_string()),
+                purpose: crate::worker::PrLookupPurpose::CreateAgent,
                 status_op_id: Some(busy_key.clone()),
             });
         let statuses = wire_statuses_from_reaction(&reaction);

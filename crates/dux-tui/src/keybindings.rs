@@ -606,6 +606,22 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         hint_contexts: &[],
     },
     BindingDef {
+        // Palette-only: attach (pin) a GitHub PR to the selected agent.
+        action: Action::AttachPullRequest,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+    },
+    BindingDef {
+        // Palette-only: drop the pin so branch autodetection resumes.
+        action: Action::DetachPullRequest,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+    },
+    BindingDef {
         action: Action::ToggleFullscreen,
         default_keys: &[],
         scopes: &[],
@@ -2544,6 +2560,7 @@ mod tests {
         let expected = [
             "add-project",
             "agent-info",
+            "attach-pull-request",
             "change-agent-provider",
             "change-default-provider",
             "change-project-default-provider",
@@ -2557,6 +2574,7 @@ mod tests {
             "delete-agent",
             "delete-project",
             "delete-terminal",
+            "detach-pull-request",
             "edit-macros",
             "filter-agents",
             "force-reconnect-agent",

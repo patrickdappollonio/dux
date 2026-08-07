@@ -207,6 +207,25 @@ export const sessionsApi = {
   // the kill-running modal. A non-2xx throws.
   kill: (id: string) =>
     request<void>("POST", `/api/v1/sessions/${encodeURIComponent(id)}/kill`),
+  // Manually attach (pin) a pull request from the raw typed reference. Replies
+  // 202 with the keyed status op id; the outcome (attached, or the failure)
+  // rides the status toast stream and the pinned badge lands via
+  // `sessions.changed`. A synchronous refusal (gh unavailable, empty
+  // reference) is a 400 and throws.
+  attachPullRequest: (id: string, pr: string) =>
+    request<{ op_id: string }>(
+      "PUT",
+      `/api/v1/sessions/${encodeURIComponent(id)}/pull-request`,
+      { pr },
+    ),
+  // Detach the manual pin so branch-name autodetection resumes. Synchronous;
+  // the info status rides the stream. A session without a pin is a successful
+  // no-op server-side.
+  detachPullRequest: (id: string) =>
+    request<void>(
+      "DELETE",
+      `/api/v1/sessions/${encodeURIComponent(id)}/pull-request`,
+    ),
   reorder: (projectId: string, sessionIds: string[]) =>
     request<void>("POST", "/api/v1/sessions/reorder", {
       project_id: projectId,

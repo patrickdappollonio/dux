@@ -24,6 +24,11 @@
 //!   project startup command in its worktree (keyed Busy → final toast).
 //! - `POST   /api/v1/sessions/reorder`             — persist order (literal
 //!   segment, registered so it does not collide with `:id`).
+//! - `PUT    /api/v1/sessions/:id/pull-request`, manually attach (pin) a
+//!   PR from a raw typed reference; `202` + `{op_id}` (deferred, the outcome
+//!   rides the toast stream and `sessions.changed`).
+//! - `DELETE /api/v1/sessions/:id/pull-request`, detach the manual pin so
+//!   autodetection resumes (synchronous, `200`).
 //! - `POST   /api/v1/pull-requests/resolve`, read a typed pull-request
 //!   reference and say which projects are checkouts of the repository it names.
 //!   A READ, not a write: it starts nothing and changes nothing, so it answers
@@ -47,7 +52,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
-    routing::{patch, post},
+    routing::{patch, post, put},
 };
 use serde::{Deserialize, Serialize};
 
@@ -84,6 +89,10 @@ pub fn routes() -> Router<AppState> {
             post(rerun_startup_command),
         )
         .route("/api/v1/sessions/{id}/kill", post(kill_session))
+        .route(
+            "/api/v1/sessions/{id}/pull-request",
+            put(attach_pull_request).delete(detach_pull_request),
+        )
 }
 
 // ── Create ───────────────────────────────────────────────────────────────────
@@ -615,6 +624,103 @@ async fn kill_session(
     }
 }
 
+// ── Pull-request attach / detach ─────────────────────────────────────────────
+
+/// Body of `PUT /api/v1/sessions/:id/pull-request`: the raw reference text the
+/// user typed (a PR URL, `#123`, `owner/repo#123`, or a bare number).
+#[derive(Deserialize)]
+struct AttachPullRequestBody {
+    pr: String,
+}
+
+/// `202 Accepted` body: the keyed status op id spanning resolve and attach, so
+/// a client can correlate the eventual final on the toast stream. This is the
+/// documented deferred direction (see `rest_common`): the handler must NOT
+/// block on the `gh` lookup.
+#[derive(Serialize)]
+struct AttachPullRequestAccepted {
+    op_id: String,
+}
+
+/// Manually attach (pin) a pull request to a session. Dispatch only: the
+/// engine mints the keyed busy (broadcast by the actor arm) and spawns the gh
+/// lookup worker; the final (attached, or the failure) rides the status toast
+/// stream, and the pinned badge lands via `sessions.changed`.
+async fn attach_pull_request(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(raw): Json<serde_json::Value>,
+) -> Response {
+    if !id_within_bound(&id) {
+        return unknown_session();
+    }
+    // Existence first, before even reading the body (the neighbors' ordering):
+    // the engine's dispatch checks the gh gate BEFORE its session lookup, so an
+    // unknown id would otherwise surface as the gh message (a 400) instead of
+    // the truthful 404.
+    match state.engine.session(id.clone()).await {
+        None => return engine_unavailable(),
+        Some(None) => return unknown_session(),
+        Some(Some(_)) => {}
+    }
+    // Parse the body ourselves so a malformed shape is a clean 400 (axum's
+    // typed `Json` rejection would be a 422), matching the create handler.
+    let body: AttachPullRequestBody = match serde_json::from_value(raw) {
+        Ok(b) => b,
+        Err(e) => {
+            return (StatusCode::BAD_REQUEST, format!("invalid attach body: {e}")).into_response();
+        }
+    };
+    match state
+        .engine
+        .attach_pull_request(
+            id,
+            body.pr,
+            scope_from_headers(&headers, &state.connections),
+        )
+        .await
+    {
+        Ok(op_id) => (
+            StatusCode::ACCEPTED,
+            Json(AttachPullRequestAccepted { op_id }),
+        )
+            .into_response(),
+        // Defense in depth for a session deleted between the check above and
+        // the dispatch: the engine's own unknown-session error stays a 404.
+        Err(e) if e.contains("unknown session") => (StatusCode::NOT_FOUND, e).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
+}
+
+/// Remove a session's manual pull-request attachment so branch-name
+/// autodetection resumes. Synchronous; the info status rides the stream like
+/// the sibling handlers' outcomes (the `ApplyWire` arm broadcasts it). A
+/// session without a pin is a successful no-op with an honest message.
+async fn detach_pull_request(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if !id_within_bound(&id) {
+        return unknown_session();
+    }
+    match state
+        .engine
+        .apply_wire_scoped(
+            WireCommand::ClearPullRequestOverride { session_id: id },
+            scope_from_headers(&headers, &state.connections),
+        )
+        .await
+    {
+        Ok(_) => StatusCode::OK.into_response(),
+        // The engine returns "unknown session: …" when the row is gone; surface
+        // that as 404, not a generic 400 (the `kill_session` pattern).
+        Err(e) if e.contains("unknown session") => (StatusCode::NOT_FOUND, e).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
+}
+
 // ── Reorder ──────────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -834,6 +940,234 @@ mod tests {
             StatusCode::CONFLICT,
             "a fresh name must not hit the existing-branch refusal"
         );
+    }
+
+    /// Boot a router whose engine has ONE session seeded straight into the
+    /// SQLite store before bootstrap (the same seam the engine-actor tests
+    /// use), so the pull-request routes can be exercised against a session
+    /// that exists without creating a worktree or spawning a provider.
+    fn router_with_seeded_session(id: &str) -> (TempDir, axum::Router) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = dux_core::config::DuxPaths {
+            root: tmp.path().to_path_buf(),
+            config_path: tmp.path().join("config.toml"),
+            sessions_db_path: tmp.path().join("sessions.sqlite3"),
+            worktrees_root: tmp.path().join("worktrees"),
+            lock_path: tmp.path().join("dux.lock"),
+        };
+        std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+        let store = dux_core::storage::SessionStore::open(&paths.sessions_db_path).unwrap();
+        let now = chrono::Utc::now();
+        store
+            .upsert_session(&dux_core::model::AgentSession {
+                id: id.to_string(),
+                project_id: "p1".to_string(),
+                project_path: None,
+                provider: dux_core::model::ProviderKind::new("claude"),
+                source_branch: "main".to_string(),
+                branch_name: "feat".to_string(),
+                initial_branch: "feat".to_string(),
+                worktree_path: tmp.path().to_string_lossy().to_string(),
+                title: Some("seeded".to_string()),
+                started_providers: Vec::new(),
+                desired_running: false,
+                auto_reopen_enabled: false,
+                status: dux_core::model::SessionStatus::Detached,
+                created_at: now,
+                updated_at: now,
+                last_focused_tab: None,
+            })
+            .unwrap();
+        drop(store);
+        let engine = crate::bootstrap::bootstrap_engine(&paths).unwrap();
+        let (handle, _join) = crate::engine_actor::spawn_engine_thread(engine);
+        (tmp, crate::server::router(handle))
+    }
+
+    async fn send_json(
+        app: &axum::Router,
+        method: &str,
+        uri: &str,
+        body: Option<serde_json::Value>,
+    ) -> axum::response::Response {
+        let builder = Request::builder().method(method).uri(uri);
+        let req = match body {
+            Some(b) => builder
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(b.to_string()))
+                .unwrap(),
+            None => builder.body(axum::body::Body::empty()).unwrap(),
+        };
+        app.clone().oneshot(req).await.unwrap()
+    }
+
+    /// PUT on an id no session has is the truthful 404, not the gh-gate 400
+    /// (the handler checks existence before dispatching).
+    #[tokio::test]
+    async fn attach_pull_request_404_for_unknown_session() {
+        let (_tmp, app) = router_no_auth();
+        let resp = send_json(
+            &app,
+            "PUT",
+            "/api/v1/sessions/ghost/pull-request",
+            Some(serde_json::json!({ "pr": "#12" })),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let _ = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    }
+
+    /// A body without the `pr` field on a REAL session is a clean 400 (the
+    /// manual parse), never a 422 or a dispatch. On a ghost id the existence
+    /// check runs first, so even a malformed body gets the truthful 404.
+    #[tokio::test]
+    async fn attach_pull_request_400_for_malformed_body() {
+        let (_tmp, app) = router_with_seeded_session("s1");
+        let resp = send_json(
+            &app,
+            "PUT",
+            "/api/v1/sessions/s1/pull-request",
+            Some(serde_json::json!({ "reference": "#12" })),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let _ = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+
+        let resp = send_json(
+            &app,
+            "PUT",
+            "/api/v1/sessions/ghost/pull-request",
+            Some(serde_json::json!({ "reference": "#12" })),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "existence is checked before the body is read"
+        );
+    }
+
+    /// Boot a router whose engine has the seeded session, its project (at a
+    /// plain NON-GitHub directory), and gh reported available, without ever
+    /// touching a real gh: the gate fields are preset before the actor spawns,
+    /// and the boot probe runs against the stand-in gh script. The attach
+    /// worker then resolves the project's remote (none: not even a git repo),
+    /// refuses the bare number BEFORE any `gh pr view`, and reports through
+    /// the keyed op, so the happy HTTP path is testable with zero gh calls.
+    fn router_with_seeded_session_and_gh(id: &str) -> (TempDir, axum::Router) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = dux_core::config::DuxPaths {
+            root: tmp.path().to_path_buf(),
+            config_path: tmp.path().join("config.toml"),
+            sessions_db_path: tmp.path().join("sessions.sqlite3"),
+            worktrees_root: tmp.path().join("worktrees"),
+            lock_path: tmp.path().join("dux.lock"),
+        };
+        std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+        let project_dir = tmp.path().join("plain-project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(
+            &paths.config_path,
+            format!(
+                "[[projects]]\nid = \"p1\"\npath = \"{}\"\nname = \"Plain\"\n",
+                project_dir.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        let store = dux_core::storage::SessionStore::open(&paths.sessions_db_path).unwrap();
+        let now = chrono::Utc::now();
+        store
+            .upsert_session(&dux_core::model::AgentSession {
+                id: id.to_string(),
+                project_id: "p1".to_string(),
+                project_path: None,
+                provider: dux_core::model::ProviderKind::new("claude"),
+                source_branch: "main".to_string(),
+                branch_name: "feat".to_string(),
+                initial_branch: "feat".to_string(),
+                worktree_path: project_dir.to_string_lossy().to_string(),
+                title: Some("seeded".to_string()),
+                started_providers: Vec::new(),
+                desired_running: false,
+                auto_reopen_enabled: false,
+                status: dux_core::model::SessionStatus::Detached,
+                created_at: now,
+                updated_at: now,
+                last_focused_tab: None,
+            })
+            .unwrap();
+        drop(store);
+        let mut engine = crate::bootstrap::bootstrap_engine(&paths).unwrap();
+        // The gate the dispatch checks, preset so the PUT cannot race the boot
+        // probe; the probe itself is pointed at the stand-in gh so enabling
+        // the integration never runs a real gh.
+        engine.github_integration_enabled = true;
+        engine.gh_status = dux_core::model::GhStatus::Available;
+        engine.gh_probe.program =
+            dux_core::gh::probe_test_support::stand_in_gh_serving(tmp.path(), &["github.com"])
+                .into();
+        let (handle, _join) = crate::engine_actor::spawn_engine_thread(engine);
+        (tmp, crate::server::router(handle))
+    }
+
+    /// The happy HTTP path: a PUT on a real session with gh available replies
+    /// `202 Accepted` immediately (no blocking on the lookup) with the keyed
+    /// status op id in the body, the codebase's documented deferred shape.
+    #[tokio::test]
+    async fn attach_pull_request_202_carries_the_op_id() {
+        let (_tmp, app) = router_with_seeded_session_and_gh("s1");
+        let resp = send_json(
+            &app,
+            "PUT",
+            "/api/v1/sessions/s1/pull-request",
+            Some(serde_json::json!({ "pr": "#42" })),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let op_id = json["op_id"].as_str().expect("op_id in the 202 body");
+        assert!(op_id.starts_with("op-"), "got {op_id:?}");
+    }
+
+    /// With a real session but no usable gh (the test engine never probes gh,
+    /// so its status stays Unknown), the dispatch refuses synchronously with a
+    /// message naming gh, mapped to 400.
+    #[tokio::test]
+    async fn attach_pull_request_400_mentions_gh_when_unavailable() {
+        let (_tmp, app) = router_with_seeded_session("s1");
+        let resp = send_json(
+            &app,
+            "PUT",
+            "/api/v1/sessions/s1/pull-request",
+            Some(serde_json::json!({ "pr": "#12" })),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let msg = String::from_utf8_lossy(&bytes);
+        assert!(
+            msg.contains("gh"),
+            "the refusal must name the gh CLI, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn detach_pull_request_404_for_unknown_session() {
+        let (_tmp, app) = router_no_auth();
+        let resp = send_json(&app, "DELETE", "/api/v1/sessions/ghost/pull-request", None).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let _ = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    }
+
+    /// Detaching a session that never had a manual pin is a successful no-op
+    /// (200); the honest "was already active" info rides the status stream.
+    #[tokio::test]
+    async fn detach_pull_request_200_without_override() {
+        let (_tmp, app) = router_with_seeded_session("s1");
+        let resp = send_json(&app, "DELETE", "/api/v1/sessions/s1/pull-request", None).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let _ = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     }
 
     /// A CONFIRMED create (`use_existing_branch: true`) is not refused by the

@@ -283,6 +283,28 @@ impl SessionStore {
             "text not null default ''",
         )?;
         ensure_column(&self.conn, "session_prs", "url", "text not null default ''")?;
+        // A manually attached ("pinned") pull request, one row per session,
+        // mirroring `session_prs`'s columns. The FK is declared for parity with
+        // `session_prs`, but the connection never enables `PRAGMA foreign_keys`,
+        // so the cascade does not fire; `delete_session` and
+        // `remove_project_records` delete these rows explicitly. The cached
+        // state/title/url make a restart render the pin instantly, before the
+        // first sync cycle refreshes them. Derived runtime state, so it lives
+        // here and never in portable config.
+        self.conn.execute_batch(
+            r#"
+            create table if not exists session_pr_overrides (
+                session_id text primary key
+                    references agent_sessions(id) on delete cascade,
+                host       text not null,
+                owner_repo text not null,
+                pr_number  integer not null,
+                state      text not null default 'OPEN',
+                title      text not null default '',
+                url        text not null default ''
+            );
+            "#,
+        )?;
         // Per-session monotonic changed-files revision counter (server mode).
         // Separate from the session record so it is purely housekeeping: a single
         // chokepoint that hands out a strictly-increasing `rev` per session,
@@ -714,6 +736,11 @@ impl SessionStore {
              (select id from agent_sessions where project_id = ?1)",
             params![project_id],
         )?;
+        tx.execute(
+            "delete from session_pr_overrides where session_id in \
+             (select id from agent_sessions where project_id = ?1)",
+            params![project_id],
+        )?;
         // Drop the per-session changed-files rev counters BEFORE the sessions
         // themselves (the subquery resolves the ids while the rows still exist),
         // so a project removal cannot leave orphaned `changes_rev` rows behind.
@@ -827,6 +854,73 @@ impl SessionStore {
             result.push(row?);
         }
         Ok(result)
+    }
+
+    /// Insert or replace a session's manually attached (pinned) pull request.
+    /// One row per session: attaching again replaces the previous pin.
+    pub fn upsert_pr_override(&self, pr: &StoredPr) -> Result<()> {
+        self.conn.execute(
+            r#"
+            insert into session_pr_overrides
+                (session_id, host, owner_repo, pr_number, state, title, url)
+            values (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            on conflict(session_id) do update set
+                host=excluded.host,
+                owner_repo=excluded.owner_repo,
+                pr_number=excluded.pr_number,
+                state=excluded.state,
+                title=excluded.title,
+                url=excluded.url
+            "#,
+            params![
+                pr.session_id,
+                pr.host,
+                pr.owner_repo,
+                pr.pr_number as i64,
+                pr.state,
+                pr.title,
+                pr.url
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Load every session's pinned pull request (at most one per session).
+    pub fn load_pr_overrides(&self) -> Result<Vec<StoredPr>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            select session_id, pr_number, host, owner_repo, state, title, url
+            from session_pr_overrides
+            "#,
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let pr_number = row.get::<_, i64>(1)? as u64;
+            let host: String = row.get(2)?;
+            let owner_repo: String = row.get(3)?;
+            Ok(StoredPr {
+                session_id: row.get(0)?,
+                pr_number,
+                host: host.clone(),
+                owner_repo: owner_repo.clone(),
+                state: row.get(4)?,
+                title: row.get(5)?,
+                url: normalize_pr_url(row.get(6)?, &host, &owner_repo, pr_number),
+            })
+        })?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
+    /// Remove a session's pinned pull request, if any (a no-op otherwise).
+    pub fn delete_pr_override(&self, session_id: &str) -> Result<()> {
+        self.conn.execute(
+            "delete from session_pr_overrides where session_id = ?1",
+            params![session_id],
+        )?;
+        Ok(())
     }
 
     pub fn upsert_session(&self, session: &AgentSession) -> Result<()> {
@@ -1086,6 +1180,10 @@ impl SessionStore {
         // never a half-deleted session (e.g. tabs gone but the session surviving).
         let tx = self.conn.unchecked_transaction()?;
         tx.execute("delete from session_prs where session_id = ?1", params![id])?;
+        tx.execute(
+            "delete from session_pr_overrides where session_id = ?1",
+            params![id],
+        )?;
         // Drop the per-session changed-files revision counter too, so a deleted
         // session leaves no housekeeping rows behind.
         tx.execute("delete from changes_rev where session_id = ?1", params![id])?;
@@ -1550,6 +1648,51 @@ mod tests {
     }
 
     #[test]
+    fn pr_override_round_trips_and_survives_reopen() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("sessions.sqlite3");
+        let now = Utc::now();
+        {
+            let store = SessionStore::open(&db).unwrap();
+            store.upsert_session(&test_session("s1", now, now)).unwrap();
+            store.upsert_pr_override(&stored_pr("s1", 9)).unwrap();
+            let loaded = store.load_pr_overrides().unwrap();
+            assert_eq!(loaded, vec![stored_pr("s1", 9)]);
+            // One row per session: a second attach REPLACES the first rather
+            // than accumulating (the primary key is the session id alone).
+            store.upsert_pr_override(&stored_pr("s1", 12)).unwrap();
+            let loaded = store.load_pr_overrides().unwrap();
+            assert_eq!(loaded, vec![stored_pr("s1", 12)]);
+        }
+        // The cached state/title/url are what make a restart render the pin
+        // instantly, so the row must survive a reopen intact.
+        let store = SessionStore::open(&db).unwrap();
+        assert_eq!(
+            store.load_pr_overrides().unwrap(),
+            vec![stored_pr("s1", 12)]
+        );
+        store.delete_pr_override("s1").unwrap();
+        assert!(store.load_pr_overrides().unwrap().is_empty());
+        // Deleting an absent override is a harmless no-op.
+        store.delete_pr_override("s1").unwrap();
+    }
+
+    #[test]
+    fn delete_session_also_removes_its_pr_override_row() {
+        let store = test_store();
+        let now = Utc::now();
+        store.upsert_session(&test_session("s1", now, now)).unwrap();
+        store.upsert_pr_override(&stored_pr("s1", 7)).unwrap();
+
+        store.delete_session("s1").unwrap();
+
+        // The declared FK cascade never fires (PRAGMA foreign_keys is off), so
+        // the explicit delete is what keeps the override row from leaking to a
+        // later session that reuses the id.
+        assert!(store.load_pr_overrides().unwrap().is_empty());
+    }
+
+    #[test]
     fn remove_project_records_clears_project_sessions_and_prs_atomically() {
         let store = test_store();
         let now = Utc::now();
@@ -1585,6 +1728,10 @@ mod tests {
             .upsert_session(&test_session_in("c", "p2", now, now))
             .unwrap();
         store.upsert_pr(&stored_pr("a", 1)).unwrap();
+        // A pinned PR for one of p1's sessions and one for p2's, so the removal
+        // is proven to drop exactly its own project's override rows.
+        store.upsert_pr_override(&stored_pr("a", 1)).unwrap();
+        store.upsert_pr_override(&stored_pr("c", 3)).unwrap();
         // Advance a changed-files rev for one of p1's sessions so there is a
         // `changes_rev` row to prove the bulk removal drops it too.
         assert_eq!(store.next_changes_rev("a").unwrap(), 1);
@@ -1604,6 +1751,8 @@ mod tests {
             .collect();
         assert_eq!(remaining, vec!["c".to_string()]);
         assert!(store.load_all_latest_prs().unwrap().is_empty());
+        // p1's override row went with its sessions; p2's survives untouched.
+        assert_eq!(store.load_pr_overrides().unwrap(), vec![stored_pr("c", 3)]);
         // The project row itself is deleted in the same transaction — only p2
         // remains, so a removal cannot leave a row that reappears on restart.
         let project_ids: Vec<String> = store

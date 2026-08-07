@@ -111,6 +111,19 @@ export function AgentInfoDialog() {
         <InfoRow label="Tabs">
           {tabCount === 1 ? "1 tab" : `${tabCount} tabs`}
         </InfoRow>
+        {session.pr ? (
+          // Mirrors the TUI Agent Info's "Pull request:" line, including the
+          // "manually attached" cue: this row is where a pin says it is one.
+          <InfoRow label="Pull request">
+            #{session.pr.number} ({session.pr.state}) {session.pr.title}
+            {session.pr.overridden ? (
+              <span className="text-muted-foreground">
+                {" "}
+                (manually attached)
+              </span>
+            ) : null}
+          </InfoRow>
+        ) : null}
       </dl>
     )
   }

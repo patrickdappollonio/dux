@@ -15,7 +15,9 @@ use crate::git;
 use crate::logger;
 use crate::model::{PrInfo, PrState, Project};
 use crate::storage::StoredPr;
-use crate::worker::{PrSyncEntry, PullRequestLookup, ResolvedPullRequest, WorkerEvent};
+use crate::worker::{
+    PrLookupPurpose, PrSyncEntry, PullRequestLookup, ResolvedPullRequest, WorkerEvent,
+};
 
 /// Live GraphQL rate-limit snapshot parsed from a batched query's top-level
 /// `rateLimit` field. Lets the PR-sync loop back off before it exhausts the
@@ -125,6 +127,15 @@ struct Planned {
     /// deleted on merge). Terminal-but-running and undiscovered sessions get
     /// only the head-ref discovery alias.
     emit_num: bool,
+    /// Whether the head-ref discovery alias is emitted at all. True for every
+    /// remote-derived plan; false for a PINNED session, whose only alias is the
+    /// by-number refresh of the pin (discovery would answer for a PR the user
+    /// deliberately overrode).
+    emit_ref: bool,
+    /// A manually attached PR: the plan targets the PIN's repo and number, and
+    /// the merge rule reports the pin (or its stored reconstruction), never a
+    /// discovery result.
+    pinned: bool,
 }
 
 /// Single source of truth for "this stored PR is terminal (MERGED/CLOSED)".
@@ -147,8 +158,19 @@ impl Planned {
     ) -> Self {
         let is_terminal = stored_pr_is_terminal(known.as_ref());
         // Open known PRs also get a by-number alias; terminal-but-running and
-        // undiscovered sessions get only the head-ref discovery alias.
-        let emit_num = known.is_some() && !is_terminal;
+        // undiscovered sessions get only the head-ref discovery alias. The
+        // by-number alias fires ONLY when the stored row names the repo being
+        // queried: PR numbers are per-repo, so a row from another repository
+        // (a detached fork pin, a remote that changed under the session) asked
+        // at this target would fetch an unrelated pull request. Such a row
+        // falls back to discovery only; a discovery miss keeps the stored
+        // badge via the merge rule's fallback.
+        let known_matches_target = known.as_ref().is_some_and(|k| {
+            k.owner_repo
+                .eq_ignore_ascii_case(&format!("{owner}/{repo}"))
+                && normalize_github_host(&k.host).eq_ignore_ascii_case(&host)
+        });
+        let emit_num = known_matches_target && !is_terminal;
         Planned {
             session_id,
             host,
@@ -158,6 +180,35 @@ impl Planned {
             known,
             is_terminal,
             emit_num,
+            emit_ref: true,
+            pinned: false,
+        }
+    }
+
+    /// Build the plan for a PINNED session: exactly one alias, the by-number
+    /// refresh of the pin, against the pin's own repo. No head-ref discovery.
+    /// `known` is the override row (which carries the pin's cached state), so
+    /// the num alias number and every fallback reconstruct the PIN.
+    fn new_pinned(
+        session_id: String,
+        host: String,
+        owner: String,
+        repo: String,
+        branch: String,
+        known: StoredPr,
+    ) -> Self {
+        let is_terminal = stored_pr_is_terminal(Some(&known));
+        Planned {
+            session_id,
+            host,
+            owner,
+            repo,
+            branch,
+            known: Some(known),
+            is_terminal,
+            emit_num: true,
+            emit_ref: false,
+            pinned: true,
         }
     }
 }
@@ -211,7 +262,7 @@ fn run_entries(
         let mut chunk: Vec<usize> = Vec::new();
         let mut alias_count = 0usize;
         for i in idxs {
-            let cost = if planned[i].emit_num { 2 } else { 1 };
+            let cost = (planned[i].emit_ref as usize) + (planned[i].emit_num as usize);
             if !chunk.is_empty() && alias_count + cost > MAX_ALIASES_PER_QUERY {
                 let (r, rl, failed, limited) = run_chunk(&host, &planned, &chunk);
                 results.extend(r);
@@ -275,6 +326,58 @@ fn plan_entries(
     let mut planned: Vec<Planned> = Vec::new();
 
     for entry in entries {
+        // A PINNED session short-circuits the remote-derived target entirely:
+        // the user named the PR, so the query goes to the pin's (host,
+        // owner_repo), the policy gates the PINNED host, and no worktree
+        // remote is resolved (a pin routinely lives on a fork the remote does
+        // not name). Every fallback below answers from the PIN's row, never
+        // from `known_pr` raw: a stale `session_prs` latest naming a different
+        // PR must not surface as a pinned session's answer.
+        if let Some(pin) = &entry.pinned {
+            // The override row is the pin's known state. A `known_pr` naming a
+            // DIFFERENT number is not the pin (a stale row from before the
+            // attach); synthesize an OPEN placeholder from the pin's identity
+            // instead so no fallback can report the wrong pull request.
+            let known = entry
+                .known_pr
+                .clone()
+                .filter(|k| k.pr_number == pin.number)
+                .unwrap_or_else(|| StoredPr {
+                    session_id: entry.session_id.clone(),
+                    pr_number: pin.number,
+                    host: pin.host.clone(),
+                    owner_repo: pin.owner_repo.clone(),
+                    state: "OPEN".to_string(),
+                    title: String::new(),
+                    url: pull_request_url(&pin.host, &pin.owner_repo, pin.number),
+                });
+            let host = normalize_github_host(&pin.host).to_ascii_lowercase();
+            // The gate runs on the PINNED host (the host the query would go
+            // to), exactly like the remote-derived gate below.
+            if !policy.allows(&host) {
+                results.push((entry.session_id.clone(), reconstruct_from_stored(&known)));
+                continue;
+            }
+            // Terminal pin + exited agent: zero network, like the unpinned rule.
+            if stored_pr_is_terminal(Some(&known)) && entry.agent_exited {
+                results.push((entry.session_id.clone(), reconstruct_from_stored(&known)));
+                continue;
+            }
+            let Some((owner, repo)) = pin.owner_repo.split_once('/') else {
+                results.push((entry.session_id.clone(), reconstruct_from_stored(&known)));
+                continue;
+            };
+            planned.push(Planned::new_pinned(
+                entry.session_id.clone(),
+                host,
+                owner.to_string(),
+                repo.to_string(),
+                entry.branch_name.clone(),
+                known,
+            ));
+            continue;
+        }
+
         // Resolve (host, owner_repo): live remote first, else the known PR's repo
         // (works even after the branch/remote is gone).
         //
@@ -917,11 +1020,13 @@ fn build_chunk_query(planned: &[Planned], chunk: &[usize]) -> (String, Vec<usize
         ));
         for &pos in positions {
             let p = &planned[chunk[pos]];
-            let qname = graphql_string(&format!("refs/heads/{}", p.branch));
-            q.push_str(&format!(
-                "    {}: ref(qualifiedName: {qname}) {{ associatedPullRequests(first: 1, orderBy: {{field: CREATED_AT, direction: DESC}}) {{ nodes {{ number state title url }} }} }}\n",
-                ref_alias(pos),
-            ));
+            if p.emit_ref {
+                let qname = graphql_string(&format!("refs/heads/{}", p.branch));
+                q.push_str(&format!(
+                    "    {}: ref(qualifiedName: {qname}) {{ associatedPullRequests(first: 1, orderBy: {{field: CREATED_AT, direction: DESC}}) {{ nodes {{ number state title url }} }} }}\n",
+                    ref_alias(pos),
+                ));
+            }
             if p.emit_num
                 && let Some(known) = &p.known
             {
@@ -995,6 +1100,13 @@ fn parse_chunk_response(
 ///     branch), else the by-number refresh (robust when the branch was deleted)
 ///   - undiscovered: whatever the head-ref discovery found
 fn merge_pr_result(p: &Planned, ref_pr: Option<PrInfo>, num_pr: Option<PrInfo>) -> Option<PrInfo> {
+    // A PINNED plan reports the pin and nothing else: the by-number refresh
+    // when it answered (a CLOSED pin can reopen, an OPEN one can merge), else
+    // the stored reconstruction. No discovery result exists to consider
+    // (`emit_ref` is false), and a per-alias failure keeps the badge.
+    if p.pinned {
+        return num_pr.or_else(|| p.known.as_ref().and_then(reconstruct_from_stored));
+    }
     let Some(known) = &p.known else {
         return ref_pr;
     };
@@ -1142,6 +1254,15 @@ pub(crate) fn pr_view_args(host: &str, owner_repo: &str, number: u64) -> Vec<Str
     ]
 }
 
+/// The exact host spelling the sync planner produces: empty means github.com,
+/// and hostnames compare (and are stored) lowercased. `apply_pr_attach` stores
+/// pins through this so a stored pin is byte-identical to what the planner
+/// derives; an unnormalized host would never match and the pin would never
+/// refresh.
+pub(crate) fn normalized_github_host(host: &str) -> String {
+    normalize_github_host(host).to_ascii_lowercase()
+}
+
 fn normalize_github_host(host: &str) -> &str {
     if host.trim().is_empty() {
         "github.com"
@@ -1248,6 +1369,7 @@ pub fn run_pull_request_lookup_job(
         Err(message) => {
             let _ = worker_tx.send(WorkerEvent::PullRequestResolved {
                 result: Err(message),
+                purpose: PrLookupPurpose::CreateAgent,
                 status_op_id,
             });
             return;
@@ -1284,6 +1406,161 @@ pub fn run_pull_request_lookup_job(
     };
     let _ = worker_tx.send(WorkerEvent::PullRequestResolved {
         result,
+        purpose: PrLookupPurpose::CreateAgent,
+        status_op_id,
+    });
+}
+
+/// Parse a user-typed PR reference into a lookup for a MANUAL ATTACH to an
+/// existing session. Deliberately NOT [`parse_pull_request_lookup`], whose
+/// project-match refusal is correct for the create flow (fetching another
+/// repository's head into this project's worktree would be wrong) and exactly
+/// backwards here: the whole point of a manual attach is that the PR may live
+/// under any head ref or another repository (a fork). Shares the same
+/// [`crate::pr_reference::parse_typed_reference`] grammar.
+///
+/// * A reference NAMING a repository is taken at its word: the host it typed
+///   (or the session's project remote host when it typed none, else
+///   github.com) is gated through the policy, and the lookup targets the typed
+///   `(host, owner_repo, number)`. No project-match check.
+/// * A BARE number resolves against the session's project remote, and the
+///   three real failure modes are surfaced by name: no GitHub origin (or an
+///   unreadable remote), and a policy-denied host. Bare numbers work exactly
+///   when that remote resolves.
+///
+/// Pure over the pre-resolved `resolution`, so every input form is testable
+/// without git.
+pub fn parse_attach_pull_request_lookup(
+    raw_input: &str,
+    resolution: &git::RemoteResolution,
+    project_name: &str,
+    policy: &GithubHostPolicy,
+) -> Result<PullRequestLookup, String> {
+    let reference = crate::pr_reference::parse_typed_reference(raw_input)?;
+
+    if let Some(owner_repo) = reference.owner_repo.clone() {
+        let host = match reference.host.as_deref() {
+            Some(host) => host.to_string(),
+            // `owner/repo#123` names no host; it inherits the project's
+            // (already-qualified) remote host, else github.com.
+            None => match resolution {
+                git::RemoteResolution::Allowed(remote) => remote.host.clone(),
+                git::RemoteResolution::Denied | git::RemoteResolution::Unresolved => {
+                    "github.com".to_string()
+                }
+            },
+        };
+        let host = host.to_ascii_lowercase();
+        if !policy.allows(&host) {
+            return Err(format!(
+                "dux cannot look up pull requests on {host}. Sign in to that host with \
+                 `gh auth login --hostname {host}`, or paste a reference from a host you \
+                 are already signed in to."
+            ));
+        }
+        let Some(number) = reference.number else {
+            return Err(format!(
+                "That address names {owner_repo} but no pull request. Add the number, \
+                 for example {owner_repo}#123."
+            ));
+        };
+        return Ok(PullRequestLookup {
+            host,
+            owner_repo,
+            number,
+        });
+    }
+
+    let Some(number) = reference.number else {
+        // Unreachable through the parser (a reference without a repository is
+        // always a bare number), kept as a refusal rather than a panic.
+        return Err(
+            "Enter a pull request URL, owner/repo#123, or a PR number. A repository \
+             address works too."
+                .to_string(),
+        );
+    };
+    match resolution {
+        git::RemoteResolution::Allowed(remote) => Ok(PullRequestLookup {
+            host: remote.host.clone(),
+            owner_repo: remote.owner_repo.clone(),
+            number,
+        }),
+        git::RemoteResolution::Denied => Err(format!(
+            "Project \"{project_name}\"'s remote is on a host dux is not signed in to, so a \
+             bare PR number cannot be resolved. Sign in with `gh auth login --hostname \
+             <host>`, or paste the full PR URL instead."
+        )),
+        git::RemoteResolution::Unresolved => Err(format!(
+            "Project \"{project_name}\" does not have a GitHub origin remote, so a bare PR \
+             number cannot be resolved. Paste the full PR URL (or owner/repo#{number}) \
+             instead."
+        )),
+    }
+}
+
+/// Resolve a PR reference for a MANUAL ATTACH and post
+/// [`WorkerEvent::PullRequestResolved`] with `purpose: Attach`. Runs on a
+/// background thread (it reads the project's remote, then shells out to
+/// `gh pr view`). Shared by the TUI's attach modal and the web's
+/// `PUT /sessions/:id/pull-request` handler through
+/// [`crate::engine::Engine::dispatch_attach_pull_request`], so both surfaces
+/// resolve attaches identically. `project` is the SESSION's project: its
+/// remote is what a bare number (or a host-less `owner/repo#123`) resolves
+/// against.
+pub fn run_attach_pull_request_lookup_job(
+    project: Project,
+    session_id: String,
+    raw_input: String,
+    worker_tx: Sender<WorkerEvent>,
+    status_op_id: Option<String>,
+    policy: GithubHostPolicy,
+) {
+    let resolution = git::resolve_remote_github_repo(Path::new(&project.path), &policy);
+    let purpose = PrLookupPurpose::Attach { session_id };
+    let lookup =
+        match parse_attach_pull_request_lookup(&raw_input, &resolution, &project.name, &policy) {
+            Ok(lookup) => lookup,
+            Err(message) => {
+                let _ = worker_tx.send(WorkerEvent::PullRequestResolved {
+                    result: Err(message),
+                    purpose,
+                    status_op_id,
+                });
+                return;
+            }
+        };
+
+    let args = pr_view_args(&lookup.host, &lookup.owner_repo, lookup.number);
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    // Bounded so a hung `gh pr view` cannot strand the attach busy forever.
+    let result = match run_gh_with_timeout(&arg_refs, GH_CALL_TIMEOUT) {
+        GhCallOutcome::Completed(output) if output.status.success() => {
+            parse_resolved_pull_request_json(
+                &String::from_utf8_lossy(&output.stdout),
+                project,
+                &lookup.host,
+                &lookup.owner_repo,
+                None,
+            )
+        }
+        GhCallOutcome::Completed(output) => Err(format!(
+            "Failed to resolve PR #{} from {}: {}",
+            lookup.number,
+            lookup.owner_repo,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )),
+        GhCallOutcome::TimedOut => Err(format!(
+            "gh pr view timed out after {}s resolving PR #{} from {}.",
+            GH_CALL_TIMEOUT.as_secs(),
+            lookup.number,
+            lookup.owner_repo,
+        )),
+        GhCallOutcome::Failed(msg) => Err(format!("Failed to run gh pr view: {msg}")),
+    };
+    let _ = worker_tx.send(WorkerEvent::PullRequestResolved {
+        result,
+        purpose,
         status_op_id,
     });
 }
@@ -2338,6 +2615,7 @@ mod tests {
             worktree_path: "/nonexistent/dux-test-path".to_string(),
             known_pr: Some(stored(42, "MERGED")),
             agent_exited: true,
+            pinned: None,
         };
         let (results, signals) = run_entries(
             std::slice::from_ref(&entry),
@@ -2962,6 +3240,7 @@ mod tests {
             worktree_path: "/nonexistent/worktree".to_string(),
             known_pr: None,
             agent_exited: false,
+            pinned: None,
         }
     }
 
@@ -3009,6 +3288,328 @@ mod tests {
         assert_eq!(planned[0].owner, "octocat");
         assert_eq!(planned[0].repo, "Hello-World");
         assert_eq!(planned[0].branch, "feat/x");
+    }
+
+    /// A stored override row for the pinned tests: PR #12 on a FORK, while the
+    /// session's own remote (when a test consults it at all) is
+    /// `octocat/Hello-World`.
+    fn pinned_stored(state: &str) -> StoredPr {
+        StoredPr {
+            session_id: "s0".to_string(),
+            pr_number: 12,
+            host: "github.com".to_string(),
+            owner_repo: "forker/Hello-World".to_string(),
+            state: state.to_string(),
+            title: "Pinned".to_string(),
+            url: "https://github.com/forker/Hello-World/pull/12".to_string(),
+        }
+    }
+
+    fn pin_of(stored: &StoredPr) -> crate::worker::PinnedPr {
+        crate::worker::PinnedPr {
+            host: stored.host.clone(),
+            owner_repo: stored.owner_repo.clone(),
+            number: stored.pr_number,
+        }
+    }
+
+    /// A pinned session queries the PINNED repo (here a fork), never the
+    /// worktree's remote: the resolver panics to prove planning does not even
+    /// look at it, and the built query carries exactly ONE alias, the by-number
+    /// one for the pinned PR. Head-ref discovery is not planned for pins.
+    #[test]
+    fn plan_entries_pinned_session_queries_only_the_pinned_repo_by_number() {
+        let stored = pinned_stored("OPEN");
+        let entry = PrSyncEntry {
+            known_pr: Some(stored.clone()),
+            pinned: Some(pin_of(&stored)),
+            ..planning_entry()
+        };
+
+        let (results, planned) = plan_entries(
+            std::slice::from_ref(&entry),
+            &|_| panic!("a pinned session must not resolve the worktree remote"),
+            &legacy_policy(),
+        );
+
+        assert!(results.is_empty(), "a pinned OPEN session is queried");
+        assert_eq!(planned.len(), 1);
+        assert_eq!(planned[0].host, "github.com");
+        assert_eq!(planned[0].owner, "forker");
+        assert_eq!(planned[0].repo, "Hello-World");
+
+        let (q, _) = build_chunk_query(&planned, &[0]);
+        assert!(
+            q.contains("repository(owner: \"forker\", name: \"Hello-World\")"),
+            "the query targets the fork: {q}"
+        );
+        assert!(
+            q.contains("s0_num: pullRequest(number: 12)"),
+            "the pinned PR is refreshed by number: {q}"
+        );
+        assert!(
+            !q.contains("s0_ref"),
+            "no head-ref discovery for a pinned session: {q}"
+        );
+    }
+
+    /// The host gate runs on the PINNED host. A denied pin answers from the
+    /// pin's own stored row, and even a stale `known_pr` naming a DIFFERENT PR
+    /// cannot leak through as the answer for a pinned session.
+    #[test]
+    fn plan_entries_pinned_gate_runs_on_the_pinned_host_and_answers_only_the_pin() {
+        let stored = StoredPr {
+            host: "git.company.example".to_string(),
+            ..pinned_stored("OPEN")
+        };
+        // A stale non-pin row (the autodetected latest) that must NOT surface.
+        let entry = PrSyncEntry {
+            known_pr: Some(stored_pr_named(50, "OPEN", "octocat/Hello-World")),
+            pinned: Some(pin_of(&stored)),
+            ..planning_entry()
+        };
+        let policy = GithubHostPolicy::Hosts(std::iter::once("github.com".to_string()).collect());
+
+        let (results, planned) = plan_entries(
+            std::slice::from_ref(&entry),
+            &|_| panic!("a pinned session must not resolve the worktree remote"),
+            &policy,
+        );
+
+        assert!(planned.is_empty(), "a denied pinned host is never queried");
+        assert_eq!(results.len(), 1);
+        let pr = results[0].1.as_ref().expect("the pin is kept");
+        assert_eq!(
+            pr.number, 12,
+            "the answer is the PIN, not the stale stored latest"
+        );
+        assert_eq!(pr.owner_repo, "forker/Hello-World");
+    }
+
+    /// Terminal pin + exited agent: zero network, reconstructed from the pin.
+    #[test]
+    fn plan_entries_pinned_terminal_exited_reconstructs_the_pin_without_network() {
+        let stored = pinned_stored("MERGED");
+        let entry = PrSyncEntry {
+            known_pr: Some(stored.clone()),
+            pinned: Some(pin_of(&stored)),
+            agent_exited: true,
+            ..planning_entry()
+        };
+
+        let (results, planned) = plan_entries(
+            std::slice::from_ref(&entry),
+            &|_| panic!("a pinned session must not resolve the worktree remote"),
+            &legacy_policy(),
+        );
+
+        assert!(planned.is_empty());
+        let pr = results[0].1.as_ref().expect("reconstructed pin");
+        assert_eq!(pr.number, 12);
+        assert_eq!(pr.state, PrState::Merged);
+    }
+
+    /// A per-alias fetch failure (the pinned repo alias came back null) keeps
+    /// the pin rather than wiping the badge, mirroring the open-known fallback.
+    #[test]
+    fn pinned_per_alias_failure_preserves_the_pin() {
+        let stored = pinned_stored("OPEN");
+        let entry = PrSyncEntry {
+            known_pr: Some(stored.clone()),
+            pinned: Some(pin_of(&stored)),
+            ..planning_entry()
+        };
+        let (_, planned) = plan_entries(
+            std::slice::from_ref(&entry),
+            &|_| panic!("no remote resolution for pins"),
+            &legacy_policy(),
+        );
+        let chunk = [0usize];
+        let (_, pos_repo) = build_chunk_query(&planned, &chunk);
+        let data = serde_json::json!({ "r0": serde_json::Value::Null });
+        let (results, _) = parse_chunk_response(&planned, &chunk, &pos_repo, Some(&data));
+        let pr = results[0].1.as_ref().expect("pin preserved");
+        assert_eq!(pr.number, 12);
+
+        // And a real answer for the pin refreshes it (a CLOSED pin can reopen).
+        let data = serde_json::json!({ "r0": { "s0_num": pr_node(12, "MERGED") } });
+        let (results, _) = parse_chunk_response(&planned, &chunk, &pos_repo, Some(&data));
+        let pr = results[0].1.as_ref().expect("refreshed pin");
+        assert_eq!(pr.number, 12);
+        assert_eq!(pr.state, PrState::Merged);
+    }
+
+    /// A stored PR naming a DIFFERENT repo than the resolved query target must
+    /// not put its number into the target repo's query: PR numbers are
+    /// per-repo, so `other/Repo#12` asked of `octocat/Hello-World` is an
+    /// unrelated pull request that would then be surfaced and persisted. The
+    /// two ways this happens for real: a detached fork pin whose row survived
+    /// somewhere, and a remote that changed under a session. Such an entry
+    /// falls back to discovery only, and a discovery miss keeps the stored
+    /// badge rather than inventing anything.
+    #[test]
+    fn a_known_pr_from_another_repo_never_emits_its_number_at_the_query_target() {
+        let entry = PrSyncEntry {
+            known_pr: Some(stored_pr_named(12, "OPEN", "forker/Hello-World")),
+            ..planning_entry()
+        };
+        let (results, planned) = plan_entries(
+            std::slice::from_ref(&entry),
+            &|_| {
+                git::RemoteResolution::Allowed(git::GitHubRemote {
+                    host: "github.com".to_string(),
+                    owner_repo: "octocat/Hello-World".to_string(),
+                })
+            },
+            &legacy_policy(),
+        );
+        assert!(results.is_empty());
+        assert_eq!(planned.len(), 1);
+
+        let chunk = [0usize];
+        let (q, pos_repo) = build_chunk_query(&planned, &chunk);
+        assert!(
+            !q.contains("s0_num"),
+            "the foreign row's number must not be asked of the session repo: {q}"
+        );
+        assert!(q.contains("s0_ref"), "discovery still runs: {q}");
+
+        // Discovery finding nothing keeps the stored badge (per-alias-failure
+        // semantics), and cannot surface an unrelated same-number PR because
+        // no by-number alias exists to fetch one.
+        let data = serde_json::json!({ "r0": { "s0_ref": serde_json::Value::Null } });
+        let (results, _) = parse_chunk_response(&planned, &chunk, &pos_repo, Some(&data));
+        let pr = results[0].1.as_ref().expect("stored badge kept");
+        assert_eq!(pr.owner_repo, "forker/Hello-World");
+        assert_eq!(pr.number, 12);
+
+        // And a same-repo known row still gets its by-number refresh, so the
+        // gate did not disable the branch-deleted-on-merge robustness.
+        let entry = PrSyncEntry {
+            known_pr: Some(stored_pr_named(12, "OPEN", "octocat/Hello-World")),
+            ..planning_entry()
+        };
+        let (_, planned) = plan_entries(
+            std::slice::from_ref(&entry),
+            &|_| {
+                git::RemoteResolution::Allowed(git::GitHubRemote {
+                    host: "github.com".to_string(),
+                    owner_repo: "octocat/Hello-World".to_string(),
+                })
+            },
+            &legacy_policy(),
+        );
+        let (q, _) = build_chunk_query(&planned, &[0]);
+        assert!(q.contains("s0_num: pullRequest(number: 12)"), "{q}");
+    }
+
+    /// The attach lookup constructor, per input form. Unlike
+    /// `parse_pull_request_lookup` there is NO project-match refusal: a
+    /// cross-repo URL is the point of the flow.
+    #[test]
+    fn parse_attach_lookup_accepts_a_cross_repo_url() {
+        let resolution = git::RemoteResolution::Allowed(git::GitHubRemote {
+            host: "github.com".to_string(),
+            owner_repo: "octocat/Hello-World".to_string(),
+        });
+        let lookup = parse_attach_pull_request_lookup(
+            "https://github.com/forker/Hello-World/pull/12",
+            &resolution,
+            "proj",
+            &legacy_policy(),
+        )
+        .expect("cross-repo URLs are accepted");
+        assert_eq!(lookup.owner_repo, "forker/Hello-World");
+        assert_eq!(lookup.number, 12);
+        assert_eq!(lookup.host, "github.com");
+
+        // `owner/repo#123` names no host: it inherits the project remote's.
+        let resolution = git::RemoteResolution::Allowed(git::GitHubRemote {
+            host: "github.example.com".to_string(),
+            owner_repo: "octocat/Hello-World".to_string(),
+        });
+        let lookup = parse_attach_pull_request_lookup(
+            "forker/Hello-World#7",
+            &resolution,
+            "proj",
+            &legacy_policy(),
+        )
+        .expect("host-less repo references are accepted");
+        assert_eq!(lookup.host, "github.example.com");
+        assert_eq!(lookup.owner_repo, "forker/Hello-World");
+        assert_eq!(lookup.number, 7);
+    }
+
+    #[test]
+    fn parse_attach_lookup_gates_the_typed_host_and_requires_a_number() {
+        let resolution = git::RemoteResolution::Allowed(git::GitHubRemote {
+            host: "github.com".to_string(),
+            owner_repo: "octocat/Hello-World".to_string(),
+        });
+        let policy = GithubHostPolicy::Hosts(std::iter::once("github.com".to_string()).collect());
+        let err = parse_attach_pull_request_lookup(
+            "https://git.company.example/acme/widget/pull/3",
+            &resolution,
+            "proj",
+            &policy,
+        )
+        .expect_err("a typed host the policy denies is refused");
+        assert!(err.contains("git.company.example"), "got {err}");
+        assert!(err.contains("gh auth login"), "got {err}");
+
+        let err = parse_attach_pull_request_lookup(
+            "https://github.com/forker/Hello-World",
+            &resolution,
+            "proj",
+            &policy,
+        )
+        .expect_err("a repository address without a number names no PR");
+        assert!(err.contains("forker/Hello-World"), "got {err}");
+    }
+
+    /// A bare number resolves against the session's project remote, and each of
+    /// the three real failure modes is surfaced by name rather than collapsed.
+    #[test]
+    fn parse_attach_lookup_bare_number_follows_the_project_remote() {
+        let allowed = git::RemoteResolution::Allowed(git::GitHubRemote {
+            host: "github.com".to_string(),
+            owner_repo: "octocat/Hello-World".to_string(),
+        });
+        let lookup = parse_attach_pull_request_lookup("#42", &allowed, "proj", &legacy_policy())
+            .expect("bare numbers resolve against the remote");
+        assert_eq!(lookup.owner_repo, "octocat/Hello-World");
+        assert_eq!(lookup.number, 42);
+
+        let err = parse_attach_pull_request_lookup(
+            "42",
+            &git::RemoteResolution::Unresolved,
+            "proj",
+            &legacy_policy(),
+        )
+        .expect_err("no GitHub origin means no bare-number resolution");
+        assert!(err.contains("GitHub origin remote"), "got {err}");
+        assert!(err.contains("proj"), "got {err}");
+
+        let err = parse_attach_pull_request_lookup(
+            "42",
+            &git::RemoteResolution::Denied,
+            "proj",
+            &legacy_policy(),
+        )
+        .expect_err("a policy-denied remote host is named, not collapsed");
+        assert!(err.contains("not signed in"), "got {err}");
+    }
+
+    fn stored_pr_named(number: u64, state: &str, owner_repo: &str) -> StoredPr {
+        StoredPr {
+            session_id: "s0".to_string(),
+            pr_number: number,
+            host: "github.com".to_string(),
+            owner_repo: owner_repo.to_string(),
+            state: state.to_string(),
+            title: "t".to_string(),
+            url: format!("https://github.com/{owner_repo}/pull/{number}"),
+        }
     }
 
     /// The counterpart, so the assertion above is not vacuous: with nothing to

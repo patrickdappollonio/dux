@@ -40,6 +40,7 @@ import {
   SquareChevronRight,
   SquareTerminal,
   Trash2,
+  Unlink,
   Variable,
   X,
 } from "lucide-react"
@@ -107,9 +108,11 @@ import {
   mobileAccessoryBarVisible,
   mobileTopBarVisible,
   setMobileBarVisibility,
+  detachPullRequest,
   openAgentEnv,
   openAgentInfo,
   openAgentStartupCommand,
+  openAttachPullRequest,
   openChangeProvider,
   openDelete,
   openDeleteTerminal,
@@ -169,6 +172,8 @@ export function AgentActionsMenu({
   // they hide is mobile-only, so a desktop viewport must never offer them
   // even when a terminal-context menu renders.
   const isMobile = useIsMobile()
+  const ghAvailable = bootstrap?.gh_available ?? false
+  const prOverridden = session.pr?.overridden ?? false
 
   return (
     <DropdownMenuGroup>
@@ -253,6 +258,26 @@ export function AgentActionsMenu({
         <Cpu />
         Change agent provider…
       </DropdownMenuItem>
+      {/* GitHub-gated, like the project menu's from-PR item: without a usable
+          gh there is nothing to attach. The label flips on the OVERRIDE (a
+          manually attached PR), not on mere PR presence, because attaching
+          over an autodetected badge is still a first manual attach. */}
+      {ghAvailable && (
+        <DropdownMenuItem onClick={() => openAttachPullRequest(session.id)}>
+          <GitPullRequest />
+          {prOverridden
+            ? "Change attached pull request…"
+            : "Attach pull request…"}
+        </DropdownMenuItem>
+      )}
+      {/* No confirm and no ellipsis: detaching is reversible (autodetection
+          resumes, and the PR can be re-attached any time). */}
+      {prOverridden && (
+        <DropdownMenuItem onClick={() => detachPullRequest(session.id)}>
+          <Unlink />
+          Detach pull request
+        </DropdownMenuItem>
+      )}
       <DropdownMenuItem onClick={() => openAgentInfo(session.id)}>
         <Info />
         Agent info…

@@ -7789,6 +7789,76 @@ impl App {
                     choose_project: choose_button,
                 };
             }
+            PromptState::AttachPullRequestInput {
+                current_pr, input, ..
+            } => {
+                self.render_dim_overlay(frame);
+                // Two body rows always (the accepted-forms hint plus spacing),
+                // plus one more when there is a current PR to name.
+                let has_current = current_pr.is_some();
+                let height = if has_current { 9 } else { 8 };
+                let area = centered_rect_exact(64, height, frame.area());
+                self.clear_overlay_area(frame, area);
+
+                let outer = self.themed_overlay_block("Attach Pull Request");
+                let inner = outer.inner(area);
+                outer.render(area, frame.buffer_mut());
+
+                let [label_area, input_area, hint_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(if has_current { 3 } else { 2 }),
+                        Constraint::Length(3),
+                        Constraint::Min(1),
+                    ])
+                    .areas(inner);
+
+                let mut labels = Vec::new();
+                if let Some(current) = current_pr {
+                    labels.push(Line::from(Span::styled(
+                        format!(" Currently showing {current}; attaching replaces it."),
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    )));
+                }
+                labels.push(Line::from(Span::styled(
+                    " Enter a PR URL, owner/repo#123, #123, or 123:",
+                    Style::default().fg(self.theme.input_label_fg),
+                )));
+                labels.push(Line::from(Span::styled(
+                    " Attaching pins the PR and pauses autodetection.",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                )));
+                Paragraph::new(labels).render(label_area, frame.buffer_mut());
+
+                // The field is the modal's only control, so it is always
+                // focused: focused border, caret drawn.
+                let input_block = Block::default()
+                    .borders(Borders::ALL)
+                    .border_set(border::ROUNDED)
+                    .border_style(self.theme.overlay_field_border_style(true));
+                let input_inner = input_block.inner(input_area);
+                Paragraph::new(render_single_line_cursor_input(
+                    " ",
+                    &input.text,
+                    input.cursor,
+                    self.theme.input_cursor_fg,
+                    self.theme.input_cursor_bg,
+                    true,
+                ))
+                .block(input_block)
+                .render(input_area, frame.buffer_mut());
+
+                let confirm_key = self.bindings.label_for(Action::Confirm);
+                let close_key = self.bindings.label_for(Action::CloseOverlay);
+                let hints = vec![
+                    Hint::key(confirm_key, "attach"),
+                    Hint::key(close_key, "cancel"),
+                ];
+                Paragraph::new(modal_hint_line(&self.theme, &hints))
+                    .render(hint_area, frame.buffer_mut());
+                self.overlay_layout.active =
+                    OverlayMouseLayout::AttachPullRequestInput { input: input_inner };
+            }
             PromptState::None => {}
         }
     }
@@ -15419,6 +15489,53 @@ mod tests {
             caret_columns(&buf, input, app.theme.input_cursor_bg).len(),
             1
         );
+    }
+
+    fn multibyte_attach_pull_request_prompt(cursor: usize) -> PromptState {
+        let mut input = TextInput::with_text(MULTIBYTE_NAME.to_string());
+        input.cursor = cursor;
+        PromptState::AttachPullRequestInput {
+            session_id: "session-1".to_string(),
+            current_pr: Some("#42 (open) Fix the frobnicator (manually attached)".to_string()),
+            input,
+        }
+    }
+
+    #[test]
+    fn attach_pull_request_modal_survives_a_caret_before_every_multibyte_character() {
+        for cursor in caret_positions(MULTIBYTE_NAME) {
+            let mut app = test_app(default_bindings());
+            app.prompt = multibyte_attach_pull_request_prompt(cursor);
+            draw(&mut app);
+        }
+    }
+
+    #[test]
+    fn attach_pull_request_modal_publishes_a_clickable_input_rect() {
+        // Both shapes publish: with a current-PR line in the body and without.
+        for current_pr in [Some("#42 (open) Fix the frobnicator".to_string()), None] {
+            let mut app = test_app(default_bindings());
+            app.prompt = PromptState::AttachPullRequestInput {
+                session_id: "session-1".to_string(),
+                current_pr,
+                input: TextInput::new(),
+            };
+            let buf = draw(&mut app);
+
+            let OverlayMouseLayout::AttachPullRequestInput { input } = app.overlay_layout.active
+            else {
+                panic!(
+                    "the attach modal must publish its input rect, got {:?}",
+                    app.overlay_layout.active
+                );
+            };
+            assert!(input.width > 0 && input.height > 0);
+            // It is the only control, so it is always focused and draws a caret.
+            assert_eq!(
+                caret_columns(&buf, input, app.theme.input_cursor_bg).len(),
+                1
+            );
+        }
     }
 
     #[test]

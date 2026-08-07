@@ -4,6 +4,7 @@ import { AddProjectDialog } from "@/components/AddProjectDialog"
 import { AgentEnvDialog } from "@/components/AgentEnvDialog"
 import { AgentInfoDialog } from "@/components/AgentInfoDialog"
 import { AgentStartupCommandDialog } from "@/components/AgentStartupCommandDialog"
+import { AttachPullRequestDialog } from "@/components/AttachPullRequestDialog"
 import { AttachWorktreeDialog } from "@/components/AttachWorktreeDialog"
 import { AppSidebar } from "@/components/Sidebar"
 import { StartupLogsDialog } from "@/components/StartupLogsDialog"
@@ -69,6 +70,7 @@ function GlobalOverlays() {
       <CreateAgentDialog />
       <NewAgentPickerDialog />
       <RenameSessionDialog />
+      <AttachPullRequestDialog />
       <ChangeProviderDialog />
       <DeleteSessionDialog />
       <ConfirmDeleteTerminalDialog />

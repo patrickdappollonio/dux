@@ -1007,14 +1007,26 @@ pub(crate) struct RefusalBlink {
     pub(crate) prompt: std::mem::Discriminant<PromptState>,
 }
 
+/// The lowercase state word for a PR, matching the web's `prStateLabel` casing
+/// (`open`/`merged`/`closed`) so both surfaces read the same.
+pub(crate) fn pr_state_word(state: &crate::model::PrState) -> &'static str {
+    match state {
+        crate::model::PrState::Open => "open",
+        crate::model::PrState::Merged => "merged",
+        crate::model::PrState::Closed => "closed",
+    }
+}
+
 /// Build the body lines of the Agent Info modal from a session: name, provider,
 /// the current/original/forked-from branches, a drift note when the current
 /// branch differs from the branch the agent was created on, then the worktree,
-/// creation time, and status. Each line carries its semantic tone so the
-/// renderer never has to substring-match prose. Pure and unit-tested.
+/// creation time, status, and the tracked pull request when one is known
+/// (naming a manual pin). Each line carries its semantic tone so the renderer
+/// never has to substring-match prose. Pure and unit-tested.
 pub(crate) fn agent_info_lines(
     session: &AgentSession,
     project_default: Option<ProviderKind>,
+    pr: Option<(&crate::model::PrInfo, bool)>,
 ) -> Vec<(String, AgentInfoTone)> {
     let name = session
         .title
@@ -1070,6 +1082,20 @@ pub(crate) fn agent_info_lines(
         format!("Status:       {}", session.status.as_str()),
         AgentInfoTone::Neutral,
     ));
+    // The PR line is the ONLY TUI cue that a manual pin exists, so when a PR
+    // is known it always renders, and a pin always says so.
+    if let Some((pr, overridden)) = pr {
+        let mut line = format!(
+            "Pull request: #{} ({}) {}",
+            pr.number,
+            pr_state_word(&pr.state),
+            pr.title
+        );
+        if overridden {
+            line.push_str(" (manually attached)");
+        }
+        lines.push((line, AgentInfoTone::Neutral));
+    }
     lines
 }
 
@@ -1588,6 +1614,23 @@ pub(crate) enum PromptState {
         project: Option<Project>,
         input: TextInput,
         focus: PullRequestInputFocus,
+    },
+    /// Attach (pin) a GitHub pull request to an existing agent session.
+    ///
+    /// Modeled on `PullRequestInput`, with ONE DELIBERATE difference: NO focus
+    /// enum. `PullRequestInput` carries `PullRequestInputFocus` because it has
+    /// two controls (the reference field and the project-chooser action); this
+    /// modal has exactly ONE control, since the session already fixes the
+    /// project, and per the movement-keys tenet a one-control modal needs no
+    /// focus concept: there is nowhere for focus to move.
+    AttachPullRequestInput {
+        session_id: String,
+        /// A prebuilt display line naming the PR currently shown for the
+        /// session (e.g. `#42 (open) Fix the frobnicator`, plus
+        /// ` (manually attached)` when it is a pin), so the body can say what
+        /// attaching would replace. `None` when no PR is known yet.
+        current_pr: Option<String>,
+        input: TextInput,
     },
     NameNewAgent {
         request: CreateAgentRequest,
@@ -2344,6 +2387,10 @@ pub(crate) enum OverlayMouseLayout {
         /// not be clickable.
         choose_project: Option<Rect>,
     },
+    /// The attach-pull-request modal's single text field (its only control).
+    AttachPullRequestInput {
+        input: Rect,
+    },
     NameNewAgent {
         input: Rect,
         checkbox: Option<OverlayCheckbox>,
@@ -2708,6 +2755,7 @@ impl App {
             gh_status: crate::model::GhStatus::Unknown,
             gh_probe: Default::default(),
             pr_statuses: HashMap::new(),
+            pr_overrides: HashMap::new(),
             branch_sync_sessions,
             pr_sync_sessions,
             pr_sync,
@@ -2738,6 +2786,7 @@ impl App {
             pending_web_checkout_ops: HashMap::new(),
             pending_web_add_project_ops: HashMap::new(),
             pending_web_pr_lookup_ops: HashMap::new(),
+            pending_pr_attach_ops: HashMap::new(),
             pending_delete_ops_web: HashMap::new(),
             pending_create_ops: HashMap::new(),
             pending_web_launch_ops: HashMap::new(),
@@ -3566,6 +3615,18 @@ impl App {
     fn is_palette_action_available(&self, action: Action) -> bool {
         match action {
             Action::OpenCurrentPullRequest => self.current_pr_info().is_some(),
+            // The PR flows require GitHub integration plus an authenticated gh.
+            Action::NewAgentFromPr | Action::AttachPullRequest => {
+                self.github_pr_agent_command_available()
+            }
+            // Detach is only meaningful when the selected agent actually holds
+            // a manually attached (pinned) pull request. Deliberately NOT
+            // gated on gh availability: detaching touches no network, and a
+            // pin must never outlive the ability to remove it (gh could be
+            // uninstalled or signed out after the attach).
+            Action::DetachPullRequest => self
+                .selected_session()
+                .is_some_and(|s| self.engine.pr_overrides.contains_key(&s.id)),
             // The terminal-move commands are offered only when a terminal exists;
             // the agent-move commands are always offered (they fall through to
             // `true` and guard at invoke, like the rest of the palette).
@@ -3639,11 +3700,7 @@ impl App {
         self.bindings
             .filtered_palette(input)
             .into_iter()
-            .filter(|binding| {
-                self.is_palette_action_available(binding.action)
-                    && (binding.action != Action::NewAgentFromPr
-                        || self.github_pr_agent_command_available())
-            })
+            .filter(|binding| self.is_palette_action_available(binding.action))
             .collect()
     }
 
@@ -3730,6 +3787,8 @@ impl App {
             "open-worktree" => self.open_selected_worktree_in_default_editor(),
             "open-worktree-with" => self.open_worktree_editor_picker(),
             "open-current-pr" => self.open_current_pr_in_browser(),
+            "attach-pull-request" => self.open_attach_pull_request_prompt(),
+            "detach-pull-request" => self.detach_pull_request(),
             "toggle-project" => {
                 self.toggle_collapse_selected_project();
                 Ok(())
@@ -3996,6 +4055,10 @@ impl App {
             // refreshing is the right thing to do. The off-to-on case is handled
             // above by launching the probe and nothing else, whose completion
             // arms this same work exactly once.
+            //
+            // Re-seed first so a manually attached PR's badge survives the
+            // reload-time `pr_statuses` churn without waiting for a cycle.
+            self.engine.seed_pr_statuses_from_store();
             self.engine.update_pr_sync_sessions();
             self.engine.spawn_initial_pr_refresh();
             self.engine.spawn_pr_sync_worker();
@@ -4656,9 +4719,15 @@ impl App {
                 .map(|p| p.default_provider.clone());
             self.input_target = InputTarget::None;
             self.fullscreen_overlay = FullscreenOverlay::None;
+            let pr = self
+                .engine
+                .pr_statuses
+                .get(&session.id)
+                .map(|pr| (pr, self.engine.pr_overrides.contains_key(&session.id)));
+            let lines = agent_info_lines(&session, project_default, pr);
             self.prompt = PromptState::AgentInfo(AgentInfoPrompt {
                 session_label: label,
-                lines: agent_info_lines(&session, project_default),
+                lines,
             });
         } else {
             self.set_error("No agent session selected. Select an agent to see its info.");
@@ -5586,7 +5655,7 @@ mod tests {
         s.initial_branch = "server-mode".into();
         s.source_branch = "main".into();
 
-        let lines = agent_info_lines(&s, None);
+        let lines = agent_info_lines(&s, None, None);
         assert!(lines.iter().any(|(l, _)| l.contains("agent-tabs"))); // current branch
         assert!(lines.iter().any(|(l, _)| l.contains("server-mode"))); // original
         assert!(lines.iter().any(|(l, _)| l.contains("main"))); // forked from
@@ -5611,7 +5680,7 @@ mod tests {
         let mut s = test_session("s1", "p1", 0);
         s.branch_name = "main".into();
         s.initial_branch = "main".into();
-        let lines = agent_info_lines(&s, None);
+        let lines = agent_info_lines(&s, None, None);
         // Both checks below are shaped so they would pass on an EMPTY list, so
         // pin that there is something to check first. Without this the test
         // passes while reporting nothing at all.
@@ -5637,7 +5706,7 @@ mod tests {
         let mut s = test_session("s1", "p1", 0);
         s.branch_name = "main".into();
         s.initial_branch = String::new();
-        let lines = agent_info_lines(&s, None);
+        let lines = agent_info_lines(&s, None, None);
         assert!(
             !lines
                 .iter()
@@ -5647,10 +5716,50 @@ mod tests {
     }
 
     #[test]
+    fn agent_info_lines_show_the_pull_request_and_name_a_manual_pin() {
+        let s = test_session("s1", "p1", 0);
+        let pr = crate::model::PrInfo {
+            number: 42,
+            state: crate::model::PrState::Open,
+            title: "Fix the frobnicator".to_string(),
+            host: "github.com".to_string(),
+            owner_repo: "o/r".to_string(),
+            url: "https://github.com/o/r/pull/42".to_string(),
+        };
+
+        // No PR known: no line at all.
+        let none = agent_info_lines(&s, None, None);
+        assert!(!none.iter().any(|(l, _)| l.starts_with("Pull request:")));
+
+        // Autodetected PR: number, lowercase state, title, no pin marker.
+        let auto = agent_info_lines(&s, None, Some((&pr, false)));
+        let line = auto
+            .iter()
+            .find(|(l, _)| l.starts_with("Pull request:"))
+            .expect("pr line");
+        assert!(
+            line.0.contains("#42 (open) Fix the frobnicator"),
+            "{}",
+            line.0
+        );
+        assert!(!line.0.contains("manually attached"));
+        assert_eq!(line.1, AgentInfoTone::Neutral);
+
+        // Pinned PR: the same line carries the manual marker. This line is the
+        // ONLY TUI cue that a pin exists, so the marker is load-bearing.
+        let pinned = agent_info_lines(&s, None, Some((&pr, true)));
+        let line = pinned
+            .iter()
+            .find(|(l, _)| l.starts_with("Pull request:"))
+            .expect("pr line");
+        assert!(line.0.ends_with("(manually attached)"), "{}", line.0);
+    }
+
+    #[test]
     fn agent_info_provider_line_notes_a_divergent_project_default() {
         let s = test_session("s1", "p1", 0); // provider "codex"
         // Matching default: plain provider line, no annotation.
-        let same = agent_info_lines(&s, Some(ProviderKind::from_str("codex")));
+        let same = agent_info_lines(&s, Some(ProviderKind::from_str("codex")), None);
         let provider_same = same
             .iter()
             .find(|(l, _)| l.starts_with("Provider:"))
@@ -5658,7 +5767,7 @@ mod tests {
         assert!(!provider_same.0.contains("project default"));
 
         // Divergent default: the line spells out the project default too.
-        let diff = agent_info_lines(&s, Some(ProviderKind::from_str("claude")));
+        let diff = agent_info_lines(&s, Some(ProviderKind::from_str("claude")), None);
         let provider_diff = diff
             .iter()
             .find(|(l, _)| l.starts_with("Provider:"))

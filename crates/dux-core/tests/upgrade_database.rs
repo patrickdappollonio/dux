@@ -498,6 +498,30 @@ fn tables_added_since_are_created_empty_and_immediately_usable() {
     assert_eq!(prs.len(), 1);
     assert_eq!(prs[0].pr_number, 42);
     assert_eq!(prs[0].title, "Make it faster");
+
+    // `session_pr_overrides`: empty (nobody upgrading has a pin yet), and
+    // immediately usable for a manual attach.
+    assert!(
+        store
+            .load_pr_overrides()
+            .expect("load overrides")
+            .is_empty()
+    );
+    store
+        .upsert_pr_override(&StoredPr {
+            session_id: "sess-1".to_string(),
+            pr_number: 7,
+            host: "github.com".to_string(),
+            owner_repo: "forker/widget".to_string(),
+            state: "OPEN".to_string(),
+            title: "Pinned by hand".to_string(),
+            url: "https://github.com/forker/widget/pull/7".to_string(),
+        })
+        .expect("upsert override");
+    let pins = store.load_pr_overrides().expect("load overrides");
+    assert_eq!(pins.len(), 1);
+    assert_eq!(pins[0].pr_number, 7);
+    assert_eq!(pins[0].owner_repo, "forker/widget");
 }
 
 #[test]

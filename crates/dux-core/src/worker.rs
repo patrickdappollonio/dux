@@ -49,6 +49,20 @@ pub struct ResolvedPullRequest {
     pub custom_name: Option<String>,
 }
 
+/// Why a PR lookup ran: to create a new agent from the PR, or to manually
+/// attach the PR to an existing session. Carried on
+/// [`WorkerEvent::PullRequestResolved`] so the completion handler routes the
+/// resolved PR to the right consumer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PrLookupPurpose {
+    CreateAgent,
+    /// Resolving for a manual attach; carries the target session so the
+    /// engine-side handler can re-check it still exists before applying.
+    Attach {
+        session_id: String,
+    },
+}
+
 /// A parsed PR-lookup target: the host/owner_repo the PR belongs to and its
 /// number. Produced by [`crate::gh::parse_pull_request_lookup`] from a raw URL
 /// or `#N`/`N` string and consumed by the `gh pr view` lookup. Shared by the
@@ -471,6 +485,12 @@ pub enum WorkerEvent {
     },
     PullRequestResolved {
         result: Result<ResolvedPullRequest, String>,
+        /// Why the lookup ran. A create-flow resolution opens the name prompt
+        /// (TUI) or hands off to the create dispatch (web); an attach-flow
+        /// resolution is applied ENGINE-SIDE (`apply_pr_attach`) after
+        /// re-checking the session still exists, under the same keyed op the
+        /// dispatch opened.
+        purpose: PrLookupPurpose,
         /// Correlation id for a web `HandlerStatusOp` whose final is resolved in
         /// the completion handler. Rides from the `apply_wire` dispatch through
         /// the lookup worker so the lookup FAILURE (here) and the lookup SUCCESS
@@ -614,6 +634,19 @@ pub struct BranchSyncEntry {
     pub branch_name: String,
 }
 
+/// The identity of a manually attached ("pinned") pull request, carried on a
+/// [`PrSyncEntry`] so the sync planner queries the PINNED repo (which may be a
+/// fork, or any repo other than the session's remote) instead of deriving a
+/// target from the worktree's remote. Identity only; the cached state/title
+/// ride in `known_pr`, which both construction sites set to the override row
+/// for a pinned session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PinnedPr {
+    pub host: String,
+    pub owner_repo: String,
+    pub number: u64,
+}
+
 /// Snapshot of session data shared with the PR-sync background worker.
 #[derive(Clone, Debug)]
 pub struct PrSyncEntry {
@@ -622,11 +655,18 @@ pub struct PrSyncEntry {
     pub worktree_path: String,
     /// If we already know a PR for this session, the worker can use `gh pr view`
     /// (works even after branch deletion) and skip terminal states (merged/closed).
+    /// For a pinned session this is the OVERRIDE row, never the `session_prs`
+    /// latest (which can be a different, autodetected PR).
     pub known_pr: Option<StoredPr>,
     /// Whether the agent process has exited. Used to skip PR discovery calls
     /// for sessions that are both exited and in a terminal PR state — nobody
     /// is pushing to that branch anymore.
     pub agent_exited: bool,
+    /// A manually attached PR. When set, the planner short-circuits the
+    /// remote-derived target: the query goes to the pinned `(host, owner_repo)`,
+    /// the host policy gates the PINNED host, and the only alias emitted is the
+    /// by-number one for the pinned PR (no head-ref discovery).
+    pub pinned: Option<PinnedPr>,
 }
 
 #[derive(Clone, Debug)]
