@@ -75,6 +75,25 @@ PR; agents open PRs themselves as part of their work. Pulling a PR's branch into
 fresh agent, on the other hand, is something the web UI does do, covered in
 [Agents from the browser](/docs/web-agents).
 
+### Attaching a PR by hand
+
+dux normally finds the PR itself, by matching the agent's branch name against
+the repository on GitHub. When that heuristic misses (the PR lives on a fork,
+or under a head branch that no longer matches), you can attach one manually:
+in the web UI it is **Attach pull request…** in the agent's ⋯ menu, and in the
+terminal UI it is the `attach-pull-request` command in the command palette. The
+field takes the same spellings as the from-PR agent flow: a full PR URL,
+`owner/repo#123`, or a bare number resolved against the project's remote.
+
+A manually attached PR is pinned: dux keeps tracking that exact pull request
+(its state still refreshes) and stops second-guessing it with autodetection,
+and the Agent Info dialog says "manually attached" so you can tell a pin from a
+find. Detaching (**Detach pull request** in the same menu, or
+`detach-pull-request` in the palette) lets autodetection take over again on the
+next sync pass; it is not destructive, so there is no confirmation. Both
+actions need GitHub integration and a signed-in `gh`, exactly like the rest of
+the PR features.
+
 ## Staying in sync
 
 There is no file watcher behind the Changes pane, and knowing that explains
