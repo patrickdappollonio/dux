@@ -3998,6 +3998,10 @@ impl App {
             // refreshing is the right thing to do. The off-to-on case is handled
             // above by launching the probe and nothing else, whose completion
             // arms this same work exactly once.
+            //
+            // Re-seed first so a manually attached PR's badge survives the
+            // reload-time `pr_statuses` churn without waiting for a cycle.
+            self.engine.seed_pr_statuses_from_store();
             self.engine.update_pr_sync_sessions();
             self.engine.spawn_initial_pr_refresh();
             self.engine.spawn_pr_sync_worker();

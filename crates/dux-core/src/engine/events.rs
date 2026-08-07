@@ -2157,6 +2157,13 @@ impl Engine {
                     // there, so an enable produces exactly one refresh, and
                     // `spawn_pr_sync_worker` is single-instance so it produces
                     // at most one poller however often this runs.
+                    //
+                    // Re-seed from the store FIRST: a toggle-off cleared
+                    // `pr_statuses`, and a manually attached PR must get its
+                    // badge back the moment the integration re-arms rather
+                    // than waiting for the first sync cycle. Idempotent (the
+                    // stored rows are refreshed on every accepted result).
+                    self.seed_pr_statuses_from_store();
                     self.update_pr_sync_sessions();
                     self.spawn_refs_watcher();
                     self.spawn_pr_sync_worker();

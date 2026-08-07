@@ -5105,6 +5105,44 @@ mod tests {
         GithubHostPolicy::Hosts(names.iter().map(|n| n.to_string()).collect())
     }
 
+    /// The off→on re-arm restores a pinned PR's badge immediately: the probe
+    /// completion (the ONE place PR work is armed) re-seeds from the store, so
+    /// the pin does not wait for the first sync cycle.
+    #[test]
+    fn probe_completion_reseeds_pinned_badges_from_the_store() {
+        let (mut engine, _tmp) = test_engine();
+        engine.github_integration_enabled = true;
+        engine
+            .session_store
+            .upsert_session(&sample_session("s1", "p1", "feat"))
+            .expect("seed session");
+        engine
+            .session_store
+            .upsert_pr_override(&crate::storage::StoredPr {
+                session_id: "s1".to_string(),
+                pr_number: 12,
+                host: "github.com".to_string(),
+                owner_repo: "forker/Hello-World".to_string(),
+                state: "OPEN".to_string(),
+                title: "Pinned".to_string(),
+                url: "https://github.com/forker/Hello-World/pull/12".to_string(),
+            })
+            .expect("seed the override");
+        // The toggle-off path cleared the in-memory badge state.
+        assert!(engine.pr_statuses.is_empty());
+
+        engine.process_worker_event(WorkerEvent::GhStatusChecked {
+            generation: 0,
+            outcome: GhProbe::Decided {
+                available: true,
+                policy: hosts(&["github.com"]),
+            },
+        });
+
+        assert_eq!(engine.pr_statuses.get("s1").map(|p| p.number), Some(12));
+        assert_eq!(engine.pr_overrides.get("s1").map(|p| p.pr_number), Some(12));
+    }
+
     #[test]
     fn a_stale_probe_result_is_discarded_before_it_changes_anything() {
         let (mut engine, _tmp) = test_engine();
