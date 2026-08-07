@@ -1284,7 +1284,10 @@ impl Engine {
             let message = if visible {
                 "Changes pane is already shown."
             } else {
-                "Changes pane is already hidden."
+                // The pane (and its actions menu) is already gone from the
+                // screen, so this answer carries the same reopen directions as
+                // the hide itself.
+                "Changes pane is already hidden. Reopen it from the show button in the header, or set it permanently in Preferences."
             };
             return WireStatus::new("info", message.to_string());
         }
@@ -4526,6 +4529,25 @@ mod tests {
             !status.message.contains("Changes actions menu"),
             "hidden message must not point at the menu that vanished with the pane, got: {}",
             status.message
+        );
+
+        // The idempotent already-hidden branch answers a user staring at the
+        // same paneless screen, so it needs the same reopen directions as the
+        // hide itself.
+        let repeat = engine
+            .apply_wire(WireCommand::SetChangesPaneVisible { visible: false })
+            .expect("hide again while already hidden");
+        let repeat_status = repeat.status.expect("an already-hidden status");
+        assert_eq!(repeat_status.tone, "info");
+        assert!(
+            repeat_status.message.contains("show button in the header"),
+            "already-hidden message must point at the header show button, got: {}",
+            repeat_status.message
+        );
+        assert!(
+            repeat_status.message.contains("Preferences"),
+            "already-hidden message must point at Preferences, got: {}",
+            repeat_status.message
         );
     }
 
