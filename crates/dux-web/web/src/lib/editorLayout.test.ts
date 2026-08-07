@@ -4,7 +4,9 @@ import {
   EDITOR_CONTENT_PANEL_ID,
   EDITOR_LAYOUT_ID,
   EXPLORER_PANEL_ID,
+  explorerExpandTarget,
   isExplorerCollapsed,
+  lastExpandedExplorerSize,
 } from "./editorLayout"
 
 // The collapse-state derivation for the editor's explorer panel: the panel
@@ -50,5 +52,46 @@ describe("isExplorerCollapsed", () => {
   it("the ids are distinct and stable (they key the persisted layout)", () => {
     expect(EXPLORER_PANEL_ID).not.toBe(EDITOR_CONTENT_PANEL_ID)
     expect(EDITOR_LAYOUT_ID.length).toBeGreaterThan(0)
+  })
+})
+
+// The toggle-open width memory. `panel.expand()` falls back to minSize when
+// no in-memory expand size exists (a fresh page load after collapsing), which
+// would land a collapse+reload+show at a 12% sliver. So the last expanded
+// size is tracked from every layout report and the toggle resizes to it.
+
+describe("lastExpandedExplorerSize", () => {
+  it("records the explorer size from an expanded layout", () => {
+    expect(
+      lastExpandedExplorerSize(
+        { [EXPLORER_PANEL_ID]: 30, [EDITOR_CONTENT_PANEL_ID]: 70 },
+        null,
+      ),
+    ).toBe(30)
+  })
+
+  it("a collapsed layout keeps the previous memory instead of recording 0", () => {
+    expect(
+      lastExpandedExplorerSize(
+        { [EXPLORER_PANEL_ID]: 0, [EDITOR_CONTENT_PANEL_ID]: 100 },
+        30,
+      ),
+    ).toBe(30)
+  })
+
+  it("a layout missing the explorer entry keeps the previous memory", () => {
+    expect(
+      lastExpandedExplorerSize({ [EDITOR_CONTENT_PANEL_ID]: 100 }, 27),
+    ).toBe(27)
+  })
+})
+
+describe("explorerExpandTarget", () => {
+  it("uses the remembered width when there is one", () => {
+    expect(explorerExpandTarget(30)).toBe("30%")
+  })
+
+  it("falls back to the mount default when nothing was ever recorded", () => {
+    expect(explorerExpandTarget(null)).toBe("22%")
   })
 })
