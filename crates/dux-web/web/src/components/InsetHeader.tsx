@@ -1,8 +1,15 @@
 import { Fragment } from "react"
+import { PanelRightOpen } from "lucide-react"
 
 import { AppMenu } from "@/components/AppMenu"
+import { SimpleTooltip } from "@/components/SimpleTooltip"
+import { Button } from "@/components/ui/button"
 import { branchDrift } from "@/lib/agentTabs"
-import { useDux } from "@/lib/store"
+import {
+  changesPaneVisible,
+  setChangesPaneVisibility,
+  useDux,
+} from "@/lib/store"
 import { matchOwner } from "@/lib/terminalOwner"
 import { terminalsForOwner, terminalTitle } from "@/lib/terminals"
 import type { SessionView, TerminalView } from "@/lib/types"
@@ -22,7 +29,8 @@ interface HeaderDetail {
 // isolation without pulling in `GlobalOverlays` -> `ConfigEditorDialog`, whose
 // eager Monaco import cannot initialize under vitest (see `TerminalArea`).
 export function InsetHeader() {
-  const { spine, selectedSessionId, selectedTarget } = useDux()
+  const dux = useDux()
+  const { spine, selectedSessionId, selectedTarget } = dux
   const allTerminals = spine?.terminals ?? []
   const focusedTerminal =
     selectedTarget?.kind === "terminal" ? selectedTarget : undefined
@@ -179,6 +187,25 @@ export function InsetHeader() {
       </div>
 
       <div className="flex shrink-0 items-center gap-2">
+        {/* The way back to a hidden Changes pane. Hiding it unmounts the pane
+            (and the pane's own ⋯ menu with it), so the reopen control must live
+            outside the pane — the sidebar's rail-only expand button applied to
+            the right panel. Same persisted preference write as the hide item;
+            outline variant so it reads as one family with the AppMenu trigger
+            beside it. Desktop only by construction: InsetHeader mounts only in
+            DesktopShell. */}
+        {!changesPaneVisible(dux) && (
+          <SimpleTooltip content="Show Changes pane">
+            <Button
+              variant="outline"
+              size="icon"
+              aria-label="Show Changes pane"
+              onClick={() => setChangesPaneVisibility(true)}
+            >
+              <PanelRightOpen />
+            </Button>
+          </SimpleTooltip>
+        )}
         <AppMenu />
       </div>
     </header>

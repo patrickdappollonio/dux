@@ -1,13 +1,17 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { cleanup, render, screen } from "@testing-library/react"
+import { cleanup, fireEvent, render, screen } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
 
 let mockState: DuxState
 vi.mock("@/lib/store", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/store")>()
-  return { ...actual, useDux: () => mockState }
+  return {
+    ...actual,
+    useDux: () => mockState,
+    setChangesPaneVisibility: vi.fn(),
+  }
 })
 
 // The store boots on import and reaches for browser globals; stub them so the
@@ -144,6 +148,36 @@ describe("InsetHeader standalone terminal crumbs", () => {
     expect(screen.getByText(/directory:/)).toBeTruthy()
     expect(screen.getByText("Terminal 1")).toBeTruthy()
     expect(screen.getByText(/terminal:/)).toBeTruthy()
+  })
+})
+
+describe("InsetHeader show-Changes button", () => {
+  // The pane's only in-app reopen control used to live inside the pane's own
+  // header menu, which unmounts with the pane; this button is the always-there
+  // way back (the sidebar rail-button pattern applied to the right panel).
+  it("renders only while the Changes pane is hidden, and clicking it shows the pane", async () => {
+    const store = await import("@/lib/store")
+    const setVisibility = vi.mocked(store.setChangesPaneVisibility)
+    setVisibility.mockClear()
+
+    mockState = {
+      ...stateFor("main", "main"),
+      bootstrap: { show_changes_pane: false },
+    } as unknown as DuxState
+    render(<InsetHeader />)
+    const button = screen.getByRole("button", { name: /show changes pane/i })
+    fireEvent.click(button)
+    expect(setVisibility).toHaveBeenCalledWith(true)
+  })
+
+  it("does not render while the Changes pane is visible", () => {
+    // stateFor carries no bootstrap and no override, so changesPaneVisible
+    // resolves to the pre-load default: visible.
+    mockState = stateFor("main", "main")
+    render(<InsetHeader />)
+    expect(
+      screen.queryByRole("button", { name: /show changes pane/i }),
+    ).toBeNull()
   })
 })
 
