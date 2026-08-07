@@ -47,8 +47,11 @@ import { isLocalAccessHost } from "@/lib/localAccess"
 import {
   EDITOR_CONTENT_PANEL_ID,
   EDITOR_LAYOUT_ID,
+  EXPLORER_DEFAULT_SIZE,
   EXPLORER_PANEL_ID,
+  explorerExpandTarget,
   isExplorerCollapsed,
+  lastExpandedExplorerSize,
 } from "@/lib/editorLayout"
 import { isImagePreviewPath, previewKind } from "@/lib/editorPreview"
 import { cn } from "@/lib/utils"
@@ -295,11 +298,22 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
     isExplorerCollapsed(defaultLayout),
   )
   const explorerPanelRef = useRef<PanelImperativeHandle | null>(null)
+  // The last width the explorer had while expanded, seeded from the persisted
+  // layout and folded forward on every layout report. Toggling open resizes
+  // to THIS rather than calling `panel.expand()`: expand() falls back to
+  // minSize when it has no in-memory expand size (a fresh page load after
+  // collapsing), which would reopen the explorer at a 12% sliver.
+  const lastExpandedExplorerSizeRef = useRef<number | null>(
+    lastExpandedExplorerSize(defaultLayout, null),
+  )
   function toggleExplorer(): void {
     const panel = explorerPanelRef.current
     if (!panel) return
-    if (panel.isCollapsed()) panel.expand()
-    else panel.collapse()
+    if (panel.isCollapsed()) {
+      panel.resize(explorerExpandTarget(lastExpandedExplorerSizeRef.current))
+    } else {
+      panel.collapse()
+    }
   }
 
   const dirty = activeTab?.dirty ?? false
@@ -504,8 +518,22 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
     if (!activeTab || activeTab.mode !== "file") return
     // Image tabs never load a buffer: the pane renders from /raw, and a /read
     // here would be refused over 5 MiB (before the binary flag exists) or
-    // read megabytes only to discard them.
-    if (isImagePreviewPath(activeTab.path)) return
+    // read megabytes only to discard them. A preview-replace onto an image
+    // can leave the tab's PREVIOUS file's buffer behind, so drop it: without
+    // this, replacing back to that file would render the stale buffer with
+    // no refetch. Same-reference return when there is nothing to drop, so
+    // this is not a setState loop (matches the prune effect's pattern).
+    if (isImagePreviewPath(activeTab.path)) {
+      const tabId = activeTab.id
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setBuffers((prev) => {
+        if (!prev.has(tabId)) return prev
+        const next = new Map(prev)
+        next.delete(tabId)
+        return next
+      })
+      return
+    }
     if (shouldSkipFileLoad(activeBuffer, activeTab.path)) return
     // `loadFileBuffer` synchronously seeds a placeholder buffer (so a stale
     // buffer from a preview-replace never renders even for one frame) before
@@ -518,7 +546,8 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
     // render (undefined -> null), which is exactly why the `loading` check
     // above exists: without it, this effect would fire a second, redundant
     // `fileApi.read` for the same tab+path before the first one even settles.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+    // (The lint reports this effect once, on the image branch's setBuffers
+    // above, so its disable covers this call too.)
     loadFileBuffer(activeTab.id, activeTab.path)
     // `loadFileBuffer` is a plain function (fresh identity every render, see
     // its own comment above), intentionally omitted so this effect is keyed
@@ -936,7 +965,9 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
                 ? "Show the file explorer"
                 : "Hide the file explorer"
             }
-            aria-pressed={explorerCollapsed}
+            // No aria-pressed: the control's state is carried by its CHANGING
+            // accessible name (Hide/Show), and a pressed state on top of a
+            // changing name reads as contradictory to assistive tech.
             onClick={toggleExplorer}
           >
             {explorerCollapsed ? <PanelLeftOpen /> : <PanelLeftClose />}
@@ -969,9 +1000,12 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
             </span>
           </SimpleTooltip>
         )}
-        {/* File / Diff view toggle — a segmented control. Hidden until a file is
-            open (nothing to view otherwise). Sets the ACTIVE TAB's mode. */}
-        {activeTab && (
+        {/* File / Diff view toggle — a segmented control. Hidden until a file
+            is open (nothing to view otherwise), and hidden for image tabs
+            (no text to diff; the store coerces image opens to file mode, so
+            offering the switch would only reach the binary-diff dead end).
+            Sets the ACTIVE TAB's mode. */}
+        {activeTab && !isImageTab && (
           <div
             className="flex shrink-0 items-center gap-0.5 rounded-md border p-0.5"
             role="group"
@@ -1105,13 +1139,17 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
           onLayoutChanged={(layout) => {
             onLayoutChanged(layout)
             setExplorerCollapsed(isExplorerCollapsed(layout))
+            lastExpandedExplorerSizeRef.current = lastExpandedExplorerSize(
+              layout,
+              lastExpandedExplorerSizeRef.current,
+            )
           }}
           className="size-full"
         >
           <ResizablePanel
             id={EXPLORER_PANEL_ID}
             panelRef={explorerPanelRef}
-            defaultSize={22}
+            defaultSize={EXPLORER_DEFAULT_SIZE}
             minSize={12}
             collapsible
           >
@@ -1212,6 +1250,21 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
                 <div className="flex h-full items-center justify-center px-4 text-center text-sm text-muted-foreground">
                   Select a file from the tree to view or edit it.
                 </div>
+              ) : isImageTab ? (
+                // Sits ABOVE the diff arm AND the buffer-gated chain on
+                // purpose. Above the buffer chain: an image tab has no
+                // buffer, so `fileReady` never turns true and those arms
+                // would park it on the spinner forever. Above the diff arm:
+                // the store coerces image opens to file mode, but if a
+                // diff-mode image tab reaches here anyway the picture must
+                // win over the binary-diff refusal (defense in depth). Keyed
+                // by path so a failed load resets when the tab
+                // preview-replaces onto another file.
+                <ImagePreviewPane
+                  key={activeTab.path}
+                  src={fileApi.rawUrl(sessionId, activeTab.path)}
+                  path={activeTab.path}
+                />
               ) : activeTab.mode === "diff" ? (
                 // Read-only Monaco diff (HEAD vs working copy).
                 activeBuffer?.diffError && !isBufferStale(activeBuffer, activeTab.path) ? (
@@ -1243,16 +1296,6 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
                     </Suspense>
                   </ChunkBoundary>
                 )
-              ) : isImageTab ? (
-                // Sits ABOVE the buffer-gated chain on purpose: an image tab has
-                // no buffer, so `fileReady` never turns true and the arms below
-                // would park it on the spinner forever. Keyed by path so a failed
-                // load resets when the tab preview-replaces onto another file.
-                <ImagePreviewPane
-                  key={activeTab.path}
-                  src={fileApi.rawUrl(sessionId, activeTab.path)}
-                  path={activeTab.path}
-                />
               ) : activeBuffer?.fileError && !isBufferStale(activeBuffer, activeTab.path) ? (
                 <div className="flex h-full flex-col items-center justify-center gap-2 px-4 text-center text-sm text-destructive">
                   {activeBuffer.fileError}
@@ -1402,30 +1445,61 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
 // Read-only preview for a raster image tab: renders straight from /raw (no
 // /read, no buffer; see the isImageTab derivation in EditorBody). The /raw
 // 25 MiB cap governs; when the request is refused (or the bytes are not a
-// decodable image) the <img> errors and the pane swaps to the error text.
-// The caller keys this by path so that state resets on a preview-replace.
+// decodable image) the <img> errors and the pane swaps to the error text
+// with a Retry. Retry bumps `attempt`, which keys the <img>, so a FRESH
+// element re-fires the request at the SAME URL (no cache-busting param;
+// /raw already sends Cache-Control: no-cache). The caller keys the whole
+// pane by path so all of this state resets on a preview-replace.
+//
+// The caption shows path + pixel dimensions once loaded. The plan asked for
+// path + byte size, but the pane deliberately never fetches the file, so the
+// byte size is unknowable here; naturalWidth/naturalHeight are what the
+// render itself knows.
 function ImagePreviewPane({ src, path }: { src: string; path: string }) {
   const [failed, setFailed] = useState(false)
+  const [attempt, setAttempt] = useState(0)
+  const [dims, setDims] = useState<{ w: number; h: number } | null>(null)
   if (failed) {
     return (
-      <div className="flex h-full items-center justify-center px-4 text-center text-sm text-destructive">
-        This image could not be loaded. It may exceed the server&rsquo;s
-        raw-file size cap.
+      <div className="flex h-full flex-col items-center justify-center gap-2 px-4 text-center text-sm text-destructive">
+        <span>
+          This image could not be loaded. One possibility is that it exceeds
+          the server&rsquo;s raw-file size cap.
+        </span>
+        {/* Mirrors the file-error arm's manual Retry. */}
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => {
+            setFailed(false)
+            setDims(null)
+            setAttempt((a) => a + 1)
+          }}
+        >
+          <RotateCw />
+          Retry
+        </Button>
       </div>
     )
   }
   return (
-    <div className="flex h-full min-h-0 flex-col items-center justify-center gap-2 bg-muted/30 p-4">
+    <PreviewImageFrame
+      caption={dims === null ? path : `${path} · ${dims.w} × ${dims.h}`}
+    >
       <img
+        key={attempt}
         src={src}
         alt={path}
-        className="max-h-full min-h-0 max-w-full object-contain"
+        className="max-h-full max-w-full object-contain"
+        onLoad={(e) =>
+          setDims({
+            w: e.currentTarget.naturalWidth,
+            h: e.currentTarget.naturalHeight,
+          })
+        }
         onError={() => setFailed(true)}
       />
-      <span className="max-w-full truncate font-mono text-xs text-muted-foreground">
-        {path}
-      </span>
-    </div>
+    </PreviewImageFrame>
   )
 }
 
@@ -1437,16 +1511,31 @@ function ImagePreviewPane({ src, path }: { src: string; path: string }) {
 function SvgPreviewPane({ draft, path }: { draft: string; path: string }) {
   const url = useObjectUrl(draft, "image/svg+xml")
   return (
-    <div className="flex h-full min-h-0 flex-col items-center justify-center gap-2 bg-muted/30 p-4">
+    <PreviewImageFrame caption={path}>
       {url !== null && (
-        <img
-          src={url}
-          alt={path}
-          className="max-h-full min-h-0 max-w-full object-contain"
-        />
+        <img src={url} alt={path} className="max-h-full max-w-full object-contain" />
       )}
-      <span className="max-w-full truncate font-mono text-xs text-muted-foreground">
-        {path}
+    </PreviewImageFrame>
+  )
+}
+
+// Shared frame for the two image panes: the image lives in a min-h-0 flex-1
+// box and the caption is a fixed (shrink-0) sibling, so a portrait image can
+// never push the caption out of the pane or force a surprise scrollbar.
+function PreviewImageFrame({
+  caption,
+  children,
+}: {
+  caption: string
+  children: React.ReactNode
+}) {
+  return (
+    <div className="flex h-full min-h-0 flex-col items-center gap-2 bg-muted/30 p-4">
+      <div className="flex min-h-0 w-full flex-1 items-center justify-center">
+        {children}
+      </div>
+      <span className="max-w-full shrink-0 truncate font-mono text-xs text-muted-foreground">
+        {caption}
       </span>
     </div>
   )

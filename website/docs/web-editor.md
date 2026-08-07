@@ -163,8 +163,11 @@ so you can tweak a path and see the shape move before committing to it.
 
 Image files (PNG, JPEG, GIF, WebP, and the rest) are not text, so they skip the
 editor entirely and open as the picture itself, centered on the right, with the
-path underneath. There is nothing to save and no preview toggle to press; it is
-simply the fastest way to check what an agent just drew into the worktree.
+path and pixel dimensions underneath. There is nothing to save, no preview
+toggle to press, and no diff view either: clicking a changed image in the
+Changes pane shows you the picture as it is on disk right now, which is what
+you wanted to see anyway. It is simply the fastest way to check what an agent
+just drew into the worktree.
 
 ## Diffs against HEAD
 

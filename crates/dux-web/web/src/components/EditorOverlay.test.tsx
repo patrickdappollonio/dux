@@ -239,7 +239,7 @@ describe("a save the server refuses", () => {
 // so a buffer-gated image tab would park on a spinner forever. Instead the
 // pane renders straight from /raw. SVG stays a TEXT tab (Monaco) whose
 // Preview toggle renders the current draft through a Blob URL.
-async function mountWithTab(path: string) {
+async function mountWithTab(path: string, mode: "file" | "diff" = "file") {
   const { EditorOverlay } = await import("@/components/EditorOverlay")
   const { getSnapshot } = await import("@/lib/store")
   mockState = {
@@ -247,30 +247,51 @@ async function mountWithTab(path: string) {
     editorTarget: { sessionId: SESSION, initialPath: path },
     editorTabs: {
       [SESSION]: {
-        tabs: [{ id: TAB_ID, path, dirty: false, preview: false, mode: "file" }],
+        tabs: [{ id: TAB_ID, path, dirty: false, preview: false, mode }],
         activeId: TAB_ID,
       },
     },
   } as DuxState
-  render(<EditorOverlay />)
+  return render(<EditorOverlay />)
+}
+
+// The createObjectURL pair jsdom does not implement, installed onto the REAL
+// URL class (never a `{ ...URL }` spread global, which would destroy the URL
+// constructor for everything else in the render). Created Blobs are captured
+// so the SVG draft-accuracy test can read back what was actually rendered.
+const createdBlobs: Blob[] = []
+let objectUrlCounter = 0
+const createObjectURLMock = vi.fn((blob: Blob) => {
+  createdBlobs.push(blob)
+  objectUrlCounter += 1
+  return `blob:test-${objectUrlCounter}`
+})
+const revokeObjectURLMock = vi.fn()
+function installObjectUrlMocks() {
+  createdBlobs.length = 0
+  objectUrlCounter = 0
+  Object.assign(URL, {
+    createObjectURL: createObjectURLMock,
+    revokeObjectURL: revokeObjectURLMock,
+  })
+}
+function removeObjectUrlMocks() {
+  const u = URL as { createObjectURL?: unknown; revokeObjectURL?: unknown }
+  delete u.createObjectURL
+  delete u.revokeObjectURL
 }
 
 describe("image and svg preview", () => {
   beforeEach(() => {
     vi.clearAllMocks()
     installBootStubs()
-    // useObjectUrl needs the createObjectURL pair jsdom does not implement.
-    let n = 0
-    vi.stubGlobal("URL", {
-      ...URL,
-      createObjectURL: vi.fn(() => `blob:test-${++n}`),
-      revokeObjectURL: vi.fn(),
-    })
+    installObjectUrlMocks()
   })
 
   afterEach(() => {
     cleanup()
     vi.unstubAllGlobals()
+    removeObjectUrlMocks()
   })
 
   it("an image tab renders from /raw, never calls /read, and hides Save", async () => {
@@ -283,6 +304,45 @@ describe("image and svg preview", () => {
     // Buffer-derived controls have no buffer to act on.
     expect(screen.queryByRole("button", { name: /save/i })).toBeNull()
     expect(screen.queryByRole("button", { name: /preview/i })).toBeNull()
+    // And the File/Diff segmented toggle is hidden: an image has no text to
+    // diff, so offering the switch would only lead to the binary-diff dead
+    // end the store-side mode coercion exists to prevent.
+    expect(screen.queryByRole("group", { name: "View mode" })).toBeNull()
+  })
+
+  it("an image tab stuck in diff mode still shows the picture (defense in depth)", async () => {
+    // The store coerces image opens to file mode; if a diff-mode image tab
+    // reaches the render anyway, the image arm sits ABOVE the diff arm so
+    // the picture wins over the binary-diff refusal.
+    await mountWithTab("assets/logo.png", "diff")
+    await screen.findByAltText("assets/logo.png")
+    expect(screen.queryByText(/diffed here/i)).toBeNull()
+  })
+
+  it("a failed image load offers Retry, which re-fires the request", async () => {
+    await mountWithTab("assets/logo.png")
+    const img = await screen.findByAltText("assets/logo.png")
+    fireEvent.error(img)
+    // Softened copy: the cap is one possibility, not the diagnosed cause.
+    expect(screen.getByText(/could not be loaded/i)).toBeTruthy()
+    fireEvent.click(screen.getByRole("button", { name: /retry/i }))
+    // A fresh <img> element (nonce-keyed) re-fires the request; same URL, no
+    // cache-busting param (/raw already sends no-cache).
+    const again = await screen.findByAltText("assets/logo.png")
+    expect(again).not.toBe(img)
+    expect(again.getAttribute("src")).toBe(
+      "/api/v1/sessions/s1/files/raw?path=assets%2Flogo.png",
+    )
+  })
+
+  it("the caption shows the pixel dimensions once the image loads", async () => {
+    await mountWithTab("assets/logo.png")
+    const img = (await screen.findByAltText("assets/logo.png")) as HTMLImageElement
+    // jsdom never decodes images; stamp the natural size and fire load.
+    Object.defineProperty(img, "naturalWidth", { value: 640 })
+    Object.defineProperty(img, "naturalHeight", { value: 480 })
+    fireEvent.load(img)
+    expect(screen.getByText(/640\s*×\s*480/)).toBeTruthy()
   })
 
   it("an svg tab opens as text and its Preview renders the draft as an image", async () => {
@@ -297,6 +357,69 @@ describe("image and svg preview", () => {
     fireEvent.click(screen.getByRole("button", { name: /preview/i }))
     const img = await screen.findByAltText("icons/logo.svg")
     expect(img.getAttribute("src")).toMatch(/^blob:/)
+  })
+
+  it("the svg preview renders the EDITED draft, not the loaded file", async () => {
+    // The plan's core SVG decision: preview parity with markdown means the
+    // Blob is built from the CURRENT DRAFT, unsaved edits included. This
+    // pins it against a draft-to-loaded regression.
+    const EDITED = '<svg xmlns="http://www.w3.org/2000/svg"><g/></svg>'
+    await mountWithTab("icons/logo.svg")
+    const box = await screen.findByTestId("code-editor")
+    await waitFor(() =>
+      expect((box as HTMLTextAreaElement).value).toBe(ON_DISK),
+    )
+    fireEvent.change(box, { target: { value: EDITED } })
+    fireEvent.click(screen.getByRole("button", { name: /preview/i }))
+    await screen.findByAltText("icons/logo.svg")
+    const lastBlob = createdBlobs[createdBlobs.length - 1]
+    expect(lastBlob.type).toBe("image/svg+xml")
+    expect(await lastBlob.text()).toBe(EDITED)
+  })
+
+  it("preview-replacing an image tab back to text refetches (no stale buffer)", async () => {
+    // README -> logo.png -> README on the SAME tab id: the image early-return
+    // must also drop the tab's stale buffer, or the return trip would render
+    // the old buffer without a refetch.
+    const { rerender } = await mountWithTab(PATH)
+    const { EditorOverlay } = await import("@/components/EditorOverlay")
+    await screen.findByTestId("code-editor")
+    await waitFor(() => expect(readMock).toHaveBeenCalledTimes(1))
+
+    mockState = {
+      ...mockState,
+      editorTabs: {
+        [SESSION]: {
+          tabs: [
+            {
+              id: TAB_ID,
+              path: "assets/logo.png",
+              dirty: false,
+              preview: true,
+              mode: "file",
+            },
+          ],
+          activeId: TAB_ID,
+        },
+      },
+    } as DuxState
+    rerender(<EditorOverlay />)
+    await screen.findByAltText("assets/logo.png")
+
+    mockState = {
+      ...mockState,
+      editorTabs: {
+        [SESSION]: {
+          tabs: [
+            { id: TAB_ID, path: PATH, dirty: false, preview: true, mode: "file" },
+          ],
+          activeId: TAB_ID,
+        },
+      },
+    } as DuxState
+    rerender(<EditorOverlay />)
+    await screen.findByTestId("code-editor")
+    await waitFor(() => expect(readMock).toHaveBeenCalledTimes(2))
   })
 })
 
@@ -321,6 +444,10 @@ describe("file explorer collapse toggle", () => {
       name: /hide the file explorer/i,
     })
     expect(btn.className).toContain("max-md:size-10")
+    // The control's state is carried by its CHANGING accessible name
+    // (Hide/Show); aria-pressed on top of a changing name would contradict
+    // it, so it must not be present.
+    expect(btn.getAttribute("aria-pressed")).toBeNull()
     // Expanded means the explorer's search box is on screen.
     expect(screen.getByPlaceholderText("Search files…")).toBeTruthy()
   })
