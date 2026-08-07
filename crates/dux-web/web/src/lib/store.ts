@@ -4539,8 +4539,11 @@ export function setMobileBarVisibility(
     .then(() => true)
     .catch((e) => {
       // Roll the optimistic override back so the bar doesn't strand in the
-      // toggled state when the persist fails.
-      setState({ [key]: prev })
+      // toggled state when the persist fails — but ONLY while the override
+      // still holds the value this call wrote. A newer tap may have landed
+      // while this write was in flight, and rolling back over it would snap
+      // the bar to a state the user already corrected.
+      if (state[key] === next) setState({ [key]: prev })
       toast.error(
         e instanceof Error
           ? e.message
@@ -4561,10 +4564,18 @@ export function restoreMobileBars(): Promise<boolean> {
     .patchSettings({ ui: { mobile_top_bar: true, mobile_accessory_bar: true } })
     .then(() => true)
     .catch((e) => {
-      setState({
-        mobileTopBarOverride: prevTop,
-        mobileAccessoryBarOverride: prevAccessory,
-      })
+      // Per-field rollback with the same overtaken-write guard as
+      // `setMobileBarVisibility`: only a field still holding the `true` this
+      // restore wrote rolls back; one a newer toggle has since re-hidden is
+      // that newer write's to keep.
+      const rollback: Partial<DuxState> = {}
+      if (state.mobileTopBarOverride === true) {
+        rollback.mobileTopBarOverride = prevTop
+      }
+      if (state.mobileAccessoryBarOverride === true) {
+        rollback.mobileAccessoryBarOverride = prevAccessory
+      }
+      if (Object.keys(rollback).length) setState(rollback)
       toast.error(
         e instanceof Error ? e.message : "Could not restore the mobile bars.",
       )

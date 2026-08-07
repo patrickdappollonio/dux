@@ -229,6 +229,57 @@ describe("mobile bar visibility", () => {
     expect(mod.mobileTopBarVisible(mod.getSnapshot())).toBe(true)
   })
 
+  it("a late failure of an overtaken write does not clobber a newer override", async () => {
+    // Tap-tap where the FIRST write fails after the SECOND already landed:
+    // hide (slow, will fail), then show (fast, succeeds). The first call's
+    // rollback must notice its value was overtaken and leave the newer
+    // override alone, otherwise the bar visibly snaps back to a state the
+    // user already corrected.
+    const mod = await loadStore()
+    let rejectFirst!: (e: Error) => void
+    fetchMock.mockImplementationOnce(
+      () =>
+        new Promise((_, reject) => {
+          rejectFirst = reject
+        }) as unknown as Promise<Response>,
+    )
+    const first = mod.setMobileBarVisibility("top", false)
+    // The second tap goes through the default (succeeding) fetch mock.
+    await expect(mod.setMobileBarVisibility("top", true)).resolves.toBe(true)
+    expect(mod.getSnapshot().mobileTopBarOverride).toBe(true)
+    rejectFirst(new Error("boom"))
+    await expect(first).resolves.toBe(false)
+    // The overtaken failure must NOT roll the override back to the first
+    // call's captured previous value (null).
+    expect(mod.getSnapshot().mobileTopBarOverride).toBe(true)
+  })
+
+  it("a restore overtaken by a newer hide only rolls back what it still owns", async () => {
+    // Start with only the ACCESSORY bar hidden (top override null). A restore
+    // (slow, will fail) writes both overrides true; before it settles the
+    // user hides the top bar again (a newer, succeeding write of false). The
+    // restore's failure rollback must leave the top override with the newer
+    // false (rolling it back would reset it to the restore's captured null),
+    // while the accessory override, still holding the restore's own true,
+    // rolls back to its pre-restore false.
+    const mod = await loadStore()
+    await mod.setMobileBarVisibility("accessory", false)
+    let rejectRestore!: (e: Error) => void
+    fetchMock.mockImplementationOnce(
+      () =>
+        new Promise((_, reject) => {
+          rejectRestore = reject
+        }) as unknown as Promise<Response>,
+    )
+    const restore = mod.restoreMobileBars()
+    expect(mod.getSnapshot().mobileTopBarOverride).toBe(true)
+    await expect(mod.setMobileBarVisibility("top", false)).resolves.toBe(true)
+    rejectRestore(new Error("boom"))
+    await expect(restore).resolves.toBe(false)
+    expect(mod.getSnapshot().mobileTopBarOverride).toBe(false)
+    expect(mod.getSnapshot().mobileAccessoryBarOverride).toBe(false)
+  })
+
   it("rolls BOTH overrides back when a restore fails", async () => {
     const mod = await loadStore()
     await mod.setMobileBarVisibility("top", false)
