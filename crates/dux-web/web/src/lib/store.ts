@@ -1729,6 +1729,15 @@ if (hasBrowser) {
   window.addEventListener("popstate", () => {
     applyUrlRoute()
   })
+  // Fragment navigation the page itself initiates — the standalone header's
+  // plain-anchor "Open in dux" link is the one shipping case — is delivered
+  // as `hashchange`, and whether a `popstate` accompanies it varies by
+  // environment (jsdom fires only `hashchange`; browsers fire both). Listen
+  // to both: `applyUrlRoute` is idempotent and by contract never writes the
+  // URL back, so a double delivery settles on the same state.
+  window.addEventListener("hashchange", () => {
+    applyUrlRoute()
+  })
 }
 
 export function useDux(): DuxState {

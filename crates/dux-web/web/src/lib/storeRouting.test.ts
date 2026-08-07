@@ -23,6 +23,7 @@ let leftApp: boolean
 // exceeds its rate limit on history calls.
 let historyWriteError: Error | null = null
 let popstateListeners: (() => void)[]
+let hashchangeListeners: (() => void)[]
 let loc: {
   protocol: string
   host: string
@@ -206,6 +207,7 @@ beforeEach(() => {
   leftApp = false
   historyWriteError = null
   popstateListeners = []
+  hashchangeListeners = []
   vi.stubGlobal("localStorage", {
     getItem: () => null,
     setItem: () => {},
@@ -214,6 +216,7 @@ beforeEach(() => {
   vi.stubGlobal("window", {
     addEventListener: (type: string, handler: () => void) => {
       if (type === "popstate") popstateListeners.push(handler)
+      if (type === "hashchange") hashchangeListeners.push(handler)
     },
   })
   vi.stubGlobal("history", fakeHistory)
@@ -1277,6 +1280,25 @@ describe("the editor rides the URL", () => {
     mod.openEditor("s2", "b.ts")
     mod.selectSession("s2")
     expect(mod.getSnapshot().editorRoute).not.toBeNull()
+  })
+
+  it("follows a fragment navigation delivered ONLY as hashchange", async () => {
+    // Some environments deliver an anchor's fragment navigation as a
+    // hashchange with no popstate. The store listens to both; this delivers
+    // ONLY the hashchange half, which a popstate-only router would miss.
+    const mod = await loadStore("#/editor/agent/s1", [
+      { id: "s1", project_id: "p1" },
+    ])
+    expect(mod.getSnapshot().standaloneEditor).toBe(true)
+    expect(hashchangeListeners.length).toBeGreaterThan(0)
+    entries = entries.slice(0, index + 1)
+    entries.push("#/agent/s1")
+    index = entries.length - 1
+    applyCurrentEntry()
+    for (const listener of hashchangeListeners) listener()
+    expect(mod.getSnapshot().standaloneEditor).toBe(false)
+    expect(mod.getSnapshot().editorRoute).toBeNull()
+    expect(mod.getSnapshot().selectedSessionId).toBe("s1")
   })
 
   it("boots the standalone editor surface from its own address", async () => {
