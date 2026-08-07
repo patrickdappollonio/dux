@@ -1985,7 +1985,7 @@ export function routeHash(route: Route): string {
   // The standalone form replaces the whole address rather than riding as a
   // suffix; a standalone route whose target somehow lost its session (or its
   // editor half) falls through to the ordinary grammar.
-  if (route.standalone && route.editor) {
+  if (route.standalone && route.editor && route.target !== null) {
     const sessionId = targetSessionId(route.target)
     if (sessionId !== null) {
       const base = `#/editor/agent/${encodeURIComponent(sessionId)}`
