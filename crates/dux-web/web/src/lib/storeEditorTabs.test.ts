@@ -378,3 +378,98 @@ describe("editor tabs store slice", () => {
     expect(mod.getSnapshot().editorTarget).toBeNull()
   })
 })
+
+// (f) drafts survive editor close: the store is what prunes the draft cache
+// (a tab that no longer exists must take its draft with it, whether or not an
+// EditorBody is mounted) and what arms/disarms the beforeunload guard off the
+// STORE dirty flags (which outlive the component).
+describe("draft cache and unload guard wiring", () => {
+  async function loadWithGuardWindow() {
+    // The suite-level window stub has only addEventListener, which the guard
+    // deliberately refuses (it will not add a handler it cannot remove).
+    // These tests need the full pair, captured.
+    const added: string[] = []
+    const removed: string[] = []
+    vi.stubGlobal("window", {
+      addEventListener: (type: string) => added.push(type),
+      removeEventListener: (type: string) => removed.push(type),
+    })
+    const mod = await loadStore()
+    const drafts = await import("./editorDrafts")
+    return { mod, drafts, added, removed }
+  }
+
+  function cachedBuffer(path: string) {
+    return {
+      path,
+      loadedPath: path,
+      loading: false,
+      loaded: "on disk",
+      draft: "typed and unsaved",
+      binary: false,
+      readOnly: false,
+      diff: null,
+      diffLoadedPath: null,
+      diffLoadedSignal: "",
+      fileError: null,
+      diffError: null,
+      errorPath: null,
+    }
+  }
+
+  it("a closed tab takes its cached draft with it", async () => {
+    const { mod, drafts } = await loadWithGuardWindow()
+    mod.editorOpenFile("s1", "a.ts", { pin: true })
+    const tabId = mod.getSnapshot().editorTabs.s1.tabs[0].id
+    drafts.storeSessionDrafts("s1", new Map([[tabId, cachedBuffer("a.ts")]]))
+
+    mod.editorCloseTab("s1", tabId)
+    expect(drafts.loadSessionDrafts("s1").size).toBe(0)
+  })
+
+  it("clearing a session drops its whole draft cache entry", async () => {
+    const { mod, drafts } = await loadWithGuardWindow()
+    mod.editorOpenFile("s1", "a.ts", { pin: true })
+    const tabId = mod.getSnapshot().editorTabs.s1.tabs[0].id
+    drafts.storeSessionDrafts("s1", new Map([[tabId, cachedBuffer("a.ts")]]))
+
+    mod.editorClearSession("s1")
+    expect(drafts.loadSessionDrafts("s1").size).toBe(0)
+  })
+
+  it("arms the beforeunload guard while any tab is dirty and disarms on discard", async () => {
+    const { mod, added, removed } = await loadWithGuardWindow()
+    mod.editorOpenFile("s1", "a.ts", { pin: true })
+    const tabId = mod.getSnapshot().editorTabs.s1.tabs[0].id
+    expect(added).not.toContain("beforeunload")
+
+    mod.editorSetTabDirty("s1", tabId, true)
+    expect(added).toContain("beforeunload")
+    expect(removed).not.toContain("beforeunload")
+
+    // The guard stays armed while the editor is CLOSED with the dirty flag
+    // still set: the draft is real and a refresh really would lose it.
+    mod.closeEditor()
+    expect(removed).not.toContain("beforeunload")
+
+    // The per-tab discard clears the flag with the tab, and the guard drops.
+    mod.editorCloseTab("s1", tabId)
+    expect(removed).toContain("beforeunload")
+  })
+
+  it("disarms when the dirty session vanishes from the spine", async () => {
+    const { mod, added, removed } = await loadWithGuardWindow()
+    spineBody = makeSpine(["s1", "s2"])
+    fireSessionsChanged()
+    await tick()
+    mod.editorOpenFile("s1", "a.ts", { pin: true })
+    const tabId = mod.getSnapshot().editorTabs.s1.tabs[0].id
+    mod.editorSetTabDirty("s1", tabId, true)
+    expect(added).toContain("beforeunload")
+
+    spineBody = makeSpine(["s2"])
+    fireSessionsChanged()
+    await tick()
+    expect(removed).toContain("beforeunload")
+  })
+})

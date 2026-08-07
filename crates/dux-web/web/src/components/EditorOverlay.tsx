@@ -33,7 +33,10 @@ import {
 } from "@/lib/editorBuffers"
 import type { TabBuffer } from "@/lib/editorBuffers"
 import {
-  dirtyCloseMessage,
+  loadSessionDrafts,
+  storeSessionDrafts,
+} from "@/lib/editorDrafts"
+import {
   hasDirtyUnderPath,
   saveResolutionOutcome,
   shouldPromoteOnEdit,
@@ -75,8 +78,6 @@ import {
   Dialog,
   DialogContent,
   DialogDescription,
-  DialogFooter,
-  DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
 import {
@@ -120,13 +121,13 @@ const MAX_SEARCH_RESULTS = 300
 // touch, and every entry point is already gated to desktop). The body is keyed
 // by SESSION ONLY (not file/mode) so opening a new file (or a preview-replace)
 // while the overlay is already open never remounts it and drops the tab list.
-// A ref lets the body intercept Esc/backdrop closes so they run the same dirty
-// guard as the in-body Close button.
+// Esc/backdrop/Close all close immediately: closing is NON-destructive now
+// (drafts survive in lib/editorDrafts.ts and the tab list survives in the
+// store), so the old overlay-close discard dialog is retired. The per-tab
+// close confirm (`ConfirmCloseEditorTabDialog`) remains the real discard.
 export function EditorOverlay() {
   const { editorTarget } = useDux()
   const isMobile = useIsMobile()
-  // Default close handler (used before a body mounts / after it unmounts).
-  const closeReqRef = useRef<() => void>(closeEditor)
 
   if (isMobile) return null
 
@@ -134,7 +135,7 @@ export function EditorOverlay() {
     <Dialog
       open={editorTarget !== null}
       onOpenChange={(open) => {
-        if (!open) closeReqRef.current()
+        if (!open) closeEditor()
       }}
     >
       <DialogContent
@@ -149,7 +150,6 @@ export function EditorOverlay() {
           <EditorBody
             key={editorTarget.sessionId}
             sessionId={editorTarget.sessionId}
-            closeReqRef={closeReqRef}
           />
         )}
       </DialogContent>
@@ -159,10 +159,9 @@ export function EditorOverlay() {
 
 interface EditorBodyProps {
   sessionId: string
-  closeReqRef: React.RefObject<() => void>
 }
 
-function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
+function EditorBody({ sessionId }: EditorBodyProps) {
   const { changes, editorTarget, editorTabs } = useDux()
   const tabsState = editorTabs[sessionId]
   const tabs = useMemo(() => tabsState?.tabs ?? [], [tabsState])
@@ -171,11 +170,20 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
   // Per-tab Monaco buffers (file content + diff cache), keyed by tab id, kept
   // OUT of the global store deliberately (see lib/editorTabs.ts header
   // comment): putting file contents in zustand-style global state would fire
-  // a store-wide update on every keystroke.
-  const [buffers, setBuffers] = useState<Map<string, TabBuffer>>(
-    () => new Map(),
+  // a store-wide update on every keystroke. Seeded from the module-level
+  // draft cache (lib/editorDrafts.ts) and written back below, which is what
+  // lets an unsaved draft survive the editor being closed and reopened.
+  const [buffers, setBuffers] = useState<Map<string, TabBuffer>>(() =>
+    loadSessionDrafts(sessionId),
   )
   const activeBuffer = activeTab ? buffers.get(activeTab.id) : undefined
+
+  // Mirror every buffer change into the draft cache. The cache outlives this
+  // component; the store prunes it when tabs close and clears it on session
+  // delete, so this side is write-only.
+  useEffect(() => {
+    storeSessionDrafts(sessionId, buffers)
+  }, [sessionId, buffers])
 
   // The `monaco` instance, captured once CodeEditor mounts (see CodeEditor's
   // `onReady`). EditorBody, not CodeEditor, owns disposal because it owns
@@ -234,11 +242,6 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
   // initializer (not a ref) so it's safe to read during render.
   const [initialPath] = useState(() => editorTarget?.initialPath ?? null)
 
-  // "Discard unsaved changes?" for closing the WHOLE overlay (Esc/backdrop/
-  // Close button) when ANY tab is dirty. Per-tab close uses the store-target
-  // `ConfirmCloseEditorTabDialog` instead; this is the overlay-level guard so
-  // Esc/backdrop/Close can never silently drop edits in some other tab.
-  const [overlayCloseConfirmOpen, setOverlayCloseConfirmOpen] = useState(false)
   // New File…/New Folder…/Rename…/Delete… dialog targets. Local EditorBody
   // state, not store targets: the file tree is a client-owned lazy cache, not
   // a server-broadcast ViewModel slice, so there is nothing for
@@ -694,31 +697,11 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
     editorOpenFile(sessionId, path, opts)
   }
 
-  function requestClose(): void {
-    if (tabs.some((t) => t.dirty)) {
-      setOverlayCloseConfirmOpen(true)
-      return
-    }
-    closeEditor()
-  }
-
-  // Let the shell's Esc/backdrop close run this same dirty guard. Updated every
-  // render (so it sees the latest `tabs`), reset on unmount so a stale closure
-  // can't fire against an unmounted body.
+  // Kept current here (an effect, not render) so the diff fetch's late callback
+  // stamps the diff with the signal as of load-resolve time.
   useEffect(() => {
-    closeReqRef.current = requestClose
-    // Kept current here (an effect, not render) so the diff fetch's late callback
-    // stamps the diff with the signal as of load-resolve time.
     openFileSignalRef.current = openFileSignal
-    return () => {
-      closeReqRef.current = closeEditor
-    }
   })
-
-  function confirmOverlayClose(): void {
-    setOverlayCloseConfirmOpen(false)
-    closeEditor()
-  }
 
   // Report the buffer's dirty state up to the store (so the strip's dot and
   // the close-confirm gating read from one place), and promote a preview tab
@@ -943,7 +926,6 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
   }
 
   const openPath = activeTab?.path ?? null
-  const dirtyTabCount = tabs.filter((t) => t.dirty).length
 
   return (
     <>
@@ -1119,7 +1101,10 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
             Save
           </Button>
         )}
-        <Button size="sm" variant="ghost" onClick={requestClose}>
+        {/* Closes immediately, dirty tabs included: nothing is lost (tabs
+            live in the store, drafts in the module cache), so there is no
+            dialog to ask with. */}
+        <Button size="sm" variant="ghost" onClick={() => closeEditor()}>
           <X />
           Close
         </Button>
@@ -1409,35 +1394,6 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
         onClose={() => setDeleteEntryTarget(null)}
         onConfirm={handleDeleteConfirm}
       />
-
-      {/* Styled unsaved-changes confirmation for closing the WHOLE overlay
-          (Esc/backdrop/Close) when any tab is dirty. Per-tab close instead uses
-          the store-target `ConfirmCloseEditorTabDialog`. */}
-      <Dialog
-        open={overlayCloseConfirmOpen}
-        onOpenChange={(open) => {
-          if (!open) setOverlayCloseConfirmOpen(false)
-        }}
-      >
-        <DialogContent showCloseButton={false} className="sm:max-w-sm">
-          <DialogHeader>
-            <DialogTitle>Discard unsaved changes?</DialogTitle>
-            <DialogDescription>{dirtyCloseMessage(dirtyTabCount)}</DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button
-              variant="outline"
-              autoFocus
-              onClick={() => setOverlayCloseConfirmOpen(false)}
-            >
-              Keep editing
-            </Button>
-            <Button variant="destructive" onClick={confirmOverlayClose}>
-              Discard
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </>
   )
 }

@@ -32,12 +32,14 @@ const TYPED = "original contents\nplus a great deal more that the server refuses
 
 let mockState: DuxState
 const editorSetTabDirtyMock = vi.fn()
+const closeEditorMock = vi.fn()
 vi.mock("@/lib/store", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/store")>()
   return {
     ...actual,
     useDux: () => mockState,
     editorSetTabDirty: editorSetTabDirtyMock,
+    closeEditor: (...a: unknown[]) => closeEditorMock(...a),
   }
 })
 
@@ -179,9 +181,13 @@ async function mountWithDirtyTab() {
 }
 
 describe("a save the server refuses", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks()
     installBootStubs()
+    // The draft cache is module-level and would otherwise carry one test's
+    // typed text into the next mount of the same session.
+    const { clearSessionDrafts } = await import("@/lib/editorDrafts")
+    clearSessionDrafts(SESSION)
   })
 
   afterEach(() => {
@@ -231,6 +237,69 @@ describe("a save the server refuses", () => {
       ),
     )
     expect(toastError).not.toHaveBeenCalled()
+  })
+})
+
+// (f) closing the editor is non-destructive: drafts move to the module-level
+// cache (lib/editorDrafts.ts), so the overlay-close discard dialog is retired
+// (Close/Esc/Back close immediately) and reopening restores the typed text
+// without another /read.
+describe("drafts survive the editor closing", () => {
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    installBootStubs()
+    const { clearSessionDrafts } = await import("@/lib/editorDrafts")
+    clearSessionDrafts(SESSION)
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.unstubAllGlobals()
+  })
+
+  it("closing with a dirty tab does not prompt, it just closes", async () => {
+    await mountWithDirtyTab()
+    fireEvent.click(screen.getByRole("button", { name: /^close$/i }))
+    // No discard dialog: the close is immediate and non-destructive.
+    expect(screen.queryByText(/discard unsaved changes/i)).toBeNull()
+    expect(closeEditorMock).toHaveBeenCalledTimes(1)
+  })
+
+  it("reopening restores the typed draft without refetching the file", async () => {
+    const { unmount } = await (async () => {
+      const { EditorOverlay } = await import("@/components/EditorOverlay")
+      const { getSnapshot } = await import("@/lib/store")
+      mockState = {
+        ...getSnapshot(),
+        editorTarget: { sessionId: SESSION, initialPath: PATH },
+        editorTabs: {
+          [SESSION]: {
+            tabs: [
+              { id: TAB_ID, path: PATH, dirty: true, preview: false, mode: "file" },
+            ],
+            activeId: TAB_ID,
+          },
+        },
+      } as DuxState
+      return render(<EditorOverlay />)
+    })()
+    const box = (await screen.findByTestId("code-editor")) as HTMLTextAreaElement
+    await waitFor(() => expect(box.value).toBe(ON_DISK))
+    fireEvent.change(box, { target: { value: TYPED } })
+    await waitFor(() => expect(box.value).toBe(TYPED))
+    expect(readMock).toHaveBeenCalledTimes(1)
+
+    // Close (unmount the body entirely), then reopen the same session.
+    unmount()
+    const { EditorOverlay } = await import("@/components/EditorOverlay")
+    render(<EditorOverlay />)
+    const again = (await screen.findByTestId(
+      "code-editor",
+    )) as HTMLTextAreaElement
+    // The draft is back, from the cache: no second /read was needed (a
+    // re-read could silently clobber the unsaved edit).
+    await waitFor(() => expect(again.value).toBe(TYPED))
+    expect(readMock).toHaveBeenCalledTimes(1)
   })
 })
 

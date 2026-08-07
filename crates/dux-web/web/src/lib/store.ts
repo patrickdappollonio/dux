@@ -52,6 +52,7 @@ import {
   closeTab as editorCloseTabPure,
   closeTabsUnderPath as editorCloseTabsUnderPathPure,
   emptyTabsState,
+  hasAnyDirtyTab,
   openFile as editorOpenFilePure,
   pinTab as editorPinTabPure,
   renameTabPaths as editorRenameTabPathsPure,
@@ -59,6 +60,11 @@ import {
   setTabMode as editorSetTabModePure,
 } from "./editorTabs"
 import type { EditorTabsState } from "./editorTabs"
+import {
+  clearSessionDrafts,
+  pruneSessionDrafts,
+  syncBeforeUnloadGuard,
+} from "./editorDrafts"
 import { isImagePreviewPath } from "./editorPreview"
 import { newClientId } from "./uid"
 import { assertNever } from "./assertNever"
@@ -2967,6 +2973,14 @@ function editorTabsFor(sessionId: string): EditorTabsState {
 function setEditorTabsFor(sessionId: string, next: EditorTabsState): void {
   if (state.editorTabs[sessionId] === next) return
   setState({ editorTabs: { ...state.editorTabs, [sessionId]: next } })
+  // A tab that no longer exists takes its cached draft with it (per-tab
+  // discard confirmed, a deleted file closing its tabs, a rename collision),
+  // whether or not an EditorBody is mounted at the time. And the unload
+  // guard tracks the STORE dirty flags, which outlive the editor body: it
+  // stays armed while the editor is closed over a dirty cached draft, and a
+  // discard that clears the last flag disarms it.
+  pruneSessionDrafts(sessionId, new Set(next.tabs.map((t) => t.id)))
+  syncBeforeUnloadGuard(hasAnyDirtyTab(state.editorTabs))
 }
 
 // Open (or activate, or preview-replace) a file in a session's tab list. See
@@ -3066,10 +3080,12 @@ export function editorCloseTabsUnderPath(sessionId: string, path: string): void 
 // the `editorTabs` prune in `applySpine`, which calls this for any session
 // key no longer present in the live spine.
 export function editorClearSession(sessionId: string): void {
+  clearSessionDrafts(sessionId)
   if (!(sessionId in state.editorTabs)) return
   const next = { ...state.editorTabs }
   delete next[sessionId]
   setState({ editorTabs: next })
+  syncBeforeUnloadGuard(hasAnyDirtyTab(state.editorTabs))
 }
 
 // Open the dirty-tab close confirmation.
