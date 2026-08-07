@@ -2198,6 +2198,29 @@ impl Engine {
                         continue;
                     }
                     self.pr_last_checked.insert(session_id.clone(), now);
+                    // Identity guard for pinned sessions. This is deliberately
+                    // NOT a `None`-only guard: several paths can still produce
+                    // `Some(other_pr)` for a pinned session (a one-shot check
+                    // racing the attach, or an early-return path answering
+                    // from a stale `known_pr`), and a `None` from discovery
+                    // must not clear a pin either. While an override exists,
+                    // only a result matching the pin's (host, owner_repo,
+                    // number) may touch `pr_statuses` or `upsert_pr`.
+                    if let Some(pin) = self.pr_overrides.get(&session_id) {
+                        let matches_pin = maybe_pr.as_ref().is_some_and(|pr| {
+                            pr.number == pin.pr_number
+                                && pr.owner_repo.eq_ignore_ascii_case(&pin.owner_repo)
+                                && pr.host.eq_ignore_ascii_case(&pin.host)
+                        });
+                        if !matches_pin {
+                            logger::debug(&format!(
+                                "[gh-integration] dropping PR result for pinned session \
+                                 {session_id} (does not match the pin, PR #{})",
+                                pin.pr_number,
+                            ));
+                            continue;
+                        }
+                    }
                     match maybe_pr {
                         Some(pr) => {
                             // Persist the PR association (including state) so
@@ -2221,6 +2244,27 @@ impl Engine {
                                 logger::error(&format!(
                                     "failed to persist PR status for {session_id} (PR #{pr_number}): {err}",
                                 ));
+                            }
+                            // An accepted result for a PINNED session also
+                            // refreshes the override row's cached state/title,
+                            // so a restart renders the pin with fresh data.
+                            if self.pr_overrides.contains_key(&session_id) {
+                                let refreshed = StoredPr {
+                                    session_id: session_id.clone(),
+                                    pr_number,
+                                    host: pr.host.clone(),
+                                    owner_repo: pr.owner_repo.clone(),
+                                    state: state_str.to_string(),
+                                    title: pr.title.clone(),
+                                    url: pr.url.clone(),
+                                };
+                                if let Err(err) = self.session_store.upsert_pr_override(&refreshed)
+                                {
+                                    logger::error(&format!(
+                                        "failed to refresh pinned PR for {session_id}: {err}",
+                                    ));
+                                }
+                                self.pr_overrides.insert(session_id.clone(), refreshed);
                             }
                             self.pr_statuses.insert(session_id, pr);
                             changed = true;
@@ -3718,6 +3762,101 @@ mod tests {
             reaction_kind(&reaction),
         );
         assert!(engine.pr_last_checked.contains_key("s1"));
+    }
+
+    /// The identity guard, in both directions. While a session is pinned, a
+    /// sync result is accepted ONLY when its (host, owner_repo, number) matches
+    /// the pin: a `Some(other_pr)` (the one-shot check racing an attach, or an
+    /// early-return path answering from a stale `known_pr`) must not overwrite
+    /// the pin, and a `None` must not clear it.
+    #[test]
+    fn pr_status_ready_identity_guard_drops_results_that_do_not_match_the_pin() {
+        let (mut engine, _tmp) = test_engine();
+        let session = sample_session("s1", "p1", "feat");
+        engine
+            .session_store
+            .upsert_session(&session)
+            .expect("seed session");
+        engine.sessions.push(session);
+        let pinned = crate::storage::StoredPr {
+            session_id: "s1".to_string(),
+            pr_number: 12,
+            host: "github.com".to_string(),
+            owner_repo: "forker/Hello-World".to_string(),
+            state: "OPEN".to_string(),
+            title: "Pinned".to_string(),
+            url: "https://github.com/forker/Hello-World/pull/12".to_string(),
+        };
+        engine.pr_statuses.insert(
+            "s1".to_string(),
+            crate::gh::reconstruct_pr_from_stored(&pinned).unwrap(),
+        );
+        engine.pr_overrides.insert("s1".to_string(), pinned);
+
+        // Direction 1: a racing one-shot answers with a DIFFERENT PR.
+        let other = PrInfo {
+            number: 50,
+            state: PrState::Open,
+            title: "Autodetected".to_string(),
+            host: "github.com".to_string(),
+            owner_repo: "octocat/Hello-World".to_string(),
+            url: "https://github.com/octocat/Hello-World/pull/50".to_string(),
+        };
+        let reaction = engine.process_worker_event(WorkerEvent::PrStatusReady(vec![(
+            "s1".to_string(),
+            Some(other),
+        )]));
+        assert!(
+            matches!(reaction, EventReaction::Nothing),
+            "a non-pin result changes nothing, got {}",
+            reaction_kind(&reaction),
+        );
+        assert_eq!(
+            engine.pr_statuses.get("s1").map(|p| p.number),
+            Some(12),
+            "the badge still shows the pin"
+        );
+        assert!(
+            engine
+                .session_store
+                .load_all_latest_prs()
+                .unwrap()
+                .is_empty(),
+            "the dropped result never reaches upsert_pr"
+        );
+
+        // Direction 2: a None (e.g. discovery finding nothing) cannot clear it.
+        let reaction =
+            engine.process_worker_event(WorkerEvent::PrStatusReady(vec![("s1".to_string(), None)]));
+        assert!(matches!(reaction, EventReaction::Nothing));
+        assert_eq!(engine.pr_statuses.get("s1").map(|p| p.number), Some(12));
+
+        // A result matching the pin IS accepted, and refreshes the override
+        // row's cached state so a restart renders the fresh state.
+        let refreshed = PrInfo {
+            number: 12,
+            state: PrState::Merged,
+            title: "Pinned".to_string(),
+            host: "github.com".to_string(),
+            owner_repo: "forker/Hello-World".to_string(),
+            url: "https://github.com/forker/Hello-World/pull/12".to_string(),
+        };
+        let reaction = engine.process_worker_event(WorkerEvent::PrStatusReady(vec![(
+            "s1".to_string(),
+            Some(refreshed),
+        )]));
+        assert!(matches!(reaction, EventReaction::RebuildLeftItems));
+        assert_eq!(
+            engine.pr_statuses.get("s1").map(|p| p.state.clone()),
+            Some(PrState::Merged)
+        );
+        let rows = engine.session_store.load_pr_overrides().unwrap();
+        assert_eq!(rows[0].state, "MERGED", "the pin's cached state refreshes");
+        assert_eq!(
+            engine.pr_overrides.get("s1").map(|p| p.state.as_str()),
+            Some("MERGED"),
+            "the in-memory pin refreshes too"
+        );
     }
 
     // ── WorktreeRemoveCompleted ──────────────────────────────────────────

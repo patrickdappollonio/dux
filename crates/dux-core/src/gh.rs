@@ -125,6 +125,15 @@ struct Planned {
     /// deleted on merge). Terminal-but-running and undiscovered sessions get
     /// only the head-ref discovery alias.
     emit_num: bool,
+    /// Whether the head-ref discovery alias is emitted at all. True for every
+    /// remote-derived plan; false for a PINNED session, whose only alias is the
+    /// by-number refresh of the pin (discovery would answer for a PR the user
+    /// deliberately overrode).
+    emit_ref: bool,
+    /// A manually attached PR: the plan targets the PIN's repo and number, and
+    /// the merge rule reports the pin (or its stored reconstruction), never a
+    /// discovery result.
+    pinned: bool,
 }
 
 /// Single source of truth for "this stored PR is terminal (MERGED/CLOSED)".
@@ -158,6 +167,35 @@ impl Planned {
             known,
             is_terminal,
             emit_num,
+            emit_ref: true,
+            pinned: false,
+        }
+    }
+
+    /// Build the plan for a PINNED session: exactly one alias, the by-number
+    /// refresh of the pin, against the pin's own repo. No head-ref discovery.
+    /// `known` is the override row (which carries the pin's cached state), so
+    /// the num alias number and every fallback reconstruct the PIN.
+    fn new_pinned(
+        session_id: String,
+        host: String,
+        owner: String,
+        repo: String,
+        branch: String,
+        known: StoredPr,
+    ) -> Self {
+        let is_terminal = stored_pr_is_terminal(Some(&known));
+        Planned {
+            session_id,
+            host,
+            owner,
+            repo,
+            branch,
+            known: Some(known),
+            is_terminal,
+            emit_num: true,
+            emit_ref: false,
+            pinned: true,
         }
     }
 }
@@ -211,7 +249,7 @@ fn run_entries(
         let mut chunk: Vec<usize> = Vec::new();
         let mut alias_count = 0usize;
         for i in idxs {
-            let cost = if planned[i].emit_num { 2 } else { 1 };
+            let cost = (planned[i].emit_ref as usize) + (planned[i].emit_num as usize);
             if !chunk.is_empty() && alias_count + cost > MAX_ALIASES_PER_QUERY {
                 let (r, rl, failed, limited) = run_chunk(&host, &planned, &chunk);
                 results.extend(r);
@@ -275,6 +313,58 @@ fn plan_entries(
     let mut planned: Vec<Planned> = Vec::new();
 
     for entry in entries {
+        // A PINNED session short-circuits the remote-derived target entirely:
+        // the user named the PR, so the query goes to the pin's (host,
+        // owner_repo), the policy gates the PINNED host, and no worktree
+        // remote is resolved (a pin routinely lives on a fork the remote does
+        // not name). Every fallback below answers from the PIN's row, never
+        // from `known_pr` raw: a stale `session_prs` latest naming a different
+        // PR must not surface as a pinned session's answer.
+        if let Some(pin) = &entry.pinned {
+            // The override row is the pin's known state. A `known_pr` naming a
+            // DIFFERENT number is not the pin (a stale row from before the
+            // attach); synthesize an OPEN placeholder from the pin's identity
+            // instead so no fallback can report the wrong pull request.
+            let known = entry
+                .known_pr
+                .clone()
+                .filter(|k| k.pr_number == pin.number)
+                .unwrap_or_else(|| StoredPr {
+                    session_id: entry.session_id.clone(),
+                    pr_number: pin.number,
+                    host: pin.host.clone(),
+                    owner_repo: pin.owner_repo.clone(),
+                    state: "OPEN".to_string(),
+                    title: String::new(),
+                    url: pull_request_url(&pin.host, &pin.owner_repo, pin.number),
+                });
+            let host = normalize_github_host(&pin.host).to_ascii_lowercase();
+            // The gate runs on the PINNED host (the host the query would go
+            // to), exactly like the remote-derived gate below.
+            if !policy.allows(&host) {
+                results.push((entry.session_id.clone(), reconstruct_from_stored(&known)));
+                continue;
+            }
+            // Terminal pin + exited agent: zero network, like the unpinned rule.
+            if stored_pr_is_terminal(Some(&known)) && entry.agent_exited {
+                results.push((entry.session_id.clone(), reconstruct_from_stored(&known)));
+                continue;
+            }
+            let Some((owner, repo)) = pin.owner_repo.split_once('/') else {
+                results.push((entry.session_id.clone(), reconstruct_from_stored(&known)));
+                continue;
+            };
+            planned.push(Planned::new_pinned(
+                entry.session_id.clone(),
+                host,
+                owner.to_string(),
+                repo.to_string(),
+                entry.branch_name.clone(),
+                known,
+            ));
+            continue;
+        }
+
         // Resolve (host, owner_repo): live remote first, else the known PR's repo
         // (works even after the branch/remote is gone).
         //
@@ -917,11 +1007,13 @@ fn build_chunk_query(planned: &[Planned], chunk: &[usize]) -> (String, Vec<usize
         ));
         for &pos in positions {
             let p = &planned[chunk[pos]];
-            let qname = graphql_string(&format!("refs/heads/{}", p.branch));
-            q.push_str(&format!(
-                "    {}: ref(qualifiedName: {qname}) {{ associatedPullRequests(first: 1, orderBy: {{field: CREATED_AT, direction: DESC}}) {{ nodes {{ number state title url }} }} }}\n",
-                ref_alias(pos),
-            ));
+            if p.emit_ref {
+                let qname = graphql_string(&format!("refs/heads/{}", p.branch));
+                q.push_str(&format!(
+                    "    {}: ref(qualifiedName: {qname}) {{ associatedPullRequests(first: 1, orderBy: {{field: CREATED_AT, direction: DESC}}) {{ nodes {{ number state title url }} }} }}\n",
+                    ref_alias(pos),
+                ));
+            }
             if p.emit_num
                 && let Some(known) = &p.known
             {
@@ -995,6 +1087,13 @@ fn parse_chunk_response(
 ///     branch), else the by-number refresh (robust when the branch was deleted)
 ///   - undiscovered: whatever the head-ref discovery found
 fn merge_pr_result(p: &Planned, ref_pr: Option<PrInfo>, num_pr: Option<PrInfo>) -> Option<PrInfo> {
+    // A PINNED plan reports the pin and nothing else: the by-number refresh
+    // when it answered (a CLOSED pin can reopen, an OPEN one can merge), else
+    // the stored reconstruction. No discovery result exists to consider
+    // (`emit_ref` is false), and a per-alias failure keeps the badge.
+    if p.pinned {
+        return num_pr.or_else(|| p.known.as_ref().and_then(reconstruct_from_stored));
+    }
     let Some(known) = &p.known else {
         return ref_pr;
     };
@@ -3011,6 +3110,167 @@ mod tests {
         assert_eq!(planned[0].owner, "octocat");
         assert_eq!(planned[0].repo, "Hello-World");
         assert_eq!(planned[0].branch, "feat/x");
+    }
+
+    /// A stored override row for the pinned tests: PR #12 on a FORK, while the
+    /// session's own remote (when a test consults it at all) is
+    /// `octocat/Hello-World`.
+    fn pinned_stored(state: &str) -> StoredPr {
+        StoredPr {
+            session_id: "s0".to_string(),
+            pr_number: 12,
+            host: "github.com".to_string(),
+            owner_repo: "forker/Hello-World".to_string(),
+            state: state.to_string(),
+            title: "Pinned".to_string(),
+            url: "https://github.com/forker/Hello-World/pull/12".to_string(),
+        }
+    }
+
+    fn pin_of(stored: &StoredPr) -> crate::worker::PinnedPr {
+        crate::worker::PinnedPr {
+            host: stored.host.clone(),
+            owner_repo: stored.owner_repo.clone(),
+            number: stored.pr_number,
+        }
+    }
+
+    /// A pinned session queries the PINNED repo (here a fork), never the
+    /// worktree's remote: the resolver panics to prove planning does not even
+    /// look at it, and the built query carries exactly ONE alias, the by-number
+    /// one for the pinned PR. Head-ref discovery is not planned for pins.
+    #[test]
+    fn plan_entries_pinned_session_queries_only_the_pinned_repo_by_number() {
+        let stored = pinned_stored("OPEN");
+        let entry = PrSyncEntry {
+            known_pr: Some(stored.clone()),
+            pinned: Some(pin_of(&stored)),
+            ..planning_entry()
+        };
+
+        let (results, planned) = plan_entries(
+            std::slice::from_ref(&entry),
+            &|_| panic!("a pinned session must not resolve the worktree remote"),
+            &legacy_policy(),
+        );
+
+        assert!(results.is_empty(), "a pinned OPEN session is queried");
+        assert_eq!(planned.len(), 1);
+        assert_eq!(planned[0].host, "github.com");
+        assert_eq!(planned[0].owner, "forker");
+        assert_eq!(planned[0].repo, "Hello-World");
+
+        let (q, _) = build_chunk_query(&planned, &[0]);
+        assert!(
+            q.contains("repository(owner: \"forker\", name: \"Hello-World\")"),
+            "the query targets the fork: {q}"
+        );
+        assert!(
+            q.contains("s0_num: pullRequest(number: 12)"),
+            "the pinned PR is refreshed by number: {q}"
+        );
+        assert!(
+            !q.contains("s0_ref"),
+            "no head-ref discovery for a pinned session: {q}"
+        );
+    }
+
+    /// The host gate runs on the PINNED host. A denied pin answers from the
+    /// pin's own stored row, and even a stale `known_pr` naming a DIFFERENT PR
+    /// cannot leak through as the answer for a pinned session.
+    #[test]
+    fn plan_entries_pinned_gate_runs_on_the_pinned_host_and_answers_only_the_pin() {
+        let stored = StoredPr {
+            host: "git.company.example".to_string(),
+            ..pinned_stored("OPEN")
+        };
+        // A stale non-pin row (the autodetected latest) that must NOT surface.
+        let entry = PrSyncEntry {
+            known_pr: Some(stored_pr_named(50, "OPEN", "octocat/Hello-World")),
+            pinned: Some(pin_of(&stored)),
+            ..planning_entry()
+        };
+        let policy = GithubHostPolicy::Hosts(std::iter::once("github.com".to_string()).collect());
+
+        let (results, planned) = plan_entries(
+            std::slice::from_ref(&entry),
+            &|_| panic!("a pinned session must not resolve the worktree remote"),
+            &policy,
+        );
+
+        assert!(planned.is_empty(), "a denied pinned host is never queried");
+        assert_eq!(results.len(), 1);
+        let pr = results[0].1.as_ref().expect("the pin is kept");
+        assert_eq!(
+            pr.number, 12,
+            "the answer is the PIN, not the stale stored latest"
+        );
+        assert_eq!(pr.owner_repo, "forker/Hello-World");
+    }
+
+    /// Terminal pin + exited agent: zero network, reconstructed from the pin.
+    #[test]
+    fn plan_entries_pinned_terminal_exited_reconstructs_the_pin_without_network() {
+        let stored = pinned_stored("MERGED");
+        let entry = PrSyncEntry {
+            known_pr: Some(stored.clone()),
+            pinned: Some(pin_of(&stored)),
+            agent_exited: true,
+            ..planning_entry()
+        };
+
+        let (results, planned) = plan_entries(
+            std::slice::from_ref(&entry),
+            &|_| panic!("a pinned session must not resolve the worktree remote"),
+            &legacy_policy(),
+        );
+
+        assert!(planned.is_empty());
+        let pr = results[0].1.as_ref().expect("reconstructed pin");
+        assert_eq!(pr.number, 12);
+        assert_eq!(pr.state, PrState::Merged);
+    }
+
+    /// A per-alias fetch failure (the pinned repo alias came back null) keeps
+    /// the pin rather than wiping the badge, mirroring the open-known fallback.
+    #[test]
+    fn pinned_per_alias_failure_preserves_the_pin() {
+        let stored = pinned_stored("OPEN");
+        let entry = PrSyncEntry {
+            known_pr: Some(stored.clone()),
+            pinned: Some(pin_of(&stored)),
+            ..planning_entry()
+        };
+        let (_, planned) = plan_entries(
+            std::slice::from_ref(&entry),
+            &|_| panic!("no remote resolution for pins"),
+            &legacy_policy(),
+        );
+        let chunk = [0usize];
+        let (_, pos_repo) = build_chunk_query(&planned, &chunk);
+        let data = serde_json::json!({ "r0": serde_json::Value::Null });
+        let (results, _) = parse_chunk_response(&planned, &chunk, &pos_repo, Some(&data));
+        let pr = results[0].1.as_ref().expect("pin preserved");
+        assert_eq!(pr.number, 12);
+
+        // And a real answer for the pin refreshes it (a CLOSED pin can reopen).
+        let data = serde_json::json!({ "r0": { "s0_num": pr_node(12, "MERGED") } });
+        let (results, _) = parse_chunk_response(&planned, &chunk, &pos_repo, Some(&data));
+        let pr = results[0].1.as_ref().expect("refreshed pin");
+        assert_eq!(pr.number, 12);
+        assert_eq!(pr.state, PrState::Merged);
+    }
+
+    fn stored_pr_named(number: u64, state: &str, owner_repo: &str) -> StoredPr {
+        StoredPr {
+            session_id: "s0".to_string(),
+            pr_number: number,
+            host: "github.com".to_string(),
+            owner_repo: owner_repo.to_string(),
+            state: state.to_string(),
+            title: "t".to_string(),
+            url: format!("https://github.com/{owner_repo}/pull/{number}"),
+        }
     }
 
     /// The counterpart, so the assertion above is not vacuous: with nothing to
