@@ -72,6 +72,22 @@ function installStubs() {
     "fetch",
     vi.fn(() => Promise.reject(new Error("offline test"))),
   )
+  // AgentActionsMenu (rendered by these rows) calls useIsMobile(), whose
+  // subscription needs matchMedia; jsdom has none. Same inert stub
+  // TerminalPane.test.tsx installs; matches:false = desktop.
+  vi.stubGlobal(
+    "matchMedia",
+    vi.fn((query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      addListener: () => {},
+      removeListener: () => {},
+      dispatchEvent: () => false,
+    })),
+  )
 }
 installStubs()
 const { FlatAgentList } = await import("./FlatAgentList")
