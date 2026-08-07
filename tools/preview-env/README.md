@@ -61,24 +61,26 @@ Then open `http://127.0.0.1:8790` (loopback only; `DUX_PORT` overrides).
 
 A rebuilt binary is a new inode, so the container is recreated to pick it up.
 
-## Screenshots and journeys (host side)
+## Screenshots (host side)
 
-Both tools find a Chromium automatically (`CHROME=` overrides: a cached
+`shot.sh` finds a Chromium automatically (`CHROME=` overrides: a cached
 Playwright build, then common system binaries).
 
 ```bash
 ./shot.sh / home.png                  # one page, one PNG
 ./shot.sh / home-mobile.png --mobile  # phone viewport
 ./shot.sh '/#/agent/<sid>' agent.png  # a deep-linked position
-
-./journey.sh working-agent out.png    # run journeys/working-agent.json
 ```
 
-A **journey** is a JSON file in `journeys/`: a sequence of `drive.js` actions
-(`click`, `clickSel`, `typeInto`, `type`, `key`, `wait`, `hover`; entries with
-only a `comment` key are ignored). Add a new journey by adding a file; nothing
-to register. For one-off exploration, call `drive.js` directly with an inline
-action array (see its header comment).
+For interactions (clicking through a flow before screenshotting), write a
+throwaway `puppeteer-core` script for the journey at hand and delete it after:
+`shot.js` shows the connection boilerplate (launch args, viewport, the
+forwarded port), and `puppeteer-core` is already in this directory's
+`package.json`. A generic action-DSL driver used to live here and was removed
+on purpose: every real journey needed bespoke selectors anyway, so the DSL was
+a second thing to learn that still could not click half the UI. Driving the
+app over REST (`/api/v1/...`) is often faster than clicking; see the routes in
+`crates/dux-web/src/`.
 
 ## Logs / teardown
 
@@ -121,6 +123,4 @@ host (`BASE_IMAGE=<image> ./up.sh`) or use the in-container build.
 | `fake-agent.sh` | Streaming provider for working-state visuals. |
 | `compose.yml` | Mounts the host binary + volumes, publishes loopback port. |
 | `up.sh` | Host: build binary + start/restart the container. |
-| `shot.sh` / `shot.js` | Host: screenshot one page of the running preview. |
-| `journey.sh` / `drive.js` | Host: run a named or inline action sequence, then screenshot. |
-| `journeys/` | Reusable journey definitions (plain JSON). |
+| `shot.sh` / `shot.js` | Host: screenshot one page of the running preview; also the boilerplate reference for throwaway interaction scripts. |
