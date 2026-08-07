@@ -15,16 +15,34 @@ sees your change on disk immediately.
 
 The editor opens as a full-screen overlay from a few places:
 
-- An agent's `⋯` menu has **Open editor**.
+- An agent's `⋯` menu has **Open editor here**.
 - A changed file's `⋯` menu has **Edit**, and clicking a changed file opens its
   diff (more on that below).
 
 It loads only when you open it, so it costs nothing until you use it.
 
-The editor is **desktop-only.** Monaco is a poor experience on a touch screen, so
-on a phone the editor overlay does not open. You can still browse your changed
-files on the mobile Changes screen, but reviewing a full diff and editing wait for
-a real keyboard.
+Prefer the editor in its own browser tab? The agent's `⋯` menu also has **Open
+editor in new tab**, and the editor's own header carries a matching icon that
+opens the current file in that standalone tab (middle-click works, it is a real
+link). The standalone tab is nothing but the editor, full-viewport, with the
+agent's name and an **Open in dux** link back to the full workspace at the top.
+
+The editor overlay is **desktop-only**: Monaco is a poor experience on a touch
+screen, so on a phone the overlay does not open. The standalone tab is the
+deliberate exception. It works on phones, best-effort, with the file explorer
+starting collapsed so the file itself gets the width, and it keeps the editor
+above the soft keyboard. Fixing a typo from the couch is exactly what it is for;
+long editing sessions still want a real keyboard.
+
+## The URL knows where you are
+
+The address bar names the editor and the file you are looking at, so the
+position survives anything a URL survives: a hard refresh reopens the editor on
+the same file (and view), a bookmark or a shared link lands there directly, and
+the standalone tab is just another address. Switching files inside the editor
+updates the address in place rather than piling up history entries, so one
+press of Back closes the editor and returns you to the workspace. Closing it
+that way loses nothing — see below.
 
 ## The layout
 
@@ -98,8 +116,17 @@ appears; save writes it to disk.
 
 The server keeps you inside the worktree and refuses to hand back things you
 should not be editing: files outside the worktree, inside `.git`, or binary blobs
-come back read-only or not at all, with a badge explaining why. If you try to
-close or switch away with unsaved changes, dux asks first.
+come back read-only or not at all, with a badge explaining why.
+
+Unsaved edits survive the editor closing. Close it — the button, Escape, the
+browser's Back — and your drafts stay put: reopen the editor and every tab is
+back, dirty dot and typed text included. The one real discard is closing a
+dirty **tab**, which still asks first. Because drafts live in the page, a hard
+refresh or closing the browser tab really would lose them, so the browser asks
+before leaving while any draft is unsaved — even if the editor itself is
+closed at the time. Deal with the draft (save it, or discard its tab) and the
+prompt stops. The one silent exception: when dux itself restarts, the page
+reloads without asking, and in-page drafts do not survive that.
 
 There are two size limits, and they are generous enough that you are unlikely to
 meet either. A file over **5 MiB** does not open in the editor at all; you get the
