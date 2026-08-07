@@ -24,10 +24,10 @@
 //!   project startup command in its worktree (keyed Busy → final toast).
 //! - `POST   /api/v1/sessions/reorder`             — persist order (literal
 //!   segment, registered so it does not collide with `:id`).
-//! - `PUT    /api/v1/sessions/:id/pull-request`    — manually attach (pin) a
+//! - `PUT    /api/v1/sessions/:id/pull-request`, manually attach (pin) a
 //!   PR from a raw typed reference; `202` + `{op_id}` (deferred, the outcome
 //!   rides the toast stream and `sessions.changed`).
-//! - `DELETE /api/v1/sessions/:id/pull-request`    — detach the manual pin so
+//! - `DELETE /api/v1/sessions/:id/pull-request`, detach the manual pin so
 //!   autodetection resumes (synchronous, `200`).
 //! - `POST   /api/v1/pull-requests/resolve`, read a typed pull-request
 //!   reference and say which projects are checkouts of the repository it names.
