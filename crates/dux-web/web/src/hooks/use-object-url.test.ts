@@ -24,16 +24,19 @@ beforeEach(() => {
   created.length = 0
   createMock.mockClear()
   revokeMock.mockClear()
-  // jsdom has no createObjectURL; stub the pair the hook must call.
-  vi.stubGlobal("URL", {
-    ...URL,
+  // jsdom has no createObjectURL; install the pair onto the REAL URL class.
+  // Never a `{ ...URL }` stubGlobal spread: that replaces the global with a
+  // plain object and destroys the URL constructor for everything else.
+  Object.assign(URL, {
     createObjectURL: createMock,
     revokeObjectURL: revokeMock,
   })
 })
 
 afterEach(() => {
-  vi.unstubAllGlobals()
+  const u = URL as { createObjectURL?: unknown; revokeObjectURL?: unknown }
+  delete u.createObjectURL
+  delete u.revokeObjectURL
 })
 
 describe("useObjectUrl", () => {
