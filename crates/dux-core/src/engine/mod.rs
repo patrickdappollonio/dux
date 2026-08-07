@@ -445,6 +445,14 @@ pub struct Engine {
     /// lookup FAILURE is resolved in `process_worker_event`'s `PullRequestResolved`
     /// Err handler.
     pub pending_web_pr_lookup_ops: HashMap<String, HandlerStatusOp<WebPrLookupOutcome>>,
+    /// Manual PR-attach ops (the "Resolving PR to attach…" busy). SHARED by
+    /// both surfaces, because the whole resolve→attach flow completes
+    /// engine-side: the busy is minted in
+    /// [`Engine::dispatch_attach_pull_request`] and the final (attached, or the
+    /// failure) is resolved in `process_worker_event`'s `PullRequestResolved`
+    /// attach arm. One keyed op spans resolve→attach; the `AttachPullRequest`
+    /// wire command itself mints no second busy.
+    pub pending_pr_attach_ops: HashMap<String, HandlerStatusOp<PrAttachOutcome>>,
     /// Web-side async worktree-deletion ops (the "Removing worktree for agent …"
     /// busy). Keyed by **session id** (the completion `WorktreeRemoveCompleted`
     /// event carries `session_id`, so it is the natural correlation handle), not
@@ -635,6 +643,16 @@ pub enum WebPrLookupOutcome {
     /// is cleared with no message.
     HandedOff,
     /// The lookup failed; `message` is the already-formatted error line.
+    Failed { message: String },
+}
+
+/// Handler-computed outcome for a manual PR-attach op (both surfaces).
+pub enum PrAttachOutcome {
+    /// The lookup resolved and the pin was applied; `message` is the
+    /// already-formatted confirmation from [`Engine::apply_pr_attach`].
+    Attached { message: String },
+    /// The lookup failed, the session vanished mid-resolve, or applying the
+    /// pin failed; `message` is the already-formatted error line.
     Failed { message: String },
 }
 
@@ -2948,6 +2966,98 @@ impl Engine {
                  was already active."
             ))
         }
+    }
+}
+
+impl Engine {
+    /// Dispatch the shared resolve→attach flow: validate synchronously, mint
+    /// the ONE keyed op that spans resolve→attach, and spawn the lookup worker.
+    /// Returns the op id and its pending (busy) status; the caller surfaces the
+    /// busy (the TUI applies it as a reaction, the web returns it plus the op
+    /// id in the `202` body). The final is resolved engine-side in
+    /// `process_worker_event`'s `PullRequestResolved` attach arm, so neither
+    /// surface can drift on the outcome handling.
+    pub fn dispatch_attach_pull_request(
+        &mut self,
+        session_id: &str,
+        raw_input: &str,
+    ) -> anyhow::Result<(String, StatusUpdate)> {
+        // Same gate as the new-agent-from-PR flow: GitHub integration on AND an
+        // authenticated `gh`.
+        if !self.pr_agent_command_available() {
+            anyhow::bail!(
+                "Attaching a pull request requires GitHub integration and an authenticated \
+                 gh CLI."
+            );
+        }
+        let Some(session) = self.sessions.iter().find(|s| s.id == session_id) else {
+            anyhow::bail!("unknown session: {session_id}");
+        };
+        let agent_name = session
+            .title
+            .clone()
+            .unwrap_or_else(|| session.branch_name.clone());
+        let Some(project) = self
+            .projects
+            .iter()
+            .find(|p| p.id == session.project_id)
+            .cloned()
+        else {
+            anyhow::bail!(
+                "Cannot attach a pull request: agent \"{agent_name}\" belongs to a project \
+                 dux no longer knows."
+            );
+        };
+        if raw_input.trim().is_empty() {
+            anyhow::bail!("Enter a GitHub PR URL, owner/repo#123, or a PR number.");
+        }
+
+        let op = status_op(format!(
+            "Resolving PR to attach to agent \"{agent_name}\"..."
+        ))
+        .resolve_in_handler(|o: &PrAttachOutcome| match o {
+            PrAttachOutcome::Attached { message } => Final::info(message.clone()),
+            PrAttachOutcome::Failed { message } => Final::error(message.clone()),
+        })
+        .with_scope(self.current_origin.clone());
+        let op_id = op.id().to_string();
+        let pending = op.pending_status();
+        self.pending_pr_attach_ops.insert(op_id.clone(), op);
+
+        let worker_tx = self.worker_tx.clone();
+        let policy = self.github_host_policy();
+        let raw = raw_input.to_string();
+        let sid = session_id.to_string();
+        let op_id_for_worker = op_id.clone();
+        std::thread::spawn(move || {
+            use std::panic::AssertUnwindSafe;
+            // Keep a sender outside `catch_unwind` so a panicking job still
+            // resolves the keyed op instead of stranding its busy.
+            let tx_panic = worker_tx.clone();
+            let sid_panic = sid.clone();
+            let op_id_panic = op_id_for_worker.clone();
+            if let Err(payload) = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                crate::gh::run_attach_pull_request_lookup_job(
+                    project,
+                    sid,
+                    raw,
+                    worker_tx,
+                    Some(op_id_for_worker),
+                    policy,
+                );
+            })) {
+                let reason = crate::engine::format_panic_payload(payload);
+                crate::logger::error(&format!("pr-attach lookup worker panicked: {reason}"));
+                let _ = tx_panic.send(crate::worker::WorkerEvent::PullRequestResolved {
+                    result: Err(format!("Worker panicked: {reason}")),
+                    purpose: crate::worker::PrLookupPurpose::Attach {
+                        session_id: sid_panic,
+                    },
+                    status_op_id: Some(op_id_panic),
+                });
+            }
+        });
+        Ok((op_id, pending))
     }
 }
 

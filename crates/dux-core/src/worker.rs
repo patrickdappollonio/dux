@@ -49,6 +49,20 @@ pub struct ResolvedPullRequest {
     pub custom_name: Option<String>,
 }
 
+/// Why a PR lookup ran: to create a new agent from the PR, or to manually
+/// attach the PR to an existing session. Carried on
+/// [`WorkerEvent::PullRequestResolved`] so the completion handler routes the
+/// resolved PR to the right consumer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PrLookupPurpose {
+    CreateAgent,
+    /// Resolving for a manual attach; carries the target session so the
+    /// engine-side handler can re-check it still exists before applying.
+    Attach {
+        session_id: String,
+    },
+}
+
 /// A parsed PR-lookup target: the host/owner_repo the PR belongs to and its
 /// number. Produced by [`crate::gh::parse_pull_request_lookup`] from a raw URL
 /// or `#N`/`N` string and consumed by the `gh pr view` lookup. Shared by the
@@ -471,6 +485,12 @@ pub enum WorkerEvent {
     },
     PullRequestResolved {
         result: Result<ResolvedPullRequest, String>,
+        /// Why the lookup ran. A create-flow resolution opens the name prompt
+        /// (TUI) or hands off to the create dispatch (web); an attach-flow
+        /// resolution is applied ENGINE-SIDE (`apply_pr_attach`) after
+        /// re-checking the session still exists, under the same keyed op the
+        /// dispatch opened.
+        purpose: PrLookupPurpose,
         /// Correlation id for a web `HandlerStatusOp` whose final is resolved in
         /// the completion handler. Rides from the `apply_wire` dispatch through
         /// the lookup worker so the lookup FAILURE (here) and the lookup SUCCESS

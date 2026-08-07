@@ -749,6 +749,7 @@ impl App {
                 dux_core::logger::error(&format!("pull-request-lookup worker panicked: {reason}"));
                 let _ = tx_panic.send(WorkerEvent::PullRequestResolved {
                     result: Err(format!("Worker panicked: {reason}")),
+                    purpose: dux_core::worker::PrLookupPurpose::CreateAgent,
                     status_op_id: Some(op_id_panic),
                 });
             }
@@ -3944,6 +3945,7 @@ mod tests {
             pending_web_checkout_ops: std::collections::HashMap::new(),
             pending_web_add_project_ops: std::collections::HashMap::new(),
             pending_web_pr_lookup_ops: std::collections::HashMap::new(),
+            pending_pr_attach_ops: std::collections::HashMap::new(),
             pending_delete_ops_web: std::collections::HashMap::new(),
             pending_create_ops: std::collections::HashMap::new(),
             pending_web_launch_ops: std::collections::HashMap::new(),
@@ -4177,6 +4179,7 @@ mod tests {
             pending_web_checkout_ops: std::collections::HashMap::new(),
             pending_web_add_project_ops: std::collections::HashMap::new(),
             pending_web_pr_lookup_ops: std::collections::HashMap::new(),
+            pending_pr_attach_ops: std::collections::HashMap::new(),
             pending_delete_ops_web: std::collections::HashMap::new(),
             pending_create_ops: std::collections::HashMap::new(),
             pending_web_launch_ops: std::collections::HashMap::new(),

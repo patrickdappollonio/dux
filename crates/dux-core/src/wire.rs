@@ -5716,6 +5716,101 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_attach_pull_request_mints_one_keyed_op_spanning_resolve_and_attach() {
+        let (mut engine, _tmp) = test_engine();
+        enable_gh(&mut engine);
+        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        let session = sample_session("s1", "p1", "feat");
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+
+        let (op_id, pending) = engine
+            .dispatch_attach_pull_request("s1", "#42")
+            .expect("dispatch");
+        assert_eq!(pending.tone, StatusTone::Busy);
+        assert_eq!(pending.key.as_deref(), Some(op_id.as_str()));
+        assert!(engine.pending_pr_attach_ops.contains_key(&op_id));
+
+        // Gated exactly like the new-agent-from-PR flow.
+        engine.gh_status = crate::model::GhStatus::NotInstalled;
+        let err = engine
+            .dispatch_attach_pull_request("s1", "#42")
+            .expect_err("no gh, no attach");
+        assert!(err.to_string().contains("gh CLI"), "got {err:#}");
+    }
+
+    /// The engine-side attach arm: a resolved lookup applies the pin and the
+    /// SAME keyed op carries the final; a session deleted mid-lookup attaches
+    /// nothing (the real vanished-session guard for both surfaces).
+    #[test]
+    fn pr_attach_resolution_applies_the_pin_or_refuses_a_vanished_session() {
+        let (mut engine, _tmp) = test_engine();
+        enable_gh(&mut engine);
+        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        let session = sample_session("s1", "p1", "feat");
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+        let (op_id, _) = engine
+            .dispatch_attach_pull_request("s1", "#12")
+            .expect("dispatch");
+
+        let resolved = crate::worker::ResolvedPullRequest {
+            project: sample_project("p1", "/tmp/p1"),
+            host: "github.com".to_string(),
+            owner_repo: "forker/Hello-World".to_string(),
+            number: 12,
+            title: "Pinned".to_string(),
+            state: "OPEN".to_string(),
+            head_ref_name: "feat".to_string(),
+            custom_name: None,
+        };
+        let reaction =
+            engine.process_worker_event(crate::worker::WorkerEvent::PullRequestResolved {
+                result: Ok(resolved.clone()),
+                purpose: crate::worker::PrLookupPurpose::Attach {
+                    session_id: "s1".to_string(),
+                },
+                status_op_id: Some(op_id.clone()),
+            });
+        let statuses = wire_statuses_from_reaction(&reaction);
+        let final_status = statuses.last().expect("keyed final");
+        assert_eq!(final_status.tone, "info");
+        assert_eq!(final_status.key.as_deref(), Some(op_id.as_str()));
+        assert!(final_status.message.contains("#12"), "{final_status:?}");
+        assert!(!engine.pending_pr_attach_ops.contains_key(&op_id));
+        assert_eq!(engine.pr_overrides.get("s1").map(|p| p.pr_number), Some(12));
+        assert_eq!(engine.pr_statuses.get("s1").map(|p| p.number), Some(12));
+        assert_eq!(engine.session_store.load_pr_overrides().unwrap().len(), 1);
+
+        // Session deleted mid-lookup: nothing is attached, the keyed final is
+        // an error, and no orphan row is written for the dead id.
+        engine.pr_overrides.clear();
+        engine.pr_statuses.clear();
+        engine.session_store.delete_pr_override("s1").unwrap();
+        let (op_id, _) = engine
+            .dispatch_attach_pull_request("s1", "#12")
+            .expect("dispatch");
+        engine.sessions.clear();
+        let reaction =
+            engine.process_worker_event(crate::worker::WorkerEvent::PullRequestResolved {
+                result: Ok(resolved),
+                purpose: crate::worker::PrLookupPurpose::Attach {
+                    session_id: "s1".to_string(),
+                },
+                status_op_id: Some(op_id.clone()),
+            });
+        let statuses = wire_statuses_from_reaction(&reaction);
+        let final_status = statuses.last().expect("keyed final");
+        assert_eq!(final_status.tone, "error");
+        assert!(final_status.message.contains("deleted"), "{final_status:?}");
+        assert!(engine.pr_overrides.is_empty());
+        assert!(
+            engine.session_store.load_pr_overrides().unwrap().is_empty(),
+            "no override row is written for a dead session id"
+        );
+    }
+
+    #[test]
     fn create_agent_from_pr_busy_is_keyed() {
         // When gh is available and the project exists, the synchronous busy
         // returned by `CreateAgentFromPr` must carry `pr-lookup:{project_id}`.
@@ -5778,6 +5873,7 @@ mod tests {
         let reaction =
             engine.process_worker_event(crate::worker::WorkerEvent::PullRequestResolved {
                 result: Err("gh pr view failed".to_string()),
+                purpose: crate::worker::PrLookupPurpose::CreateAgent,
                 status_op_id: Some(busy_key.clone()),
             });
         let statuses = wire_statuses_from_reaction(&reaction);

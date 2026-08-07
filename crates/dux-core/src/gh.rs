@@ -15,7 +15,9 @@ use crate::git;
 use crate::logger;
 use crate::model::{PrInfo, PrState, Project};
 use crate::storage::StoredPr;
-use crate::worker::{PrSyncEntry, PullRequestLookup, ResolvedPullRequest, WorkerEvent};
+use crate::worker::{
+    PrLookupPurpose, PrSyncEntry, PullRequestLookup, ResolvedPullRequest, WorkerEvent,
+};
 
 /// Live GraphQL rate-limit snapshot parsed from a batched query's top-level
 /// `rateLimit` field. Lets the PR-sync loop back off before it exhausts the
@@ -1347,6 +1349,7 @@ pub fn run_pull_request_lookup_job(
         Err(message) => {
             let _ = worker_tx.send(WorkerEvent::PullRequestResolved {
                 result: Err(message),
+                purpose: PrLookupPurpose::CreateAgent,
                 status_op_id,
             });
             return;
@@ -1383,6 +1386,161 @@ pub fn run_pull_request_lookup_job(
     };
     let _ = worker_tx.send(WorkerEvent::PullRequestResolved {
         result,
+        purpose: PrLookupPurpose::CreateAgent,
+        status_op_id,
+    });
+}
+
+/// Parse a user-typed PR reference into a lookup for a MANUAL ATTACH to an
+/// existing session. Deliberately NOT [`parse_pull_request_lookup`], whose
+/// project-match refusal is correct for the create flow (fetching another
+/// repository's head into this project's worktree would be wrong) and exactly
+/// backwards here: the whole point of a manual attach is that the PR may live
+/// under any head ref or another repository (a fork). Shares the same
+/// [`crate::pr_reference::parse_typed_reference`] grammar.
+///
+/// * A reference NAMING a repository is taken at its word: the host it typed
+///   (or the session's project remote host when it typed none, else
+///   github.com) is gated through the policy, and the lookup targets the typed
+///   `(host, owner_repo, number)`. No project-match check.
+/// * A BARE number resolves against the session's project remote, and the
+///   three real failure modes are surfaced by name: no GitHub origin (or an
+///   unreadable remote), and a policy-denied host. Bare numbers work exactly
+///   when that remote resolves.
+///
+/// Pure over the pre-resolved `resolution`, so every input form is testable
+/// without git.
+pub fn parse_attach_pull_request_lookup(
+    raw_input: &str,
+    resolution: &git::RemoteResolution,
+    project_name: &str,
+    policy: &GithubHostPolicy,
+) -> Result<PullRequestLookup, String> {
+    let reference = crate::pr_reference::parse_typed_reference(raw_input)?;
+
+    if let Some(owner_repo) = reference.owner_repo.clone() {
+        let host = match reference.host.as_deref() {
+            Some(host) => host.to_string(),
+            // `owner/repo#123` names no host; it inherits the project's
+            // (already-qualified) remote host, else github.com.
+            None => match resolution {
+                git::RemoteResolution::Allowed(remote) => remote.host.clone(),
+                git::RemoteResolution::Denied | git::RemoteResolution::Unresolved => {
+                    "github.com".to_string()
+                }
+            },
+        };
+        let host = host.to_ascii_lowercase();
+        if !policy.allows(&host) {
+            return Err(format!(
+                "dux cannot look up pull requests on {host}. Sign in to that host with \
+                 `gh auth login --hostname {host}`, or paste a reference from a host you \
+                 are already signed in to."
+            ));
+        }
+        let Some(number) = reference.number else {
+            return Err(format!(
+                "That address names {owner_repo} but no pull request. Add the number, \
+                 for example {owner_repo}#123."
+            ));
+        };
+        return Ok(PullRequestLookup {
+            host,
+            owner_repo,
+            number,
+        });
+    }
+
+    let Some(number) = reference.number else {
+        // Unreachable through the parser (a reference without a repository is
+        // always a bare number), kept as a refusal rather than a panic.
+        return Err(
+            "Enter a pull request URL, owner/repo#123, or a PR number. A repository \
+             address works too."
+                .to_string(),
+        );
+    };
+    match resolution {
+        git::RemoteResolution::Allowed(remote) => Ok(PullRequestLookup {
+            host: remote.host.clone(),
+            owner_repo: remote.owner_repo.clone(),
+            number,
+        }),
+        git::RemoteResolution::Denied => Err(format!(
+            "Project \"{project_name}\"'s remote is on a host dux is not signed in to, so a \
+             bare PR number cannot be resolved. Sign in with `gh auth login --hostname \
+             <host>`, or paste the full PR URL instead."
+        )),
+        git::RemoteResolution::Unresolved => Err(format!(
+            "Project \"{project_name}\" does not have a GitHub origin remote, so a bare PR \
+             number cannot be resolved. Paste the full PR URL (or owner/repo#{number}) \
+             instead."
+        )),
+    }
+}
+
+/// Resolve a PR reference for a MANUAL ATTACH and post
+/// [`WorkerEvent::PullRequestResolved`] with `purpose: Attach`. Runs on a
+/// background thread (it reads the project's remote, then shells out to
+/// `gh pr view`). Shared by the TUI's attach modal and the web's
+/// `PUT /sessions/:id/pull-request` handler through
+/// [`crate::engine::Engine::dispatch_attach_pull_request`], so both surfaces
+/// resolve attaches identically. `project` is the SESSION's project: its
+/// remote is what a bare number (or a host-less `owner/repo#123`) resolves
+/// against.
+pub fn run_attach_pull_request_lookup_job(
+    project: Project,
+    session_id: String,
+    raw_input: String,
+    worker_tx: Sender<WorkerEvent>,
+    status_op_id: Option<String>,
+    policy: GithubHostPolicy,
+) {
+    let resolution = git::resolve_remote_github_repo(Path::new(&project.path), &policy);
+    let purpose = PrLookupPurpose::Attach { session_id };
+    let lookup =
+        match parse_attach_pull_request_lookup(&raw_input, &resolution, &project.name, &policy) {
+            Ok(lookup) => lookup,
+            Err(message) => {
+                let _ = worker_tx.send(WorkerEvent::PullRequestResolved {
+                    result: Err(message),
+                    purpose,
+                    status_op_id,
+                });
+                return;
+            }
+        };
+
+    let args = pr_view_args(&lookup.host, &lookup.owner_repo, lookup.number);
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    // Bounded so a hung `gh pr view` cannot strand the attach busy forever.
+    let result = match run_gh_with_timeout(&arg_refs, GH_CALL_TIMEOUT) {
+        GhCallOutcome::Completed(output) if output.status.success() => {
+            parse_resolved_pull_request_json(
+                &String::from_utf8_lossy(&output.stdout),
+                project,
+                &lookup.host,
+                &lookup.owner_repo,
+                None,
+            )
+        }
+        GhCallOutcome::Completed(output) => Err(format!(
+            "Failed to resolve PR #{} from {}: {}",
+            lookup.number,
+            lookup.owner_repo,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )),
+        GhCallOutcome::TimedOut => Err(format!(
+            "gh pr view timed out after {}s resolving PR #{} from {}.",
+            GH_CALL_TIMEOUT.as_secs(),
+            lookup.number,
+            lookup.owner_repo,
+        )),
+        GhCallOutcome::Failed(msg) => Err(format!("Failed to run gh pr view: {msg}")),
+    };
+    let _ = worker_tx.send(WorkerEvent::PullRequestResolved {
+        result,
+        purpose,
         status_op_id,
     });
 }
@@ -3259,6 +3417,103 @@ mod tests {
         let pr = results[0].1.as_ref().expect("refreshed pin");
         assert_eq!(pr.number, 12);
         assert_eq!(pr.state, PrState::Merged);
+    }
+
+    /// The attach lookup constructor, per input form. Unlike
+    /// `parse_pull_request_lookup` there is NO project-match refusal: a
+    /// cross-repo URL is the point of the flow.
+    #[test]
+    fn parse_attach_lookup_accepts_a_cross_repo_url() {
+        let resolution = git::RemoteResolution::Allowed(git::GitHubRemote {
+            host: "github.com".to_string(),
+            owner_repo: "octocat/Hello-World".to_string(),
+        });
+        let lookup = parse_attach_pull_request_lookup(
+            "https://github.com/forker/Hello-World/pull/12",
+            &resolution,
+            "proj",
+            &legacy_policy(),
+        )
+        .expect("cross-repo URLs are accepted");
+        assert_eq!(lookup.owner_repo, "forker/Hello-World");
+        assert_eq!(lookup.number, 12);
+        assert_eq!(lookup.host, "github.com");
+
+        // `owner/repo#123` names no host: it inherits the project remote's.
+        let resolution = git::RemoteResolution::Allowed(git::GitHubRemote {
+            host: "github.example.com".to_string(),
+            owner_repo: "octocat/Hello-World".to_string(),
+        });
+        let lookup = parse_attach_pull_request_lookup(
+            "forker/Hello-World#7",
+            &resolution,
+            "proj",
+            &legacy_policy(),
+        )
+        .expect("host-less repo references are accepted");
+        assert_eq!(lookup.host, "github.example.com");
+        assert_eq!(lookup.owner_repo, "forker/Hello-World");
+        assert_eq!(lookup.number, 7);
+    }
+
+    #[test]
+    fn parse_attach_lookup_gates_the_typed_host_and_requires_a_number() {
+        let resolution = git::RemoteResolution::Allowed(git::GitHubRemote {
+            host: "github.com".to_string(),
+            owner_repo: "octocat/Hello-World".to_string(),
+        });
+        let policy = GithubHostPolicy::Hosts(std::iter::once("github.com".to_string()).collect());
+        let err = parse_attach_pull_request_lookup(
+            "https://git.company.example/acme/widget/pull/3",
+            &resolution,
+            "proj",
+            &policy,
+        )
+        .expect_err("a typed host the policy denies is refused");
+        assert!(err.contains("git.company.example"), "got {err}");
+        assert!(err.contains("gh auth login"), "got {err}");
+
+        let err = parse_attach_pull_request_lookup(
+            "https://github.com/forker/Hello-World",
+            &resolution,
+            "proj",
+            &policy,
+        )
+        .expect_err("a repository address without a number names no PR");
+        assert!(err.contains("forker/Hello-World"), "got {err}");
+    }
+
+    /// A bare number resolves against the session's project remote, and each of
+    /// the three real failure modes is surfaced by name rather than collapsed.
+    #[test]
+    fn parse_attach_lookup_bare_number_follows_the_project_remote() {
+        let allowed = git::RemoteResolution::Allowed(git::GitHubRemote {
+            host: "github.com".to_string(),
+            owner_repo: "octocat/Hello-World".to_string(),
+        });
+        let lookup = parse_attach_pull_request_lookup("#42", &allowed, "proj", &legacy_policy())
+            .expect("bare numbers resolve against the remote");
+        assert_eq!(lookup.owner_repo, "octocat/Hello-World");
+        assert_eq!(lookup.number, 42);
+
+        let err = parse_attach_pull_request_lookup(
+            "42",
+            &git::RemoteResolution::Unresolved,
+            "proj",
+            &legacy_policy(),
+        )
+        .expect_err("no GitHub origin means no bare-number resolution");
+        assert!(err.contains("GitHub origin remote"), "got {err}");
+        assert!(err.contains("proj"), "got {err}");
+
+        let err = parse_attach_pull_request_lookup(
+            "42",
+            &git::RemoteResolution::Denied,
+            "proj",
+            &legacy_policy(),
+        )
+        .expect_err("a policy-denied remote host is named, not collapsed");
+        assert!(err.contains("not signed in"), "got {err}");
     }
 
     fn stored_pr_named(number: u64, state: &str, owner_repo: &str) -> StoredPr {

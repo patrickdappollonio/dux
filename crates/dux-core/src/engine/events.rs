@@ -2302,6 +2302,7 @@ impl Engine {
             WorkerEvent::PullRequestResolved {
                 result,
                 status_op_id,
+                purpose: crate::worker::PrLookupPurpose::CreateAgent,
             } => match result {
                 Ok(pr) => EventReaction::OpenNewAgentPromptForPr {
                     pr: Box::new(pr),
@@ -2322,6 +2323,72 @@ impl Engine {
                     }
                 }
             },
+            WorkerEvent::PullRequestResolved {
+                result,
+                status_op_id,
+                purpose: crate::worker::PrLookupPurpose::Attach { session_id },
+            } => {
+                // The attach application is engine-side and surface-agnostic:
+                // this arm is the real vanished-session guard for BOTH
+                // surfaces. The lookup is async, so a delete can land first,
+                // and an unguarded apply would write an override row for a
+                // dead id, exactly the orphan the storage cleanup defends
+                // against. (`apply_pr_attach` re-checks too; the explicit
+                // check here exists to say WHY nothing was attached.)
+                let outcome = match result {
+                    Ok(pr) => {
+                        if !self.sessions.iter().any(|s| s.id == session_id) {
+                            crate::engine::PrAttachOutcome::Failed {
+                                message: format!(
+                                    "The agent was deleted while PR #{} was being resolved; \
+                                     nothing was attached.",
+                                    pr.number,
+                                ),
+                            }
+                        } else {
+                            match self.apply_pr_attach(
+                                &session_id,
+                                &pr.host,
+                                &pr.owner_repo,
+                                pr.number,
+                                &pr.title,
+                                &pr.state,
+                                "",
+                            ) {
+                                Ok(message) => crate::engine::PrAttachOutcome::Attached { message },
+                                Err(err) => crate::engine::PrAttachOutcome::Failed {
+                                    message: format!("Failed to attach PR #{}: {err:#}", pr.number),
+                                },
+                            }
+                        }
+                    }
+                    Err(message) => crate::engine::PrAttachOutcome::Failed { message },
+                };
+                let attached = matches!(outcome, crate::engine::PrAttachOutcome::Attached { .. });
+                let final_reaction = if let Some(id) = status_op_id
+                    && let Some(op) = self.pending_pr_attach_ops.remove(&id)
+                {
+                    op.resolve(&outcome).into_reaction()
+                } else {
+                    // No keyed op (a defensive fallback): still surface the
+                    // outcome rather than swallowing it.
+                    match outcome {
+                        crate::engine::PrAttachOutcome::Attached { message } => {
+                            EventReaction::Status(StatusUpdate::info(message))
+                        }
+                        crate::engine::PrAttachOutcome::Failed { message } => {
+                            EventReaction::Status(StatusUpdate::error(message))
+                        }
+                    }
+                };
+                if attached {
+                    // The badge changed; the TUI sidebar re-derives from
+                    // `pr_statuses` on rebuild (the web refetches the spine).
+                    EventReaction::Multi(vec![final_reaction, EventReaction::RebuildLeftItems])
+                } else {
+                    final_reaction
+                }
+            }
             WorkerEvent::RefsChanged(session_id) => {
                 logger::debug(&format!(
                     "[gh-integration] refs watcher: triggering PR check for session {}",

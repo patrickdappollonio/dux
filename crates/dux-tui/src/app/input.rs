@@ -15479,6 +15479,7 @@ not_a_real_action = ["x"]
                     head_ref_name: "feature/pr-42".to_string(),
                     custom_name: None,
                 }),
+                purpose: dux_core::worker::PrLookupPurpose::CreateAgent,
                 status_op_id: None,
             })
             .expect("send PR resolution");
@@ -15549,6 +15550,7 @@ not_a_real_action = ["x"]
                     head_ref_name: "feature/pr-42".to_string(),
                     custom_name: None,
                 }),
+                purpose: dux_core::worker::PrLookupPurpose::CreateAgent,
                 status_op_id: Some(op_id.clone()),
             })
             .expect("send PR resolution");
@@ -15582,6 +15584,7 @@ not_a_real_action = ["x"]
             .worker_tx
             .send(WorkerEvent::PullRequestResolved {
                 result: Err("gh pr view failed".to_string()),
+                purpose: dux_core::worker::PrLookupPurpose::CreateAgent,
                 status_op_id: Some(op_id.clone()),
             })
             .expect("send PR failure");
