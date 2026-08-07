@@ -1012,9 +1012,20 @@ pub(crate) struct RefusalBlink {
 /// branch differs from the branch the agent was created on, then the worktree,
 /// creation time, and status. Each line carries its semantic tone so the
 /// renderer never has to substring-match prose. Pure and unit-tested.
+/// The lowercase state word for a PR, matching the web's `prStateLabel` casing
+/// (`open`/`merged`/`closed`) so both surfaces read the same.
+pub(crate) fn pr_state_word(state: &crate::model::PrState) -> &'static str {
+    match state {
+        crate::model::PrState::Open => "open",
+        crate::model::PrState::Merged => "merged",
+        crate::model::PrState::Closed => "closed",
+    }
+}
+
 pub(crate) fn agent_info_lines(
     session: &AgentSession,
     project_default: Option<ProviderKind>,
+    pr: Option<(&crate::model::PrInfo, bool)>,
 ) -> Vec<(String, AgentInfoTone)> {
     let name = session
         .title
@@ -1070,6 +1081,20 @@ pub(crate) fn agent_info_lines(
         format!("Status:       {}", session.status.as_str()),
         AgentInfoTone::Neutral,
     ));
+    // The PR line is the ONLY TUI cue that a manual pin exists, so when a PR
+    // is known it always renders, and a pin always says so.
+    if let Some((pr, overridden)) = pr {
+        let mut line = format!(
+            "Pull request: #{} ({}) {}",
+            pr.number,
+            pr_state_word(&pr.state),
+            pr.title
+        );
+        if overridden {
+            line.push_str(" (manually attached)");
+        }
+        lines.push((line, AgentInfoTone::Neutral));
+    }
     lines
 }
 
@@ -4662,9 +4687,15 @@ impl App {
                 .map(|p| p.default_provider.clone());
             self.input_target = InputTarget::None;
             self.fullscreen_overlay = FullscreenOverlay::None;
+            let pr = self
+                .engine
+                .pr_statuses
+                .get(&session.id)
+                .map(|pr| (pr, self.engine.pr_overrides.contains_key(&session.id)));
+            let lines = agent_info_lines(&session, project_default, pr);
             self.prompt = PromptState::AgentInfo(AgentInfoPrompt {
                 session_label: label,
-                lines: agent_info_lines(&session, project_default),
+                lines,
             });
         } else {
             self.set_error("No agent session selected. Select an agent to see its info.");
@@ -5592,7 +5623,7 @@ mod tests {
         s.initial_branch = "server-mode".into();
         s.source_branch = "main".into();
 
-        let lines = agent_info_lines(&s, None);
+        let lines = agent_info_lines(&s, None, None);
         assert!(lines.iter().any(|(l, _)| l.contains("agent-tabs"))); // current branch
         assert!(lines.iter().any(|(l, _)| l.contains("server-mode"))); // original
         assert!(lines.iter().any(|(l, _)| l.contains("main"))); // forked from
@@ -5617,7 +5648,7 @@ mod tests {
         let mut s = test_session("s1", "p1", 0);
         s.branch_name = "main".into();
         s.initial_branch = "main".into();
-        let lines = agent_info_lines(&s, None);
+        let lines = agent_info_lines(&s, None, None);
         // Both checks below are shaped so they would pass on an EMPTY list, so
         // pin that there is something to check first. Without this the test
         // passes while reporting nothing at all.
@@ -5643,7 +5674,7 @@ mod tests {
         let mut s = test_session("s1", "p1", 0);
         s.branch_name = "main".into();
         s.initial_branch = String::new();
-        let lines = agent_info_lines(&s, None);
+        let lines = agent_info_lines(&s, None, None);
         assert!(
             !lines
                 .iter()
@@ -5653,10 +5684,50 @@ mod tests {
     }
 
     #[test]
+    fn agent_info_lines_show_the_pull_request_and_name_a_manual_pin() {
+        let s = test_session("s1", "p1", 0);
+        let pr = crate::model::PrInfo {
+            number: 42,
+            state: crate::model::PrState::Open,
+            title: "Fix the frobnicator".to_string(),
+            host: "github.com".to_string(),
+            owner_repo: "o/r".to_string(),
+            url: "https://github.com/o/r/pull/42".to_string(),
+        };
+
+        // No PR known: no line at all.
+        let none = agent_info_lines(&s, None, None);
+        assert!(!none.iter().any(|(l, _)| l.starts_with("Pull request:")));
+
+        // Autodetected PR: number, lowercase state, title, no pin marker.
+        let auto = agent_info_lines(&s, None, Some((&pr, false)));
+        let line = auto
+            .iter()
+            .find(|(l, _)| l.starts_with("Pull request:"))
+            .expect("pr line");
+        assert!(
+            line.0.contains("#42 (open) Fix the frobnicator"),
+            "{}",
+            line.0
+        );
+        assert!(!line.0.contains("manually attached"));
+        assert_eq!(line.1, AgentInfoTone::Neutral);
+
+        // Pinned PR: the same line carries the manual marker. This line is the
+        // ONLY TUI cue that a pin exists, so the marker is load-bearing.
+        let pinned = agent_info_lines(&s, None, Some((&pr, true)));
+        let line = pinned
+            .iter()
+            .find(|(l, _)| l.starts_with("Pull request:"))
+            .expect("pr line");
+        assert!(line.0.ends_with("(manually attached)"), "{}", line.0);
+    }
+
+    #[test]
     fn agent_info_provider_line_notes_a_divergent_project_default() {
         let s = test_session("s1", "p1", 0); // provider "codex"
         // Matching default: plain provider line, no annotation.
-        let same = agent_info_lines(&s, Some(ProviderKind::from_str("codex")));
+        let same = agent_info_lines(&s, Some(ProviderKind::from_str("codex")), None);
         let provider_same = same
             .iter()
             .find(|(l, _)| l.starts_with("Provider:"))
@@ -5664,7 +5735,7 @@ mod tests {
         assert!(!provider_same.0.contains("project default"));
 
         // Divergent default: the line spells out the project default too.
-        let diff = agent_info_lines(&s, Some(ProviderKind::from_str("claude")));
+        let diff = agent_info_lines(&s, Some(ProviderKind::from_str("claude")), None);
         let provider_diff = diff
             .iter()
             .find(|(l, _)| l.starts_with("Provider:"))
