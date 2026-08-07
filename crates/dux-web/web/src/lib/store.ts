@@ -1894,16 +1894,29 @@ const CHANGES_SUFFIX = "/changes"
 // encodeURIComponent-encoded, so it is one slashless segment).
 const EDITOR_SUFFIX = "/editor"
 
-// Parse the editor suffix off a hash, or null when it carries none. Anchored
-// at the end; the prefix must itself parse as a target that HAS a session
-// (the editor is session-scoped, so `#/terminal/t1/editor` is not a route).
+// Parse the editor suffix off a hash, or null when it carries none. The
+// prefix must itself parse as a target that HAS a session (the editor is
+// session-scoped, so `#/terminal/t1/editor` is not a route).
+//
+// NOT a single greedy regex, deliberately: a file literally named "editor"
+// makes the string contain "/editor" twice (`#/agent/s1/editor/file/editor`),
+// and a greedy match splits at the LAST one, leaving a prefix that is not a
+// target, so the whole route used to fall through to home. Instead every
+// "/editor" occurrence is tried as the split point, rightmost first, and the
+// first candidate whose tail has the suffix shape AND whose prefix parses as
+// a session-carrying target wins.
 function parseEditorRoute(hash: string): Route | null {
-  const m = hash.match(/^(.*)\/editor(?:\/(file|diff)\/([^/]+))?$/)
-  if (!m) return null
-  const target = parseSelectionHash(m[1])
-  if (!target || targetSessionId(target) === null) return null
-  const editor = parseEditorSegment(m[2], m[3])
-  return { target, changes: false, editor, standalone: false }
+  let at = hash.length
+  while ((at = hash.lastIndexOf(EDITOR_SUFFIX, at - 1)) > 0) {
+    const tail = hash.slice(at + EDITOR_SUFFIX.length)
+    const tm = tail.match(/^(?:\/(file|diff)\/([^/]+))?$/)
+    if (!tm) continue
+    const target = parseSelectionHash(hash.slice(0, at))
+    if (!target || targetSessionId(target) === null) continue
+    const editor = parseEditorSegment(tm[1], tm[2])
+    return { target, changes: false, editor, standalone: false }
+  }
+  return null
 }
 
 // The standalone editor's whole-tab address: `#/editor/agent/<sid>` plus the

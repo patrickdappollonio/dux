@@ -1009,6 +1009,28 @@ describe("the editor rides the URL", () => {
         editor: { mode: "diff" as const, path: "src/a b.ts" },
         standalone: false,
       },
+      // Files whose NAMES collide with the grammar's own keywords: a path
+      // literally called "editor" or "changes" must round-trip exactly (the
+      // parser picks the split point whose prefix is a real target, not the
+      // rightmost "/editor" in the string).
+      {
+        target,
+        changes: false,
+        editor: { mode: "file" as const, path: "editor" },
+        standalone: false,
+      },
+      {
+        target,
+        changes: false,
+        editor: { mode: "diff" as const, path: "docs/editor" },
+        standalone: false,
+      },
+      {
+        target,
+        changes: false,
+        editor: { mode: "file" as const, path: "changes" },
+        standalone: false,
+      },
       // The standalone surface: the same editor positions at their un-nested
       // whole-tab addresses.
       {
@@ -1023,10 +1045,53 @@ describe("the editor rides the URL", () => {
         editor: { mode: "diff" as const, path: "src/a b.ts" },
         standalone: true,
       },
+      {
+        target,
+        changes: false,
+        editor: { mode: "file" as const, path: "editor" },
+        standalone: true,
+      },
     ]
     for (const route of routes) {
       expect(mod.parseRoute(mod.routeHash(route))).toEqual(route)
     }
+  })
+
+  it("normalizes the shapes the standalone grammar cannot carry", async () => {
+    // Standalone routes are session-slot only BY DEFINITION (the surface is
+    // the editor, not a tab strip), and they carry no changes screen. The
+    // serializer already drops both; the parser can only ever produce the
+    // normalized form, so serialize-then-parse lands on it.
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
+    const editor = { mode: "file" as const, path: "a.ts" }
+    const normalized = {
+      target: { kind: "agent" as const, sessionId: "s1", tabId: "s1" },
+      changes: false,
+      editor,
+      standalone: true,
+    }
+    // An extra-tab target normalizes to the session-slot tab.
+    expect(
+      mod.parseRoute(
+        mod.routeHash({
+          target: { kind: "agent", sessionId: "s1", tabId: "t2" },
+          changes: false,
+          editor,
+          standalone: true,
+        }),
+      ),
+    ).toEqual(normalized)
+    // A changes flag is dropped: the standalone form has nowhere to say it.
+    expect(
+      mod.parseRoute(
+        mod.routeHash({
+          target: { kind: "agent", sessionId: "s1", tabId: "s1" },
+          changes: true,
+          editor,
+          standalone: true,
+        }),
+      ),
+    ).toEqual(normalized)
   })
 
   it("the serializer emits at most one suffix, and the parser tries editor first", async () => {
