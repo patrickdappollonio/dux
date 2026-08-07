@@ -563,6 +563,15 @@ export interface DuxState {
   // toggle persists to config via the server; this clears once the broadcast
   // confirms (or on command error / disconnect, which roll it back).
   changesPaneOverride: boolean | null
+  // Optimistic overrides for the mobile terminal screens' two hideable bars
+  // (the top bar and the accessory key bar). `null` follows the persisted
+  // config (`bootstrap.mobile_top_bar` / `bootstrap.mobile_accessory_bar`);
+  // the terminal-screen ⋯ menu's quick toggles and the compose bar's restore
+  // button set an explicit bool for instant feedback. Reconciled against the
+  // next bootstrap exactly like `changesPaneOverride` above, and rolled back
+  // (with a toast) when the settings PATCH fails.
+  mobileTopBarOverride: boolean | null
+  mobileAccessoryBarOverride: boolean | null
   // The session whose code-editor overlay is open, the file to auto-open on
   // launch (null = none preselected), and the view it opens in: "file" (editable
   // Monaco buffer) or "diff" (read-only Monaco DiffEditor, HEAD vs working copy).
@@ -735,6 +744,8 @@ let state: DuxState = {
   createAgentPrRequestId: null,
   sidebarWidth: loadSidebarWidth(),
   changesPaneOverride: null,
+  mobileTopBarOverride: null,
+  mobileAccessoryBarOverride: null,
   editorTarget: null,
   editorTabs: {},
   editorCloseTabTarget: null,
@@ -1166,6 +1177,19 @@ function applyBootstrap(b: Bootstrap): void {
       state.changesPaneOverride === b.show_changes_pane
         ? null
         : state.changesPaneOverride,
+    // Same reconcile for the two mobile-bar overrides: drop each optimistic
+    // override once the refetched config confirms it, so config becomes the
+    // single source of truth across every connected client.
+    mobileTopBarOverride:
+      state.mobileTopBarOverride !== null &&
+      state.mobileTopBarOverride === (b.mobile_top_bar ?? true)
+        ? null
+        : state.mobileTopBarOverride,
+    mobileAccessoryBarOverride:
+      state.mobileAccessoryBarOverride !== null &&
+      state.mobileAccessoryBarOverride === (b.mobile_accessory_bar ?? true)
+        ? null
+        : state.mobileAccessoryBarOverride,
     // Same reconcile as changesPaneOverride: drop the optimistic sort override once
     // the refetched config confirms it, so config.ui.agent_sort is the single truth.
     agentSort:
@@ -1608,6 +1632,8 @@ function clearPendingClientIntent(): Partial<DuxState> {
     ...clearPendingOrders(),
     pendingCreateFocus: null,
     changesPaneOverride: null,
+    mobileTopBarOverride: null,
+    mobileAccessoryBarOverride: null,
   }
 }
 
@@ -4469,6 +4495,92 @@ export function setChangesPaneVisibility(next: boolean): Promise<boolean> {
 // saved preference itself is the `ui.show_changes_pane` Preferences row.
 export function toggleChangesPane(): void {
   setChangesPaneVisibility(!changesPaneVisible(state))
+}
+
+// ── Mobile hideable bars (ui.mobile_top_bar / ui.mobile_accessory_bar) ──────
+
+// The mobile terminal screens' top bar's effective visibility: the optimistic
+// override if set, else the config default from the bootstrap document, else
+// visible (the pre-load window before the first bootstrap fetch lands).
+export function mobileTopBarVisible(s: DuxState): boolean {
+  return s.mobileTopBarOverride ?? s.bootstrap?.mobile_top_bar ?? true
+}
+
+// Same resolution for the accessory key bar.
+export function mobileAccessoryBarVisible(s: DuxState): boolean {
+  return (
+    s.mobileAccessoryBarOverride ?? s.bootstrap?.mobile_accessory_bar ?? true
+  )
+}
+
+// Which of the two hideable mobile bars an action targets.
+export type MobileBar = "top" | "accessory"
+
+// Set one mobile bar's visibility and persist it through the GENERIC settings
+// PATCH (these preferences are pure render gates with no server-side side
+// effect, so they ride `PATCH /api/v1/config/settings` like any Preferences
+// row; see the settings tenet). The override is set optimistically so the bar
+// moves on tap; the server writes config and emits `config.changed`, the
+// refetched bootstrap carries the confirmed value, and `applyBootstrap` drops
+// the override so config is the single source of truth across every client.
+// Rolls the optimistic override back with a toast on error. Resolves to
+// whether the persist succeeded; fire-and-forget callers ignore the promise.
+export function setMobileBarVisibility(
+  bar: MobileBar,
+  next: boolean,
+): Promise<boolean> {
+  const key =
+    bar === "top" ? "mobileTopBarOverride" : "mobileAccessoryBarOverride"
+  const field = bar === "top" ? "mobile_top_bar" : "mobile_accessory_bar"
+  const prev = state[key]
+  setState({ [key]: next })
+  return configApi
+    .patchSettings({ ui: { [field]: next } })
+    .then(() => true)
+    .catch((e) => {
+      // Roll the optimistic override back so the bar doesn't strand in the
+      // toggled state when the persist fails — but ONLY while the override
+      // still holds the value this call wrote. A newer tap may have landed
+      // while this write was in flight, and rolling back over it would snap
+      // the bar to a state the user already corrected.
+      if (state[key] === next) setState({ [key]: prev })
+      toast.error(
+        e instanceof Error
+          ? e.message
+          : "Could not save the mobile bar preference.",
+      )
+      return false
+    })
+}
+
+// The compose bar's restore button: one tap restores BOTH bars (a deliberate
+// decision, the button is the escape hatch, not a per-bar toggle), in a
+// single settings PATCH so the two writes cannot half-apply on the wire.
+export function restoreMobileBars(): Promise<boolean> {
+  const prevTop = state.mobileTopBarOverride
+  const prevAccessory = state.mobileAccessoryBarOverride
+  setState({ mobileTopBarOverride: true, mobileAccessoryBarOverride: true })
+  return configApi
+    .patchSettings({ ui: { mobile_top_bar: true, mobile_accessory_bar: true } })
+    .then(() => true)
+    .catch((e) => {
+      // Per-field rollback with the same overtaken-write guard as
+      // `setMobileBarVisibility`: only a field still holding the `true` this
+      // restore wrote rolls back; one a newer toggle has since re-hidden is
+      // that newer write's to keep.
+      const rollback: Partial<DuxState> = {}
+      if (state.mobileTopBarOverride === true) {
+        rollback.mobileTopBarOverride = prevTop
+      }
+      if (state.mobileAccessoryBarOverride === true) {
+        rollback.mobileAccessoryBarOverride = prevAccessory
+      }
+      if (Object.keys(rollback).length) setState(rollback)
+      toast.error(
+        e instanceof Error ? e.message : "Could not restore the mobile bars.",
+      )
+      return false
+    })
 }
 
 

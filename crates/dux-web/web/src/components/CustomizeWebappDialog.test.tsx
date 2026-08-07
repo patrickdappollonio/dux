@@ -270,6 +270,50 @@ describe("CustomizeWebappDialog", () => {
     expect(saveSettings).not.toHaveBeenCalled()
   })
 
+  // The two mobile-bar rows ride the GENERIC settings PATCH but still carry a
+  // store-side optimistic override (the terminal screen's quick toggles), so
+  // like the Changes-pane row their baseline must be the override-aware
+  // selector. Read from the raw bootstrap, the switch would show a stale
+  // value AND `buildWrites` would treat a toggle back to that stale value as
+  // a no-op and silently save nothing.
+  it("the mobile top-bar row reflects an active override, and toggling back to the stale bootstrap value still writes", async () => {
+    seed({ mobile_top_bar: true } as Partial<Bootstrap>)
+    ;(
+      mockState as unknown as { mobileTopBarOverride: boolean | null }
+    ).mobileTopBarOverride = false // a quick toggle already hid it.
+    render(<CustomizeWebappDialog />)
+
+    const sw = screen.getByLabelText("Mobile terminal top bar")
+    expect(sw.getAttribute("aria-checked")).toBe("false")
+
+    fireEvent.click(sw) // back to true — the (stale) bootstrap value.
+    fireEvent.click(screen.getByRole("button", { name: "Save" }))
+
+    await waitFor(() => expect(closeCustomizeWebapp).toHaveBeenCalled())
+    expect(saveSettings).toHaveBeenCalledTimes(1)
+    expect(saveSettings.mock.calls[0][0].ui).toEqual({ mobile_top_bar: true })
+  })
+
+  it("the mobile terminal-keys row reflects an active override the same way", async () => {
+    seed({ mobile_accessory_bar: true } as Partial<Bootstrap>)
+    ;(
+      mockState as unknown as { mobileAccessoryBarOverride: boolean | null }
+    ).mobileAccessoryBarOverride = false
+    render(<CustomizeWebappDialog />)
+
+    const sw = screen.getByLabelText("Mobile terminal keys")
+    expect(sw.getAttribute("aria-checked")).toBe("false")
+
+    fireEvent.click(sw)
+    fireEvent.click(screen.getByRole("button", { name: "Save" }))
+
+    await waitFor(() => expect(closeCustomizeWebapp).toHaveBeenCalled())
+    expect(saveSettings).toHaveBeenCalledTimes(1)
+    expect(saveSettings.mock.calls[0][0].ui).toEqual({
+      mobile_accessory_bar: true,
+    })
+  })
+
   it("does not persist anything when Save is clicked without touching a field", async () => {
     seed()
     render(<CustomizeWebappDialog />)

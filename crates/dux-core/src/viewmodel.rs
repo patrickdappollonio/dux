@@ -105,6 +105,16 @@ pub struct BootstrapView {
     /// autocorrect) and redirects a terminal tap into it (default true). Read
     /// by the terminal pane and by the web's Preferences dialog. Web-only.
     pub compose_bar: bool,
+    /// Mirrors `config.ui.mobile_top_bar`: whether the web's mobile terminal
+    /// screens show the top bar (the back/branch header plus the agent tab
+    /// strip), default true. A pure render gate read by the mobile shell and
+    /// by the web's Preferences dialog. Web-only.
+    pub mobile_top_bar: bool,
+    /// Mirrors `config.ui.mobile_accessory_bar`: whether the web's mobile
+    /// terminal screens show the accessory key bar (Esc/Tab/Ctrl/Alt/arrows),
+    /// default true. A pure render gate read by the terminal pane and by the
+    /// web's Preferences dialog. Web-only.
+    pub mobile_accessory_bar: bool,
     /// Mirrors `config.ui.auto_reopen_agents`: the GLOBAL startup auto-reopen
     /// switch (default false). When on, agents that were running when dux last
     /// exited (and have their per-agent opt-in) are relaunched at startup, by
@@ -1117,6 +1127,8 @@ impl Engine {
             github_integration: self.config.ui.github_integration,
             copy_on_select: self.config.ui.copy_on_select,
             compose_bar: self.config.ui.compose_bar,
+            mobile_top_bar: self.config.ui.mobile_top_bar,
+            mobile_accessory_bar: self.config.ui.mobile_accessory_bar,
             auto_reopen_agents: self.config.ui.auto_reopen_agents,
             attention_grace_seconds: self.config.ui.attention_grace_seconds,
             web_notifications: self.config.capabilities.web_notifications,
@@ -2034,6 +2046,21 @@ mod tests {
     }
 
     #[test]
+    fn mobile_bar_preferences_are_projected_from_config() {
+        let (mut engine, _tmp) = test_engine();
+
+        assert!(engine.bootstrap().mobile_top_bar);
+        assert!(engine.bootstrap().mobile_accessory_bar);
+
+        engine.config.ui.mobile_top_bar = false;
+        assert!(!engine.bootstrap().mobile_top_bar);
+        assert!(engine.bootstrap().mobile_accessory_bar);
+
+        engine.config.ui.mobile_accessory_bar = false;
+        assert!(!engine.bootstrap().mobile_accessory_bar);
+    }
+
+    #[test]
     fn auto_reopen_agents_is_projected_from_config() {
         let (mut engine, _tmp) = test_engine();
 
@@ -2372,6 +2399,8 @@ mod tests {
             "github_integration",
             "copy_on_select",
             "compose_bar",
+            "mobile_top_bar",
+            "mobile_accessory_bar",
             "auto_reopen_agents",
             "attention_grace_seconds",
             "web_notifications",

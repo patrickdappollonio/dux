@@ -62,6 +62,17 @@ export interface Bootstrap {
    * pre-compose-bar behavior. Older servers omit it, so consumers fall back
    * to true. */
   compose_bar?: boolean
+  /** Mirrors `config.ui.mobile_top_bar`: whether the mobile terminal screens
+   * show the top bar (the back/branch header plus the agent tab strip). A
+   * pure render gate; hidden bars are restored from the
+   * show-bars button below the terminal or the Preferences dialog. Older servers omit it, so
+   * consumers fall back to true. */
+  mobile_top_bar?: boolean
+  /** Mirrors `config.ui.mobile_accessory_bar`: whether the mobile terminal
+   * screens show the accessory key bar (Esc/Tab/Ctrl/Alt/arrows). Same
+   * render-gate/restore story as `mobile_top_bar`; older servers omit it, so
+   * consumers fall back to true. */
+  mobile_accessory_bar?: boolean
   /** Mirrors `config.ui.auto_reopen_agents`: the GLOBAL startup auto-reopen
    * switch. When on, agents that were still running when dux last exited (and
    * have their per-agent opt-in) relaunch at the next startup, on the TUI and

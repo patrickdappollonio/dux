@@ -38,6 +38,8 @@ import { renderInlineCode } from "@/lib/inlineMarkdown"
 import {
   changesPaneVisible,
   closeCustomizeWebapp,
+  mobileAccessoryBarVisible,
+  mobileTopBarVisible,
   saveSettings,
   setChangesPaneVisibility,
   setInstanceIdentity,
@@ -420,7 +422,11 @@ function SettingRow({
 // one field (the Changes menu can flip it live outside this dialog too), so
 // its baseline is the override-aware `changesPaneVisible()`, not the raw
 // bootstrap field, and comparing against the raw field would wrongly treat a
-// toggle back to the STALE bootstrap value as a no-op. For the same reason
+// toggle back to the STALE bootstrap value as a no-op. The same
+// override-awareness applies to the two mobile-bar rows (`ui.mobile_top_bar`,
+// `ui.mobile_accessory_bar`), which ride the generic PATCH but are flipped
+// live by the terminal screen's quick toggles; the dialog's `originalOf`
+// resolves all of these to the store's override-aware selectors. Separately,
 // `ui.show_changes_pane` is excluded from the generic `settings` bucket here
 // and routed through `setChangesPaneVisibility` by the caller instead of the
 // generic PATCH. See the `writeTarget` doc in `settingsDescriptors.ts`.
@@ -537,16 +543,21 @@ function CustomizeWebappForm({
   const [overrides, setOverrides] = useState<Record<string, SettingValue>>({})
 
   // The pre-touch baseline for a row: what it would show/compare against if
-  // the user had never touched it in this dialog session. The Changes-pane
-  // row's baseline must be the store's override-aware `changesPaneVisible()`,
-  // not the raw bootstrap field: the Changes menu can flip an optimistic
-  // `changesPaneOverride` while this dialog is open (or already applied one
-  // before it opened), and reading `bootstrap.show_changes_pane` directly
-  // would show a stale value until the next bootstrap refetch reconciles it,
-  // and would make `buildWrites` wrongly treat a toggle back to that stale
-  // value as a no-op.
+  // the user had never touched it in this dialog session. The rule for the
+  // special cases is OVERRIDE-AWARENESS, not writeTarget: any field the store
+  // tracks an optimistic override for (something outside this dialog can flip
+  // it live — the Changes menu, the mobile terminal screen's quick toggles,
+  // the compose bar's restore button) must read the store's override-aware
+  // selector, not the raw bootstrap field. Reading the raw field would show a
+  // stale value until the next bootstrap refetch reconciles it, and would
+  // make `buildWrites` wrongly treat a toggle back to that stale value as a
+  // no-op. That the Changes-pane case coincides with a bespoke writeTarget is
+  // incidental; the two mobile-bar rows ride the generic settings PATCH and
+  // still need their baseline read this way.
   const originalOf = (d: SettingDescriptor): SettingValue => {
     if (d.writeTarget === "changesPane") return changesPaneVisible(dux)
+    if (d.key === "ui.mobile_top_bar") return mobileTopBarVisible(dux)
+    if (d.key === "ui.mobile_accessory_bar") return mobileAccessoryBarVisible(dux)
     return bootstrap ? d.read(bootstrap) : d.default
   }
 

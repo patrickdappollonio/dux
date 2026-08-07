@@ -15,6 +15,8 @@ const sampleBootstrap: Bootstrap = {
   github_integration: false,
   copy_on_select: false,
   compose_bar: false,
+  mobile_top_bar: false,
+  mobile_accessory_bar: false,
   auto_reopen_agents: true,
   attention_grace_seconds: 11,
   web_notifications: false,
@@ -59,6 +61,8 @@ describe("settingsDescriptors", () => {
         "ui.show_changes_pane",
         "ui.copy_on_select",
         "ui.compose_bar",
+        "ui.mobile_top_bar",
+        "ui.mobile_accessory_bar",
         "ui.auto_reopen_agents",
         "capabilities.web_notifications",
         "ui.status_clear_seconds",
@@ -118,6 +122,8 @@ describe("settingsDescriptors", () => {
     expect(byKey["ui.show_changes_pane"]).toBe(false)
     expect(byKey["ui.copy_on_select"]).toBe(false)
     expect(byKey["ui.compose_bar"]).toBe(false)
+    expect(byKey["ui.mobile_top_bar"]).toBe(false)
+    expect(byKey["ui.mobile_accessory_bar"]).toBe(false)
     expect(byKey["ui.auto_reopen_agents"]).toBe(true)
     expect(byKey["capabilities.web_notifications"]).toBe(false)
     expect(byKey["ui.status_clear_seconds"]).toBe(42)
@@ -213,6 +219,8 @@ describe("settingsDescriptors", () => {
       "ui.copy_on_select",
       "ui.disable_automated_welcome_screen",
       "ui.disable_release_notes",
+      "ui.mobile_accessory_bar",
+      "ui.mobile_top_bar",
       "ui.pr_banner_position",
       "ui.status_clear_seconds",
     ])
@@ -253,6 +261,8 @@ describe("settingsDescriptors", () => {
     delete bare.attention_on_bell
     delete bare.global_default_provider
     delete bare.compose_bar
+    delete bare.mobile_top_bar
+    delete bare.mobile_accessory_bar
     delete bare.auto_reopen_agents
     const byKey = Object.fromEntries(
       allSettingDescriptors().map((d) => [d.key, d.read(bare as Bootstrap)]),
@@ -261,8 +271,26 @@ describe("settingsDescriptors", () => {
     expect(byKey["ui.attention_on_bell"]).toBe(true)
     expect(byKey["defaults.provider"]).toBe("claude")
     expect(byKey["ui.compose_bar"]).toBe(true)
+    expect(byKey["ui.mobile_top_bar"]).toBe(true)
+    expect(byKey["ui.mobile_accessory_bar"]).toBe(true)
     // Unlike compose_bar, the auto-reopen fallback is FALSE (the config default).
     expect(byKey["ui.auto_reopen_agents"]).toBe(false)
+  })
+
+  // Escape-hatch truth: each mobile-bar description must name BOTH restore
+  // routes (the show-bars button that renders below the terminal — inside the
+  // compose bar when it is on, in its own minimal row when it is off — and
+  // this Preferences dialog) rather than leaving the user to rediscover them.
+  // Deliberately NOT "the compose bar's button": that wording was false with
+  // the compose bar disabled.
+  it("both mobile-bar descriptions name the restore routes", () => {
+    for (const key of ["ui.mobile_top_bar", "ui.mobile_accessory_bar"]) {
+      const d = allSettingDescriptors().find((x) => x.key === key)
+      expect(d?.writeTarget, key).toBe("settings")
+      expect(d?.default, key).toBe(true)
+      expect(d?.description, key).toContain("below the terminal")
+      expect(d?.description, key).toContain("Preferences")
+    }
   })
 
   // The global default-provider row's options aren't known statically: they

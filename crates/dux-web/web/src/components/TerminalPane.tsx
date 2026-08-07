@@ -6,7 +6,7 @@ import { MonitorSmartphone } from "lucide-react"
 import { toast } from "sonner"
 import { AccessoryBar } from "@/components/AccessoryBar"
 import type { ScrollDir } from "@/components/AccessoryBar"
-import { ComposeBar } from "@/components/ComposeBar"
+import { ComposeBar, RestoreBarsButton } from "@/components/ComposeBar"
 import {
   COMPOSE_SUBMIT_DELAY_MS,
   composeSendTooLarge,
@@ -57,6 +57,9 @@ import {
 import {
   ejectSelectionForReconnect,
   handleTabGone,
+  mobileAccessoryBarVisible,
+  mobileTopBarVisible,
+  restoreMobileBars,
   useDux,
 } from "@/lib/store"
 import type { SelectedTarget, TerminalOwnerRef } from "@/lib/store"
@@ -281,7 +284,8 @@ export function TerminalPane(props: TerminalPaneProps) {
     setAlt(next.alt)
   }
 
-  const { spine, bootstrap, offline, conn } = useDux()
+  const duxState = useDux()
+  const { spine, bootstrap, offline, conn } = duxState
   // Size xterm's scrollback to the configured `agent_scrollback_lines` (now from
   // the bootstrap document) so the reconnect repaint's replayed history isn't
   // trimmed by xterm's 1000-line default. Read via a ref (not an effect dep) so
@@ -315,6 +319,15 @@ export function TerminalPane(props: TerminalPaneProps) {
   // otherwise capture a stale value. When the preference is off, nothing
   // renders and no focus behavior changes, exactly today's tap-focuses-xterm.
   const composeBarEnabled = isMobile && (bootstrap?.compose_bar ?? true)
+  // The two hideable-bar preferences (`ui.mobile_top_bar`,
+  // `ui.mobile_accessory_bar`), resolved through their optimistic overrides.
+  // The accessory value gates the AccessoryBar render below (beside the
+  // existing owner gate, for EVERY terminal kind, since all of them share
+  // this pane); the pair decides whether the compose bar shows its restore
+  // button, the escape hatch that brings BOTH bars back in one tap.
+  const accessoryBarVisible = mobileAccessoryBarVisible(duxState)
+  const anyMobileBarHidden =
+    !mobileTopBarVisible(duxState) || !accessoryBarVisible
   // Whether dropping a file onto this pane does anything at all. `[server]
   // file_drop_max_bytes = 0` switches the feature off, so the whole drag
   // surface goes with it (see `dragCarriesFiles`). Read reactively rather than
@@ -2222,17 +2235,23 @@ export function TerminalPane(props: TerminalPaneProps) {
           reappear the moment ownership returns. */}
       {isOwner ? (
         <>
-          <AccessoryBar
-            onEsc={() => sendSeq(ESC)}
-            onTab={() => sendSeq(TAB)}
-            onNewline={sendNewline}
-            onArrow={onArrow}
-            onScroll={onScroll}
-            ctrl={ctrl}
-            alt={alt}
-            onToggleCtrl={toggleCtrl}
-            onToggleAlt={toggleAlt}
-          />
+          {/* The accessory bar is additionally gated on the
+              `ui.mobile_accessory_bar` preference (default on): hiding it
+              returns its two key rows to the terminal. The compose bar's
+              restore button (below) and Preferences bring it back. */}
+          {accessoryBarVisible ? (
+            <AccessoryBar
+              onEsc={() => sendSeq(ESC)}
+              onTab={() => sendSeq(TAB)}
+              onNewline={sendNewline}
+              onArrow={onArrow}
+              onScroll={onScroll}
+              ctrl={ctrl}
+              alt={alt}
+              onToggleCtrl={toggleCtrl}
+              onToggleAlt={toggleAlt}
+            />
+          ) : null}
           {/* The compose bar (the `ui.compose_bar` preference, default on):
               the third row, below the accessory bar's two key rows, so the
               typing surface sits directly on the soft keyboard. When the
@@ -2246,7 +2265,21 @@ export function TerminalPane(props: TerminalPaneProps) {
               onChange={setComposeText}
               onSend={sendCompose}
               inputRef={composeInputRef}
+              showRestoreBars={anyMobileBarHidden}
+              onRestoreBars={() => void restoreMobileBars()}
             />
+          ) : anyMobileBarHidden ? (
+            // The compose bar is off AND a bar is hidden: without this the
+            // terminal screen would be completely chrome-free, and the app
+            // ships as a standalone PWA where no browser Back button exists.
+            // A minimal bottom row carries ONLY the same restore button the
+            // compose bar would (the shared RestoreBarsButton), so the way
+            // back is always one visible tap.
+            <div className="flex shrink-0 items-end gap-1.5 border-t bg-background px-1 py-1">
+              <RestoreBarsButton
+                onRestoreBars={() => void restoreMobileBars()}
+              />
+            </div>
           ) : null}
         </>
       ) : null}
