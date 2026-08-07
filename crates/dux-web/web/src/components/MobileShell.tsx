@@ -22,6 +22,7 @@ import {
 import { isExtraTabDormant, shouldShowTabStrip } from "@/lib/agentTabs"
 import { resolveInstanceTitle } from "@/lib/instanceTitle"
 import {
+  mobileTopBarVisible,
   navigateUp,
   openChangesScreen,
   selectSession,
@@ -111,13 +112,21 @@ function AgentlessTerminalScreen({
   terminalId: string
   primary: string
 }) {
-  const { spine } = useDux()
+  const duxState = useDux()
+  const { spine } = duxState
   // This owner's own terminals, selected out of the flat collection by owner, so
   // the crumb still disambiguates against its true siblings.
   const ownedTerminals = terminalsForOwner(spine?.terminals ?? [], owner)
   const terminal = ownedTerminals.find((t) => t.id === terminalId)
+  // The same `ui.mobile_top_bar` gate as the agent terminal screen: both
+  // preferences deliberately cover every mobile terminal surface. This screen
+  // has no ⋯ menu (a decision, not an omission), so hiding from here happens
+  // via Preferences, and restoring via the compose bar's show-bars button or
+  // Preferences.
+  const topBarVisible = mobileTopBarVisible(duxState)
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
+      {topBarVisible ? (
       <header className="flex h-11 shrink-0 items-center gap-2 border-b px-3">
         {/* Up to the hub, by name. A relative history step would walk out
             of the app whenever this screen is the entry the browser opened
@@ -138,6 +147,7 @@ function AgentlessTerminalScreen({
           </span>
         </div>
       </header>
+      ) : null}
       <div className="min-h-0 flex-1">
         <ChunkBoundary>
           <Suspense fallback={null}>
@@ -202,6 +212,7 @@ function StandaloneTerminalScreen({
 
 // The focused-terminal spoke: a slim top bar over the full-screen shared terminal.
 function TerminalScreen() {
+  const duxState = useDux()
   const {
     spine,
     bootstrap,
@@ -210,7 +221,13 @@ function TerminalScreen() {
     terminalEpoch,
     changes,
     startedDormantTabs,
-  } = useDux()
+  } = duxState
+  // The `ui.mobile_top_bar` render gate (resolved through the optimistic
+  // override): hiding the top bar hides the header AND the tab strip (a
+  // deliberate decision: hiding states an intent, more space; switching tabs
+  // while hidden is a two-step through restore). Restore lives on the compose
+  // bar's show-bars button and in Preferences.
+  const topBarVisible = mobileTopBarVisible(duxState)
   const session = spine?.sessions.find((s) => s.id === selectedSessionId)
   const changeCount =
     changes.sessionId === selectedSessionId && changes.phase === "loaded"
@@ -272,6 +289,8 @@ function TerminalScreen() {
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
+      {topBarVisible ? (
+        <>
       <header className="flex h-11 shrink-0 items-center gap-2 border-b px-3">
         {/* Up to the hub, by name (see the project-terminal header above). */}
         <Button
@@ -328,7 +347,7 @@ function TerminalScreen() {
             <Ellipsis />
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
-            <AgentActionsMenu session={session} />
+            <AgentActionsMenu session={session} context="terminal" />
           </DropdownMenuContent>
         </DropdownMenu>
       </header>
@@ -340,6 +359,8 @@ function TerminalScreen() {
           activeTabId={selectedTarget.tabId}
           maxTabs={bootstrap?.agent_tabs_max}
         />
+      ) : null}
+        </>
       ) : null}
 
       <div className="min-h-0 flex-1">

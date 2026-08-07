@@ -185,3 +185,30 @@ describe("ComposeBar", () => {
     expect(ta.className).not.toContain("text-base")
   })
 })
+
+describe("ComposeBar restore-bars button", () => {
+  it("is absent unless the parent says a bar is hidden", () => {
+    render(<Harness />)
+    expect(
+      screen.queryByRole("button", { name: "Show hidden bars" }),
+    ).toBeNull()
+  })
+
+  it("renders beside the textarea and fires onRestoreBars", () => {
+    const onRestoreBars = vi.fn()
+    render(
+      <ComposeBar
+        value=""
+        onChange={() => {}}
+        onSend={onSend}
+        showRestoreBars
+        onRestoreBars={onRestoreBars}
+      />,
+    )
+    const btn = screen.getByRole("button", { name: "Show hidden bars" })
+    fireEvent.click(btn)
+    expect(onRestoreBars).toHaveBeenCalledTimes(1)
+    // Restoring is not sending: the tap must not fire the buffer.
+    expect(onSend).not.toHaveBeenCalled()
+  })
+})

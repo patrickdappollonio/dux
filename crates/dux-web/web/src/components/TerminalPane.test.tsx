@@ -720,3 +720,125 @@ describe("TerminalPane tap-to-focus redirect", () => {
     expect(bytes).toBe("\x1b[<0;11;11M\x1b[<0;11;11m")
   })
 })
+
+// The accessory-bar render gate (the `ui.mobile_accessory_bar` preference,
+// default on) sits beside the owner gate: hiding the key rows returns them to
+// the terminal, while the compose bar (its own preference) stays.
+describe("TerminalPane mobile accessory-bar preference", () => {
+  const desktopWidth = window.innerWidth
+  const goMobile = () => {
+    Object.defineProperty(window, "innerWidth", {
+      value: 500,
+      configurable: true,
+    })
+  }
+  afterEach(() => {
+    Object.defineProperty(window, "innerWidth", {
+      value: desktopWidth,
+      configurable: true,
+    })
+  })
+
+  it("renders the accessory bar on mobile by default (preference absent falls back to on)", () => {
+    goMobile()
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(screen.getByRole("button", { name: "Esc" })).toBeTruthy()
+  })
+
+  it("hides the accessory bar when the preference is off, keeping the compose bar", () => {
+    goMobile()
+    const state = makeState()
+    ;(
+      state.bootstrap as unknown as { mobile_accessory_bar?: boolean }
+    ).mobile_accessory_bar = false
+    mockState = state
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(screen.queryByRole("button", { name: "Esc" })).toBeNull()
+    expect(screen.getByRole("textbox", { name: "Message" })).toBeTruthy()
+  })
+
+  it("an optimistic override hides the accessory bar before the bootstrap confirms", () => {
+    goMobile()
+    const state = makeState()
+    ;(
+      state as unknown as { mobileAccessoryBarOverride: boolean | null }
+    ).mobileAccessoryBarOverride = false
+    mockState = state
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(screen.queryByRole("button", { name: "Esc" })).toBeNull()
+  })
+})
+
+// The compose bar's restore button: the escape hatch back from hidden bars.
+// It renders only while at least one bar is hidden, and one tap restores BOTH
+// preferences through the same settings PATCH the quick toggles use.
+describe("TerminalPane compose-bar restore button", () => {
+  const desktopWidth = window.innerWidth
+  const goMobile = () => {
+    Object.defineProperty(window, "innerWidth", {
+      value: 500,
+      configurable: true,
+    })
+  }
+  afterEach(() => {
+    Object.defineProperty(window, "innerWidth", {
+      value: desktopWidth,
+      configurable: true,
+    })
+  })
+
+  it("does not render while both bars are visible", () => {
+    goMobile()
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(
+      screen.queryByRole("button", { name: "Show hidden bars" }),
+    ).toBeNull()
+  })
+
+  it("renders when the accessory bar is hidden", () => {
+    goMobile()
+    const state = makeState()
+    ;(
+      state.bootstrap as unknown as { mobile_accessory_bar?: boolean }
+    ).mobile_accessory_bar = false
+    mockState = state
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(
+      screen.getByRole("button", { name: "Show hidden bars" }),
+    ).toBeTruthy()
+  })
+
+  it("renders when the top bar is hidden", () => {
+    goMobile()
+    const state = makeState()
+    ;(
+      state.bootstrap as unknown as { mobile_top_bar?: boolean }
+    ).mobile_top_bar = false
+    mockState = state
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(
+      screen.getByRole("button", { name: "Show hidden bars" }),
+    ).toBeTruthy()
+  })
+
+  it("one tap restores BOTH preferences through the settings PATCH", () => {
+    goMobile()
+    const state = makeState()
+    ;(
+      state.bootstrap as unknown as { mobile_top_bar?: boolean }
+    ).mobile_top_bar = false
+    mockState = state
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    fireEvent.click(screen.getByRole("button", { name: "Show hidden bars" }))
+    const fetchSpy = globalThis.fetch as unknown as ReturnType<typeof vi.fn>
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "/api/v1/config/settings",
+      expect.objectContaining({
+        method: "PATCH",
+        body: JSON.stringify({
+          ui: { mobile_top_bar: true, mobile_accessory_bar: true },
+        }),
+      }),
+    )
+  })
+})

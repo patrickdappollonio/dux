@@ -25,6 +25,10 @@ import {
   GitFork,
   GitPullRequest,
   Info,
+  Keyboard,
+  KeyboardOff,
+  PanelTopClose,
+  PanelTopOpen,
   Pencil,
   Play,
   Plus,
@@ -98,6 +102,9 @@ import {
   addTab,
   agentSortValue,
   createTerminal,
+  mobileAccessoryBarVisible,
+  mobileTopBarVisible,
+  setMobileBarVisibility,
   openAgentEnv,
   openAgentInfo,
   openAgentStartupCommand,
@@ -132,16 +139,56 @@ export interface FlatSelectHandlers {
 // The shared agent ⋯ actions menu body, every per-agent action from the parity
 // inventory, in one place so desktop and mobile can never drift. Reused verbatim
 // by both surfaces (this is the SessionActions menu the redesign must preserve).
-export function AgentActionsMenu({ session }: { session: SessionView }) {
-  const { bootstrap, spine, createTabInFlight } = useDux()
+//
+// `context` says which screen the menu opened FROM: `"hub"` (the default; the
+// hub/sidebar row menus on both surfaces) or `"terminal"` (the mobile terminal
+// screen's header menu, passed by MobileShell). The mobile-bar quick toggles
+// render only in the terminal context, because they toggle chrome that only
+// the terminal screen shows: an unscoped gate would leak them into the hub's
+// row menus (and the desktop sidebar), where that chrome is not even visible.
+export function AgentActionsMenu({
+  session,
+  context = "hub",
+}: {
+  session: SessionView
+  context?: "hub" | "terminal"
+}) {
+  const duxState = useDux()
+  const { bootstrap, spine, createTabInFlight } = duxState
   const tabCap = bootstrap?.agent_tabs_max ?? DEFAULT_AGENT_TABS_MAX
   const atTabCap = session.tabs.length >= tabCap
   const addingTab = createTabInFlight.includes(session.id)
   const providers = bootstrap?.available_providers ?? []
   const defaultProvider = defaultProviderForSession(spine, session)
+  const topBarVisible = mobileTopBarVisible(duxState)
+  const accessoryBarVisible = mobileAccessoryBarVisible(duxState)
 
   return (
     <DropdownMenuGroup>
+      {context === "terminal" ? (
+        <>
+          {/* Quick toggles for the two hideable mobile bars (`ui.mobile_top_bar`,
+              `ui.mobile_accessory_bar`). Neutral color and no trailing ellipsis:
+              they act immediately (an optimistic override plus the generic
+              settings PATCH), no dialog and nothing destructive. Restore lives
+              on the compose bar's show-bars button and in Preferences. */}
+          <DropdownMenuItem
+            onClick={() => void setMobileBarVisibility("top", !topBarVisible)}
+          >
+            {topBarVisible ? <PanelTopClose /> : <PanelTopOpen />}
+            {topBarVisible ? "Hide top bar" : "Show top bar"}
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            onClick={() =>
+              void setMobileBarVisibility("accessory", !accessoryBarVisible)
+            }
+          >
+            {accessoryBarVisible ? <KeyboardOff /> : <Keyboard />}
+            {accessoryBarVisible ? "Hide terminal keys" : "Show terminal keys"}
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
+        </>
+      ) : null}
       <DropdownMenuSub>
         <DropdownMenuSubTrigger disabled={atTabCap || addingTab}>
           <Plus />

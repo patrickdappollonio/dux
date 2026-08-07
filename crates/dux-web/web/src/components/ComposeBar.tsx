@@ -1,7 +1,8 @@
 import * as React from "react"
 import { useEffect, useRef } from "react"
-import { ArrowUp } from "lucide-react"
+import { ArrowUp, Eye } from "lucide-react"
 
+import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Button } from "@/components/ui/button"
 
 // Typing straight into xterm's hidden textarea is hostile on a phone: the
@@ -43,6 +44,15 @@ interface ComposeBarProps {
   // plain RefObject (not a callback ref) attached directly to the textarea;
   // when absent the component falls back to its own internal ref.
   inputRef?: React.RefObject<HTMLTextAreaElement | null>
+  // Whether the restore-bars button renders: true while at least one of the
+  // two hideable mobile bars (the top bar, the accessory keys) is hidden. The
+  // compose bar is the one surface guaranteed to still be on screen then, so
+  // it carries the escape hatch.
+  showRestoreBars?: boolean
+  // One tap restores BOTH bars (the parent persists both preferences in a
+  // single settings PATCH). Presentational split as with onSend: the store
+  // action and its optimistic overrides live in the parent.
+  onRestoreBars?: () => void
 }
 
 // The textarea grows with its content from one line up to this many, then
@@ -87,6 +97,8 @@ export function ComposeBar({
   onChange,
   onSend,
   inputRef,
+  showRestoreBars = false,
+  onRestoreBars,
 }: ComposeBarProps) {
   // The textarea handle used for the autosize re-measure: the parent's ref
   // when provided (so the parent and this component share ONE handle rather
@@ -129,6 +141,23 @@ export function ComposeBar({
 
   return (
     <div className="flex shrink-0 items-end gap-1.5 border-t bg-background px-1 py-1">
+      {/* The restore-bars escape hatch, only while a bar is hidden: one tap
+          brings back BOTH the top bar and the terminal keys. Leading position
+          and `size-10 shrink-0 self-end` mirror Send's placement idiom on the
+          opposite edge (bottom-aligned beside a grown multi-row textarea),
+          and size-10 keeps the 40px touch-target floor. */}
+      {showRestoreBars ? (
+        <SimpleTooltip content="Show hidden bars">
+          <Button
+            variant="ghost"
+            aria-label="Show hidden bars"
+            onClick={() => onRestoreBars?.()}
+            className="size-10 shrink-0 self-end"
+          >
+            <Eye />
+          </Button>
+        </SimpleTooltip>
+      ) : null}
       <textarea
         ref={taRef}
         value={value}
