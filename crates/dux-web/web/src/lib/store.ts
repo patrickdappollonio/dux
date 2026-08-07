@@ -2013,8 +2013,13 @@ export function parseRoute(hash: string): Route {
 // so a pathless route's mode is normalized to "file" on the way back in.
 export function routeHash(route: Route): string {
   // The standalone form replaces the whole address rather than riding as a
-  // suffix; a standalone route whose target somehow lost its session (or its
-  // editor half) falls through to the ordinary grammar.
+  // suffix, and it is SESSION-SLOT ONLY by definition (the surface is the
+  // editor, not a tab strip) with no changes screen: an extra-tab target is
+  // serialized by its session id alone and a changes flag is dropped, which
+  // the parser mirrors (it can only ever produce the normalized form; the
+  // round-trip test pins both normalizations). A standalone route whose
+  // target somehow lost its session (or its editor half) falls through to
+  // the ordinary grammar.
   if (route.standalone && route.editor && route.target !== null) {
     const sessionId = targetSessionId(route.target)
     if (sessionId !== null) {
