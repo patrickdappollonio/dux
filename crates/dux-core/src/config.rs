@@ -710,6 +710,19 @@ pub struct UiConfig {
     /// terminal (the pre-compose-bar behavior). Changing it from the web's
     /// Preferences dialog persists the new value here. Web-only behavior.
     pub compose_bar: bool,
+    /// Whether the web UI's mobile terminal screens show the top bar (the
+    /// back-chevron header with the branch crumb and actions, plus the agent
+    /// tab strip below it). Set to false to hide it and give those rows back
+    /// to the terminal. Hidden bars can be restored from the compose bar's
+    /// show-bars button or from the web UI's Preferences dialog. Web-only
+    /// behavior; the hub and Changes screens are unaffected.
+    pub mobile_top_bar: bool,
+    /// Whether the web UI's mobile terminal screens show the terminal-keys
+    /// accessory bar (Esc, Tab, Ctrl, Alt, the arrows and paging keys). Set
+    /// to false to hide it and give those rows back to the terminal. Hidden
+    /// bars can be restored from the compose bar's show-bars button or from
+    /// the web UI's Preferences dialog. Web-only behavior.
+    pub mobile_accessory_bar: bool,
     /// Seconds the attention indicators stay visible after dux regains your
     /// attention, before the focused agent's needs-attention flag clears.
     /// Applies when you return to the dux browser tab (web UI) and when your
@@ -1027,6 +1040,8 @@ impl Default for UiConfig {
             pr_poll_interval_seconds: DEFAULT_PR_POLL_INTERVAL_SECONDS,
             copy_on_select: true,
             compose_bar: true,
+            mobile_top_bar: true,
+            mobile_accessory_bar: true,
             attention_grace_seconds: 3,
             auto_reopen_agents: false,
             show_changes_pane: true,
@@ -1574,6 +1589,8 @@ impl Default for Config {
                 pr_poll_interval_seconds: DEFAULT_PR_POLL_INTERVAL_SECONDS,
                 copy_on_select: true,
                 compose_bar: true,
+                mobile_top_bar: true,
+                mobile_accessory_bar: true,
                 attention_grace_seconds: 3,
                 auto_reopen_agents: false,
                 show_changes_pane: true,

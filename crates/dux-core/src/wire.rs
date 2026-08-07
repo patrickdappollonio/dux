@@ -668,6 +668,16 @@ pub struct SettingsPatch {
     /// phone typing surface). A plain field write with no side effects, so it
     /// rides the generic settings path like `copy_on_select`.
     pub compose_bar: Option<bool>,
+    /// `ui.mobile_top_bar`: the web mobile terminal screens' top bar (the
+    /// back/branch header plus the agent tab strip). A plain field write with
+    /// no side effects (a pure render gate), so it rides the generic settings
+    /// path like `compose_bar`.
+    pub mobile_top_bar: Option<bool>,
+    /// `ui.mobile_accessory_bar`: the web mobile terminal screens' accessory
+    /// key bar (Esc/Tab/Ctrl/Alt/arrows). A plain field write with no side
+    /// effects (a pure render gate), so it rides the generic settings path
+    /// like `compose_bar`.
+    pub mobile_accessory_bar: Option<bool>,
     /// `ui.auto_reopen_agents`: the global startup auto-reopen switch. A plain
     /// field write with no side effects (the reopen pass reads it at the NEXT
     /// startup), so it rides the generic settings path.
@@ -1377,6 +1387,8 @@ impl Engine {
         let SettingsPatch {
             copy_on_select,
             compose_bar,
+            mobile_top_bar,
+            mobile_accessory_bar,
             auto_reopen_agents,
             show_changes_pane,
             web_notifications,
@@ -1419,6 +1431,12 @@ impl Engine {
         }
         if let Some(v) = compose_bar {
             candidate.ui.compose_bar = v;
+        }
+        if let Some(v) = mobile_top_bar {
+            candidate.ui.mobile_top_bar = v;
+        }
+        if let Some(v) = mobile_accessory_bar {
+            candidate.ui.mobile_accessory_bar = v;
         }
         if let Some(v) = auto_reopen_agents {
             candidate.ui.auto_reopen_agents = v;
@@ -9028,6 +9046,20 @@ mod tests {
                 expect: "false",
             },
             SettingsFieldRow {
+                key: "mobile_top_bar",
+                seed: |c| c.ui.mobile_top_bar = true,
+                sent: serde_json::json!(false),
+                read: |c| c.ui.mobile_top_bar.to_string(),
+                expect: "false",
+            },
+            SettingsFieldRow {
+                key: "mobile_accessory_bar",
+                seed: |c| c.ui.mobile_accessory_bar = true,
+                sent: serde_json::json!(false),
+                read: |c| c.ui.mobile_accessory_bar.to_string(),
+                expect: "false",
+            },
+            SettingsFieldRow {
                 key: "auto_reopen_agents",
                 seed: |c| c.ui.auto_reopen_agents = false,
                 sent: serde_json::json!(true),
@@ -9143,7 +9175,7 @@ mod tests {
         let rows = settings_field_rows();
         assert_eq!(
             rows.len(),
-            16,
+            18,
             "add a row when you add a field to SettingsPatch"
         );
         for row in rows {
@@ -9187,6 +9219,8 @@ mod tests {
         let patch = WireCommand::SetSettings(SettingsPatch {
             copy_on_select: Some(!before.ui.copy_on_select),
             compose_bar: Some(!before.ui.compose_bar),
+            mobile_top_bar: Some(!before.ui.mobile_top_bar),
+            mobile_accessory_bar: Some(!before.ui.mobile_accessory_bar),
             auto_reopen_agents: Some(!before.ui.auto_reopen_agents),
             show_changes_pane: Some(!before.ui.show_changes_pane),
             web_notifications: Some(!before.capabilities.web_notifications),
@@ -9215,6 +9249,11 @@ mod tests {
         let after = &engine.config;
         assert_eq!(after.ui.copy_on_select, !before.ui.copy_on_select);
         assert_eq!(after.ui.compose_bar, !before.ui.compose_bar);
+        assert_eq!(after.ui.mobile_top_bar, !before.ui.mobile_top_bar);
+        assert_eq!(
+            after.ui.mobile_accessory_bar,
+            !before.ui.mobile_accessory_bar
+        );
         assert_eq!(after.ui.auto_reopen_agents, !before.ui.auto_reopen_agents);
         assert_eq!(after.ui.show_changes_pane, !before.ui.show_changes_pane);
         assert_eq!(
@@ -9261,6 +9300,8 @@ mod tests {
         let disk: crate::config::Config = toml::from_str(&raw).expect("parse config");
         assert_eq!(disk.ui.copy_on_select, after.ui.copy_on_select);
         assert_eq!(disk.ui.compose_bar, after.ui.compose_bar);
+        assert_eq!(disk.ui.mobile_top_bar, after.ui.mobile_top_bar);
+        assert_eq!(disk.ui.mobile_accessory_bar, after.ui.mobile_accessory_bar);
         assert_eq!(disk.ui.auto_reopen_agents, after.ui.auto_reopen_agents);
         assert_eq!(disk.ui.show_changes_pane, after.ui.show_changes_pane);
         assert_eq!(

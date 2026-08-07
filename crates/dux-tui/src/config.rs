@@ -417,6 +417,20 @@ fn config_schema() -> Vec<ConfigEntry> {
             value_fn: |c| FieldValue::Bool(c.ui.compose_bar),
         },
         ConfigEntry::Field {
+            key: "mobile_top_bar",
+            comment: Some(CommentSource::Static(
+                "# Web UI only: on a phone, show the terminal screen's top bar (the back\n# chevron, branch crumb and actions, plus the agent tab strip below it).\n# Set to false to hide it and give those rows back to the terminal. Bring\n# hidden bars back with the compose bar's show-bars button, or from the\n# web UI's Preferences dialog. The hub and Changes screens are unaffected.",
+            )),
+            value_fn: |c| FieldValue::Bool(c.ui.mobile_top_bar),
+        },
+        ConfigEntry::Field {
+            key: "mobile_accessory_bar",
+            comment: Some(CommentSource::Static(
+                "# Web UI only: on a phone, show the terminal-keys bar (Esc, Tab, Ctrl,\n# Alt, the arrows and paging keys) above the compose box. Set to false to\n# hide it and give those rows back to the terminal. Bring hidden bars back\n# with the compose bar's show-bars button, or from the web UI's\n# Preferences dialog.",
+            )),
+            value_fn: |c| FieldValue::Bool(c.ui.mobile_accessory_bar),
+        },
+        ConfigEntry::Field {
             key: "attention_grace_seconds",
             comment: Some(CommentSource::Static(
                 "# Seconds the attention indicators stay visible after dux regains your\n# attention, before the focused agent's needs-attention flag clears. Applies\n# when you return to the dux browser tab (web UI) and when your terminal\n# window regains focus (TUI). Gives you time to see which agent(s) wanted you\n# before the indicator vanishes. Set to 0 to clear the indicator immediately.\n# TUI note: requires a terminal that reports focus; under tmux, set\n# `focus-events on`. Terminals that never report focus keep the old behavior.",
@@ -1943,6 +1957,8 @@ mod tests {
         assert!(rendered.contains("empty_project_separator_min_projects = 5"));
         assert!(rendered.contains("copy_on_select = true"));
         assert!(rendered.contains("compose_bar = true"));
+        assert!(rendered.contains("mobile_top_bar = true"));
+        assert!(rendered.contains("mobile_accessory_bar = true"));
         assert!(rendered.contains("attention_grace_seconds = 3"));
         assert!(rendered.contains("auto_reopen_agents = false"));
         assert!(rendered.contains("always_show_tab_strip = false"));
