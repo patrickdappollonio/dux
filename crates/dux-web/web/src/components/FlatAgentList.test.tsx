@@ -472,7 +472,10 @@ describe("FlatAgentList editor menu entries", () => {
     expect(here!.className).toContain("max-md:hidden")
   })
 
-  it("offers Open editor in new tab, targeting the standalone address", async () => {
+  it("offers Open editor in new tab as a REAL anchor to the standalone address", async () => {
+    // An anchor, not a window.open handler, so middle-click and
+    // ctrl/cmd-click keep their native new-tab semantics, matching the
+    // editor header's affordance.
     const open = vi.fn()
     vi.stubGlobal("open", open)
     await openFirstAgentMenu()
@@ -482,8 +485,12 @@ describe("FlatAgentList editor menu entries", () => {
     expect(item).not.toBeNull()
     // Always available, phones included: it is the ONLY editor entry there.
     expect(item!.className).not.toContain("max-md:hidden")
-    fireEvent.click(item!)
+    expect(item!.tagName).toBe("A")
     // The first displayed agent is Alpha (name sort in makeState("name")).
-    expect(open).toHaveBeenCalledWith("#/editor/agent/alpha", "_blank", "noopener")
+    expect(item!.getAttribute("href")).toBe("#/editor/agent/alpha")
+    expect(item!.getAttribute("target")).toBe("_blank")
+    expect(item!.getAttribute("rel")).toBe("noopener")
+    fireEvent.click(item!)
+    expect(open).not.toHaveBeenCalled()
   })
 })
