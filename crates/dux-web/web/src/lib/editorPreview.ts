@@ -3,14 +3,14 @@
 //
 // Two different mechanisms, split on purpose:
 //
-// - `isImagePreviewPath` — raster (and other non-SVG) images. These NEVER
+// - `isImagePreviewPath`: raster (and other non-SVG) images. These NEVER
 //   fetch `/read`: the server stats the size and refuses anything over the
 //   5 MiB editable cap BEFORE the text/binary sniff runs, so an image tab
 //   waiting on a buffer would park on a spinner (or read megabytes only to
 //   discard them). EditorBody skips `loadFileBuffer` for them entirely and
 //   renders a read-only pane from `fileApi.rawUrl` instead.
 //
-// - `previewKind` — text formats with a draft-accurate preview TOGGLE:
+// - `previewKind`: text formats with a draft-accurate preview TOGGLE:
 //   markdown renders through react-markdown, SVG through a Blob object URL
 //   over the CURRENT DRAFT. SVGs stay editable in Monaco; the preview is a
 //   view of the unsaved text, exactly like markdown's.

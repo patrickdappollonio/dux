@@ -40,9 +40,10 @@ import {
   renameTarget as computeRenameTarget,
 } from "@/lib/fileTreeOps"
 import { isLocalAccessHost } from "@/lib/localAccess"
-import { isMarkdownPath } from "@/lib/markdown"
+import { isImagePreviewPath, previewKind } from "@/lib/editorPreview"
 import { cn } from "@/lib/utils"
 import { useIsMobile } from "@/hooks/use-mobile"
+import { useObjectUrl } from "@/hooks/use-object-url"
 import type { MonacoInstance } from "@/components/CodeEditor"
 import { DeleteEntryDialog } from "@/components/DeleteEntryDialog"
 import type { DeleteEntryTarget } from "@/components/DeleteEntryDialog"
@@ -262,7 +263,17 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
   const [openingEditor, setOpeningEditor] = useState(false)
 
   const dirty = activeTab?.dirty ?? false
-  const isMarkdown = activeTab !== null && isMarkdownPath(activeTab.path)
+  // Raster images never fetch /read (the 5 MiB /read cap refuses them before
+  // the binary flag exists, and fileReady would park the tab on a spinner);
+  // they render a read-only pane from /raw instead, and the buffer-derived
+  // toolbar controls (Save, the preview toggle) do not render for them. SVG
+  // is deliberately NOT an image tab: it opens in Monaco as editable text.
+  const isImageTab = activeTab !== null && isImagePreviewPath(activeTab.path)
+  // Which draft-accurate preview this tab's TEXT can offer: "markdown"
+  // (react-markdown) or "svg" (a Blob URL over the current draft), null when
+  // the Preview toggle should not render at all.
+  const activePreviewKind =
+    activeTab !== null ? previewKind(activeTab.path) : null
   const fileReady =
     activeTab !== null &&
     activeBuffer !== undefined &&
@@ -270,10 +281,13 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
     activeBuffer.loadedPath === activeTab.path
   const binary = fileReady ? (activeBuffer?.binary ?? false) : false
   const readOnly = fileReady ? (activeBuffer?.readOnly ?? false) : false
-  // Markdown preview is available only for a loaded, non-binary markdown file in
-  // file mode — one source of truth for both the toggle button and the render.
+  // The preview is available only for a loaded, non-binary previewable file in
+  // file mode: one source of truth for both the toggle button and the render.
   const canPreview =
-    activeTab?.mode === "file" && isMarkdown && fileReady && !binary
+    activeTab?.mode === "file" &&
+    activePreviewKind !== null &&
+    fileReady &&
+    !binary
   const showPreview =
     activeTab !== null && previewOpenTabIds.has(activeTab.id) && canPreview
   // "Open editor" spawns a GUI editor on the SERVER, so it only helps when the
@@ -448,6 +462,10 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
   // under us: re-reading could silently clobber unsaved edits.
   useEffect(() => {
     if (!activeTab || activeTab.mode !== "file") return
+    // Image tabs never load a buffer: the pane renders from /raw, and a /read
+    // here would be refused over 5 MiB (before the binary flag exists) or
+    // read megabytes only to discard them.
+    if (isImagePreviewPath(activeTab.path)) return
     if (shouldSkipFileLoad(activeBuffer, activeTab.path)) return
     // `loadFileBuffer` synchronously seeds a placeholder buffer (so a stale
     // buffer from a preview-replace never renders even for one frame) before
@@ -992,8 +1010,9 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
             </span>
           </SimpleTooltip>
         )}
-        {/* Save — file mode only (diff is read-only). */}
-        {activeTab?.mode === "file" && (
+        {/* Save — file mode only (diff is read-only), and never for an image
+            tab (no buffer exists for it to act on). */}
+        {activeTab?.mode === "file" && !isImageTab && (
           <Button
             size="sm"
             disabled={!dirty || isSaving || readOnly}
@@ -1140,6 +1159,16 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
                 </Suspense>
               </ChunkBoundary>
             )
+          ) : isImageTab ? (
+            // Sits ABOVE the buffer-gated chain on purpose: an image tab has
+            // no buffer, so `fileReady` never turns true and the arms below
+            // would park it on the spinner forever. Keyed by path so a failed
+            // load resets when the tab preview-replaces onto another file.
+            <ImagePreviewPane
+              key={activeTab.path}
+              src={fileApi.rawUrl(sessionId, activeTab.path)}
+              path={activeTab.path}
+            />
           ) : activeBuffer?.fileError && !isBufferStale(activeBuffer, activeTab.path) ? (
             <div className="flex h-full flex-col items-center justify-center gap-2 px-4 text-center text-sm text-destructive">
               {activeBuffer.fileError}
@@ -1165,23 +1194,34 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
               This file is binary and can&rsquo;t be edited here.
             </div>
           ) : showPreview ? (
-            // Rendered markdown of the current buffer (unsaved edits included).
-            // Lazy like Monaco, so the same ChunkBoundary + Suspense applies.
-            <ChunkBoundary>
-              <Suspense
-                fallback={
-                  <div className="flex h-full items-center justify-center text-muted-foreground">
-                    <Loader2 className="size-5 motion-safe:animate-spin" />
-                  </div>
-                }
-              >
-                <MarkdownPreview
-                  content={activeBuffer?.draft ?? ""}
-                  sessionId={sessionId}
-                  path={activeTab.path}
-                />
-              </Suspense>
-            </ChunkBoundary>
+            activePreviewKind === "svg" ? (
+              // Rendered SVG of the current buffer (unsaved edits included):
+              // a Blob object URL over the DRAFT, so it stays draft-accurate
+              // like markdown's, and an <img>-embedded SVG executes no
+              // scripts by spec. Not lazy: no heavy chunk to defer.
+              <SvgPreviewPane
+                draft={activeBuffer?.draft ?? ""}
+                path={activeTab.path}
+              />
+            ) : (
+              // Rendered markdown of the current buffer (unsaved edits included).
+              // Lazy like Monaco, so the same ChunkBoundary + Suspense applies.
+              <ChunkBoundary>
+                <Suspense
+                  fallback={
+                    <div className="flex h-full items-center justify-center text-muted-foreground">
+                      <Loader2 className="size-5 motion-safe:animate-spin" />
+                    </div>
+                  }
+                >
+                  <MarkdownPreview
+                    content={activeBuffer?.draft ?? ""}
+                    sessionId={sessionId}
+                    path={activeTab.path}
+                  />
+                </Suspense>
+              </ChunkBoundary>
+            )
           ) : (
             // ChunkBoundary (outside Suspense) catches a failed lazy import after
             // a redeploy — a 404 on the hashed Monaco chunk — and offers reload,
@@ -1270,5 +1310,58 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
         </DialogContent>
       </Dialog>
     </>
+  )
+}
+
+// Read-only preview for a raster image tab: renders straight from /raw (no
+// /read, no buffer; see the isImageTab derivation in EditorBody). The /raw
+// 25 MiB cap governs; when the request is refused (or the bytes are not a
+// decodable image) the <img> errors and the pane swaps to the error text.
+// The caller keys this by path so that state resets on a preview-replace.
+function ImagePreviewPane({ src, path }: { src: string; path: string }) {
+  const [failed, setFailed] = useState(false)
+  if (failed) {
+    return (
+      <div className="flex h-full items-center justify-center px-4 text-center text-sm text-destructive">
+        This image could not be loaded. It may exceed the server&rsquo;s
+        raw-file size cap.
+      </div>
+    )
+  }
+  return (
+    <div className="flex h-full min-h-0 flex-col items-center justify-center gap-2 bg-muted/30 p-4">
+      <img
+        src={src}
+        alt={path}
+        className="max-h-full min-h-0 max-w-full object-contain"
+        onError={() => setFailed(true)}
+      />
+      <span className="max-w-full truncate font-mono text-xs text-muted-foreground">
+        {path}
+      </span>
+    </div>
+  )
+}
+
+// Draft-accurate SVG preview: the Blob URL is rebuilt on every draft change
+// and revoked by useObjectUrl, so unsaved edits render exactly like the
+// markdown preview's. A draft that is not (yet) valid SVG shows the browser's
+// broken-image state until the next keystroke fixes it; that is honest for a
+// live preview of text mid-edit.
+function SvgPreviewPane({ draft, path }: { draft: string; path: string }) {
+  const url = useObjectUrl(draft, "image/svg+xml")
+  return (
+    <div className="flex h-full min-h-0 flex-col items-center justify-center gap-2 bg-muted/30 p-4">
+      {url !== null && (
+        <img
+          src={url}
+          alt={path}
+          className="max-h-full min-h-0 max-w-full object-contain"
+        />
+      )}
+      <span className="max-w-full truncate font-mono text-xs text-muted-foreground">
+        {path}
+      </span>
+    </div>
   )
 }

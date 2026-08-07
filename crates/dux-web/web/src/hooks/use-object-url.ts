@@ -2,8 +2,8 @@ import { useEffect, useState } from "react"
 
 // A Blob object URL over `content`, revoked automatically: on content change
 // (the previous URL is revoked as the new one is minted), on content going
-// null, and on unmount. Object URLs are manual-lifetime — every create must
-// be paired with a revoke or the blob leaks for the life of the page — so the
+// null, and on unmount. Object URLs are manual-lifetime: every create must
+// be paired with a revoke or the blob leaks for the life of the page, so the
 // pairing lives in one effect here rather than at call sites.
 //
 // Used by the editor's SVG preview: the URL is rebuilt from the CURRENT DRAFT
@@ -26,7 +26,6 @@ export function useObjectUrl(
       return
     }
     const next = URL.createObjectURL(new Blob([content], { type }))
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     setUrl(next)
     return () => URL.revokeObjectURL(next)
   }, [content, type])

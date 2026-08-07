@@ -42,16 +42,21 @@ vi.mock("@/lib/store", async (importOriginal) => {
 })
 
 const writeMock = vi.fn()
+const readMock = vi.fn(async () => ({
+  path: PATH,
+  content: ON_DISK,
+  binary: false,
+  read_only: false,
+}))
 vi.mock("@/lib/fileApi", () => ({
   fileApi: {
     list: vi.fn(async () => ({ files: [PATH], truncated: false })),
     tree: vi.fn(async () => ({ dir: "", entries: [] })),
-    read: vi.fn(async () => ({
-      path: PATH,
-      content: ON_DISK,
-      binary: false,
-      read_only: false,
-    })),
+    read: () => readMock(),
+    // The real builder's shape, duplicated here because the module is fully
+    // mocked: the image-pane test asserts the exact URL the <img> gets.
+    rawUrl: (sessionId: string, path: string) =>
+      `/api/v1/sessions/${encodeURIComponent(sessionId)}/files/raw?path=${encodeURIComponent(path)}`,
     diff: vi.fn(async () => ({ head: "", working: "", binary: false })),
     write: (...args: unknown[]) => writeMock(...args),
     openInEditor: vi.fn(),
@@ -226,5 +231,71 @@ describe("a save the server refuses", () => {
       ),
     )
     expect(toastError).not.toHaveBeenCalled()
+  })
+})
+
+// (d) image + SVG preview. An image tab must never fetch /read: the server
+// refuses anything over the 5 MiB editable cap BEFORE the binary flag exists,
+// so a buffer-gated image tab would park on a spinner forever. Instead the
+// pane renders straight from /raw. SVG stays a TEXT tab (Monaco) whose
+// Preview toggle renders the current draft through a Blob URL.
+async function mountWithTab(path: string) {
+  const { EditorOverlay } = await import("@/components/EditorOverlay")
+  const { getSnapshot } = await import("@/lib/store")
+  mockState = {
+    ...getSnapshot(),
+    editorTarget: { sessionId: SESSION, initialPath: path },
+    editorTabs: {
+      [SESSION]: {
+        tabs: [{ id: TAB_ID, path, dirty: false, preview: false, mode: "file" }],
+        activeId: TAB_ID,
+      },
+    },
+  } as DuxState
+  render(<EditorOverlay />)
+}
+
+describe("image and svg preview", () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    installBootStubs()
+    // useObjectUrl needs the createObjectURL pair jsdom does not implement.
+    let n = 0
+    vi.stubGlobal("URL", {
+      ...URL,
+      createObjectURL: vi.fn(() => `blob:test-${++n}`),
+      revokeObjectURL: vi.fn(),
+    })
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.unstubAllGlobals()
+  })
+
+  it("an image tab renders from /raw, never calls /read, and hides Save", async () => {
+    await mountWithTab("assets/logo.png")
+    const img = await screen.findByAltText("assets/logo.png")
+    expect(img.getAttribute("src")).toBe(
+      "/api/v1/sessions/s1/files/raw?path=assets%2Flogo.png",
+    )
+    expect(readMock).not.toHaveBeenCalled()
+    // Buffer-derived controls have no buffer to act on.
+    expect(screen.queryByRole("button", { name: /save/i })).toBeNull()
+    expect(screen.queryByRole("button", { name: /preview/i })).toBeNull()
+  })
+
+  it("an svg tab opens as text and its Preview renders the draft as an image", async () => {
+    await mountWithTab("icons/logo.svg")
+    // SVG is a text tab: /read is fetched and Monaco (the stub) mounts.
+    const box = await screen.findByTestId("code-editor")
+    await waitFor(() =>
+      expect((box as HTMLTextAreaElement).value).toBe(ON_DISK),
+    )
+    expect(readMock).toHaveBeenCalled()
+    // The preview toggle extends beyond markdown to .svg.
+    fireEvent.click(screen.getByRole("button", { name: /preview/i }))
+    const img = await screen.findByAltText("icons/logo.svg")
+    expect(img.getAttribute("src")).toMatch(/^blob:/)
   })
 })

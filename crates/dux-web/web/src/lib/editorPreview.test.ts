@@ -11,7 +11,7 @@ import {
 //   /read (the 5 MiB /read cap fires before the binary flag exists, so an
 //   image tab would otherwise park on a spinner) and render from /raw.
 // - previewKind: text formats with a draft-accurate preview TOGGLE (markdown
-//   via react-markdown, SVG via a Blob URL) — SVGs open in Monaco as text.
+//   via react-markdown, SVG via a Blob URL); SVGs open in Monaco as text.
 
 describe("isSvgPath", () => {
   it("matches .svg case-insensitively", () => {
