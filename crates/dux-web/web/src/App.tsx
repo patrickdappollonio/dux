@@ -100,9 +100,11 @@ function GlobalOverlays() {
 function DesktopShell() {
   const dux = useDux()
   const { sidebarWidth } = dux
-  // The Changes pane honours config.ui.show_changes_pane (via the bootstrap document) and
-  // the per-session palette/menu toggle. When hidden, the terminal panel takes
-  // the full width and the handle + panel are unmounted (no leftover sliver).
+  // The Changes pane honours config.ui.show_changes_pane (via the bootstrap
+  // document). The runtime hide/show controls (the pane's ⋯ menu, the header's
+  // show button, the Preferences row) all persist that same preference. When
+  // hidden, the terminal panel takes the full width and the handle + panel are
+  // unmounted (no leftover sliver).
   const showChanges = changesPaneVisible(dux)
 
   return (

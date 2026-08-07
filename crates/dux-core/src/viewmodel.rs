@@ -155,9 +155,12 @@ pub struct BootstrapView {
     /// 1000-line default and trims the replayed history.
     pub agent_scrollback_lines: usize,
     /// Mirrors `config.ui.show_changes_pane`. The desktop web hides the
-    /// right-hand Changes pane when false; the Changes actions menu's runtime
-    /// toggle overrides it per session. Older servers omit it, so the web treats a
-    /// missing value as `true`.
+    /// right-hand Changes pane when false. The runtime hide/show controls (the
+    /// Changes actions menu's hide item, the header's show button) persist this
+    /// same preference on every flip; the browser's client-side override is
+    /// only an optimistic echo, dropped once the refreshed bootstrap confirms
+    /// the value. Older servers omit it, so the web treats a missing value as
+    /// `true`.
     pub show_changes_pane: bool,
     /// Global environment variables from `[env]` in `config.toml`, applied to
     /// every spawned provider/terminal. Surfaced so a client can pre-fill an
