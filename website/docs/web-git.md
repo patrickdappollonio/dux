@@ -90,9 +90,12 @@ A manually attached PR is pinned: dux keeps tracking that exact pull request
 and the Agent Info dialog says "manually attached" so you can tell a pin from a
 find. Detaching (**Detach pull request** in the same menu, or
 `detach-pull-request` in the palette) lets autodetection take over again on the
-next sync pass; it is not destructive, so there is no confirmation. Both
-actions need GitHub integration and a signed-in `gh`, exactly like the rest of
-the PR features.
+next sync pass; it is not destructive, so there is no confirmation. Attaching
+needs GitHub integration and a signed-in `gh` (it resolves the reference
+through `gh`); detaching does not, so a pin never outlives your ability to
+remove it. With GitHub integration switched off entirely, the pin is hidden
+(and not removable) until the integration is re-armed, at which point the
+badge reseeds from what dux remembered.
 
 ## Staying in sync
 

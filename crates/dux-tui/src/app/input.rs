@@ -15336,15 +15336,27 @@ not_a_real_action = ["x"]
     fn command_palette_gates_attach_and_detach_pull_request_on_gh_and_the_pin() {
         let mut app = test_app(default_bindings());
 
-        // gh unavailable: neither command is offered.
+        // gh unavailable: attach (which needs gh to resolve) is not offered.
         assert!(
             app.filtered_palette_commands("attach-pull-request")
                 .is_empty()
         );
+        // Detach is NOT gh-gated: it touches no network, and a pin must never
+        // outlive the ability to remove it. With no pin it stays hidden; with
+        // one it appears even while gh is unavailable.
         assert!(
             app.filtered_palette_commands("detach-pull-request")
                 .is_empty()
         );
+        app.engine
+            .pr_overrides
+            .insert("session-1".to_string(), pinned_stored_pr("session-1"));
+        assert!(
+            !app.filtered_palette_commands("detach-pull-request")
+                .is_empty(),
+            "a pin must be removable without gh"
+        );
+        app.engine.pr_overrides.clear();
 
         // gh available, selected session has no pin: attach only.
         app.engine.github_integration_enabled = true;

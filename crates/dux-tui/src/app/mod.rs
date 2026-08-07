@@ -3620,13 +3620,13 @@ impl App {
                 self.github_pr_agent_command_available()
             }
             // Detach is only meaningful when the selected agent actually holds
-            // a manually attached (pinned) pull request.
-            Action::DetachPullRequest => {
-                self.github_pr_agent_command_available()
-                    && self
-                        .selected_session()
-                        .is_some_and(|s| self.engine.pr_overrides.contains_key(&s.id))
-            }
+            // a manually attached (pinned) pull request. Deliberately NOT
+            // gated on gh availability: detaching touches no network, and a
+            // pin must never outlive the ability to remove it (gh could be
+            // uninstalled or signed out after the attach).
+            Action::DetachPullRequest => self
+                .selected_session()
+                .is_some_and(|s| self.engine.pr_overrides.contains_key(&s.id)),
             // The terminal-move commands are offered only when a terminal exists;
             // the agent-move commands are always offered (they fall through to
             // `true` and guard at invoke, like the rest of the palette).
