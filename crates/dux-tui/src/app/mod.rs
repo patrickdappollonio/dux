@@ -1007,11 +1007,6 @@ pub(crate) struct RefusalBlink {
     pub(crate) prompt: std::mem::Discriminant<PromptState>,
 }
 
-/// Build the body lines of the Agent Info modal from a session: name, provider,
-/// the current/original/forked-from branches, a drift note when the current
-/// branch differs from the branch the agent was created on, then the worktree,
-/// creation time, and status. Each line carries its semantic tone so the
-/// renderer never has to substring-match prose. Pure and unit-tested.
 /// The lowercase state word for a PR, matching the web's `prStateLabel` casing
 /// (`open`/`merged`/`closed`) so both surfaces read the same.
 pub(crate) fn pr_state_word(state: &crate::model::PrState) -> &'static str {
@@ -1022,6 +1017,12 @@ pub(crate) fn pr_state_word(state: &crate::model::PrState) -> &'static str {
     }
 }
 
+/// Build the body lines of the Agent Info modal from a session: name, provider,
+/// the current/original/forked-from branches, a drift note when the current
+/// branch differs from the branch the agent was created on, then the worktree,
+/// creation time, status, and the tracked pull request when one is known
+/// (naming a manual pin). Each line carries its semantic tone so the renderer
+/// never has to substring-match prose. Pure and unit-tested.
 pub(crate) fn agent_info_lines(
     session: &AgentSession,
     project_default: Option<ProviderKind>,
