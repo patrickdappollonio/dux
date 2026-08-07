@@ -97,6 +97,22 @@ function codeEditorStub() {
 vi.mock("@/components/CodeEditor", codeEditorStub)
 vi.mock("./CodeEditor", codeEditorStub)
 
+// Panel props recorded at render time, so the panel-unit tests can assert the
+// editor hands react-resizable-panels STRING percentages. v4 reads a bare
+// number as PIXELS (defaultSize={22} mounted the explorer ~22px wide), so a
+// future bare number must fail here. The real Panel still renders (spread
+// actual), keeping every other test on the genuine library.
+const recordedPanelProps: Array<Record<string, unknown>> = []
+vi.mock("react-resizable-panels", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("react-resizable-panels")>()
+  const Panel = (props: Parameters<typeof actual.Panel>[0]) => {
+    recordedPanelProps.push(props as unknown as Record<string, unknown>)
+    return <actual.Panel {...props} />
+  }
+  return { ...actual, Panel }
+})
+
 const toastError = vi.fn()
 vi.mock("sonner", () => ({
   toast: Object.assign(vi.fn(), {
@@ -490,6 +506,36 @@ describe("image and svg preview", () => {
     await screen.findByTestId("code-editor")
     await waitFor(() => expect(readMock).toHaveBeenCalledTimes(2))
   })
+})
+
+// The editor's panel sizes must be STRING percentages: react-resizable-panels
+// v4 treats a bare number as PIXELS, which is the "explorer opens ~20px wide"
+// bug. The pixel truth is the preview-env screenshot pass; what is pinned
+// here is the contract the components hand the library.
+describe("editor panel units and scroll surfaces", () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    recordedPanelProps.length = 0
+    installBootStubs()
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.unstubAllGlobals()
+  })
+
+  it("hands the panel library string percentages, never bare numbers", async () => {
+    await mountWithTab(PATH)
+    const explorer = recordedPanelProps.find((p) => p.id === "editor-explorer")
+    const content = recordedPanelProps.find((p) => p.id === "editor-content")
+    expect(explorer).toBeTruthy()
+    expect(content).toBeTruthy()
+    // A bare number here is pixels and re-opens the sliver-explorer bug.
+    expect(explorer!.defaultSize).toBe("22%")
+    expect(explorer!.minSize).toBe("12%")
+    expect(content!.minSize).toBe("30%")
+  })
+
 })
 
 // (a) the explorer is a collapsible resizable panel with an explicit header

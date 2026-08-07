@@ -55,13 +55,16 @@ import {
 } from "@/lib/fileTreeOps"
 import { isLocalAccessHost } from "@/lib/localAccess"
 import {
+  EDITOR_CONTENT_MIN_SIZE_PROP,
   EDITOR_CONTENT_PANEL_ID,
   EDITOR_LAYOUT_ID,
-  EXPLORER_DEFAULT_SIZE,
+  EXPLORER_DEFAULT_SIZE_PROP,
+  EXPLORER_MIN_SIZE_PROP,
   EXPLORER_PANEL_ID,
   explorerExpandTarget,
   isExplorerCollapsed,
   lastExpandedExplorerSize,
+  sanitizeEditorLayout,
 } from "@/lib/editorLayout"
 import { isImagePreviewPath, previewKind } from "@/lib/editorPreview"
 import { cn } from "@/lib/utils"
@@ -271,12 +274,17 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
     panelIds: [EXPLORER_PANEL_ID, EDITOR_CONTENT_PANEL_ID],
     storage: localStorage,
   })
+  // Drop a stored layout carrying the sliver-explorer artifact (persisted
+  // while defaultSize was a bare number the library read as pixels); see
+  // sanitizeEditorLayout. Everything below reads the sanitized layout so the
+  // seeds and the mount agree.
+  const storedLayout = sanitizeEditorLayout(defaultLayout)
   // The header toggle's icon/label state. Seeded from the persisted layout
   // (so a collapsed explorer stays collapsed across opens; with nothing
   // stored the desktop overlay starts expanded) and kept current by
   // onLayoutChanged, which fires for drag-collapse and toggle alike.
   const [explorerCollapsed, setExplorerCollapsed] = useState(() =>
-    isExplorerCollapsed(defaultLayout),
+    isExplorerCollapsed(storedLayout),
   )
   const explorerPanelRef = useRef<PanelImperativeHandle | null>(null)
   // The last width the explorer had while expanded, seeded from the persisted
@@ -285,7 +293,7 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
   // minSize when it has no in-memory expand size (a fresh page load after
   // collapsing), which would reopen the explorer at a 12% sliver.
   const lastExpandedExplorerSizeRef = useRef<number | null>(
-    lastExpandedExplorerSize(defaultLayout, null),
+    lastExpandedExplorerSize(storedLayout, null),
   )
   function toggleExplorer(): void {
     const panel = explorerPanelRef.current
@@ -1144,7 +1152,7 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
         <ResizablePanelGroup
           orientation="horizontal"
           id={EDITOR_LAYOUT_ID}
-          defaultLayout={defaultLayout}
+          defaultLayout={storedLayout}
           onLayoutChanged={(layout) => {
             onLayoutChanged(layout)
             setExplorerCollapsed(isExplorerCollapsed(layout))
@@ -1155,11 +1163,14 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
           }}
           className="size-full"
         >
+          {/* Size props are STRING percentages (see editorLayout.ts): the
+              panel library reads a bare number as PIXELS, which is how the
+              explorer once mounted ~22px wide. */}
           <ResizablePanel
             id={EXPLORER_PANEL_ID}
             panelRef={explorerPanelRef}
-            defaultSize={EXPLORER_DEFAULT_SIZE}
-            minSize={12}
+            defaultSize={EXPLORER_DEFAULT_SIZE_PROP}
+            minSize={EXPLORER_MIN_SIZE_PROP}
             collapsible
           >
             {/* min-w-0 so path truncation keeps working at narrow widths. */}
@@ -1253,7 +1264,10 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
             </div>
           </ResizablePanel>
           <ResizableHandle />
-          <ResizablePanel id={EDITOR_CONTENT_PANEL_ID} minSize={30}>
+          <ResizablePanel
+            id={EDITOR_CONTENT_PANEL_ID}
+            minSize={EDITOR_CONTENT_MIN_SIZE_PROP}
+          >
             <div className="relative h-full min-w-0">
               {activeTab === null ? (
                 <div className="flex h-full items-center justify-center px-4 text-center text-sm text-muted-foreground">
