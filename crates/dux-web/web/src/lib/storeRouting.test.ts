@@ -989,18 +989,39 @@ describe("the editor rides the URL", () => {
     const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
     const target = { kind: "agent" as const, sessionId: "s1", tabId: "s1" }
     const routes = [
-      { target, changes: false, editor: null },
-      { target, changes: true, editor: null },
-      { target, changes: false, editor: { mode: "file" as const, path: null } },
+      { target, changes: false, editor: null, standalone: false },
+      { target, changes: true, editor: null, standalone: false },
+      {
+        target,
+        changes: false,
+        editor: { mode: "file" as const, path: null },
+        standalone: false,
+      },
       {
         target,
         changes: false,
         editor: { mode: "file" as const, path: "src/a b.ts" },
+        standalone: false,
       },
       {
         target,
         changes: false,
         editor: { mode: "diff" as const, path: "src/a b.ts" },
+        standalone: false,
+      },
+      // The standalone surface: the same editor positions at their un-nested
+      // whole-tab addresses.
+      {
+        target,
+        changes: false,
+        editor: { mode: "file" as const, path: null },
+        standalone: true,
+      },
+      {
+        target,
+        changes: false,
+        editor: { mode: "diff" as const, path: "src/a b.ts" },
+        standalone: true,
       },
     ]
     for (const route of routes) {
@@ -1135,6 +1156,51 @@ describe("the editor rides the URL", () => {
     expect(loc.hash).toBe("#/agent/s2")
     expect(index).toBe(depth)
     expect(entries).not.toContain("#/agent/s1/editor/file/a.ts")
+  })
+
+  it("boots the standalone editor surface from its own address", async () => {
+    const mod = await loadStore("#/editor/agent/s1/file/src%2Fa.ts", [
+      { id: "s1", project_id: "p1" },
+    ])
+    expect(mod.getSnapshot().standaloneEditor).toBe(true)
+    expect(mod.getSnapshot().selectedSessionId).toBe("s1")
+    expect(mod.getSnapshot().editorRoute).toEqual({
+      sessionId: "s1",
+      mode: "file",
+      path: "src/a.ts",
+    })
+    expect(mod.getSnapshot().editorTabs.s1.tabs.map((t) => t.path)).toEqual([
+      "src/a.ts",
+    ])
+    // A restore of the address the tab opened on: nothing pushed, nothing
+    // rewritten.
+    expect(loc.hash).toBe("#/editor/agent/s1/file/src%2Fa.ts")
+    expect(index).toBe(DUX_ENTRY_INDEX)
+  })
+
+  it("keeps the standalone grammar when switching files in the standalone tab", async () => {
+    const mod = await loadStore("#/editor/agent/s1", [
+      { id: "s1", project_id: "p1" },
+    ])
+    expect(mod.getSnapshot().standaloneEditor).toBe(true)
+    const depth = index
+    mod.editorSyncActiveTab("s1", "file", "b.ts")
+    expect(loc.hash).toBe("#/editor/agent/s1/file/b.ts")
+    expect(index).toBe(depth)
+  })
+
+  it("leaves the standalone surface when the address stops naming it", async () => {
+    // The standalone header's open-in-dux link is a plain hash anchor: the
+    // browser pushes the entry and fires popstate, and the URL, as always,
+    // is what decides which surface renders.
+    const mod = await loadStore("#/editor/agent/s1", [
+      { id: "s1", project_id: "p1" },
+    ])
+    popstateTo("#/agent/s1")
+    expect(mod.getSnapshot().standaloneEditor).toBe(false)
+    expect(mod.getSnapshot().selectedSessionId).toBe("s1")
+    // The in-app address names no editor, so the editor state closed with it.
+    expect(mod.getSnapshot().editorRoute).toBeNull()
   })
 
   it("renders not-found for an editor link to an agent that does not exist", async () => {

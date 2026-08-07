@@ -593,6 +593,14 @@ export interface DuxState {
     mode: EditorViewMode
     path: string | null
   } | null
+  // True while this tab IS the standalone editor surface (`#/editor/agent/…`
+  // addresses): `App()` renders `StandaloneEditorShell` instead of either
+  // shell, and `EditorOverlay` stands down so the overlay Dialog and the
+  // standalone shell can never both mount an `EditorBody` (two Monaco models
+  // and two buffer maps over the same files). Seeded from the boot address
+  // and kept in line with the URL by `applyUrlRoute`, so the standalone
+  // header's plain-anchor way back into the full app just works.
+  standaloneEditor: boolean
   // Per-session editor tab metadata (pure client state; the heavy Monaco
   // buffers live in the `EditorBody` component, keyed by tab id). Keyed by
   // session id so reopening a session's editor restores its tab list. A
@@ -669,6 +677,20 @@ function loadingChanges(sessionId: string): ChangesSlice {
     unstaged: [],
     error: null,
   }
+}
+
+// Whether this tab BOOTED on the standalone editor's whole-tab address. A
+// hoisted function (the state literal below runs before the route constants
+// exist, so it cannot call `parseRoute` yet), and a prefix probe rather than
+// the full parser on purpose: the SHELL choice must be settled at module init
+// or the ordinary shell would flash and open its sockets first, and the
+// prefix is disjoint from every other grammar (`parseStandaloneEditorRoute`
+// owns the full shape; a malformed tail still lands in the standalone shell,
+// which then renders its not-found/empty state). `applyUrlRoute` keeps the
+// flag in line with the URL from then on.
+function bootIsStandaloneEditor(): boolean {
+  if (typeof location === "undefined") return false
+  return /^#\/editor\/agent\//.test(location.hash ?? "")
 }
 
 let state: DuxState = {
@@ -756,6 +778,7 @@ let state: DuxState = {
   changesPaneOverride: null,
   editorTarget: null,
   editorRoute: null,
+  standaloneEditor: bootIsStandaloneEditor(),
   editorTabs: {},
   editorCloseTabTarget: null,
   changes: emptyChanges(),
@@ -1855,6 +1878,11 @@ export interface Route {
   // SERIALIZED form: `routeHash` emits at most one suffix (editor wins), and
   // `parseRoute` tries the editor suffix first.
   editor: { mode: EditorViewMode; path: string | null } | null
+  // True when the address is the STANDALONE editor's whole-tab form
+  // (`#/editor/agent/<sid>[/<mode>/<encoded-path>]`) rather than the in-app
+  // suffix. Only meaningful with a non-null `editor`; it decides which shell
+  // `App()` renders and which grammar `routeHash` writes back.
+  standalone: boolean
 }
 
 // The changes screen rides as a suffix on the focused target's hash, so it
@@ -1874,22 +1902,47 @@ function parseEditorRoute(hash: string): Route | null {
   if (!m) return null
   const target = parseSelectionHash(m[1])
   if (!target || targetSessionId(target) === null) return null
-  if (m[3] === undefined) {
-    return { target, changes: false, editor: { mode: "file", path: null } }
-  }
-  // Malformed percent-encoding in the path degrades to the bare target (the
-  // same "treat as no/invalid deep link" rule parseSelectionHash applies),
-  // rather than throwing at module init.
+  const editor = parseEditorSegment(m[2], m[3])
+  return { target, changes: false, editor, standalone: false }
+}
+
+// The standalone editor's whole-tab address: `#/editor/agent/<sid>` plus the
+// same optional mode/path pair as the in-app suffix. It cannot collide with
+// the target grammars (none begins `#/editor/`), and it always names the
+// session-slot target: the standalone surface is the editor, not a tab strip.
+function parseStandaloneEditorRoute(hash: string): Route | null {
+  const m = hash.match(/^#\/editor\/agent\/([^/]+)(?:\/(file|diff)\/([^/]+))?$/)
+  if (!m) return null
   try {
-    const path = decodeURIComponent(m[3])
-    if (!path) return { target, changes: false, editor: null }
+    const sessionId = decodeURIComponent(m[1])
+    if (!sessionId) return null
     return {
-      target,
+      target: { kind: "agent", sessionId, tabId: sessionId },
       changes: false,
-      editor: { mode: m[2] as EditorViewMode, path },
+      editor: parseEditorSegment(m[2], m[3]),
+      standalone: true,
     }
   } catch {
-    return { target, changes: false, editor: null }
+    return null
+  }
+}
+
+// The shared mode/path tail of both editor grammars. No mode segment means
+// "open with no file" (mode normalized to "file"); malformed
+// percent-encoding in the path degrades to no editor half (the same "treat
+// as no/invalid deep link" rule parseSelectionHash applies) rather than
+// throwing at module init.
+function parseEditorSegment(
+  mode: string | undefined,
+  encodedPath: string | undefined,
+): Route["editor"] {
+  if (encodedPath === undefined) return { mode: "file", path: null }
+  try {
+    const path = decodeURIComponent(encodedPath)
+    if (!path) return null
+    return { mode: mode as EditorViewMode, path }
+  } catch {
+    return null
   }
 }
 
@@ -1897,8 +1950,14 @@ function parseEditorRoute(hash: string): Route | null {
 // Exported for the round-trip tests only (`routeHash` likewise): the grammar
 // must stay an exact inverse pair, and that is only checkable from outside.
 export function parseRoute(hash: string): Route {
+  // The standalone editor's grammar is prefix-disjoint from everything else
+  // (`#/editor/…` vs `#/agent/…`, `#/project/…`, `#/terminal/…`), so its
+  // position in this ladder decides nothing; it goes first as the most
+  // specific shape.
+  const standalone = parseStandaloneEditorRoute(hash)
+  if (standalone) return standalone
   const direct = parseSelectionHash(hash)
-  if (direct) return { target: direct, changes: false, editor: null }
+  if (direct) return { target: direct, changes: false, editor: null, standalone: false }
   // The editor suffix is tried BEFORE the changes suffix, which is what makes
   // the two mutually exclusive in practice: an editor path is a single
   // encoded segment, so `#/agent/s1/editor/file/changes` (a file literally
@@ -1910,9 +1969,9 @@ export function parseRoute(hash: string): Route {
   if (editor) return editor
   if (hash.endsWith(CHANGES_SUFFIX)) {
     const target = parseSelectionHash(hash.slice(0, -CHANGES_SUFFIX.length))
-    if (target) return { target, changes: true, editor: null }
+    if (target) return { target, changes: true, editor: null, standalone: false }
   }
-  return { target: null, changes: false, editor: null }
+  return { target: null, changes: false, editor: null, standalone: false }
 }
 
 // The hash for a route. Home is the empty hash; both suffixes only apply on
@@ -1923,6 +1982,17 @@ export function parseRoute(hash: string): Route {
 // pins the cross-product. A pathless editor suffix carries no mode segment,
 // so a pathless route's mode is normalized to "file" on the way back in.
 export function routeHash(route: Route): string {
+  // The standalone form replaces the whole address rather than riding as a
+  // suffix; a standalone route whose target somehow lost its session (or its
+  // editor half) falls through to the ordinary grammar.
+  if (route.standalone && route.editor) {
+    const sessionId = targetSessionId(route.target)
+    if (sessionId !== null) {
+      const base = `#/editor/agent/${encodeURIComponent(sessionId)}`
+      if (route.editor.path === null) return base
+      return `${base}/${route.editor.mode}/${encodeURIComponent(route.editor.path)}`
+    }
+  }
   const base = selectionHash(route.target)
   if (base === "") return base
   if (route.editor) {
@@ -1948,7 +2018,7 @@ function routeScreen(route: Route): MobileScreen {
 // closes it), while switching files inside the editor keeps it (so switches
 // replace and never pile up). Exported for the routing tests only.
 export function routePushKey(route: Route): string {
-  return `${routeScreen(route)}${route.editor ? "+editor" : ""}`
+  return `${routeScreen(route)}${route.editor ? "+editor" : ""}${route.standalone ? "+standalone" : ""}`
 }
 
 // The route the app currently holds in state.
@@ -1968,6 +2038,10 @@ function currentRoute(): Route {
     target,
     changes: state.mobileScreen === "changes",
     editor,
+    // The surface bit, so a file switch inside the standalone tab writes the
+    // standalone grammar back rather than silently converting the address to
+    // the in-app form.
+    standalone: state.standaloneEditor && editor !== null,
   }
 }
 
@@ -2034,6 +2108,13 @@ function syncUrl(mode?: "replace"): void {
 function applyUrlRoute(): void {
   const hash = typeof location !== "undefined" ? (location.hash ?? "") : ""
   const route = parseRoute(hash)
+  // The surface bit follows the URL immediately, spine or no spine: which
+  // shell renders must not wait on a fetch, and it is what lets the
+  // standalone header's plain-anchor open-in-dux link (and a Back across it)
+  // swap surfaces with no code of its own.
+  if (route.standalone !== state.standaloneEditor) {
+    setState({ standaloneEditor: route.standalone })
+  }
   const spine = state.spine
   if (!spine) {
     // A popstate before the first spine landed: a slow spine fetch, or a
@@ -2246,7 +2327,7 @@ function setRouteNotFound(sessionId: string): void {
 const bootRoute: Route =
   typeof location !== "undefined"
     ? parseRoute(location.hash ?? "")
-    : { target: null, changes: false, editor: null }
+    : { target: null, changes: false, editor: null, standalone: false }
 // All three halves are mutable: a popstate that beats the first spine
 // overwrites them with the address the browser actually moved to (see
 // `applyUrlRoute`), so the restore resolves that rather than a boot hash the
@@ -2329,6 +2410,7 @@ function restoreDeepLink(spine: Spine): void {
     target: link,
     changes: pendingDeepLinkChanges,
     editor: pendingDeepLinkEditor,
+    standalone: state.standaloneEditor,
   })
 }
 
