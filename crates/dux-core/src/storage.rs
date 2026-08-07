@@ -286,7 +286,7 @@ impl SessionStore {
         // A manually attached ("pinned") pull request, one row per session,
         // mirroring `session_prs`'s columns. The FK is declared for parity with
         // `session_prs`, but the connection never enables `PRAGMA foreign_keys`,
-        // so the cascade does not fire — `delete_session` and
+        // so the cascade does not fire; `delete_session` and
         // `remove_project_records` delete these rows explicitly. The cached
         // state/title/url make a restart render the pin instantly, before the
         // first sync cycle refreshes them. Derived runtime state, so it lives
