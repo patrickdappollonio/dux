@@ -433,7 +433,7 @@ fn config_schema() -> Vec<ConfigEntry> {
         ConfigEntry::Field {
             key: "show_changes_pane",
             comment: Some(CommentSource::Static(
-                "# Show the Changes pane (the right-hand list of changed files).\n# Set to false to hide it by default; toggle it at runtime from the TUI\n# command palette, or the web UI's Changes actions menu.",
+                "# Show the Changes pane (the right-hand list of changed files).\n# Set to false to hide it by default; toggle it at runtime from the TUI\n# command palette, the web's Changes actions menu (hide), or the\n# show button in the web header (show).",
             )),
             value_fn: |c| FieldValue::Bool(c.ui.show_changes_pane),
         },
@@ -1876,6 +1876,20 @@ mod tests {
         assert!(
             rendered.contains("#   allowed_hosts = ["),
             "allowed_hosts has no example of the list format"
+        );
+    }
+
+    #[test]
+    fn changes_pane_comment_names_the_web_header_show_button() {
+        // Hiding the pane on the web unmounts its actions menu with it, so the
+        // config comment must also name the reopen control that survives the
+        // hide: the show button in the web header. The config file is the
+        // documentation; a comment pointing only at a vanished menu strands
+        // the user it is written for.
+        let rendered = render_config_default(&Config::default());
+        assert!(
+            rendered.contains("# show button in the web header (show)."),
+            "the show_changes_pane comment must name the web header's show button, got:\n{rendered}"
         );
     }
 
