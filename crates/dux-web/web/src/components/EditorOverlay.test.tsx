@@ -510,8 +510,12 @@ describe("image and svg preview", () => {
 
 // The editor's panel sizes must be STRING percentages: react-resizable-panels
 // v4 treats a bare number as PIXELS, which is the "explorer opens ~20px wide"
-// bug. The pixel truth is the preview-env screenshot pass; what is pinned
-// here is the contract the components hand the library.
+// bug. And each panel's inner wrapper (the div the library gives
+// `overflow: auto`) must be clipped to `hidden` so the only scroll surface in
+// the content pane is Monaco's own (and each preview pane's own); the
+// wrapper's auto scrollbars are what stacked nested scrollbars around the
+// diff view. The pixel truth of both is the preview-env screenshot pass; what
+// is pinned here is the contract the components hand the library.
 describe("editor panel units and scroll surfaces", () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -536,6 +540,16 @@ describe("editor panel units and scroll surfaces", () => {
     expect(content!.minSize).toBe("30%")
   })
 
+  it("clips both panel wrappers so panes own their scrolling", async () => {
+    await mountWithTab(PATH)
+    // The overlay Dialog portals to document.body, so query the document.
+    const panels = document.querySelectorAll("[data-panel]")
+    expect(panels.length).toBe(2)
+    for (const panel of panels) {
+      const wrapper = panel.firstElementChild as HTMLElement
+      expect(wrapper.style.overflow).toBe("hidden")
+    }
+  })
 })
 
 // (a) the explorer is a collapsible resizable panel with an explicit header

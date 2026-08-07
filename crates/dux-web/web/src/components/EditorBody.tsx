@@ -1165,12 +1165,20 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
         >
           {/* Size props are STRING percentages (see editorLayout.ts): the
               panel library reads a bare number as PIXELS, which is how the
-              explorer once mounted ~22px wide. */}
+              explorer once mounted ~22px wide. The inline overflow:hidden
+              overrides the library wrapper's own overflow:auto (a className
+              cannot beat an inline style) so each pane owns its scrolling:
+              the tree/search ScrollAreas here, Monaco and the preview panes
+              in the content panel. Without it the wrapper sprouts its own
+              scrollbars around Monaco's (the nested-scrollbar bug) and
+              jitters during divider drags (see TerminalArea's identical
+              clip). */}
           <ResizablePanel
             id={EXPLORER_PANEL_ID}
             panelRef={explorerPanelRef}
             defaultSize={EXPLORER_DEFAULT_SIZE_PROP}
             minSize={EXPLORER_MIN_SIZE_PROP}
+            style={{ overflow: "hidden" }}
             collapsible
           >
             {/* min-w-0 so path truncation keeps working at narrow widths. */}
@@ -1267,6 +1275,7 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
           <ResizablePanel
             id={EDITOR_CONTENT_PANEL_ID}
             minSize={EDITOR_CONTENT_MIN_SIZE_PROP}
+            style={{ overflow: "hidden" }}
           >
             <div className="relative h-full min-w-0">
               {activeTab === null ? (
