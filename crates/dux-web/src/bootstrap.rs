@@ -155,6 +155,7 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
         gh_status: GhStatus::Unknown,
         gh_probe: Default::default(),
         pr_statuses: HashMap::new(),
+        pr_overrides: HashMap::new(),
         branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
         pr_sync_sessions: Arc::new(Mutex::new(Vec::new())),
         pr_sync: Arc::new(Default::default()),

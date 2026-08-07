@@ -249,6 +249,14 @@ pub struct Engine {
     /// stamp that keeps overlapping probes ordered, and the program to run.
     pub gh_probe: GhProbeState,
     pub pr_statuses: HashMap<String, PrInfo>,
+    /// Manually attached ("pinned") pull requests, keyed by session id: the
+    /// in-memory mirror of the `session_pr_overrides` table. While a session
+    /// has an entry here, PR sync queries ONLY the pinned PR (see
+    /// [`crate::worker::PinnedPr`]) and the `PrStatusReady` identity guard
+    /// drops any result that does not match the pin. Written by
+    /// `AttachPullRequest`/`ClearPullRequestOverride` and loaded at boot by
+    /// [`Engine::seed_pr_statuses_from_store`].
+    pub pr_overrides: HashMap<String, crate::storage::StoredPr>,
     pub branch_sync_sessions: Arc<Mutex<Vec<BranchSyncEntry>>>,
     pub pr_sync_sessions: Arc<Mutex<Vec<PrSyncEntry>>>,
     /// Arm state and single-instance guard for pull-request background work.
@@ -2512,6 +2520,17 @@ impl Engine {
                 self.pr_statuses.insert(pr.session_id, info);
             }
         }
+        // A manually attached PR wins over the `session_prs` latest: the latest
+        // row may be a different (even higher-numbered) autodetected PR, and
+        // the badge must show the pin. Loading the map here is also what arms
+        // the `PrStatusReady` identity guard and the pinned sync planning from
+        // boot (and again on the integration re-arm paths, which re-call this).
+        for pinned in self.session_store.load_pr_overrides().unwrap_or_default() {
+            if let Some(info) = crate::gh::reconstruct_pr_from_stored(&pinned) {
+                self.pr_statuses.insert(pinned.session_id.clone(), info);
+            }
+            self.pr_overrides.insert(pinned.session_id.clone(), pinned);
+        }
         if !self.pr_statuses.is_empty() {
             crate::logger::info(&format!(
                 "[gh-integration] seeded {} PR statuses from database",
@@ -2545,17 +2564,26 @@ impl Engine {
         let Some(session) = self.sessions.iter().find(|s| s.id == session_id) else {
             return;
         };
-        let known_pr = self
-            .session_store
-            .load_prs(session_id)
-            .ok()
-            .and_then(|prs| prs.into_iter().next());
+        // A pinned session checks against its PIN, exactly like the batched
+        // loop: the override row is the known PR and the pin identity rides
+        // along so the one-shot check queries the pinned repo only. Without
+        // this, a one-shot racing an attach could answer for the remote-derived
+        // repo (the identity guard would drop it, but there is no reason to
+        // spend the call).
+        let pinned_row = self.pr_overrides.get(session_id).cloned();
+        let known_pr = pinned_row.clone().or_else(|| {
+            self.session_store
+                .load_prs(session_id)
+                .ok()
+                .and_then(|prs| prs.into_iter().next())
+        });
         let entry = PrSyncEntry {
             session_id: session.id.clone(),
             branch_name: session.branch_name.clone(),
             worktree_path: session.worktree_path.clone(),
             known_pr,
             agent_exited: !self.providers.contains_key(session_id),
+            pinned: pinned_row.as_ref().map(pinned_pr_from_stored),
         };
         let label = format!("pr-check:{}", entry.session_id);
         let backoff = Arc::clone(&self.pr_backoff);
@@ -2813,15 +2841,122 @@ impl Engine {
             *guard = self
                 .sessions
                 .iter()
-                .map(|s| PrSyncEntry {
-                    session_id: s.id.clone(),
-                    branch_name: s.branch_name.clone(),
-                    worktree_path: s.worktree_path.clone(),
-                    known_pr: known_map.get(&s.id).cloned(),
-                    agent_exited: !self.providers.contains_key(&s.id),
+                .map(|s| {
+                    // A pinned session syncs against its PIN: the override row
+                    // is the known PR (the `session_prs` latest can be a
+                    // different, autodetected PR) and the pin identity rides
+                    // along so the planner queries the pinned repo only.
+                    let pinned_row = self.pr_overrides.get(&s.id);
+                    PrSyncEntry {
+                        session_id: s.id.clone(),
+                        branch_name: s.branch_name.clone(),
+                        worktree_path: s.worktree_path.clone(),
+                        known_pr: pinned_row
+                            .cloned()
+                            .or_else(|| known_map.get(&s.id).cloned()),
+                        agent_exited: !self.providers.contains_key(&s.id),
+                        pinned: pinned_row.map(pinned_pr_from_stored),
+                    }
                 })
                 .collect();
         }
+    }
+
+    /// Apply a manual pull-request attachment: persist the override row, mirror
+    /// it in memory, show the badge immediately, and re-derive the sync snapshot
+    /// so the next cycle queries the pin. Shared by the `AttachPullRequest` wire
+    /// command and the `PullRequestResolved` attach handler, so both surfaces
+    /// apply the exact same mutation. Returns the user-facing confirmation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_pr_attach(
+        &mut self,
+        session_id: &str,
+        host: &str,
+        owner_repo: &str,
+        number: u64,
+        title: &str,
+        state: &str,
+        url: &str,
+    ) -> anyhow::Result<String> {
+        let Some(session) = self.sessions.iter().find(|s| s.id == session_id) else {
+            anyhow::bail!("unknown session: {session_id}");
+        };
+        // The stored state column is constrained to the three values
+        // `reconstruct_pr_from_stored` understands; anything else would seed a
+        // row the zero-network reconstruction silently drops.
+        if !matches!(state, "OPEN" | "MERGED" | "CLOSED") {
+            anyhow::bail!(
+                "cannot attach PR #{number}: \"{state}\" is not a state dux can track \
+                 (expected OPEN, MERGED or CLOSED)."
+            );
+        }
+        let agent_name = session
+            .title
+            .clone()
+            .unwrap_or_else(|| session.branch_name.clone());
+        // Hostnames are case-insensitive and this value becomes a `gh` argument;
+        // lowercase at the boundary like every other host dux stores.
+        let host = host.to_ascii_lowercase();
+        let url = if url.trim().is_empty() {
+            crate::gh::pull_request_url(&host, owner_repo, number)
+        } else {
+            url.to_string()
+        };
+        let stored = crate::storage::StoredPr {
+            session_id: session_id.to_string(),
+            pr_number: number,
+            host,
+            owner_repo: owner_repo.to_string(),
+            state: state.to_string(),
+            title: title.to_string(),
+            url,
+        };
+        self.session_store.upsert_pr_override(&stored)?;
+        if let Some(info) = crate::gh::reconstruct_pr_from_stored(&stored) {
+            self.pr_statuses.insert(session_id.to_string(), info);
+        }
+        self.pr_overrides.insert(session_id.to_string(), stored);
+        self.update_pr_sync_sessions();
+        Ok(format!(
+            "Attached PR #{number} ({owner_repo}) to agent \"{agent_name}\". dux will track \
+             this pull request until you detach it; autodetection is paused for this agent."
+        ))
+    }
+
+    /// Remove a session's manual pull-request attachment so autodetection kicks
+    /// back in on the next sync cycle. The last-known PR badge deliberately
+    /// stays visible until that cycle re-evaluates, rather than blanking.
+    pub fn clear_pull_request_override(&mut self, session_id: &str) -> anyhow::Result<String> {
+        let Some(session) = self.sessions.iter().find(|s| s.id == session_id) else {
+            anyhow::bail!("unknown session: {session_id}");
+        };
+        let agent_name = session
+            .title
+            .clone()
+            .unwrap_or_else(|| session.branch_name.clone());
+        let had_pin = self.pr_overrides.remove(session_id).is_some();
+        self.session_store.delete_pr_override(session_id)?;
+        self.update_pr_sync_sessions();
+        if had_pin {
+            Ok(format!(
+                "Detached the pull request from agent \"{agent_name}\". Autodetection from the \
+                 branch name resumes on the next sync cycle."
+            ))
+        } else {
+            Ok(format!(
+                "Agent \"{agent_name}\" had no manually attached pull request; autodetection \
+                 was already active."
+            ))
+        }
+    }
+}
+
+/// Project a stored override row into the pin identity the sync planner reads.
+pub(crate) fn pinned_pr_from_stored(row: &crate::storage::StoredPr) -> crate::worker::PinnedPr {
+    crate::worker::PinnedPr {
+        host: row.host.clone(),
+        owner_repo: row.owner_repo.clone(),
+        number: row.pr_number,
     }
 }
 
@@ -5676,6 +5811,55 @@ mod tests {
         let info = engine.pr_statuses.get("s1").expect("seeded PR status");
         assert_eq!(info.number, 42);
         assert_eq!(info.state, crate::model::PrState::Open);
+    }
+
+    /// A pinned PR wins over the `session_prs` latest at seed time: the latest
+    /// row can be a HIGHER-numbered autodetected PR, and the badge must show the
+    /// pin. The pin also lands in `pr_overrides` so the identity guard and the
+    /// sync planner know about it from boot.
+    #[test]
+    fn seed_pr_statuses_prefers_the_override_over_the_latest_stored_pr() {
+        let (mut engine, _tmp) = test_engine();
+        engine.github_integration_enabled = true;
+        engine
+            .session_store
+            .upsert_session(&sample_session("s1", "p1", "feat"))
+            .expect("seed session");
+        engine
+            .session_store
+            .upsert_pr(&crate::storage::StoredPr {
+                session_id: "s1".to_string(),
+                pr_number: 50,
+                host: "github.com".to_string(),
+                owner_repo: "o/r".to_string(),
+                state: "OPEN".to_string(),
+                title: "Autodetected".to_string(),
+                url: "https://github.com/o/r/pull/50".to_string(),
+            })
+            .expect("seed a stored PR");
+        engine
+            .session_store
+            .upsert_pr_override(&crate::storage::StoredPr {
+                session_id: "s1".to_string(),
+                pr_number: 10,
+                host: "github.com".to_string(),
+                owner_repo: "fork/r".to_string(),
+                state: "OPEN".to_string(),
+                title: "Pinned".to_string(),
+                url: "https://github.com/fork/r/pull/10".to_string(),
+            })
+            .expect("seed the override");
+
+        engine.seed_pr_statuses_from_store();
+
+        let info = engine.pr_statuses.get("s1").expect("seeded PR status");
+        assert_eq!(info.number, 10, "the pin wins over the latest stored PR");
+        assert_eq!(info.owner_repo, "fork/r");
+        assert_eq!(
+            engine.pr_overrides.get("s1").map(|p| p.pr_number),
+            Some(10),
+            "the override map is loaded alongside the badge",
+        );
     }
 
     #[test]

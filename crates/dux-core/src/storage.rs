@@ -1667,7 +1667,10 @@ mod tests {
         // The cached state/title/url are what make a restart render the pin
         // instantly, so the row must survive a reopen intact.
         let store = SessionStore::open(&db).unwrap();
-        assert_eq!(store.load_pr_overrides().unwrap(), vec![stored_pr("s1", 12)]);
+        assert_eq!(
+            store.load_pr_overrides().unwrap(),
+            vec![stored_pr("s1", 12)]
+        );
         store.delete_pr_override("s1").unwrap();
         assert!(store.load_pr_overrides().unwrap().is_empty());
         // Deleting an absent override is a harmless no-op.

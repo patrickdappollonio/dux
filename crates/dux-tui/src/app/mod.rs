@@ -2708,6 +2708,7 @@ impl App {
             gh_status: crate::model::GhStatus::Unknown,
             gh_probe: Default::default(),
             pr_statuses: HashMap::new(),
+            pr_overrides: HashMap::new(),
             branch_sync_sessions,
             pr_sync_sessions,
             pr_sync,

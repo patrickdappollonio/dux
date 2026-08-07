@@ -67,6 +67,7 @@ pub(crate) fn test_engine() -> (Engine, TempDir) {
         force_worker_spawn_failure: false,
         gh_probe: Default::default(),
         pr_statuses: HashMap::new(),
+        pr_overrides: HashMap::new(),
         branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
         pr_sync_sessions: Arc::new(Mutex::new(Vec::new())),
         pr_sync: Arc::new(Default::default()),

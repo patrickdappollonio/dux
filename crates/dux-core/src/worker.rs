@@ -614,6 +614,19 @@ pub struct BranchSyncEntry {
     pub branch_name: String,
 }
 
+/// The identity of a manually attached ("pinned") pull request, carried on a
+/// [`PrSyncEntry`] so the sync planner queries the PINNED repo (which may be a
+/// fork, or any repo other than the session's remote) instead of deriving a
+/// target from the worktree's remote. Identity only; the cached state/title
+/// ride in `known_pr`, which both construction sites set to the override row
+/// for a pinned session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PinnedPr {
+    pub host: String,
+    pub owner_repo: String,
+    pub number: u64,
+}
+
 /// Snapshot of session data shared with the PR-sync background worker.
 #[derive(Clone, Debug)]
 pub struct PrSyncEntry {
@@ -622,11 +635,18 @@ pub struct PrSyncEntry {
     pub worktree_path: String,
     /// If we already know a PR for this session, the worker can use `gh pr view`
     /// (works even after branch deletion) and skip terminal states (merged/closed).
+    /// For a pinned session this is the OVERRIDE row, never the `session_prs`
+    /// latest (which can be a different, autodetected PR).
     pub known_pr: Option<StoredPr>,
     /// Whether the agent process has exited. Used to skip PR discovery calls
     /// for sessions that are both exited and in a terminal PR state — nobody
     /// is pushing to that branch anymore.
     pub agent_exited: bool,
+    /// A manually attached PR. When set, the planner short-circuits the
+    /// remote-derived target: the query goes to the pinned `(host, owner_repo)`,
+    /// the host policy gates the PINNED host, and the only alias emitted is the
+    /// by-number one for the pinned PR (no head-ref discovery).
+    pub pinned: Option<PinnedPr>,
 }
 
 #[derive(Clone, Debug)]

@@ -2338,6 +2338,7 @@ mod tests {
             worktree_path: "/nonexistent/dux-test-path".to_string(),
             known_pr: Some(stored(42, "MERGED")),
             agent_exited: true,
+            pinned: None,
         };
         let (results, signals) = run_entries(
             std::slice::from_ref(&entry),
@@ -2962,6 +2963,7 @@ mod tests {
             worktree_path: "/nonexistent/worktree".to_string(),
             known_pr: None,
             agent_exited: false,
+            pinned: None,
         }
     }
 
