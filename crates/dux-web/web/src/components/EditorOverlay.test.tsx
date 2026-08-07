@@ -299,3 +299,29 @@ describe("image and svg preview", () => {
     expect(img.getAttribute("src")).toMatch(/^blob:/)
   })
 })
+
+// (a) the explorer is a collapsible resizable panel with an explicit header
+// toggle. Layout drag behavior belongs to the preview-env visual pass; what
+// is pinned here is that the toggle exists, meets the touch floor, and the
+// overlay starts expanded when nothing is stored.
+describe("file explorer collapse toggle", () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    installBootStubs()
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.unstubAllGlobals()
+  })
+
+  it("renders in the header, starts expanded, and meets the touch floor", async () => {
+    await mountWithTab(PATH)
+    const btn = await screen.findByRole("button", {
+      name: /hide the file explorer/i,
+    })
+    expect(btn.className).toContain("max-md:size-10")
+    // Expanded means the explorer's search box is on screen.
+    expect(screen.getByPlaceholderText("Search files…")).toBeTruthy()
+  })
+})

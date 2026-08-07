@@ -9,12 +9,16 @@ import {
   FileText,
   GitCompare,
   Loader2,
+  PanelLeftClose,
+  PanelLeftOpen,
   Pencil,
   RotateCw,
   Save,
   Search,
   X,
 } from "lucide-react"
+import { useDefaultLayout } from "react-resizable-panels"
+import type { PanelImperativeHandle } from "react-resizable-panels"
 import { toast } from "sonner"
 import { fileApi } from "@/lib/fileApi"
 import { OPEN_IN_EDITORS } from "@/lib/editors"
@@ -40,6 +44,12 @@ import {
   renameTarget as computeRenameTarget,
 } from "@/lib/fileTreeOps"
 import { isLocalAccessHost } from "@/lib/localAccess"
+import {
+  EDITOR_CONTENT_PANEL_ID,
+  EDITOR_LAYOUT_ID,
+  EXPLORER_PANEL_ID,
+  isExplorerCollapsed,
+} from "@/lib/editorLayout"
 import { isImagePreviewPath, previewKind } from "@/lib/editorPreview"
 import { cn } from "@/lib/utils"
 import { useIsMobile } from "@/hooks/use-mobile"
@@ -73,6 +83,11 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
+import {
+  ResizableHandle,
+  ResizablePanel,
+  ResizablePanelGroup,
+} from "@/components/ui/resizable"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import {
   closeEditor,
@@ -261,6 +276,31 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
   const [search, setSearch] = useState("")
   // "Open editor" request in flight.
   const [openingEditor, setOpeningEditor] = useState(false)
+
+  // Explorer panel layout: persisted by the panel library's OWN
+  // useDefaultLayout (per tenet: reuse before invent; hand-rolled persistence
+  // is exactly what this hook exists to replace). One shared localStorage
+  // layout keyed by EDITOR_LAYOUT_ID. `onLayoutChanged` is the current
+  // callback; `onLayoutChange` is deprecated and deliberately unused.
+  const { defaultLayout, onLayoutChanged } = useDefaultLayout({
+    id: EDITOR_LAYOUT_ID,
+    panelIds: [EXPLORER_PANEL_ID, EDITOR_CONTENT_PANEL_ID],
+    storage: localStorage,
+  })
+  // The header toggle's icon/label state. Seeded from the persisted layout
+  // (so a collapsed explorer stays collapsed across opens; with nothing
+  // stored the desktop overlay starts expanded) and kept current by
+  // onLayoutChanged, which fires for drag-collapse and toggle alike.
+  const [explorerCollapsed, setExplorerCollapsed] = useState(() =>
+    isExplorerCollapsed(defaultLayout),
+  )
+  const explorerPanelRef = useRef<PanelImperativeHandle | null>(null)
+  function toggleExplorer(): void {
+    const panel = explorerPanelRef.current
+    if (!panel) return
+    if (panel.isCollapsed()) panel.expand()
+    else panel.collapse()
+  }
 
   const dirty = activeTab?.dirty ?? false
   // Raster images never fetch /read (the 5 MiB /read cap refuses them before
@@ -880,6 +920,28 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
     <>
       {/* Header: open file path, view toggle, dirty indicator, actions. */}
       <div className="flex items-center gap-2 border-b px-3 py-2">
+        {/* Explorer collapse/expand toggle: lives in the header, OUTSIDE the
+            panel it hides, so it stays reachable while collapsed. */}
+        <SimpleTooltip
+          content={
+            explorerCollapsed ? "Show the file explorer" : "Hide the file explorer"
+          }
+        >
+          <Button
+            size="icon-sm"
+            variant="ghost"
+            className="shrink-0 max-md:size-10"
+            aria-label={
+              explorerCollapsed
+                ? "Show the file explorer"
+                : "Hide the file explorer"
+            }
+            aria-pressed={explorerCollapsed}
+            onClick={toggleExplorer}
+          >
+            {explorerCollapsed ? <PanelLeftOpen /> : <PanelLeftClose />}
+          </Button>
+        </SimpleTooltip>
         <FileCode2 className="size-4 shrink-0 text-muted-foreground" />
         {/* <bdi> LTR isolate: keeps a leading bidi-neutral char in a dotfile
             path (".github/...") from being reordered to the end by direction:rtl. */}
@@ -1032,221 +1094,245 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
       {/* Tab strip, only renders once the session has at least one tab. */}
       <EditorTabsStrip sessionId={sessionId} />
 
-      {/* Body: worktree file tree (left) + Monaco editor/diff (right). */}
-      <div className="flex min-h-0 flex-1">
-        <div className="flex w-64 shrink-0 flex-col border-r">
-          <div className="flex items-center gap-1 border-b p-2">
-            <div className="relative flex-1">
-              <Search className="pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search files…"
-                className="h-8 pl-7 text-sm"
-              />
-            </div>
-            <SimpleTooltip content="New file">
-              <Button
-                size="icon-sm"
-                variant="ghost"
-                aria-label="New file"
-                onClick={() => setNewEntryTarget({ kind: "file", dir: "" })}
-              >
-                <FilePlus />
-              </Button>
-            </SimpleTooltip>
-          </div>
-          {/* The tree owns its own ScrollArea (it virtualizes against its
-              viewport, so it must be the element that scrolls); this outer one
-              wraps only the flat search results. */}
-          {search.trim() ? (
-            <ScrollArea className="min-h-0 flex-1">
-              <div className="p-1">
-                {searchLoading ? (
-                  <div className="flex items-center justify-center py-4 text-muted-foreground">
-                    <Loader2 className="size-4 motion-safe:animate-spin" />
-                  </div>
-                ) : filtered.length === 0 ? (
-                  <p className="px-1 py-2 text-sm text-muted-foreground">
-                    No files match.
-                  </p>
-                ) : (
-                  <>
-                    {filtered.map((p) => (
-                      <button
-                        key={p}
-                        type="button"
-                        onClick={() => requestOpen(p)}
-                        className={cn(
-                          "flex w-full items-center gap-1.5 rounded px-1 py-1 hover:bg-muted",
-                          p === openPath && "bg-muted",
-                        )}
-                      >
-                        {changedMap.has(p) && (
-                          <FileStatusIcon status={changedMap.get(p)!} />
-                        )}
-                        {/* Full path → start-ellipsize so the filename stays visible.
-                            <bdi> LTR isolate keeps a leading "." (dotfile path) from
-                            being reordered to the end by direction:rtl. */}
-                        <span className="min-w-0 flex-1 truncate text-left font-mono text-sm [direction:rtl]">
-                          <bdi dir="ltr">{p}</bdi>
-                        </span>
-                      </button>
-                    ))}
-                    {searchTruncated && (
-                      <p className="px-1 py-2 text-xs text-muted-foreground">
-                        The search index was capped — results may be
-                        incomplete.
+      {/* Body: worktree file tree (left, a collapsible resizable panel) +
+          Monaco editor/diff (right). The outer div mirrors DesktopShell's
+          panel-group mount (min-h-0 flex-1 wrapper, size-full group). */}
+      <div className="min-h-0 flex-1">
+        <ResizablePanelGroup
+          orientation="horizontal"
+          id={EDITOR_LAYOUT_ID}
+          defaultLayout={defaultLayout}
+          onLayoutChanged={(layout) => {
+            onLayoutChanged(layout)
+            setExplorerCollapsed(isExplorerCollapsed(layout))
+          }}
+          className="size-full"
+        >
+          <ResizablePanel
+            id={EXPLORER_PANEL_ID}
+            panelRef={explorerPanelRef}
+            defaultSize={22}
+            minSize={12}
+            collapsible
+          >
+            {/* min-w-0 so path truncation keeps working at narrow widths. */}
+            <div className="flex h-full min-w-0 flex-col border-r">
+              <div className="flex items-center gap-1 border-b p-2">
+                <div className="relative flex-1">
+                  <Search className="pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                  <Input
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                    placeholder="Search files…"
+                    className="h-8 pl-7 text-sm"
+                  />
+                </div>
+                <SimpleTooltip content="New file">
+                  <Button
+                    size="icon-sm"
+                    variant="ghost"
+                    aria-label="New file"
+                    onClick={() => setNewEntryTarget({ kind: "file", dir: "" })}
+                  >
+                    <FilePlus />
+                  </Button>
+                </SimpleTooltip>
+              </div>
+              {/* The tree owns its own ScrollArea (it virtualizes against its
+                  viewport, so it must be the element that scrolls); this outer one
+                  wraps only the flat search results. */}
+              {search.trim() ? (
+                <ScrollArea className="min-h-0 flex-1">
+                  <div className="p-1">
+                    {searchLoading ? (
+                      <div className="flex items-center justify-center py-4 text-muted-foreground">
+                        <Loader2 className="size-4 motion-safe:animate-spin" />
+                      </div>
+                    ) : filtered.length === 0 ? (
+                      <p className="px-1 py-2 text-sm text-muted-foreground">
+                        No files match.
                       </p>
+                    ) : (
+                      <>
+                        {filtered.map((p) => (
+                          <button
+                            key={p}
+                            type="button"
+                            onClick={() => requestOpen(p)}
+                            className={cn(
+                              "flex w-full items-center gap-1.5 rounded px-1 py-1 hover:bg-muted",
+                              p === openPath && "bg-muted",
+                            )}
+                          >
+                            {changedMap.has(p) && (
+                              <FileStatusIcon status={changedMap.get(p)!} />
+                            )}
+                            {/* Full path → start-ellipsize so the filename stays visible.
+                                <bdi> LTR isolate keeps a leading "." (dotfile path) from
+                                being reordered to the end by direction:rtl. */}
+                            <span className="min-w-0 flex-1 truncate text-left font-mono text-sm [direction:rtl]">
+                              <bdi dir="ltr">{p}</bdi>
+                            </span>
+                          </button>
+                        ))}
+                        {searchTruncated && (
+                          <p className="px-1 py-2 text-xs text-muted-foreground">
+                            The search index was capped — results may be
+                            incomplete.
+                          </p>
+                        )}
+                      </>
                     )}
-                  </>
-                )}
-              </div>
-            </ScrollArea>
-          ) : (
-            <FileTree
-              sessionId={sessionId}
-              openPath={openPath}
-              changed={changedMap}
-              initialPath={initialPath}
-              onOpen={requestOpen}
-              onNewFile={(dir) => setNewEntryTarget({ kind: "file", dir })}
-              onNewFolder={(dir) => setNewEntryTarget({ kind: "folder", dir })}
-              onRename={(path, isDir) =>
-                setRenameEntryTarget({ path, isDir })
-              }
-              onDelete={(path, isDir) =>
-                setDeleteEntryTarget({ path, isDir })
-              }
-              revalidate={treeRevalidate}
-            />
-          )}
-        </div>
-
-        <div className="relative min-w-0 flex-1">
-          {activeTab === null ? (
-            <div className="flex h-full items-center justify-center px-4 text-center text-sm text-muted-foreground">
-              Select a file from the tree to view or edit it.
-            </div>
-          ) : activeTab.mode === "diff" ? (
-            // Read-only Monaco diff (HEAD vs working copy).
-            activeBuffer?.diffError && !isBufferStale(activeBuffer, activeTab.path) ? (
-              <div className="flex h-full items-center justify-center px-4 text-center text-sm text-destructive">
-                {activeBuffer.diffError}
-              </div>
-            ) : !diffReady ? (
-              <div className="flex h-full items-center justify-center text-muted-foreground">
-                <Loader2 className="size-5 motion-safe:animate-spin" />
-              </div>
-            ) : activeBuffer?.diff?.binary ? (
-              <div className="flex h-full items-center justify-center px-4 text-center text-sm text-muted-foreground">
-                This file is binary and can&rsquo;t be diffed here.
-              </div>
-            ) : (
-              <ChunkBoundary>
-                <Suspense
-                  fallback={
-                    <div className="flex h-full items-center justify-center text-muted-foreground">
-                      <Loader2 className="size-5 motion-safe:animate-spin" />
-                    </div>
+                  </div>
+                </ScrollArea>
+              ) : (
+                <FileTree
+                  sessionId={sessionId}
+                  openPath={openPath}
+                  changed={changedMap}
+                  initialPath={initialPath}
+                  onOpen={requestOpen}
+                  onNewFile={(dir) => setNewEntryTarget({ kind: "file", dir })}
+                  onNewFolder={(dir) => setNewEntryTarget({ kind: "folder", dir })}
+                  onRename={(path, isDir) =>
+                    setRenameEntryTarget({ path, isDir })
                   }
-                >
-                  <DiffViewer
-                    path={activeTab.path}
-                    original={activeBuffer?.diff?.original ?? ""}
-                    modified={activeBuffer?.diff?.modified ?? ""}
-                  />
-                </Suspense>
-              </ChunkBoundary>
-            )
-          ) : isImageTab ? (
-            // Sits ABOVE the buffer-gated chain on purpose: an image tab has
-            // no buffer, so `fileReady` never turns true and the arms below
-            // would park it on the spinner forever. Keyed by path so a failed
-            // load resets when the tab preview-replaces onto another file.
-            <ImagePreviewPane
-              key={activeTab.path}
-              src={fileApi.rawUrl(sessionId, activeTab.path)}
-              path={activeTab.path}
-            />
-          ) : activeBuffer?.fileError && !isBufferStale(activeBuffer, activeTab.path) ? (
-            <div className="flex h-full flex-col items-center justify-center gap-2 px-4 text-center text-sm text-destructive">
-              {activeBuffer.fileError}
-              {/* Manual retry: a settled error is never auto-retried (see
-                  `errorPath`/`shouldSkipFileLoad`), so this is the only way
-                  back without switching tabs. Mirrors the diff pane's reload
-                  button above. */}
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => loadFileBuffer(activeTab.id, activeTab.path)}
-              >
-                <RotateCw />
-                Retry
-              </Button>
-            </div>
-          ) : !fileReady ? (
-            <div className="flex h-full items-center justify-center text-muted-foreground">
-              <Loader2 className="size-5 motion-safe:animate-spin" />
-            </div>
-          ) : binary ? (
-            <div className="flex h-full items-center justify-center px-4 text-center text-sm text-muted-foreground">
-              This file is binary and can&rsquo;t be edited here.
-            </div>
-          ) : showPreview ? (
-            activePreviewKind === "svg" ? (
-              // Rendered SVG of the current buffer (unsaved edits included):
-              // a Blob object URL over the DRAFT, so it stays draft-accurate
-              // like markdown's, and an <img>-embedded SVG executes no
-              // scripts by spec. Not lazy: no heavy chunk to defer.
-              <SvgPreviewPane
-                draft={activeBuffer?.draft ?? ""}
-                path={activeTab.path}
-              />
-            ) : (
-              // Rendered markdown of the current buffer (unsaved edits included).
-              // Lazy like Monaco, so the same ChunkBoundary + Suspense applies.
-              <ChunkBoundary>
-                <Suspense
-                  fallback={
-                    <div className="flex h-full items-center justify-center text-muted-foreground">
-                      <Loader2 className="size-5 motion-safe:animate-spin" />
-                    </div>
+                  onDelete={(path, isDir) =>
+                    setDeleteEntryTarget({ path, isDir })
                   }
-                >
-                  <MarkdownPreview
-                    content={activeBuffer?.draft ?? ""}
-                    sessionId={sessionId}
-                    path={activeTab.path}
-                  />
-                </Suspense>
-              </ChunkBoundary>
-            )
-          ) : (
-            // ChunkBoundary (outside Suspense) catches a failed lazy import after
-            // a redeploy — a 404 on the hashed Monaco chunk — and offers reload,
-            // instead of unmounting the whole app to a white screen.
-            <ChunkBoundary>
-              <Suspense
-                fallback={
+                  revalidate={treeRevalidate}
+                />
+              )}
+            </div>
+          </ResizablePanel>
+          <ResizableHandle />
+          <ResizablePanel id={EDITOR_CONTENT_PANEL_ID} minSize={30}>
+            <div className="relative h-full min-w-0">
+              {activeTab === null ? (
+                <div className="flex h-full items-center justify-center px-4 text-center text-sm text-muted-foreground">
+                  Select a file from the tree to view or edit it.
+                </div>
+              ) : activeTab.mode === "diff" ? (
+                // Read-only Monaco diff (HEAD vs working copy).
+                activeBuffer?.diffError && !isBufferStale(activeBuffer, activeTab.path) ? (
+                  <div className="flex h-full items-center justify-center px-4 text-center text-sm text-destructive">
+                    {activeBuffer.diffError}
+                  </div>
+                ) : !diffReady ? (
                   <div className="flex h-full items-center justify-center text-muted-foreground">
                     <Loader2 className="size-5 motion-safe:animate-spin" />
                   </div>
-                }
-              >
-                <CodeEditor
+                ) : activeBuffer?.diff?.binary ? (
+                  <div className="flex h-full items-center justify-center px-4 text-center text-sm text-muted-foreground">
+                    This file is binary and can&rsquo;t be diffed here.
+                  </div>
+                ) : (
+                  <ChunkBoundary>
+                    <Suspense
+                      fallback={
+                        <div className="flex h-full items-center justify-center text-muted-foreground">
+                          <Loader2 className="size-5 motion-safe:animate-spin" />
+                        </div>
+                      }
+                    >
+                      <DiffViewer
+                        path={activeTab.path}
+                        original={activeBuffer?.diff?.original ?? ""}
+                        modified={activeBuffer?.diff?.modified ?? ""}
+                      />
+                    </Suspense>
+                  </ChunkBoundary>
+                )
+              ) : isImageTab ? (
+                // Sits ABOVE the buffer-gated chain on purpose: an image tab has
+                // no buffer, so `fileReady` never turns true and the arms below
+                // would park it on the spinner forever. Keyed by path so a failed
+                // load resets when the tab preview-replaces onto another file.
+                <ImagePreviewPane
+                  key={activeTab.path}
+                  src={fileApi.rawUrl(sessionId, activeTab.path)}
                   path={activeTab.path}
-                  value={activeBuffer?.draft ?? ""}
-                  onChange={handleDraftChange}
-                  onSave={save}
-                  onReady={(mon) => {
-                    monacoRef.current = mon
-                  }}
                 />
-              </Suspense>
-            </ChunkBoundary>
-          )}
-        </div>
+              ) : activeBuffer?.fileError && !isBufferStale(activeBuffer, activeTab.path) ? (
+                <div className="flex h-full flex-col items-center justify-center gap-2 px-4 text-center text-sm text-destructive">
+                  {activeBuffer.fileError}
+                  {/* Manual retry: a settled error is never auto-retried (see
+                      `errorPath`/`shouldSkipFileLoad`), so this is the only way
+                      back without switching tabs. Mirrors the diff pane's reload
+                      button above. */}
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => loadFileBuffer(activeTab.id, activeTab.path)}
+                  >
+                    <RotateCw />
+                    Retry
+                  </Button>
+                </div>
+              ) : !fileReady ? (
+                <div className="flex h-full items-center justify-center text-muted-foreground">
+                  <Loader2 className="size-5 motion-safe:animate-spin" />
+                </div>
+              ) : binary ? (
+                <div className="flex h-full items-center justify-center px-4 text-center text-sm text-muted-foreground">
+                  This file is binary and can&rsquo;t be edited here.
+                </div>
+              ) : showPreview ? (
+                activePreviewKind === "svg" ? (
+                  // Rendered SVG of the current buffer (unsaved edits included):
+                  // a Blob object URL over the DRAFT, so it stays draft-accurate
+                  // like markdown's, and an <img>-embedded SVG executes no
+                  // scripts by spec. Not lazy: no heavy chunk to defer.
+                  <SvgPreviewPane
+                    draft={activeBuffer?.draft ?? ""}
+                    path={activeTab.path}
+                  />
+                ) : (
+                  // Rendered markdown of the current buffer (unsaved edits included).
+                  // Lazy like Monaco, so the same ChunkBoundary + Suspense applies.
+                  <ChunkBoundary>
+                    <Suspense
+                      fallback={
+                        <div className="flex h-full items-center justify-center text-muted-foreground">
+                          <Loader2 className="size-5 motion-safe:animate-spin" />
+                        </div>
+                      }
+                    >
+                      <MarkdownPreview
+                        content={activeBuffer?.draft ?? ""}
+                        sessionId={sessionId}
+                        path={activeTab.path}
+                      />
+                    </Suspense>
+                  </ChunkBoundary>
+                )
+              ) : (
+                // ChunkBoundary (outside Suspense) catches a failed lazy import after
+                // a redeploy — a 404 on the hashed Monaco chunk — and offers reload,
+                // instead of unmounting the whole app to a white screen.
+                <ChunkBoundary>
+                  <Suspense
+                    fallback={
+                      <div className="flex h-full items-center justify-center text-muted-foreground">
+                        <Loader2 className="size-5 motion-safe:animate-spin" />
+                      </div>
+                    }
+                  >
+                    <CodeEditor
+                      path={activeTab.path}
+                      value={activeBuffer?.draft ?? ""}
+                      onChange={handleDraftChange}
+                      onSave={save}
+                      onReady={(mon) => {
+                        monacoRef.current = mon
+                      }}
+                    />
+                  </Suspense>
+                </ChunkBoundary>
+              )}
+            </div>
+          </ResizablePanel>
+        </ResizablePanelGroup>
       </div>
 
       {/* New File… / New Folder…, Rename…, Delete…: driven by the file
