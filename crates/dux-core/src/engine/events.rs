@@ -2230,16 +2230,13 @@ impl Engine {
                     }
                     match maybe_pr {
                         Some(pr) => {
-                            // Persist the PR association (including state) so
-                            // it survives restarts and squash-merge branch
-                            // deletions.
                             let state_str = match pr.state {
                                 PrState::Open => "OPEN",
                                 PrState::Merged => "MERGED",
                                 PrState::Closed => "CLOSED",
                             };
                             let pr_number = pr.number;
-                            if let Err(err) = self.session_store.upsert_pr(&StoredPr {
+                            let row = StoredPr {
                                 session_id: session_id.clone(),
                                 pr_number,
                                 host: pr.host.clone(),
@@ -2247,31 +2244,30 @@ impl Engine {
                                 state: state_str.to_string(),
                                 title: pr.title.clone(),
                                 url: pr.url.clone(),
-                            }) {
-                                logger::error(&format!(
-                                    "failed to persist PR status for {session_id} (PR #{pr_number}): {err}",
-                                ));
-                            }
-                            // An accepted result for a PINNED session also
-                            // refreshes the override row's cached state/title,
-                            // so a restart renders the pin with fresh data.
+                            };
                             if self.pr_overrides.contains_key(&session_id) {
-                                let refreshed = StoredPr {
-                                    session_id: session_id.clone(),
-                                    pr_number,
-                                    host: pr.host.clone(),
-                                    owner_repo: pr.owner_repo.clone(),
-                                    state: state_str.to_string(),
-                                    title: pr.title.clone(),
-                                    url: pr.url.clone(),
-                                };
-                                if let Err(err) = self.session_store.upsert_pr_override(&refreshed)
-                                {
+                                // A PINNED session's accepted result refreshes
+                                // the override row (its durable cache) and
+                                // deliberately NEVER touches `session_prs`: a
+                                // pin can live on a FORK, and a fork row in
+                                // `session_prs` would become the post-detach
+                                // `known_pr`, making the next cycle query the
+                                // session's OWN repo with the fork's number.
+                                if let Err(err) = self.session_store.upsert_pr_override(&row) {
                                     logger::error(&format!(
                                         "failed to refresh pinned PR for {session_id}: {err}",
                                     ));
                                 }
-                                self.pr_overrides.insert(session_id.clone(), refreshed);
+                                self.pr_overrides.insert(session_id.clone(), row);
+                            } else {
+                                // Persist the autodetected association
+                                // (including state) so it survives restarts
+                                // and squash-merge branch deletions.
+                                if let Err(err) = self.session_store.upsert_pr(&row) {
+                                    logger::error(&format!(
+                                        "failed to persist PR status for {session_id} (PR #{pr_number}): {err}",
+                                    ));
+                                }
                             }
                             self.pr_statuses.insert(session_id, pr);
                             changed = true;
@@ -3930,6 +3926,73 @@ mod tests {
             engine.pr_overrides.get("s1").map(|p| p.state.as_str()),
             Some("MERGED"),
             "the in-memory pin refreshes too"
+        );
+        // An accepted PINNED result must never land in `session_prs`: the
+        // override row is the pin's durable cache, and a fork row written into
+        // `session_prs` would become the post-detach `known_pr`, making the
+        // next cycle emit the FORK's number against the session's OWN repo.
+        assert!(
+            engine
+                .session_store
+                .load_all_latest_prs()
+                .unwrap()
+                .is_empty(),
+            "a pinned cycle leaves session_prs untouched"
+        );
+    }
+
+    /// The full detach cycle from the review: pin a FORK PR, accept one pinned
+    /// sync result, detach, and the next sync snapshot must not carry the fork
+    /// row as `known_pr` (which would query the session's own repo with the
+    /// fork's number and could surface an unrelated PR).
+    #[test]
+    fn detaching_a_fork_pin_leaves_no_fork_residue_for_the_next_cycle() {
+        let (mut engine, _tmp) = test_engine();
+        engine.github_integration_enabled = true;
+        engine.gh_status = crate::model::GhStatus::Available;
+        let session = sample_session("s1", "p1", "feat");
+        engine
+            .session_store
+            .upsert_session(&session)
+            .expect("seed session");
+        engine.sessions.push(session);
+        engine
+            .apply_pr_attach(
+                "s1",
+                "github.com",
+                "forker/Hello-World",
+                12,
+                "Pinned",
+                "OPEN",
+                "",
+            )
+            .expect("attach the fork pin");
+
+        // One accepted pinned cycle (the state refresh path).
+        let refreshed = PrInfo {
+            number: 12,
+            state: PrState::Open,
+            title: "Pinned".to_string(),
+            host: "github.com".to_string(),
+            owner_repo: "forker/Hello-World".to_string(),
+            url: "https://github.com/forker/Hello-World/pull/12".to_string(),
+        };
+        engine.process_worker_event(WorkerEvent::PrStatusReady(vec![(
+            "s1".to_string(),
+            Some(refreshed),
+        )]));
+
+        engine.clear_pull_request_override("s1").expect("detach");
+
+        // The next cycle's snapshot: no pin, and no fork row smuggled in as
+        // the known PR (session_prs never learned about the fork).
+        let entries = engine.pr_sync_sessions.lock().unwrap().clone();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].pinned.is_none());
+        assert!(
+            entries[0].known_pr.is_none(),
+            "the fork pin must not survive detach as known_pr, got {:?}",
+            entries[0].known_pr,
         );
     }
 

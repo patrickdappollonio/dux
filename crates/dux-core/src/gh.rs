@@ -158,8 +158,19 @@ impl Planned {
     ) -> Self {
         let is_terminal = stored_pr_is_terminal(known.as_ref());
         // Open known PRs also get a by-number alias; terminal-but-running and
-        // undiscovered sessions get only the head-ref discovery alias.
-        let emit_num = known.is_some() && !is_terminal;
+        // undiscovered sessions get only the head-ref discovery alias. The
+        // by-number alias fires ONLY when the stored row names the repo being
+        // queried: PR numbers are per-repo, so a row from another repository
+        // (a detached fork pin, a remote that changed under the session) asked
+        // at this target would fetch an unrelated pull request. Such a row
+        // falls back to discovery only; a discovery miss keeps the stored
+        // badge via the merge rule's fallback.
+        let known_matches_target = known.as_ref().is_some_and(|k| {
+            k.owner_repo
+                .eq_ignore_ascii_case(&format!("{owner}/{repo}"))
+                && normalize_github_host(&k.host).eq_ignore_ascii_case(&host)
+        });
+        let emit_num = known_matches_target && !is_terminal;
         Planned {
             session_id,
             host,
@@ -3417,6 +3428,70 @@ mod tests {
         let pr = results[0].1.as_ref().expect("refreshed pin");
         assert_eq!(pr.number, 12);
         assert_eq!(pr.state, PrState::Merged);
+    }
+
+    /// A stored PR naming a DIFFERENT repo than the resolved query target must
+    /// not put its number into the target repo's query: PR numbers are
+    /// per-repo, so `other/Repo#12` asked of `octocat/Hello-World` is an
+    /// unrelated pull request that would then be surfaced and persisted. The
+    /// two ways this happens for real: a detached fork pin whose row survived
+    /// somewhere, and a remote that changed under a session. Such an entry
+    /// falls back to discovery only, and a discovery miss keeps the stored
+    /// badge rather than inventing anything.
+    #[test]
+    fn a_known_pr_from_another_repo_never_emits_its_number_at_the_query_target() {
+        let entry = PrSyncEntry {
+            known_pr: Some(stored_pr_named(12, "OPEN", "forker/Hello-World")),
+            ..planning_entry()
+        };
+        let (results, planned) = plan_entries(
+            std::slice::from_ref(&entry),
+            &|_| {
+                git::RemoteResolution::Allowed(git::GitHubRemote {
+                    host: "github.com".to_string(),
+                    owner_repo: "octocat/Hello-World".to_string(),
+                })
+            },
+            &legacy_policy(),
+        );
+        assert!(results.is_empty());
+        assert_eq!(planned.len(), 1);
+
+        let chunk = [0usize];
+        let (q, pos_repo) = build_chunk_query(&planned, &chunk);
+        assert!(
+            !q.contains("s0_num"),
+            "the foreign row's number must not be asked of the session repo: {q}"
+        );
+        assert!(q.contains("s0_ref"), "discovery still runs: {q}");
+
+        // Discovery finding nothing keeps the stored badge (per-alias-failure
+        // semantics), and cannot surface an unrelated same-number PR because
+        // no by-number alias exists to fetch one.
+        let data = serde_json::json!({ "r0": { "s0_ref": serde_json::Value::Null } });
+        let (results, _) = parse_chunk_response(&planned, &chunk, &pos_repo, Some(&data));
+        let pr = results[0].1.as_ref().expect("stored badge kept");
+        assert_eq!(pr.owner_repo, "forker/Hello-World");
+        assert_eq!(pr.number, 12);
+
+        // And a same-repo known row still gets its by-number refresh, so the
+        // gate did not disable the branch-deleted-on-merge robustness.
+        let entry = PrSyncEntry {
+            known_pr: Some(stored_pr_named(12, "OPEN", "octocat/Hello-World")),
+            ..planning_entry()
+        };
+        let (_, planned) = plan_entries(
+            std::slice::from_ref(&entry),
+            &|_| {
+                git::RemoteResolution::Allowed(git::GitHubRemote {
+                    host: "github.com".to_string(),
+                    owner_repo: "octocat/Hello-World".to_string(),
+                })
+            },
+            &legacy_policy(),
+        );
+        let (q, _) = build_chunk_query(&planned, &[0]);
+        assert!(q.contains("s0_num: pullRequest(number: 12)"), "{q}");
     }
 
     /// The attach lookup constructor, per input form. Unlike
