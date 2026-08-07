@@ -101,6 +101,7 @@ import {
   editorRenameTabPaths,
   editorSetTabDirty,
   editorSetTabMode,
+  editorSyncActiveTab,
   useDux,
 } from "@/lib/store"
 
@@ -184,6 +185,16 @@ function EditorBody({ sessionId }: EditorBodyProps) {
   useEffect(() => {
     storeSessionDrafts(sessionId, buffers)
   }, [sessionId, buffers])
+
+  // Report the active tab up as the editor's live URL position: the address
+  // bar names the file (and mode) actually on screen, and in-editor switches
+  // REPLACE the history entry (see the store's `editorSyncActiveTab`). No
+  // active tab reports a pathless open editor.
+  const activeTabMode = activeTab?.mode ?? "file"
+  const activeTabPathForUrl = activeTab?.path ?? null
+  useEffect(() => {
+    editorSyncActiveTab(sessionId, activeTabMode, activeTabPathForUrl)
+  }, [sessionId, activeTabMode, activeTabPathForUrl])
 
   // The `monaco` instance, captured once CodeEditor mounts (see CodeEditor's
   // `onReady`). EditorBody, not CodeEditor, owns disposal because it owns

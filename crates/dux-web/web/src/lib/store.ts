@@ -581,6 +581,18 @@ export interface DuxState {
     initialPath: string | null
     initialMode: EditorViewMode
   } | null
+  // The editor's LIVE position, and the source of the URL's editor suffix:
+  // which session's editor is open, and the active tab's mode + path (path
+  // null = editor open with no file). Distinct from `editorTarget` on
+  // purpose: that is a one-shot MOUNT SEED frozen when the body mounts, while
+  // this field tracks every active-tab change (`editorSyncActiveTab`) so
+  // `currentRoute()` can serialize where the editor actually is. Written by
+  // open/close and the reconstitution paths; null = editor closed.
+  editorRoute: {
+    sessionId: string
+    mode: EditorViewMode
+    path: string | null
+  } | null
   // Per-session editor tab metadata (pure client state; the heavy Monaco
   // buffers live in the `EditorBody` component, keyed by tab id). Keyed by
   // session id so reopening a session's editor restores its tab list. A
@@ -743,6 +755,7 @@ let state: DuxState = {
   sidebarWidth: loadSidebarWidth(),
   changesPaneOverride: null,
   editorTarget: null,
+  editorRoute: null,
   editorTabs: {},
   editorCloseTabTarget: null,
   changes: emptyChanges(),
@@ -1324,8 +1337,16 @@ function pruneEditorStateIfGone(spine: Spine): void {
   for (const sessionId of Object.keys(state.editorTabs)) {
     if (!liveSessionIds.has(sessionId)) editorClearSession(sessionId)
   }
-  if (state.editorTarget && !liveSessionIds.has(state.editorTarget.sessionId)) {
-    closeEditor()
+  const editorSession =
+    state.editorTarget?.sessionId ?? state.editorRoute?.sessionId ?? null
+  if (editorSession !== null && !liveSessionIds.has(editorSession)) {
+    // State only, NO URL write: `pruneSelectionIfGone` (which runs before
+    // this in the same `applySpine` pass) is the single URL writer for a
+    // vanished session — its navigation already serializes without the
+    // editor suffix, because `currentRoute` drops an editor arm whose
+    // session no longer matches the focused target. A second writer here
+    // (the old `closeEditor()` call) would push or double-write.
+    clearEditorStateSilently()
   }
 }
 
@@ -1822,42 +1843,93 @@ function selectionHash(target: SelectedTarget | null): string {
     : `${base}/tab/${encodeURIComponent(target.tabId)}`
 }
 
-// A position in the app: what is focused, plus whether the changes screen is
-// open on top of it. This is everything the URL encodes and everything the
-// screen is derived from.
-interface Route {
+// A position in the app: what is focused, whether the changes screen is open
+// on top of it, and whether (and where) the editor is open on top of it. This
+// is everything the URL encodes and everything the screen is derived from.
+// Exported for the route-grammar round-trip tests only.
+export interface Route {
   target: SelectedTarget | null
   changes: boolean
+  // The editor suffix: the active tab's mode and path, path null when the
+  // editor is open with no file. Mutually exclusive with `changes` in the
+  // SERIALIZED form: `routeHash` emits at most one suffix (editor wins), and
+  // `parseRoute` tries the editor suffix first.
+  editor: { mode: EditorViewMode; path: string | null } | null
 }
 
 // The changes screen rides as a suffix on the focused target's hash, so it
 // bookmarks and shares like any other position.
 const CHANGES_SUFFIX = "/changes"
 
-// Parse a hash into a route. A hash that names no valid target is home.
-function parseRoute(hash: string): Route {
-  const direct = parseSelectionHash(hash)
-  if (direct) return { target: direct, changes: false }
-  // The two branches are mutually exclusive rather than ranked: every regex in
-  // `parseSelectionHash` is anchored, so no hash can parse both as a target and
-  // as a target-plus-suffix. `#/agent/s1/tab/changes` parses directly and never
-  // reaches here; `#/agent/s1/changes` does not parse directly and only the
-  // strip finds it. Trying the direct parse first is just the common case
-  // first, it decides nothing, and inverting the order would produce the same
-  // answers.
-  if (hash.endsWith(CHANGES_SUFFIX)) {
-    const target = parseSelectionHash(hash.slice(0, -CHANGES_SUFFIX.length))
-    if (target) return { target, changes: true }
+// The editor rides as a suffix too: `#/agent/<sid>/editor` (open, no file) or
+// `#/agent/<sid>/editor/<mode>/<encoded-path>` (mode = file | diff, path
+// encodeURIComponent-encoded, so it is one slashless segment).
+const EDITOR_SUFFIX = "/editor"
+
+// Parse the editor suffix off a hash, or null when it carries none. Anchored
+// at the end; the prefix must itself parse as a target that HAS a session
+// (the editor is session-scoped, so `#/terminal/t1/editor` is not a route).
+function parseEditorRoute(hash: string): Route | null {
+  const m = hash.match(/^(.*)\/editor(?:\/(file|diff)\/([^/]+))?$/)
+  if (!m) return null
+  const target = parseSelectionHash(m[1])
+  if (!target || targetSessionId(target) === null) return null
+  if (m[3] === undefined) {
+    return { target, changes: false, editor: { mode: "file", path: null } }
   }
-  return { target: null, changes: false }
+  // Malformed percent-encoding in the path degrades to the bare target (the
+  // same "treat as no/invalid deep link" rule parseSelectionHash applies),
+  // rather than throwing at module init.
+  try {
+    const path = decodeURIComponent(m[3])
+    if (!path) return { target, changes: false, editor: null }
+    return {
+      target,
+      changes: false,
+      editor: { mode: m[2] as EditorViewMode, path },
+    }
+  } catch {
+    return { target, changes: false, editor: null }
+  }
 }
 
-// The hash for a route. Home is the empty hash; the changes suffix only applies
-// on top of a focused target, since there is nothing to show changes for
-// otherwise.
-function routeHash(route: Route): string {
+// Parse a hash into a route. A hash that names no valid target is home.
+// Exported for the round-trip tests only (`routeHash` likewise): the grammar
+// must stay an exact inverse pair, and that is only checkable from outside.
+export function parseRoute(hash: string): Route {
+  const direct = parseSelectionHash(hash)
+  if (direct) return { target: direct, changes: false, editor: null }
+  // The editor suffix is tried BEFORE the changes suffix, which is what makes
+  // the two mutually exclusive in practice: an editor path is a single
+  // encoded segment, so `#/agent/s1/editor/file/changes` (a file literally
+  // named "changes") must resolve as an editor route, never as a changes
+  // route with a mangled tail. The direct parse above stays first as the
+  // common case; every regex here is end-anchored, so no hash parses two
+  // ways.
+  const editor = parseEditorRoute(hash)
+  if (editor) return editor
+  if (hash.endsWith(CHANGES_SUFFIX)) {
+    const target = parseSelectionHash(hash.slice(0, -CHANGES_SUFFIX.length))
+    if (target) return { target, changes: true, editor: null }
+  }
+  return { target: null, changes: false, editor: null }
+}
+
+// The hash for a route. Home is the empty hash; both suffixes only apply on
+// top of a focused target, and AT MOST ONE is emitted: the editor wins over
+// changes (they cannot honestly coexist — the desktop editor overlay covers
+// the screen, and the changes screen is the mobile shell's). `parseRoute`
+// mirrors this by trying the editor suffix first, and the round-trip test
+// pins the cross-product. A pathless editor suffix carries no mode segment,
+// so a pathless route's mode is normalized to "file" on the way back in.
+export function routeHash(route: Route): string {
   const base = selectionHash(route.target)
-  if (base === "" || !route.changes) return base
+  if (base === "") return base
+  if (route.editor) {
+    if (route.editor.path === null) return base + EDITOR_SUFFIX
+    return `${base}${EDITOR_SUFFIX}/${route.editor.mode}/${encodeURIComponent(route.editor.path)}`
+  }
+  if (!route.changes) return base
   return base + CHANGES_SUFFIX
 }
 
@@ -1868,11 +1940,34 @@ function routeScreen(route: Route): MobileScreen {
   return route.changes ? "changes" : "terminal"
 }
 
+// What `syncUrl` compares to decide push versus replace. NOT `routeScreen`:
+// that function's output IS `mobileScreen` (six call sites consume it), so
+// folding the editor bit into it would leak an "editor" screen into the
+// mobile shell. This key exists for exactly one consumer, the push/replace
+// comparison: opening the editor changes the key (so it pushes, and one Back
+// closes it), while switching files inside the editor keeps it (so switches
+// replace and never pile up). Exported for the routing tests only.
+export function routePushKey(route: Route): string {
+  return `${routeScreen(route)}${route.editor ? "+editor" : ""}`
+}
+
 // The route the app currently holds in state.
 function currentRoute(): Route {
+  const target = state.selectedTarget
+  const er = state.editorRoute
+  // The editor arm is serialized only while it names the SAME session the
+  // focused target resolves to: in the one window where they can disagree
+  // (the editor's session vanished and the selection prune is navigating away
+  // before the editor prune clears the state), the URL must not carry a dead
+  // editor suffix on the new agent's address.
+  const editor =
+    er !== null && target !== null && targetSessionId(target) === er.sessionId
+      ? { mode: er.mode, path: er.path }
+      : null
   return {
-    target: state.selectedTarget,
+    target,
     changes: state.mobileScreen === "changes",
+    editor,
   }
 }
 
@@ -1918,8 +2013,10 @@ function syncUrl(mode?: "replace"): void {
       ? (location.pathname ?? "") + (location.search ?? "")
       : ""
   const url = next === "" ? base : next
+  // `routePushKey`, not `routeScreen`: the editor-open bit must push/pop like
+  // a screen without ever BEING a screen (see routePushKey's comment).
   const movedScreen =
-    routeScreen(parseRoute(next)) !== routeScreen(parseRoute(current))
+    routePushKey(parseRoute(next)) !== routePushKey(parseRoute(current))
   try {
     if (mode !== "replace" && movedScreen && typeof history.pushState === "function") {
       history.pushState({ duxRoute: next }, "", url)
@@ -1957,9 +2054,14 @@ function applyUrlRoute(): void {
     // needs a session list, and there is none yet.
     pendingDeepLink = route.target
     pendingDeepLinkChanges = route.changes
+    pendingDeepLinkEditor = route.editor
     return
   }
   if (!route.target) {
+    // Home names no editor, so a Back that lands here closes an open one —
+    // state only; the selection clear below is the URL's writer (and writes
+    // nothing, since the browser is already parked on home).
+    clearEditorStateSilently()
     // Through `selectSessionRoute`, not `clearSelection`, because pressing Back
     // to home is the user taking control: it must disarm the reconnect
     // deep-link intent, or a reconnect could yank them back to the agent they
@@ -1967,6 +2069,60 @@ function applyUrlRoute(): void {
     selectSessionRoute(null)
     return
   }
+  resolveRoute(spine, route)
+}
+
+// Clear the editor's open/position state WITHOUT writing the URL. The two
+// callers are exactly the paths that must not write it: the reconstitution
+// paths (the browser is already parked on an address that names no editor)
+// and the spine prune (where `pruneSelectionIfGone`'s navigation is the single
+// URL writer in the pass). Everything user-initiated goes through
+// `closeEditor`, which does write.
+function clearEditorStateSilently(): void {
+  if (state.editorTarget === null && state.editorRoute === null) return
+  setState({ editorTarget: null, editorRoute: null })
+}
+
+// Mirror a parsed route's editor half into state, directly and silently.
+// This is the reconstitution path (popstate, boot deep-link, the not-found
+// retry): it NEVER calls `openEditor` (which selects the session and writes
+// the URL — the browser is already parked on this address, and `openEditor`'s
+// `selectSession` would double-write it) and never writes the URL itself. Tab
+// seeding goes through the `editorOpenFile` reducer wrapper, which is pure
+// state work. An editor half naming a session this spine does not have (or no
+// editor half at all) closes an open editor, state only.
+function syncEditorStateFromRoute(spine: Spine, route: Route): void {
+  const sessionId =
+    route.editor !== null && route.target !== null
+      ? targetSessionId(route.target)
+      : null
+  if (
+    route.editor === null ||
+    sessionId === null ||
+    !spine.sessions.some((s) => s.id === sessionId)
+  ) {
+    clearEditorStateSilently()
+    return
+  }
+  const { mode, path } = route.editor
+  // Keep the existing mount seed when it already points at this session:
+  // `EditorBody` is keyed by session id, so churning the seed would remount
+  // it for nothing on every Back/Forward inside the same editor.
+  const editorTarget =
+    state.editorTarget !== null && state.editorTarget.sessionId === sessionId
+      ? state.editorTarget
+      : { sessionId, initialPath: path, initialMode: mode }
+  setState({ editorTarget, editorRoute: { sessionId, mode, path } })
+  if (path !== null) editorOpenFile(sessionId, path, { mode })
+}
+
+// Resolve a whole parsed route against a spine: the editor half first (state
+// only), then the target half, which owns any URL correction. Shared by
+// popstate, the boot deep-link restore, and the not-found retry, so all three
+// reconstitute the editor identically.
+function resolveRoute(spine: Spine, route: Route): void {
+  if (route.target === null) return
+  syncEditorStateFromRoute(spine, route)
   resolveRouteTarget(spine, route.target, route.changes)
 }
 
@@ -2065,7 +2221,7 @@ function retryRouteNotFound(spine: Spine): void {
   if (!route.target) return
   if (targetSessionId(route.target) !== missing.sessionId) return
   if (!spine.sessions.some((s) => s.id === missing.sessionId)) return
-  resolveRouteTarget(spine, route.target, route.changes)
+  resolveRoute(spine, route)
 }
 
 // The URL names an agent this workspace does not have. Clear the selection and
@@ -2090,12 +2246,14 @@ function setRouteNotFound(sessionId: string): void {
 const bootRoute: Route =
   typeof location !== "undefined"
     ? parseRoute(location.hash ?? "")
-    : { target: null, changes: false }
-// Both halves are mutable: a popstate that beats the first spine overwrites
-// them with the address the browser actually moved to (see `applyUrlRoute`), so
-// the restore resolves that rather than a boot hash the user has already left.
+    : { target: null, changes: false, editor: null }
+// All three halves are mutable: a popstate that beats the first spine
+// overwrites them with the address the browser actually moved to (see
+// `applyUrlRoute`), so the restore resolves that rather than a boot hash the
+// user has already left.
 let pendingDeepLink: SelectedTarget | null = bootRoute.target
 let pendingDeepLinkChanges = bootRoute.changes
+let pendingDeepLinkEditor = bootRoute.editor
 
 // Route a normalized route target onto an already-resolved session: restore a
 // still-present terminal or extra tab, else fall back to the session-slot tab.
@@ -2167,7 +2325,11 @@ function restoreDeepLink(spine: Spine): void {
   const link = pendingDeepLink
   if (!link) return
   pendingDeepLink = null // one-shot, whatever the outcome
-  resolveRouteTarget(spine, link, pendingDeepLinkChanges)
+  resolveRoute(spine, {
+    target: link,
+    changes: pendingDeepLinkChanges,
+    editor: pendingDeepLinkEditor,
+  })
 }
 
 // Restore a project-terminal route against a spine: select the terminal when its
@@ -2933,6 +3095,7 @@ export function openEditor(
   sessionId: string,
   initialPath: string | null = null,
   mode: EditorViewMode = "file",
+  opts?: { urlMode?: "replace" },
 ): void {
   if (state.selectedSessionId !== sessionId) selectSession(sessionId)
   // An image path never opens in diff mode: there is no text to diff, so a
@@ -2944,13 +3107,43 @@ export function openEditor(
     initialPath !== null && isImagePreviewPath(initialPath) ? "file" : mode
   setState({
     editorTarget: { sessionId, initialPath, initialMode: effectiveMode },
+    editorRoute: { sessionId, mode: effectiveMode, path: initialPath },
   })
   if (initialPath !== null)
     editorOpenFile(sessionId, initialPath, { mode: effectiveMode })
+  // Opening the editor is a move to a new position, so by default it PUSHES
+  // (routePushKey changes on the editor-open bit) and one Back closes it.
+  // `urlMode: "replace"` is for the restore paths, exactly as on the
+  // selection functions.
+  syncUrl(opts?.urlMode)
 }
 
-export function closeEditor(): void {
-  setState({ editorTarget: null })
+export function closeEditor(opts?: { urlMode?: "replace" }): void {
+  if (state.editorTarget === null && state.editorRoute === null) return
+  setState({ editorTarget: null, editorRoute: null })
+  // Closing is a move too (Esc, the Close button): the push-key drops its
+  // editor bit, so this pushes the closed position like any other navigation
+  // between two real places. The popstate path never comes through here (see
+  // `syncEditorStateFromRoute`), so Back itself writes nothing.
+  syncUrl(opts?.urlMode)
+}
+
+// EditorBody reports its active tab here on every change of mode/path, which
+// is what keeps the URL naming the file actually on screen. Same push key
+// before and after (the editor stays open), so `syncUrl` REPLACES: switching
+// files inside the editor never piles up history entries. A report for a
+// session whose editor is not open is dropped — a late effect from an
+// unmounting body must not resurrect a closed editor's suffix.
+export function editorSyncActiveTab(
+  sessionId: string,
+  mode: EditorViewMode,
+  path: string | null,
+): void {
+  const cur = state.editorRoute
+  if (cur === null || cur.sessionId !== sessionId) return
+  if (cur.mode === mode && cur.path === path) return
+  setState({ editorRoute: { sessionId, mode, path } })
+  syncUrl()
 }
 
 // --- Editor tabs: thin store wrappers over the pure reducer (lib/editorTabs.ts).

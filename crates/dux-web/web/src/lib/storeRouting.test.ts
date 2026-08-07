@@ -960,3 +960,192 @@ describe("a standalone terminal is addressable in its own right", () => {
     expect(index).toBe(depth + 1)
   })
 })
+
+// (c) the editor rides the URL. The route grammar grows an editor suffix
+// (`#/agent/<sid>/editor[/<mode>/<encoded-path>]`), mutually exclusive with
+// the `/changes` suffix; opening the editor PUSHES one entry, in-editor file
+// switches REPLACE it, one Back closes the editor and keeps every draft, and
+// a hard refresh restores the editor and its open file from the address.
+describe("the editor rides the URL", () => {
+  function editorBuffer(path: string, draft: string) {
+    return {
+      path,
+      loadedPath: path,
+      loading: false,
+      loaded: "on disk",
+      draft,
+      binary: false,
+      readOnly: false,
+      diff: null,
+      diffLoadedPath: null,
+      diffLoadedSignal: "",
+      fileError: null,
+      diffError: null,
+      errorPath: null,
+    }
+  }
+
+  it("parses and serializes as exact inverses over the suffix cross-product", async () => {
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
+    const target = { kind: "agent" as const, sessionId: "s1", tabId: "s1" }
+    const routes = [
+      { target, changes: false, editor: null },
+      { target, changes: true, editor: null },
+      { target, changes: false, editor: { mode: "file" as const, path: null } },
+      {
+        target,
+        changes: false,
+        editor: { mode: "file" as const, path: "src/a b.ts" },
+      },
+      {
+        target,
+        changes: false,
+        editor: { mode: "diff" as const, path: "src/a b.ts" },
+      },
+    ]
+    for (const route of routes) {
+      expect(mod.parseRoute(mod.routeHash(route))).toEqual(route)
+    }
+  })
+
+  it("the serializer emits at most one suffix, and the parser tries editor first", async () => {
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
+    const target = { kind: "agent" as const, sessionId: "s1", tabId: "s1" }
+    // A route claiming both suffixes serializes to the editor form only.
+    expect(
+      mod.routeHash({
+        target,
+        changes: true,
+        editor: { mode: "file", path: null },
+      }),
+    ).toBe("#/agent/s1/editor")
+    // And an editor path that literally ends in "changes" stays an editor
+    // route: the parser tries the editor suffix first.
+    const tricky = mod.routeHash({
+      target,
+      changes: false,
+      editor: { mode: "file", path: "changes" },
+    })
+    expect(mod.parseRoute(tricky).editor).toEqual({
+      mode: "file",
+      path: "changes",
+    })
+  })
+
+  it("opening the editor pushes exactly one entry", async () => {
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
+    mod.selectSession("s1")
+    const depth = index
+    mod.openEditor("s1")
+    expect(loc.hash).toBe("#/agent/s1/editor")
+    expect(index).toBe(depth + 1)
+    history.back()
+    expect(loc.hash).toBe("#/agent/s1")
+    expect(mod.getSnapshot().editorTarget).toBeNull()
+  })
+
+  it("an in-editor file switch replaces the entry rather than piling up", async () => {
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
+    mod.selectSession("s1")
+    mod.openEditor("s1", "a.ts")
+    expect(loc.hash).toBe("#/agent/s1/editor/file/a.ts")
+    const depth = index
+    mod.editorSyncActiveTab("s1", "file", "b.ts")
+    expect(loc.hash).toBe("#/agent/s1/editor/file/b.ts")
+    expect(index).toBe(depth)
+    mod.editorSyncActiveTab("s1", "diff", "b.ts")
+    expect(loc.hash).toBe("#/agent/s1/editor/diff/b.ts")
+    expect(index).toBe(depth)
+  })
+
+  it("one Back closes the editor and keeps tabs, dirty flags, and drafts", async () => {
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
+    const drafts = await import("./editorDrafts")
+    mod.selectSession("s1")
+    mod.openEditor("s1", "a.ts")
+    const tabId = mod.getSnapshot().editorTabs.s1.tabs[0].id
+    // The user typed: the store flag flips and the draft cache holds the text
+    // (in the app EditorBody does both; the store test does them directly).
+    mod.editorSetTabDirty("s1", tabId, true)
+    drafts.storeSessionDrafts(
+      "s1",
+      new Map([[tabId, editorBuffer("a.ts", "typed and unsaved")]]),
+    )
+
+    history.back()
+    // Closed, and the dirty state did NOT gate the Back: there is no cancel,
+    // because nothing is lost.
+    expect(mod.getSnapshot().editorTarget).toBeNull()
+    expect(mod.getSnapshot().editorRoute).toBeNull()
+    expect(loc.hash).toBe("#/agent/s1")
+    expect(mod.getSnapshot().editorTabs.s1.tabs).toHaveLength(1)
+    expect(mod.getSnapshot().editorTabs.s1.tabs[0].dirty).toBe(true)
+    expect(drafts.loadSessionDrafts("s1").get(tabId)?.draft).toBe(
+      "typed and unsaved",
+    )
+
+    // And Forward reopens it, tab intact, from the address alone.
+    history.forward()
+    expect(mod.getSnapshot().editorTarget).not.toBeNull()
+    expect(mod.getSnapshot().editorRoute).toEqual({
+      sessionId: "s1",
+      mode: "file",
+      path: "a.ts",
+    })
+    drafts.clearSessionDrafts("s1")
+  })
+
+  it("a hard refresh restores the editor and its open file from the address", async () => {
+    const mod = await loadStore("#/agent/s1/editor/file/src%2Fa.ts", [
+      { id: "s1", project_id: "p1" },
+    ])
+    expect(mod.getSnapshot().selectedSessionId).toBe("s1")
+    expect(mod.getSnapshot().editorTarget).toEqual({
+      sessionId: "s1",
+      initialPath: "src/a.ts",
+      initialMode: "file",
+    })
+    expect(mod.getSnapshot().editorRoute).toEqual({
+      sessionId: "s1",
+      mode: "file",
+      path: "src/a.ts",
+    })
+    expect(mod.getSnapshot().editorTabs.s1.tabs.map((t) => t.path)).toEqual([
+      "src/a.ts",
+    ])
+    // A restore, not a move: the browser is already parked on this entry.
+    expect(loc.hash).toBe("#/agent/s1/editor/file/src%2Fa.ts")
+    expect(index).toBe(DUX_ENTRY_INDEX)
+  })
+
+  it("clears the editor with a single URL write when its session vanishes", async () => {
+    const mod = await loadStore("", [
+      { id: "s1", project_id: "p1" },
+      { id: "s2", project_id: "p1" },
+    ])
+    mod.selectSession("s1")
+    mod.openEditor("s1", "a.ts")
+    const depth = index
+    await pushSpine(mod, [{ id: "s2", project_id: "p1" }])
+    // The selection prune is the single URL writer in that pass; the editor
+    // prune only clears state.
+    expect(mod.getSnapshot().editorTarget).toBeNull()
+    expect(mod.getSnapshot().editorRoute).toBeNull()
+    expect(mod.getSnapshot().selectedSessionId).toBe("s2")
+    expect(loc.hash).toBe("#/agent/s2")
+    expect(index).toBe(depth)
+    expect(entries).not.toContain("#/agent/s1/editor/file/a.ts")
+  })
+
+  it("renders not-found for an editor link to an agent that does not exist", async () => {
+    const mod = await loadStore("#/agent/missing/editor/file/a.ts", [
+      { id: "s1", project_id: "p1" },
+    ])
+    expect(mod.getSnapshot().routeNotFound).toEqual({
+      kind: "agent",
+      sessionId: "missing",
+    })
+    expect(mod.getSnapshot().editorTarget).toBeNull()
+    expect(mod.getSnapshot().editorRoute).toBeNull()
+  })
+})
