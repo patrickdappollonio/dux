@@ -176,6 +176,37 @@ describe("editor tabs store slice", () => {
     expect(tabs[0].mode).toBe("diff")
   })
 
+  it("an image path never opens in diff mode: openEditor coerces to file", async () => {
+    // A changed image clicked in the Changes pane asks for "diff"; there is
+    // no text to diff, so the choke point coerces and the overlay shows the
+    // picture instead of dead-ending on the binary-diff refusal.
+    const mod = await loadStore()
+    mod.openEditor("s1", "assets/logo.png", "diff")
+    expect(mod.getSnapshot().editorTarget).toEqual({
+      sessionId: "s1",
+      initialPath: "assets/logo.png",
+      initialMode: "file",
+    })
+    const tabs = mod.getSnapshot().editorTabs.s1.tabs
+    expect(tabs).toHaveLength(1)
+    expect(tabs[0]).toMatchObject({ path: "assets/logo.png", mode: "file" })
+  })
+
+  it("editorOpenFile coerces an explicit diff intent to file for an image path", async () => {
+    const mod = await loadStore()
+    mod.editorOpenFile("s1", "logo.png", { mode: "diff" })
+    expect(mod.getSnapshot().editorTabs.s1.tabs[0].mode).toBe("file")
+    // And an already-open image tab cannot be retargeted into diff either.
+    mod.editorOpenFile("s1", "logo.png", { mode: "diff" })
+    expect(mod.getSnapshot().editorTabs.s1.tabs[0].mode).toBe("file")
+  })
+
+  it("an svg path still honors diff mode (it is a text tab, not an image tab)", async () => {
+    const mod = await loadStore()
+    mod.openEditor("s1", "icons/logo.svg", "diff")
+    expect(mod.getSnapshot().editorTabs.s1.tabs[0].mode).toBe("diff")
+  })
+
   it("editorOpenFile with an explicit mode retargets an existing tab (changed-files Diff button)", async () => {
     const mod = await loadStore()
     mod.editorOpenFile("s1", "a.ts", { mode: "file", pin: true })
@@ -345,5 +376,100 @@ describe("editor tabs store slice", () => {
 
     expect(mod.getSnapshot().editorTabs.s1).toBeUndefined()
     expect(mod.getSnapshot().editorTarget).toBeNull()
+  })
+})
+
+// (f) drafts survive editor close: the store is what prunes the draft cache
+// (a tab that no longer exists must take its draft with it, whether or not an
+// EditorBody is mounted) and what arms/disarms the beforeunload guard off the
+// STORE dirty flags (which outlive the component).
+describe("draft cache and unload guard wiring", () => {
+  async function loadWithGuardWindow() {
+    // The suite-level window stub has only addEventListener, which the guard
+    // deliberately refuses (it will not add a handler it cannot remove).
+    // These tests need the full pair, captured.
+    const added: string[] = []
+    const removed: string[] = []
+    vi.stubGlobal("window", {
+      addEventListener: (type: string) => added.push(type),
+      removeEventListener: (type: string) => removed.push(type),
+    })
+    const mod = await loadStore()
+    const drafts = await import("./editorDrafts")
+    return { mod, drafts, added, removed }
+  }
+
+  function cachedBuffer(path: string) {
+    return {
+      path,
+      loadedPath: path,
+      loading: false,
+      loaded: "on disk",
+      draft: "typed and unsaved",
+      binary: false,
+      readOnly: false,
+      diff: null,
+      diffLoadedPath: null,
+      diffLoadedSignal: "",
+      fileError: null,
+      diffError: null,
+      errorPath: null,
+    }
+  }
+
+  it("a closed tab takes its cached draft with it", async () => {
+    const { mod, drafts } = await loadWithGuardWindow()
+    mod.editorOpenFile("s1", "a.ts", { pin: true })
+    const tabId = mod.getSnapshot().editorTabs.s1.tabs[0].id
+    drafts.storeSessionDrafts("s1", new Map([[tabId, cachedBuffer("a.ts")]]))
+
+    mod.editorCloseTab("s1", tabId)
+    expect(drafts.loadSessionDrafts("s1").size).toBe(0)
+  })
+
+  it("clearing a session drops its whole draft cache entry", async () => {
+    const { mod, drafts } = await loadWithGuardWindow()
+    mod.editorOpenFile("s1", "a.ts", { pin: true })
+    const tabId = mod.getSnapshot().editorTabs.s1.tabs[0].id
+    drafts.storeSessionDrafts("s1", new Map([[tabId, cachedBuffer("a.ts")]]))
+
+    mod.editorClearSession("s1")
+    expect(drafts.loadSessionDrafts("s1").size).toBe(0)
+  })
+
+  it("arms the beforeunload guard while any tab is dirty and disarms on discard", async () => {
+    const { mod, added, removed } = await loadWithGuardWindow()
+    mod.editorOpenFile("s1", "a.ts", { pin: true })
+    const tabId = mod.getSnapshot().editorTabs.s1.tabs[0].id
+    expect(added).not.toContain("beforeunload")
+
+    mod.editorSetTabDirty("s1", tabId, true)
+    expect(added).toContain("beforeunload")
+    expect(removed).not.toContain("beforeunload")
+
+    // The guard stays armed while the editor is CLOSED with the dirty flag
+    // still set: the draft is real and a refresh really would lose it.
+    mod.closeEditor()
+    expect(removed).not.toContain("beforeunload")
+
+    // The per-tab discard clears the flag with the tab, and the guard drops.
+    mod.editorCloseTab("s1", tabId)
+    expect(removed).toContain("beforeunload")
+  })
+
+  it("disarms when the dirty session vanishes from the spine", async () => {
+    const { mod, added, removed } = await loadWithGuardWindow()
+    spineBody = makeSpine(["s1", "s2"])
+    fireSessionsChanged()
+    await tick()
+    mod.editorOpenFile("s1", "a.ts", { pin: true })
+    const tabId = mod.getSnapshot().editorTabs.s1.tabs[0].id
+    mod.editorSetTabDirty("s1", tabId, true)
+    expect(added).toContain("beforeunload")
+
+    spineBody = makeSpine(["s2"])
+    fireSessionsChanged()
+    await tick()
+    expect(removed).toContain("beforeunload")
   })
 })

@@ -451,3 +451,46 @@ describe("FlatAgentList PR chip", () => {
     expect(handlers.onSelectSession).not.toHaveBeenCalled()
   })
 })
+
+// (b) the agent menu's editor entries: the in-app item is renamed to
+// distinguish surfaces and hidden on phones (where the overlay cannot open,
+// so it was a dead no-op), and a new-tab item opens the standalone editor
+// address. Every item keeps a leading icon per the menu tenet.
+describe("FlatAgentList editor menu entries", () => {
+  async function openFirstAgentMenu() {
+    render(<FlatAgentList handlers={handlers} />)
+    fireEvent.click(screen.getAllByLabelText("Session actions")[0])
+    await screen.findByRole("menu")
+  }
+
+  it("renames the in-app item and hides it on phones via CSS", async () => {
+    await openFirstAgentMenu()
+    const here = screen
+      .getByText("Open editor here")
+      .closest('[role="menuitem"]')
+    expect(here).not.toBeNull()
+    expect(here!.className).toContain("max-md:hidden")
+  })
+
+  it("offers Open editor in new tab as a REAL anchor to the standalone address", async () => {
+    // An anchor, not a window.open handler, so middle-click and
+    // ctrl/cmd-click keep their native new-tab semantics, matching the
+    // editor header's affordance.
+    const open = vi.fn()
+    vi.stubGlobal("open", open)
+    await openFirstAgentMenu()
+    const item = screen
+      .getByText("Open editor in new tab")
+      .closest('[role="menuitem"]')
+    expect(item).not.toBeNull()
+    // Always available, phones included: it is the ONLY editor entry there.
+    expect(item!.className).not.toContain("max-md:hidden")
+    expect(item!.tagName).toBe("A")
+    // The first displayed agent is Alpha (name sort in makeState("name")).
+    expect(item!.getAttribute("href")).toBe("#/editor/agent/alpha")
+    expect(item!.getAttribute("target")).toBe("_blank")
+    expect(item!.getAttribute("rel")).toBe("noopener")
+    fireEvent.click(item!)
+    expect(open).not.toHaveBeenCalled()
+  })
+})

@@ -1,6 +1,6 @@
 ---
 title: The code editor
-description: A real Monaco editor in the browser for any file in a worktree, with syntax highlighting, JSON and TOML help, Markdown preview, path search, diffs against HEAD, and open-in-local-editor.
+description: A real Monaco editor in the browser for any file in a worktree, with syntax highlighting, JSON and TOML help, Markdown and SVG previews, image viewing, path search, diffs against HEAD, and open-in-local-editor.
 group: Web UI
 order: 62
 ---
@@ -15,24 +15,48 @@ sees your change on disk immediately.
 
 The editor opens as a full-screen overlay from a few places:
 
-- An agent's `⋯` menu has **Open editor**.
+- An agent's `⋯` menu has **Open editor here**.
 - A changed file's `⋯` menu has **Edit**, and clicking a changed file opens its
   diff (more on that below).
 
 It loads only when you open it, so it costs nothing until you use it.
 
-The editor is **desktop-only.** Monaco is a poor experience on a touch screen, so
-on a phone the editor overlay does not open. You can still browse your changed
-files on the mobile Changes screen, but reviewing a full diff and editing wait for
-a real keyboard.
+Prefer the editor in its own browser tab? The agent's `⋯` menu also has **Open
+editor in new tab**, and the editor's own header carries a matching icon that
+opens the current file in that standalone tab (middle-click works, it is a real
+link). The standalone tab is nothing but the editor, full-viewport, with the
+agent's name and an **Open in dux** link back to the full workspace at the top.
+
+The editor overlay is **desktop-only**: Monaco is a poor experience on a touch
+screen, so on a phone the overlay does not open. The standalone tab is the
+deliberate exception. It works on phones, best-effort, with the file explorer
+starting collapsed so the file itself gets the width, and it keeps the editor
+above the soft keyboard. Fixing a typo from the couch is exactly what it is for;
+long editing sessions still want a real keyboard.
+
+## The URL knows where you are
+
+The address bar names the editor and the file you are looking at, so the
+position survives anything a URL survives: a hard refresh reopens the editor on
+the same file (and view), a bookmark or a shared link lands there directly, and
+the standalone tab is just another address. Opening the editor is exactly one
+step in your browser history, wherever you opened it from, and switching files
+inside it updates the address in place rather than piling up entries — so one
+press of Back closes the editor and returns you to whatever you were looking
+at before it opened. Closing it that way loses nothing — see below.
 
 ## The layout
 
 The overlay is two panes. On the left, a search box, a header shortcut to create a
 file at the worktree root, and a file tree. On the right, the file itself: the
-editor, a diff view, or a Markdown preview, depending on the toggles in the header.
+editor, a diff view, or a rendered preview, depending on the toggles in the header.
 The header also carries the file path, a dirty dot when you have unsaved edits, a
 read-only badge where it applies, and **Save** and **Close**.
+
+The explorer pane is yours to shape: drag the divider to resize it, or collapse it
+entirely with the toggle at the left end of the header when you want the whole
+width for the file. Your width and collapsed/expanded choice are remembered in the
+browser, so the editor reopens the way you left it.
 
 Save with the button or with `Ctrl+S` / `Cmd+S`. A toast confirms the write.
 
@@ -93,8 +117,17 @@ appears; save writes it to disk.
 
 The server keeps you inside the worktree and refuses to hand back things you
 should not be editing: files outside the worktree, inside `.git`, or binary blobs
-come back read-only or not at all, with a badge explaining why. If you try to
-close or switch away with unsaved changes, dux asks first.
+come back read-only or not at all, with a badge explaining why.
+
+Unsaved edits survive the editor closing. Close it — the button, Escape, the
+browser's Back — and your drafts stay put: reopen the editor and every tab is
+back, dirty dot and typed text included. The one real discard is closing a
+dirty **tab**, which still asks first. Because drafts live in the page, a hard
+refresh or closing the browser tab really would lose them, so the browser asks
+before leaving while any draft is unsaved — even if the editor itself is
+closed at the time. Deal with the draft (save it, or discard its tab) and the
+prompt stops. The one silent exception: when dux itself restarts, the page
+reloads without asking, and in-page drafts do not survive that.
 
 There are two size limits, and they are generous enough that you are unlikely to
 meet either. A file over **5 MiB** does not open in the editor at all; you get the
@@ -142,13 +175,27 @@ This is a deliberately trimmed Monaco: highlighting and JSON validation, but no
 heavyweight IntelliSense or cross-file diagnostics. It is a fast, honest text
 editor with great highlighting, not a full IDE.
 
-## Markdown preview
+## Markdown and SVG preview
 
 For Markdown files (`.md`, `.markdown`, and friends) a **Preview / Edit** toggle
 renders the current buffer, unsaved edits included, so you can check how a README
 reads without saving first. It handles GitHub-flavored Markdown, hides a YAML
 frontmatter block, and rewrites relative image paths so they load from the
 worktree.
+
+SVG files get the same treatment: they open in the editor as text, and the same
+toggle renders the drawing from whatever is in the buffer right now, saved or not,
+so you can tweak a path and see the shape move before committing to it.
+
+## Images
+
+Image files (PNG, JPEG, GIF, WebP, and the rest) are not text, so they skip the
+editor entirely and open as the picture itself, centered on the right, with the
+path and pixel dimensions underneath. There is nothing to save, no preview
+toggle to press, and no diff view either: clicking a changed image in the
+Changes pane shows you the picture as it is on disk right now, which is what
+you wanted to see anyway. It is simply the fastest way to check what an agent
+just drew into the worktree.
 
 ## Diffs against HEAD
 

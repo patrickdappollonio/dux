@@ -89,7 +89,11 @@ function TabPill({
       >
         <FileTreeIcon kind={fileIconKind(tab.path)} />
         <span
-          className={cn("max-w-40 truncate", tab.preview && "italic")}
+          // `pr-0.5` is inside the truncating (overflow-hidden) box on
+          // purpose: an italic final ascender leans past the content edge and
+          // gets clipped without it. Unconditional so a preview tab pinning
+          // itself never shifts the label.
+          className={cn("max-w-40 truncate pr-0.5", tab.preview && "italic")}
         >
           {basename}
         </span>

@@ -94,6 +94,24 @@ describe("EditorTabsStrip", () => {
     expect(screen.getByText("b.ts").className).not.toContain("italic")
   })
 
+  it("the truncating label span keeps a right padding so italics don't clip", () => {
+    // The clip happens inside the span's own overflow-hidden box: an italic
+    // final ascender leans past the content edge and `truncate` cuts it. The
+    // padding is unconditional (not preview-only) so a tab flipping between
+    // preview and permanent never shifts its label by a padding's width.
+    seed(
+      "s1",
+      [
+        tab({ id: "t1", path: "a.ts", preview: true }),
+        tab({ id: "t2", path: "b.ts", preview: false }),
+      ],
+      "t1",
+    )
+    render(<EditorTabsStrip sessionId="s1" />)
+    expect(screen.getByText("a.ts").className).toContain("pr-0.5")
+    expect(screen.getByText("b.ts").className).toContain("pr-0.5")
+  })
+
   it("clicking a pill activates that tab", () => {
     seed("s1", [tab({ id: "t1" }), tab({ id: "t2", path: "b.ts" })], "t1")
     render(<EditorTabsStrip sessionId="s1" />)

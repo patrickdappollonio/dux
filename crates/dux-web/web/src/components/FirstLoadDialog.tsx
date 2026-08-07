@@ -37,7 +37,14 @@ const ART_COLUMN = "md:w-[152px]"
 const DUCK_SIZE = "md:w-[118px]"
 
 export function FirstLoadDialog() {
-  const { firstLoad, bootstrap } = useDux()
+  const { firstLoad, bootstrap, standaloneEditor } = useDux()
+
+  // The onboarding belongs to the MAIN shell. The standalone editor tab is a
+  // second SPA instance sharing the same store boot, so without this gate the
+  // welcome/what's-new screen would open over a tab that is nothing but the
+  // editor; it stands down there and shows in the workspace tab instead
+  // (dismissal is version-recorded server-side, so the two never both show).
+  if (standaloneEditor) return null
 
   function handleOpenChange(open: boolean) {
     // Closing an AUTOMATIC screen dismisses it (the store posts the dismissal,

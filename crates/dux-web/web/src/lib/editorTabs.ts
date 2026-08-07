@@ -260,13 +260,16 @@ export function hasDirtyUnderPath(
   return state.tabs.some((t) => underPath(t.path, path) && t.dirty)
 }
 
-// The overlay-close "Discard unsaved changes?" confirmation copy, singular vs.
-// plural across however many tabs are dirty. Single source of truth so the
-// dialog body and any future caller never drift on the exact wording.
-export function dirtyCloseMessage(dirtyCount: number): string {
-  return dirtyCount === 1
-    ? "You have unsaved changes in 1 tab. They will be lost."
-    : `You have unsaved changes in ${dirtyCount} tabs. They will be lost.`
+// True when any tab of any session carries a dirty flag. This is the
+// beforeunload-guard predicate: the STORE flags are what outlive the editor
+// body, so the guard stays honest while the editor is closed with a dirty
+// draft still cached (see lib/editorDrafts.ts). The old overlay-close discard
+// dialog read a per-session dirty count here; closing became non-destructive
+// (drafts survive in the cache), so that dialog and its copy are gone.
+export function hasAnyDirtyTab(
+  states: Record<string, EditorTabsState>,
+): boolean {
+  return Object.values(states).some((s) => s.tabs.some((t) => t.dirty))
 }
 
 export interface SaveResolution {

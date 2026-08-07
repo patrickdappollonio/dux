@@ -23,6 +23,7 @@ let leftApp: boolean
 // exceeds its rate limit on history calls.
 let historyWriteError: Error | null = null
 let popstateListeners: (() => void)[]
+let hashchangeListeners: (() => void)[]
 let loc: {
   protocol: string
   host: string
@@ -206,6 +207,7 @@ beforeEach(() => {
   leftApp = false
   historyWriteError = null
   popstateListeners = []
+  hashchangeListeners = []
   vi.stubGlobal("localStorage", {
     getItem: () => null,
     setItem: () => {},
@@ -214,6 +216,7 @@ beforeEach(() => {
   vi.stubGlobal("window", {
     addEventListener: (type: string, handler: () => void) => {
       if (type === "popstate") popstateListeners.push(handler)
+      if (type === "hashchange") hashchangeListeners.push(handler)
     },
   })
   vi.stubGlobal("history", fakeHistory)
@@ -958,5 +961,452 @@ describe("a standalone terminal is addressable in its own right", () => {
     expect(mod.getSnapshot().mobileScreen).toBe("home")
     expect(loc.hash).toBe("")
     expect(index).toBe(depth + 1)
+  })
+})
+
+// (c) the editor rides the URL. The route grammar grows an editor suffix
+// (`#/agent/<sid>/editor[/<mode>/<encoded-path>]`), mutually exclusive with
+// the `/changes` suffix; opening the editor PUSHES one entry, in-editor file
+// switches REPLACE it, one Back closes the editor and keeps every draft, and
+// a hard refresh restores the editor and its open file from the address.
+describe("the editor rides the URL", () => {
+  function editorBuffer(path: string, draft: string) {
+    return {
+      path,
+      loadedPath: path,
+      loading: false,
+      loaded: "on disk",
+      draft,
+      binary: false,
+      readOnly: false,
+      diff: null,
+      diffLoadedPath: null,
+      diffLoadedSignal: "",
+      fileError: null,
+      diffError: null,
+      errorPath: null,
+    }
+  }
+
+  it("parses and serializes as exact inverses over the suffix cross-product", async () => {
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
+    const target = { kind: "agent" as const, sessionId: "s1", tabId: "s1" }
+    const routes = [
+      { target, changes: false, editor: null, standalone: false },
+      { target, changes: true, editor: null, standalone: false },
+      {
+        target,
+        changes: false,
+        editor: { mode: "file" as const, path: null },
+        standalone: false,
+      },
+      {
+        target,
+        changes: false,
+        editor: { mode: "file" as const, path: "src/a b.ts" },
+        standalone: false,
+      },
+      {
+        target,
+        changes: false,
+        editor: { mode: "diff" as const, path: "src/a b.ts" },
+        standalone: false,
+      },
+      // Files whose NAMES collide with the grammar's own keywords: a path
+      // literally called "editor" or "changes" must round-trip exactly (the
+      // parser picks the split point whose prefix is a real target, not the
+      // rightmost "/editor" in the string).
+      {
+        target,
+        changes: false,
+        editor: { mode: "file" as const, path: "editor" },
+        standalone: false,
+      },
+      {
+        target,
+        changes: false,
+        editor: { mode: "diff" as const, path: "docs/editor" },
+        standalone: false,
+      },
+      {
+        target,
+        changes: false,
+        editor: { mode: "file" as const, path: "changes" },
+        standalone: false,
+      },
+      // The standalone surface: the same editor positions at their un-nested
+      // whole-tab addresses.
+      {
+        target,
+        changes: false,
+        editor: { mode: "file" as const, path: null },
+        standalone: true,
+      },
+      {
+        target,
+        changes: false,
+        editor: { mode: "diff" as const, path: "src/a b.ts" },
+        standalone: true,
+      },
+      {
+        target,
+        changes: false,
+        editor: { mode: "file" as const, path: "editor" },
+        standalone: true,
+      },
+    ]
+    for (const route of routes) {
+      expect(mod.parseRoute(mod.routeHash(route))).toEqual(route)
+    }
+  })
+
+  it("normalizes the shapes the standalone grammar cannot carry", async () => {
+    // Standalone routes are session-slot only BY DEFINITION (the surface is
+    // the editor, not a tab strip), and they carry no changes screen. The
+    // serializer already drops both; the parser can only ever produce the
+    // normalized form, so serialize-then-parse lands on it.
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
+    const editor = { mode: "file" as const, path: "a.ts" }
+    const normalized = {
+      target: { kind: "agent" as const, sessionId: "s1", tabId: "s1" },
+      changes: false,
+      editor,
+      standalone: true,
+    }
+    // An extra-tab target normalizes to the session-slot tab.
+    expect(
+      mod.parseRoute(
+        mod.routeHash({
+          target: { kind: "agent", sessionId: "s1", tabId: "t2" },
+          changes: false,
+          editor,
+          standalone: true,
+        }),
+      ),
+    ).toEqual(normalized)
+    // A changes flag is dropped: the standalone form has nowhere to say it.
+    expect(
+      mod.parseRoute(
+        mod.routeHash({
+          target: { kind: "agent", sessionId: "s1", tabId: "s1" },
+          changes: true,
+          editor,
+          standalone: true,
+        }),
+      ),
+    ).toEqual(normalized)
+  })
+
+  it("the serializer emits at most one suffix, and the parser tries editor first", async () => {
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
+    const target = { kind: "agent" as const, sessionId: "s1", tabId: "s1" }
+    // A route claiming both suffixes serializes to the editor form only.
+    expect(
+      mod.routeHash({
+        target,
+        changes: true,
+        editor: { mode: "file", path: null },
+      }),
+    ).toBe("#/agent/s1/editor")
+    // And an editor path that literally ends in "changes" stays an editor
+    // route: the parser tries the editor suffix first.
+    const tricky = mod.routeHash({
+      target,
+      changes: false,
+      editor: { mode: "file", path: "changes" },
+    })
+    expect(mod.parseRoute(tricky).editor).toEqual({
+      mode: "file",
+      path: "changes",
+    })
+  })
+
+  it("opening the editor pushes exactly one entry", async () => {
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
+    mod.selectSession("s1")
+    const depth = index
+    mod.openEditor("s1")
+    expect(loc.hash).toBe("#/agent/s1/editor")
+    expect(index).toBe(depth + 1)
+    history.back()
+    expect(loc.hash).toBe("#/agent/s1")
+    expect(mod.getSnapshot().editorTarget).toBeNull()
+  })
+
+  it("opening from HOME is one push, one position: Back returns straight home", async () => {
+    // The selection move and the editor open are ONE navigation the user
+    // made, so they must land as one entry. Two pushes would bury an agent
+    // screen the user never visited between home and the editor.
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
+    const depth = index
+    mod.openEditor("s1", "a.ts")
+    expect(mod.getSnapshot().selectedSessionId).toBe("s1")
+    expect(loc.hash).toBe("#/agent/s1/editor/file/a.ts")
+    expect(index).toBe(depth + 1)
+    history.back()
+    expect(loc.hash).toBe("")
+    expect(mod.getSnapshot().mobileScreen).toBe("home")
+    expect(mod.getSnapshot().editorTarget).toBeNull()
+  })
+
+  it("opening from ANOTHER AGENT is one push: Back returns to that agent", async () => {
+    const mod = await loadStore("", [
+      { id: "s1", project_id: "p1" },
+      { id: "s2", project_id: "p1" },
+    ])
+    mod.selectSession("s2")
+    const depth = index
+    mod.openEditor("s1", "a.ts")
+    expect(mod.getSnapshot().selectedSessionId).toBe("s1")
+    expect(loc.hash).toBe("#/agent/s1/editor/file/a.ts")
+    expect(index).toBe(depth + 1)
+    expect(entries).not.toContain("#/agent/s1")
+    history.back()
+    expect(loc.hash).toBe("#/agent/s2")
+    expect(mod.getSnapshot().selectedSessionId).toBe("s2")
+    expect(mod.getSnapshot().editorTarget).toBeNull()
+  })
+
+  it("an in-editor file switch replaces the entry rather than piling up", async () => {
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
+    mod.selectSession("s1")
+    mod.openEditor("s1", "a.ts")
+    expect(loc.hash).toBe("#/agent/s1/editor/file/a.ts")
+    const depth = index
+    mod.editorSyncActiveTab("s1", "file", "b.ts")
+    expect(loc.hash).toBe("#/agent/s1/editor/file/b.ts")
+    expect(index).toBe(depth)
+    mod.editorSyncActiveTab("s1", "diff", "b.ts")
+    expect(loc.hash).toBe("#/agent/s1/editor/diff/b.ts")
+    expect(index).toBe(depth)
+  })
+
+  it("one Back closes the editor and keeps tabs, dirty flags, and drafts", async () => {
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
+    const drafts = await import("./editorDrafts")
+    mod.selectSession("s1")
+    mod.openEditor("s1", "a.ts")
+    const tabId = mod.getSnapshot().editorTabs.s1.tabs[0].id
+    // The user typed: the store flag flips and the draft cache holds the text
+    // (in the app EditorBody does both; the store test does them directly).
+    mod.editorSetTabDirty("s1", tabId, true)
+    drafts.storeSessionDrafts(
+      "s1",
+      new Map([[tabId, editorBuffer("a.ts", "typed and unsaved")]]),
+    )
+
+    history.back()
+    // Closed, and the dirty state did NOT gate the Back: there is no cancel,
+    // because nothing is lost.
+    expect(mod.getSnapshot().editorTarget).toBeNull()
+    expect(mod.getSnapshot().editorRoute).toBeNull()
+    expect(loc.hash).toBe("#/agent/s1")
+    expect(mod.getSnapshot().editorTabs.s1.tabs).toHaveLength(1)
+    expect(mod.getSnapshot().editorTabs.s1.tabs[0].dirty).toBe(true)
+    expect(drafts.loadSessionDrafts("s1").get(tabId)?.draft).toBe(
+      "typed and unsaved",
+    )
+
+    // And Forward reopens it, tab intact, from the address alone.
+    history.forward()
+    expect(mod.getSnapshot().editorTarget).not.toBeNull()
+    expect(mod.getSnapshot().editorRoute).toEqual({
+      sessionId: "s1",
+      mode: "file",
+      path: "a.ts",
+    })
+    drafts.clearSessionDrafts("s1")
+  })
+
+  it("a hard refresh restores the editor and its open file from the address", async () => {
+    const mod = await loadStore("#/agent/s1/editor/file/src%2Fa.ts", [
+      { id: "s1", project_id: "p1" },
+    ])
+    expect(mod.getSnapshot().selectedSessionId).toBe("s1")
+    expect(mod.getSnapshot().editorTarget).toEqual({
+      sessionId: "s1",
+      initialPath: "src/a.ts",
+      initialMode: "file",
+    })
+    expect(mod.getSnapshot().editorRoute).toEqual({
+      sessionId: "s1",
+      mode: "file",
+      path: "src/a.ts",
+    })
+    expect(mod.getSnapshot().editorTabs.s1.tabs.map((t) => t.path)).toEqual([
+      "src/a.ts",
+    ])
+    // A restore, not a move: the browser is already parked on this entry.
+    expect(loc.hash).toBe("#/agent/s1/editor/file/src%2Fa.ts")
+    expect(index).toBe(DUX_ENTRY_INDEX)
+  })
+
+  it("clears the editor with a single URL write when its session vanishes", async () => {
+    const mod = await loadStore("", [
+      { id: "s1", project_id: "p1" },
+      { id: "s2", project_id: "p1" },
+    ])
+    mod.selectSession("s1")
+    mod.openEditor("s1", "a.ts")
+    const depth = index
+    await pushSpine(mod, [{ id: "s2", project_id: "p1" }])
+    // The selection prune is the single URL writer in that pass; the editor
+    // prune only clears state.
+    expect(mod.getSnapshot().editorTarget).toBeNull()
+    expect(mod.getSnapshot().editorRoute).toBeNull()
+    expect(mod.getSnapshot().selectedSessionId).toBe("s2")
+    expect(loc.hash).toBe("#/agent/s2")
+    expect(index).toBe(depth)
+    expect(entries).not.toContain("#/agent/s1/editor/file/a.ts")
+  })
+
+  it("closes the editor when the selection moves to a different session", async () => {
+    // A non-UI caller can move the selection while the editor is open. The
+    // hash must always name the VISIBLE position, so the editor closes in
+    // the same commit rather than being merely hidden from the URL while
+    // its state lingers.
+    const mod = await loadStore("", [
+      { id: "s1", project_id: "p1" },
+      { id: "s2", project_id: "p1" },
+    ])
+    mod.openEditor("s1", "a.ts")
+    expect(mod.getSnapshot().editorRoute).not.toBeNull()
+    mod.selectSession("s2")
+    expect(mod.getSnapshot().editorTarget).toBeNull()
+    expect(mod.getSnapshot().editorRoute).toBeNull()
+    expect(loc.hash).toBe("#/agent/s2")
+    // Re-selecting the editor's own session keeps it open (the guard is
+    // about a DIFFERENT session, not any selection at all).
+    mod.openEditor("s2", "b.ts")
+    mod.selectSession("s2")
+    expect(mod.getSnapshot().editorRoute).not.toBeNull()
+  })
+
+  it("follows a fragment navigation delivered ONLY as hashchange", async () => {
+    // Some environments deliver an anchor's fragment navigation as a
+    // hashchange with no popstate. The store listens to both; this delivers
+    // ONLY the hashchange half, which a popstate-only router would miss.
+    const mod = await loadStore("#/editor/agent/s1", [
+      { id: "s1", project_id: "p1" },
+    ])
+    expect(mod.getSnapshot().standaloneEditor).toBe(true)
+    expect(hashchangeListeners.length).toBeGreaterThan(0)
+    entries = entries.slice(0, index + 1)
+    entries.push("#/agent/s1")
+    index = entries.length - 1
+    applyCurrentEntry()
+    for (const listener of hashchangeListeners) listener()
+    expect(mod.getSnapshot().standaloneEditor).toBe(false)
+    expect(mod.getSnapshot().editorRoute).toBeNull()
+    expect(mod.getSnapshot().selectedSessionId).toBe("s1")
+  })
+
+  it("boots the standalone editor surface from its own address", async () => {
+    const mod = await loadStore("#/editor/agent/s1/file/src%2Fa.ts", [
+      { id: "s1", project_id: "p1" },
+    ])
+    expect(mod.getSnapshot().standaloneEditor).toBe(true)
+    expect(mod.getSnapshot().selectedSessionId).toBe("s1")
+    expect(mod.getSnapshot().editorRoute).toEqual({
+      sessionId: "s1",
+      mode: "file",
+      path: "src/a.ts",
+    })
+    expect(mod.getSnapshot().editorTabs.s1.tabs.map((t) => t.path)).toEqual([
+      "src/a.ts",
+    ])
+    // A restore of the address the tab opened on: nothing pushed, nothing
+    // rewritten.
+    expect(loc.hash).toBe("#/editor/agent/s1/file/src%2Fa.ts")
+    expect(index).toBe(DUX_ENTRY_INDEX)
+  })
+
+  it("keeps the standalone grammar when switching files in the standalone tab", async () => {
+    const mod = await loadStore("#/editor/agent/s1", [
+      { id: "s1", project_id: "p1" },
+    ])
+    expect(mod.getSnapshot().standaloneEditor).toBe(true)
+    const depth = index
+    mod.editorSyncActiveTab("s1", "file", "b.ts")
+    expect(loc.hash).toBe("#/editor/agent/s1/file/b.ts")
+    expect(index).toBe(depth)
+  })
+
+  it("leaves the standalone surface when the address stops naming it", async () => {
+    // The standalone header's open-in-dux link is a plain hash anchor: the
+    // browser pushes the entry and fires popstate, and the URL, as always,
+    // is what decides which surface renders.
+    const mod = await loadStore("#/editor/agent/s1", [
+      { id: "s1", project_id: "p1" },
+    ])
+    popstateTo("#/agent/s1")
+    expect(mod.getSnapshot().standaloneEditor).toBe(false)
+    expect(mod.getSnapshot().selectedSessionId).toBe("s1")
+    // The in-app address names no editor, so the editor state closed with it.
+    expect(mod.getSnapshot().editorRoute).toBeNull()
+  })
+
+  it("escapes a dead standalone link onto a real surface, never the boot spinner", async () => {
+    // The blocker: a standalone tab whose agent is gone used to keep
+    // `standaloneEditor` true with `editorTarget` null, and the not-found
+    // screen's only button then landed the shell on its boot spinner forever.
+    const mod = await loadStore("#/editor/agent/missing", [
+      { id: "s1", project_id: "p1" },
+    ])
+    expect(mod.getSnapshot().routeNotFound).toEqual({
+      kind: "agent",
+      sessionId: "missing",
+    })
+    // Clearing the editor state outside popstate also clears the surface
+    // flag, so not-found already renders in the ordinary shell.
+    expect(mod.getSnapshot().standaloneEditor).toBe(false)
+    mod.navigateUp()
+    expect(mod.getSnapshot().standaloneEditor).toBe(false)
+    expect(mod.getSnapshot().routeNotFound).toBeNull()
+    expect(mod.getSnapshot().mobileScreen).toBe("home")
+    expect(loc.hash).toBe("")
+  })
+
+  it("swaps the standalone tab to the ordinary shell when its session vanishes", async () => {
+    const mod = await loadStore("#/editor/agent/s1/file/a.ts", [
+      { id: "s1", project_id: "p1" },
+      { id: "s2", project_id: "p1" },
+    ])
+    expect(mod.getSnapshot().standaloneEditor).toBe(true)
+    const depth = index
+    await pushSpine(mod, [{ id: "s2", project_id: "p1" }])
+    // The selection prune stays the single URL writer and writes the in-app
+    // grammar; the editor prune clears the state AND the surface flag, so
+    // the tab renders the workspace rather than a spinner.
+    expect(mod.getSnapshot().standaloneEditor).toBe(false)
+    expect(mod.getSnapshot().editorTarget).toBeNull()
+    expect(mod.getSnapshot().editorRoute).toBeNull()
+    expect(mod.getSnapshot().selectedSessionId).toBe("s2")
+    expect(loc.hash).toBe("#/agent/s2")
+    expect(index).toBe(depth)
+  })
+
+  it("boots the NORMAL shell on a standalone address with a malformed tail", async () => {
+    // Strict parse at boot: the surface flag comes from the same grammar the
+    // router uses, so a mangled link cannot marooon the tab on a standalone
+    // shell whose route resolves to nothing.
+    const mod = await loadStore("#/editor/agent/s1/file/%ZZ", [
+      { id: "s1", project_id: "p1" },
+    ])
+    expect(mod.getSnapshot().standaloneEditor).toBe(false)
+    expect(mod.getSnapshot().mobileScreen).toBe("home")
+    expect(mod.getSnapshot().editorTarget).toBeNull()
+  })
+
+  it("renders not-found for an editor link to an agent that does not exist", async () => {
+    const mod = await loadStore("#/agent/missing/editor/file/a.ts", [
+      { id: "s1", project_id: "p1" },
+    ])
+    expect(mod.getSnapshot().routeNotFound).toEqual({
+      kind: "agent",
+      sessionId: "missing",
+    })
+    expect(mod.getSnapshot().editorTarget).toBeNull()
+    expect(mod.getSnapshot().editorRoute).toBeNull()
   })
 })

@@ -20,6 +20,7 @@ import {
   ClipboardCopy,
   Cpu,
   Ellipsis,
+  ExternalLink,
   FileCode2,
   Folder,
   GitFork,
@@ -113,6 +114,7 @@ import {
   openDelete,
   openDeleteTerminal,
   openEditor,
+  standaloneEditorHash,
   openForceReconnect,
   openForkAgent,
   openRename,
@@ -273,9 +275,32 @@ export function AgentActionsMenu({
         Startup command logs…
       </DropdownMenuItem>
       <DropdownMenuSeparator />
-      <DropdownMenuItem onClick={() => openEditor(session.id)}>
+      {/* Two editor entries, named to distinguish their surfaces. The in-app
+          overlay cannot open on a phone (EditorOverlay is desktop-only), so
+          its item is CSS-hidden there rather than left as a dead no-op; the
+          new-tab item, which opens the standalone surface, is the only
+          editor entry on phones. Final copy was left to PR review. */}
+      <DropdownMenuItem
+        className="max-md:hidden"
+        onClick={() => openEditor(session.id)}
+      >
         <FileCode2 />
-        Open editor
+        Open editor here
+      </DropdownMenuItem>
+      {/* A real anchor, matching the editor header's affordance: middle-click
+          and ctrl/cmd-click keep their native new-tab semantics, which a
+          window.open handler would flatten. */}
+      <DropdownMenuItem
+        render={
+          <a
+            href={standaloneEditorHash(session.id)}
+            target="_blank"
+            rel="noopener"
+          />
+        }
+      >
+        <ExternalLink />
+        Open editor in new tab
       </DropdownMenuItem>
       <DropdownMenuItem onClick={() => createTerminal(session.id)}>
         <SquareTerminal />

@@ -3,8 +3,8 @@ import {
   activateTab,
   closeTab,
   closeTabsUnderPath,
-  dirtyCloseMessage,
   emptyTabsState,
+  hasAnyDirtyTab,
   hasDirtyUnderPath,
   nextActiveId,
   openFile,
@@ -216,17 +216,34 @@ describe("shouldPromoteOnEdit", () => {
   })
 })
 
-describe("dirtyCloseMessage", () => {
-  it("uses singular phrasing for exactly one dirty tab", () => {
-    expect(dirtyCloseMessage(1)).toBe(
-      "You have unsaved changes in 1 tab. They will be lost.",
-    )
+describe("hasAnyDirtyTab", () => {
+  it("is false with no sessions and false when every tab is clean", () => {
+    expect(hasAnyDirtyTab({})).toBe(false)
+    expect(
+      hasAnyDirtyTab({
+        s1: {
+          tabs: [
+            { id: "t1", path: "a.ts", mode: "file", preview: false, dirty: false },
+          ],
+          activeId: "t1",
+        },
+      }),
+    ).toBe(false)
   })
 
-  it("uses plural phrasing for more than one dirty tab", () => {
-    expect(dirtyCloseMessage(3)).toBe(
-      "You have unsaved changes in 3 tabs. They will be lost.",
-    )
+  it("is true when any tab of any session is dirty", () => {
+    expect(
+      hasAnyDirtyTab({
+        s1: { tabs: [], activeId: null },
+        s2: {
+          tabs: [
+            { id: "t1", path: "a.ts", mode: "file", preview: false, dirty: false },
+            { id: "t2", path: "b.ts", mode: "file", preview: false, dirty: true },
+          ],
+          activeId: "t1",
+        },
+      }),
+    ).toBe(true)
   })
 })
 

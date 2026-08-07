@@ -133,6 +133,15 @@ describe("FirstLoadDialog", () => {
     expect(screen.queryByRole("dialog")).toBeNull()
   })
 
+  it("stands down on the standalone editor surface", () => {
+    // The onboarding belongs to the main shell: a tab that is nothing but
+    // the editor must not open the welcome/what's-new dialog over it.
+    seed({})
+    mockState = { ...mockState, standaloneEditor: true } as DuxState
+    render(<FirstLoadDialog />)
+    expect(screen.queryByRole("dialog")).toBeNull()
+  })
+
   describe("the welcome screen", () => {
     it("shows the title, the tagline, the prose, and the three numbered steps", () => {
       seed({ screen: "welcome" })
