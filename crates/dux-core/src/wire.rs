@@ -1293,7 +1293,7 @@ impl Engine {
         let message = if visible {
             "Changes pane shown. Hide it again from the Changes actions menu, or set it permanently in Preferences."
         } else {
-            "Changes pane hidden. Reopen it from the Changes actions menu, or set it permanently in Preferences."
+            "Changes pane hidden. Reopen it from the show button in the header, or set it permanently in Preferences."
         };
         WireStatus::new("info", message.to_string())
     }
@@ -4496,6 +4496,37 @@ mod tests {
             .apply_wire(WireCommand::SetChangesPaneVisible { visible: true })
             .expect("apply idempotent");
         assert!(engine.config.ui.show_changes_pane);
+    }
+
+    #[test]
+    fn set_changes_pane_visible_hidden_message_points_at_reachable_controls() {
+        // Hiding the pane unmounts it, and the pane's own actions menu with it,
+        // so a hide message pointing at "the Changes actions menu" named a
+        // control the user could no longer reach. The reopen affordances that
+        // actually survive the hide are the header's show button and the
+        // Preferences row; the message must name those and not the vanished
+        // menu.
+        let (mut engine, _tmp) = test_engine();
+        let outcome = engine
+            .apply_wire(WireCommand::SetChangesPaneVisible { visible: false })
+            .expect("hide changes pane");
+        let status = outcome.status.expect("a status message");
+        assert_eq!(status.tone, "info");
+        assert!(
+            status.message.contains("show button in the header"),
+            "hidden message must point at the header show button, got: {}",
+            status.message
+        );
+        assert!(
+            status.message.contains("Preferences"),
+            "hidden message must point at Preferences, got: {}",
+            status.message
+        );
+        assert!(
+            !status.message.contains("Changes actions menu"),
+            "hidden message must not point at the menu that vanished with the pane, got: {}",
+            status.message
+        );
     }
 
     #[test]
