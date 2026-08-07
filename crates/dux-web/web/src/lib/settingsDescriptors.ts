@@ -176,6 +176,28 @@ export const SETTING_GROUPS: SettingGroup[] = [
         read: (b) => b.compose_bar ?? true,
       },
       {
+        key: "ui.mobile_top_bar",
+        label: "Mobile terminal top bar",
+        description:
+          "On phones, shows the terminal screen's top bar: the back chevron, branch crumb and actions, plus the agent tab strip. Hide it to give those rows to the terminal; bring it back with the compose bar's show-bars button or from this Preferences dialog.",
+        surface: "web",
+        control: { kind: "bool" },
+        default: true,
+        writeTarget: "settings",
+        read: (b) => b.mobile_top_bar ?? true,
+      },
+      {
+        key: "ui.mobile_accessory_bar",
+        label: "Mobile terminal keys",
+        description:
+          "On phones, shows the terminal-keys bar (Esc, Tab, Ctrl, Alt and the arrows) above the compose box. Hide it to give those rows to the terminal; bring it back with the compose bar's show-bars button or from this Preferences dialog.",
+        surface: "web",
+        control: { kind: "bool" },
+        default: true,
+        writeTarget: "settings",
+        read: (b) => b.mobile_accessory_bar ?? true,
+      },
+      {
         key: "capabilities.web_notifications",
         label: "Desktop notifications",
         description:
