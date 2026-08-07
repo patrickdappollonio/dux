@@ -187,6 +187,12 @@ SVG files get the same treatment: they open in the editor as text, and the same
 toggle renders the drawing from whatever is in the buffer right now, saved or not,
 so you can tweak a path and see the shape move before committing to it.
 
+The toggle is there in the **Diff** view too, so a changed README clicked in the
+Changes pane can be read as a rendered page without flipping the tab to File
+first. It always shows the file's end state: your unsaved draft when you have
+one, otherwise the file as it is on disk. Toggling it off puts you right back on
+the diff.
+
 ## Images
 
 Image files (PNG, JPEG, GIF, WebP, and the rest) are not text, so they skip the

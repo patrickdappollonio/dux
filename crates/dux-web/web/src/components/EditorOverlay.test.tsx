@@ -50,6 +50,14 @@ const readMock = vi.fn(async () => ({
   binary: false,
   read_only: false,
 }))
+// The real endpoint's FileDiffContents shape; per-test overrides set the sides
+// the diff-mode preview tests assert against.
+const diffMock = vi.fn(async () => ({
+  path: PATH,
+  original: "",
+  modified: "",
+  binary: false,
+}))
 vi.mock("@/lib/fileApi", () => ({
   fileApi: {
     list: vi.fn(async () => ({ files: [PATH], truncated: false })),
@@ -59,7 +67,7 @@ vi.mock("@/lib/fileApi", () => ({
     // mocked: the image-pane test asserts the exact URL the <img> gets.
     rawUrl: (sessionId: string, path: string) =>
       `/api/v1/sessions/${encodeURIComponent(sessionId)}/files/raw?path=${encodeURIComponent(path)}`,
-    diff: vi.fn(async () => ({ head: "", working: "", binary: false })),
+    diff: () => diffMock(),
     write: (...args: unknown[]) => writeMock(...args),
     openInEditor: vi.fn(),
     createFile: vi.fn(),
@@ -96,6 +104,29 @@ function codeEditorStub() {
 }
 vi.mock("@/components/CodeEditor", codeEditorStub)
 vi.mock("./CodeEditor", codeEditorStub)
+
+// DiffViewer is Monaco's diff editor and cannot run in jsdom either. The stub
+// exposes both sides as data attributes so the diff-mode preview tests can
+// assert the diff view is what the tab returns to when Preview toggles off.
+function diffViewerStub() {
+  return {
+    default: ({
+      original,
+      modified,
+    }: {
+      original: string
+      modified: string
+    }) => (
+      <div
+        data-testid="diff-viewer"
+        data-original={original}
+        data-modified={modified}
+      />
+    ),
+  }
+}
+vi.mock("@/components/DiffViewer", diffViewerStub)
+vi.mock("./DiffViewer", diffViewerStub)
 
 // Panel props recorded at render time, so the panel-unit tests can assert the
 // editor hands react-resizable-panels STRING percentages. v4 reads a bare
@@ -505,6 +536,139 @@ describe("image and svg preview", () => {
     rerender(<EditorOverlay />)
     await screen.findByTestId("code-editor")
     await waitFor(() => expect(readMock).toHaveBeenCalledTimes(2))
+  })
+})
+
+// Preview in DIFF mode: a previewable file (markdown, SVG) opened straight
+// into diff mode (e.g. clicking a changed file in the Changes pane) offers
+// the same Preview toggle as file mode, rendering the END STATE of the file:
+// the unsaved draft when the tab has one, else the diff's MODIFIED side (the
+// file as on disk). Toggling off returns to the diff; the tab's mode never
+// changes. A diff tab may have NO file buffer at all (diff mode never calls
+// /read), so the toggle gates on the diff being loaded, not on fileReady.
+describe("preview in diff mode", () => {
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    installBootStubs()
+    installObjectUrlMocks()
+    const { clearSessionDrafts } = await import("@/lib/editorDrafts")
+    clearSessionDrafts(SESSION)
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.unstubAllGlobals()
+    removeObjectUrlMocks()
+  })
+
+  it("a markdown diff tab offers Preview immediately and renders the MODIFIED side", async () => {
+    diffMock.mockResolvedValue({
+      path: "README.md",
+      original: "# The old heading\n",
+      modified: "# From the modified side\n",
+      binary: false,
+    })
+    await mountWithTab("README.md", "diff")
+    await screen.findByTestId("diff-viewer")
+    // Diff mode never loads a file buffer; the toggle must not wait on one.
+    expect(readMock).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole("button", { name: /preview/i }))
+    // The end state renders: the modified side, never the original.
+    await screen.findByText("From the modified side")
+    expect(screen.queryByText("The old heading")).toBeNull()
+  })
+
+  it("an svg diff tab renders a blob URL built from the MODIFIED side", async () => {
+    const MODIFIED = '<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>'
+    diffMock.mockResolvedValue({
+      path: "icons/logo.svg",
+      original: "<svg/>",
+      modified: MODIFIED,
+      binary: false,
+    })
+    await mountWithTab("icons/logo.svg", "diff")
+    await screen.findByTestId("diff-viewer")
+    fireEvent.click(screen.getByRole("button", { name: /preview/i }))
+    const img = await screen.findByAltText("icons/logo.svg")
+    expect(img.getAttribute("src")).toMatch(/^blob:/)
+    const lastBlob = createdBlobs[createdBlobs.length - 1]
+    expect(lastBlob.type).toBe("image/svg+xml")
+    expect(await lastBlob.text()).toBe(MODIFIED)
+  })
+
+  it("a dirty draft wins over the modified side", async () => {
+    diffMock.mockResolvedValue({
+      path: "README.md",
+      original: "# The old heading\n",
+      modified: "# From the modified side\n",
+      binary: false,
+    })
+    // Edit in file mode first (diff mode never loads the buffer the draft
+    // lives in), then flip the tab to diff mode as the store would.
+    const { rerender } = await mountWithTab("README.md", "file")
+    const box = (await screen.findByTestId(
+      "code-editor",
+    )) as HTMLTextAreaElement
+    await waitFor(() => expect(box.value).toBe(ON_DISK))
+    fireEvent.change(box, { target: { value: "# The unsaved draft\n" } })
+    await waitFor(() => expect(box.value).toBe("# The unsaved draft\n"))
+
+    mockState = {
+      ...mockState,
+      editorTabs: {
+        [SESSION]: {
+          tabs: [
+            {
+              id: TAB_ID,
+              path: "README.md",
+              dirty: true,
+              preview: false,
+              mode: "diff",
+            },
+          ],
+          activeId: TAB_ID,
+        },
+      },
+    } as DuxState
+    const { EditorOverlay } = await import("@/components/EditorOverlay")
+    rerender(<EditorOverlay />)
+    await screen.findByTestId("diff-viewer")
+
+    fireEvent.click(screen.getByRole("button", { name: /preview/i }))
+    await screen.findByText("The unsaved draft")
+    expect(screen.queryByText("From the modified side")).toBeNull()
+  })
+
+  it("toggling Preview off returns to the diff view, not the editor", async () => {
+    diffMock.mockResolvedValue({
+      path: "README.md",
+      original: "",
+      modified: "# The rendered body\n",
+      binary: false,
+    })
+    await mountWithTab("README.md", "diff")
+    await screen.findByTestId("diff-viewer")
+    const toggle = screen.getByRole("button", { name: /preview/i })
+    fireEvent.click(toggle)
+    await screen.findByText("The rendered body")
+    expect(screen.queryByTestId("diff-viewer")).toBeNull()
+    // Off again: back to the diff, never the Monaco editor (the tab's mode
+    // was never changed by previewing).
+    fireEvent.click(toggle)
+    await screen.findByTestId("diff-viewer")
+    expect(screen.queryByTestId("code-editor")).toBeNull()
+  })
+
+  it("a non-previewable file in diff mode still has no Preview toggle", async () => {
+    diffMock.mockResolvedValue({
+      path: PATH,
+      original: "a\n",
+      modified: "b\n",
+      binary: false,
+    })
+    await mountWithTab(PATH, "diff")
+    await screen.findByTestId("diff-viewer")
+    expect(screen.queryByRole("button", { name: /preview/i })).toBeNull()
   })
 })
 

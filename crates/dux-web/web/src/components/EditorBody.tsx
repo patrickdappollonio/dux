@@ -338,15 +338,11 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
     activeBuffer.loadedPath === activeTab.path
   const binary = fileReady ? (activeBuffer?.binary ?? false) : false
   const readOnly = fileReady ? (activeBuffer?.readOnly ?? false) : false
-  // The preview is available only for a loaded, non-binary previewable file in
-  // file mode: one source of truth for both the toggle button and the render.
-  const canPreview =
-    activeTab?.mode === "file" &&
-    activePreviewKind !== null &&
-    fileReady &&
-    !binary
-  const showPreview =
-    activeTab !== null && previewOpenTabIds.has(activeTab.id) && canPreview
+  // File-mode readiness for the preview toggle: a loaded, non-binary buffer.
+  // The toggle itself is available in BOTH modes; its diff-mode half needs
+  // `diffReady`, declared further down, so `canPreview` lives beside it (one
+  // source of truth for both the toggle button and the render).
+  const filePreviewReady = fileReady && !binary
   // "Open editor" spawns a GUI editor on the SERVER, so it only helps when the
   // server is the user's own machine. Enable for local-access URLs; for remote
   // URLs keep the control but disable it with an explanatory tooltip.
@@ -401,8 +397,57 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
     activeBuffer.diffLoadedPath === activeTab.path
   const diffStale =
     diffReady && openFileSignal !== (activeBuffer?.diffLoadedSignal ?? "")
+  // Diff-mode readiness for the preview: the diff is loaded for the tab's
+  // current path and neither side is binary (the `fileReady && !binary`
+  // equivalent for a tab whose only content is the diff cache).
+  const diffPreviewReady = diffReady && !(activeBuffer?.diff?.binary ?? false)
+  const canPreview =
+    activePreviewKind !== null &&
+    (activeTab?.mode === "diff" ? diffPreviewReady : filePreviewReady)
+  const showPreview =
+    activeTab !== null && previewOpenTabIds.has(activeTab.id) && canPreview
+  // What the preview renders: always the END STATE of the file. In file mode
+  // that is the draft. In diff mode the tab may have no file buffer at all,
+  // so the unsaved draft wins only when one actually exists (buffer loaded
+  // AND the tab is dirty); otherwise the diff's MODIFIED side (the file as on
+  // disk) is exactly what file-mode preview would show.
+  const previewContent =
+    activeTab?.mode === "diff" && !(fileReady && dirty)
+      ? (activeBuffer?.diff?.modified ?? "")
+      : (activeBuffer?.draft ?? "")
   // This tab's save is in flight.
   const isSaving = savingTabId !== null && savingTabId === activeTab?.id
+
+  // The one preview pane both content arms share (file mode and diff mode),
+  // rendering `previewContent` (the file's end state, see its derivation
+  // above). A plain function, not a component: extracting it as a component
+  // would remount the pane (and re-mint the SVG blob URL) on every render.
+  function renderPreviewPane(path: string) {
+    return activePreviewKind === "svg" ? (
+      // Rendered SVG of the end state (unsaved edits included when a draft
+      // exists): a Blob object URL, and an <img>-embedded SVG executes no
+      // scripts by spec. Not lazy: no heavy chunk to defer.
+      <SvgPreviewPane draft={previewContent} path={path} />
+    ) : (
+      // Rendered markdown of the end state. Lazy like Monaco, so the same
+      // ChunkBoundary + Suspense applies.
+      <ChunkBoundary>
+        <Suspense
+          fallback={
+            <div className="flex h-full items-center justify-center text-muted-foreground">
+              <Loader2 className="size-5 motion-safe:animate-spin" />
+            </div>
+          }
+        >
+          <MarkdownPreview
+            content={previewContent}
+            sessionId={sessionId}
+            path={path}
+          />
+        </Suspense>
+      </ChunkBoundary>
+    )
+  }
 
   const filtered = useMemo(() => {
     const needle = search.trim().toLowerCase()
@@ -1039,7 +1084,11 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
             </Button>
           </SimpleTooltip>
         )}
-        {/* Markdown preview toggle — file mode only. */}
+        {/* Markdown/SVG preview toggle — both modes. In file mode the label
+            swaps to "Edit" while previewing (the toggle returns to the
+            editor); in diff mode toggling off returns to the READ-ONLY diff,
+            so "Edit" would lie — the label stays "Preview" and aria-pressed
+            plus the variant carry the state. */}
         {canPreview && (
           <Button
             size="sm"
@@ -1047,8 +1096,8 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
             aria-pressed={showPreview}
             onClick={togglePreview}
           >
-            {showPreview ? <Pencil /> : <Eye />}
-            {showPreview ? "Edit" : "Preview"}
+            {showPreview && activeTab?.mode === "file" ? <Pencil /> : <Eye />}
+            {showPreview && activeTab?.mode === "file" ? "Edit" : "Preview"}
           </Button>
         )}
         {/* Open in a local GUI editor — a menu of supported editors. A disabled
@@ -1320,6 +1369,12 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
                   <div className="flex h-full items-center justify-center px-4 text-center text-sm text-muted-foreground">
                     This file is binary and can&rsquo;t be diffed here.
                   </div>
+                ) : showPreview ? (
+                  // Same preview as file mode, rendering the file's END
+                  // STATE (the draft when one exists, else the diff's
+                  // modified side). Toggling off returns here, to the diff:
+                  // previewing never changes the tab's mode.
+                  renderPreviewPane(activeTab.path)
                 ) : (
                   <ChunkBoundary>
                     <Suspense
@@ -1362,34 +1417,7 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
                   This file is binary and can&rsquo;t be edited here.
                 </div>
               ) : showPreview ? (
-                activePreviewKind === "svg" ? (
-                  // Rendered SVG of the current buffer (unsaved edits included):
-                  // a Blob object URL over the DRAFT, so it stays draft-accurate
-                  // like markdown's, and an <img>-embedded SVG executes no
-                  // scripts by spec. Not lazy: no heavy chunk to defer.
-                  <SvgPreviewPane
-                    draft={activeBuffer?.draft ?? ""}
-                    path={activeTab.path}
-                  />
-                ) : (
-                  // Rendered markdown of the current buffer (unsaved edits included).
-                  // Lazy like Monaco, so the same ChunkBoundary + Suspense applies.
-                  <ChunkBoundary>
-                    <Suspense
-                      fallback={
-                        <div className="flex h-full items-center justify-center text-muted-foreground">
-                          <Loader2 className="size-5 motion-safe:animate-spin" />
-                        </div>
-                      }
-                    >
-                      <MarkdownPreview
-                        content={activeBuffer?.draft ?? ""}
-                        sessionId={sessionId}
-                        path={activeTab.path}
-                      />
-                    </Suspense>
-                  </ChunkBoundary>
-                )
+                renderPreviewPane(activeTab.path)
               ) : (
                 // ChunkBoundary (outside Suspense) catches a failed lazy import after
                 // a redeploy — a 404 on the hashed Monaco chunk — and offers reload,
