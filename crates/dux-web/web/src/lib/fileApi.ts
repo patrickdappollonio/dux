@@ -86,6 +86,14 @@ export const fileApi = {
     }),
   read: (sessionId: string, path: string) =>
     postFile<WorktreeFile>(fileUrl(sessionId, "read"), { path }),
+  // The GET URL that serves a file's raw bytes (same route the markdown
+  // preview's asset proxy hits, see `markdownAssetUrl` in lib/markdown.ts): a
+  // pure builder, no fetch — the image preview pane hands it straight to an
+  // <img src>. The server re-validates worktree containment and caps the
+  // response; it already sends Cache-Control: no-cache, so no cache-busting
+  // param is needed here.
+  rawUrl: (sessionId: string, path: string) =>
+    `${fileUrl(sessionId, "raw")}?path=${encodeURIComponent(path)}`,
   // The two raw sides (HEAD vs working copy) of a changed file for the Monaco
   // diff view. The server resolves both sides and the binary flag.
   diff: (sessionId: string, path: string) =>
