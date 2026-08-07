@@ -1,6 +1,6 @@
 ---
 title: The code editor
-description: A real Monaco editor in the browser for any file in a worktree, with syntax highlighting, JSON and TOML help, Markdown preview, path search, diffs against HEAD, and open-in-local-editor.
+description: A real Monaco editor in the browser for any file in a worktree, with syntax highlighting, JSON and TOML help, Markdown and SVG previews, image viewing, path search, diffs against HEAD, and open-in-local-editor.
 group: Web UI
 order: 62
 ---
@@ -30,9 +30,14 @@ a real keyboard.
 
 The overlay is two panes. On the left, a search box, a header shortcut to create a
 file at the worktree root, and a file tree. On the right, the file itself: the
-editor, a diff view, or a Markdown preview, depending on the toggles in the header.
+editor, a diff view, or a rendered preview, depending on the toggles in the header.
 The header also carries the file path, a dirty dot when you have unsaved edits, a
 read-only badge where it applies, and **Save** and **Close**.
+
+The explorer pane is yours to shape: drag the divider to resize it, or collapse it
+entirely with the toggle at the left end of the header when you want the whole
+width for the file. Your width and collapsed/expanded choice are remembered in the
+browser, so the editor reopens the way you left it.
 
 Save with the button or with `Ctrl+S` / `Cmd+S`. A toast confirms the write.
 
@@ -142,13 +147,24 @@ This is a deliberately trimmed Monaco: highlighting and JSON validation, but no
 heavyweight IntelliSense or cross-file diagnostics. It is a fast, honest text
 editor with great highlighting, not a full IDE.
 
-## Markdown preview
+## Markdown and SVG preview
 
 For Markdown files (`.md`, `.markdown`, and friends) a **Preview / Edit** toggle
 renders the current buffer, unsaved edits included, so you can check how a README
 reads without saving first. It handles GitHub-flavored Markdown, hides a YAML
 frontmatter block, and rewrites relative image paths so they load from the
 worktree.
+
+SVG files get the same treatment: they open in the editor as text, and the same
+toggle renders the drawing from whatever is in the buffer right now, saved or not,
+so you can tweak a path and see the shape move before committing to it.
+
+## Images
+
+Image files (PNG, JPEG, GIF, WebP, and the rest) are not text, so they skip the
+editor entirely and open as the picture itself, centered on the right, with the
+path underneath. There is nothing to save and no preview toggle to press; it is
+simply the fastest way to check what an agent just drew into the worktree.
 
 ## Diffs against HEAD
 
