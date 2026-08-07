@@ -176,6 +176,20 @@ pub enum EngineRequest {
     /// ITS exact new session instead of a racy set-difference. `None` while the
     /// create is still in flight or the entry has expired.
     CreatedSessionForOp(String, oneshot::Sender<Option<String>>),
+    /// Manually attach (pin) a pull request to a session from a raw typed
+    /// reference (`PUT /api/v1/sessions/:id/pull-request`). Dispatches
+    /// [`dux_core::engine::Engine::dispatch_attach_pull_request`], which mints
+    /// the ONE keyed op spanning resolve and attach and spawns the gh lookup
+    /// worker; the reply carries the op id. The pending busy is broadcast on
+    /// the status stream by the handler arm (scoped like the `ApplyWire` arm's
+    /// statuses), and the final is resolved engine-side in
+    /// `process_worker_event`, so it rides the normal status stream.
+    AttachPullRequest(
+        String,
+        String,
+        StatusScope,
+        oneshot::Sender<Result<String, String>>,
+    ),
     /// Bump and return the next monotonic changed-files revision for a session
     /// (one actor round-trip over the engine's single SQLite connection). The
     /// `ChangesService` calls this at each detected change; the counter is
@@ -959,6 +973,25 @@ impl EngineHandle {
         rx.await.ok()
     }
 
+    /// Manually attach (pin) a pull request to a session from the raw typed
+    /// reference. Returns the keyed status op id the REST handler echoes in its
+    /// `202` body; the outcome rides the status toast stream. A synchronous
+    /// refusal (gh unavailable, empty reference, unknown session) is `Err` with
+    /// the engine's message.
+    pub async fn attach_pull_request(
+        &self,
+        session_id: String,
+        raw: String,
+        scope: StatusScope,
+    ) -> Result<String, String> {
+        let (tx, rx) = oneshot::channel();
+        self.req_tx
+            .send(EngineRequest::AttachPullRequest(session_id, raw, scope, tx))
+            .await
+            .map_err(|_| "engine thread gone".to_string())?;
+        rx.await.map_err(|_| "engine reply dropped".to_string())?
+    }
+
     /// Resolve the session id produced by create op `op_id` (returned in
     /// `WireCommandOutcome.created_op_id`). `None` while the create is still in
     /// flight, the entry has expired, or the engine thread is gone.
@@ -1333,6 +1366,12 @@ fn request_mutates_spine(req: &EngineRequest) -> bool {
         | EngineRequest::CreateProjectTerminal(..)
         | EngineRequest::CreateStandaloneTerminal(..)
         | EngineRequest::CreateAgentTab(..) => true,
+
+        // The attach dispatch itself only mints a pending status op and spawns
+        // the lookup worker, but the worker's result lands as an engine event
+        // that pins the PR onto the session view (`SessionView.pr`), so lean
+        // `true` per the asymmetry note above.
+        EngineRequest::AttachPullRequest(..) => true,
 
         // Writers of the per-tab activity/attention state that the spine
         // projects. `WritePty` calls `note_pty_input`, which is what lights the
@@ -2250,6 +2289,31 @@ fn handle_request(
         }
         EngineRequest::EmitStatus(status) => {
             let _ = status_tx.send(status);
+        }
+        EngineRequest::AttachPullRequest(session_id, raw, origin, reply) => {
+            // Mirror the `ApplyWire` arm's origin discipline: the engine reads
+            // `current_origin` when it mints the keyed op (the pending busy AND
+            // the eventual final carry that scope), so set it for the duration
+            // of the dispatch and reset to `All` after.
+            engine.current_origin = origin;
+            let res = engine.dispatch_attach_pull_request(&session_id, &raw);
+            engine.current_origin = StatusScope::All;
+            let res = match res {
+                Ok((op_id, pending)) => {
+                    // Broadcast the pending busy so the toast actually reaches
+                    // clients: unlike a wire command there is no outcome.status
+                    // carrying it, so route it through the same shared stream
+                    // the `ApplyWire` arm uses.
+                    for status in dux_core::wire::wire_statuses_from_reaction(
+                        &EventReaction::Status(pending),
+                    ) {
+                        let _ = status_tx.send(status);
+                    }
+                    Ok(op_id)
+                }
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = reply.send(res);
         }
         // SubscribePty is handled inline in the loop (it needs `&mut pending`).
         EngineRequest::SubscribePty(_, _) => unreachable!("SubscribePty handled in the loop"),
