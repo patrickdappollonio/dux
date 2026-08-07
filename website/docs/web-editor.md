@@ -39,10 +39,11 @@ long editing sessions still want a real keyboard.
 The address bar names the editor and the file you are looking at, so the
 position survives anything a URL survives: a hard refresh reopens the editor on
 the same file (and view), a bookmark or a shared link lands there directly, and
-the standalone tab is just another address. Switching files inside the editor
-updates the address in place rather than piling up history entries, so one
-press of Back closes the editor and returns you to the workspace. Closing it
-that way loses nothing — see below.
+the standalone tab is just another address. Opening the editor is exactly one
+step in your browser history, wherever you opened it from, and switching files
+inside it updates the address in place rather than piling up entries — so one
+press of Back closes the editor and returns you to whatever you were looking
+at before it opened. Closing it that way loses nothing — see below.
 
 ## The layout
 
