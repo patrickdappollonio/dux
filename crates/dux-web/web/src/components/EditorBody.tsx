@@ -929,8 +929,17 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
 
   return (
     <>
-      {/* Header: open file path, view toggle, dirty indicator, actions. */}
-      <div className="flex items-center gap-2 border-b px-3 py-2">
+      {/* Header: open file path, view toggle, dirty indicator, actions.
+          min-h-12.75 (51px) floors the row at its tallest control, the
+          File/Diff segmented group, an h-7 (28px) button inside p-0.5 (4px)
+          + border (2px) = 34px, plus the row's py-2 (16px) and its own
+          border-b (1px; min-h is border-box), so the bar keeps one height
+          as controls come and go instead of jumping 6px whenever a file
+          opens or closes (measured 51px with a file open, 45px without,
+          before the floor). The mobile toggle (max-md:size-10, 40px)
+          exceeds the floor on phones, where the toggle always renders, so
+          the row is constant there too. */}
+      <div className="flex min-h-12.75 items-center gap-2 border-b px-3 py-2">
         {/* Explorer collapse/expand toggle: lives in the header, OUTSIDE the
             panel it hides, so it stays reachable while collapsed. */}
         <SimpleTooltip

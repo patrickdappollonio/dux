@@ -552,6 +552,53 @@ describe("editor panel units and scroll surfaces", () => {
   })
 })
 
+// The header row must not change height as its controls come and go: the
+// File/Diff segmented control (an h-7 button inside p-0.5 + border) is the
+// tallest thing the row can hold, and without a floor the row shrinks when no
+// file is open and jumps when one opens. jsdom cannot measure pixels, so what
+// is pinned is the min-h floor class; the pixel truth is the screenshot pass.
+describe("editor header keeps a stable height", () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    installBootStubs()
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.unstubAllGlobals()
+  })
+
+  async function headerRow(): Promise<HTMLElement> {
+    const btn = await screen.findByRole("button", {
+      name: /the file explorer/i,
+    })
+    const row = btn.closest("div.border-b") as HTMLElement
+    expect(row).toBeTruthy()
+    return row
+  }
+
+  it("carries the min-h floor with a file open (Save present)", async () => {
+    await mountWithTab(PATH)
+    await screen.findByRole("button", { name: /save/i })
+    const row = await headerRow()
+    expect(row.className).toContain("min-h-12.75")
+  })
+
+  it("carries the same floor with no file open (Save absent)", async () => {
+    const { EditorOverlay } = await import("@/components/EditorOverlay")
+    const { getSnapshot } = await import("@/lib/store")
+    mockState = {
+      ...getSnapshot(),
+      editorTarget: { sessionId: SESSION, initialPath: null },
+      editorTabs: { [SESSION]: { tabs: [], activeId: null } },
+    } as DuxState
+    render(<EditorOverlay />)
+    expect(screen.queryByRole("button", { name: /save/i })).toBeNull()
+    const row = await headerRow()
+    expect(row.className).toContain("min-h-12.75")
+  })
+})
+
 // (a) the explorer is a collapsible resizable panel with an explicit header
 // toggle. Layout drag behavior belongs to the preview-env visual pass; what
 // is pinned here is that the toggle exists, meets the touch floor, and the
