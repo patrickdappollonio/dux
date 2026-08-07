@@ -1130,6 +1130,40 @@ describe("the editor rides the URL", () => {
     expect(mod.getSnapshot().editorTarget).toBeNull()
   })
 
+  it("opening from HOME is one push, one position: Back returns straight home", async () => {
+    // The selection move and the editor open are ONE navigation the user
+    // made, so they must land as one entry. Two pushes would bury an agent
+    // screen the user never visited between home and the editor.
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
+    const depth = index
+    mod.openEditor("s1", "a.ts")
+    expect(mod.getSnapshot().selectedSessionId).toBe("s1")
+    expect(loc.hash).toBe("#/agent/s1/editor/file/a.ts")
+    expect(index).toBe(depth + 1)
+    history.back()
+    expect(loc.hash).toBe("")
+    expect(mod.getSnapshot().mobileScreen).toBe("home")
+    expect(mod.getSnapshot().editorTarget).toBeNull()
+  })
+
+  it("opening from ANOTHER AGENT is one push: Back returns to that agent", async () => {
+    const mod = await loadStore("", [
+      { id: "s1", project_id: "p1" },
+      { id: "s2", project_id: "p1" },
+    ])
+    mod.selectSession("s2")
+    const depth = index
+    mod.openEditor("s1", "a.ts")
+    expect(mod.getSnapshot().selectedSessionId).toBe("s1")
+    expect(loc.hash).toBe("#/agent/s1/editor/file/a.ts")
+    expect(index).toBe(depth + 1)
+    expect(entries).not.toContain("#/agent/s1")
+    history.back()
+    expect(loc.hash).toBe("#/agent/s2")
+    expect(mod.getSnapshot().selectedSessionId).toBe("s2")
+    expect(mod.getSnapshot().editorTarget).toBeNull()
+  })
+
   it("an in-editor file switch replaces the entry rather than piling up", async () => {
     const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
     mod.selectSession("s1")
@@ -1221,6 +1255,28 @@ describe("the editor rides the URL", () => {
     expect(loc.hash).toBe("#/agent/s2")
     expect(index).toBe(depth)
     expect(entries).not.toContain("#/agent/s1/editor/file/a.ts")
+  })
+
+  it("closes the editor when the selection moves to a different session", async () => {
+    // A non-UI caller can move the selection while the editor is open. The
+    // hash must always name the VISIBLE position, so the editor closes in
+    // the same commit rather than being merely hidden from the URL while
+    // its state lingers.
+    const mod = await loadStore("", [
+      { id: "s1", project_id: "p1" },
+      { id: "s2", project_id: "p1" },
+    ])
+    mod.openEditor("s1", "a.ts")
+    expect(mod.getSnapshot().editorRoute).not.toBeNull()
+    mod.selectSession("s2")
+    expect(mod.getSnapshot().editorTarget).toBeNull()
+    expect(mod.getSnapshot().editorRoute).toBeNull()
+    expect(loc.hash).toBe("#/agent/s2")
+    // Re-selecting the editor's own session keeps it open (the guard is
+    // about a DIFFERENT session, not any selection at all).
+    mod.openEditor("s2", "b.ts")
+    mod.selectSession("s2")
+    expect(mod.getSnapshot().editorRoute).not.toBeNull()
   })
 
   it("boots the standalone editor surface from its own address", async () => {

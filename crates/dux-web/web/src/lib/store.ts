@@ -2760,21 +2760,42 @@ function screenPatch(changes?: boolean): { mobileScreen: MobileScreen } | object
   return changes ? { mobileScreen: "changes" as const } : {}
 }
 
+// The editor half of a selection commit. A selection that moves to a session
+// DIFFERENT from the open editor's CLOSES the editor in the same state patch:
+// the hash must always name the VISIBLE position, and the old behavior of
+// merely dropping the editor suffix from the URL (see `currentRoute`'s
+// session guard) while the editor state lingered left the two disagreeing.
+// Closing also drops the standalone surface flag, per the rule that every
+// editor clear outside popstate does (`clearEditorStateSilently`). Selecting
+// the editor's OWN session (or the same session's tab/terminal) keeps it
+// open. `openEditor` overrides this patch with its own open patch, which is
+// how its selection move and its editor open land as one commit.
+function editorSelectionPatch(sessionId: string | null): Partial<DuxState> {
+  const editorSession =
+    state.editorRoute?.sessionId ?? state.editorTarget?.sessionId ?? null
+  if (editorSession === null || editorSession === sessionId) return {}
+  return { editorTarget: null, editorRoute: null, standaloneEditor: false }
+}
+
 // `selectSession` with control over how the URL is written. `urlMode:
 // "replace"` is for a move the user did not make: a restore, or the destination
 // chosen when what they were looking at vanished. `changes` restores the changes
-// screen for a route that names it.
+// screen for a route that names it. `extra` is a state patch committed IN THE
+// SAME setState as the selection (and therefore serialized by the same, single
+// `syncUrl` write); its only caller is `openEditor`, whose selection move and
+// editor open must land as one history entry, one real position.
 function selectSessionRoute(
   id: string | null,
   urlMode?: "replace",
   changes?: boolean,
+  extra?: Partial<DuxState>,
 ): void {
   // Any deliberate selection (to an agent OR to null/home) means the user took
   // control. See `ejectSelectionForReconnect` below for the one carve-out.
   lastClearWasReconnectEject = false
   const prev = state.selectedSessionId
   if (id === null) {
-    clearSelection(urlMode)
+    clearSelection(urlMode, extra)
     return
   }
   const session = state.spine?.sessions.find((s) => s.id === id)
@@ -2783,7 +2804,7 @@ function selectSessionRoute(
     // A remembered extra tab is still live: select it directly so the
     // hash/changes wiring and the persistence write match an explicit tab
     // click exactly.
-    selectTab(id, focusedTab, { urlMode, changes })
+    selectTab(id, focusedTab, { urlMode, changes, extra })
     return
   }
   setState({
@@ -2794,7 +2815,9 @@ function selectSessionRoute(
     // the loading window so the pane shows a spinner, not the previous session's
     // files.
     changes: prev === id ? state.changes : loadingChanges(id),
+    ...editorSelectionPatch(id),
     ...screenPatch(changes),
+    ...(extra ?? {}),
   })
   // Move the per-session changed-files subscription, THEN fetch — subscribing
   // before the GET means an invalidation that races the fetch is never missed.
@@ -2805,13 +2828,16 @@ function selectSessionRoute(
 
 // Drop the focused target and land on home. The target is cleared FIRST so any
 // synchronous re-render shows the fallback; the URL is written after, and the
-// screen follows the empty target (see `setState`).
-function clearSelection(urlMode?: "replace"): void {
+// screen follows the empty target (see `setState`). Home names no editor, so
+// an open one closes in the same commit (`editorSelectionPatch`).
+function clearSelection(urlMode?: "replace", extra?: Partial<DuxState>): void {
   const prev = state.selectedSessionId
   setState({
     selectedTarget: null,
     selectedSessionId: null,
     changes: emptyChanges(),
+    ...editorSelectionPatch(null),
+    ...(extra ?? {}),
   })
   // Drop the previous session's changed-files subscription; there is no global
   // watch to clear, so the cross-client clobber is gone by construction.
@@ -2848,14 +2874,24 @@ export function ejectSelectionForReconnect(): void {
 export function selectTab(
   sessionId: string,
   tabId: string,
-  opts?: { persist?: boolean; urlMode?: "replace"; changes?: boolean },
+  opts?: {
+    persist?: boolean
+    urlMode?: "replace"
+    changes?: boolean
+    // Same contract as `selectSessionRoute`'s: a patch committed in the same
+    // setState, threaded through when a remembered tab diverts an
+    // `openEditor` selection here.
+    extra?: Partial<DuxState>
+  },
 ): void {
   const prev = state.selectedSessionId
   setState({
     selectedTarget: { kind: "agent", sessionId, tabId },
     selectedSessionId: sessionId,
     changes: prev === sessionId ? state.changes : loadingChanges(sessionId),
+    ...editorSelectionPatch(sessionId),
     ...screenPatch(opts?.changes),
+    ...(opts?.extra ?? {}),
   })
   switchChangesSubscription(prev, sessionId)
   syncUrl(opts?.urlMode)
@@ -2924,6 +2960,9 @@ export function selectTerminal(
         : prev === sessionId
           ? state.changes
           : loadingChanges(sessionId),
+    // A terminal of the editor's own session keeps the editor; any other
+    // owner closes it, same rule as an agent selection.
+    ...editorSelectionPatch(sessionId),
     ...screenPatch(opts?.changes),
   })
   // The changed files belong to the SESSION, so subscribe/fetch the parent
@@ -3228,7 +3267,6 @@ export function openEditor(
   mode: EditorViewMode = "file",
   opts?: { urlMode?: "replace" },
 ): void {
-  if (state.selectedSessionId !== sessionId) selectSession(sessionId)
   // An image path never opens in diff mode: there is no text to diff, so a
   // changed image clicked in the Changes pane (which asks for "diff") must
   // show the picture rather than dead-end on the binary-diff refusal. This
@@ -3236,22 +3274,39 @@ export function openEditor(
   // keeps the image arm above the diff arm as defense in depth.
   const effectiveMode: EditorViewMode =
     initialPath !== null && isImagePreviewPath(initialPath) ? "file" : mode
-  setState({
+  const editorPatch: Partial<DuxState> = {
     editorTarget: { sessionId, initialPath, initialMode: effectiveMode },
     editorRoute: { sessionId, mode: effectiveMode, path: initialPath },
-  })
+  }
+  // Tab seeding first: it touches only `editorTabs`, which the URL never
+  // serializes, so ordering it before the route commit changes nothing the
+  // history sees.
   if (initialPath !== null)
     editorOpenFile(sessionId, initialPath, { mode: effectiveMode })
   // Opening the editor is a move to a new position, so by default it PUSHES
-  // (routePushKey changes on the editor-open bit) and one Back closes it.
-  // `urlMode: "replace"` is for the restore paths, exactly as on the
-  // selection functions.
+  // (routePushKey changes on the editor-open bit) and one Back closes it and
+  // lands wherever the user opened it FROM. When the session was not already
+  // selected, the selection move and the editor open are still ONE navigation
+  // the user made, so they commit as ONE setState (the `extra` patch) and one
+  // `syncUrl` — never two pushes with a never-visited agent screen buried
+  // between. `urlMode: "replace"` is for the restore paths, exactly as on
+  // the selection functions.
+  if (state.selectedSessionId !== sessionId) {
+    selectSessionRoute(sessionId, opts?.urlMode, undefined, editorPatch)
+    return
+  }
+  setState(editorPatch)
   syncUrl(opts?.urlMode)
 }
 
 export function closeEditor(opts?: { urlMode?: "replace" }): void {
   if (state.editorTarget === null && state.editorRoute === null) return
-  setState({ editorTarget: null, editorRoute: null })
+  // The surface flag drops with the editor state, the same rule every
+  // non-popstate clear follows (see `clearEditorStateSilently`): a standalone
+  // shell kept up over a closed editor is the boot spinner forever. Unreachable
+  // from the standalone UI today (its body hides the Close button), so this is
+  // defense in depth.
+  setState({ editorTarget: null, editorRoute: null, standaloneEditor: false })
   // Closing is a move too (Esc, the Close button): the push-key drops its
   // editor bit, so this pushes the closed position like any other navigation
   // between two real places. The popstate path never comes through here (see
