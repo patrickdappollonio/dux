@@ -179,6 +179,33 @@ describe("InsetHeader show-Changes button", () => {
       screen.queryByRole("button", { name: /show changes pane/i }),
     ).toBeNull()
   })
+
+  it("does not render when the saved preference shows the pane", () => {
+    // The common loaded state: config says visible, no override in play.
+    mockState = {
+      ...stateFor("main", "main"),
+      bootstrap: { show_changes_pane: true },
+    } as unknown as DuxState
+    render(<InsetHeader />)
+    expect(
+      screen.queryByRole("button", { name: /show changes pane/i }),
+    ).toBeNull()
+  })
+
+  it("does not render while the optimistic show override covers a stale hidden bootstrap", () => {
+    // The moment right after the click: the persist is in flight, the
+    // bootstrap still says hidden, and the optimistic override already says
+    // shown. The pane is on screen, so the button must already be gone.
+    mockState = {
+      ...stateFor("main", "main"),
+      bootstrap: { show_changes_pane: false },
+      changesPaneOverride: true,
+    } as unknown as DuxState
+    render(<InsetHeader />)
+    expect(
+      screen.queryByRole("button", { name: /show changes pane/i }),
+    ).toBeNull()
+  })
 })
 
 describe("InsetHeader branch drift cue", () => {

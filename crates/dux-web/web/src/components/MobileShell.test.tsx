@@ -458,3 +458,23 @@ describe("MobileShell not-found screen", () => {
     expect(screen.queryByText("agent sessions")).toBeNull()
   })
 })
+
+describe("MobileShell Changes-pane show button absence", () => {
+  it("renders no 'Show Changes pane' button even when the preference hides the pane", () => {
+    // The reopen button is a desktop-only affordance (InsetHeader mounts only
+    // in DesktopShell); the mobile shell reaches Changes through its own
+    // screen, so a hidden desktop pane must not grow a stray control here.
+    mockState = makeState({
+      spine: makeSessionSpine(1),
+      bootstrap: {
+        title: "dux #1",
+        dux_version: "v9.9.9",
+        show_changes_pane: false,
+      },
+    })
+    render(<MobileShell />)
+    expect(
+      screen.queryByRole("button", { name: /show changes pane/i }),
+    ).toBeNull()
+  })
+})
