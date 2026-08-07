@@ -1,0 +1,33 @@
+# Isolated dux preview stack. Brought up by ./up.sh, which builds the dux binary
+# on the host and exports DUX_BIN before invoking compose.
+#
+# Isolation: the binary is the ONLY thing shared with the host, and read-only.
+# Config + sessions live in the dux-data volume (DUX_HOME=/data/dux); repos live
+# in dux-repos. Nothing here can reach the host's ~/.config/dux. The port is
+# published on loopback only.
+services:
+  dux:
+    build:
+      context: .
+      args:
+        BASE_IMAGE: ${BASE_IMAGE:-archlinux:latest}
+    image: dux-preview
+    container_name: dux-preview
+    ports:
+      - "127.0.0.1:${DUX_PORT:-8790}:8790"
+    environment:
+      - DUX_PORT=8790
+    volumes:
+      # Host-built binary, read-only. Rebuild on the host + `docker compose
+      # restart dux` to pick up new code (a new inode needs a container restart).
+      - ${DUX_BIN:?set DUX_BIN to the built dux binary (up.sh does this)}:/usr/local/bin/dux:ro
+      - dux-data:/data
+      - dux-repos:/repos
+    # A PTY-heavy app; the defaults are enough (Docker provides /dev/ptmx), but
+    # give it a tty/stdin so any diagnostic that expects one behaves.
+    tty: true
+    stdin_open: true
+
+volumes:
+  dux-data:
+  dux-repos:

@@ -246,6 +246,15 @@ Ask for a smoke test rather than assuming one: `cargo run` starts the TUI, and
 `cargo run -- server` starts the web server. Both bind the single-instance lock in
 your dux config directory, so only one can run at a time against a given config.
 
+For inspecting the **web UI** specifically, prefer the isolated preview
+container in [`tools/preview-env/`](tools/preview-env/README.md): it runs a
+host-built binary against its own config and sessions inside Docker, ships a
+fake streaming provider so no agent CLI has to be installed or authenticated,
+and can drive scripted journeys and capture screenshots. That matters most
+when you (or an agent working for you) already have a real dux instance
+running: a second directly-run instance contends for the same config
+directory, and killing the wrong dux process can take down a live session.
+
 ## A few house rules worth knowing up front
 
 - **Commit messages are plain sentences.** No `feat:`/`fix:`/`chore:` prefixes and

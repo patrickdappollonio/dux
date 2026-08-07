@@ -1,0 +1,8 @@
+{
+  "name": "dux-preview-shot",
+  "private": true,
+  "description": "Host-side screenshot tool for the dux preview container",
+  "dependencies": {
+    "puppeteer-core": "^23.0.0"
+  }
+}
