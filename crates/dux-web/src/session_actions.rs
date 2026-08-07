@@ -655,6 +655,15 @@ async fn attach_pull_request(
     if !id_within_bound(&id) {
         return unknown_session();
     }
+    // Existence first, before even reading the body (the neighbors' ordering):
+    // the engine's dispatch checks the gh gate BEFORE its session lookup, so an
+    // unknown id would otherwise surface as the gh message (a 400) instead of
+    // the truthful 404.
+    match state.engine.session(id.clone()).await {
+        None => return engine_unavailable(),
+        Some(None) => return unknown_session(),
+        Some(Some(_)) => {}
+    }
     // Parse the body ourselves so a malformed shape is a clean 400 (axum's
     // typed `Json` rejection would be a 422), matching the create handler.
     let body: AttachPullRequestBody = match serde_json::from_value(raw) {
@@ -663,14 +672,6 @@ async fn attach_pull_request(
             return (StatusCode::BAD_REQUEST, format!("invalid attach body: {e}")).into_response();
         }
     };
-    // Existence first: the engine's dispatch checks the gh gate BEFORE its
-    // session lookup, so an unknown id would otherwise surface as the gh
-    // message (a 400) instead of the truthful 404.
-    match state.engine.session(id.clone()).await {
-        None => return engine_unavailable(),
-        Some(None) => return unknown_session(),
-        Some(Some(_)) => {}
-    }
     match state
         .engine
         .attach_pull_request(
@@ -1016,11 +1017,22 @@ mod tests {
         let _ = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     }
 
-    /// A body without the `pr` field is a clean 400 (the manual parse), never
-    /// a 422 or a dispatch.
+    /// A body without the `pr` field on a REAL session is a clean 400 (the
+    /// manual parse), never a 422 or a dispatch. On a ghost id the existence
+    /// check runs first, so even a malformed body gets the truthful 404.
     #[tokio::test]
     async fn attach_pull_request_400_for_malformed_body() {
-        let (_tmp, app) = router_no_auth();
+        let (_tmp, app) = router_with_seeded_session("s1");
+        let resp = send_json(
+            &app,
+            "PUT",
+            "/api/v1/sessions/s1/pull-request",
+            Some(serde_json::json!({ "reference": "#12" })),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let _ = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+
         let resp = send_json(
             &app,
             "PUT",
@@ -1028,18 +1040,99 @@ mod tests {
             Some(serde_json::json!({ "reference": "#12" })),
         )
         .await;
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-        let _ = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "existence is checked before the body is read"
+        );
+    }
+
+    /// Boot a router whose engine has the seeded session, its project (at a
+    /// plain NON-GitHub directory), and gh reported available, without ever
+    /// touching a real gh: the gate fields are preset before the actor spawns,
+    /// and the boot probe runs against the stand-in gh script. The attach
+    /// worker then resolves the project's remote (none: not even a git repo),
+    /// refuses the bare number BEFORE any `gh pr view`, and reports through
+    /// the keyed op, so the happy HTTP path is testable with zero gh calls.
+    fn router_with_seeded_session_and_gh(id: &str) -> (TempDir, axum::Router) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = dux_core::config::DuxPaths {
+            root: tmp.path().to_path_buf(),
+            config_path: tmp.path().join("config.toml"),
+            sessions_db_path: tmp.path().join("sessions.sqlite3"),
+            worktrees_root: tmp.path().join("worktrees"),
+            lock_path: tmp.path().join("dux.lock"),
+        };
+        std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+        let project_dir = tmp.path().join("plain-project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(
+            &paths.config_path,
+            format!(
+                "[[projects]]\nid = \"p1\"\npath = \"{}\"\nname = \"Plain\"\n",
+                project_dir.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        let store = dux_core::storage::SessionStore::open(&paths.sessions_db_path).unwrap();
+        let now = chrono::Utc::now();
+        store
+            .upsert_session(&dux_core::model::AgentSession {
+                id: id.to_string(),
+                project_id: "p1".to_string(),
+                project_path: None,
+                provider: dux_core::model::ProviderKind::new("claude"),
+                source_branch: "main".to_string(),
+                branch_name: "feat".to_string(),
+                initial_branch: "feat".to_string(),
+                worktree_path: project_dir.to_string_lossy().to_string(),
+                title: Some("seeded".to_string()),
+                started_providers: Vec::new(),
+                desired_running: false,
+                auto_reopen_enabled: false,
+                status: dux_core::model::SessionStatus::Detached,
+                created_at: now,
+                updated_at: now,
+                last_focused_tab: None,
+            })
+            .unwrap();
+        drop(store);
+        let mut engine = crate::bootstrap::bootstrap_engine(&paths).unwrap();
+        // The gate the dispatch checks, preset so the PUT cannot race the boot
+        // probe; the probe itself is pointed at the stand-in gh so enabling
+        // the integration never runs a real gh.
+        engine.github_integration_enabled = true;
+        engine.gh_status = dux_core::model::GhStatus::Available;
+        engine.gh_probe.program =
+            dux_core::gh::probe_test_support::stand_in_gh_serving(tmp.path(), &["github.com"])
+                .into();
+        let (handle, _join) = crate::engine_actor::spawn_engine_thread(engine);
+        (tmp, crate::server::router(handle))
+    }
+
+    /// The happy HTTP path: a PUT on a real session with gh available replies
+    /// `202 Accepted` immediately (no blocking on the lookup) with the keyed
+    /// status op id in the body, the codebase's documented deferred shape.
+    #[tokio::test]
+    async fn attach_pull_request_202_carries_the_op_id() {
+        let (_tmp, app) = router_with_seeded_session_and_gh("s1");
+        let resp = send_json(
+            &app,
+            "PUT",
+            "/api/v1/sessions/s1/pull-request",
+            Some(serde_json::json!({ "pr": "#42" })),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let op_id = json["op_id"].as_str().expect("op_id in the 202 body");
+        assert!(op_id.starts_with("op-"), "got {op_id:?}");
     }
 
     /// With a real session but no usable gh (the test engine never probes gh,
     /// so its status stays Unknown), the dispatch refuses synchronously with a
-    /// message naming gh, mapped to 400. This is also why the 202 + op_id
-    /// happy path is NOT tested here: making gh "available" would let the
-    /// dispatch spawn the real gh lookup worker, and tests never invoke gh.
-    /// The 202 contract (one keyed op spanning resolve and attach) is pinned
-    /// core-side by `dispatch_attach_pull_request_mints_one_keyed_op_...` in
-    /// dux-core's wire tests.
+    /// message naming gh, mapped to 400.
     #[tokio::test]
     async fn attach_pull_request_400_mentions_gh_when_unavailable() {
         let (_tmp, app) = router_with_seeded_session("s1");
