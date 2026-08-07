@@ -261,17 +261,18 @@ describe("settingsDescriptors", () => {
     expect(byKey["ui.auto_reopen_agents"]).toBe(false)
   })
 
-  // Escape-hatch truth: with the compose bar off and both bars hidden, no
-  // on-screen restore exists on the terminal screens, so each mobile-bar
-  // description must name BOTH restore routes (the compose bar's show-bars
-  // button and this Preferences dialog) rather than leaving the user to
-  // rediscover them.
+  // Escape-hatch truth: each mobile-bar description must name BOTH restore
+  // routes (the show-bars button that renders below the terminal — inside the
+  // compose bar when it is on, in its own minimal row when it is off — and
+  // this Preferences dialog) rather than leaving the user to rediscover them.
+  // Deliberately NOT "the compose bar's button": that wording was false with
+  // the compose bar disabled.
   it("both mobile-bar descriptions name the restore routes", () => {
     for (const key of ["ui.mobile_top_bar", "ui.mobile_accessory_bar"]) {
       const d = allSettingDescriptors().find((x) => x.key === key)
       expect(d?.writeTarget, key).toBe("settings")
       expect(d?.default, key).toBe(true)
-      expect(d?.description.toLowerCase(), key).toContain("compose bar")
+      expect(d?.description, key).toContain("below the terminal")
       expect(d?.description, key).toContain("Preferences")
     }
   })

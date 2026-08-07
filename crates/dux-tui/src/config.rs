@@ -419,14 +419,14 @@ fn config_schema() -> Vec<ConfigEntry> {
         ConfigEntry::Field {
             key: "mobile_top_bar",
             comment: Some(CommentSource::Static(
-                "# Web UI only: on a phone, show the terminal screen's top bar (the back\n# chevron, branch crumb and actions, plus the agent tab strip below it).\n# Set to false to hide it and give those rows back to the terminal. Bring\n# hidden bars back with the compose bar's show-bars button, or from the\n# web UI's Preferences dialog. The hub and Changes screens are unaffected.",
+                "# Web UI only: on a phone, show the terminal screen's top bar (the back\n# chevron, branch crumb and actions, plus the agent tab strip below it).\n# Set to false to hide it and give those rows back to the terminal. Bring\n# hidden bars back with the show-bars button below the terminal, or from\n# the web UI's Preferences dialog. The hub and Changes screens are unaffected.",
             )),
             value_fn: |c| FieldValue::Bool(c.ui.mobile_top_bar),
         },
         ConfigEntry::Field {
             key: "mobile_accessory_bar",
             comment: Some(CommentSource::Static(
-                "# Web UI only: on a phone, show the terminal-keys bar (Esc, Tab, Ctrl,\n# Alt, the arrows and paging keys) above the compose box. Set to false to\n# hide it and give those rows back to the terminal. Bring hidden bars back\n# with the compose bar's show-bars button, or from the web UI's\n# Preferences dialog.",
+                "# Web UI only: on a phone, show the terminal-keys bar (Esc, Tab, Ctrl,\n# Alt, the arrows and paging keys) above the compose box. Set to false to\n# hide it and give those rows back to the terminal. Bring hidden bars back\n# with the show-bars button below the terminal, or from the web UI's\n# Preferences dialog.",
             )),
             value_fn: |c| FieldValue::Bool(c.ui.mobile_accessory_bar),
         },

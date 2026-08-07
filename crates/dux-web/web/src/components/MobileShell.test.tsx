@@ -509,8 +509,11 @@ describe("MobileShell hideable top bar (ui.mobile_top_bar)", () => {
     expect(screen.queryByLabelText("Back")).toBeNull()
   })
 
-  it("hides the agentless terminal screen's header through the same preference", () => {
-    mockState = terminalState({
+  // The agentless (project/standalone) terminal screens share the same
+  // preference; one state builder serves the hidden test and its positive
+  // control so the two can only ever differ in the preference itself.
+  function agentlessState(bootstrap: Record<string, unknown>): DuxState {
+    return terminalState({
       spine: {
         projects: [
           { id: "p1", name: "Repo", path: "/tmp/p1", default_provider: "claude" },
@@ -535,15 +538,43 @@ describe("MobileShell hideable top bar (ui.mobile_top_bar)", () => {
         title: "dux",
         dux_version: "v1",
         available_providers: ["claude"],
-        mobile_top_bar: false,
+        ...bootstrap,
       },
     })
+  }
+
+  it("shows the agentless terminal screen's header while the preference is on (positive control)", () => {
+    mockState = agentlessState({ mobile_top_bar: true })
+    render(<MobileShell />)
+    expect(screen.getByLabelText("Back")).toBeTruthy()
+    expect(screen.getByText("Repo")).toBeTruthy()
+  })
+
+  it("hides the agentless terminal screen's header through the same preference", () => {
+    mockState = agentlessState({ mobile_top_bar: false })
     render(<MobileShell />)
     expect(screen.queryByLabelText("Back")).toBeNull()
   })
 })
 
 describe("MobileShell quick toggles in the terminal-screen ⋯ menu", () => {
+  // The toggles are gated on `context === "terminal" && isMobile`, and
+  // `useIsMobile` reads `window.innerWidth`, so these tests shrink it below
+  // the 768px breakpoint (mirroring the TerminalPane compose-bar tests).
+  const desktopWidth = window.innerWidth
+  beforeEach(() => {
+    Object.defineProperty(window, "innerWidth", {
+      value: 500,
+      configurable: true,
+    })
+  })
+  afterEach(() => {
+    Object.defineProperty(window, "innerWidth", {
+      value: desktopWidth,
+      configurable: true,
+    })
+  })
+
   function terminalState(overrides: Record<string, unknown> = {}): DuxState {
     return makeState({
       spine: makeSessionSpine(1),
@@ -603,6 +634,38 @@ describe("MobileShell quick toggles in the terminal-screen ⋯ menu", () => {
         body: JSON.stringify({ ui: { mobile_top_bar: false } }),
       }),
     )
+  })
+
+  it("renders no toggles at desktop width even in the terminal context", () => {
+    // The gate is context AND isMobile: the chrome these toggles hide is
+    // mobile-only, so a desktop viewport must never see them even when a
+    // terminal-context menu renders.
+    Object.defineProperty(window, "innerWidth", {
+      value: desktopWidth,
+      configurable: true,
+    })
+    mockState = terminalState()
+    render(<MobileShell />)
+    fireEvent.click(screen.getByLabelText("Session actions"))
+    expect(screen.getByText("New agent tab…")).toBeTruthy()
+    expect(screen.queryByText("Hide top bar")).toBeNull()
+    expect(screen.queryByText("Hide terminal keys")).toBeNull()
+  })
+
+  it("survives its own menu unmounting when Hide top bar removes the header", () => {
+    // Tapping "Hide top bar" hides the header that CONTAINS the open menu's
+    // trigger. Simulate the confirmed state landing (the mocked store state
+    // flips) and re-render: the menu and header must simply be gone, with no
+    // crash from unmounting under an open menu.
+    mockState = terminalState()
+    const view = render(<MobileShell />)
+    fireEvent.click(screen.getByLabelText("Session actions"))
+    fireEvent.click(screen.getByText("Hide top bar"))
+    mockState = terminalState({ mobileTopBarOverride: false })
+    view.rerender(<MobileShell />)
+    expect(screen.queryByLabelText("Session actions")).toBeNull()
+    expect(screen.queryByText("Hide top bar")).toBeNull()
+    expect(screen.queryByLabelText("Back")).toBeNull()
   })
 
   it("does not leak the toggles into the hub's row menus", () => {

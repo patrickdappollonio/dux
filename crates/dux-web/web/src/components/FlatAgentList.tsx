@@ -45,6 +45,7 @@ import {
 import type { CSSProperties } from "react"
 import { useState } from "react"
 
+import { useIsMobile } from "@/hooks/use-mobile"
 import { AgentVitalsTooltip } from "@/components/AgentVitalsTooltip"
 import { ProjectMenuItems } from "@/components/ProjectMenuItems"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
@@ -162,16 +163,20 @@ export function AgentActionsMenu({
   const defaultProvider = defaultProviderForSession(spine, session)
   const topBarVisible = mobileTopBarVisible(duxState)
   const accessoryBarVisible = mobileAccessoryBarVisible(duxState)
+  // The quick toggles need the viewport too, not just the context: the chrome
+  // they hide is mobile-only, so a desktop viewport must never offer them
+  // even when a terminal-context menu renders.
+  const isMobile = useIsMobile()
 
   return (
     <DropdownMenuGroup>
-      {context === "terminal" ? (
+      {context === "terminal" && isMobile ? (
         <>
           {/* Quick toggles for the two hideable mobile bars (`ui.mobile_top_bar`,
               `ui.mobile_accessory_bar`). Neutral color and no trailing ellipsis:
               they act immediately (an optimistic override plus the generic
               settings PATCH), no dialog and nothing destructive. Restore lives
-              on the compose bar's show-bars button and in Preferences. */}
+              on the show-bars button below the terminal and in Preferences. */}
           <DropdownMenuItem
             onClick={() => void setMobileBarVisibility("top", !topBarVisible)}
           >

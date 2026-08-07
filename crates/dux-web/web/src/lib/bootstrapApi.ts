@@ -64,8 +64,8 @@ export interface Bootstrap {
   compose_bar?: boolean
   /** Mirrors `config.ui.mobile_top_bar`: whether the mobile terminal screens
    * show the top bar (the back/branch header plus the agent tab strip). A
-   * pure render gate; hidden bars are restored from the compose bar's
-   * show-bars button or the Preferences dialog. Older servers omit it, so
+   * pure render gate; hidden bars are restored from the
+   * show-bars button below the terminal or the Preferences dialog. Older servers omit it, so
    * consumers fall back to true. */
   mobile_top_bar?: boolean
   /** Mirrors `config.ui.mobile_accessory_bar`: whether the mobile terminal

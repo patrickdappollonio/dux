@@ -147,16 +147,7 @@ export function ComposeBar({
           opposite edge (bottom-aligned beside a grown multi-row textarea),
           and size-10 keeps the 40px touch-target floor. */}
       {showRestoreBars ? (
-        <SimpleTooltip content="Show hidden bars">
-          <Button
-            variant="ghost"
-            aria-label="Show hidden bars"
-            onClick={() => onRestoreBars?.()}
-            className="size-10 shrink-0 self-end"
-          >
-            <Eye />
-          </Button>
-        </SimpleTooltip>
+        <RestoreBarsButton onRestoreBars={() => onRestoreBars?.()} />
       ) : null}
       <textarea
         ref={taRef}
@@ -196,5 +187,31 @@ export function ComposeBar({
         <ArrowUp />
       </Button>
     </div>
+  )
+}
+
+// THE restore-bars button, extracted so the two surfaces that show it cannot
+// drift: the compose bar's leading slot (above) and TerminalPane's minimal
+// bottom row when the compose bar itself is off (the terminal screen must
+// never be chrome-free — the PWA ships standalone, with no browser Back
+// button to fall back on). `size-10` keeps the 40px touch-target floor;
+// `self-end` bottom-aligns it beside a grown multi-row textarea exactly as
+// Send does (inert in the single-child fallback row).
+export function RestoreBarsButton({
+  onRestoreBars,
+}: {
+  onRestoreBars: () => void
+}) {
+  return (
+    <SimpleTooltip content="Show hidden bars">
+      <Button
+        variant="ghost"
+        aria-label="Show hidden bars"
+        onClick={onRestoreBars}
+        className="size-10 shrink-0 self-end"
+      >
+        <Eye />
+      </Button>
+    </SimpleTooltip>
   )
 }

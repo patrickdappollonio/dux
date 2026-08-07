@@ -6,7 +6,7 @@ import { MonitorSmartphone } from "lucide-react"
 import { toast } from "sonner"
 import { AccessoryBar } from "@/components/AccessoryBar"
 import type { ScrollDir } from "@/components/AccessoryBar"
-import { ComposeBar } from "@/components/ComposeBar"
+import { ComposeBar, RestoreBarsButton } from "@/components/ComposeBar"
 import {
   COMPOSE_SUBMIT_DELAY_MS,
   composeSendTooLarge,
@@ -2268,6 +2268,18 @@ export function TerminalPane(props: TerminalPaneProps) {
               showRestoreBars={anyMobileBarHidden}
               onRestoreBars={() => void restoreMobileBars()}
             />
+          ) : anyMobileBarHidden ? (
+            // The compose bar is off AND a bar is hidden: without this the
+            // terminal screen would be completely chrome-free, and the app
+            // ships as a standalone PWA where no browser Back button exists.
+            // A minimal bottom row carries ONLY the same restore button the
+            // compose bar would (the shared RestoreBarsButton), so the way
+            // back is always one visible tap.
+            <div className="flex shrink-0 items-end gap-1.5 border-t bg-background px-1 py-1">
+              <RestoreBarsButton
+                onRestoreBars={() => void restoreMobileBars()}
+              />
+            </div>
           ) : null}
         </>
       ) : null}

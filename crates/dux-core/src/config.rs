@@ -713,15 +713,15 @@ pub struct UiConfig {
     /// Whether the web UI's mobile terminal screens show the top bar (the
     /// back-chevron header with the branch crumb and actions, plus the agent
     /// tab strip below it). Set to false to hide it and give those rows back
-    /// to the terminal. Hidden bars can be restored from the compose bar's
-    /// show-bars button or from the web UI's Preferences dialog. Web-only
-    /// behavior; the hub and Changes screens are unaffected.
+    /// to the terminal. Hidden bars can be restored from the show-bars
+    /// button below the terminal or from the web UI's Preferences dialog.
+    /// Web-only behavior; the hub and Changes screens are unaffected.
     pub mobile_top_bar: bool,
     /// Whether the web UI's mobile terminal screens show the terminal-keys
     /// accessory bar (Esc, Tab, Ctrl, Alt, the arrows and paging keys). Set
     /// to false to hide it and give those rows back to the terminal. Hidden
-    /// bars can be restored from the compose bar's show-bars button or from
-    /// the web UI's Preferences dialog. Web-only behavior.
+    /// bars can be restored from the show-bars button below the terminal or
+    /// from the web UI's Preferences dialog. Web-only behavior.
     pub mobile_accessory_bar: bool,
     /// Seconds the attention indicators stay visible after dux regains your
     /// attention, before the focused agent's needs-attention flag clears.

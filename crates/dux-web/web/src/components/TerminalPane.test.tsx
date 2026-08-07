@@ -842,3 +842,57 @@ describe("TerminalPane compose-bar restore button", () => {
     )
   })
 })
+
+// The escape hatch when the compose bar itself is off: the terminal screen
+// must never be chrome-free (the PWA has no browser Back button), so with a
+// bar hidden and `ui.compose_bar` false the pane renders a minimal bottom row
+// carrying ONLY the same restore button.
+describe("TerminalPane restore row when the compose bar is off", () => {
+  const desktopWidth = window.innerWidth
+  const goMobile = () => {
+    Object.defineProperty(window, "innerWidth", {
+      value: 500,
+      configurable: true,
+    })
+  }
+  afterEach(() => {
+    Object.defineProperty(window, "innerWidth", {
+      value: desktopWidth,
+      configurable: true,
+    })
+  })
+
+  it("renders the restore button in its own bottom row when a bar is hidden", () => {
+    goMobile()
+    const state = makeState()
+    ;(
+      state.bootstrap as unknown as {
+        compose_bar?: boolean
+        mobile_top_bar?: boolean
+      }
+    ).compose_bar = false
+    ;(
+      state.bootstrap as unknown as { mobile_top_bar?: boolean }
+    ).mobile_top_bar = false
+    mockState = state
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    // No compose bar, but the restore escape hatch is still on screen.
+    expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
+    expect(
+      screen.getByRole("button", { name: "Show hidden bars" }),
+    ).toBeTruthy()
+  })
+
+  it("renders nothing extra while both bars are visible", () => {
+    goMobile()
+    const state = makeState()
+    ;(state.bootstrap as unknown as { compose_bar?: boolean }).compose_bar =
+      false
+    mockState = state
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
+    expect(
+      screen.queryByRole("button", { name: "Show hidden bars" }),
+    ).toBeNull()
+  })
+})
