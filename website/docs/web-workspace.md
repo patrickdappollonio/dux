@@ -254,6 +254,14 @@ plain Enter for confirming menus and prompts. Tapping the terminal drops you int
 the compose box (a refused send keeps your draft and tells you why), and the
 whole thing can be turned off in Preferences if you would rather type raw.
 
+Terminal rows are precious on a phone, so the chrome around the terminal is
+hideable. The terminal screen's `⋯` menu has **Hide top bar** (which also takes
+the tab strip with it) and **Hide terminal keys**, each backed by its own
+preference, and the reclaimed rows go straight back to the terminal. While
+anything is hidden, an eye button appears next to the compose box: one tap
+brings both bars back. If you also keep the compose bar off, Preferences is
+the way back, both toggles live there too.
+
 ## Install it like an app
 
 dux ships a small PWA manifest, so your browser will offer to add it to your home
