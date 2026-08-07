@@ -154,6 +154,7 @@ pub(super) fn outside_click_policy(prompt: &PromptState) -> OutsideClickPolicy {
         | PromptState::ConfigureGlobalEnv { .. }
         | PromptState::RenameSession { .. }
         | PromptState::PullRequestInput { .. }
+        | PromptState::AttachPullRequestInput { .. }
         | PromptState::NameNewAgent { .. }
         | PromptState::KillRunning(_) => Blink,
     }
@@ -340,6 +341,7 @@ impl App {
             | PromptState::ConfigureGlobalEnv { .. }
             | PromptState::RenameSession { .. }
             | PromptState::PullRequestInput { .. }
+            | PromptState::AttachPullRequestInput { .. }
             | PromptState::NameNewAgent { .. }
             | PromptState::KillRunning(_) => return false,
         }
@@ -550,6 +552,14 @@ mod tests {
                     input: TextInput::with_text("half-typed-name".to_string()),
                 },
             ),
+            (
+                "AttachPullRequestInput",
+                PromptState::AttachPullRequestInput {
+                    session_id: "session-1".to_string(),
+                    current_pr: None,
+                    input: TextInput::with_text("half-typed-name".to_string()),
+                },
+            ),
             ("NameNewAgent", name_new_agent_prompt(app)),
             (
                 "KillRunning",
@@ -591,6 +601,7 @@ mod tests {
             | PromptState::ConfigureGlobalEnv { input, .. }
             | PromptState::RenameSession { input, .. }
             | PromptState::PullRequestInput { input, .. }
+            | PromptState::AttachPullRequestInput { input, .. }
             | PromptState::NameNewAgent { input, .. } => input.text.clone(),
             PromptState::KillRunning(prompt) => format!("{:?}", prompt.selected_ids),
             other => panic!("not a refusing modal: {other:?}"),

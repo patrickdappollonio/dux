@@ -1614,6 +1614,23 @@ pub(crate) enum PromptState {
         input: TextInput,
         focus: PullRequestInputFocus,
     },
+    /// Attach (pin) a GitHub pull request to an existing agent session.
+    ///
+    /// Modeled on `PullRequestInput`, with ONE DELIBERATE difference: NO focus
+    /// enum. `PullRequestInput` carries `PullRequestInputFocus` because it has
+    /// two controls (the reference field and the project-chooser action); this
+    /// modal has exactly ONE control, since the session already fixes the
+    /// project, and per the movement-keys tenet a one-control modal needs no
+    /// focus concept: there is nowhere for focus to move.
+    AttachPullRequestInput {
+        session_id: String,
+        /// A prebuilt display line naming the PR currently shown for the
+        /// session (e.g. `#42 (open) Fix the frobnicator`, plus
+        /// ` (manually attached)` when it is a pin), so the body can say what
+        /// attaching would replace. `None` when no PR is known yet.
+        current_pr: Option<String>,
+        input: TextInput,
+    },
     NameNewAgent {
         request: CreateAgentRequest,
         input: TextInput,
@@ -2368,6 +2385,10 @@ pub(crate) enum OverlayMouseLayout {
         /// drawn (no project chosen yet). A control that is not on screen must
         /// not be clickable.
         choose_project: Option<Rect>,
+    },
+    /// The attach-pull-request modal's single text field (its only control).
+    AttachPullRequestInput {
+        input: Rect,
     },
     NameNewAgent {
         input: Rect,
@@ -3593,6 +3614,18 @@ impl App {
     fn is_palette_action_available(&self, action: Action) -> bool {
         match action {
             Action::OpenCurrentPullRequest => self.current_pr_info().is_some(),
+            // The PR flows require GitHub integration plus an authenticated gh.
+            Action::NewAgentFromPr | Action::AttachPullRequest => {
+                self.github_pr_agent_command_available()
+            }
+            // Detach is only meaningful when the selected agent actually holds
+            // a manually attached (pinned) pull request.
+            Action::DetachPullRequest => {
+                self.github_pr_agent_command_available()
+                    && self
+                        .selected_session()
+                        .is_some_and(|s| self.engine.pr_overrides.contains_key(&s.id))
+            }
             // The terminal-move commands are offered only when a terminal exists;
             // the agent-move commands are always offered (they fall through to
             // `true` and guard at invoke, like the rest of the palette).
@@ -3666,11 +3699,7 @@ impl App {
         self.bindings
             .filtered_palette(input)
             .into_iter()
-            .filter(|binding| {
-                self.is_palette_action_available(binding.action)
-                    && (binding.action != Action::NewAgentFromPr
-                        || self.github_pr_agent_command_available())
-            })
+            .filter(|binding| self.is_palette_action_available(binding.action))
             .collect()
     }
 
@@ -3757,6 +3786,8 @@ impl App {
             "open-worktree" => self.open_selected_worktree_in_default_editor(),
             "open-worktree-with" => self.open_worktree_editor_picker(),
             "open-current-pr" => self.open_current_pr_in_browser(),
+            "attach-pull-request" => self.open_attach_pull_request_prompt(),
+            "detach-pull-request" => self.detach_pull_request(),
             "toggle-project" => {
                 self.toggle_collapse_selected_project();
                 Ok(())

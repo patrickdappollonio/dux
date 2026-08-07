@@ -300,6 +300,20 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         description: "Open the selected agent's current pull request in the default browser",
         // Per-session: web links to the PR directly from the session's PR badge.
     },
+    PaletteCommand {
+        action: Action::AttachPullRequest,
+        name: "attach-pull-request",
+        description: "Attach a GitHub pull request to the selected agent",
+        // Per-session: the web exposes "Attach pull request…" in the agent's
+        // own ⋯ menu (already shipped), so no app-menu entry is warranted.
+    },
+    PaletteCommand {
+        action: Action::DetachPullRequest,
+        name: "detach-pull-request",
+        description: "Detach the manually attached pull request so autodetection resumes",
+        // Per-session: the web's agent ⋯ menu carries "Detach pull request"
+        // (already shipped), so no app-menu entry is warranted.
+    },
     // ── Global ────────────────────────────────────────────────────
     PaletteCommand {
         action: Action::ToggleSidebar,

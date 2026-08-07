@@ -283,7 +283,8 @@ pub(crate) fn modal_spec(prompt: &PromptState) -> Option<ModalSpec> {
         // so the rule asks no button of them.
         PromptState::RenameSession { .. }
         | PromptState::NameNewAgent { .. }
-        | PromptState::PullRequestInput { .. } => ModalSpec::new(Form, false, false),
+        | PromptState::PullRequestInput { .. }
+        | PromptState::AttachPullRequestInput { .. } => ModalSpec::new(Form, false, false),
 
         // The three configure modals: one full-text field plus Cancel/Save.
         // They were the dual-mode rule's only violators and are now compliant,
@@ -355,6 +356,7 @@ pub(crate) fn prompt_text_inputs(prompt: &PromptState) -> Vec<&TextInput> {
         | PromptState::ConfigureGlobalEnv { input, .. }
         | PromptState::RenameSession { input, .. }
         | PromptState::PullRequestInput { input, .. }
+        | PromptState::AttachPullRequestInput { input, .. }
         | PromptState::NameNewAgent { input, .. } => vec![input],
 
         PromptState::StartupCommandLogs(prompt) => vec![&prompt.filter],
@@ -412,6 +414,9 @@ pub(crate) fn layout_publishes_confirm_button(layout: &OverlayMouseLayout) -> bo
         // not commit the form. Its field is single-line, so Enter still submits
         // and the dual-mode rule asks no confirm button of it.
         | OverlayMouseLayout::PullRequestInput { .. }
+        // One single-line field and nothing else: Enter submits, so the
+        // dual-mode rule asks no confirm button of it.
+        | OverlayMouseLayout::AttachPullRequestInput { .. }
         | OverlayMouseLayout::NameNewAgent { .. } => false,
 
         // A button that commits.
@@ -1028,6 +1033,14 @@ mod tests {
                 PromptState::PullRequestInput {
                     focus: crate::app::PullRequestInputFocus::Input,
                     project: Some(project.clone()),
+                    input: TextInput::new(),
+                },
+            ),
+            (
+                "AttachPullRequestInput",
+                PromptState::AttachPullRequestInput {
+                    session_id: "s1".to_string(),
+                    current_pr: Some("#42 (open) Fix the frobnicator".to_string()),
                     input: TextInput::new(),
                 },
             ),

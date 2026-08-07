@@ -186,6 +186,7 @@ enum PromptMouseTarget {
     NameNewAgentInput,
     PullRequestInput,
     PullRequestChooseProject,
+    AttachPullRequestInput,
     MacroNameInput,
     MacroTextInput,
     /// Index into `MacroSurface`'s `Agent, Terminal, Both` order.
@@ -311,6 +312,7 @@ impl ButtonPressedTarget {
             | PromptMouseTarget::RenameInput
             | PromptMouseTarget::NameNewAgentInput
             | PromptMouseTarget::PullRequestInput
+            | PromptMouseTarget::AttachPullRequestInput
             | PromptMouseTarget::MacroNameInput
             | PromptMouseTarget::MacroTextInput
             | PromptMouseTarget::MacroSurfaceOption(_)
@@ -3933,6 +3935,35 @@ impl App {
             return Ok(false);
         }
 
+        if matches!(self.prompt, PromptState::AttachPullRequestInput { .. }) {
+            // The field is the modal's ONLY control (no focus enum, per the
+            // movement-keys tenet), so it is always focused: plain characters
+            // and the horizontal arrows always belong to the caret and never
+            // reach the binding lookup.
+            let action = if binding_lookup_is_suppressed(key, true) {
+                None
+            } else {
+                self.bindings.lookup(&key, BindingScope::Dialog)
+            };
+            match modal_key_step(action, key, true) {
+                ModalKeyStep::Close => {
+                    self.prompt = PromptState::None;
+                }
+                ModalKeyStep::Confirm => {
+                    self.confirm_attach_pull_request_input()?;
+                }
+                // One control: there is nowhere for focus to move, and Space
+                // (ActivateFocus) cannot fire while a field has focus.
+                ModalKeyStep::MoveFocus(_) | ModalKeyStep::ActivateFocus => {}
+                ModalKeyStep::FallThroughToField => {
+                    if let PromptState::AttachPullRequestInput { input, .. } = &mut self.prompt {
+                        input.handle_key(key);
+                    }
+                }
+            }
+            return Ok(false);
+        }
+
         if matches!(self.prompt, PromptState::NameNewAgent { .. }) {
             let checkbox_focused = matches!(
                 self.prompt,
@@ -5250,6 +5281,10 @@ impl App {
                 }
                 contains_point(input, column, row).then_some(PromptMouseTarget::PullRequestInput)
             }
+            OverlayMouseLayout::AttachPullRequestInput { input } => {
+                contains_point(input, column, row)
+                    .then_some(PromptMouseTarget::AttachPullRequestInput)
+            }
             OverlayMouseLayout::RenameSession { input, checkbox } => {
                 // Published click rects in priority order; the caller focuses
                 // the hit control and then acts on it (see `modal::click_target`).
@@ -6468,6 +6503,18 @@ impl App {
         }
     }
 
+    fn set_attach_pull_request_cursor_from_mouse(&mut self, column: u16) {
+        let input_area = match self.overlay_layout.active {
+            OverlayMouseLayout::AttachPullRequestInput { input } => input,
+            _ => return,
+        };
+        if let PromptState::AttachPullRequestInput { input, .. } = &mut self.prompt {
+            // The single-line renderer pads by one leading space. No focus to
+            // move: the field is the modal's only control and always has it.
+            input.cursor = cursor_from_single_line_position(&input.text, input_area, 1, column);
+        }
+    }
+
     fn set_name_new_agent_cursor_from_mouse(&mut self, column: u16) {
         let input_area = match self.overlay_layout.active {
             OverlayMouseLayout::NameNewAgent { input, .. } => input,
@@ -6552,6 +6599,36 @@ impl App {
             Some(project) => self.dispatch_pull_request_lookup(project, raw_input),
             None => self.dispatch_pull_request_reference(raw_input),
         }
+    }
+
+    /// Confirm on the attach modal's reference field. An empty reference is
+    /// refused in place (the modal stays open, matching the create-from-PR
+    /// modal's inline refusals); a non-empty one closes the modal and hands the
+    /// text to the engine's one keyed resolve→attach op, whose pending busy is
+    /// applied here as a reaction. The final (info/error) arrives through the
+    /// normal drain_events path, so no per-op bookkeeping lives in the TUI.
+    pub(crate) fn confirm_attach_pull_request_input(&mut self) -> Result<()> {
+        let (session_id, raw_input) = match &self.prompt {
+            PromptState::AttachPullRequestInput {
+                session_id, input, ..
+            } => (session_id.clone(), input.text.trim().to_string()),
+            _ => return Ok(()),
+        };
+        if raw_input.is_empty() {
+            self.set_error("Enter a GitHub PR URL, owner/repo#123, or a PR number.");
+            return Ok(());
+        }
+        self.prompt = PromptState::None;
+        match self
+            .engine
+            .dispatch_attach_pull_request(&session_id, &raw_input)
+        {
+            Ok((_op_id, pending)) => {
+                self.apply_reaction(dux_core::engine::EventReaction::Status(pending));
+            }
+            Err(err) => self.set_error(format!("{err:#}")),
+        }
+        Ok(())
     }
 
     /// The modal's secondary action: hand over to the existing project selector
@@ -7105,6 +7182,9 @@ impl App {
             }
             PromptMouseTarget::PullRequestInput => {
                 self.set_pull_request_cursor_from_mouse(mouse.column);
+            }
+            PromptMouseTarget::AttachPullRequestInput => {
+                self.set_attach_pull_request_cursor_from_mouse(mouse.column);
             }
             // The button targets are armed on mouse-down and fired on release
             // by the press machinery (`activate_button`), so nothing happens
@@ -15237,6 +15317,169 @@ not_a_real_action = ["x"]
         assert!(
             !app.filtered_palette_commands("move-agent-bottom")
                 .is_empty()
+        );
+    }
+
+    fn pinned_stored_pr(session_id: &str) -> dux_core::storage::StoredPr {
+        dux_core::storage::StoredPr {
+            session_id: session_id.to_string(),
+            pr_number: 7,
+            host: "github.com".to_string(),
+            owner_repo: "o/r".to_string(),
+            state: "OPEN".to_string(),
+            title: "Pinned".to_string(),
+            url: "https://github.com/o/r/pull/7".to_string(),
+        }
+    }
+
+    #[test]
+    fn command_palette_gates_attach_and_detach_pull_request_on_gh_and_the_pin() {
+        let mut app = test_app(default_bindings());
+
+        // gh unavailable: neither command is offered.
+        assert!(
+            app.filtered_palette_commands("attach-pull-request")
+                .is_empty()
+        );
+        assert!(
+            app.filtered_palette_commands("detach-pull-request")
+                .is_empty()
+        );
+
+        // gh available, selected session has no pin: attach only.
+        app.engine.github_integration_enabled = true;
+        app.engine.gh_status = dux_core::model::GhStatus::Available;
+        assert_eq!(
+            app.selected_session().map(|s| s.id.clone()),
+            Some("session-1".to_string()),
+            "the fixture session must be selected for the detach gate to apply"
+        );
+        assert!(
+            !app.filtered_palette_commands("attach-pull-request")
+                .is_empty()
+        );
+        assert!(
+            app.filtered_palette_commands("detach-pull-request")
+                .is_empty(),
+            "detach must not be offered while the selected agent holds no pin"
+        );
+
+        // Pin the selected session: detach appears alongside attach.
+        app.engine
+            .pr_overrides
+            .insert("session-1".to_string(), pinned_stored_pr("session-1"));
+        assert!(
+            !app.filtered_palette_commands("attach-pull-request")
+                .is_empty()
+        );
+        assert!(
+            !app.filtered_palette_commands("detach-pull-request")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn attach_pull_request_confirm_closes_the_modal_and_mints_the_keyed_busy() {
+        let mut app = test_app(default_bindings());
+        app.engine.github_integration_enabled = true;
+        app.engine.gh_status = dux_core::model::GhStatus::Available;
+
+        app.execute_command("attach-pull-request".to_string())
+            .expect("open the attach modal");
+        assert!(
+            matches!(app.prompt, PromptState::AttachPullRequestInput { .. }),
+            "got {:?}",
+            app.prompt
+        );
+
+        // An empty confirm is refused in place: error status, modal stays open.
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
+        assert!(
+            matches!(app.prompt, PromptState::AttachPullRequestInput { .. }),
+            "an empty confirm must keep the modal open"
+        );
+
+        // Type a reference and confirm. The dispatch spawns a lookup worker
+        // against the fixture repo (no remote, so it fails locally without gh);
+        // its event stays in the channel, and every assertion here is on the
+        // deterministic pre-drain state.
+        for ch in ['#', '1', '2'] {
+            app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+                .unwrap();
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(
+            matches!(app.prompt, PromptState::None),
+            "a non-empty confirm closes the modal"
+        );
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Busy);
+        assert_eq!(app.engine.pending_pr_attach_ops.len(), 1);
+        let op_id = app
+            .engine
+            .pending_pr_attach_ops
+            .keys()
+            .next()
+            .cloned()
+            .expect("one pending op");
+        let visible = app.status.most_recent().expect("a visible status");
+        assert_eq!(
+            visible.key.as_deref(),
+            Some(op_id.as_str()),
+            "the busy must be keyed by the op so the final can replace it"
+        );
+    }
+
+    #[test]
+    fn detach_pull_request_drops_the_pin_and_reports_the_no_op_honestly() {
+        let mut app = test_app(default_bindings());
+        // The override row has a foreign key on the session row, so the
+        // fixture session must be persisted before the pin can be.
+        let session = app.engine.sessions[0].clone();
+        app.engine
+            .session_store
+            .upsert_session(&session)
+            .expect("persist session");
+        let stored = pinned_stored_pr("session-1");
+        app.engine
+            .session_store
+            .upsert_pr_override(&stored)
+            .expect("persist pin");
+        app.engine
+            .pr_overrides
+            .insert("session-1".to_string(), stored);
+
+        app.execute_command("detach-pull-request".to_string())
+            .expect("detach");
+        assert!(app.engine.pr_overrides.is_empty(), "the pin must be gone");
+        assert!(
+            app.engine
+                .session_store
+                .load_pr_overrides()
+                .expect("load overrides")
+                .is_empty(),
+            "the stored pin row must be gone too"
+        );
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Info);
+        assert!(
+            app.status.message().contains("Detached"),
+            "got {:?}",
+            app.status.message()
+        );
+
+        // On an unpinned session the command still reports the honest no-op.
+        app.execute_command("detach-pull-request".to_string())
+            .expect("detach again");
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Info);
+        assert!(
+            app.status
+                .message()
+                .contains("no manually attached pull request"),
+            "got {:?}",
+            app.status.message()
         );
     }
 
