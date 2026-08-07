@@ -146,7 +146,7 @@ export const SETTING_GROUPS: SettingGroup[] = [
         key: "ui.show_changes_pane",
         label: "Show the Changes pane",
         description:
-          "Shows the right-hand Changes pane (the changed-files list) by default. A runtime toggle from the Changes menu overrides this per session without changing the saved preference.",
+          "Shows the right-hand Changes pane (the changed-files list). Hiding it from the Changes menu or showing it from the header button saves this same preference, so this row and those controls always agree.",
         surface: "web",
         control: { kind: "bool" },
         default: true,

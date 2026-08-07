@@ -89,6 +89,22 @@ describe("settingsDescriptors", () => {
     }
   })
 
+  it("the Changes-pane description says the runtime toggle saves this same preference", () => {
+    // The runtime toggle (the pane's hide item, the header's show button) goes
+    // through setChangesPaneVisibility -> PUT /api/v1/ui/changes-pane, which
+    // persists ui.show_changes_pane on every flip. An earlier copy claimed the
+    // toggle worked "without changing the saved preference", which was false:
+    // the client-side override is only an optimistic echo, cleared once the
+    // broadcast config value matches.
+    const d = allSettingDescriptors().find(
+      (x) => x.key === "ui.show_changes_pane",
+    )
+    expect(d).toBeDefined()
+    const description = d!.description.toLowerCase()
+    expect(description).not.toContain("without changing the saved preference")
+    expect(description).toContain("same preference")
+  })
+
   it("read() returns the bootstrap value for each descriptor", () => {
     for (const d of allSettingDescriptors()) {
       const value = d.read(sampleBootstrap)
