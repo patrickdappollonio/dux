@@ -228,6 +228,42 @@ fn header(resp: &axum::http::Response<Body>, name: &str) -> Option<String> {
 }
 
 #[tokio::test]
+async fn a_br_accepting_client_gets_brotli_bytes_that_decode_to_the_page() {
+    // The wire contract for every browser: compressible assets are embedded
+    // Brotli-compressed and served as-is with `Content-Encoding: br` (plus the
+    // Vary the cache correctness depends on), and the bytes really are Brotli
+    // of the page. Clients without br (the other tests here send no
+    // Accept-Encoding) get the decompressed body instead.
+    require_real_ui_build!("a_br_accepting_client_gets_brotli_bytes_that_decode_to_the_page");
+
+    let (_tmp, app) = test_router();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/")
+                .header("accept-encoding", "gzip, deflate, br, zstd")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(header(&resp, "content-encoding").as_deref(), Some("br"));
+    assert_eq!(header(&resp, "vary").as_deref(), Some("Accept-Encoding"));
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let mut html = Vec::new();
+    brotli::BrotliDecompress(&mut &body[..], &mut html)
+        .expect("the br-encoded body must be valid Brotli");
+    let html = String::from_utf8_lossy(&html);
+    assert!(
+        html.contains("<!doctype html>") || html.contains("<!DOCTYPE html>"),
+        "the decoded body is not the page:\n{html}"
+    );
+}
+
+#[tokio::test]
 async fn manifest_served_with_manifest_mime() {
     require_real_ui_build!("manifest_served_with_manifest_mime");
     let (_tmp, app) = test_router();
@@ -660,8 +696,8 @@ async fn index_references_a_real_hashed_asset_that_is_actually_served() {
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
         .unwrap();
-    // No Accept-Encoding was sent, so the handler inflates the build-time gzip for
-    // us and this is the real HTML either way.
+    // No Accept-Encoding was sent, so the handler decompresses the build-time
+    // Brotli for us and this is the real HTML either way.
     let html = String::from_utf8_lossy(&bytes).to_string();
 
     let seeds = hashed_asset_refs(&html);
@@ -760,9 +796,10 @@ fn the_embedded_asset_set_is_a_whole_frontend_build() {
     // build script ZERO times, rust-embed baked in nothing, and the server
     // answered 404 at the root with no warning anywhere.
     //
-    // The byte floor is compared against the EMBEDDED bytes, which are gzipped for
-    // the text assets, so it is measuring less than the raw dist does. A real
-    // build embeds about 2.3 MB that way, four times the floor.
+    // The byte floor is compared against the EMBEDDED bytes, which are
+    // Brotli-compressed for the text assets, so it is measuring less than the
+    // raw dist does. A real build embeds a couple of MB that way, several
+    // times the floor.
     require_real_ui_build!("the_embedded_asset_set_is_a_whole_frontend_build");
 
     let mut hashed = Vec::new();

@@ -27,7 +27,7 @@ cargo build
 That is all. `crates/dux-web/build.rs` runs `npm ci` (when the lockfile is newer
 than `node_modules`) and then `npm run build` in `crates/dux-web/web`. The raw
 Vite output is left in `web/dist` untouched; what `rust_embed` bakes into the
-binary is a **gzipped mirror the build script stages under `$OUT_DIR/ui`**. That
+binary is a **Brotli-compressed mirror the build script stages under `$OUT_DIR/ui`**. That
 distinction matters the moment you go looking for why the binary is serving
 something you did not expect, so it has a section of its own:
 [Where the embedded assets actually live](#where-the-embedded-assets-actually-live).
@@ -111,7 +111,7 @@ build through quietly is not, and that distinction is the whole point of the fla
 `crates/dux-web/web/dist` is raw Vite output, and everything above still describes
 it correctly: the build script READS it to decide between the notice page and the
 reuse path. What it no longer does is embed it. rust-embed reads
-`$OUT_DIR/ui`, a gzipped mirror the build script stages from `dist` on every path
+`$OUT_DIR/ui`, a Brotli-compressed mirror the build script stages from `dist` on every path
 it can take.
 
 The reason is written out in full in the long comment in `crates/dux-web/build.rs`,

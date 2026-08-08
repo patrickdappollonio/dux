@@ -1,7 +1,7 @@
 //! The built web UI embedded into the binary by rust-embed and served with SPA
 //! fallback. Built by build.rs.
 //!
-//! The embedded tree is `$OUT_DIR/ui`, a gzipped mirror build.rs stages from
+//! The embedded tree is `$OUT_DIR/ui`, a Brotli-compressed mirror build.rs stages from
 //! `web/dist` on every path it can take, NOT `web/dist` itself. Reading the
 //! generated directory directly meant the embedded bytes depended on the state of
 //! a directory cargo was not allowed to watch (watching it re-runs the frontend
@@ -19,11 +19,13 @@
 //! `the_embed_folder_resolves_to_something` covers is the state that DOES
 //! compile: a staging directory that exists and is empty.
 //!
-//! The text assets are gzipped during that staging, so the bytes rust-embed bakes
-//! in are already compressed (shrinking the binary). The handler detects the gzip
-//! magic bytes and serves them with `Content-Encoding: gzip` for clients that
-//! accept it (every browser), inflating on the fly for the rare client that
-//! doesn't.
+//! The text assets are Brotli-compressed during that staging, so the bytes
+//! rust-embed bakes in are already compressed (shrinking the binary). Brotli has
+//! NO magic bytes, so unlike the gzip scheme this replaced the handler cannot
+//! sniff compressed-ness from the payload: it decides by extension, through the
+//! same [`crate::compressible_exts`] list build.rs compresses by, and serves
+//! those assets with `Content-Encoding: br` for clients that accept it (every
+//! browser), decompressing on the fly for the rare client that doesn't.
 
 use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
@@ -215,9 +217,9 @@ fn cache_policy(path: &str) -> &'static str {
 }
 
 /// Weak ETag derived from rust-embed's build-time sha256 of the file. Weak
-/// (`W/`) on purpose: the same URL serves gzip or inflated bytes depending on
-/// `Accept-Encoding`, and a weak validator asserts semantic equivalence across
-/// those representations.
+/// (`W/`) on purpose: the same URL serves Brotli or decompressed bytes depending
+/// on `Accept-Encoding`, and a weak validator asserts semantic equivalence
+/// across those representations.
 fn etag_for(content: &rust_embed::EmbeddedFile) -> String {
     let mut tag = String::with_capacity(4 + 64 + 1);
     tag.push_str("W/\"");
@@ -246,12 +248,12 @@ fn if_none_match_matches(headers: &HeaderMap, etag: &str) -> bool {
 /// - `offline.html` is a real embedded asset, so it is served here directly and
 ///   never shadowed by the SPA `index.html` fallback below.
 pub async fn static_handler(uri: Uri, headers: HeaderMap) -> Response {
-    let accepts_gzip = accepts_gzip(&headers);
+    let accepts_br = accepts_br(&headers);
     let path = uri.path().trim_start_matches('/');
     let path = if path.is_empty() { "index.html" } else { path };
     if let Some(content) = WebAssets::get(path) {
         let mime = content.metadata.mimetype().to_string();
-        return serve_embedded(&mime, path, content, accepts_gzip, &headers);
+        return serve_embedded(&mime, path, content, accepts_br, &headers);
     }
     // The hashed bundle lives under `assets/`. A miss here means the browser is
     // requesting a chunk URL from a stale `index.html` (the binary was rebuilt
@@ -263,7 +265,7 @@ pub async fn static_handler(uri: Uri, headers: HeaderMap) -> Response {
         return (StatusCode::NOT_FOUND, "asset not found").into_response();
     }
     match WebAssets::get("index.html") {
-        Some(content) => serve_embedded("text/html", "index.html", content, accepts_gzip, &headers),
+        Some(content) => serve_embedded("text/html", "index.html", content, accepts_br, &headers),
         None => (StatusCode::NOT_FOUND, "not found").into_response(),
     }
 }
@@ -275,7 +277,7 @@ fn serve_embedded(
     content_type: &str,
     path: &str,
     content: rust_embed::EmbeddedFile,
-    accepts_gzip: bool,
+    accepts_br: bool,
     request_headers: &HeaderMap,
 ) -> Response {
     let etag = etag_for(&content);
@@ -294,28 +296,42 @@ fn serve_embedded(
     serve_asset(
         content_type,
         content.data.into_owned(),
-        accepts_gzip,
+        crate::compressible_exts::compressible_path(path),
+        accepts_br,
         Some(cache_control),
         Some(&etag),
     )
 }
 
-fn accepts_gzip(headers: &HeaderMap) -> bool {
+/// Whether the client accepts Brotli. Token-wise rather than `contains("br")`,
+/// because "br" is short enough to appear inside another token; parameters
+/// (`br;q=0.9`) are tolerated, `q=0` is rare enough in real browsers to ignore
+/// (the previous gzip check ignored it too).
+fn accepts_br(headers: &HeaderMap) -> bool {
     headers
         .get(header::ACCEPT_ENCODING)
         .and_then(|v| v.to_str().ok())
-        .map(|v| v.contains("gzip"))
+        .map(|v| {
+            v.split(',').any(|token| {
+                token
+                    .trim()
+                    .split(';')
+                    .next()
+                    .is_some_and(|t| t.trim() == "br")
+            })
+        })
         .unwrap_or(false)
 }
 
 /// Build a response for an embedded asset, transparently handling the
-/// gzip-at-build-time scheme. `bytes` may be gzip-compressed (detected via the
-/// magic bytes); only the text assets build.rs compresses ever are, and no binary
-/// asset starts with those bytes, so detection is unambiguous.
+/// Brotli-at-build-time scheme. `compressed` says whether `bytes` are Brotli:
+/// the CALLER decides, from the shared extension list, because Brotli has no
+/// magic bytes to sniff (unlike the gzip scheme this replaced).
 fn serve_asset(
     content_type: &str,
     bytes: Vec<u8>,
-    accepts_gzip: bool,
+    compressed: bool,
+    accepts_br: bool,
     cache_control: Option<&'static str>,
     etag: Option<&str>,
 ) -> Response {
@@ -332,16 +348,16 @@ fn serve_asset(
         headers.insert(header::ETAG, value);
     }
 
-    if bytes.starts_with(&[0x1f, 0x8b]) {
-        // Caches must key on Accept-Encoding since the same URL can serve gzip or
-        // inflated bytes depending on the client.
+    if compressed {
+        // Caches must key on Accept-Encoding since the same URL can serve Brotli
+        // or decompressed bytes depending on the client.
         headers.insert(header::VARY, HeaderValue::from_static("Accept-Encoding"));
-        if accepts_gzip {
-            headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+        if accepts_br {
+            headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("br"));
             return (headers, bytes).into_response();
         }
-        // Rare client without gzip support: inflate on the fly.
-        return match inflate(&bytes) {
+        // Rare client without Brotli support: decompress on the fly.
+        return match decompress(&bytes) {
             Ok(raw) => (headers, raw).into_response(),
             Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "decode error").into_response(),
         };
@@ -350,14 +366,9 @@ fn serve_asset(
     (headers, bytes).into_response()
 }
 
-fn inflate(bytes: &[u8]) -> std::io::Result<Vec<u8>> {
-    use std::io::Read;
-
-    use flate2::read::GzDecoder;
-
-    let mut decoder = GzDecoder::new(bytes);
+fn decompress(bytes: &[u8]) -> std::io::Result<Vec<u8>> {
     let mut out = Vec::new();
-    decoder.read_to_end(&mut out)?;
+    brotli::BrotliDecompress(&mut &bytes[..], &mut out)?;
     Ok(out)
 }
 
@@ -487,38 +498,33 @@ mod tests {
         }
     }
 
-    fn gzip(bytes: &[u8]) -> Vec<u8> {
-        use std::io::Write;
-
-        use flate2::Compression;
-        use flate2::write::GzEncoder;
-
-        let mut enc = GzEncoder::new(Vec::new(), Compression::best());
-        enc.write_all(bytes).unwrap();
-        enc.finish().unwrap()
+    fn br(bytes: &[u8]) -> Vec<u8> {
+        let params = brotli::enc::BrotliEncoderParams::default();
+        let mut out = Vec::new();
+        brotli::BrotliCompress(&mut &bytes[..], &mut out, &params).unwrap();
+        out
     }
 
     #[test]
-    fn gzipped_asset_is_served_with_content_encoding_when_accepted() {
+    fn compressed_asset_is_served_with_content_encoding_when_accepted() {
         let resp = serve_asset(
             "text/javascript",
-            gzip(b"console.log('hi')\n"),
+            br(b"console.log('hi')\n"),
+            true,
             true,
             None,
             None,
         );
-        assert_eq!(
-            resp.headers().get(header::CONTENT_ENCODING).unwrap(),
-            "gzip"
-        );
+        assert_eq!(resp.headers().get(header::CONTENT_ENCODING).unwrap(), "br");
         assert_eq!(resp.headers().get(header::VARY).unwrap(), "Accept-Encoding");
     }
 
     #[test]
-    fn gzipped_asset_is_inflated_when_client_does_not_accept_gzip() {
+    fn compressed_asset_is_decompressed_when_client_does_not_accept_br() {
         let resp = serve_asset(
             "text/javascript",
-            gzip(b"console.log('hi')\n"),
+            br(b"console.log('hi')\n"),
+            true,
             false,
             None,
             None,
@@ -526,13 +532,47 @@ mod tests {
         assert!(resp.headers().get(header::CONTENT_ENCODING).is_none());
     }
 
+    #[tokio::test]
+    async fn decompressed_body_matches_the_original_text() {
+        // The on-the-fly fallback must hand back the exact pre-compression
+        // bytes, or a no-br client gets a corrupt bundle with a 200 on it.
+        let resp = serve_asset(
+            "text/javascript",
+            br(b"console.log('hi')\n"),
+            true,
+            false,
+            None,
+            None,
+        );
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"console.log('hi')\n");
+    }
+
     #[test]
     fn raw_asset_is_served_unchanged() {
-        // A PNG header — not gzip — must pass through with no Content-Encoding.
+        // A PNG (not a compressible extension, so the caller passes
+        // compressed: false) must pass through with no Content-Encoding.
         let png = vec![0x89u8, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
-        let resp = serve_asset("image/png", png, true, None, None);
+        let resp = serve_asset("image/png", png, false, true, None, None);
         assert!(resp.headers().get(header::CONTENT_ENCODING).is_none());
         assert!(resp.headers().get(header::VARY).is_none());
+    }
+
+    #[test]
+    fn compressed_ness_is_decided_by_the_shared_extension_list() {
+        // Brotli has no magic bytes: this predicate IS the contract between
+        // build.rs (which compresses by it) and serve_embedded (which passes
+        // its answer to serve_asset). A drift here serves garbage.
+        use crate::compressible_exts::compressible_path;
+        assert!(compressible_path("assets/index-B5xQabc1.js"));
+        assert!(compressible_path("index.html"));
+        assert!(compressible_path("manifest.webmanifest"));
+        assert!(compressible_path("assets/style-Abc.css"));
+        assert!(!compressible_path("favicon.png"));
+        assert!(!compressible_path("assets/codicon-ngg6Pgfi.ttf"));
+        assert!(!compressible_path("no-extension"));
     }
 
     #[test]
@@ -553,6 +593,7 @@ mod tests {
         let resp = serve_asset(
             "text/html",
             b"<html></html>".to_vec(),
+            false,
             true,
             Some("no-cache"),
             Some("W/\"abc123\""),
@@ -602,13 +643,26 @@ mod tests {
     }
 
     #[test]
-    fn accepts_gzip_reads_the_header() {
+    fn accepts_br_reads_the_header_token_wise() {
         let mut h = HeaderMap::new();
-        assert!(!accepts_gzip(&h));
+        assert!(!accepts_br(&h));
         h.insert(
             header::ACCEPT_ENCODING,
             HeaderValue::from_static("gzip, deflate, br"),
         );
-        assert!(accepts_gzip(&h));
+        assert!(accepts_br(&h));
+        // Parameters are tolerated; a token merely CONTAINING "br" is not br.
+        h.insert(
+            header::ACCEPT_ENCODING,
+            HeaderValue::from_static("br;q=0.9"),
+        );
+        assert!(accepts_br(&h));
+        h.insert(header::ACCEPT_ENCODING, HeaderValue::from_static("zbrotli"));
+        assert!(!accepts_br(&h));
+        h.insert(
+            header::ACCEPT_ENCODING,
+            HeaderValue::from_static("gzip, deflate"),
+        );
+        assert!(!accepts_br(&h));
     }
 }

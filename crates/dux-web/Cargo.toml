@@ -27,13 +27,16 @@ rust-embed = { version = "8", features = [
     "interpolate-folder-path",
 ] }
 # Decompress embedded assets on the fly for the rare client that doesn't accept
-# gzip (build.rs stores them gzipped to shrink the binary). Already in the lock.
-flate2 = "1"
+# br (build.rs stores them Brotli-compressed to shrink the binary).
+brotli = "8"
 
-# Gzip the built web assets while staging them into $OUT_DIR/ui, so rust-embed
-# bakes the compressed bytes into the binary (and they're served with
-# Content-Encoding: gzip).
+# Brotli-compress the built web assets while staging them into $OUT_DIR/ui, so
+# rust-embed bakes the compressed bytes into the binary (and they're served with
+# Content-Encoding: br). flate2 stays for one legacy job: a checkout whose dist
+# was gzipped IN PLACE by an old version of build.rs must be inflated before it
+# is recompressed (and the not-built notice detection reads such a dist too).
 [build-dependencies]
+brotli = "8"
 flate2 = "1"
 
 [dev-dependencies]

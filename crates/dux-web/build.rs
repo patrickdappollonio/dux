@@ -1,5 +1,5 @@
 //! Builds the React frontend in `web/`, leaves the raw Vite output in `web/dist`,
-//! and stages a gzipped mirror of it under `$OUT_DIR/ui` for `rust_embed` to bake
+//! and stages a Brotli-compressed mirror of it under `$OUT_DIR/ui` for `rust_embed` to bake
 //! into the binary.
 //!
 //! The staging is not tidiness. `web/dist` is a directory this script GENERATES,
@@ -61,12 +61,10 @@
 //! with a throwaway crate, not assumed), so writing the marker on EVERY path is
 //! what makes it unspoofable.
 
-use std::io::Write;
 use std::path::Path;
 use std::process::Command;
 
-use flate2::Compression;
-use flate2::write::GzEncoder;
+use brotli::enc::BrotliEncoderParams;
 
 /// Set this to any non-empty value to skip the frontend build entirely.
 const DISABLE_ENV: &str = "DUX_DISABLE_UI_BUILD";
@@ -157,22 +155,19 @@ cargo build --release</pre>
 </html>
 "#;
 
-/// Text asset extensions worth gzipping. Binary assets (fonts, images, wasm) are
-/// already compressed, so they're left raw.
-const COMPRESSIBLE: &[&str] = &[
-    "js",
-    "css",
-    "html",
-    "json",
-    "svg",
-    "webmanifest",
-    "txt",
-    "map",
-];
+// The COMPRESSIBLE extension list and `compressible_path`, shared with the
+// serving side. Brotli has no magic bytes, so the server decides "this asset is
+// compressed" by extension; the list living in one file is what keeps the two
+// sides from drifting. (`include!` because a build script cannot depend on the
+// crate it builds.)
+include!("src/compressible_exts.rs");
 
 fn main() {
     let web = Path::new("web");
     println!("cargo:rerun-if-changed=web/src");
+    // The shared compressible-extension list this script include!s: editing it
+    // must restage the embed, or the server and the staged bytes disagree.
+    println!("cargo:rerun-if-changed=src/compressible_exts.rs");
     println!("cargo:rerun-if-changed=web/public");
     println!("cargo:rerun-if-changed=web/index.html");
     println!("cargo:rerun-if-changed=web/package.json");
@@ -287,7 +282,7 @@ fn main() {
     // skipping on a genuine build. See the module docs.
     mark_state("built");
 
-    // Stage the gzipped mirror rust-embed actually reads. Runs after the Vite
+    // Stage the Brotli-compressed mirror rust-embed actually reads. Runs after the Vite
     // build, which writes the raw files.
     stage_dist(&dist, &staged);
 }
@@ -415,9 +410,9 @@ fn is_not_built_notice(dist_index: &Path) -> bool {
     String::from_utf8_lossy(&bytes).contains(NOT_BUILT_SENTINEL)
 }
 
-/// Mirror `dist` into the staging directory rust-embed reads, gzipping the text
-/// assets DURING the copy so the binary carries the compressed bytes (and
-/// `web_assets` serves them with `Content-Encoding: gzip`).
+/// Mirror `dist` into the staging directory rust-embed reads, Brotli-compressing
+/// the text assets DURING the copy so the binary carries the compressed bytes
+/// (and `web_assets` serves them with `Content-Encoding: br`).
 ///
 /// Must run on EVERY path through this script. If one skipped it, `$OUT_DIR/ui`
 /// would not exist and the crate would fail to compile. That is loud rather than
@@ -491,17 +486,37 @@ fn copy_tree(from: &Path, to: &Path) {
             .and_then(|e| e.to_str())
             .map(|e| COMPRESSIBLE.contains(&e))
             .unwrap_or(false);
-        // The magic-byte check is still needed: a checkout whose dist was gzipped
-        // IN PLACE by the previous version of this script hands us compressed
-        // bytes already, and compressing them twice would serve garbage to a
-        // browser that inflates once.
-        let already_gzipped = bytes.starts_with(&[0x1f, 0x8b]);
-        let out = if compressible && !already_gzipped {
-            let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
-            encoder
-                .write_all(&bytes)
-                .and_then(|()| encoder.finish())
-                .unwrap_or_else(|err| panic!("dux-web: could not gzip {path:?}: {err}"))
+        let out = if compressible {
+            // The gzip magic-byte check is still needed: a checkout whose dist
+            // was gzipped IN PLACE by the ancient in-place version of this
+            // script hands us compressed bytes already. The server no longer
+            // speaks gzip, so those bytes are inflated FIRST and then Brotli'd
+            // like any other text asset — every staged file with a compressible
+            // extension must be Brotli, because the extension is the only
+            // signal the server has (Brotli has no magic bytes).
+            let raw = if bytes.starts_with(&[0x1f, 0x8b]) {
+                use std::io::Read;
+
+                use flate2::read::GzDecoder;
+
+                let mut out = Vec::new();
+                GzDecoder::new(&bytes[..])
+                    .read_to_end(&mut out)
+                    .unwrap_or_else(|err| {
+                        panic!("dux-web: could not inflate the in-place-gzipped {path:?}: {err}")
+                    });
+                out
+            } else {
+                bytes
+            };
+            let params = BrotliEncoderParams {
+                quality: 11,
+                ..Default::default()
+            };
+            let mut compressed = Vec::new();
+            brotli::BrotliCompress(&mut raw.as_slice(), &mut compressed, &params)
+                .unwrap_or_else(|err| panic!("dux-web: could not brotli {path:?}: {err}"));
+            compressed
         } else {
             bytes
         };

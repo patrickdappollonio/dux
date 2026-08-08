@@ -29,6 +29,7 @@ pub mod browse_routes;
 pub mod build_routes;
 pub mod changes;
 pub mod changes_routes;
+pub mod compressible_exts;
 pub mod config_routes;
 pub mod console;
 pub mod engine_actor;
