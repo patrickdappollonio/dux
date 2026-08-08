@@ -672,6 +672,117 @@ describe("preview in diff mode", () => {
   })
 })
 
+// A DELETED file clicked in the Changes pane opens the editor in diff mode.
+// The diff must render as a deletion (HEAD content vs an empty modified side),
+// and every way the load can fail must SETTLE into a visible state with a
+// Retry action — never a permanent spinner. File mode on the same path keeps
+// the existing fileError + Retry arm.
+describe("a deleted file in the editor", () => {
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    installBootStubs()
+    const { clearSessionDrafts } = await import("@/lib/editorDrafts")
+    clearSessionDrafts(SESSION)
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.unstubAllGlobals()
+  })
+
+  it("a deleted file's diff renders the DiffViewer as an all-delete diff", async () => {
+    diffMock.mockResolvedValue({
+      path: "src/gone.txt",
+      original: "the content at HEAD\n",
+      modified: "",
+      binary: false,
+    })
+    await mountWithTab("src/gone.txt", "diff")
+    const viewer = await screen.findByTestId("diff-viewer")
+    expect(viewer.getAttribute("data-original")).toBe("the content at HEAD\n")
+    expect(viewer.getAttribute("data-modified")).toBe("")
+    // Diff mode never fetches /read, so a missing working copy can't error it.
+    expect(readMock).not.toHaveBeenCalled()
+  })
+
+  it("a rejecting diff fetch settles into an error with a Retry action", async () => {
+    diffMock.mockRejectedValue(
+      new Error("file not found in the worktree or at HEAD: src/gone.txt"),
+    )
+    await mountWithTab("src/gone.txt", "diff")
+    await screen.findByText(/file not found in the worktree or at HEAD/i)
+    const callsAfterSettle = diffMock.mock.calls.length
+
+    // Retry re-fires the diff request; on success the viewer renders.
+    diffMock.mockResolvedValue({
+      path: "src/gone.txt",
+      original: "the content at HEAD\n",
+      modified: "",
+      binary: false,
+    })
+    fireEvent.click(screen.getByRole("button", { name: /retry/i }))
+    await screen.findByTestId("diff-viewer")
+    expect(diffMock.mock.calls.length).toBeGreaterThan(callsAfterSettle)
+  })
+
+  it("preview-replacing a diff tab onto another path loads the new diff", async () => {
+    // The Changes-pane flow that reuses a tab id: open file A in diff mode,
+    // then the store preview-replaces the SAME tab onto path B (rule 2 in
+    // lib/editorTabs.ts). The tab's cached buffer still carries A's path, and
+    // the diff fetch for B must not be dropped on that stale buffer — that
+    // drop is a permanent spinner (nothing re-triggers the load effect).
+    diffMock.mockResolvedValue({
+      path: "src/a.txt",
+      original: "a at HEAD\n",
+      modified: "a on disk\n",
+      binary: false,
+    })
+    const { rerender } = await mountWithTab("src/a.txt", "diff")
+    const viewer = await screen.findByTestId("diff-viewer")
+    expect(viewer.getAttribute("data-original")).toBe("a at HEAD\n")
+
+    diffMock.mockResolvedValue({
+      path: "src/gone.txt",
+      original: "b at HEAD\n",
+      modified: "",
+      binary: false,
+    })
+    mockState = {
+      ...mockState,
+      editorTabs: {
+        [SESSION]: {
+          tabs: [
+            {
+              id: TAB_ID,
+              path: "src/gone.txt",
+              dirty: false,
+              preview: true,
+              mode: "diff",
+            },
+          ],
+          activeId: TAB_ID,
+        },
+      },
+    } as DuxState
+    const { EditorOverlay } = await import("@/components/EditorOverlay")
+    rerender(<EditorOverlay />)
+    await waitFor(() => {
+      const v = screen.getByTestId("diff-viewer")
+      expect(v.getAttribute("data-original")).toBe("b at HEAD\n")
+      expect(v.getAttribute("data-modified")).toBe("")
+    })
+  })
+
+  it("file mode on a deleted path settles into the fileError arm with Retry", async () => {
+    readMock.mockRejectedValue(
+      new Error("file not found: src/gone.txt") as never,
+    )
+    await mountWithTab("src/gone.txt", "file")
+    await screen.findByText(/file not found: src\/gone\.txt/i)
+    expect(screen.getByRole("button", { name: /retry/i })).toBeTruthy()
+  })
+})
+
 // The editor's panel sizes must be STRING percentages: react-resizable-panels
 // v4 treats a bare number as PIXELS, which is the "explorer opens ~20px wide"
 // bug. And each panel's inner wrapper (the div the library gives

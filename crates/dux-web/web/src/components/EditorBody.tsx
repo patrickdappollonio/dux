@@ -614,6 +614,35 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
   // Fetch and store a tab's diff cache for `path`. Extracted for the same
   // reason as `loadFileBuffer` above; also a plain function for the same
   // compiler-derived-lint-rule reason.
+  //
+  // The settle-time base: the tab's cached buffer may still carry a PREVIOUS
+  // file's path (a preview-replace reuses the tab id and swaps the path; diff
+  // mode has no synchronous seed the way `loadFileBuffer` does). A result for
+  // `path` must then land on a FRESH buffer for `path`, not be dropped on the
+  // stale one: dropping it left `diffLoadedPath` forever behind the tab's
+  // path, nothing re-triggered the load effect, and the pane sat on the
+  // spinner permanently (the Changes-pane "click a second file" bug). The
+  // stale buffer's file fields are deliberately NOT carried over — they
+  // describe the old file. When the buffer already belongs to `path` it is
+  // kept, so a draft loaded in file mode survives a diff load.
+  //
+  // `tabsRef` guards the one remaining race: a valid-token result whose
+  // `path` the tab has ALREADY moved off (the path changed after this fetch
+  // started, before the load effect fired the replacement request and bumped
+  // the token). Installing a buffer for the abandoned path would strand the
+  // tab again, so that result is dropped; the new path's own load effect is
+  // what recovers.
+  function diffResultBase(
+    prev: Map<string, TabBuffer>,
+    tabId: string,
+    path: string,
+  ): TabBuffer | null {
+    const cur = prev.get(tabId) ?? emptyBuffer(path)
+    if (cur.path === path) return cur
+    const tabPathNow = tabsRef.current.find((t) => t.id === tabId)?.path
+    return tabPathNow === path ? emptyBuffer(path) : null
+  }
+
   function loadDiffBuffer(tabId: string, path: string): void {
     const token = (diffRequestTokenRef.current.get(tabId) ?? 0) + 1
     diffRequestTokenRef.current.set(tabId, token)
@@ -622,11 +651,11 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
       .then((d) => {
         if (diffRequestTokenRef.current.get(tabId) !== token) return
         setBuffers((prev) => {
-          const cur = prev.get(tabId) ?? emptyBuffer(path)
-          if (cur.path !== path) return prev
+          const base = diffResultBase(prev, tabId, path)
+          if (base === null) return prev
           const next = new Map(prev)
           next.set(tabId, {
-            ...cur,
+            ...base,
             diff: d,
             diffLoadedPath: path,
             diffLoadedSignal: openFileSignalRef.current,
@@ -638,11 +667,11 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
       .catch((e) => {
         if (diffRequestTokenRef.current.get(tabId) !== token) return
         setBuffers((prev) => {
-          const cur = prev.get(tabId) ?? emptyBuffer(path)
-          if (cur.path !== path) return prev
+          const base = diffResultBase(prev, tabId, path)
+          if (base === null) return prev
           const next = new Map(prev)
           next.set(tabId, {
-            ...cur,
+            ...base,
             diffError: e instanceof Error ? e.message : "could not load diff",
           })
           return next
@@ -1358,8 +1387,21 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
               ) : activeTab.mode === "diff" ? (
                 // Read-only Monaco diff (HEAD vs working copy).
                 activeBuffer?.diffError && !isBufferStale(activeBuffer, activeTab.path) ? (
-                  <div className="flex h-full items-center justify-center px-4 text-center text-sm text-destructive">
+                  <div className="flex h-full flex-col items-center justify-center gap-2 px-4 text-center text-sm text-destructive">
                     {activeBuffer.diffError}
+                    {/* Manual retry, mirroring the file-mode error arm below: a
+                        settled diff error is never auto-retried (the load
+                        effect's deps don't move once diffError is set), so
+                        without this the only ways back are switching tabs or
+                        reopening the editor. */}
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => loadDiffBuffer(activeTab.id, activeTab.path)}
+                    >
+                      <RotateCw />
+                      Retry
+                    </Button>
                   </div>
                 ) : !diffReady ? (
                   <div className="flex h-full items-center justify-center text-muted-foreground">

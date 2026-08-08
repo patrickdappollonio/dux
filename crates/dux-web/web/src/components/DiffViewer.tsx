@@ -34,22 +34,41 @@ export default function DiffViewer({ path, original, modified }: DiffViewerProps
   // diff-view close. Passing keepCurrent{Original,Modified}Model below tells the
   // library to leave the models alone (it then only disposes the widget), which
   // silences the assertion but would LEAK the anonymous in-memory models; this
-  // cleanup reclaims them. Ordering is safe: the library's DiffEditor is our
-  // child, so React runs its widget-disposing cleanup before this parent
-  // cleanup, so by the time we dispose the models no live widget still holds
-  // them. `onMount` fires after the wrapper's internal model-swap effects, so
+  // cleanup reclaims them. Ordering is NOT safe on its own: React runs a
+  // deleted subtree's cleanups parent-first, so this cleanup fires while the
+  // child's widget is still live and still holds the models (see the detach
+  // step inside the cleanup). `onMount` fires after the wrapper's internal model-swap effects, so
   // getModel() here is the exact stable pair the widget keeps for its lifetime
   // (path/content/language changes reuse these models via setValue, never
   // replace them, since we pass no model paths).
   const modelsRef = useRef<MonacoEditor.IDiffEditorModel | null>(null)
+  const editorRef = useRef<MonacoEditor.IStandaloneDiffEditor | null>(null)
   const handleMount: DiffOnMount = (editorInstance) => {
+    editorRef.current = editorInstance
     modelsRef.current = editorInstance.getModel()
   }
   useEffect(() => {
     return () => {
+      const editor = editorRef.current
       const models = modelsRef.current
+      editorRef.current = null
       modelsRef.current = null
       if (!models) return
+      // On unmount this component's subtree is DELETED, and React runs a
+      // deleted subtree's cleanups PARENT-FIRST: this cleanup runs while the
+      // library's DiffEditor child is still live and its widget still holds
+      // these models. Monaco 0.55 asserts on disposing a TextModel in exactly
+      // that state (measured in the preview env: "TextModel got disposed
+      // before DiffEditorWidget model got reset" thrown during the commit
+      // that swaps the diff arm for the loading arm on a preview-replace).
+      // So detach the pair from the widget first, then dispose. The catch
+      // covers a widget the library already disposed (nothing left to
+      // detach); the models are still ours to reclaim.
+      try {
+        editor?.setModel(null)
+      } catch {
+        // Widget already disposed; fall through to model disposal.
+      }
       if (!models.original.isDisposed()) models.original.dispose()
       if (!models.modified.isDisposed()) models.modified.dispose()
     }
