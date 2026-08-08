@@ -1434,9 +1434,12 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
                   // via the `allDelete` prop): the current-line highlight
                   // borders the now-blank row, and the overview ruler is a
                   // CANVAS whose green speck no CSS can reach. Layer three is
-                  // the scoped line-number rule (safe: an all-delete diff has
-                  // exactly one modified line, so only the phantom's "1" is
-                  // hidden). The original side's text is never touched.
+                  // the line-number rule, scoped to `.editor.modified`: the
+                  // deleted rows' numbers are ordinary .line-numbers in the
+                  // sibling original editor's margin and must survive, while
+                  // the modified editor's sole line number in an all-delete
+                  // diff is the phantom row's. The original side's text is
+                  // never touched.
                   <div
                     className={
                       activeBuffer?.diff && isAllDeleteDiff(activeBuffer.diff)

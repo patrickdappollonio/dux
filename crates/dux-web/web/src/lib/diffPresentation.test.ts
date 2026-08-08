@@ -52,22 +52,25 @@ describe("isAllDeleteDiff", () => {
 })
 
 // The CSS half of the suppression is proven by the preview-env screenshots,
-// but ONE selector shape is pinned here because it regressed once already:
-// the line-number rule must carry the `.monaco-editor` prefix. Monaco's own
+// but ONE selector shape is pinned here because it regressed twice, once in
+// each direction: the line-number rule must scope to `.editor.modified`.
+// That scope picks WHICH numbers to hide — the deleted rows' numbers are
+// ordinary `.line-numbers` in the sibling `.editor.original`'s margin, so a
+// wider scope hides them too (measured on ab6564e7: the red rows lost their
+// 1-4) — and it doubles as the load-order guard: Monaco's own
 // `.monaco-editor .margin-view-overlays .line-numbers` rule (no !important)
-// ships inside the LAZY DiffViewer chunk, so it loads after index.css and
-// wins a specificity tie on source order — the prefixed form out-specifies
-// it and wins regardless of load order. (The live validation that missed
-// this injected its rules via addStyleTag, which appends after Monaco's
-// sheet and so masked the order dependence.)
+// ships inside the LAZY DiffViewer chunk, so it loads after index.css and a
+// specificity TIE loses on source order (measured on 9c6fc2d1: the phantom
+// "1" stayed). The live addStyleTag validation appends after Monaco's sheet
+// and so masked the order dependence.
 describe("the all-delete line-number rule's selector shape", () => {
-  it("keeps the .monaco-editor prefix that beats Monaco's lazy-loaded tie", () => {
+  it("scopes to the modified editor and out-specifies Monaco's lazy-loaded rule", () => {
     const css = readFileSync(
       fileURLToPath(new URL("../index.css", import.meta.url)),
       "utf8",
     )
     expect(css).toContain(
-      ".dux-diff-all-delete .monaco-editor .margin-view-overlays .line-numbers",
+      ".dux-diff-all-delete .editor.modified .margin-view-overlays .line-numbers",
     )
   })
 })

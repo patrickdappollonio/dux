@@ -378,9 +378,11 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
    own `.monaco-editor .insert-sign { display: flex !important }` — a bare
    class rule loses that !important tie on specificity; this form matches it
    and wins as the later sheet. The final rule hides the phantom row's line
-   number, safe under this marker because an all-delete diff has exactly one
-   modified line (the deleted rows' numbers render in Monaco's inline view
-   zones, not as `.line-numbers`). */
+   number. It MUST scope to `.editor.modified`: the deleted rows' numbers are
+   ORDINARY `.line-numbers` elements too, in the sibling `.editor.original`'s
+   margin (they are not view-zone content — that was measured wrong once and
+   hid them), so an unscoped rule always matches all of them. The modified
+   editor's sole line number in an all-delete diff is the phantom row's. */
 .dux-diff-all-delete .line-insert {
   display: none !important;
 }
@@ -393,13 +395,15 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
 .dux-diff-all-delete .monaco-editor .insert-sign {
   display: none !important;
 }
-/* The `.monaco-editor` prefix here is a LOAD-ORDER guard, not decoration:
-   Monaco's own `.monaco-editor .margin-view-overlays .line-numbers` rule
-   (display: inline-block, no !important) ships inside the lazy DiffViewer
-   chunk, so it loads AFTER this sheet and wins any specificity tie on source
-   order. This selector out-specifies it (0,4,0 vs 0,3,0) and so wins
+/* The `.editor.modified` scope does double duty. It picks WHICH line numbers
+   to hide (only the modified editor's — the deleted rows' numbers live in the
+   sibling `.editor.original` and must survive), and it is also the LOAD-ORDER
+   guard: Monaco's own `.monaco-editor .margin-view-overlays .line-numbers`
+   rule (display: inline-block, no !important) ships inside the lazy
+   DiffViewer chunk, so it loads AFTER this sheet and wins any specificity tie
+   on source order. This selector out-specifies it (0,4,0 vs 0,3,0) and wins
    regardless of load order, with no !important needed. (The four rules above
    DO need their !important, because Monaco's counterparts carry it.) */
-.dux-diff-all-delete .monaco-editor .margin-view-overlays .line-numbers {
+.dux-diff-all-delete .editor.modified .margin-view-overlays .line-numbers {
   display: none;
 }
