@@ -190,10 +190,13 @@ export function AgentActionsMenu({
   const isMobile = useIsMobile()
   const ghAvailable = bootstrap?.gh_available ?? false
   const prOverridden = session.pr?.overridden ?? false
-  // While another device input-owns one of this agent's PTYs (reported into
-  // the store by the mounted TerminalPane), the entries that MUTATE the agent
-  // disable: deleting, renaming or relaunching an agent someone else is
-  // actively driving is a surprise for them. Read-only entries (info, the
+  // While another connection input-owns one of this agent's PTYs, the entries
+  // that MUTATE the agent disable: deleting, renaming or relaunching an agent
+  // someone else is actively driving is a surprise for them. Two sources feed
+  // the answer (see `sessionActiveElsewhere`): a mounted TerminalPane's live
+  // verdict, and the server-published `input_owner` field on the spine's
+  // tabs — the latter is what lets a hub or sidebar row gate an agent NO pane
+  // on this device is attached to. Read-only entries (info, the
   // project submenu, editor/terminal/copy entries) and this device's own view
   // preferences (the bar toggles) stay usable. The reason renders as an
   // inline label rather than a tooltip: disabled menu items are

@@ -60,6 +60,7 @@ import {
   mobileAccessoryBarVisible,
   mobileTopBarVisible,
   noteAgentPtyOwnership,
+  noteOwnPtyConnection,
   restoreMobileBars,
   useDux,
 } from "@/lib/store"
@@ -765,6 +766,10 @@ export function TerminalPane(props: TerminalPaneProps) {
     // the `pty.owner` handler can compare a handover's claimer id against ours.
     pty.onConnected = (connId) => {
       myConnIdRef.current = connId
+      // Register the id as one of OURS in the store, so the server-published
+      // `input_owner` spine field can be compared against this client's own
+      // identity by surfaces outside this pane (see `sessionActiveElsewhere`).
+      noteOwnPtyConnection(connId, true)
       // A take-over requested before our id was known deferred its claim; now that
       // we know our id, perform the resize/claim so the server's resulting
       // `pty.owner` carries an id we recognise as ours.
@@ -1309,6 +1314,12 @@ export function TerminalPane(props: TerminalPaneProps) {
       // and a stale id would make `isOwnerAfterHandover` misjudge ownership. With
       // it null, a pre-`connected` handover safely reads as non-owner and resolves
       // once the new `connected` frame lands (epoch dedup keeps the latest claim).
+      // Retire the stale id from the store's own-connection set too: the server
+      // has already released anything it owned, so keeping it would make a spine
+      // field naming it read as "mine" when it no longer is.
+      if (myConnIdRef.current !== null) {
+        noteOwnPtyConnection(myConnIdRef.current, false)
+      }
       myConnIdRef.current = null
       initialResizeDone = false
       setReconnecting(false)
@@ -1331,6 +1342,17 @@ export function TerminalPane(props: TerminalPaneProps) {
     // The socket dropped and is retrying: surface the non-blocking reconnect state.
     pty.onReconnecting = () => {
       setReconnecting(true)
+      // The dropped socket's connection id is dead server-side (its ownerships
+      // were released on disconnect); retire it from the own-connection set so
+      // a stale spine field naming it cannot read as "mine", and null the ref
+      // like the onOpen and unmount paths do, so the two "is this id mine"
+      // trackers never disagree (a take-over in this window then defers its
+      // claim to the next `connected` frame instead of writing into a closed
+      // socket).
+      if (myConnIdRef.current !== null) {
+        noteOwnPtyConnection(myConnIdRef.current, false)
+        myConnIdRef.current = null
+      }
     }
     // Connection-state transitions. The one we act on is `failed`: the PTY socket
     // now shares the events socket's 3-attempt cap, so when its budget is spent it
@@ -1496,6 +1518,13 @@ export function TerminalPane(props: TerminalPaneProps) {
       // focus switch swaps panes; whichever order React runs old-cleanup vs
       // new-effect, the guard ensures we never null out the incoming pane's
       // registration (it has already replaced ours by the time we'd clear it).
+      // The socket dies with the pane, and so does its connection id: retire
+      // it from the store's own-connection set (the server releases anything
+      // it owned the moment the socket closes).
+      if (myConnIdRef.current !== null) {
+        noteOwnPtyConnection(myConnIdRef.current, false)
+        myConnIdRef.current = null
+      }
       pty.close()
       if (ptyRef.current === pty) ptyRef.current = null
       if (getActivePtySocket() === pty) setActivePtySocket(null)
@@ -1532,15 +1561,29 @@ export function TerminalPane(props: TerminalPaneProps) {
   // Publish this pane's ownership verdict into the store ledger so surfaces
   // OUTSIDE the pane (the agent ⋯ menu) can disable mutating actions while
   // another device drives the agent. Agent PTYs only: a companion terminal
-  // taken over elsewhere says nothing about the agent itself. The unmount
-  // cleanup clears the entry, because with the pane gone this client no
-  // longer knows the PTY's ownership and a stale entry would gate menus
-  // forever.
+  // taken over elsewhere says nothing about the agent itself. The verdict is
+  // the ledger's fast path in BOTH directions: "elsewhere" gates the menu the
+  // moment the handover frame lands, and "mine" un-gates it right after a
+  // take-over, while the spine's `input_owner` still names the previous owner
+  // until the refetch. "mine" starts as the same optimistic foreground guess
+  // `isOwner` itself starts from (the foregrounded pane claims via its first
+  // resize moments later); it is corrected by the `pty.owner` handovers. A
+  // pane whose socket has FAILED for good publishes no verdict at all: its
+  // belief is about a connection that no longer exists, and a stale "mine"
+  // would override the server field forever on a surface that cannot type.
+  // The cleanup retires the verdict; it also runs between re-publishes (any
+  // dep flip), which is harmless because the new verdict lands in the same
+  // synchronous pass, and on unmount it is what hands the answer back to the
+  // server-published spine field alone.
   useEffect(() => {
     if (kind !== "agent") return
-    noteAgentPtyOwnership(id, !isOwner)
-    return () => noteAgentPtyOwnership(id, false)
-  }, [kind, id, isOwner])
+    if (connectionLost) {
+      noteAgentPtyOwnership(id, "unknown")
+      return
+    }
+    noteAgentPtyOwnership(id, isOwner ? "mine" : "elsewhere")
+    return () => noteAgentPtyOwnership(id, "unknown")
+  }, [kind, id, isOwner, connectionLost])
 
   // Gaining ownership is a fresh "looking at it" moment: ping the server at once
   // (when visible) so the agent's attention flag drops immediately, rather than

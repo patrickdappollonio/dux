@@ -353,26 +353,30 @@ describe("TerminalPane take-over device naming", () => {
 // `pty.owner` handovers on its own socket), so it publishes the verdict into
 // the store ledger the agent ⋯ menu gates its mutating entries on.
 describe("TerminalPane ownership reporting into the store", () => {
-  it("reports an agent PTY as owned-elsewhere on takeover and clears it on reclaim and unmount", async () => {
+  it("reports the live verdict on takeover, reclaim, and retirement on unmount", async () => {
     const store = await import("@/lib/store")
     const { unmount } = render(
       <TerminalPane kind="agent" id="s1" sessionId="s1" />,
     )
-    expect(store.getSnapshot().ptyOwnedElsewhere["s1"]).toBeUndefined()
+    // A foregrounded pane assumes ownership until told otherwise, and says so:
+    // the "mine" verdict is what overrides a stale spine `input_owner` right
+    // after a take-over.
+    expect(store.getSnapshot().ptyOwnership["s1"]).toBe("mine")
     act(() => notifyPtyOwner("s1", "conn-other"))
-    expect(store.getSnapshot().ptyOwnedElsewhere["s1"]).toBe(true)
-    // Take over from here: the placeholder's button reclaims and the ledger
-    // entry clears with it.
+    expect(store.getSnapshot().ptyOwnership["s1"]).toBe("elsewhere")
+    // Take over from here: the placeholder's button reclaims and the verdict
+    // flips back with it.
     act(() => {
       fireEvent.click(screen.getByText("Take over"))
     })
-    expect(store.getSnapshot().ptyOwnedElsewhere["s1"]).toBeUndefined()
-    // Owned elsewhere again, then unmount: with the pane gone this client no
-    // longer knows, so the entry must not linger and disable menus forever.
+    expect(store.getSnapshot().ptyOwnership["s1"]).toBe("mine")
+    // Owned elsewhere again, then unmount: with the pane gone this client has
+    // no live verdict, so the entry must retire entirely (the server-published
+    // spine field answers alone from here).
     act(() => notifyPtyOwner("s1", "conn-other-2"))
-    expect(store.getSnapshot().ptyOwnedElsewhere["s1"]).toBe(true)
+    expect(store.getSnapshot().ptyOwnership["s1"]).toBe("elsewhere")
     unmount()
-    expect(store.getSnapshot().ptyOwnedElsewhere["s1"]).toBeUndefined()
+    expect(store.getSnapshot().ptyOwnership["s1"]).toBeUndefined()
   })
 
   it("does not report companion-terminal PTYs (a terminal is not the agent)", async () => {
@@ -385,7 +389,48 @@ describe("TerminalPane ownership reporting into the store", () => {
       />,
     )
     act(() => notifyPtyOwner("t1", "conn-other"))
-    expect(store.getSnapshot().ptyOwnedElsewhere["t1"]).toBeUndefined()
+    expect(store.getSnapshot().ptyOwnership["t1"]).toBeUndefined()
+  })
+
+  it("registers its socket id as this client's own and retires it on reconnect and unmount", async () => {
+    // The own-connection set is the identity half of the server-published
+    // ownership comparison: a spine `input_owner` naming an id in this set is
+    // OUR ownership, anything else is another connection's. A dropped call
+    // site here would make a client read its OWN agent as active elsewhere.
+    const store = await import("@/lib/store")
+    const { unmount } = render(
+      <TerminalPane kind="agent" id="s1" sessionId="s1" />,
+    )
+    const pty = FakePtySocket.instances.at(-1)!
+    act(() => pty.onConnected("c7"))
+    expect(store.getSnapshot().ownPtyConnIds["c7"]).toBe(true)
+    // The socket drops: the server has released anything c7 owned, so the id
+    // must retire immediately, not linger until the reopen.
+    act(() => pty.onReconnecting())
+    expect(store.getSnapshot().ownPtyConnIds["c7"]).toBeUndefined()
+    // The reopen mints a fresh id.
+    act(() => {
+      pty.onOpen()
+      pty.onConnected("c8")
+    })
+    expect(store.getSnapshot().ownPtyConnIds["c8"]).toBe(true)
+    unmount()
+    expect(store.getSnapshot().ownPtyConnIds["c8"]).toBeUndefined()
+  })
+
+  it("retires its ownership verdict while the socket has failed for good", async () => {
+    // A pane whose socket never (re)connects knows nothing about the live
+    // PTY; a stale "mine" would override the server-published owner forever
+    // on a surface that cannot even type.
+    const store = await import("@/lib/store")
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(store.getSnapshot().ptyOwnership["s1"]).toBe("mine")
+    const pty = FakePtySocket.instances.at(-1)!
+    pty.emit("failed")
+    expect(store.getSnapshot().ptyOwnership["s1"]).toBeUndefined()
+    // A successful reopen restores the live verdict.
+    pty.emit("open")
+    expect(store.getSnapshot().ptyOwnership["s1"]).toBe("mine")
   })
 })
 

@@ -171,6 +171,31 @@ describe("spine slice", () => {
     expect(spineFetches).toBe(before + 1)
   })
 
+  it("a sessions.changed refetch carries a tab's input_owner through ingestion", async () => {
+    // The server publishes the input-owning PTY-socket connection id per tab
+    // (an ownership flip fires `sessions.changed`); the ingestion path must
+    // hand it through untouched so `sessionActiveElsewhere` can gate the row
+    // menus of agents no pane here is attached to.
+    const mod = await loadStore()
+    await pushSpine(
+      mod,
+      makeSpine({
+        sessions: [
+          {
+            ...session("s1", "p1"),
+            tabs: [
+              { id: "s1", provider: "claude", order: 0, input_owner: "42" },
+            ],
+          } as unknown as Spine["sessions"][number],
+        ],
+      }),
+      "sessions.changed",
+    )
+    expect(
+      mod.getSnapshot().spine?.sessions[0]?.tabs?.[0]?.input_owner,
+    ).toBe("42")
+  })
+
   describe("a tab's launched drop-paste profile", () => {
     // WHY IT LIVES ON THE SPINE. The profile says how a file dropped onto a tab
     // has its path quoted, and which CLI's length limit applies. It changes when

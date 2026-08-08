@@ -130,10 +130,13 @@ afterEach(() => {
 })
 
 describe("AgentActionsMenu while the agent is active on another device", () => {
-  // Ownership is per-PTY runtime state reported into the store by the mounted
-  // TerminalPane (`ptyOwnedElsewhere`). While any of the agent's tab PTYs is
-  // input-owned by another device, the entries that MUTATE the agent disable;
-  // read-only entries (info, project submenu, editor, terminals) stay usable.
+  // Ownership reaches the menu two ways: a MOUNTED TerminalPane's live
+  // verdict in the `ptyOwnership` ledger, and the server-published
+  // `input_owner` field on the spine's tabs (compared against this client's
+  // own PTY-socket ids), which needs NO pane mounted at all. While any of the
+  // agent's tab PTYs is input-owned by another connection, the entries that
+  // MUTATE the agent disable; read-only entries (info, project submenu,
+  // editor, terminals) stay usable.
   const disabledLabels = [
     /^New agent tab for /,
     "Force recreate agent…",
@@ -166,8 +169,8 @@ describe("AgentActionsMenu while the agent is active on another device", () => {
   it("disables the mutating entries and keeps the read-only ones enabled", async () => {
     const session = makeSession({ id: "s1", pr: prPinned })
     seed(session, true)
-    ;(mockState as unknown as { ptyOwnedElsewhere: Record<string, true> }).ptyOwnedElsewhere =
-      { s1: true }
+    ;(mockState as unknown as { ptyOwnership: Record<string, string> }).ptyOwnership =
+      { s1: "elsewhere" }
     await openMenu(session)
     for (const label of disabledLabels) {
       expect(
@@ -191,7 +194,7 @@ describe("AgentActionsMenu while the agent is active on another device", () => {
   it("keeps every entry enabled and shows no hint when nothing is owned elsewhere", async () => {
     const session = makeSession({ id: "s1", pr: prPinned })
     seed(session, true)
-    ;(mockState as unknown as { ptyOwnedElsewhere: Record<string, true> }).ptyOwnedElsewhere =
+    ;(mockState as unknown as { ptyOwnership: Record<string, string> }).ptyOwnership =
       {}
     await openMenu(session)
     for (const label of [...disabledLabels, ...enabledLabels]) {
@@ -200,6 +203,42 @@ describe("AgentActionsMenu while the agent is active on another device", () => {
         `expected enabled: ${label}`,
       ).not.toBe("true")
     }
+    expect(screen.queryByText(/active on another device/i)).toBeNull()
+  })
+
+  it("disables from the server-published input_owner alone, with no pane mounted", async () => {
+    // The hub/sidebar row case: this client never attached to the agent, so
+    // the ledger is empty and there are no own connection ids; the spine's
+    // `input_owner` is the only signal, and it must be enough.
+    const session = makeSession({
+      id: "s1",
+      pr: prPinned,
+      tabs: [
+        { id: "s1", provider: "claude", order: 0, input_owner: "42" },
+      ] as unknown as SessionView["tabs"],
+    })
+    seed(session, true)
+    await openMenu(session)
+    expect(itemFor("Delete agent…").getAttribute("aria-disabled")).toBe("true")
+    expect(itemFor("Rename agent…").getAttribute("aria-disabled")).toBe("true")
+    expect(screen.getByText(/active on another device/i)).toBeTruthy()
+  })
+
+  it("stays enabled when the published owner is one of this client's own connections", async () => {
+    const session = makeSession({
+      id: "s1",
+      pr: prPinned,
+      tabs: [
+        { id: "s1", provider: "claude", order: 0, input_owner: "42" },
+      ] as unknown as SessionView["tabs"],
+    })
+    seed(session, true)
+    ;(mockState as unknown as { ownPtyConnIds: Record<string, true> }).ownPtyConnIds =
+      { "42": true }
+    await openMenu(session)
+    expect(itemFor("Delete agent…").getAttribute("aria-disabled")).not.toBe(
+      "true",
+    )
     expect(screen.queryByText(/active on another device/i)).toBeNull()
   })
 
@@ -213,8 +252,8 @@ describe("AgentActionsMenu while the agent is active on another device", () => {
       ] as unknown as SessionView["tabs"],
     })
     seed(session, true)
-    ;(mockState as unknown as { ptyOwnedElsewhere: Record<string, true> }).ptyOwnedElsewhere =
-      { "tab-2": true }
+    ;(mockState as unknown as { ptyOwnership: Record<string, string> }).ptyOwnership =
+      { "tab-2": "elsewhere" }
     await openMenu(session)
     expect(itemFor("Delete agent…").getAttribute("aria-disabled")).toBe("true")
   })

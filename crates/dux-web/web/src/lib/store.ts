@@ -584,16 +584,32 @@ export interface DuxState {
   // (with a toast) when the settings PATCH fails.
   mobileTopBarOverride: boolean | null
   mobileAccessoryBarOverride: boolean | null
-  // Per-PTY "another device owns input" verdicts, keyed by pty id (a tab id,
-  // with the session-slot tab id equal to the session id). Reported by the
-  // mounted TerminalPane — the one surface that knows, from the `pty.owner`
-  // handovers on its own socket — so surfaces OUTSIDE the pane (the agent ⋯
-  // menu) can gate mutating actions while another device drives the agent.
-  // Only ids currently owned ELSEWHERE appear; regaining ownership or
-  // unmounting the pane removes the entry, because with the pane gone this
-  // client no longer knows. Runtime-only client state: an agent no pane here
-  // is attached to simply has no entry and gates nothing.
-  ptyOwnedElsewhere: Record<string, true>
+  // Per-PTY input-ownership verdicts from MOUNTED TerminalPanes, keyed by pty
+  // id (a tab id, with the session-slot tab id equal to the session id). The
+  // pane is the freshest source: it learns handovers from the `pty.owner`
+  // events on its own socket the moment they happen, ahead of the next spine
+  // refetch. "elsewhere" gates the agent ⋯ menu's mutating actions at once;
+  // "mine" overrides a STALE spine field the other way (right after a
+  // take-over, the spine still names the previous owner until the refetch
+  // lands, and the menu must not stay disabled for the device that just took
+  // over). "mine" is the pane's live BELIEF, not a server receipt: it starts
+  // as the optimistic foreground guess the pane itself starts from (the
+  // foregrounded pane claims via its first resize moments later) and is
+  // corrected by `pty.owner` handovers. Unmounting the pane, or its socket
+  // failing for good, removes the entry — with no live socket this client has
+  // no verdict and the server-published `AgentTabView.input_owner` field (see
+  // `sessionActiveElsewhere`) takes over. Runtime-only client state.
+  ptyOwnership: Record<string, "mine" | "elsewhere">
+  // This client's OWN live PTY-socket connection ids, one per mounted pane
+  // with an open socket (the server allocates a fresh id per socket open; the
+  // pane registers it from the socket's `connected` frame and retires it on
+  // reconnect/close). This is the identity half of the server-published
+  // ownership comparison: a spine tab whose `input_owner` is NOT in this set
+  // is owned by some other connection — another device, or another tab of
+  // this browser. Deliberately the PTY-socket id space, not the events-socket
+  // `X-Connection-Id`: ownership is recorded per PTY socket server-side, and
+  // the `pty.owner` frames already speak this id space.
+  ownPtyConnIds: Record<string, true>
   // The session whose code-editor overlay is open, the file to auto-open on
   // launch (null = none preselected), and the view it opens in: "file" (editable
   // Monaco buffer) or "diff" (read-only Monaco DiffEditor, HEAD vs working copy).
@@ -805,7 +821,8 @@ let state: DuxState = {
   changesPaneOverride: null,
   mobileTopBarOverride: null,
   mobileAccessoryBarOverride: null,
-  ptyOwnedElsewhere: {},
+  ptyOwnership: {},
+  ownPtyConnIds: {},
   editorTarget: null,
   editorRoute: null,
   standaloneEditor: bootIsStandaloneEditor(),
@@ -5054,38 +5071,68 @@ export function setMobileBarVisibility(
     })
 }
 
-// ── Per-PTY input ownership (the `ptyOwnedElsewhere` ledger) ────────────────
+// ── Per-PTY input ownership (the `ptyOwnership` ledger) ─────────────────────
 
-// TerminalPane's reporter: record whether the AGENT PTY it renders is
-// input-owned by another device. Only owned-elsewhere ids are kept (see the
-// DuxState field's doc); the pane calls this with `false` on reclaim and from
-// its unmount cleanup. Idempotent so the per-render effect churn never
-// re-publishes an unchanged verdict.
+// TerminalPane's reporter: record this pane's live ownership verdict for the
+// AGENT PTY it renders ("mine" while it holds input, "elsewhere" while another
+// connection does), or retire the verdict ("unknown", from the unmount
+// cleanup — with the pane gone this client has no live verdict and the
+// server-published spine field takes over). Idempotent so the per-render
+// effect churn never re-publishes an unchanged verdict.
 export function noteAgentPtyOwnership(
   ptyId: string,
-  ownedElsewhere: boolean,
+  verdict: "mine" | "elsewhere" | "unknown",
 ): void {
-  const has = Boolean(state.ptyOwnedElsewhere[ptyId])
-  if (has === ownedElsewhere) return
-  const next = { ...state.ptyOwnedElsewhere }
-  if (ownedElsewhere) next[ptyId] = true
-  else delete next[ptyId]
-  setState({ ptyOwnedElsewhere: next })
+  const current = state.ptyOwnership[ptyId]
+  const next = verdict === "unknown" ? undefined : verdict
+  if (current === next) return
+  const map = { ...state.ptyOwnership }
+  if (next === undefined) delete map[ptyId]
+  else map[ptyId] = next
+  setState({ ptyOwnership: map })
 }
 
-// True while any of the agent's tab PTYs this client is attached to is
-// input-owned by another device. The agent ⋯ menu disables its MUTATING
-// entries on this (deleting or relaunching an agent someone else is driving
-// is a surprise for them); read-only entries stay usable. Knowable only for
-// PTYs a pane here is attached to, so an agent nobody on this device is
-// viewing reads false and its menu stays fully enabled. The optional chain is
-// deliberate: unit-test states are built as partial mocks.
+// TerminalPane's other reporter: register (live) or retire (dead) one of this
+// client's OWN PTY-socket connection ids, from the socket's `connected` frame
+// and its reconnect/close paths. See the `ownPtyConnIds` field doc.
+export function noteOwnPtyConnection(connId: string, live: boolean): void {
+  const has = Boolean(state.ownPtyConnIds[connId])
+  if (has === live) return
+  const next = { ...state.ownPtyConnIds }
+  if (live) next[connId] = true
+  else delete next[connId]
+  setState({ ownPtyConnIds: next })
+}
+
+// True while any of the agent's tab PTYs is input-owned by another connection
+// (another device, or another tab of this browser). The agent ⋯ menu disables
+// its MUTATING entries on this (deleting or relaunching an agent someone else
+// is driving is a surprise for them); read-only entries stay usable.
+//
+// Two sources feed the answer, per tab, freshest first:
+//  - a MOUNTED pane's live verdict in `ptyOwnership` ("mine" clears the tab
+//    even when the server field is stale right after a take-over; "elsewhere"
+//    gates it before the next spine refetch lands), then
+//  - the server-published `AgentTabView.input_owner` (the owning PTY-socket
+//    connection id riding the spine), compared against this client's own ids:
+//    owned, and not by me, means elsewhere. This is what lets the hub and
+//    sidebar row menus gate an agent NO pane on this device is attached to.
+// The optional chains are deliberate: unit-test states are partial mocks.
 export function sessionActiveElsewhere(
   s: DuxState,
   session: SessionView,
 ): boolean {
-  if (s.ptyOwnedElsewhere?.[session.id]) return true
-  return (session.tabs ?? []).some((t) => s.ptyOwnedElsewhere?.[t.id])
+  // Belt-and-braces for states whose `tabs` is absent (partial test mocks, an
+  // older server): the session-slot tab's id IS the session id, so when tabs
+  // are present the loop below covers this entry too, with the full local
+  // -then-server precedence. Do not "optimize" the loop to skip the slot tab.
+  if (s.ptyOwnership?.[session.id] === "elsewhere") return true
+  return (session.tabs ?? []).some((t) => {
+    const local = s.ptyOwnership?.[t.id]
+    if (local === "elsewhere") return true
+    if (local === "mine") return false
+    return Boolean(t.input_owner) && !s.ownPtyConnIds?.[t.input_owner as string]
+  })
 }
 
 // The compose bar's restore button: one tap restores BOTH bars (a deliberate

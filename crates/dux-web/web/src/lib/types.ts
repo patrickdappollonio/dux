@@ -96,6 +96,16 @@ export interface AgentTabView {
    * process, so a tab relaunched under a different provider was still quoted for
    * the previous one until a reconnect. See `dragDropPasteFormFor`. */
   drop_paste?: DropPasteProfile
+  /** The PTY-socket connection id currently input-owning this tab's PTY, or
+   * absent when nobody does (nobody claimed it, the owner disconnected, or the
+   * server predates the field). Same id space as the `pty.owner` events'
+   * `owner` field and the PTY socket's own `connected` frame id — NOT the
+   * events-socket `X-Connection-Id`. The spine publishes the IDENTITY rather
+   * than a per-client "elsewhere" flag because it is one shared document:
+   * each client compares against its own live PTY-socket ids
+   * (`ownPtyConnIds`) in `sessionActiveElsewhere`, which is how a hub or
+   * sidebar row menu can gate an agent this device never attached to. */
+  input_owner?: string
 }
 
 export interface TerminalView {
