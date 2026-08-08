@@ -3,6 +3,12 @@ import * as React from "react"
 const MOBILE_BREAKPOINT = 768
 
 function subscribe(callback: () => void) {
+  // jsdom ships no matchMedia, and the shared dropdown-menu primitive now calls
+  // useIsMobile in every menu-rendering test. A missing matchMedia only costs
+  // the resize SUBSCRIPTION (the snapshot below reads window.innerWidth
+  // directly), so degrade to a no-op unsubscribe instead of crashing tests
+  // that never stubbed it.
+  if (typeof window.matchMedia !== "function") return () => {}
   const mql = window.matchMedia(`(max-width: ${MOBILE_BREAKPOINT - 1}px)`)
   mql.addEventListener("change", callback)
   return () => mql.removeEventListener("change", callback)

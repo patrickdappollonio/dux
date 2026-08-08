@@ -4,7 +4,47 @@ import * as React from "react"
 import { Menu as MenuPrimitive } from "@base-ui/react/menu"
 
 import { cn } from "@/lib/utils"
-import { ChevronRightIcon, CheckIcon } from "lucide-react"
+import { useIsMobile } from "@/hooks/use-mobile"
+import { ChevronRightIcon, ChevronLeftIcon, CheckIcon } from "lucide-react"
+
+// On phones every dropdown/⋯ menu renders as a full-width bottom sheet instead
+// of an anchored popup (matching the cog's AppMenuSheet): anchored popups clip
+// against the small viewport and hide the row they came from. The split is
+// JS-driven (useIsMobile) so the desktop tree stays byte-identical, and the
+// mobile tree swaps only the PRESENTATION — the base-ui Root/Trigger/Popup/Item
+// machinery (roles, focus, close-on-select, Escape, data-popup-open on
+// triggers) is the same in both.
+//
+// Mechanism, measured on @base-ui/react 1.5.0: Menu.Popup cannot render
+// outside a Menu.Positioner (it requires the positioner context), but a
+// caller-supplied `style` on the Positioner wins over its computed floating
+// styles (usePositioner merges internal styles first and useRenderElement
+// merges the component's own style prop last). So the sheet keeps the
+// Positioner and overrides its geometry with the fixed bottom-edge styles
+// below — a supported prop, not an !important fight with inline styles.
+const SHEET_POSITIONER_STYLE: React.CSSProperties = {
+  position: "fixed",
+  top: "auto",
+  left: 0,
+  right: 0,
+  bottom: 0,
+  transform: "none",
+}
+
+// The sheet caps at 85dvh and scrolls internally, which leaves an uncovered
+// gap at the top of the screen; the backdrop underneath covers that gap, so a
+// tap there is an outside press and dismisses (base-ui's own dismissal — the
+// backdrop needs no click handler). Styled after SheetOverlay in sheet.tsx.
+const SHEET_BACKDROP_CLASS =
+  "fixed inset-0 z-50 bg-black/10 supports-backdrop-filter:backdrop-blur-sm transition-opacity duration-150 data-starting-style:opacity-0 data-ending-style:opacity-0 motion-reduce:transition-none"
+
+// The popup as a bottom sheet: full width, slide-in from the bottom edge,
+// internal scroll. motion-reduce drops the enter/exit animation wholesale
+// (the `!` outranks the data-open/data-closed animate classes; base-ui then
+// completes the open/close transition instantly). The safe-area padding keeps
+// the last row above a phone's home-indicator strip.
+const SHEET_POPUP_CLASS =
+  "z-50 max-h-[85dvh] w-full overflow-x-hidden overflow-y-auto overscroll-contain rounded-t-2xl bg-popover p-1 pb-[max(env(safe-area-inset-bottom),0.25rem)] text-popover-foreground shadow-lg ring-1 ring-foreground/10 outline-none duration-200 data-open:animate-in data-open:fade-in-0 data-open:slide-in-from-bottom data-closed:animate-out data-closed:fade-out-0 data-closed:slide-out-to-bottom data-closed:overflow-hidden motion-reduce:animate-none!"
 
 function DropdownMenu({ ...props }: MenuPrimitive.Root.Props) {
   return <MenuPrimitive.Root data-slot="dropdown-menu" {...props} />
@@ -30,6 +70,37 @@ function DropdownMenuContent({
     MenuPrimitive.Positioner.Props,
     "align" | "alignOffset" | "side" | "sideOffset"
   >) {
+  const isMobile = useIsMobile()
+  if (isMobile) {
+    // The bottom-sheet presentation. Same Portal/Positioner/Popup parts as the
+    // desktop branch, so every menu-content convention (items, icons,
+    // destructive tint, disabled rows, checkbox/radio items) rides through
+    // unchanged; only geometry and animation differ. The anchored align/side
+    // props are accepted and ignored: the positioner still receives them, but
+    // SHEET_POSITIONER_STYLE overrides the computed placement.
+    return (
+      <MenuPrimitive.Portal>
+        <MenuPrimitive.Backdrop
+          data-slot="dropdown-menu-backdrop"
+          className={SHEET_BACKDROP_CLASS}
+        />
+        <MenuPrimitive.Positioner
+          className="isolate z-50 outline-none"
+          style={SHEET_POSITIONER_STYLE}
+          align={align}
+          alignOffset={alignOffset}
+          side={side}
+          sideOffset={sideOffset}
+        >
+          <MenuPrimitive.Popup
+            data-slot="dropdown-menu-content"
+            className={cn(SHEET_POPUP_CLASS, className)}
+            {...props}
+          />
+        </MenuPrimitive.Positioner>
+      </MenuPrimitive.Portal>
+    )
+  }
   return (
     <MenuPrimitive.Portal>
       <MenuPrimitive.Positioner
@@ -104,8 +175,36 @@ function DropdownMenuItem({
   )
 }
 
-function DropdownMenuSub({ ...props }: MenuPrimitive.SubmenuRoot.Props) {
-  return <MenuPrimitive.SubmenuRoot data-slot="dropdown-menu-sub" {...props} />
+// Lets the mobile sub-sheet's Back row close ITS OWN submenu (and only it):
+// base-ui's supported imperative handle (`actionsRef.close()`) closes the
+// nearest SubmenuRoot with the imperative-action reason, returning focus to
+// the submenu trigger in the parent sheet — a drill-back, not a dismissal.
+const SubmenuCloseContext = React.createContext<(() => void) | null>(null)
+
+function DropdownMenuSub({
+  actionsRef: actionsRefProp,
+  ...props
+}: MenuPrimitive.SubmenuRoot.Props) {
+  const localActionsRef = React.useRef<MenuPrimitive.Root.Actions | null>(null)
+  // Respect a caller-supplied actionsRef; ours is only a fallback. Measured on
+  // 1.5.0: passing actionsRef is inert (it only registers the handle) — the
+  // "must unmount manually" note in its docs describes the unmount() action,
+  // not a behavior change from merely providing the ref.
+  const actionsRef = actionsRefProp ?? localActionsRef
+  // No manual useCallback: the React Compiler memoizes this (and flags a
+  // hand-written dependency list over ref.current access as unpreservable).
+  const close = () => {
+    actionsRef.current?.close()
+  }
+  return (
+    <SubmenuCloseContext.Provider value={close}>
+      <MenuPrimitive.SubmenuRoot
+        data-slot="dropdown-menu-sub"
+        actionsRef={actionsRef}
+        {...props}
+      />
+    </SubmenuCloseContext.Provider>
+  )
 }
 
 function DropdownMenuSubTrigger({
@@ -142,8 +241,45 @@ function DropdownMenuSubContent({
   side = "right",
   sideOffset = 0,
   className,
+  children,
   ...props
 }: React.ComponentProps<typeof DropdownMenuContent>) {
+  const isMobile = useIsMobile()
+  const closeSub = React.useContext(SubmenuCloseContext)
+  if (isMobile) {
+    // A submenu drills down, matching AppMenuSheet's idiom: the sub-popup is
+    // the same full-width sheet, stacked over the parent sheet (its own dim
+    // backdrop in between reads as depth), with a Back row on top returning
+    // to the parent. Nested anchored popovers cannot work on a phone. The Back
+    // row is a real menu item (role, focus, arrow keys) that closes only its
+    // submenu; closeOnClick={false} keeps the tree-wide close-on-select out of
+    // it. The desktop-only submenu className is deliberately NOT merged here —
+    // it carries anchored-popup geometry (w-auto, zoom animations) that would
+    // undo the sheet.
+    return (
+      <DropdownMenuContent
+        data-slot="dropdown-menu-sub-content"
+        className={className}
+        align={align}
+        alignOffset={alignOffset}
+        side={side}
+        sideOffset={sideOffset}
+        {...props}
+      >
+        <DropdownMenuItem
+          data-slot="dropdown-menu-back"
+          closeOnClick={false}
+          onClick={() => closeSub?.()}
+          className="font-medium"
+        >
+          <ChevronLeftIcon />
+          Back
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        {children}
+      </DropdownMenuContent>
+    )
+  }
   return (
     <DropdownMenuContent
       data-slot="dropdown-menu-sub-content"
@@ -153,7 +289,9 @@ function DropdownMenuSubContent({
       side={side}
       sideOffset={sideOffset}
       {...props}
-    />
+    >
+      {children}
+    </DropdownMenuContent>
   )
 }
 
