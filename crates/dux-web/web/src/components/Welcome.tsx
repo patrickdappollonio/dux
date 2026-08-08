@@ -5,22 +5,17 @@ import { useDux } from "@/lib/store"
 // The dux welcome screen, mirroring the TUI's idle agent pane: the duck mark
 // over the block-letter logo, with one playful tip underneath. The duck is the
 // real PNG logo (the same `/dux-logo.png` the login/unreachable screens use);
-// The wordmark deliberately DIVERGES from the TUI's block logo
-// (crates/dux-tui/src/app/render.rs ASCII_LOGO): that one is drawn with
-// shade/block glyphs (U+2591/U+2588), which terminal fonts carry but many
-// system monospace fonts do not — in a browser the missing glyphs fall back
-// to a different font with a different advance width and the art shears,
-// device-dependently. Every character here is pure ASCII, which every
-// monospace font renders aligned. Trailing padding keeps the lines a clean
-// 28-column rectangle so the block centers properly.
+// the block-letter wordmark is ported VERBATIM from crates/dux-tui/src/app/
+// render.rs (ASCII_LOGO), trailing padding included so the lines stay a clean
+// 33-column rectangle and center properly.
 const TEXT_LOGO = [
-  "      888                   ",
-  "      888                   ",
-  "  .d88888 888  888 888  888 ",
-  " d88\" 888 888  888  Y8bd8P' ",
-  " 888  888 888  888   X88K   ",
-  " Y88b 888 Y88b 888  d8\"8b.  ",
-  "  \"Y88888  \"Y88888 888  888 ",
+  "       ░██                       ",
+  "       ░██                       ",
+  " ░████████ ░██    ░██ ░██    ░██ ",
+  "░██    ░██ ░██    ░██  ░██  ░██  ",
+  "░██    ░██ ░██    ░██   ░█████   ",
+  "░██   ░███ ░██   ░███  ░██  ░██  ",
+  " ░█████░██  ░█████░██ ░██    ░██ ",
 ].join("\n")
 
 // Tips come from the server's ViewModel — the single source of truth is crates/dux-core/src/welcome.rs (WELCOME_TIPS). Add new tips THERE, with both surface variants.
