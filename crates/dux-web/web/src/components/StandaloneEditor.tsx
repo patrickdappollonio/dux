@@ -1,8 +1,7 @@
-import { FileCode2, House, Loader2 } from "lucide-react"
+import { FileCode2, Loader2 } from "lucide-react"
 
 import { AgentNotFound } from "@/components/AgentNotFound"
 import { EditorBody } from "@/components/EditorBody"
-import { Button } from "@/components/ui/button"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { useVisualViewportHeight } from "@/hooks/use-visual-viewport"
 import { useDux } from "@/lib/store"
@@ -12,11 +11,12 @@ import { keyboardLikelyOpen } from "@/lib/viewport"
 // editor, at `#/editor/agent/<sid>[/<mode>/<encoded-path>]`. It is a full
 // second SPA instance (bootstrap, spine, events socket, restart reload — that
 // cost is accepted); this shell only composes the extracted `EditorBody`
-// full-viewport under a minimal header: the agent's name and the way back
-// into the full app. That way back is a PLAIN hash anchor on purpose: the
-// hash change fires popstate, `applyUrlRoute` flips `standaloneEditor` off,
-// and `App()` swaps shells — the URL is the source of truth, so the link
-// needs no click handler and Back returns to the standalone editor.
+// full-viewport under a minimal header naming the agent. There is
+// deliberately NO in-app way out (no "Open in dux" link): this surface is a
+// browser tab the user opened, and the browser's own controls — Back, or
+// closing the tab — are the exit. The store still listens for hash changes,
+// so any hash navigation (a bookmark, a manually edited address) keeps
+// swapping surfaces through the URL as before.
 //
 // Phones reach this surface deliberately (best-effort, a settled decision:
 // Monaco is poor on touch, but editing on the go beats no editor at all), so
@@ -79,19 +79,6 @@ export function StandaloneEditorShell() {
             <span className="min-w-0 flex-1 truncate text-sm font-medium">
               {agentName}
             </span>
-            <Button
-              size="sm"
-              variant="ghost"
-              className="max-md:min-h-10"
-              render={
-                <a
-                  href={`#/agent/${encodeURIComponent(editorTarget.sessionId)}`}
-                />
-              }
-            >
-              <House />
-              Open in dux
-            </Button>
           </div>
           <EditorBody
             key={editorTarget.sessionId}

@@ -1,15 +1,18 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { cleanup, render, screen } from "@testing-library/react"
+import { cleanup, fireEvent, render, screen } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
 
 // The standalone editor surface: a whole browser tab that is nothing but the
 // editor (plan (b)). What is pinned here: the shell composes EditorBody (the
-// code editor mounts), names the agent, offers the open-in-dux anchor as a
-// PLAIN hash link (the URL is what swaps surfaces), renders not-found for a
-// vanished agent, and the overlay Dialog stands down while the tab is the
-// standalone surface so EditorBody can never mount twice.
+// code editor mounts), names the agent, deliberately offers NO in-app exit
+// (the browser's own Back/close-tab controls are the way out), renders
+// not-found for a vanished agent, and the overlay Dialog stands down while
+// the tab is the standalone surface so EditorBody can never mount twice.
+// Also pinned: the phone header folds its secondary controls into one ⋯
+// menu (the row-actions tenet), keeping only the explorer toggle and Save
+// inline, while the desktop header keeps today's inline controls.
 
 if (!Element.prototype.getAnimations) {
   Element.prototype.getAnimations = () => []
@@ -151,7 +154,7 @@ describe("the standalone editor shell", () => {
     vi.unstubAllGlobals()
   })
 
-  it("composes EditorBody full-viewport with the agent name and an open-in-dux link", async () => {
+  it("composes EditorBody full-viewport with the agent name and no in-app exit", async () => {
     await seedState({})
     const { StandaloneEditorShell } = await import(
       "@/components/StandaloneEditor"
@@ -161,16 +164,98 @@ describe("the standalone editor shell", () => {
     await screen.findByTestId("code-editor")
     // The agent is named.
     expect(screen.getByText("My agent")).toBeTruthy()
-    // The way out is a PLAIN hash anchor (no target=_blank): the hash change
-    // fires popstate and the URL decides which surface renders.
-    const link = screen.getByRole("link", { name: /open in dux/i })
-    expect(link.getAttribute("href")).toBe("#/agent/s1")
-    expect(link.getAttribute("target")).toBeNull()
+    // No "Open in dux" link: the exit is deliberately the browser's own
+    // controls (Back, or closing the tab), so the shell ships no anchor.
+    expect(screen.queryByRole("link", { name: /open in dux/i })).toBeNull()
     // And the body knows it IS the tab: no Close button, no open-in-new-tab.
     expect(screen.queryByRole("button", { name: /^close$/i })).toBeNull()
     expect(
       screen.queryByRole("link", { name: /open editor in new tab/i }),
     ).toBeNull()
+  })
+
+  it("keeps the desktop header inline: mode toggle, preview-capable controls, Open local editor", async () => {
+    await seedState({})
+    const { StandaloneEditorShell } = await import(
+      "@/components/StandaloneEditor"
+    )
+    render(<StandaloneEditorShell />)
+    await screen.findByTestId("code-editor")
+    // The File/Diff segmented control renders inline.
+    expect(screen.getByRole("group", { name: "View mode" })).toBeTruthy()
+    // The GUI-editor dropdown is named "Open local editor" (it spawns an
+    // editor on the machine dux runs on, not in the browser).
+    expect(screen.getByText("Open local editor")).toBeTruthy()
+    expect(screen.queryByText(/^Open editor$/)).toBeNull()
+    // The mobile fold's ⋯ trigger exists but is desktop-hidden by class.
+    const fold = screen.getByRole("button", { name: /more editor actions/i })
+    expect(fold.className).toContain("md:hidden")
+  })
+
+  it("folds the phone header's secondary controls into one ⋯ menu", async () => {
+    await seedState({})
+    const { StandaloneEditorShell } = await import(
+      "@/components/StandaloneEditor"
+    )
+    render(<StandaloneEditorShell />)
+    await screen.findByTestId("code-editor")
+    // The inline secondary controls carry the phone-hidden class; only the
+    // explorer toggle and Save stay visible inline on a phone.
+    expect(
+      screen.getByRole("group", { name: "View mode" }).className,
+    ).toContain("max-md:hidden")
+    expect(
+      screen.getByRole("button", { name: /show the file explorer|hide the file explorer/i })
+        .className,
+    ).not.toContain("max-md:hidden")
+    expect(
+      screen.getByRole("button", { name: /^save$/i }).className,
+    ).not.toContain("max-md:hidden")
+    // The ⋯ menu carries the folded controls: the mode switch (with the
+    // active mode readable), the preview toggle, and Open local editor.
+    fireEvent.click(
+      screen.getByRole("button", { name: /more editor actions/i }),
+    )
+    const fileItem = await screen.findByRole("menuitem", { name: /file view/i })
+    expect(fileItem.getAttribute("aria-current")).toBe("true")
+    const diffItem = screen.getByRole("menuitem", { name: /diff view/i })
+    expect(diffItem.getAttribute("aria-current")).toBeNull()
+    // A .ts file offers no draft preview, so the fold (like the inline
+    // header) carries no preview item for it.
+    expect(screen.queryByRole("menuitem", { name: /show preview/i })).toBeNull()
+    expect(
+      screen.getByRole("menuitem", { name: /open local editor/i }),
+    ).toBeTruthy()
+  })
+
+  it("the ⋯ menu offers the preview toggle for a previewable file", async () => {
+    await seedState({
+      editorTabs: {
+        [SESSION]: {
+          tabs: [
+            {
+              id: "t1",
+              path: "README.md",
+              dirty: false,
+              preview: false,
+              mode: "file",
+            },
+          ],
+          activeId: "t1",
+        },
+      },
+    })
+    const { StandaloneEditorShell } = await import(
+      "@/components/StandaloneEditor"
+    )
+    render(<StandaloneEditorShell />)
+    await screen.findByTestId("code-editor")
+    fireEvent.click(
+      screen.getByRole("button", { name: /more editor actions/i }),
+    )
+    expect(
+      await screen.findByRole("menuitem", { name: /show preview/i }),
+    ).toBeTruthy()
   })
 
   it("renders the not-found screen when the address names a vanished agent", async () => {

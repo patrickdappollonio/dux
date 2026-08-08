@@ -1,14 +1,15 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-// The standalone editor's "Open in dux" affordance is a PLAIN hash anchor: no
-// click handler, no history call — the browser navigates the fragment and the
-// router follows the URL. Whether a browser delivers that navigation as a
-// `popstate`, a `hashchange`, or both is not guaranteed (jsdom, notably,
-// fires only `hashchange` for an anchor click), so the store listens to BOTH
-// and `applyUrlRoute` is idempotent and never writes the URL back. This test
-// clicks a REAL anchor under jsdom — the environment where popstate alone
-// would silently miss — rather than synthesizing a popstate.
+// Any plain hash anchor (a bookmark, a link a user pastes, markdown-preview
+// links) drives the router with no click handler and no history call — the
+// browser navigates the fragment and the router follows the URL. Whether a
+// browser delivers that navigation as a `popstate`, a `hashchange`, or both
+// is not guaranteed (jsdom, notably, fires only `hashchange` for an anchor
+// click), so the store listens to BOTH and `applyUrlRoute` is idempotent and
+// never writes the URL back. This test clicks a REAL anchor under jsdom —
+// the environment where popstate alone would silently miss — rather than
+// synthesizing a popstate.
 
 const SPINE = {
   projects: [{ id: "p1", name: "Repo", path: "/tmp/p1" }],

@@ -25,14 +25,19 @@ Prefer the editor in its own browser tab? The agent's `⋯` menu also has **Open
 editor in new tab**, and the editor's own header carries a matching icon that
 opens the current file in that standalone tab (middle-click works, it is a real
 link). The standalone tab is nothing but the editor, full-viewport, with the
-agent's name and an **Open in dux** link back to the full workspace at the top.
+agent's name at the top. There is no in-app link back to the workspace — the
+tab is yours, so your browser's Back button or closing the tab is the way out.
 
 The editor overlay is **desktop-only**: Monaco is a poor experience on a touch
 screen, so on a phone the overlay does not open. The standalone tab is the
 deliberate exception. It works on phones, best-effort, with the file explorer
-starting collapsed so the file itself gets the width, and it keeps the editor
-above the soft keyboard. Fixing a typo from the couch is exactly what it is for;
-long editing sessions still want a real keyboard.
+starting collapsed so the file itself gets the width (the header's toggle
+reopens it at a phone-sized width), and it keeps the editor above the soft
+keyboard. The phone header stays lean, too: only the explorer toggle and
+**Save** sit inline, and everything else — the File/Diff switch, the preview
+toggle, **Open local editor** — folds into one `⋯` menu at the end of the row.
+Fixing a typo from the couch is exactly what it is for; long editing sessions
+still want a real keyboard.
 
 ## The URL knows where you are
 
@@ -214,7 +219,7 @@ refresh on your own terms.
 
 ## Open in your local editor
 
-Prefer your own editor? The **Open editor ▾** dropdown launches **Cursor, VS
+Prefer your own editor? The **Open local editor ▾** dropdown launches **Cursor, VS
 Code, Zed, VSCodium, or Sublime Text** on the file. Because it spawns that editor
 **on the server** (the machine dux is running on), it only makes sense when you
 are sitting at that machine. dux enables it only for local-access URLs (loopback,

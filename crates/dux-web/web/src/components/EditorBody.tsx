@@ -7,8 +7,10 @@
 // second buffer map over the same files.
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react"
 import {
+  Check,
   ChevronDown,
   CircleAlert,
+  Ellipsis,
   ExternalLink,
   Eye,
   FileCode2,
@@ -90,6 +92,9 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
@@ -1094,8 +1099,13 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
             offering the switch would only reach the binary-diff dead end).
             Sets the ACTIVE TAB's mode. */}
         {activeTab && !isImageTab && (
+          // max-md:hidden: on phones (only the standalone surface — the
+          // overlay is desktop-only) the header folds every secondary
+          // control into the one ⋯ menu at the row's end, per the
+          // row-actions tenet; only the explorer toggle and Save stay
+          // inline. Desktop keeps the inline layout exactly.
           <div
-            className="flex shrink-0 items-center gap-0.5 rounded-md border p-0.5"
+            className="flex shrink-0 items-center gap-0.5 rounded-md border p-0.5 max-md:hidden"
             role="group"
             aria-label="View mode"
           >
@@ -1127,7 +1137,7 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
             <Button
               size="sm"
               variant="ghost"
-              className="text-amber-500"
+              className="text-amber-500 max-md:hidden"
               aria-label="Reload diff — the file changed on disk"
               onClick={refreshDiff}
             >
@@ -1145,6 +1155,7 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
           <Button
             size="sm"
             variant={showPreview ? "default" : "ghost"}
+            className="max-md:hidden"
             aria-pressed={showPreview}
             onClick={togglePreview}
           >
@@ -1163,7 +1174,7 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
                 : "Only available when dux is opened locally — not over a remote URL."
             }
           >
-            <span className="inline-flex">
+            <span className="inline-flex max-md:hidden">
               <DropdownMenu>
                 <DropdownMenuTrigger
                   render={
@@ -1180,7 +1191,7 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
                   ) : (
                     <ExternalLink />
                   )}
-                  Open editor
+                  Open local editor
                   <ChevronDown />
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end">
@@ -1203,6 +1214,7 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
         {activeTab?.mode === "file" && !isImageTab && (
           <Button
             size="sm"
+            className="max-md:min-h-10"
             disabled={!dirty || isSaving || readOnly}
             aria-busy={isSaving}
             onClick={save}
@@ -1210,6 +1222,89 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
             {isSaving ? <Loader2 className="motion-safe:animate-spin" /> : <Save />}
             Save
           </Button>
+        )}
+        {/* The phone fold (md:hidden): every secondary header control in ONE
+            ⋯ menu, per the row-actions tenet — the mode switch, the stale-
+            diff reload, the preview toggle, and Open local editor. Items
+            keep their leading lucide icons; none carries a trailing "…"
+            because none opens a dialog. The active view mode is marked with
+            a trailing check AND aria-current so it reads to assistive tech.
+            Only the explorer toggle and Save stay inline on a phone. */}
+        {activeTab && (
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              render={
+                <Button
+                  size="icon-sm"
+                  variant="ghost"
+                  className="shrink-0 md:hidden max-md:size-10"
+                  aria-label="More editor actions"
+                />
+              }
+            >
+              <Ellipsis />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              {!isImageTab && (
+                <>
+                  <DropdownMenuItem
+                    aria-current={activeTab.mode === "file" ? "true" : undefined}
+                    onClick={() =>
+                      editorSetTabMode(sessionId, activeTab.id, "file")
+                    }
+                  >
+                    <FileText />
+                    File view
+                    {activeTab.mode === "file" && <Check className="ml-auto" />}
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    aria-current={activeTab.mode === "diff" ? "true" : undefined}
+                    onClick={() =>
+                      editorSetTabMode(sessionId, activeTab.id, "diff")
+                    }
+                  >
+                    <GitCompare />
+                    Diff view
+                    {activeTab.mode === "diff" && <Check className="ml-auto" />}
+                  </DropdownMenuItem>
+                </>
+              )}
+              {activeTab.mode === "diff" && diffStale && (
+                <DropdownMenuItem onClick={refreshDiff}>
+                  <CircleAlert />
+                  Reload diff
+                </DropdownMenuItem>
+              )}
+              {canPreview && (
+                <DropdownMenuItem onClick={togglePreview}>
+                  {showPreview && activeTab.mode === "file" ? (
+                    <Pencil />
+                  ) : (
+                    <Eye />
+                  )}
+                  {showPreview ? "Hide preview" : "Show preview"}
+                </DropdownMenuItem>
+              )}
+              {/* Present for image tabs too, matching the inline control. */}
+              <DropdownMenuSub>
+                <DropdownMenuSubTrigger disabled={!localAccess || openingEditor}>
+                  <ExternalLink />
+                  Open local editor
+                </DropdownMenuSubTrigger>
+                <DropdownMenuSubContent>
+                  {OPEN_IN_EDITORS.map((editor) => (
+                    <DropdownMenuItem
+                      key={editor.key}
+                      onClick={() => openInEditorAction(editor.key)}
+                    >
+                      <EditorIcon editorKey={editor.key} />
+                      {editor.label}
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuSubContent>
+              </DropdownMenuSub>
+            </DropdownMenuContent>
+          </DropdownMenu>
         )}
         {/* Open this editor as its own browser tab (the standalone surface).
             A real anchor, not a click handler, so middle-click and
@@ -1293,8 +1388,15 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
             style={{ overflow: "hidden" }}
             collapsible
           >
-            {/* min-w-0 so path truncation keeps working at narrow widths. */}
-            <div className="flex h-full min-w-0 flex-col border-r">
+            {/* min-w-0 so path truncation keeps working at narrow widths.
+                Deliberately NO border-r: the ResizableHandle beside this
+                panel already draws the 1px pane separator, and the app-wide
+                idiom (the terminal/changes split, the Changes pane's
+                border-0 Card) is panes bleeding to the shell edge with the
+                handle as the only divider. A border here doubled the left
+                edge of the editor content while its bottom/right had none,
+                which read as an unfinished frame. */}
+            <div className="flex h-full min-w-0 flex-col">
               <div className="flex items-center gap-1 border-b p-2">
                 <div className="relative flex-1">
                   <Search className="pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2 text-muted-foreground" />
