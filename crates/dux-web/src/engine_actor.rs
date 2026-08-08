@@ -60,6 +60,12 @@ pub enum EngineRequest {
     /// to broadcast through the shared status controller so it auto-clears and
     /// reaches every client, exactly like engine-originated statuses.
     EmitStatus(WireStatus),
+    /// Dismiss a keyed status without replacing it: the pending→final contract
+    /// allows a CLEAR as the final, for operations whose success is already on
+    /// the user's screen (the release-notes route: the rendered notes are the
+    /// success signal, so a "loaded" toast would narrate the visible). Errors
+    /// still post a real final on the same key.
+    ClearStatus(String),
     SubscribePty(String, oneshot::Sender<Result<PtySubscription, String>>),
     WritePty(String, Vec<u8>),
     ResizePty(String, u16, u16),
@@ -599,6 +605,21 @@ impl EngineHandle {
             dux_core::logger::warn(&format!(
                 "engine request channel full: dropped a non-engine status update \
                  (tone={tone}, key={key:?})"
+            ));
+        }
+    }
+
+    /// Dismiss a keyed status without replacing it. The valid FINAL for an
+    /// operation whose success is already visible on screen (see
+    /// [`EngineRequest::ClearStatus`]); error paths must still post a real
+    /// final. Same fire-and-forget semantics as [`Self::emit_status`].
+    pub fn clear_status(&self, key: &str) {
+        if let Err(mpsc::error::TrySendError::Full(_)) = self
+            .req_tx
+            .try_send(EngineRequest::ClearStatus(key.to_string()))
+        {
+            dux_core::logger::warn(&format!(
+                "engine request channel full: dropped a status clear (key={key})"
             ));
         }
     }
@@ -1448,7 +1469,7 @@ fn request_mutates_spine(req: &EngineRequest) -> bool {
 
         // Broadcast on the status channels only. Statuses are their own transport
         // (toasts on the web); no spine field carries them.
-        EngineRequest::EmitStatus(..) => false,
+        EngineRequest::EmitStatus(..) | EngineRequest::ClearStatus(..) => false,
     }
 }
 
@@ -2289,6 +2310,9 @@ fn handle_request(
         }
         EngineRequest::EmitStatus(status) => {
             let _ = status_tx.send(status);
+        }
+        EngineRequest::ClearStatus(key) => {
+            status_tx.clear(key);
         }
         EngineRequest::AttachPullRequest(session_id, raw, origin, reply) => {
             // Mirror the `ApplyWire` arm's origin discipline: the engine reads
@@ -3184,6 +3208,38 @@ mod tests {
     }
 
     #[test]
+    fn emitter_clear_dismisses_a_keyed_busy_and_broadcasts_its_key() {
+        // The path behind `EngineRequest::ClearStatus` (the release-notes
+        // route's success final): an explicit clear must drop the keyed entry
+        // from the snapshot AND broadcast the key so the WS forwarder sends
+        // `StatusCleared`, dismissing the busy toast without a success toast.
+        let (tx, _rx) = broadcast::channel::<WireStatus>(16);
+        let (clear_tx, mut crx) = broadcast::channel::<Option<String>>(16);
+        let (snap_tx, snap_rx) = watch::channel::<Vec<KeyedWireStatus>>(vec![]);
+        let mut e = StatusEmitter {
+            tx,
+            clear_tx,
+            snapshot_tx: snap_tx,
+            controller: KeyedStatusController::with_clear_after(Duration::from_secs(6)),
+            generations: std::collections::HashMap::new(),
+        };
+        let _ = e.send(WireStatus::keyed("notes", "busy", "Fetching\u{2026}"));
+        assert_eq!(snap_rx.borrow().len(), 1, "busy must be in the snapshot");
+
+        e.clear("notes".to_string());
+
+        assert!(
+            snap_rx.borrow().is_empty(),
+            "an explicit clear must drop the keyed entry"
+        );
+        assert_eq!(
+            crx.try_recv().ok(),
+            Some(Some("notes".to_string())),
+            "the cleared key must be broadcast for the StatusCleared frame"
+        );
+    }
+
+    #[test]
     fn emitter_tick_clears_expired_info_and_broadcasts_clear_key() {
         // An expired Info entry is removed from the snapshot AND its key is
         // pushed onto the clear broadcast so the WS forwarder can send
@@ -4067,6 +4123,11 @@ mod tests {
                 false,
             ),
             (
+                "ClearStatus",
+                EngineRequest::ClearStatus("op-example".to_string()),
+                false,
+            ),
+            (
                 "SubscribePty",
                 EngineRequest::SubscribePty("s1".into(), dead_reply()),
                 true,
@@ -4323,7 +4384,7 @@ mod tests {
         // through with a copied-from-its-neighbour `false` that nothing reads.
         assert_eq!(
             request_kind_answers().len(),
-            37,
+            38,
             "every EngineRequest kind needs a row in request_kind_answers; \
              update the count deliberately when adding one"
         );

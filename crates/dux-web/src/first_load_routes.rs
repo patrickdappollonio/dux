@@ -331,10 +331,12 @@ async fn get_release_notes(State(state): State<AppState>, headers: HeaderMap) ->
 
     match fetched {
         Ok(Ok(notes)) => {
-            final_status(
-                "info",
-                format!("Loaded the release notes for {}.", notes.version),
-            );
+            // The final for the success path is a CLEAR, not an info: the
+            // rendered notes ARE the success signal, and a toast narrating
+            // what is already on screen is noise. The keyed contract is
+            // still honored (the Busy never strands); only the error paths
+            // below post a message-carrying final.
+            state.engine.clear_status(RELEASE_NOTES_STATUS_KEY);
             Json(notes).into_response()
         }
         Ok(Err(err)) => {
