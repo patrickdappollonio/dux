@@ -27,10 +27,6 @@ import {
   GitFork,
   GitPullRequest,
   Info,
-  Keyboard,
-  KeyboardOff,
-  PanelTopClose,
-  PanelTopOpen,
   Pencil,
   Play,
   Plus,
@@ -48,8 +44,8 @@ import {
 import type { CSSProperties } from "react"
 import { useState } from "react"
 
-import { useIsMobile } from "@/hooks/use-mobile"
 import { AgentVitalsTooltip } from "@/components/AgentVitalsTooltip"
+import { MobileBarToggleItems } from "@/components/MobileBarToggleItems"
 import { ProjectMenuItems } from "@/components/ProjectMenuItems"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Button } from "@/components/ui/button"
@@ -112,9 +108,6 @@ import {
   agentSortValue,
   createTerminal,
   detachPullRequest,
-  mobileAccessoryBarVisible,
-  mobileTopBarVisible,
-  setMobileBarVisibility,
   openAgentEnv,
   openAgentInfo,
   openAgentStartupCommand,
@@ -182,12 +175,6 @@ export function AgentActionsMenu({
   const projectName = spine?.projects.find(
     (p) => p.id === session.project_id,
   )?.name
-  const topBarVisible = mobileTopBarVisible(duxState)
-  const accessoryBarVisible = mobileAccessoryBarVisible(duxState)
-  // The quick toggles need the viewport too, not just the context: the chrome
-  // they hide is mobile-only, so a desktop viewport must never offer them
-  // even when a terminal-context menu renders.
-  const isMobile = useIsMobile()
   const ghAvailable = bootstrap?.gh_available ?? false
   const prOverridden = session.pr?.overridden ?? false
   // While another connection input-owns one of this agent's PTYs, the entries
@@ -215,30 +202,13 @@ export function AgentActionsMenu({
           <DropdownMenuSeparator />
         </>
       ) : null}
-      {context === "terminal" && isMobile ? (
-        <>
-          {/* Quick toggles for the two hideable mobile bars (`ui.mobile_top_bar`,
-              `ui.mobile_accessory_bar`). Neutral color and no trailing ellipsis:
-              they act immediately (an optimistic override plus the generic
-              settings PATCH), no dialog and nothing destructive. Restore lives
-              on the show-bars button below the terminal and in Preferences. */}
-          <DropdownMenuItem
-            onClick={() => void setMobileBarVisibility("top", !topBarVisible)}
-          >
-            {topBarVisible ? <PanelTopClose /> : <PanelTopOpen />}
-            {topBarVisible ? "Hide top bar" : "Show top bar"}
-          </DropdownMenuItem>
-          <DropdownMenuItem
-            onClick={() =>
-              void setMobileBarVisibility("accessory", !accessoryBarVisible)
-            }
-          >
-            {accessoryBarVisible ? <KeyboardOff /> : <Keyboard />}
-            {accessoryBarVisible ? "Hide terminal keys" : "Show terminal keys"}
-          </DropdownMenuItem>
-          <DropdownMenuSeparator />
-        </>
-      ) : null}
+      {/* The shared mobile-bar quick toggles (labels, icons and store actions
+          live in MobileBarToggleItems, shared with the agentless terminal
+          screens' menu so the menus can never drift; the component self-gates
+          on the viewport). Deliberately NOT disabled while the agent is active
+          elsewhere: hiding this device's own bars is this device's view
+          preference, not a mutation of the agent. */}
+      {context === "terminal" ? <MobileBarToggleItems /> : null}
       <DropdownMenuSub>
         <DropdownMenuSubTrigger disabled={atTabCap || addingTab || activeElsewhere}>
           <Plus />
