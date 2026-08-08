@@ -126,4 +126,33 @@ describe("NewAgentPickerDialog", () => {
     expect(container.ownerDocument.querySelector(".h-72")).not.toBeNull()
     expect(container.ownerDocument.querySelector(".max-h-72")).toBeNull()
   })
+
+  it("shrinks the list instead of clipping when the popup hits its viewport cap", () => {
+    // Phone-keyboard regression pin (the "cannot scroll the New Agent modal
+    // with a finger" bug): the popup must NOT be overflow-hidden with a rigid
+    // inner list. The idiom is a flex column whose list is the one shrinkable
+    // child, so when the soft keyboard shrinks the popup's dvh cap the list
+    // gives up height and the header + Add-project footer stay reachable; the
+    // popup keeps its base overflow-y-auto as the last-resort scroll.
+    seed("new")
+    const { container } = render(<NewAgentPickerDialog />)
+    const doc = container.ownerDocument
+    const popup = doc.querySelector('[data-slot="dialog-content"]')
+    expect(popup).not.toBeNull()
+    expect(popup!.className).toContain("flex-col")
+    expect(popup!.className).not.toContain("overflow-hidden")
+    const list = doc.querySelector('[data-slot="scroll-area"]')
+    expect(list).not.toBeNull()
+    expect(list!.classList.contains("shrink")).toBe(true)
+    expect(list!.classList.contains("shrink-0")).toBe(false)
+    expect(list!.classList.contains("min-h-0")).toBe(true)
+    // The list must be the ONLY child that gives way: header and footer pin
+    // their height so shrinking cannot crush the controls themselves.
+    const header = doc.querySelector('[data-slot="dialog-header"]')
+    expect(header!.className).toContain("shrink-0")
+    const footerButton = [...doc.querySelectorAll("button")].find((b) =>
+      b.textContent!.includes("Add a new project"),
+    )
+    expect(footerButton!.parentElement!.className).toContain("shrink-0")
+  })
 })

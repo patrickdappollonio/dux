@@ -46,7 +46,15 @@ export function NewAgentPickerDialog() {
         if (!open) dismissNewAgentPicker()
       }}
     >
-      <DialogContent className="gap-0 overflow-hidden p-0 sm:max-w-lg">
+      {/* Flex column, and deliberately NOT overflow-hidden: the popup's base
+          max-h caps it to the dynamic viewport, and when the soft keyboard
+          shrinks 100dvh the list below shrinks with it (min-h-0 flex child)
+          instead of the popup clipping. The earlier overflow-hidden override
+          left NO scrollable element when the cap bit — a finger drag anywhere
+          on the dialog moved nothing and the bottom rows were unreachable on
+          phones. The base overflow-y-auto stays as the last-resort scroll for
+          viewports too short for even the shrunken layout. */}
+      <DialogContent className="flex flex-col gap-0 p-0 sm:max-w-lg">
         {/* Mount the stateful body only while open so its useState initializers
             re-run on each open (a fresh search / selection / provider) without a
             reset effect. */}
@@ -130,7 +138,7 @@ function PickerBody() {
 
   return (
     <>
-      <DialogHeader className="p-4 pb-3">
+      <DialogHeader className="shrink-0 p-4 pb-3">
           <DialogTitle>{INTENT_COPY[intent].title}</DialogTitle>
           <DialogDescription>{INTENT_COPY[intent].description}</DialogDescription>
           <div className="mt-2 flex items-center gap-2 rounded-md border border-input bg-input/30 px-3 max-md:min-h-10">
@@ -146,10 +154,13 @@ function PickerBody() {
           </div>
         </DialogHeader>
 
-        {/* Fixed height (not max-h) so the modal never grows or shrinks with the
+        {/* Height h-72 (not max-h) so the modal never grows or shrinks with the
             result count as the user types; the list scrolls internally and the
-            empty state fills the same space instead of collapsing. */}
-        <ScrollArea className="h-72 border-t">
+            empty state fills the same space instead of collapsing. It is a flex
+            child that may SHRINK (min-h-0, never grow) so that when the soft
+            keyboard shrinks the popup's dvh cap, this list gives up the space
+            and the header and Add-project footer stay on screen and tappable. */}
+        <ScrollArea className="h-72 min-h-0 shrink border-t">
           <div className="p-2">
             <p className="px-2 pt-1 pb-1.5 font-mono text-xs uppercase tracking-wide text-muted-foreground">
               Choose a project
@@ -206,7 +217,7 @@ function PickerBody() {
           </div>
         </ScrollArea>
 
-        <div className="border-t p-2">
+        <div className="shrink-0 border-t p-2">
           <button
             type="button"
             onClick={openAddProject}
