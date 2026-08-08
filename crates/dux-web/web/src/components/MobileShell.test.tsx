@@ -688,6 +688,27 @@ describe("MobileShell quick toggles in the terminal-screen ⋯ menu", () => {
     expect(screen.queryByLabelText("Back")).toBeNull()
   })
 
+  it("gives the submenu trigger rows the same phone touch-target height as sibling items", () => {
+    // DropdownMenuItem carries min-h-11 (44px) on phones, undone on desktop
+    // via md:min-h-0. The two DropdownMenuSubTrigger rows (New agent tab,
+    // Project) must carry the exact same pair, or they render visibly shorter
+    // than every sibling item in the same open menu.
+    mockState = terminalState()
+    render(<MobileShell />)
+    fireEvent.click(screen.getByLabelText("Session actions"))
+    const item = screen.getByText("Hide top bar").closest('[role="menuitem"]')!
+    const subTriggers = [
+      screen.getByText(/^New agent tab for /).closest('[role="menuitem"]')!,
+      screen.getByText(/^Project /).closest('[role="menuitem"]')!,
+    ]
+    for (const cls of ["min-h-11", "md:min-h-0"]) {
+      expect(item.className).toContain(cls)
+      for (const trigger of subTriggers) {
+        expect(trigger.className).toContain(cls)
+      }
+    }
+  })
+
   it("does not leak the toggles into the hub's row menus", () => {
     // The hub row's ⋯ menu shares AgentActionsMenu with the terminal screen;
     // the toggles are terminal-context-only, so they must not appear here.
