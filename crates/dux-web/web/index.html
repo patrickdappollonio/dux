@@ -5,30 +5,21 @@
     <link rel="icon" type="image/png" href="/favicon.png" />
     <link rel="manifest" href="/manifest.webmanifest" />
     <meta name="theme-color" content="#0a0a0a" />
-    <!-- viewport-fit=cover lets the page draw under the notch/home indicator
-         AND makes env(safe-area-inset-*) report the real insets (they are 0
-         without it). The mobile chrome uses those insets to keep content off
-         rounded corners — see the env() padding on the mobile root in App.tsx
-         (and the fullscreen terminal column in TerminalPane.tsx).
+    <!--
+             __
+           <(o )___
+            ( ._> /     quack. you found the source.
+             `~~~'
 
-         interactive-widget=resizes-content makes the soft keyboard shrink the
-         LAYOUT viewport (and window.visualViewport.height with it) instead of
-         floating over the page. Without it, Chromium/Android reports a
-         visualViewport.height that still includes the keyboard's toolbar strip,
-         so the mobile terminal's accessory bar rendered a row behind the
-         keyboard. With it, visualViewport.height is accurate and the existing
-         viewport-pinning in App.tsx/TerminalPane.tsx sits the accessory bar
-         exactly on the keyboard. The directive is Chromium-only; iOS Safari and
-         Firefox ignore it and fall back to the same visualViewport handling
-         (which already reports an accurate height there).
+         dux — orchestrate AI coding agents, one git worktree at a time.
 
-         maximum-scale=1 exists for ONE reason: the mobile compose bar's
-         textarea uses 14px type (matching the terminal), and iOS Safari
-         auto-zooms the page when an input with a font under 16px gains focus.
-         This is the standard, accessibility-preserving fix: Chromium/Android
-         ignores maximum-scale entirely, and since iOS 10 Safari ignores it for
-         USER pinch-zoom too (so accessibility zoom still works) while it still
-         disables that input-focus auto-zoom. -->
+         website:  https://getdux.app
+         source:   https://github.com/patrickdappollonio/dux
+         made by:  Patrick D'appollonio — https://www.patrickdap.com
+
+         (every directive on the viewport meta below is deliberate and
+          measured; the reasoning lives in CLAUDE.md's web UI tenets.)
+    -->
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
     <title>dux</title>
   </head>
