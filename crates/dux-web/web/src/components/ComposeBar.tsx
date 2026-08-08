@@ -1,6 +1,6 @@
 import * as React from "react"
 import { useEffect, useRef } from "react"
-import { ArrowUp, Eye } from "lucide-react"
+import { CornerDownLeft, PanelTopOpen } from "lucide-react"
 
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Button } from "@/components/ui/button"
@@ -176,7 +176,8 @@ export function ComposeBar({
       {/* Enabled even when the buffer is empty: an empty Send is a bare Enter
           (confirming TUI menus/prompts), not a no-op. size-10 keeps the 40px
           touch-target floor; self-end pins it to the bar's bottom edge as the
-          textarea grows. */}
+          textarea grows. The glyph is the return-key arrow (CornerDownLeft),
+          because Send IS the Enter press; an up-arrow read as "scroll up". */}
       <Button
         variant="secondary"
         aria-label="Send"
@@ -184,7 +185,7 @@ export function ComposeBar({
         onClick={onSendClick}
         className="size-10 shrink-0"
       >
-        <ArrowUp />
+        <CornerDownLeft />
       </Button>
     </div>
   )
@@ -210,7 +211,10 @@ export function RestoreBarsButton({
         onClick={onRestoreBars}
         className="size-10 shrink-0 self-end"
       >
-        <Eye />
+        {/* PanelTopOpen, not an eye: the action reopens hidden chrome, and
+            the icon stays in the panel/keyboard icon family the hide/show
+            menu items already use. */}
+        <PanelTopOpen />
       </Button>
     </SimpleTooltip>
   )
