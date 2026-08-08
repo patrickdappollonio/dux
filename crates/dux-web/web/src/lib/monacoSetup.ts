@@ -16,23 +16,18 @@
 import { loader } from "@monaco-editor/react"
 import * as monaco from "monaco-editor/esm/vs/editor/edcore.main"
 import "@/monacoLanguages"
-// JSON has no "basic-language" grammar — its highlighting ships with the real
-// JSON language service. We keep that one service (its worker is ~400KB vs the
-// 6.6MB ts.worker we dropped) so JSON — the config-file format you edit most —
-// gets a proper, well-tested tokenizer plus validation. No other language
-// services are registered, so no other worker ships.
-import "monaco-editor/esm/vs/language/json/monaco.contribution"
 import editorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker"
-import jsonWorker from "monaco-editor/esm/vs/language/json/json.worker?worker"
 
 import { extensionForPath, fileNameForPath } from "@/lib/pathExt"
 
 // Self-host: point the wrapper at the bundled `monaco` instance and supply the
-// workers via Vite `?worker` imports (hashed chunks rust-embed bakes into the
-// binary).
+// one worker via a Vite `?worker` import (a hashed chunk rust-embed bakes into
+// the binary). Only the editor worker ships: no language service is registered,
+// so no language-service worker exists to route to. (The JSON language service
+// was the last one — its ~400KB worker bought schema validation dux never
+// used; JSON coloring now comes from the Monarch grammar below.)
 self.MonacoEnvironment = {
-  getWorker: (_id, label) =>
-    label === "json" ? new jsonWorker() : new editorWorker(),
+  getWorker: () => new editorWorker(),
 }
 loader.config({ monaco })
 
@@ -67,6 +62,27 @@ if (!monaco.languages.getLanguages().some((l) => l.id === "toml")) {
     },
   }
   monaco.languages.setMonarchTokensProvider("toml", toml)
+}
+
+// JSON has no "basic-language" grammar either — its stock highlighting ships
+// only with the JSON language service, whose ~400KB worker exists for schema
+// validation dux never used. So JSON gets the same treatment as TOML: a minimal
+// Monarch tokenizer (property keys, strings, numbers, keywords). Highlighting
+// only — no language service, no worker.
+if (!monaco.languages.getLanguages().some((l) => l.id === "json")) {
+  monaco.languages.register({ id: "json", extensions: [".json"], aliases: ["JSON"] })
+  const json: monaco.languages.IMonarchLanguage = {
+    tokenizer: {
+      root: [
+        [/"(?:[^"\\]|\\.)*"(?=\s*:)/, "type"],
+        [/"(?:[^"\\]|\\.)*"/, "string"],
+        [/\b(?:true|false|null)\b/, "keyword"],
+        [/-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/, "number"],
+        [/[{}[\],:]/, "delimiter"],
+      ],
+    },
+  }
+  monaco.languages.setMonarchTokensProvider("json", json)
 }
 
 export { monaco }
