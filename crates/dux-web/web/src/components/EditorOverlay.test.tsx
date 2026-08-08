@@ -113,14 +113,17 @@ function diffViewerStub() {
     default: ({
       original,
       modified,
+      allDelete,
     }: {
       original: string
       modified: string
+      allDelete?: boolean
     }) => (
       <div
         data-testid="diff-viewer"
         data-original={original}
         data-modified={modified}
+        data-all-delete={String(allDelete ?? false)}
       />
     ),
   }
@@ -703,6 +706,23 @@ describe("a deleted file in the editor", () => {
     expect(viewer.getAttribute("data-modified")).toBe("")
     // Diff mode never fetches /read, so a missing working copy can't error it.
     expect(readMock).not.toHaveBeenCalled()
+    // The phantom-inserted-line suppression is armed: the wrapper carries the
+    // CSS marker class and the viewer gets the option-level flag.
+    expect(viewer.closest(".dux-diff-all-delete")).not.toBeNull()
+    expect(viewer.getAttribute("data-all-delete")).toBe("true")
+  })
+
+  it("a normal modified file's diff arms no all-delete suppression", async () => {
+    diffMock.mockResolvedValue({
+      path: "src/kept.txt",
+      original: "old\n",
+      modified: "new\n",
+      binary: false,
+    })
+    await mountWithTab("src/kept.txt", "diff")
+    const viewer = await screen.findByTestId("diff-viewer")
+    expect(viewer.closest(".dux-diff-all-delete")).toBeNull()
+    expect(viewer.getAttribute("data-all-delete")).toBe("false")
   })
 
   it("a rejecting diff fetch settles into an error with a Retry action", async () => {

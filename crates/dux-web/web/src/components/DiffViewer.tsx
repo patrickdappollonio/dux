@@ -4,6 +4,7 @@ import type { editor as MonacoEditor } from "monaco-editor"
 // Importing the shared bootstrap wires Monaco's self-host (workers + bundled
 // instance) before DiffEditor mounts, and gives us the path→language helper.
 import { monacoLanguageForPath } from "@/lib/monacoSetup"
+import { allDeleteDiffOptions } from "@/lib/diffPresentation"
 
 interface DiffViewerProps {
   // Worktree-relative path — used only to pick the syntax language for both sides.
@@ -12,6 +13,11 @@ interface DiffViewerProps {
   original: string
   // Working-copy content ("" for a deleted file → all-delete diff).
   modified: string
+  // True when this is an ALL-DELETE diff (isAllDeleteDiff, decided by the
+  // caller who also carries the CSS marker class): drops the option-level
+  // half of the phantom-inserted-line suppression (overview ruler + line
+  // highlight, see allDeleteDiffOptions).
+  allDelete?: boolean
 }
 
 // Read-only INLINE (unified) diff of HEAD vs the working copy, rendered with
@@ -20,7 +26,12 @@ interface DiffViewerProps {
 // cramping. `readOnly` still permits selection + copy, which is the whole point of
 // viewing a diff here; the colors are Monaco's built-in diff styling under the
 // dark theme. Default export so it lazy-loads as its own chunk (see EditorOverlay).
-export default function DiffViewer({ path, original, modified }: DiffViewerProps) {
+export default function DiffViewer({
+  path,
+  original,
+  modified,
+  allDelete = false,
+}: DiffViewerProps) {
   // Path only changes when the user switches files; memoize so the language scan
   // doesn't repeat on every parent re-render.
   const language = useMemo(() => monacoLanguageForPath(path), [path])
@@ -107,6 +118,10 @@ export default function DiffViewer({ path, original, modified }: DiffViewerProps
         automaticLayout: true,
         // Hide the inline change-accept arrows — this is a viewer, not a merge UI.
         renderMarginRevertIcon: false,
+        // All-delete diffs drop the overview ruler (canvas — CSS can't blank
+        // its phantom green speck) and the current-line highlight (it borders
+        // the phantom empty row). See allDeleteDiffOptions for the reasoning.
+        ...allDeleteDiffOptions(allDelete),
       }}
     />
   )

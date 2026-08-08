@@ -39,6 +39,7 @@ import {
   unionRevalidateBatch,
 } from "@/lib/editorBuffers"
 import type { TabBuffer } from "@/lib/editorBuffers"
+import { isAllDeleteDiff } from "@/lib/diffPresentation"
 import {
   loadSessionDrafts,
   storeSessionDrafts,
@@ -1418,21 +1419,52 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
                   // previewing never changes the tab's mode.
                   renderPreviewPane(activeTab.path)
                 ) : (
-                  <ChunkBoundary>
-                    <Suspense
-                      fallback={
-                        <div className="flex h-full items-center justify-center text-muted-foreground">
-                          <Loader2 className="size-5 motion-safe:animate-spin" />
-                        </div>
-                      }
-                    >
-                      <DiffViewer
-                        path={activeTab.path}
-                        original={activeBuffer?.diff?.original ?? ""}
-                        modified={activeBuffer?.diff?.modified ?? ""}
-                      />
-                    </Suspense>
-                  </ChunkBoundary>
+                  // An ALL-DELETE diff (a deleted or truncated-to-empty file)
+                  // gets the `dux-diff-all-delete` marker class, which scopes
+                  // the three-layer suppression of Monaco's phantom trailing
+                  // "1 +" inserted line (an empty modified model still has one
+                  // line, and monaco 0.55.1's diff computer reports a real
+                  // insertion for it — original [1,N) → modified [1,2) — for
+                  // every original shape). Layer one is CSS (index.css under
+                  // this marker): the insertion DECORATIONS are plain DOM, so
+                  // scoped rules blank them — but Monaco ships its own
+                  // `.monaco-editor .insert-sign { display: flex !important }`,
+                  // so the sign rule must match that specificity to win the
+                  // !important tie. Layer two is options (allDeleteDiffOptions
+                  // via the `allDelete` prop): the current-line highlight
+                  // borders the now-blank row, and the overview ruler is a
+                  // CANVAS whose green speck no CSS can reach. Layer three is
+                  // the scoped line-number rule (safe: an all-delete diff has
+                  // exactly one modified line, so only the phantom's "1" is
+                  // hidden). The original side's text is never touched.
+                  <div
+                    className={
+                      activeBuffer?.diff && isAllDeleteDiff(activeBuffer.diff)
+                        ? "dux-diff-all-delete h-full"
+                        : "h-full"
+                    }
+                  >
+                    <ChunkBoundary>
+                      <Suspense
+                        fallback={
+                          <div className="flex h-full items-center justify-center text-muted-foreground">
+                            <Loader2 className="size-5 motion-safe:animate-spin" />
+                          </div>
+                        }
+                      >
+                        <DiffViewer
+                          path={activeTab.path}
+                          original={activeBuffer?.diff?.original ?? ""}
+                          modified={activeBuffer?.diff?.modified ?? ""}
+                          allDelete={
+                            activeBuffer?.diff !== null &&
+                            activeBuffer?.diff !== undefined &&
+                            isAllDeleteDiff(activeBuffer.diff)
+                          }
+                        />
+                      </Suspense>
+                    </ChunkBoundary>
+                  </div>
                 )
               ) : activeBuffer?.fileError && !isBufferStale(activeBuffer, activeTab.path) ? (
                 <div className="flex h-full flex-col items-center justify-center gap-2 px-4 text-center text-sm text-destructive">

@@ -363,3 +363,36 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
   width: 0.75rem;
   border-top: 1px solid var(--sidebar-border);
 }
+/* ALL-DELETE diff (a deleted or truncated-to-empty file): hide Monaco's
+   phantom trailing "1 +" inserted line. An empty modified TextModel still has
+   one line — Monaco models cannot have zero — so the diff computer reports a
+   real insertion for it (measured on monaco 0.55.1: original [1,N) →
+   modified [1,2) for every original shape), and git reports zero added lines
+   for the same change, so the green row is false content. The marker class is
+   set by EditorBody exactly when isAllDeleteDiff holds; DiffViewer's
+   allDeleteDiffOptions handles the halves CSS cannot (the current-line border
+   on the blanked row, and the overview ruler's canvas-drawn green speck).
+   These four rules blank the insertion DECORATIONS: line background, margin
+   background, char overlay (the empty-range marker rides it), and the +
+   sign. The sign needs the `.monaco-editor` prefix because Monaco ships its
+   own `.monaco-editor .insert-sign { display: flex !important }` — a bare
+   class rule loses that !important tie on specificity; this form matches it
+   and wins as the later sheet. The final rule hides the phantom row's line
+   number, safe under this marker because an all-delete diff has exactly one
+   modified line (the deleted rows' numbers render in Monaco's inline view
+   zones, not as `.line-numbers`). */
+.dux-diff-all-delete .line-insert {
+  display: none !important;
+}
+.dux-diff-all-delete .gutter-insert {
+  display: none !important;
+}
+.dux-diff-all-delete .char-insert {
+  display: none !important;
+}
+.dux-diff-all-delete .monaco-editor .insert-sign {
+  display: none !important;
+}
+.dux-diff-all-delete .margin-view-overlays .line-numbers {
+  display: none;
+}
