@@ -1,6 +1,22 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { Bootstrap } from "./bootstrapApi"
 
+// Sonner is mocked so the toast policy is assertable: a successful bar write
+// must raise NO toast of any kind (the bar visibly moving is the feedback,
+// and the PATCH asks the server for quiet so no status toast arrives either),
+// while a failed write must still toast the error (a silent rollback would be
+// a silent failure).
+const toastMock = Object.assign(vi.fn(), {
+  error: vi.fn(),
+  success: vi.fn(),
+  info: vi.fn(),
+  warning: vi.fn(),
+  loading: vi.fn(),
+  dismiss: vi.fn(),
+  custom: vi.fn(),
+})
+vi.mock("sonner", () => ({ toast: toastMock }))
+
 // Mirror the storeChangesPane test harness: the store module reads
 // location/localStorage, registers listeners, and fires a bootstrap fetch on
 // import, so stub the minimum for it to settle.
@@ -143,7 +159,7 @@ describe("mobile bar visibility", () => {
       "/api/v1/config/settings",
       expect.objectContaining({
         method: "PATCH",
-        body: JSON.stringify({ ui: { mobile_top_bar: false } }),
+        body: JSON.stringify({ ui: { mobile_top_bar: false }, quiet: true }),
       }),
     )
   })
@@ -160,7 +176,7 @@ describe("mobile bar visibility", () => {
       "/api/v1/config/settings",
       expect.objectContaining({
         method: "PATCH",
-        body: JSON.stringify({ ui: { mobile_accessory_bar: false } }),
+        body: JSON.stringify({ ui: { mobile_accessory_bar: false }, quiet: true }),
       }),
     )
   })
@@ -183,6 +199,7 @@ describe("mobile bar visibility", () => {
         method: "PATCH",
         body: JSON.stringify({
           ui: { mobile_top_bar: true, mobile_accessory_bar: true },
+          quiet: true,
         }),
       }),
     )
@@ -210,6 +227,39 @@ describe("mobile bar visibility", () => {
       expect(mod.getSnapshot().bootstrap?.mobile_accessory_bar).toBe(true)
     })
     expect(mod.getSnapshot().mobileAccessoryBarOverride).toBe(false)
+  })
+
+  it("a successful bar write raises no client toast (success is silence)", async () => {
+    const mod = await loadStore()
+    toastMock.mockClear()
+    toastMock.error.mockClear()
+    toastMock.success.mockClear()
+    toastMock.info.mockClear()
+    toastMock.custom.mockClear()
+    await expect(mod.setMobileBarVisibility("top", false)).resolves.toBe(true)
+    await expect(mod.restoreMobileBars()).resolves.toBe(true)
+    expect(toastMock).not.toHaveBeenCalled()
+    expect(toastMock.error).not.toHaveBeenCalled()
+    expect(toastMock.success).not.toHaveBeenCalled()
+    expect(toastMock.info).not.toHaveBeenCalled()
+    expect(toastMock.custom).not.toHaveBeenCalled()
+  })
+
+  it("a failed bar write still toasts the error (a silent rollback is a silent failure)", async () => {
+    const mod = await loadStore()
+    toastMock.error.mockClear()
+    fetchMock.mockImplementationOnce(
+      async () =>
+        ({
+          ok: false,
+          status: 500,
+          json: async () => null,
+          text: async () => "disk full",
+          headers: { get: () => null },
+        }) as unknown as Response,
+    )
+    await expect(mod.setMobileBarVisibility("top", false)).resolves.toBe(false)
+    expect(toastMock.error).toHaveBeenCalledWith("disk full")
   })
 
   it("rolls the optimistic override back and resolves false when the PATCH fails", async () => {

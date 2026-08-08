@@ -737,6 +737,16 @@ pub struct SettingsPatch {
     /// `disable_automated_welcome_screen`, and likewise leaves the on-demand
     /// "What's new…" menu entry working.
     pub disable_release_notes: Option<bool>,
+    /// Presentation-only, NOT a settings field: when true, and the patch is
+    /// confined to the two mobile-bar fields, the engine emits no info status
+    /// for this request. Those two fields gate chrome the user is looking
+    /// straight at, so the bar visibly moving is the whole feedback and a
+    /// "Settings updated." toast on top is noise. The flag is honored per
+    /// request and only for that field pair (`is_mobile_bar_only`), so it can
+    /// never silence any other settings write; validation and save errors
+    /// still fail the command loudly regardless of the flag.
+    #[serde(default)]
+    pub quiet: bool,
 }
 
 impl SettingsPatch {
@@ -748,7 +758,30 @@ impl SettingsPatch {
     /// stale. The field-by-field version of this check is how a patch carrying
     /// only an unlisted field once read as empty and silently no-opped.
     pub fn any_present(&self) -> bool {
-        *self != Self::default()
+        // `quiet` is a presentation flag, not a settings field: neutralize it
+        // in the compare so a patch carrying only `quiet` still reads as
+        // empty (nothing to write, no `config.changed`).
+        *self
+            != Self {
+                quiet: self.quiet,
+                ..Self::default()
+            }
+    }
+
+    /// True when the patch carries at least one of the two mobile-bar fields
+    /// and no other settings field. This is the gate that scopes `quiet`: the
+    /// whole-struct compare (every field its own default except the pair and
+    /// the flag) cannot go stale when a field is added, mirroring
+    /// `any_present`.
+    pub fn is_mobile_bar_only(&self) -> bool {
+        (self.mobile_top_bar.is_some() || self.mobile_accessory_bar.is_some())
+            && *self
+                == Self {
+                    mobile_top_bar: self.mobile_top_bar,
+                    mobile_accessory_bar: self.mobile_accessory_bar,
+                    quiet: self.quiet,
+                    ..Self::default()
+                }
     }
 }
 
@@ -1157,9 +1190,11 @@ impl Engine {
                 });
             }
             WireCommand::SetSettings(patch) => {
+                // `set_settings` decides its own status presence: a quiet
+                // mobile-bar-only patch succeeds with `None` (no toast).
                 let status = self.set_settings(patch)?;
                 return Ok(WireCommandOutcome {
-                    status: Some(status),
+                    status,
                     detached: None,
                     created_op_id: None,
                 });
@@ -1426,20 +1461,30 @@ impl Engine {
     /// The write is eager and idempotent (unchanged values skip the
     /// disk write), and a non-empty patch mutates config-static state so the web
     /// fires `config.changed` for connected clients to refetch their settings.
-    fn set_settings(&mut self, patch: SettingsPatch) -> anyhow::Result<WireStatus> {
+    fn set_settings(&mut self, patch: SettingsPatch) -> anyhow::Result<Option<WireStatus>> {
+        // Resolve the quiet flag before the destructure moves the patch
+        // apart. Quiet drops the INFO statuses only, and only for a patch
+        // confined to the two mobile-bar fields (see the field's doc); errors
+        // below still bail loudly. `None` here means "succeeded, say
+        // nothing" — the bar visibly moving is the feedback.
+        let quiet = patch.quiet && patch.is_mobile_bar_only();
+        let info = |status: WireStatus| if quiet { None } else { Some(status) };
         // Ask before the destructure moves the patch apart. This message is
         // deliberately distinct from "Settings unchanged." below: "you sent me
         // no fields" and "you sent values that already match" are different
         // statements, and both are pinned by tests.
         if !patch.any_present() {
-            return Ok(WireStatus::new("info", "Nothing to update."));
+            return Ok(info(WireStatus::new("info", "Nothing to update.")));
         }
 
         // LOAD-BEARING: this destructure is exhaustive with no `..` on purpose.
         // It is what makes the compiler reject a field added to `SettingsPatch`
         // but never mapped onto the candidate below, which is the only field
-        // list left on this path. Do not "tidy" it with `..`.
+        // list left on this path. Do not "tidy" it with `..`. `quiet` is the
+        // one deliberate non-candidate binding: it is a presentation flag,
+        // already consumed above, and maps onto no config field.
         let SettingsPatch {
+            quiet: _,
             copy_on_select,
             compose_bar,
             mobile_top_bar,
@@ -1546,7 +1591,7 @@ impl Engine {
         // actually change? Unlike that chain, it cannot go stale when a field
         // is added.
         if candidate == self.config {
-            return Ok(WireStatus::new("info", "Settings unchanged."));
+            return Ok(info(WireStatus::new("info", "Settings unchanged.")));
         }
 
         // Persist eagerly so a disk failure is surfaced before the endpoint
@@ -1569,11 +1614,11 @@ impl Engine {
             .save_eager(candidate.clone())
             .map_err(|err| anyhow::anyhow!("saving to config failed: {err}"))?;
         self.config = candidate;
-        Ok(WireStatus::new(
+        Ok(info(WireStatus::new(
             "info",
             "Settings updated. Every connected browser picks up the change now; a \
              running dux TUI applies it after its next config reload or restart.",
-        ))
+        )))
     }
 
     /// Flip `defaults.enable_randomized_pet_name_by_default` and persist it,
@@ -9348,6 +9393,74 @@ mod tests {
         );
     }
 
+    /// The quiet flag: a mobile-bar-only patch that asks for quiet gets NO
+    /// status at all — the bar visibly moving is the feedback, and the write
+    /// still lands. Suppression is per request: only a request carrying the
+    /// flag is silent, so no other settings write can lose its toast.
+    #[test]
+    fn set_settings_quiet_mobile_bar_patch_emits_no_status() {
+        let (mut engine, _tmp) = test_engine();
+        let outcome = engine
+            .apply_wire(WireCommand::SetSettings(SettingsPatch {
+                mobile_top_bar: Some(false),
+                mobile_accessory_bar: Some(false),
+                quiet: true,
+                ..Default::default()
+            }))
+            .expect("dispatch ok");
+        assert!(
+            outcome.status.is_none(),
+            "a quiet mobile-bar write must emit no status"
+        );
+        assert!(!engine.config.ui.mobile_top_bar, "the write still lands");
+        assert!(!engine.config.ui.mobile_accessory_bar);
+    }
+
+    /// Quiet is honored ONLY for a patch confined to the two mobile-bar
+    /// fields. Any other field present keeps the normal status, so the flag
+    /// cannot be used to silence an ordinary settings write.
+    #[test]
+    fn set_settings_quiet_is_ignored_when_the_patch_touches_other_fields() {
+        let (mut engine, _tmp) = test_engine();
+        let outcome = engine
+            .apply_wire(WireCommand::SetSettings(SettingsPatch {
+                mobile_top_bar: Some(false),
+                copy_on_select: Some(false),
+                quiet: true,
+                ..Default::default()
+            }))
+            .expect("dispatch ok");
+        let status = outcome.status.expect("status kept for a mixed patch");
+        assert!(status.message.starts_with("Settings updated."), "{status:?}");
+    }
+
+    /// A quiet mobile-bar patch whose values already match is silent too: the
+    /// "Settings unchanged." info is exactly the redundant confirmation the
+    /// flag exists to drop.
+    #[test]
+    fn set_settings_quiet_suppresses_the_unchanged_status_too() {
+        let (mut engine, _tmp) = test_engine();
+        let already = engine.config.ui.mobile_top_bar;
+        let outcome = engine
+            .apply_wire(WireCommand::SetSettings(SettingsPatch {
+                mobile_top_bar: Some(already),
+                quiet: true,
+                ..Default::default()
+            }))
+            .expect("dispatch ok");
+        assert!(outcome.status.is_none());
+    }
+
+    /// A patch JSON that predates the quiet flag still deserializes (quiet
+    /// defaults to false), so older clients keep their status unchanged.
+    #[test]
+    fn settings_patch_without_quiet_field_deserializes_as_not_quiet() {
+        let patch: SettingsPatch =
+            serde_json::from_str(r#"{"mobile_top_bar": false}"#).expect("deserialize");
+        assert!(!patch.quiet);
+        assert_eq!(patch.mobile_top_bar, Some(false));
+    }
+
     /// One accepted `SetSettings` field, described end to end: how to seed the
     /// running config with a value that DIFFERS from what the patch sends (so
     /// the row can never pass vacuously), the JSON the patch carries, and how
@@ -9579,6 +9692,9 @@ mod tests {
             default_provider: Some("codex".to_string()),
             disable_automated_welcome_screen: Some(!before.ui.disable_automated_welcome_screen),
             disable_release_notes: Some(!before.ui.disable_release_notes),
+            // Presentation flag, maps to no config field; false keeps this
+            // full-patch round trip on the normal (status-emitting) path.
+            quiet: false,
         });
         engine.apply_wire(patch).expect("dispatch ok");
 

@@ -5021,8 +5021,11 @@ export function setMobileBarVisibility(
   const field = bar === "top" ? "mobile_top_bar" : "mobile_accessory_bar"
   const prev = state[key]
   setState({ [key]: next })
+  // `quiet: true`: success is silence. The bar visibly moving IS the
+  // feedback, so the server is asked to skip its "Settings updated." status
+  // for this write; a failed PATCH still toasts below.
   return configApi
-    .patchSettings({ ui: { [field]: next } })
+    .patchSettings({ ui: { [field]: next }, quiet: true })
     .then(() => true)
     .catch((e) => {
       // Roll the optimistic override back so the bar doesn't strand in the
@@ -5047,8 +5050,13 @@ export function restoreMobileBars(): Promise<boolean> {
   const prevTop = state.mobileTopBarOverride
   const prevAccessory = state.mobileAccessoryBarOverride
   setState({ mobileTopBarOverride: true, mobileAccessoryBarOverride: true })
+  // `quiet: true` for the same reason as `setMobileBarVisibility`: the bars
+  // visibly returning is the feedback, so no success status is wanted.
   return configApi
-    .patchSettings({ ui: { mobile_top_bar: true, mobile_accessory_bar: true } })
+    .patchSettings({
+      ui: { mobile_top_bar: true, mobile_accessory_bar: true },
+      quiet: true,
+    })
     .then(() => true)
     .catch((e) => {
       // Per-field rollback with the same overtaken-write guard as

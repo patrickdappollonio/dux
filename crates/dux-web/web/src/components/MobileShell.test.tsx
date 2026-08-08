@@ -651,7 +651,9 @@ describe("MobileShell quick toggles in the terminal-screen ⋯ menu", () => {
       "/api/v1/config/settings",
       expect.objectContaining({
         method: "PATCH",
-        body: JSON.stringify({ ui: { mobile_top_bar: false } }),
+        // `quiet: true` asks the server to skip the "Settings updated."
+        // status for this write; the bar disappearing is the feedback.
+        body: JSON.stringify({ ui: { mobile_top_bar: false }, quiet: true }),
       }),
     )
   })

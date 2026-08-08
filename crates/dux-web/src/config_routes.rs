@@ -355,6 +355,13 @@ struct SettingsBody {
     ui: UiSettingsPatch,
     capabilities: CapabilitiesSettingsPatch,
     defaults: DefaultsSettingsPatch,
+    /// Top-level because it is not a settings field: it asks the engine to
+    /// emit no info status for this request, and the engine honors it only
+    /// for a patch confined to the two mobile-bar fields (see
+    /// `SettingsPatch::quiet`), so it cannot silence any other settings
+    /// write. Sent by the web's mobile bar toggles, whose feedback is the
+    /// bar itself moving.
+    quiet: bool,
 }
 
 /// `PATCH /api/v1/config/settings`. Set explicit values for the Settings
@@ -421,6 +428,7 @@ async fn set_settings(
             default_provider: body.defaults.provider,
             disable_automated_welcome_screen: body.ui.disable_automated_welcome_screen,
             disable_release_notes: body.ui.disable_release_notes,
+            quiet: body.quiet,
         }),
     )
     .await
@@ -793,6 +801,28 @@ mod tests {
         assert!(raw.contains("copy_on_select = false"), "raw: {raw}");
         assert!(raw.contains("always_show_tab_strip = true"), "raw: {raw}");
         assert!(raw.contains("pr_banner_position = \"top\""), "raw: {raw}");
+    }
+
+    /// The top-level `quiet` flag rides beside the groups (it is not a
+    /// settings field) and still persists the mobile-bar write; the engine
+    /// drops the info status for such a request (pinned in
+    /// `dux_core::wire`'s `set_settings_quiet_*` tests).
+    #[tokio::test]
+    async fn set_settings_accepts_the_quiet_flag() {
+        let (_tmp, app) = router_no_auth();
+        let resp = app
+            .clone()
+            .oneshot(json_req(
+                "PATCH",
+                "/api/v1/config/settings",
+                r#"{"ui":{"mobile_top_bar":false},"quiet":true}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let raw = read_raw_config_text(&app).await;
+        assert!(raw.contains("mobile_top_bar = false"), "raw: {raw}");
     }
 
     #[tokio::test]
