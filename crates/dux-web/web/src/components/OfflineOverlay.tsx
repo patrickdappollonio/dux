@@ -52,7 +52,7 @@ export function OfflineOverlay() {
       <div className="w-full max-w-md rounded-xl border bg-card p-6 text-center text-card-foreground shadow-xl">
         <pre
           aria-hidden
-          className="mx-auto mb-6 inline-block text-left font-mono text-[11px] leading-[1.15] text-muted-foreground"
+          className="mx-auto mb-6 inline-block text-left font-blocks text-[11px] leading-[1.15] text-muted-foreground"
         >
           {DUX_ART}
         </pre>

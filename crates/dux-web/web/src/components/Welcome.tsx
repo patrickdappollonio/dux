@@ -65,7 +65,7 @@ export function Welcome() {
       />
       <pre
         aria-label="dux"
-        className="font-mono text-[11px] leading-[1.15] text-muted-foreground"
+        className="font-blocks text-[11px] leading-[1.15] text-muted-foreground"
       >
         {TEXT_LOGO}
       </pre>
