@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs"
+import { fileURLToPath } from "node:url"
+
 import { describe, expect, it } from "vitest"
 
 import { allDeleteDiffOptions, isAllDeleteDiff } from "./diffPresentation"
@@ -45,6 +48,27 @@ describe("isAllDeleteDiff", () => {
     expect(
       isAllDeleteDiff({ original: "x\n", modified: "", binary: true }),
     ).toBe(false)
+  })
+})
+
+// The CSS half of the suppression is proven by the preview-env screenshots,
+// but ONE selector shape is pinned here because it regressed once already:
+// the line-number rule must carry the `.monaco-editor` prefix. Monaco's own
+// `.monaco-editor .margin-view-overlays .line-numbers` rule (no !important)
+// ships inside the LAZY DiffViewer chunk, so it loads after index.css and
+// wins a specificity tie on source order — the prefixed form out-specifies
+// it and wins regardless of load order. (The live validation that missed
+// this injected its rules via addStyleTag, which appends after Monaco's
+// sheet and so masked the order dependence.)
+describe("the all-delete line-number rule's selector shape", () => {
+  it("keeps the .monaco-editor prefix that beats Monaco's lazy-loaded tie", () => {
+    const css = readFileSync(
+      fileURLToPath(new URL("../index.css", import.meta.url)),
+      "utf8",
+    )
+    expect(css).toContain(
+      ".dux-diff-all-delete .monaco-editor .margin-view-overlays .line-numbers",
+    )
   })
 })
 
