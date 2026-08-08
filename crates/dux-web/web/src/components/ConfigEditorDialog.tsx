@@ -1,8 +1,8 @@
-import { Info } from "lucide-react"
+import { Info, Loader2 } from "lucide-react"
 
-import { useState } from "react"
+import { lazy, Suspense, useState } from "react"
 
-import CodeEditor from "@/components/CodeEditor"
+import { ChunkBoundary } from "@/components/ChunkBoundary"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -18,6 +18,12 @@ import {
   saveConfigEditor,
   useDux,
 } from "@/lib/store"
+
+// Monaco is multiple MB; this dialog mounts (closed) in GlobalOverlays, so a
+// static CodeEditor import would drag the whole Monaco chunk into the eager
+// index bundle. Lazy-load it exactly like EditorBody does — the two share the
+// self-host bootstrap (lib/monacoSetup), so the heavy chunk loads once for both.
+const CodeEditor = lazy(() => import("@/components/CodeEditor"))
 
 // The form body is mounted only once the raw config has loaded, so its lazy
 // `useState` initializer seeds the editor from a settled value (no
@@ -36,12 +42,25 @@ function ConfigEditorForm({
   return (
     <>
       <div className="h-[60vh] overflow-hidden rounded-md border border-border">
-        <CodeEditor
-          path="config.toml"
-          value={text}
-          onChange={setText}
-          onSave={() => saveConfigEditor(text)}
-        />
+        {/* ChunkBoundary wraps Suspense (not inside it) so a failed lazy
+            import after a redeploy surfaces its reload-needed error instead
+            of an eternal spinner (same idiom as EditorBody). */}
+        <ChunkBoundary>
+          <Suspense
+            fallback={
+              <div className="flex h-full items-center justify-center text-muted-foreground">
+                <Loader2 className="size-5 motion-safe:animate-spin" />
+              </div>
+            }
+          >
+            <CodeEditor
+              path="config.toml"
+              value={text}
+              onChange={setText}
+              onSave={() => saveConfigEditor(text)}
+            />
+          </Suspense>
+        </ChunkBoundary>
       </div>
       {error ? (
         <p className="max-h-24 overflow-y-auto font-mono text-sm whitespace-pre-wrap text-destructive">
