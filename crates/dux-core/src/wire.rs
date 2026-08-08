@@ -9431,7 +9431,10 @@ mod tests {
             }))
             .expect("dispatch ok");
         let status = outcome.status.expect("status kept for a mixed patch");
-        assert!(status.message.starts_with("Settings updated."), "{status:?}");
+        assert!(
+            status.message.starts_with("Settings updated."),
+            "{status:?}"
+        );
     }
 
     /// A quiet mobile-bar patch whose values already match is silent too: the
