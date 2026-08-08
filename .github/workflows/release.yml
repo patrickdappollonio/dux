@@ -124,8 +124,9 @@ jobs:
           DUX_RELEASE_BUILD: "1"
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Strip binary
-        run: strip target/${{ matrix.target }}/release/dux
+      # Symbol stripping happens in Cargo ([profile.release] strip = "symbols"),
+      # so local release builds and CI produce the same binary and there is
+      # exactly one stripping mechanism.
 
       - name: Package
         run: tar czf ${{ matrix.archive }} -C target/${{ matrix.target }}/release dux

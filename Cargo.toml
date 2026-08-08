@@ -39,10 +39,14 @@ futures-util = "0.3"
 tokio-tungstenite = "0.29"
 
 [profile.release]
-opt-level = "z"   # Optimize for size.
-lto = true        # Enable link time optimization.
-codegen-units = 1 # Reduce parallel code generation units.
-debug = 0         # No debug information
+opt-level = "z"    # Optimize for size.
+lto = true         # Enable link time optimization.
+codegen-units = 1  # Reduce parallel code generation units.
+debug = 0          # No debug information
+# Strip symbols here, in Cargo, so every release build is small by the same
+# mechanism (CI has no separate strip step). The symbol-keeping path for
+# profilers is [profile.profiling] below.
+strip = "symbols"
 
 [profile.profiling]
 inherits = "release"
