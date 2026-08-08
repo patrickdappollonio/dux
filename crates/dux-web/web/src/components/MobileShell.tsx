@@ -12,6 +12,7 @@ import { ConnDot } from "@/components/ConnDot"
 import { AgentTabsStrip } from "@/components/AgentTabsStrip"
 import { DormantTabCard } from "@/components/DormantTabCard"
 import { AgentActionsMenu, FlatAgentList } from "@/components/FlatAgentList"
+import { MacroPopover } from "@/components/MacroPopover"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Button } from "@/components/ui/button"
 import {
@@ -146,6 +147,15 @@ function AgentlessTerminalScreen({
               {terminal ? terminalTitle(terminal, ownedTerminals) : "Terminal"}
             </span>
           </div>
+          {/* The macro quick-picker's mobile entry point, a header icon like
+              the agent screen's (a floating trigger over the PTY covered the
+              text under it). Hiding the top bar hides it with the header —
+              the same more-space trade the tab strip makes; restore is the
+              show-bars button or Preferences. */}
+          <MacroPopover
+            variant="icon"
+            target={{ kind: "terminal", terminalId, owner }}
+          />
         </header>
       ) : null}
       <div className="min-h-0 flex-1">
@@ -324,6 +334,14 @@ function TerminalScreen() {
                 </a>
               </SimpleTooltip>
             ) : null}
+            {/* The macro quick-picker's mobile entry point. It lives HERE, in
+                the header beside the chips, because the floating TerminalPane
+                trigger sat over the PTY text on a phone and made the text
+                under it unreadable. When ui.mobile_top_bar is off it hides
+                with the whole header — the same deliberate more-space trade
+                the tab strip makes; restore is the show-bars button below the
+                terminal or Preferences. */}
+            <MacroPopover variant="icon" target={selectedTarget} />
             <Button
               variant="outline"
               size="sm"

@@ -577,6 +577,89 @@ describe("MobileShell hideable top bar (ui.mobile_top_bar)", () => {
   })
 })
 
+describe("MobileShell terminal-screen macro trigger", () => {
+  // On phones the macro quick-picker's trigger is a header icon button, not
+  // TerminalPane's floating overlay (which sat on top of the PTY text and
+  // made it unreadable). The suite shrinks the viewport like the quick-toggle
+  // tests so the shell composes exactly as a phone would.
+  const desktopWidth = window.innerWidth
+  beforeEach(() => {
+    Object.defineProperty(window, "innerWidth", {
+      value: 500,
+      configurable: true,
+    })
+  })
+  afterEach(() => {
+    Object.defineProperty(window, "innerWidth", {
+      value: desktopWidth,
+      configurable: true,
+    })
+  })
+
+  function terminalState(overrides: Record<string, unknown> = {}): DuxState {
+    return makeState({
+      spine: makeSessionSpine(1),
+      bootstrap: {
+        title: "dux",
+        dux_version: "v1",
+        available_providers: ["claude"],
+      },
+      selectedTarget: { kind: "agent", sessionId: "s1", tabId: "s1" },
+      selectedSessionId: "s1",
+      mobileScreen: "terminal",
+      changes: { sessionId: "s1", phase: "loaded", staged: [], unstaged: [] },
+      startedDormantTabs: [],
+      terminalEpoch: 0,
+      mobileTopBarOverride: null,
+      mobileAccessoryBarOverride: null,
+      ...overrides,
+    } as unknown as Partial<DuxState>)
+  }
+
+  it("puts the macro trigger in the agent terminal screen's header", () => {
+    mockState = terminalState()
+    render(<MobileShell />)
+    expect(screen.getByLabelText("Run a macro")).toBeTruthy()
+  })
+
+  it("hides the macro trigger together with the hidden top bar", () => {
+    // Hiding the top bar states an intent (more space), so the macro trigger
+    // goes with the header; restore is the show-bars button or Preferences.
+    mockState = terminalState({ mobileTopBarOverride: false })
+    render(<MobileShell />)
+    expect(screen.queryByLabelText("Run a macro")).toBeNull()
+  })
+
+  it("puts the macro trigger in the agentless terminal screen's header too", () => {
+    // The floating trigger used to render over project/standalone terminals
+    // as well, so their header gets the same treatment as the agent screen.
+    mockState = terminalState({
+      spine: {
+        projects: [
+          { id: "p1", name: "Repo", path: "/tmp/p1", default_provider: "claude" },
+        ],
+        sessions: [],
+        terminals: [
+          {
+            id: "pt-1",
+            owner: { kind: "project", project_id: "p1" },
+            label: "Terminal 2",
+          },
+        ],
+        sidebar: { groups: [], agentless_start: null },
+      },
+      selectedTarget: {
+        kind: "terminal",
+        terminalId: "pt-1",
+        owner: { kind: "project", projectId: "p1" },
+      },
+      selectedSessionId: null,
+    })
+    render(<MobileShell />)
+    expect(screen.getByLabelText("Run a macro")).toBeTruthy()
+  })
+})
+
 describe("MobileShell quick toggles in the terminal-screen ⋯ menu", () => {
   // The toggles are gated on `context === "terminal" && isMobile`, and
   // `useIsMobile` reads `window.innerWidth`, so these tests shrink it below

@@ -35,6 +35,7 @@ import type { SelectedTarget } from "@/lib/store"
 export function MacroPopover({
   target,
   finalFocus,
+  variant = "labeled",
 }: {
   target: SelectedTarget
   // Where focus lands when the popover closes (selecting a macro, Esc, or
@@ -47,6 +48,13 @@ export function MacroPopover({
   // This intentionally overrides the usual "return focus to the trigger" popover
   // convention because the trigger floats over a live terminal the user drives.
   finalFocus?: () => HTMLElement | null
+  // "labeled" is the desktop floating trigger ("Macros…" over the pane);
+  // "icon" is the mobile terminal-screen header's icon button, matching the
+  // header's ghost size-10 chrome idiom. On phones the picker submits through
+  // the compose bar / a tap, so the icon variant keeps the default
+  // return-focus-to-trigger behavior (no finalFocus) rather than popping the
+  // soft keyboard by focusing a terminal textarea.
+  variant?: "labeled" | "icon"
 }) {
   const { bootstrap } = useDux()
   const [open, setOpen] = useState(false)
@@ -64,12 +72,25 @@ export function MacroPopover({
   return (
     <Popover open={open} onOpenChange={setOpen}>
       {/* Ellipsis on the label signals the button opens a menu of choices
-          (rather than acting immediately). */}
+          (rather than acting immediately). The icon variant drops the label:
+          it sits in the mobile header among other icon-only controls, and
+          its 40px target follows the header's touch-target idiom. */}
       <PopoverTrigger
-        render={<Button variant="secondary" aria-label="Run a macro" />}
+        render={
+          variant === "icon" ? (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-10 shrink-0"
+              aria-label="Run a macro"
+            />
+          ) : (
+            <Button variant="secondary" aria-label="Run a macro" />
+          )
+        }
       >
         <SquareSlash />
-        Macros…
+        {variant === "icon" ? null : <>Macros…</>}
       </PopoverTrigger>
       <PopoverContent align="end" className="w-72 p-0" finalFocus={finalFocus}>
         {allMacros.length === 0 ? (

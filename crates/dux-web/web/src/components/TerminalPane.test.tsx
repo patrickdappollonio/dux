@@ -118,7 +118,12 @@ vi.mock("@/lib/agentNotifications", () => ({
     return () => {}
   },
 }))
-vi.mock("@/components/MacroPopover", () => ({ MacroPopover: () => null }))
+// A marker stand-in rather than null so the floating-trigger suite below can
+// assert WHERE the pane composes it (desktop only) without pulling in the
+// real popover's Command/Popover machinery.
+vi.mock("@/components/MacroPopover", () => ({
+  MacroPopover: () => <div data-testid="macro-popover" />,
+}))
 vi.mock("@/lib/ptySocket", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/ptySocket")>()
   return { ...actual, PtySocket: FakePtySocket }
@@ -420,6 +425,34 @@ describe("TerminalPane project-terminal owner resolution", () => {
       />,
     )
     expect(screen.getByText("Launching terminal…")).toBeTruthy()
+  })
+})
+
+// The floating "Macros…" trigger is desktop chrome only: on a phone it sat
+// over the PTY text and made the text under it unreadable, so the mobile
+// entry point is the terminal screen's header (MobileShell), never this
+// overlay.
+describe("TerminalPane floating macro trigger", () => {
+  const desktopWidth = window.innerWidth
+  afterEach(() => {
+    Object.defineProperty(window, "innerWidth", {
+      value: desktopWidth,
+      configurable: true,
+    })
+  })
+
+  it("renders the floating trigger on desktop", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(screen.getByTestId("macro-popover")).toBeTruthy()
+  })
+
+  it("does not render the floating trigger on mobile", () => {
+    Object.defineProperty(window, "innerWidth", {
+      value: 500,
+      configurable: true,
+    })
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(screen.queryByTestId("macro-popover")).toBeNull()
   })
 })
 
@@ -835,8 +868,11 @@ describe("TerminalPane compose-bar restore button", () => {
       "/api/v1/config/settings",
       expect.objectContaining({
         method: "PATCH",
+        // `quiet: true` asks the server to skip its "Settings updated."
+        // status: the bars visibly returning is the feedback.
         body: JSON.stringify({
           ui: { mobile_top_bar: true, mobile_accessory_bar: true },
+          quiet: true,
         }),
       }),
     )

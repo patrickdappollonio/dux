@@ -2117,18 +2117,23 @@ export function TerminalPane(props: TerminalPaneProps) {
           overlaps the scrollbar: 0.5rem MUST match the host's `p-2` padding below,
           then the shared --xterm-scrollbar-width (fallback keeps the offset valid
           if the var is ever missing), then a small gap. */}
-      <div className="absolute top-3 right-[calc(0.5rem+var(--xterm-scrollbar-width,8px)+0.25rem)] z-10 flex gap-2">
-        {/* The popover trigger renders a secondary labeled Button (see
-            MacroPopover); it must remain reachable on touch, so it does not
-            hide on blur. On close we hand Base UI the terminal's textarea as the
-            focus target instead of calling termRef.focus() imperatively like the
-            accessory-bar handlers do, because Base UI owns focus during a
-            popover close — see the MacroPopover finalFocus comment. */}
-        <MacroPopover
-          target={macroTarget}
-          finalFocus={() => termRef.current?.textarea ?? null}
-        />
-      </div>
+      {/* DESKTOP ONLY: on a phone this floating trigger sat on top of the PTY
+          text and made the text under it unreadable, so the mobile entry
+          point is the terminal screen's header icon button (MobileShell),
+          never this overlay. */}
+      {!isMobile ? (
+        <div className="absolute top-3 right-[calc(0.5rem+var(--xterm-scrollbar-width,8px)+0.25rem)] z-10 flex gap-2">
+          {/* The popover trigger renders a secondary labeled Button (see
+              MacroPopover). On close we hand Base UI the terminal's textarea as
+              the focus target instead of calling termRef.focus() imperatively
+              like the accessory-bar handlers do, because Base UI owns focus
+              during a popover close — see the MacroPopover finalFocus comment. */}
+          <MacroPopover
+            target={macroTarget}
+            finalFocus={() => termRef.current?.textarea ?? null}
+          />
+        </div>
+      ) : null}
       {/* Readiness / reconnect overlay. Non-blocking (pointer-events-none) so it
           never steals input. Shows while the PTY is still starting up (before its
           first output latches `everReady`) OR whenever the socket has dropped and
