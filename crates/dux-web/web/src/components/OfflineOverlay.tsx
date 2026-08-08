@@ -8,13 +8,16 @@ import { reconnect, useDux } from "@/lib/store"
 // offline.html`) shows, so the in-app modal and the service-worker page read as
 // one experience. Left-aligned inside an inline-block so the body's centering
 // places the art as a block without shearing each line independently.
-const DUX_ART = `       ░██
-       ░██
- ░████████ ░██    ░██ ░██    ░██
-░██    ░██ ░██    ░██  ░██  ░██
-░██    ░██ ░██    ░██   ░█████
-░██   ░███ ░██   ░███  ░██  ░██
- ░█████░██  ░█████░██ ░██    ░██ `
+//
+// Pure ASCII on purpose: shade/block glyphs (U+2591 etc.) are missing from
+// most system monospace fonts, so the browser substitutes them from a
+// different fallback font whose advance width differs and the art shears,
+// device-dependently. Every character below exists in every monospace font.
+const DUX_ART = `     _
+  __| |_   ___  __
+ / _\` | | | \\ \\/ /
+| (_| | |_| |>  <
+ \\__,_|\\__,_/_/\\_\\`
 
 // The app-wide "the events socket is down" modal. It mirrors the installed-PWA
 // offline page (`public/offline.html`) but lives inside the running SPA: when the
