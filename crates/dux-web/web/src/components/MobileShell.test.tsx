@@ -15,6 +15,11 @@ const addTabMock = vi.fn()
 // destination rather than step the browser's history (see the up-navigation
 // suite at the bottom of this file).
 const navigateUpMock = vi.fn()
+// `openDeleteTerminal` is spied on so the agentless terminal screen's Close…
+// entry can be asserted to route into the existing confirm-dialog target
+// (ConfirmDeleteTerminalDialog reads `deleteTerminalTarget`; the dialog itself
+// has its own tests) rather than closing anything directly.
+const openDeleteTerminalMock = vi.fn()
 vi.mock("@/lib/store", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/store")>()
   return {
@@ -22,6 +27,7 @@ vi.mock("@/lib/store", async (importOriginal) => {
     useDux: () => mockState,
     addTab: addTabMock,
     navigateUp: navigateUpMock,
+    openDeleteTerminal: openDeleteTerminalMock,
   }
 })
 const historyBack = vi.fn()
@@ -118,6 +124,7 @@ beforeEach(() => {
   installBootStubs()
   addTabMock.mockClear()
   navigateUpMock.mockClear()
+  openDeleteTerminalMock.mockClear()
   historyBack.mockClear()
   // jsdom's own history is real; replace only `back` so a stray relative step
   // is observable instead of silently doing nothing.
@@ -810,5 +817,163 @@ describe("MobileShell quick toggles in the terminal-screen ⋯ menu", () => {
     expect(screen.getByText(/^New agent tab for /)).toBeTruthy()
     expect(screen.queryByText("Hide top bar")).toBeNull()
     expect(screen.queryByText("Hide terminal keys")).toBeNull()
+  })
+})
+
+describe("MobileShell agentless terminal screen ⋯ menu", () => {
+  // The project and standalone terminal screens used to carry NO menu at all,
+  // so hiding the bars from them meant a trip through Preferences. That
+  // decision changed: every mobile terminal screen carries the quick toggles.
+  // The toggles read `useIsMobile`, so the viewport shrinks below the 768px
+  // breakpoint exactly like the agent-screen quick-toggle suite above.
+  const desktopWidth = window.innerWidth
+  beforeEach(() => {
+    Object.defineProperty(window, "innerWidth", {
+      value: 500,
+      configurable: true,
+    })
+  })
+  afterEach(() => {
+    Object.defineProperty(window, "innerWidth", {
+      value: desktopWidth,
+      configurable: true,
+    })
+  })
+
+  // A phone focused on a PROJECT terminal: no session anywhere in sight.
+  function projectTerminalState(
+    bootstrap: Record<string, unknown> = {},
+  ): DuxState {
+    return makeState({
+      spine: {
+        projects: [
+          { id: "p1", name: "Repo", path: "/tmp/p1", default_provider: "claude" },
+        ],
+        sessions: [],
+        terminals: [
+          {
+            id: "pt-1",
+            owner: { kind: "project", project_id: "p1" },
+            label: "Terminal 2",
+          },
+        ],
+        sidebar: { groups: [], agentless_start: null },
+      },
+      selectedTarget: {
+        kind: "terminal",
+        terminalId: "pt-1",
+        owner: { kind: "project", projectId: "p1" },
+      },
+      selectedSessionId: null,
+      mobileScreen: "terminal",
+      changes: { sessionId: null, phase: "empty", staged: [], unstaged: [] },
+      startedDormantTabs: [],
+      terminalEpoch: 0,
+      mobileTopBarOverride: null,
+      mobileAccessoryBarOverride: null,
+      bootstrap: {
+        title: "dux",
+        dux_version: "v1",
+        available_providers: ["claude"],
+        ...bootstrap,
+      },
+    } as unknown as Partial<DuxState>)
+  }
+
+  // The same phone on a STANDALONE terminal: the other agentless wrapper.
+  function standaloneTerminalState(): DuxState {
+    return makeState({
+      spine: {
+        projects: [],
+        sessions: [],
+        terminals: [
+          {
+            id: "solo-1",
+            owner: { kind: "standalone", cwd_label: "~/code" },
+            label: "Terminal 1",
+          },
+        ],
+        sidebar: { groups: [], agentless_start: null },
+      },
+      selectedTarget: {
+        kind: "terminal",
+        terminalId: "solo-1",
+        owner: { kind: "standalone" },
+      },
+      selectedSessionId: null,
+      mobileScreen: "terminal",
+      changes: { sessionId: null, phase: "empty", staged: [], unstaged: [] },
+      startedDormantTabs: [],
+      terminalEpoch: 0,
+      mobileTopBarOverride: null,
+      mobileAccessoryBarOverride: null,
+    } as unknown as Partial<DuxState>)
+  }
+
+  it("renders the ⋯ trigger in the project terminal screen's header", () => {
+    mockState = projectTerminalState()
+    render(<MobileShell />)
+    expect(screen.getByLabelText("Terminal actions")).toBeTruthy()
+  })
+
+  it("renders the ⋯ trigger on the standalone terminal screen too", () => {
+    mockState = standaloneTerminalState()
+    render(<MobileShell />)
+    expect(screen.getByLabelText("Terminal actions")).toBeTruthy()
+  })
+
+  it("offers both bar quick toggles, exactly as the agent screen words them", () => {
+    mockState = projectTerminalState()
+    render(<MobileShell />)
+    fireEvent.click(screen.getByLabelText("Terminal actions"))
+    expect(screen.getByText("Hide top bar")).toBeTruthy()
+    expect(screen.getByText("Hide terminal keys")).toBeTruthy()
+  })
+
+  it("labels flip to Show when a bar is already hidden", () => {
+    mockState = projectTerminalState({
+      // The top bar stays visible so its ⋯ menu is still reachable; the
+      // ACCESSORY preference is the hidden one whose label must flip.
+      mobile_top_bar: true,
+      mobile_accessory_bar: false,
+    })
+    render(<MobileShell />)
+    fireEvent.click(screen.getByLabelText("Terminal actions"))
+    expect(screen.getByText("Hide top bar")).toBeTruthy()
+    expect(screen.getByText("Show terminal keys")).toBeTruthy()
+  })
+
+  it("tapping Hide top bar persists through the generic settings PATCH", () => {
+    mockState = projectTerminalState()
+    render(<MobileShell />)
+    fireEvent.click(screen.getByLabelText("Terminal actions"))
+    fireEvent.click(screen.getByText("Hide top bar"))
+    const fetchSpy = globalThis.fetch as unknown as ReturnType<typeof vi.fn>
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "/api/v1/config/settings",
+      expect.objectContaining({
+        method: "PATCH",
+        body: JSON.stringify({ ui: { mobile_top_bar: false }, quiet: true }),
+      }),
+    )
+  })
+
+  it("routes Close… into the existing confirm-dialog target, per terminal id", () => {
+    // The row menu's one real action, reproduced here so the screen is
+    // self-sufficient: it opens the ConfirmDeleteTerminalDialog target, it
+    // does not close anything directly.
+    mockState = projectTerminalState()
+    render(<MobileShell />)
+    fireEvent.click(screen.getByLabelText("Terminal actions"))
+    fireEvent.click(screen.getByText("Close…"))
+    expect(openDeleteTerminalMock).toHaveBeenCalledExactlyOnceWith("pt-1")
+  })
+
+  it("carries no agent-only entries: this menu is the terminal's, not a session's", () => {
+    mockState = projectTerminalState()
+    render(<MobileShell />)
+    fireEvent.click(screen.getByLabelText("Terminal actions"))
+    expect(screen.queryByText(/^New agent tab for /)).toBeNull()
+    expect(screen.queryByText("Rename agent…")).toBeNull()
   })
 })

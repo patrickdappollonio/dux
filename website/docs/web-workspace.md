@@ -255,7 +255,8 @@ the compose box (a refused send keeps your draft and tells you why), and the
 whole thing can be turned off in Preferences if you would rather type raw.
 
 Terminal rows are precious on a phone, so the chrome around the terminal is
-hideable. The terminal screen's `⋯` menu has **Hide top bar** (which also takes
+hideable. Every terminal screen's `⋯` menu (agent, project, and standalone
+terminals alike) has **Hide top bar** (which on the agent screen also takes
 the tab strip with it) and **Hide terminal keys**, each backed by its own
 preference, and the reclaimed rows go straight back to the terminal. While
 anything is hidden, an eye button appears below the terminal (next to the

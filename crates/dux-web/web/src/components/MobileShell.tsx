@@ -1,4 +1,4 @@
-import { ChevronLeft, Ellipsis, GitPullRequest, Settings } from "lucide-react"
+import { ChevronLeft, Ellipsis, GitPullRequest, Settings, X } from "lucide-react"
 import { Suspense, useState, type ReactElement } from "react"
 
 import { AddProjectSplitButton } from "@/components/AddProjectSplitButton"
@@ -18,14 +18,17 @@ import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
+import { MobileBarToggleItems } from "@/components/MobileBarToggleItems"
 import { isExtraTabDormant, shouldShowTabStrip } from "@/lib/agentTabs"
 import { resolveInstanceTitle } from "@/lib/instanceTitle"
 import {
   mobileTopBarVisible,
   navigateUp,
   openChangesScreen,
+  openDeleteTerminal,
   selectSession,
   selectTerminal,
   useDux,
@@ -98,7 +101,9 @@ function HomeScreen() {
 
 // The spoke for a terminal that is NOT session-owned: one identity crumb over
 // the shared terminal. Such a terminal has no agent, so it borrows none of the
-// agent screen's chrome (no changes chip, no agent actions menu).
+// agent screen's AGENT chrome (no changes chip, no agent actions menu) — but it
+// carries a ⋯ menu of its own, with the shared mobile-bar quick toggles and the
+// terminal's one real action, Close….
 //
 // Shared by the project-owned and standalone screens, which differ only in what
 // the identity crumb says and in what has to exist for the screen to be valid;
@@ -120,10 +125,10 @@ function AgentlessTerminalScreen({
   const ownedTerminals = terminalsForOwner(spine?.terminals ?? [], owner)
   const terminal = ownedTerminals.find((t) => t.id === terminalId)
   // The same `ui.mobile_top_bar` gate as the agent terminal screen: both
-  // preferences deliberately cover every mobile terminal surface. This screen
-  // has no ⋯ menu (a decision, not an omission), so hiding from here happens
-  // via Preferences, and restoring via the show-bars button below the terminal or
-  // Preferences.
+  // preferences deliberately cover every mobile terminal surface. Hiding
+  // happens from this screen's own ⋯ menu (the shared quick toggles below),
+  // exactly as on the agent screen; restoring via the show-bars button below
+  // the terminal or Preferences.
   const topBarVisible = mobileTopBarVisible(duxState)
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
@@ -156,6 +161,32 @@ function AgentlessTerminalScreen({
             variant="icon"
             target={{ kind: "terminal", terminalId, owner }}
           />
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              render={
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="size-10 shrink-0"
+                  aria-label="Terminal actions"
+                />
+              }
+            >
+              <Ellipsis />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              {/* The shared mobile-bar quick toggles, identical to the agent
+                  screen's menu, then the terminal's one real action from its
+                  sidebar row menu: Close…, neutral color per the destructive
+                  convention (the … plus ConfirmDeleteTerminalDialog are the
+                  danger signal), routed through the same confirm target. */}
+              <MobileBarToggleItems />
+              <DropdownMenuItem onClick={() => openDeleteTerminal(terminalId)}>
+                <X />
+                Close…
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </header>
       ) : null}
       <div className="min-h-0 flex-1">
