@@ -42,17 +42,31 @@ interface AccessoryBarProps {
 }
 
 // CRITICAL: every bar button calls preventDefault() on pointerdown so the press
-// can't shift focus off the xterm hidden textarea before the handler runs, and
-// we fire on pointerdown (not click) for a snappy, latency-free feel. The input
-// keys (Esc, Tab, Ctrl, Alt, the ⇧↵ newline, and the cursor arrows) rely on this
-// to keep the textarea focused and the soft keyboard open; the PgUp/PgDn
-// page-scroll keys reuse the same handler for that focus/sequencing guarantee but
-// then deliberately blur in TerminalPane.onScroll to dismiss the keyboard for
-// reading. So "keeps focus" is the input-key contract, not a universal one.
+// can't shift focus off the active typing surface before the handler runs, and
+// we fire on pointerdown (not click) for a snappy, latency-free feel. Because
+// the press never takes focus, a tap PRESERVES the soft-keyboard state,
+// whichever it was: a user typing keeps the keyboard (and their focus), and a
+// user paging through output with the keyboard closed does not have it pop
+// open — the parent's handlers only refocus when the typing surface had focus
+// at tap time. The PgUp/PgDn page-scroll keys reuse the same handler for that
+// focus/sequencing guarantee but then deliberately blur in
+// TerminalPane.onScroll to dismiss the keyboard for reading. So "preserves the
+// keyboard" is the input-key contract, not a universal one.
 function keyDown(handler: () => void) {
   return (event: React.PointerEvent) => {
     event.preventDefault()
     handler()
+  }
+}
+
+// Keyboard/AT activation, the same pattern as the compose bar's Send button:
+// Enter or Space on the focused button fires a `click` with `detail === 0` (no
+// pointer press). A click that FOLLOWS a real pointer tap carries `detail >= 1`
+// and is ignored, because the pointerdown handler above already fired; without
+// the detail gate every tap would fire the key twice.
+function keyClick(handler: () => void) {
+  return (event: React.MouseEvent) => {
+    if (event.detail === 0) handler()
   }
 }
 
@@ -87,13 +101,16 @@ function KeyButton({
   label,
   ariaLabel,
   pressed,
-  onPointerDown,
+  onActivate,
   children,
 }: {
   label?: string
   ariaLabel?: string
   pressed?: boolean
-  onPointerDown: (event: React.PointerEvent) => void
+  // The key's intent, fired once per activation: on pointerdown for a real
+  // press (focus-preserving, see `keyDown`) and on a detail-0 click for
+  // keyboard/AT activation (see `keyClick`).
+  onActivate: () => void
   children?: React.ReactNode
 }) {
   return (
@@ -101,7 +118,8 @@ function KeyButton({
       variant="secondary"
       aria-label={ariaLabel ?? label}
       aria-pressed={pressed}
-      onPointerDown={onPointerDown}
+      onPointerDown={keyDown(onActivate)}
+      onClick={keyClick(onActivate)}
       className={cn(
         "h-10 min-w-0 flex-1 font-mono",
         // Latched modifiers get an accent fill so the active state is
@@ -134,19 +152,19 @@ export function AccessoryBar({
     <div className="flex shrink-0 flex-col gap-1.5 border-t bg-background px-1 py-1">
       {/* Row one — modifier / special keys sent to the program. */}
       <div className="flex items-center gap-1">
-        <KeyButton label="Esc" onPointerDown={keyDown(onEsc)} />
-        <KeyButton label="Tab" onPointerDown={keyDown(onTab)} />
+        <KeyButton label="Esc" onActivate={onEsc} />
+        <KeyButton label="Tab" onActivate={onTab} />
         <KeyButton
           label="Ctrl"
           pressed={ctrl}
-          onPointerDown={keyDown(onToggleCtrl)}
+          onActivate={onToggleCtrl}
         />
         <KeyButton
           label="Alt"
           pressed={alt}
-          onPointerDown={keyDown(onToggleAlt)}
+          onActivate={onToggleAlt}
         />
-        <KeyButton ariaLabel="Insert newline" onPointerDown={keyDown(onNewline)}>
+        <KeyButton ariaLabel="Insert newline" onActivate={onNewline}>
           <ShiftEnterIcon />
         </KeyButton>
       </div>
@@ -157,18 +175,18 @@ export function AccessoryBar({
           aiming for → would otherwise yank the keyboard away (misclick-safe
           spacing, per the CLAUDE.md tenet). */}
       <div className="flex items-center gap-1">
-        <KeyButton ariaLabel="Left" onPointerDown={keyDown(() => onArrow("left"))}>
+        <KeyButton ariaLabel="Left" onActivate={() => onArrow("left")}>
           <ArrowLeft />
         </KeyButton>
-        <KeyButton ariaLabel="Down" onPointerDown={keyDown(() => onArrow("down"))}>
+        <KeyButton ariaLabel="Down" onActivate={() => onArrow("down")}>
           <ArrowDown />
         </KeyButton>
-        <KeyButton ariaLabel="Up" onPointerDown={keyDown(() => onArrow("up"))}>
+        <KeyButton ariaLabel="Up" onActivate={() => onArrow("up")}>
           <ArrowUp />
         </KeyButton>
         <KeyButton
           ariaLabel="Right"
-          onPointerDown={keyDown(() => onArrow("right"))}
+          onActivate={() => onArrow("right")}
         >
           <ArrowRight />
         </KeyButton>
@@ -179,12 +197,12 @@ export function AccessoryBar({
         <KeyButton
           label="PgUp"
           ariaLabel="Page up"
-          onPointerDown={keyDown(() => onScroll("pageUp"))}
+          onActivate={() => onScroll("pageUp")}
         />
         <KeyButton
           label="PgDn"
           ariaLabel="Page down"
-          onPointerDown={keyDown(() => onScroll("pageDown"))}
+          onActivate={() => onScroll("pageDown")}
         />
       </div>
     </div>

@@ -1973,6 +1973,25 @@ export function TerminalPane(props: TerminalPaneProps) {
     }
   }
 
+  // Whether the active typing surface (the compose textarea while the bar is
+  // up, xterm's hidden textarea otherwise) holds focus RIGHT NOW. The
+  // accessory-key handlers read this at tap time to preserve the soft-keyboard
+  // state: a key tap must never CHANGE that state, so they refocus only when
+  // the surface had focus when the tap landed (the bar's buttons preventDefault
+  // their pointerdown, so the tap itself never moves focus — the conditional
+  // refocus is insurance for browsers where that suppression is incomplete).
+  // An unconditional focusTypingSurface() here was the soft-keyboard-pop bug:
+  // a user paging through output with the keyboard closed had it summoned by
+  // every key tap.
+  function typingSurfaceHasFocus(): boolean {
+    const active = document.activeElement
+    if (active === null) return false
+    if (composeActiveRef.current && composeInputRef.current !== null) {
+      return active === composeInputRef.current
+    }
+    return active === (termRef.current?.textarea ?? null)
+  }
+
   // Accessory-bar key sends. Esc/Tab/arrows are full sequences, not single
   // chars, so they bypass `applyModifiers` (which only transforms single-char
   // input). We still honor a latched Alt by prefixing ESC, and we clear any
@@ -2052,13 +2071,17 @@ export function TerminalPane(props: TerminalPaneProps) {
     // Read-only when not the owner: the accessory-bar keys (Esc/Tab/arrows) are
     // input too, so a secondary viewer's taps are dropped just like typed input.
     if (!isOwnerRef.current) return
+    // Captured BEFORE acting: a key tap preserves the keyboard state, so the
+    // refocus below runs only when the typing surface had focus at tap time
+    // (see typingSurfaceHasFocus).
+    const keepFocus = typingSurfaceHasFocus()
     const mods = modsRef.current
     const out = mods.alt ? ESC + seq : seq
     if (mods.ctrl || mods.alt) {
       setMods({ ctrl: false, alt: false })
     }
     ptyRef.current?.sendInput(encoder.encode(out))
-    focusTypingSurface()
+    if (keepFocus) focusTypingSurface()
   }
 
   function onArrow(dir: "up" | "down" | "left" | "right") {
@@ -2074,21 +2097,24 @@ export function TerminalPane(props: TerminalPaneProps) {
   // Shift-Enter handler so both land input identically.
   function sendNewline() {
     if (!isOwnerRef.current) return
+    const keepFocus = typingSurfaceHasFocus()
     if (modsRef.current.ctrl || modsRef.current.alt) {
       setMods({ ctrl: false, alt: false })
     }
     writeSoftNewline(termRef.current, ptyRef.current)
-    focusTypingSurface()
+    if (keepFocus) focusTypingSurface()
   }
 
   function toggleCtrl() {
+    const keepFocus = typingSurfaceHasFocus()
     setMods({ ctrl: !modsRef.current.ctrl, alt: modsRef.current.alt })
-    focusTypingSurface()
+    if (keepFocus) focusTypingSurface()
   }
 
   function toggleAlt() {
+    const keepFocus = typingSurfaceHasFocus()
     setMods({ ctrl: modsRef.current.ctrl, alt: !modsRef.current.alt })
-    focusTypingSurface()
+    if (keepFocus) focusTypingSurface()
   }
 
   // Scroll the xterm viewport from the accessory bar's second row. On the normal

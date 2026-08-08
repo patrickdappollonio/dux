@@ -755,6 +755,94 @@ describe("TerminalPane mobile compose bar", () => {
   })
 })
 
+// The accessory keys must PRESERVE the soft-keyboard state, never change it:
+// a user paging through output with the keyboard closed must not have it pop
+// open because a key handler unconditionally refocused the typing surface,
+// and a user mid-typing must not lose the keyboard to a key tap. The bar's
+// buttons already preventDefault their pointerdown (they never take focus);
+// what these tests pin is the HANDLER side — the refocus is conditional on
+// the typing surface having had focus when the tap landed.
+describe("TerminalPane accessory keys preserve the keyboard state", () => {
+  const desktopWidth = window.innerWidth
+  const goMobile = () => {
+    Object.defineProperty(window, "innerWidth", {
+      value: 500,
+      configurable: true,
+    })
+  }
+  afterEach(() => {
+    Object.defineProperty(window, "innerWidth", {
+      value: desktopWidth,
+      configurable: true,
+    })
+  })
+
+  const composeTextarea = () =>
+    screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement
+  const bytesOf = (call: unknown[]) =>
+    new TextDecoder().decode(call[0] as Uint8Array)
+
+  it("a key tap with the keyboard closed does NOT focus the compose textarea", () => {
+    goMobile()
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const pty = last()
+    // The keyboard is closed: nothing has focus (the user blurred to read).
+    composeTextarea().blur()
+    expect(document.activeElement).not.toBe(composeTextarea())
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Esc" }))
+    // The key still reached the PTY…
+    expect(pty.sendInput).toHaveBeenCalledTimes(1)
+    expect(bytesOf(pty.sendInput.mock.calls[0])).toBe("\x1b")
+    // …but the typing surface was NOT summoned (no soft keyboard pop).
+    expect(document.activeElement).not.toBe(composeTextarea())
+  })
+
+  it("a key tap while typing keeps the compose textarea focused", () => {
+    goMobile()
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const pty = last()
+    composeTextarea().focus()
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Left" }))
+    expect(pty.sendInput).toHaveBeenCalledTimes(1)
+    expect(document.activeElement).toBe(composeTextarea())
+  })
+
+  it("an arrow tap with the keyboard closed leaves it closed too", () => {
+    goMobile()
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const pty = last()
+    composeTextarea().blur()
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Down" }))
+    expect(pty.sendInput).toHaveBeenCalledTimes(1)
+    expect(document.activeElement).not.toBe(composeTextarea())
+  })
+
+  it("a modifier latch tap preserves the keyboard state in both directions", () => {
+    goMobile()
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const ctrlKey = () => screen.getByRole("button", { name: "Ctrl" })
+    // Closed stays closed…
+    composeTextarea().blur()
+    fireEvent.pointerDown(ctrlKey())
+    expect(ctrlKey().getAttribute("aria-pressed")).toBe("true")
+    expect(document.activeElement).not.toBe(composeTextarea())
+    // …and open stays open.
+    composeTextarea().focus()
+    fireEvent.pointerDown(ctrlKey())
+    expect(ctrlKey().getAttribute("aria-pressed")).toBe("false")
+    expect(document.activeElement).toBe(composeTextarea())
+  })
+
+  it("a keyboard/AT activation (click with detail 0) still sends the key", () => {
+    goMobile()
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const pty = last()
+    fireEvent.click(screen.getByRole("button", { name: "Tab" }), { detail: 0 })
+    expect(pty.sendInput).toHaveBeenCalledTimes(1)
+    expect(bytesOf(pty.sendInput.mock.calls[0])).toBe("\t")
+  })
+})
+
 // The compose-insert sink: while the compose bar is the rendered typing
 // surface (mobile, preference on, input owner), the pane registers a sink the
 // store's `runMacro` routes a picked macro through, so the macro text lands in
