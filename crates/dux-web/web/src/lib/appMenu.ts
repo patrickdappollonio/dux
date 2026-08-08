@@ -107,9 +107,9 @@ export function appMenuModel(ctx: AppMenuContext): AppMenuEntry[] {
   const asItems = (items: ReturnType<typeof addProjectMenuItems>) =>
     items.map((item): AppMenuItem => ({ kind: "item", ...item }))
   return [
-    // The two creation submenus OPEN the menu (Patrick's call): creating an
-    // agent or adding a project is the most common reason to reach for the
-    // cog, so they outrank Preferences. They are the menu's twins of the
+    // The two creation submenus OPEN the menu: creating an agent or adding a
+    // project is the most common reason to reach for the cog, so they
+    // outrank Preferences. They are the menu's twins of the
     // sidebar's New-agent and Add-project split buttons; their entries are
     // the shared lists spliced in verbatim (see asItems above). No trailing
     // "…" on the submenu titles: a submenu opens a list, not a dialog; the

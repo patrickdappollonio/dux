@@ -431,7 +431,7 @@ pub fn delete_entry(worktree: &Path, rel_path: &str) -> anyhow::Result<()> {
         // `Path::components()` normalizes away a non-leading `.` segment, so
         // `sub/.` does NOT surface a `Component::CurDir` above even though the
         // raw string contains one. Check the raw, unnormalized string instead.
-        // This closes the reviewer-found hole: `delete_entry(worktree,
+        // The hole this closes: `delete_entry(worktree,
         // "<symlink>/.")` let a trailing `.` make `symlink_metadata` dereference
         // the preceding symlink (POSIX resolves `.` against the target
         // directory, so it reports is_dir=true, is_symlink=false) AND made
@@ -1160,7 +1160,7 @@ mod tests {
         assert!(dir.path().exists());
     }
 
-    /// Reproduces the reviewer's finding: `delete_entry(worktree, "<symlink>/.")`
+    /// Pins the trailing-dot hole: `delete_entry(worktree, "<symlink>/.")`
     /// where the symlink points OUTSIDE the worktree must NOT recursively delete
     /// the target directory's contents.
     ///

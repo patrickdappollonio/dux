@@ -3174,8 +3174,8 @@ mod tests {
     // --- resolve_worktree_path: CurDir (`.`) rejection ---
     //
     // A literal `.` component is never legitimate in a UI-supplied path: it has
-    // no meaning a client should be sending, and (per the reviewer's finding
-    // reproduced in `worktree_file::tests::delete_refuses_curdir_component`) it
+    // no meaning a client should be sending, and (as
+    // `worktree_file::tests::delete_refuses_curdir_component` pins) it
     // can make `symlink_metadata` dereference a preceding symlink and make
     // `Path::parent()` strip the symlink component from containment checks.
     // Reject it lexically at this shared boundary, same as ParentDir.
