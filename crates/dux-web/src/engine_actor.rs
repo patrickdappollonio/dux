@@ -22,6 +22,8 @@ use dux_core::wire::{WireCommand, WireCommandOutcome, WireStatus};
 use dux_core::worker::AgentLaunchKind;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
+use crate::pty_owners::PtySizeOwners;
+
 /// A PTY subscription: an RAII unsubscribe guard, an initial repaint snapshot,
 /// and the live byte stream the caller forwards. Drop the guard to detach
 /// immediately without waiting for the next PTY output.
@@ -359,6 +361,11 @@ pub(crate) struct ActorLoopEnds {
     /// The inline `Shutdown` request trips this so forwarders exit promptly even
     /// before the engine drop disconnects their channels.
     shutdown_flag: Arc<AtomicBool>,
+    /// The same registry as [`EngineHandle::pty_input_owners`]: the loop reads
+    /// it every spine check to overlay the current input owners onto the
+    /// projected spine, so an ownership flip moves the sessions fingerprint and
+    /// fires `sessions.changed` like any other spine mutation.
+    pty_input_owners: Arc<PtySizeOwners>,
 }
 
 /// True when a config reload changed any `[server]` setting that only takes
@@ -448,6 +455,11 @@ pub(crate) fn build_actor_channels(engine: &Engine) -> (EngineHandle, ActorLoopE
     // signals (idempotent refetches).
     let (spine_change_tx, _spine_change_rx) = broadcast::channel::<SpineChange>(64);
     let shutdown_flag = Arc::new(AtomicBool::new(false));
+    // The input-ownership registry is built alongside the channels because it,
+    // too, is a bridge between the loop and the web layer: the PTY socket
+    // handlers write claims into it and the loop's spine check reads them back
+    // out to publish the owner per agent tab.
+    let pty_input_owners = Arc::new(PtySizeOwners::default());
     (
         EngineHandle {
             req_tx,
@@ -458,6 +470,7 @@ pub(crate) fn build_actor_channels(engine: &Engine) -> (EngineHandle, ActorLoopE
             spine_change_tx: spine_change_tx.clone(),
             shutdown_flag: Arc::clone(&shutdown_flag),
             has_active_processes: Arc::clone(&engine.has_active_processes),
+            pty_input_owners: Arc::clone(&pty_input_owners),
             #[cfg(test)]
             refresh_requests: Arc::new(std::sync::Mutex::new(Vec::new())),
         },
@@ -469,6 +482,7 @@ pub(crate) fn build_actor_channels(engine: &Engine) -> (EngineHandle, ActorLoopE
             config_reload_tx,
             spine_change_tx,
             shutdown_flag,
+            pty_input_owners,
         },
     )
 }
@@ -527,6 +541,14 @@ pub struct EngineHandle {
     /// atomic load (deciding its 2s-vs-10s cadence) instead of an actor
     /// round-trip. The engine writes it; the handle only reads it.
     has_active_processes: Arc<AtomicBool>,
+    /// The per-PTY input-ownership registry, shared three ways: the per-PTY
+    /// socket handlers write claims/releases into it (via
+    /// [`crate::server::AppState`], which clones this Arc out of the handle),
+    /// the file-drop route reads its courtesy check from it, and the engine
+    /// actor loop overlays it onto the spine so ownership is published to every
+    /// client. Built here (in [`build_actor_channels`]) because the loop starts
+    /// before the router exists, so the router cannot be the one to create it.
+    pty_input_owners: Arc<PtySizeOwners>,
     /// Test-only tally of the worktrees [`Self::refresh_changed_files`] was asked
     /// to recompute, newest last. That call is fire-and-forget into the actor
     /// channel, so a route test has no other way to prove the request was made,
@@ -1043,6 +1065,14 @@ impl EngineHandle {
         self.spine_change_tx.subscribe()
     }
 
+    /// The shared per-PTY input-ownership registry (see the field doc). The
+    /// router clones this into `AppState` so the PTY socket handlers, the
+    /// file-drop courtesy check, and the loop's spine overlay all operate on
+    /// the one map.
+    pub(crate) fn pty_input_owners(&self) -> Arc<PtySizeOwners> {
+        Arc::clone(&self.pty_input_owners)
+    }
+
     /// The configured preferred editor name for the "open in editor" action
     /// (`config.editor.default`). Empty if the engine is gone — the handler then
     /// falls back to the first detected editor.
@@ -1356,7 +1386,7 @@ pub fn spawn_engine_thread(mut engine: Engine) -> (EngineHandle, JoinHandle<()>)
 }
 
 /// Whether handling `req` can change the projected spine (the projects /
-/// sessions / sidebar snapshot that [`spine_fingerprints`] serializes), and so
+/// sessions / sidebar snapshot that [`fingerprint_halves`] serializes), and so
 /// must bump `mutation_version` to open the change-gated spine check.
 ///
 /// EXHAUSTIVE ON PURPOSE, with no wildcard arm. This used to be a `matches!`
@@ -1495,6 +1525,7 @@ pub(crate) fn run_engine_loop(
         config_reload_tx,
         spine_change_tx,
         shutdown_flag,
+        pty_input_owners,
     } = ends;
     // Route every status through the shared KeyedStatusController so the web gets
     // the SAME auto-clear + pending→final behaviour as the TUI from one place.
@@ -1525,7 +1556,7 @@ pub(crate) fn run_engine_loop(
     // accumulator). Seeded from the current state so the first tick does not emit
     // a spurious change for an unchanged spine and a `/spine` read before the
     // first change still serves a valid body.
-    let mut spine_check = SpineCheck::new(&engine);
+    let mut spine_check = SpineCheck::new(&engine, &pty_input_owners);
     // In-memory spine mutation version: bumped after each loop-level spine mutator
     // (apply_wire / a CreateTerminal request, worker-event drain, a changed
     // terminal-foreground refresh, a non-empty PTY prune). The spine check runs
@@ -1844,6 +1875,7 @@ pub(crate) fn run_engine_loop(
                 &engine,
                 mutation_version,
                 streaming_version,
+                &pty_input_owners,
                 &spine_change_tx,
             );
         }
@@ -1918,6 +1950,7 @@ pub(crate) fn run_engine_loop(
                         &mut thread_status_tx,
                         &config_reload_tx,
                         &mut config_disk_ahead,
+                        &pty_input_owners,
                     );
                 }
             }
@@ -2066,13 +2099,12 @@ impl StatusEmitter {
 /// client refetches the whole `/spine` on either event regardless. What matters
 /// is that it fires on ONE of them: firing on neither is the silent-omission bug
 /// this whole partition exists to prevent.
-fn spine_fingerprints(engine: &Engine) -> (String, String) {
-    fingerprint_halves(&engine.spine())
-}
-
-/// The pure half of [`spine_fingerprints`]: the projection is already done, so
-/// this is only the split-and-serialize, which is what makes the owner
-/// partitioning testable without spawning a real PTY.
+///
+/// The check builds the spine through [`owned_spine`] (the engine projection
+/// plus the web-layer input-owner overlay) and hands it here, so ownership
+/// flips fingerprint like any other sessions-half change. The projection is
+/// already done by then, so this is only the split-and-serialize, which is
+/// what makes the owner partitioning testable without spawning a real PTY.
 fn fingerprint_halves(spine: &dux_core::viewmodel::SpineView) -> (String, String) {
     // Exhaustive over the owner kinds: a new kind must decide which coarse event
     // its churn belongs to instead of silently signalling nothing.
@@ -2083,7 +2115,7 @@ fn fingerprint_halves(spine: &dux_core::viewmodel::SpineView) -> (String, String
             // Owned by nothing, so it rode in neither container and there is no
             // previous event to preserve. It fires the sessions event, which is
             // where the flat sidebar list's churn already goes; see the note on
-            // `spine_fingerprints`.
+            // `fingerprint_halves`.
             dux_core::viewmodel::TerminalOwnerView::Standalone { .. } => true,
         });
     let projects = serde_json::to_string(&(&spine.projects, &project_terminals))
@@ -2093,13 +2125,56 @@ fn fingerprint_halves(spine: &dux_core::viewmodel::SpineView) -> (String, String
     (projects, sessions)
 }
 
+/// Build the spine the web layer actually serves: the engine's projection with
+/// the current PTY input owners stamped onto each owned agent tab. The check
+/// builds this ONCE per pass and derives both the fingerprint compare and the
+/// cached `/spine` JSON from the same built value, so the served document
+/// always matches what was fingerprinted (two separate builds could straddle a
+/// concurrent claim and disagree). An ownership flip therefore moves the
+/// sessions fingerprint and fires `sessions.changed` exactly like any
+/// engine-side spine mutation. See
+/// [`dux_core::viewmodel::AgentTabView::input_owner`] for why the engine
+/// cannot fill this itself.
+fn owned_spine(engine: &Engine, owners: &PtySizeOwners) -> dux_core::viewmodel::SpineView {
+    let mut spine = engine.spine();
+    let map = owners.input_owners_snapshot();
+    if !map.is_empty() {
+        for session in &mut spine.sessions {
+            overlay_session_input_owners(session, &map);
+        }
+    }
+    spine
+}
+
+/// The pure half of the overlay: stamp `input_owner` onto every tab of ONE
+/// session whose PTY id appears in the owner map. Tab ids are the PTY ids (the
+/// session id for the session-slot tab), so this is a direct per-tab lookup.
+/// Companion terminal ownership is deliberately NOT published: a terminal
+/// driven elsewhere says nothing about the agent, and no surface consumes it
+/// today. Shared by [`owned_spine`] and the `Spine`/`Session` request arms in
+/// [`handle_request`], so every web-served read of a session agrees about who
+/// owns its tabs.
+fn overlay_session_input_owners(
+    session: &mut dux_core::viewmodel::SessionView,
+    owners: &std::collections::HashMap<String, u64>,
+) {
+    for tab in &mut session.tabs {
+        if let Some(conn_id) = owners.get(&tab.id) {
+            // Stringified so the wire shape matches the `pty.owner` handover
+            // frames' `owner` field, which is what the client compares its own
+            // PTY-socket ids against.
+            tab.input_owner = Some(conn_id.to_string());
+        }
+    }
+}
+
 /// Loop-local state for the change-gated spine check and its self-healing
 /// backstop. Holds the last-seen fingerprints of the two spine halves, the cached
 /// whole-spine JSON for `GET /api/v1/spine`, the version values last compared
 /// against, and the backstop tick accumulator.
 ///
 /// The gate's job is to skip the (relatively expensive) project + serialize on
-/// idle intervals: it runs [`spine_fingerprints`] only when a change signal moved
+/// idle intervals: it runs the [`owned_spine`] build + [`fingerprint_halves`] only when a change signal moved
 /// since the last check, or the backstop fired. The fingerprint compare remains
 /// the PRECISE emit gate — it never emits a coarse event for an unchanged half —
 /// so the version signals only need to be a conservative "something might have
@@ -2113,6 +2188,14 @@ struct SpineCheck {
     last_checked_mutation: u64,
     /// The `streaming_version` value at the last fingerprint compare.
     last_checked_streaming: u64,
+    /// The input-ownership generation ([`PtySizeOwners::ownership_generation`])
+    /// at the last fingerprint compare. Ownership lives outside the engine, so
+    /// neither `mutation_version` nor `streaming_version` can observe a claim
+    /// or a disconnect release; this third signal is what opens the gate for
+    /// them. It moves ONLY on take-over/first-claim/release — never on
+    /// ordinary keystrokes — so publishing ownership does not churn the spine
+    /// per write.
+    last_checked_ownership: u64,
     /// Ticks accumulated toward the next backstop fire. Counted in real ticks
     /// (incremented by [`SPINE_CHECK_TICK_INTERVAL`] per call, since
     /// [`SpineCheck::maybe_check`] runs once per interval) and reset when the
@@ -2126,16 +2209,22 @@ struct SpineCheck {
 }
 
 impl SpineCheck {
-    fn new(engine: &Engine) -> Self {
-        let (prev_projects_fp, prev_sessions_fp) = spine_fingerprints(engine);
-        let spine_json_cache =
-            serde_json::to_string(&engine.spine()).unwrap_or_else(|_| "{}".to_string());
+    fn new(engine: &Engine, owners: &PtySizeOwners) -> Self {
+        // Read the generation BEFORE building the spine: a claim landing in
+        // between then reads as newer than what was fingerprinted, so the next
+        // check re-runs rather than missing it until the backstop.
+        let last_checked_ownership = owners.ownership_generation();
+        // ONE build feeds both the fingerprints and the cache (see `owned_spine`).
+        let spine = owned_spine(engine, owners);
+        let (prev_projects_fp, prev_sessions_fp) = fingerprint_halves(&spine);
+        let spine_json_cache = serde_json::to_string(&spine).unwrap_or_else(|_| "{}".to_string());
         Self {
             prev_projects_fp,
             prev_sessions_fp,
             spine_json_cache,
             last_checked_mutation: 0,
             last_checked_streaming: 0,
+            last_checked_ownership,
             ticks_since_backstop: 0,
             #[cfg(test)]
             fp_call_count: 0,
@@ -2152,19 +2241,25 @@ impl SpineCheck {
         engine: &Engine,
         mutation_version: u64,
         streaming_version: u64,
+        owners: &PtySizeOwners,
         spine_change_tx: &broadcast::Sender<SpineChange>,
     ) {
         self.ticks_since_backstop = self
             .ticks_since_backstop
             .saturating_add(SPINE_CHECK_TICK_INTERVAL as u32);
+        // Same before-the-build ordering as `new`: a claim racing this check
+        // reads as a still-newer generation next interval.
+        let ownership_generation = owners.ownership_generation();
         let signalled = mutation_version != self.last_checked_mutation
-            || streaming_version != self.last_checked_streaming;
+            || streaming_version != self.last_checked_streaming
+            || ownership_generation != self.last_checked_ownership;
         let backstop = self.ticks_since_backstop >= SPINE_BACKSTOP_TICK_INTERVAL;
         if !signalled && !backstop {
             return;
         }
         self.last_checked_mutation = mutation_version;
         self.last_checked_streaming = streaming_version;
+        self.last_checked_ownership = ownership_generation;
         if backstop {
             self.ticks_since_backstop = 0;
         }
@@ -2173,7 +2268,11 @@ impl SpineCheck {
             self.fp_call_count += 1;
         }
 
-        let (projects_fp, sessions_fp) = spine_fingerprints(engine);
+        // ONE build feeds both the fingerprints and (below) the cache, so the
+        // served JSON can never describe a different ownership snapshot than
+        // the fingerprint that gated its `sessions.changed`.
+        let spine = owned_spine(engine, owners);
+        let (projects_fp, sessions_fp) = fingerprint_halves(&spine);
         let mut spine_changed = false;
         if projects_fp != self.prev_projects_fp {
             self.prev_projects_fp = projects_fp;
@@ -2189,7 +2288,7 @@ impl SpineCheck {
         // changed, so the common case (no change) skips the full serialization.
         if spine_changed {
             self.spine_json_cache =
-                serde_json::to_string(&engine.spine()).unwrap_or_else(|_| "{}".to_string());
+                serde_json::to_string(&spine).unwrap_or_else(|_| "{}".to_string());
         }
     }
 }
@@ -2254,6 +2353,11 @@ fn handle_request(
     // disk (an explicit reload, or the reconcile below before a config-static
     // mutation). Loop-local because only the web surface writes raw config.
     config_disk_ahead: &mut bool,
+    // The shared input-ownership registry, so the `Spine` and `Session` reads
+    // carry the same `input_owner` overlay the cached `/spine` document does —
+    // without it the REST list/single reads would permanently answer "unowned"
+    // while `/spine` names an owner.
+    input_owners: &PtySizeOwners,
 ) {
     match req {
         EngineRequest::ApplyWire(cmd, reply, origin) => {
@@ -2464,12 +2568,16 @@ fn handle_request(
             let _ = reply.send(engine.bootstrap());
         }
         EngineRequest::Spine(reply) => {
-            let _ = reply.send(engine.spine());
+            let _ = reply.send(owned_spine(engine, input_owners));
         }
         // SpineJson is handled inline in the loop (it serves the loop-local cache).
         EngineRequest::SpineJson(_) => unreachable!("SpineJson handled in the loop"),
         EngineRequest::Session(id, reply) => {
-            let view = engine.session_view(&id).map(|session| {
+            let view = engine.session_view(&id).map(|mut session| {
+                // Same input-owner overlay as the spine (see `owned_spine`), so
+                // the single-session read agrees with `/spine` about who is
+                // driving each tab.
+                overlay_session_input_owners(&mut session, &input_owners.input_owners_snapshot());
                 let terminals = engine
                     .terminal_views_for_owner(dux_core::model::TerminalOwnerRef::Session(&id));
                 (session, terminals)
@@ -3437,7 +3545,7 @@ mod tests {
     // deterministic, allocation-free of real sleeps where it matters, and
     // immune to the parallel-test races a shared global call counter would have
     // suffered. `SpineCheck::fp_call_count` (a cfg(test) field) is the seam: it
-    // counts how many times the gate actually ran `spine_fingerprints` (the
+    // counts how many times the gate actually ran the fingerprint serialize (the
     // serialize), so "the serialize was skipped" is a positive assertion, not an
     // inference from "no event fired".
     // -----------------------------------------------------------------------
@@ -3598,17 +3706,18 @@ mod tests {
     fn idle_ticks_do_not_serialize_the_spine() {
         // With no command, worker event, or streaming transition bumping the
         // versions, and before the backstop interval, the gate must NEVER call
-        // `spine_fingerprints` — proving idle ticks cost zero serialization.
+        // the fingerprint serialize — proving idle ticks cost zero serialization.
         let (_tmp, paths) = temp_paths();
         let engine = bootstrap_engine(&paths).expect("bootstrap");
         let (tx, _rx) = broadcast::channel::<SpineChange>(64);
-        let mut check = SpineCheck::new(&engine);
+        let owners = crate::pty_owners::PtySizeOwners::default();
+        let mut check = SpineCheck::new(&engine, &owners);
 
         // Run every spine-check interval that fits before the backstop would fire.
         let intervals_before_backstop =
             (SPINE_BACKSTOP_TICK_INTERVAL / SPINE_CHECK_TICK_INTERVAL as u32) - 1;
         for _ in 0..intervals_before_backstop {
-            check.maybe_check(&engine, 0, 0, &tx);
+            check.maybe_check(&engine, 0, 0, &owners, &tx);
         }
         assert_eq!(
             check.fp_call_count, 0,
@@ -3625,7 +3734,8 @@ mod tests {
         seed_session(&paths, "s1");
         let mut engine = bootstrap_engine(&paths).expect("bootstrap");
         let (tx, mut rx) = broadcast::channel::<SpineChange>(64);
-        let mut check = SpineCheck::new(&engine);
+        let owners = crate::pty_owners::PtySizeOwners::default();
+        let mut check = SpineCheck::new(&engine, &owners);
 
         // Mutate the sessions spine WITHOUT touching the version counters.
         for s in engine.sessions.iter_mut() {
@@ -3638,7 +3748,7 @@ mod tests {
         // so the only thing that can run the compare is the backstop.
         let intervals_to_backstop = SPINE_BACKSTOP_TICK_INTERVAL / SPINE_CHECK_TICK_INTERVAL as u32;
         for _ in 0..intervals_to_backstop {
-            check.maybe_check(&engine, 0, 0, &tx);
+            check.maybe_check(&engine, 0, 0, &owners, &tx);
         }
         assert!(
             check.fp_call_count >= 1,
@@ -3654,6 +3764,129 @@ mod tests {
         assert!(
             saw_sessions,
             "the backstop must emit the change that bypassed the version"
+        );
+    }
+
+    /// The published-input-ownership chain, end to end at the loop level: a
+    /// claim on an agent PTY moves the sessions fingerprint WITHOUT any engine
+    /// version bump (ownership lives outside the engine, so the generation is
+    /// the only signal), fires `sessions.changed`, and stamps the owning
+    /// connection id into the served `/spine` JSON; the owner's disconnect
+    /// release clears the field the same way. This is what lets a client that
+    /// never attached to the PTY disable its agent-menu mutations while
+    /// another device drives the agent.
+    #[test]
+    fn an_ownership_flip_publishes_the_owner_and_fires_sessions_changed() {
+        let (_tmp, paths) = temp_paths();
+        seed_session(&paths, "s1");
+        let engine = bootstrap_engine(&paths).expect("bootstrap");
+        let owners = crate::pty_owners::PtySizeOwners::default();
+        let (tx, mut rx) = broadcast::channel::<SpineChange>(64);
+        let mut check = SpineCheck::new(&engine, &owners);
+        assert!(
+            !check.spine_json_cache.contains("input_owner"),
+            "an unowned PTY must publish no owner at all (absent, not null)"
+        );
+
+        // Take-over: a connection claims the session-slot tab's PTY.
+        owners.claim("s1", 42);
+        check.maybe_check(&engine, 0, 0, &owners, &tx);
+        assert_eq!(
+            rx.try_recv(),
+            Ok(SpineChange::Sessions),
+            "an ownership claim must fire sessions.changed with no engine version bump"
+        );
+        assert!(
+            check.spine_json_cache.contains(r#""input_owner":"42""#),
+            "the served spine must carry the owning connection id: {}",
+            check.spine_json_cache
+        );
+
+        // Steady state: the owner typing away bumps nothing, so further checks
+        // must not churn (no event, no re-serialize).
+        let serializes_after_claim = check.fp_call_count;
+        assert!(owners.may_write("s1", 42).allowed);
+        check.maybe_check(&engine, 0, 0, &owners, &tx);
+        assert_eq!(
+            check.fp_call_count, serializes_after_claim,
+            "unchanged ownership must not even re-run the fingerprint compare"
+        );
+        assert!(rx.try_recv().is_err(), "and must emit no event");
+
+        // The owner disconnects: the release must clear the published field so
+        // a crashed device never leaves the agent permanently owned.
+        owners.release("s1", 42);
+        check.maybe_check(&engine, 0, 0, &owners, &tx);
+        assert_eq!(
+            rx.try_recv(),
+            Ok(SpineChange::Sessions),
+            "a disconnect release must fire sessions.changed"
+        );
+        assert!(
+            !check.spine_json_cache.contains("input_owner"),
+            "and the served spine must drop the owner field"
+        );
+    }
+
+    /// Ownership of a pty id that is not an agent tab (a companion terminal's,
+    /// or a stale id) is deliberately NOT published: the overlay only stamps
+    /// agent tabs. The generation still opens the gate, but the fingerprints
+    /// come out identical, so no coarse event fires and the cache stays put.
+    #[test]
+    fn a_non_tab_claim_publishes_nothing_and_fires_no_event() {
+        let (_tmp, paths) = temp_paths();
+        seed_session(&paths, "s1");
+        let engine = bootstrap_engine(&paths).expect("bootstrap");
+        let owners = crate::pty_owners::PtySizeOwners::default();
+        let (tx, mut rx) = broadcast::channel::<SpineChange>(64);
+        let mut check = SpineCheck::new(&engine, &owners);
+
+        owners.claim("term-9", 7);
+        check.maybe_check(&engine, 0, 0, &owners, &tx);
+        assert!(
+            rx.try_recv().is_err(),
+            "a claim on a non-tab pty must not fire any coarse event"
+        );
+        assert!(!check.spine_json_cache.contains("input_owner"));
+    }
+
+    /// The overlay must iterate EVERY session's tabs, not merely find a first
+    /// match: with two agents, claiming the second one's PTY must stamp that
+    /// tab and only that tab. A regression narrowing the loop to the first
+    /// session would pass the single-session tests above while letting a
+    /// second agent driven elsewhere read as unowned.
+    #[test]
+    fn the_overlay_stamps_the_right_tab_across_multiple_sessions() {
+        let (_tmp, paths) = temp_paths();
+        seed_session(&paths, "s1");
+        seed_session(&paths, "s2");
+        let engine = bootstrap_engine(&paths).expect("bootstrap");
+        let owners = crate::pty_owners::PtySizeOwners::default();
+        owners.claim("s2", 9);
+
+        let spine = owned_spine(&engine, &owners);
+        let owner_of = |sid: &str| {
+            spine
+                .sessions
+                .iter()
+                .find(|s| s.id == sid)
+                .expect("session present")
+                .tabs
+                .iter()
+                .find(|t| t.id == sid)
+                .expect("session-slot tab present")
+                .input_owner
+                .clone()
+        };
+        assert_eq!(
+            owner_of("s2"),
+            Some("9".to_string()),
+            "the claimed session's slot tab must carry the owning connection id"
+        );
+        assert_eq!(
+            owner_of("s1"),
+            None,
+            "and the unclaimed session must not be stamped"
         );
     }
 
@@ -3708,8 +3941,9 @@ mod tests {
         // And the gate opens: the changed streaming_version makes the next
         // interval run the fingerprint compare.
         let (tx, _rx) = broadcast::channel::<SpineChange>(64);
-        let mut check = SpineCheck::new(&engine);
-        check.maybe_check(&engine, 0, streaming_version, &tx);
+        let owners = crate::pty_owners::PtySizeOwners::default();
+        let mut check = SpineCheck::new(&engine, &owners);
+        check.maybe_check(&engine, 0, streaming_version, &owners, &tx);
         assert_eq!(
             check.fp_call_count, 1,
             "a streaming_version change must open the gate"
@@ -3813,7 +4047,8 @@ mod tests {
         let (tx, mut rx) = broadcast::channel::<SpineChange>(64);
         // Seed the fingerprint WHILE the terminal is present so its removal is a
         // real diff.
-        let mut check = SpineCheck::new(&engine);
+        let owners = crate::pty_owners::PtySizeOwners::default();
+        let mut check = SpineCheck::new(&engine, &owners);
 
         // Wait for the child to exit, then prune (the loop's #4 mutator).
         let mut mutation_version = 0u64;
@@ -3831,7 +4066,7 @@ mod tests {
         // A SINGLE spine-check interval later (one maybe_check), the bump opens
         // the gate. The backstop needs many more intervals, so this proves the
         // bump path, not the backstop.
-        check.maybe_check(&engine, mutation_version, 0, &tx);
+        check.maybe_check(&engine, mutation_version, 0, &owners, &tx);
         assert_eq!(
             check.fp_call_count, 1,
             "the prune bump must open the gate on the next interval"
@@ -3992,7 +4227,15 @@ mod tests {
         let mut status = StatusEmitter::new(tx, clear_tx, snapshot_tx, Duration::from_secs(6));
         let (config_reload_tx, _config_rx) = broadcast::channel(8);
         let mut disk_ahead = false;
-        handle_request(engine, req, &mut status, &config_reload_tx, &mut disk_ahead);
+        let owners = crate::pty_owners::PtySizeOwners::default();
+        handle_request(
+            engine,
+            req,
+            &mut status,
+            &config_reload_tx,
+            &mut disk_ahead,
+            &owners,
+        );
     }
 
     /// A `cat`-backed companion terminal on a bootstrapped engine, so a

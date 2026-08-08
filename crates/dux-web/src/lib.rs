@@ -41,6 +41,7 @@ pub mod git_routes;
 pub mod host_guard;
 pub mod project_actions;
 pub mod project_reads;
+pub(crate) mod pty_owners;
 pub mod resource_routes;
 pub mod rest_common;
 pub mod server;

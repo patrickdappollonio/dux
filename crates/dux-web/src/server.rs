@@ -32,6 +32,7 @@ use crate::changes::ChangesService;
 use crate::console::Console;
 use crate::engine_actor::{EngineHandle, SpineChange};
 use crate::event_bus::{self, Event, EventBus};
+use crate::pty_owners::PtySizeOwners;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -517,6 +518,9 @@ pub fn build_app(
         Arc::clone(&event_bus),
         Arc::clone(&first_load),
     );
+    // Clone the shared input-ownership registry out of the handle before the
+    // handle itself moves into the state literal below.
+    let engine_pty_owners = engine.pty_input_owners();
     let state = AppState {
         engine,
         console: params.console,
@@ -567,7 +571,10 @@ pub fn build_app(
         changes,
         resources,
         idempotency: Arc::new(crate::rest_common::IdempotencyCache::new()),
-        pty_size_owners: Arc::new(PtySizeOwners::default()),
+        // Shared with the engine actor loop (see `build_actor_channels`), which
+        // overlays the owner map onto the spine so every client learns which
+        // connection is driving each agent PTY without attaching to it.
+        pty_size_owners: engine_pty_owners,
         connections: Arc::new(crate::rest_common::ConnectionRegistry::new()),
         first_load,
     };
@@ -935,144 +942,6 @@ struct PtyResizeFrame {
 struct PtyViewedFrame {
     #[allow(dead_code)]
     viewed: bool,
-}
-
-/// Tracks which connection currently owns sizing for each PTY, keyed by pty id
-/// (the session id for an agent PTY, the terminal id for a companion). The most
-/// recently ATTACHED connection owns sizing; a resize from a non-owner is ignored,
-/// which breaks the last-writer-wins feedback loop two viewers of one PTY would
-/// otherwise create. Lives in [`AppState`] so every per-PTY socket shares it.
-/// The owner map plus the monotonic ownership epoch, guarded together by ONE std
-/// Mutex so a fresh epoch is assigned in the SAME critical section that records a
-/// new owner. Bumping the epoch under the lock that serializes every owner write
-/// makes epochs monotonic in TRUE claim order even when two connections claim
-/// concurrently, so the `pty.owner` broadcast (emitted after the lock releases, and
-/// therefore freely reorderable by the runtime) can be deduped by epoch on the
-/// client without confusing which claim actually won (see `ptyOwnership.ts`).
-#[derive(Default)]
-struct OwnersState {
-    /// pty id -> the connection id that currently owns sizing+input.
-    map: std::collections::HashMap<String, u64>,
-    /// Bumped on every ownership CHANGE; the value handed to the caller and stamped
-    /// onto the emitted `pty.owner` so clients converge on the latest claim
-    /// regardless of broadcast arrival order. Never decreases within a process.
-    epoch: u64,
-}
-
-#[derive(Default)]
-struct PtySizeOwners {
-    owners: std::sync::Mutex<OwnersState>,
-    next_conn_id: std::sync::atomic::AtomicU64,
-}
-
-/// Outcome of [`PtySizeOwners::may_write`]: whether the connection may forward its
-/// stdin to the PTY (`allowed`), whether the check itself NEWLY claimed an unowned
-/// PTY (`claimed_new`) so the caller emits exactly one `pty.owner` handover for that
-/// uncontested first write, and the ownership `epoch` assigned for that new claim
-/// (`Some` iff `claimed_new`) so the emitted handover carries it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct WriteClaim {
-    allowed: bool,
-    claimed_new: bool,
-    epoch: Option<u64>,
-}
-
-impl PtySizeOwners {
-    /// Allocate a process-unique id for a freshly attached PTY socket, used to
-    /// compare against the recorded owner.
-    fn next_conn_id(&self) -> u64 {
-        self.next_conn_id
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    }
-
-    /// Make `conn_id` the current sizing+input owner of `pty_id`. A client claims
-    /// ownership by sending a size frame, so the most recently claiming connection
-    /// wins, taking over from any prior owner. Attaching alone no longer claims:
-    /// a backgrounded tab that attaches as a silent observer (sends no size) never
-    /// steals ownership from the foregrounded device. Returns whether the owner
-    /// CHANGED, returning `Some(epoch)` with the new ownership epoch on a real
-    /// handover and `None` on a same-owner re-claim (so the caller broadcasts a
-    /// `pty.owner` only on a real handover, stamping the returned epoch onto it).
-    /// The epoch is assigned UNDER the owners lock, so it orders concurrent claims
-    /// by their true serialization order.
-    fn claim(&self, pty_id: &str, conn_id: u64) -> Option<u64> {
-        let mut owners = self.owners.lock().unwrap();
-        if owners.map.get(pty_id) == Some(&conn_id) {
-            return None;
-        }
-        owners.map.insert(pty_id.to_string(), conn_id);
-        owners.epoch += 1;
-        Some(owners.epoch)
-    }
-
-    /// Whether `conn_id` is the current owner of `pty_id`. Unlike [`claim`] this
-    /// never mutates: an unowned PTY (no client has sent a size yet) returns false.
-    /// A read-only ownership probe used by tests to assert the post-conditions of
-    /// [`claim`], [`may_write`], and [`release`]; the live handler gates stdin
-    /// through [`may_write`] (atomic) and resize through [`claim`], so production
-    /// never needs a separate non-mutating check.
-    ///
-    /// [`claim`]: PtySizeOwners::claim
-    /// [`may_write`]: PtySizeOwners::may_write
-    /// [`release`]: PtySizeOwners::release
-    #[cfg(test)]
-    fn is_owner(&self, pty_id: &str, conn_id: u64) -> bool {
-        self.owners.lock().unwrap().map.get(pty_id) == Some(&conn_id)
-    }
-
-    /// Decide whether `conn_id` may write stdin to `pty_id`, resolving the gate
-    /// ATOMICALLY under the owners lock so no concurrent [`claim`] can slip between
-    /// the decision and the write (the TOCTOU window a separate `is_owner`-then-write
-    /// left open: a just-demoted connection's keystroke could still reach the PTY).
-    /// Semantics:
-    ///   - no current owner -> `conn_id` becomes the owner (an uncontested first
-    ///     writer claims, mirroring how a size frame auto-claims an unowned PTY),
-    ///     reported via `claimed_new` so the caller emits exactly one `pty.owner`
-    ///     handover. This restores input for a solo/out-of-band client whose stdin
-    ///     arrives before any size frame (previously silently dropped).
-    ///   - owner == conn_id -> allowed, no handover.
-    ///   - a different owner -> denied; the non-owner's stdin is dropped so a
-    ///     read-only secondary viewer can never disrupt the active device's typing.
-    ///
-    /// Unlike a size frame's [`claim`] (most-recent-wins, which DOES take over an
-    /// existing owner), writing never steals control from another owner: typing must
-    /// not silently wrest the prompt away from the active device.
-    ///
-    /// [`claim`]: PtySizeOwners::claim
-    fn may_write(&self, pty_id: &str, conn_id: u64) -> WriteClaim {
-        let mut owners = self.owners.lock().unwrap();
-        match owners.map.get(pty_id) {
-            Some(&owner) if owner == conn_id => WriteClaim {
-                allowed: true,
-                claimed_new: false,
-                epoch: None,
-            },
-            Some(_) => WriteClaim {
-                allowed: false,
-                claimed_new: false,
-                epoch: None,
-            },
-            None => {
-                owners.map.insert(pty_id.to_string(), conn_id);
-                owners.epoch += 1;
-                WriteClaim {
-                    allowed: true,
-                    claimed_new: true,
-                    epoch: Some(owners.epoch),
-                }
-            }
-        }
-    }
-
-    /// Release ownership of `pty_id` if `conn_id` still holds it (called when the
-    /// connection disconnects). A no-op if another connection has since claimed it,
-    /// so a later attach is never clobbered.
-    fn release(&self, pty_id: &str, conn_id: u64) {
-        let mut owners = self.owners.lock().unwrap();
-        if owners.map.get(pty_id) == Some(&conn_id) {
-            owners.map.remove(pty_id);
-        }
-    }
 }
 
 /// Upgrade handler for `GET /ws/sessions/:id/pty` — stream the agent session's main
@@ -2563,6 +2432,8 @@ impl Drop for ConnectionGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::pty_owners::WriteClaim;
     use tower::ServiceExt; // for `oneshot`
 
     #[test]
