@@ -1,3 +1,7 @@
 node_modules/
 shots/
 *.png
+# Throwaway per-journey puppeteer drivers (agents write one, run it, delete
+# it); only the committed screenshot tool is tracked.
+*.js
+!shot.js
