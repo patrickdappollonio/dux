@@ -31,6 +31,8 @@ let bootstrapMacros: MacroView[] = []
 // When set, the bootstrap fetch fails so `state.bootstrap` stays null — the
 // window the saveMacros guard protects against.
 let failBootstrap = false
+// When set, the macros PUT returns a 400, exercising the reorder rollback path.
+let failMacrosPut = false
 
 function makeBootstrap(macros: MacroView[]): Bootstrap {
   return {
@@ -71,6 +73,15 @@ const fetchMock = vi.fn(async (url: string) => {
   }
   // The macro editor now persists via a REST PUT (Phase 6, was a `/ws` command).
   if (u.includes("/api/v1/macros")) {
+    if (failMacrosPut) {
+      return {
+        ok: false,
+        status: 400,
+        json: async () => null,
+        text: async () => "macros rejected",
+        headers: { get: () => null },
+      } as unknown as Response
+    }
     return {
       ok: true,
       status: 204,
@@ -103,6 +114,7 @@ class FakeWebSocket {
 beforeEach(() => {
   bootstrapMacros = []
   failBootstrap = false
+  failMacrosPut = false
   vi.stubGlobal("location", { host: "localhost:0" })
   vi.stubGlobal("localStorage", {
     getItem: () => null,
@@ -267,6 +279,66 @@ describe("store macros commands", () => {
     expect(sent.map((m) => m.name)).toEqual(["Build", "Review", "New"])
     // The dialog closes after dispatching the save.
     expect(mod.getSnapshot().macrosDialogOpen).toBe(false)
+  })
+
+  it("persistMacroOrder PUTs the reordered entries, keeps the dialog open, resolves true", async () => {
+    bootstrapMacros = [
+      { name: "Review", text: "review this", surface: "agent" },
+      { name: "Build", text: "cargo build", surface: "terminal" },
+    ]
+    const mod = await loadStore()
+    mod.openMacrosDialog()
+    fetchMock.mockClear()
+
+    const reordered: MacroView[] = [
+      { name: "Build", text: "cargo build", surface: "terminal" },
+      { name: "Review", text: "review this", surface: "agent" },
+    ]
+    await expect(mod.persistMacroOrder(reordered)).resolves.toBe(true)
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/macros",
+      expect.objectContaining({
+        method: "PUT",
+        body: JSON.stringify({ entries: reordered }),
+      }),
+    )
+    // Unlike saveMacros, a reorder save must NOT close the dialog: the user is
+    // still arranging the list.
+    expect(mod.getSnapshot().macrosDialogOpen).toBe(true)
+  })
+
+  it("persistMacroOrder resolves false and toasts when the PUT is rejected", async () => {
+    bootstrapMacros = [{ name: "Review", text: "review this", surface: "agent" }]
+    failMacrosPut = true
+    const mod = await loadStore()
+    const { toast } = await import("sonner")
+    mod.openMacrosDialog()
+
+    await expect(
+      mod.persistMacroOrder([
+        { name: "Review", text: "review this", surface: "agent" },
+      ]),
+    ).resolves.toBe(false)
+    // The caller rolls the visual order back on false; the toast names why.
+    expect(toast.error).toHaveBeenCalled()
+    expect(mod.getSnapshot().macrosDialogOpen).toBe(true)
+  })
+
+  it("persistMacroOrder refuses (no PUT, resolves false) when bootstrap is null", async () => {
+    failBootstrap = true
+    const mod = await loadStoreNoBootstrap()
+    const { toast } = await import("sonner")
+    fetchMock.mockClear()
+
+    await expect(
+      mod.persistMacroOrder([{ name: "X", text: "y", surface: "both" }]),
+    ).resolves.toBe(false)
+    const putCall = fetchMock.mock.calls.find(
+      (c) => String(c[0]) === "/api/v1/macros",
+    )
+    expect(putCall).toBeUndefined()
+    expect(toast.error).toHaveBeenCalled()
   })
 
   it("saveMacros refuses (no PUT, error toast, dialog stays open) when bootstrap is null", async () => {

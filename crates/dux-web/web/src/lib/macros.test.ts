@@ -4,10 +4,12 @@ import {
   MACRO_SURFACE_OPTIONS,
   commitMacro,
   isMacroSurface,
+  macroDragIds,
   macroMatchesSurface,
   macroPayloadBytes,
   macroTextPreview,
   macrosForTarget,
+  reorderMacrosByDrag,
   validateMacros,
 } from "./macros"
 import type { SelectedTarget } from "./store"
@@ -208,5 +210,39 @@ describe("macroPayloadBytes", () => {
   it("preserves multi-byte UTF-8 glyphs intact", () => {
     // The duck emoji is 4 UTF-8 bytes; none of them is a newline byte.
     expect(bytes("🦆")).toEqual(Array.from(new TextEncoder().encode("🦆")))
+  })
+})
+
+describe("macroDragIds / reorderMacrosByDrag", () => {
+  const macros: MacroView[] = [
+    { name: "Review", text: "review this", surface: "agent" },
+    { name: "Build", text: "cargo build", surface: "terminal" },
+    { name: "Deploy", text: "deploy it", surface: "both" },
+  ]
+
+  it("derives one positional id per macro", () => {
+    // Ids are POSITIONAL, not name-based: a transiently invalid draft can hold
+    // duplicate names, and dnd-kit requires unique ids. The list only changes
+    // on drop, so positional ids are stable for the drag's whole lifetime.
+    expect(macroDragIds(macros)).toEqual(["macro-0", "macro-1", "macro-2"])
+    expect(macroDragIds([])).toEqual([])
+  })
+
+  it("moves the dragged macro to the drop target's slot", () => {
+    const next = reorderMacrosByDrag(macros, "macro-0", "macro-2")
+    expect(next.map((m) => m.name)).toEqual(["Build", "Deploy", "Review"])
+    // A new array; the input is never mutated.
+    expect(macros.map((m) => m.name)).toEqual(["Review", "Build", "Deploy"])
+  })
+
+  it("moves upward too", () => {
+    const next = reorderMacrosByDrag(macros, "macro-2", "macro-0")
+    expect(next.map((m) => m.name)).toEqual(["Deploy", "Review", "Build"])
+  })
+
+  it("is a no-op for a same-slot drop or an unknown id", () => {
+    expect(reorderMacrosByDrag(macros, "macro-1", "macro-1")).toBe(macros)
+    expect(reorderMacrosByDrag(macros, "macro-9", "macro-0")).toBe(macros)
+    expect(reorderMacrosByDrag(macros, "bogus", "macro-0")).toBe(macros)
   })
 })

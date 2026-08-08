@@ -4900,6 +4900,32 @@ export function saveMacros(macros: MacroView[]): void {
   closeMacrosDialog()
 }
 
+// Persist a drag-reorder of the macro editor's list through the same wholesale
+// PUT as `saveMacros`, WITHOUT closing the dialog (the user is still arranging
+// the list). Resolves `true` on success and `false` on any refusal or failure,
+// so the dialog can apply the new order optimistically and roll it back when
+// this reports false — the same optimistic-apply / snap-back idiom as
+// `reorderAgents`, with the overlay living in the dialog's local draft instead
+// of a store field (the draft is component state; a spine never reconciles it).
+// Failures toast here, mirroring the reorder actions above.
+export function persistMacroOrder(macros: MacroView[]): Promise<boolean> {
+  // Same guard as saveMacros: before bootstrap loads the draft was seeded
+  // empty, and a wholesale PUT from that base would wipe the server's macros.
+  if (state.bootstrap === null) {
+    toast.error("Macros aren't loaded yet. Try again in a moment.")
+    return Promise.resolve(false)
+  }
+  return configApi
+    .updateMacros(macros)
+    .then(() => true)
+    .catch((e) => {
+      toast.error(
+        e instanceof Error ? e.message : "Could not reorder the macros.",
+      )
+      return false
+    })
+}
+
 // Open the mobile changes screen over the focused agent. It is a position of its
 // own in the URL (`#/agent/<sid>/changes`), so entering it pushes an entry and
 // the browser's Back leaves it. There is no matching "go to the terminal screen"

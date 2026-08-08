@@ -136,6 +136,34 @@ export function commitMacro(
   return prev.map((m, i) => (i === index ? macro : m))
 }
 
+// Sortable ids for the editor list's drag-and-drop, one per macro, POSITIONAL
+// ("macro-0", "macro-1", ...). Deliberately not name-based: a transiently
+// invalid draft can hold duplicate names, and dnd-kit requires unique ids. The
+// list only changes on drop, so positional ids are stable for the whole drag.
+export function macroDragIds(macros: MacroView[]): string[] {
+  return macros.map((_, index) => `macro-${index}`)
+}
+
+// Apply a drag's end to the macro list: move the macro at `activeId`'s slot to
+// `overId`'s slot (the same `moveItem` semantics the sidebar reorders use).
+// Returns `prev` unchanged (same reference) for a same-slot drop or an id that
+// doesn't name a list slot, so callers can cheaply detect the no-op.
+export function reorderMacrosByDrag(
+  prev: MacroView[],
+  activeId: string,
+  overId: string,
+): MacroView[] {
+  if (activeId === overId) return prev
+  const ids = macroDragIds(prev)
+  const from = ids.indexOf(activeId)
+  const to = ids.indexOf(overId)
+  if (from === -1 || to === -1) return prev
+  const next = prev.slice()
+  const [moved] = next.splice(from, 1)
+  next.splice(to, 0, moved)
+  return next
+}
+
 // Single-line preview of a macro's text for the editor list: newlines collapse
 // to a visible glyph so a multi-line macro stays one row. Truncation is by
 // CHARACTER (not byte) so multi-byte glyphs never split — and capped so a long
