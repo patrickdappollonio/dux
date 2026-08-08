@@ -154,6 +154,14 @@ const DRAG_THRESHOLD_PX = 4
 // The touch drag path (dragScrollLines) is finger-proportional and unaffected.
 const WHEEL_SCROLL_SENSITIVITY = 3
 
+// How long the container must hold still before its new size goes to the PTY.
+// A PTY resize is a SIGWINCH — a full child repaint — so it is debounced to one
+// send with the final dimensions (the ResizeObserver below), and the SAME delay
+// is reused when a touch-scroll gesture ends with a held resize to flush (see
+// resizeHeldByGesture): the flush is a settle window like any other, giving the
+// keyboard/URL-bar animation that held it time to finish collapsing.
+const RESIZE_SEND_DEBOUNCE_MS = 200
+
 // The sonner id ONE file drop lives on: its per-file spinners and its single
 // report at the end. One id per drop is what makes the final REPLACE that
 // drop's spinner in place instead of stacking a second toast beneath it, and it
@@ -979,6 +987,21 @@ export function TerminalPane(props: TerminalPaneProps) {
     let touchScrolling = false
     let touchActive = false
     let touchSelecting = false
+    // Set when the debounced PTY resize (sendSize, below) came due while a
+    // touch-scroll gesture was still in flight. A resize is a SIGWINCH — a full
+    // child repaint — and landing one in the middle of the forwarded wheel-report
+    // stream corrupts a mouse-tracking alt-screen pager's repaint (duplicated
+    // rows that PERSIST, since an alt-screen has no client scrollback and nothing
+    // reconnects to re-sync it). This is not exotic: the scroll-start blur below
+    // collapses the soft keyboard, `interactive-widget=resizes-content` then
+    // grows the viewport, and the debounced resize would fire under the finger,
+    // which is exactly how in-app nav (whose mount-time compose focus rides the
+    // row tap's user gesture, so the keyboard IS up) corrupted the pager while a
+    // hard refresh (whose programmatic focus cannot open a keyboard) did not.
+    // So sendSize holds the send while `touchScrolling`, and endTouch flushes it
+    // through the same debounce once the finger lifts — after the last wheel
+    // report, coalescing however many container resizes the collapse produced.
+    let resizeHeldByGesture = false
     let longPressTimer: ReturnType<typeof setTimeout> | undefined
     const onTouchStart = (e: TouchEvent) => {
       // Any new touch (including a second finger landing mid-gesture) supersedes
@@ -1065,6 +1088,14 @@ export function TerminalPane(props: TerminalPaneProps) {
       touchActive = false
       touchScrolling = false
       touchSelecting = false
+      // Flush a resize the gesture held back (see resizeHeldByGesture above):
+      // the wheel-report stream ends with the finger, so re-arming the normal
+      // debounce here sends one resize, at the final size, after the stream.
+      if (resizeHeldByGesture) {
+        resizeHeldByGesture = false
+        clearTimeout(sendTimer)
+        sendTimer = setTimeout(sendSize, RESIZE_SEND_DEBOUNCE_MS)
+      }
     }
     // Tap-to-focus redirect for the compose bar. xterm grabs focus from a
     // `mousedown` listener on its element (`ev.preventDefault(); this.focus()`,
@@ -1146,6 +1177,13 @@ export function TerminalPane(props: TerminalPaneProps) {
       pty.sendResize(rows, cols)
     }
     const sendSize = () => {
+      // Never land a SIGWINCH inside an active touch-scroll's wheel-report
+      // stream: hold the send and let endTouch flush it after the finger lifts
+      // (see resizeHeldByGesture in the touch block above).
+      if (touchScrolling) {
+        resizeHeldByGesture = true
+        return
+      }
       if (term.rows !== lastRows || term.cols !== lastCols) {
         lastRows = term.rows
         lastCols = term.cols
@@ -1394,7 +1432,7 @@ export function TerminalPane(props: TerminalPaneProps) {
       cancelAnimationFrame(fitFrame)
       fitFrame = requestAnimationFrame(() => fit.fit())
       clearTimeout(sendTimer)
-      sendTimer = setTimeout(sendSize, 200)
+      sendTimer = setTimeout(sendSize, RESIZE_SEND_DEBOUNCE_MS)
     })
     ro.observe(container)
 

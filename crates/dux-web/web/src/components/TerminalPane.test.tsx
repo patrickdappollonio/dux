@@ -1017,3 +1017,133 @@ describe("TerminalPane restore row when the compose bar is off", () => {
     ).toBeNull()
   })
 })
+
+// A PTY resize that lands while a touch-scroll gesture is still in flight puts a
+// SIGWINCH (a full child repaint) in the middle of the forwarded wheel-report
+// stream, and a mouse-tracking alt-screen pager's repaint corrupts under that
+// interleaving (persistently: an alt-screen has no client scrollback and nothing
+// reconnects). The scroll-start blur makes this routine on phones: it collapses
+// the soft keyboard, the viewport grows, and the debounced resize would fire
+// under the finger. So the debounced send is HELD while a touch-scroll gesture
+// is active and flushed once the finger lifts. These tests drive the real
+// ResizeObserver debounce with a capturing stub plus fake timers.
+describe("TerminalPane holds the PTY resize while a touch-scroll gesture is active", () => {
+  // The capturing ResizeObserver: remembers each observer's callback so the
+  // test can model the container growing (the keyboard collapse) on demand.
+  let roCallbacks: (() => void)[]
+  const installCapturingRO = () => {
+    roCallbacks = []
+    const cbs = roCallbacks
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        constructor(cb: () => void) {
+          cbs.push(cb)
+        }
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      },
+    )
+  }
+
+  const container = () => screen.getByTestId("terminal-container")
+
+  // Mount the pane, let the initial first-frame resize (the 250ms fallback plus
+  // the 60ms jiggle tail) run to completion, and clear the spy so the tests
+  // below observe ONLY the ResizeObserver-debounced sends.
+  const mountSettled = () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    act(() => {
+      vi.advanceTimersByTime(400)
+    })
+    const pty = last()
+    pty.sendResize.mockClear()
+    return pty
+  }
+
+  // Engage a scroll gesture: past the 8px threshold so touchScrolling arms.
+  // jsdom rects are 0, so the row-height fallback (16px) applies; the local
+  // scroll path consumes rows while the buffer stays "normal".
+  const startScroll = () => {
+    fireEvent.touchStart(container(), {
+      touches: [{ clientX: 10, clientY: 300 }],
+    })
+    fireEvent.touchMove(container(), {
+      touches: [{ clientX: 10, clientY: 280 }],
+    })
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+    installCapturingRO()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it("defers the debounced resize until touchend, then sends exactly once", () => {
+    const pty = mountSettled()
+    const term = TermStub.instances.at(-1)
+    if (!term) throw new Error("no terminal constructed")
+    startScroll()
+    // The keyboard collapse: the container grows, the observer fires, and the
+    // refit yields a new row count while the finger is still down.
+    term.rows = 40
+    act(() => {
+      roCallbacks.forEach((cb) => cb())
+      vi.advanceTimersByTime(250)
+    })
+    // Mid-gesture: nothing goes on the wire (no SIGWINCH inside the stream).
+    expect(pty.sendResize).not.toHaveBeenCalled()
+    // The finger lifts: the held resize flushes once, at the final size.
+    fireEvent.touchEnd(container(), { touches: [], changedTouches: [] })
+    act(() => {
+      vi.advanceTimersByTime(250)
+    })
+    expect(pty.sendResize).toHaveBeenCalledTimes(1)
+    expect(pty.sendResize).toHaveBeenCalledWith(40, 80)
+  })
+
+  it("touchcancel flushes a held resize too", () => {
+    const pty = mountSettled()
+    const term = TermStub.instances.at(-1)
+    if (!term) throw new Error("no terminal constructed")
+    startScroll()
+    term.rows = 40
+    act(() => {
+      roCallbacks.forEach((cb) => cb())
+      vi.advanceTimersByTime(250)
+    })
+    expect(pty.sendResize).not.toHaveBeenCalled()
+    fireEvent.touchCancel(container(), { touches: [] })
+    act(() => {
+      vi.advanceTimersByTime(250)
+    })
+    expect(pty.sendResize).toHaveBeenCalledTimes(1)
+    expect(pty.sendResize).toHaveBeenCalledWith(40, 80)
+  })
+
+  it("a gesture without any held resize sends nothing on touchend", () => {
+    const pty = mountSettled()
+    startScroll()
+    fireEvent.touchEnd(container(), { touches: [], changedTouches: [] })
+    act(() => {
+      vi.advanceTimersByTime(500)
+    })
+    expect(pty.sendResize).not.toHaveBeenCalled()
+  })
+
+  it("a resize outside any gesture still sends through the normal debounce", () => {
+    const pty = mountSettled()
+    const term = TermStub.instances.at(-1)
+    if (!term) throw new Error("no terminal constructed")
+    term.rows = 40
+    act(() => {
+      roCallbacks.forEach((cb) => cb())
+      vi.advanceTimersByTime(250)
+    })
+    expect(pty.sendResize).toHaveBeenCalledTimes(1)
+    expect(pty.sendResize).toHaveBeenCalledWith(40, 80)
+  })
+})
