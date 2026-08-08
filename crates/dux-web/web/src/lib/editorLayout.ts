@@ -65,7 +65,38 @@ export function sanitizeEditorLayout(
   if (typeof size === "number" && size >= 1 && size < EXPLORER_MIN_SIZE) {
     return undefined
   }
+  // A sub-1% nonzero entry READS as collapsed (isExplorerCollapsed's
+  // epsilon), but handed to the group as a defaultLayout it renders as a
+  // literal 0.5%-ish flex-grow: a few-pixel sliver that is neither hidden
+  // nor usable, with the toggle saying "Show". The library only ever
+  // persists exactly 0 for a real collapse, so anything in (0, 1) is float
+  // slop or a foreign artifact; snap it to a true 0 and keep the layout's
+  // sum intact so the group still accepts it.
+  if (typeof size === "number" && size > 0 && size < 1) {
+    const out: { [id: string]: number } = { ...layout, [EXPLORER_PANEL_ID]: 0 }
+    const content = layout[EDITOR_CONTENT_PANEL_ID]
+    if (typeof content === "number") {
+      out[EDITOR_CONTENT_PANEL_ID] = parseFloat((content + size).toFixed(3))
+    }
+    return out
+  }
   return layout
+}
+
+// The layout handed to the panel group at mount: the (sanitized) stored
+// layout, except when the surface starts with the explorer collapsed (a
+// phone standalone open), where the explorer must MOUNT collapsed. A
+// defaultLayout override rather than only an imperative `panel.collapse()`
+// from a mount effect: mounting collapsed leaves no frame where the panel
+// renders expanded, cannot race the library's own deferred initial layout,
+// and wins over an expanded layout persisted by a desktop visit sharing the
+// same localStorage key.
+export function editorMountLayout(
+  stored: { [id: string]: number } | undefined,
+  startCollapsed: boolean,
+): { [id: string]: number } | undefined {
+  if (!startCollapsed) return stored
+  return { [EXPLORER_PANEL_ID]: 0, [EDITOR_CONTENT_PANEL_ID]: 100 }
 }
 
 // Fold a layout report into the last-expanded-width memory: an expanded
@@ -86,6 +117,17 @@ export function lastExpandedExplorerSize(
 // bare number as PIXELS. `panel.expand()` is not used because it falls back
 // to minSize when no in-memory expand size exists (a fresh page load after
 // collapsing), which would open the explorer at a 12% sliver.
-export function explorerExpandTarget(lastExpanded: number | null): string {
+//
+// On a phone the remembered/default width is ignored entirely: the memory on
+// the shared localStorage key is usually a desktop-sized 22%, which at 390px
+// is an ~86px tree (measured; technically open, practically unusable). The
+// phone target is 100% minus the content pane's minimum — the widest width
+// the group's constraints permit (70% ≈ 273px at 390px), chosen because
+// anything larger is clamped back by EDITOR_CONTENT_MIN_SIZE anyway.
+export function explorerExpandTarget(
+  lastExpanded: number | null,
+  mobile = false,
+): string {
+  if (mobile) return `${100 - EDITOR_CONTENT_MIN_SIZE}%`
   return `${lastExpanded ?? EXPLORER_DEFAULT_SIZE}%`
 }

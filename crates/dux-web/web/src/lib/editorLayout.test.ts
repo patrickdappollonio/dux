@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest"
 
 import {
+  EDITOR_CONTENT_MIN_SIZE,
   EDITOR_CONTENT_MIN_SIZE_PROP,
   EDITOR_CONTENT_PANEL_ID,
   EDITOR_LAYOUT_ID,
+  editorMountLayout,
   EXPLORER_DEFAULT_SIZE,
   EXPLORER_DEFAULT_SIZE_PROP,
   EXPLORER_MIN_SIZE,
@@ -156,6 +158,36 @@ describe("sanitizeEditorLayout", () => {
     expect(sanitizeEditorLayout(layout)).toBeUndefined()
   })
 
+  it("snaps a sub-1% explorer entry to a true 0% collapse", () => {
+    // A stored value under the collapsed epsilon READS as collapsed
+    // (isExplorerCollapsed says true, the toggle shows "Show"), but handed to
+    // the panel group as a defaultLayout it renders as a literal 0.5%
+    // flex-basis: a one-or-two-pixel sliver that is neither hidden nor
+    // usable. The library only ever persists exactly 0 for a real collapse,
+    // so any 0 < size < 1 is float slop or a foreign artifact; snap it to the
+    // exact collapsed size and keep the layout's sum intact.
+    const layout = {
+      [EXPLORER_PANEL_ID]: 0.5,
+      [EDITOR_CONTENT_PANEL_ID]: 99.5,
+    }
+    expect(sanitizeEditorLayout(layout)).toEqual({
+      [EXPLORER_PANEL_ID]: 0,
+      [EDITOR_CONTENT_PANEL_ID]: 100,
+    })
+  })
+
+  it("snaps the smallest representable sliver too, never rendering it", () => {
+    const layout = {
+      [EXPLORER_PANEL_ID]: 0.999,
+      [EDITOR_CONTENT_PANEL_ID]: 99.001,
+    }
+    const out = sanitizeEditorLayout(layout)!
+    expect(out[EXPLORER_PANEL_ID]).toBe(0)
+    expect(out[EXPLORER_PANEL_ID] + out[EDITOR_CONTENT_PANEL_ID]).toBe(100)
+    // The snapped layout still reads as collapsed for the toggle seed.
+    expect(isExplorerCollapsed(out)).toBe(true)
+  })
+
   it("passes undefined through", () => {
     expect(sanitizeEditorLayout(undefined)).toBeUndefined()
   })
@@ -173,5 +205,53 @@ describe("explorerExpandTarget", () => {
 
   it("falls back to the mount default when nothing was ever recorded", () => {
     expect(explorerExpandTarget(null)).toBe("22%")
+  })
+
+  it("on a phone, expands to the widest width the layout permits", () => {
+    // 22% of a 390px phone is an ~86px tree: technically open, practically
+    // unusable. The phone target is 100% minus the content pane's minimum —
+    // the widest the constraints allow (70% ≈ 273px at 390px, a real tree) —
+    // and it deliberately ignores the remembered width, which on a shared
+    // localStorage key is usually a desktop-sized 22%.
+    expect(explorerExpandTarget(30, true)).toBe(
+      `${100 - EDITOR_CONTENT_MIN_SIZE}%`,
+    )
+    expect(explorerExpandTarget(null, true)).toBe(
+      `${100 - EDITOR_CONTENT_MIN_SIZE}%`,
+    )
+  })
+})
+
+// The layout actually handed to the panel group at mount: the sanitized
+// stored layout, except on a phone standalone open, where the explorer must
+// MOUNT collapsed. Overriding the default layout (rather than only calling
+// panel.collapse() from a mount effect) means there is no window where the
+// panel renders expanded and no race with the library's own deferred initial
+// layout, and it also wins over an expanded layout persisted by a desktop
+// visit sharing the same localStorage key.
+describe("editorMountLayout", () => {
+  it("passes the stored layout through when not starting collapsed", () => {
+    const layout = { [EXPLORER_PANEL_ID]: 22, [EDITOR_CONTENT_PANEL_ID]: 78 }
+    expect(editorMountLayout(layout, false)).toBe(layout)
+    expect(editorMountLayout(undefined, false)).toBeUndefined()
+  })
+
+  it("mounts fully collapsed when starting collapsed, whatever was stored", () => {
+    const desktopExpanded = {
+      [EXPLORER_PANEL_ID]: 40,
+      [EDITOR_CONTENT_PANEL_ID]: 60,
+    }
+    expect(editorMountLayout(desktopExpanded, true)).toEqual({
+      [EXPLORER_PANEL_ID]: 0,
+      [EDITOR_CONTENT_PANEL_ID]: 100,
+    })
+    expect(editorMountLayout(undefined, true)).toEqual({
+      [EXPLORER_PANEL_ID]: 0,
+      [EDITOR_CONTENT_PANEL_ID]: 100,
+    })
+  })
+
+  it("a collapsed mount layout reads as collapsed for the toggle seed", () => {
+    expect(isExplorerCollapsed(editorMountLayout(undefined, true))).toBe(true)
   })
 })

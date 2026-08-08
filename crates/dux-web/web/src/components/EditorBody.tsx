@@ -59,6 +59,7 @@ import {
   EDITOR_CONTENT_MIN_SIZE_PROP,
   EDITOR_CONTENT_PANEL_ID,
   EDITOR_LAYOUT_ID,
+  editorMountLayout,
   EXPLORER_DEFAULT_SIZE_PROP,
   EXPLORER_MIN_SIZE_PROP,
   EXPLORER_PANEL_ID,
@@ -280,12 +281,29 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
   // sanitizeEditorLayout. Everything below reads the sanitized layout so the
   // seeds and the mount agree.
   const storedLayout = sanitizeEditorLayout(defaultLayout)
-  // The header toggle's icon/label state. Seeded from the persisted layout
-  // (so a collapsed explorer stays collapsed across opens; with nothing
-  // stored the desktop overlay starts expanded) and kept current by
-  // onLayoutChanged, which fires for drag-collapse and toggle alike.
+  // On a phone the STANDALONE editor starts with the explorer collapsed
+  // (settled decision: phone standalone is best-effort, and the viewport
+  // barely fits Monaco alone). Read at mount by editorMountLayout below;
+  // a later resize or rotation must not re-collapse an explorer the user
+  // has since expanded, and it cannot, because a defaultLayout only applies
+  // at mount.
+  const isMobile = useIsMobile()
+  const startExplorerCollapsed = standalone && isMobile
+  // What the group actually mounts with: the stored layout, or a true
+  // 0%/100% collapse for the phone standalone case — overriding whatever a
+  // desktop visit persisted under the same localStorage key. Structural on
+  // purpose: mounting collapsed (rather than relying only on the
+  // belt-and-braces collapse() effect below) leaves no frame where the
+  // explorer renders expanded and no race with the library's initial layout.
+  const mountLayout = editorMountLayout(storedLayout, startExplorerCollapsed)
+  // The header toggle's icon/label state. Seeded from the mount layout (so a
+  // collapsed explorer stays collapsed across opens, and the phone
+  // standalone's forced-collapsed mount shows "Show" from the first frame;
+  // with nothing stored the desktop overlay starts expanded) and kept
+  // current by onLayoutChanged, which fires for drag-collapse and toggle
+  // alike.
   const [explorerCollapsed, setExplorerCollapsed] = useState(() =>
-    isExplorerCollapsed(storedLayout),
+    isExplorerCollapsed(mountLayout),
   )
   const explorerPanelRef = useRef<PanelImperativeHandle | null>(null)
   // The last width the explorer had while expanded, seeded from the persisted
@@ -300,21 +318,25 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
     const panel = explorerPanelRef.current
     if (!panel) return
     if (panel.isCollapsed()) {
-      panel.resize(explorerExpandTarget(lastExpandedExplorerSizeRef.current))
+      // On a phone the expand target ignores the remembered width (usually a
+      // desktop-sized 22%, an ~86px sliver at 390px) and opens to the widest
+      // width the content pane's minimum permits. See explorerExpandTarget.
+      panel.resize(
+        explorerExpandTarget(lastExpandedExplorerSizeRef.current, isMobile),
+      )
     } else {
       panel.collapse()
     }
   }
 
-  // On a phone the STANDALONE editor starts with the explorer collapsed
-  // (settled decision: phone standalone is best-effort, and the viewport
-  // barely fits Monaco alone). Through the panel handle rather than a
-  // defaultLayout override so it also wins over an expanded layout persisted
-  // by a desktop visit sharing the same localStorage key. Mount-only on
+  // Belt-and-braces for the phone standalone's collapsed start: the mount
+  // layout above already mounts the explorer at a true 0%, so this is a
+  // no-op when that landed (collapse() bails when already at collapsedSize).
+  // It stays for the one gap defaultLayout has — the library ignores a
+  // defaultLayout when its keys don't cover every panel — so the explorer
+  // can never mount expanded on a phone through that route. Mount-only on
   // purpose: a later resize or rotation must not re-collapse an explorer the
   // user has since expanded.
-  const isMobile = useIsMobile()
-  const startExplorerCollapsed = standalone && isMobile
   useEffect(() => {
     if (startExplorerCollapsed) explorerPanelRef.current?.collapse()
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1242,7 +1264,7 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
         <ResizablePanelGroup
           orientation="horizontal"
           id={EDITOR_LAYOUT_ID}
-          defaultLayout={storedLayout}
+          defaultLayout={mountLayout}
           onLayoutChanged={(layout) => {
             onLayoutChanged(layout)
             setExplorerCollapsed(isExplorerCollapsed(layout))
