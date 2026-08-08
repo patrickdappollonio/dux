@@ -3,6 +3,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { cleanup, fireEvent, render, screen } from "@testing-library/react"
 
 const openCustomizeWebapp = vi.fn()
+const openCreateAgentFromPr = vi.fn()
+const openNewAgentPicker = vi.fn()
+const openAddProject = vi.fn()
+// The renderer reads gh availability from the live bootstrap; tests flip this.
+let ghAvailable = true
 vi.mock("@/lib/store", () => ({
   openCustomizeWebapp: () => openCustomizeWebapp(),
   openConfigEditor: vi.fn(),
@@ -12,6 +17,12 @@ vi.mock("@/lib/store", () => ({
   openWelcomeScreen: vi.fn(),
   openReleaseNotes: vi.fn(),
   sortAgents: vi.fn(),
+  openAddProject: () => openAddProject(),
+  openAddProjectForInit: vi.fn(),
+  openCreateAgentFromPr: (projectId: string | null) =>
+    openCreateAgentFromPr(projectId),
+  openNewAgentPicker: (intent: string) => openNewAgentPicker(intent),
+  useDux: () => ({ bootstrap: { gh_available: ghAvailable } }),
 }))
 vi.mock("@/lib/configApi", () => ({
   configApi: { reload: () => Promise.resolve() },
@@ -31,7 +42,10 @@ const settle = () => new Promise((r) => setTimeout(r, 40))
 afterEach(() => cleanup())
 
 describe("AppMenu", () => {
-  beforeEach(() => vi.clearAllMocks())
+  beforeEach(() => {
+    vi.clearAllMocks()
+    ghAvailable = true
+  })
 
   it("renders a cog trigger labelled Menu", () => {
     render(<AppMenu />)
@@ -83,7 +97,7 @@ describe("AppMenu", () => {
     await screen.findByRole("menu")
 
     // Drive the expectation from the model, never a hand-written list.
-    const topLevel = appMenuModel().filter((e) => e.kind !== "separator")
+    const topLevel = appMenuModel({ ghAvailable: true }).filter((e) => e.kind !== "separator")
     const rendered = screen.getAllByRole("menuitem").map((e) => e.textContent)
     expect(rendered).toHaveLength(topLevel.length)
     for (const entry of topLevel) {
@@ -111,7 +125,7 @@ describe("AppMenu", () => {
     const subTriggers = document.querySelectorAll(
       '[data-slot="dropdown-menu-sub-trigger"]',
     )
-    const submenus = appMenuModel().filter((e) => e.kind === "submenu")
+    const submenus = appMenuModel({ ghAvailable: true }).filter((e) => e.kind === "submenu")
     expect(subTriggers).toHaveLength(submenus.length)
     for (const t of subTriggers) {
       expect(t.getAttribute("aria-haspopup")).toBe("menu")
@@ -147,6 +161,44 @@ describe("AppMenu", () => {
     expect(screen.getByText("Recently updated")).toBeTruthy()
     expect(screen.getByText("Created")).toBeTruthy()
     expect(screen.getByText("Name")).toBeTruthy()
+  })
+
+  // The creation submenus mirror the sidebar's split-button menus: same items,
+  // same store actions, same gh gating. This is the desktop half; the sheet
+  // test has the mobile twin.
+  it("expands the New agent submenu and routes a variant to its store action", async () => {
+    render(<AppMenu />)
+    fireEvent.click(screen.getByRole("button", { name: /^menu$/i }))
+    await screen.findByRole("menu")
+    fireEvent.click(screen.getByText("New agent"))
+    await settle()
+    expect(screen.getByText("New agent…")).toBeTruthy()
+    expect(screen.getByText("New agent from PR…")).toBeTruthy()
+    expect(screen.getByText("New agent from existing worktree…")).toBeTruthy()
+    fireEvent.click(screen.getByText("New agent from PR…"))
+    expect(openCreateAgentFromPr).toHaveBeenCalledWith(null)
+  })
+
+  it("hides the from-PR variant when gh is unavailable", async () => {
+    ghAvailable = false
+    render(<AppMenu />)
+    fireEvent.click(screen.getByRole("button", { name: /^menu$/i }))
+    await screen.findByRole("menu")
+    fireEvent.click(screen.getByText("New agent"))
+    await settle()
+    expect(screen.getByText("New agent…")).toBeTruthy()
+    expect(screen.queryByText("New agent from PR…")).toBeNull()
+  })
+
+  it("expands the Add project submenu and routes a variant to its store action", async () => {
+    render(<AppMenu />)
+    fireEvent.click(screen.getByRole("button", { name: /^menu$/i }))
+    await screen.findByRole("menu")
+    fireEvent.click(screen.getByText("Add project"))
+    await settle()
+    expect(screen.getByText("Initialize a repository…")).toBeTruthy()
+    fireEvent.click(screen.getByText("Add project…"))
+    expect(openAddProject).toHaveBeenCalledOnce()
   })
 
   it("closes on Escape and returns focus to the trigger", async () => {
@@ -193,6 +245,6 @@ describe("AppMenu", () => {
 
   it("walks the whole model without a submenu losing entries", () => {
     // Guards the recursion contract the renderer depends on.
-    expect(walk(appMenuModel()).length).toBeGreaterThan(appMenuModel().length)
+    expect(walk(appMenuModel({ ghAvailable: true })).length).toBeGreaterThan(appMenuModel({ ghAvailable: true }).length)
   })
 })

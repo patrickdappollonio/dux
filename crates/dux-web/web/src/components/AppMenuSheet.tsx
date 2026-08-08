@@ -10,6 +10,7 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet"
 import { appMenuModel, findSubmenu, type AppMenuEntry } from "@/lib/appMenu"
+import { useDux } from "@/lib/store"
 
 // The mobile app menu: the same `appMenuModel()` the desktop flyout renders,
 // presented as a bottom sheet with drill-down.
@@ -92,7 +93,12 @@ export function AppMenuSheet({
     if (!open) setDrilled(null)
   }
 
-  const model = appMenuModel()
+  // The model's one context input: gh availability gates the from-PR agent
+  // variant, exactly as the sidebar's NewAgentSplitButton gates its copy.
+  const { bootstrap } = useDux()
+  const ghAvailable = bootstrap?.gh_available ?? false
+
+  const model = appMenuModel({ ghAvailable })
   const submenu = drilled ? findSubmenu(model, drilled) : null
   // Fall back to the root if a drilled id ever goes missing, so the sheet can
   // never strand the user on an empty list with no way back.

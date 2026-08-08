@@ -4,6 +4,10 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react"
 
 const openCustomizeWebapp = vi.fn()
 const sortAgents = vi.fn()
+const openNewAgentPicker = vi.fn()
+const openAddProjectForInit = vi.fn()
+// The renderer reads gh availability from the live bootstrap; tests flip this.
+let ghAvailable = true
 vi.mock("@/lib/store", () => ({
   openCustomizeWebapp: () => openCustomizeWebapp(),
   openConfigEditor: vi.fn(),
@@ -13,6 +17,11 @@ vi.mock("@/lib/store", () => ({
   openWelcomeScreen: vi.fn(),
   openReleaseNotes: vi.fn(),
   sortAgents: (by: string) => sortAgents(by),
+  openAddProject: vi.fn(),
+  openAddProjectForInit: () => openAddProjectForInit(),
+  openCreateAgentFromPr: vi.fn(),
+  openNewAgentPicker: (intent: string) => openNewAgentPicker(intent),
+  useDux: () => ({ bootstrap: { gh_available: ghAvailable } }),
 }))
 vi.mock("@/lib/configApi", () => ({
   configApi: { reload: () => Promise.resolve() },
@@ -30,13 +39,16 @@ function Harness({ onOpenChange = vi.fn() }: { onOpenChange?: () => void }) {
 }
 
 describe("AppMenuSheet", () => {
-  beforeEach(() => vi.clearAllMocks())
+  beforeEach(() => {
+    vi.clearAllMocks()
+    ghAvailable = true
+  })
 
   // THE ANTI-DRIFT TEST. Both presentations render from one model, so the mobile
   // sheet's root list must match the desktop menu's top level exactly.
   it("renders the same top-level titles as the desktop menu", () => {
     render(<Harness />)
-    const expected = appMenuModel()
+    const expected = appMenuModel({ ghAvailable: true })
       .filter((e) => e.kind !== "separator")
       .map((e) => (e.kind === "separator" ? "" : e.title))
     const rendered = screen.getAllByRole("menuitem").map((e) => e.textContent)
@@ -85,7 +97,7 @@ describe("AppMenuSheet", () => {
     render(<Harness />)
     fireEvent.click(screen.getByText("Sort agents by"))
     await settle()
-    const sub = findSubmenu(appMenuModel(), "sort-agents")!
+    const sub = findSubmenu(appMenuModel({ ghAvailable: true }), "sort-agents")!
     expect(screen.getAllByText(sub.title).length).toBeGreaterThan(0)
     expect(screen.getByText("Recently updated")).toBeTruthy()
   })
@@ -126,6 +138,40 @@ describe("AppMenuSheet", () => {
     render(<AppMenuSheet open onOpenChange={onOpenChange} />)
     fireEvent.click(screen.getByText("Preferences…"))
     expect(openCustomizeWebapp).toHaveBeenCalledOnce()
+    expect(onOpenChange).toHaveBeenCalledWith(false)
+  })
+
+  // The mobile twin of AppMenu.test.tsx's creation-submenu checks: the sheet
+  // drills into the same shared lists the sidebar's split buttons render.
+  it("drills into New agent and routes a variant to its store action", async () => {
+    const onOpenChange = vi.fn()
+    render(<AppMenuSheet open onOpenChange={onOpenChange} />)
+    fireEvent.click(screen.getByText("New agent"))
+    await settle()
+    expect(screen.getByLabelText("Back")).toBeTruthy()
+    expect(screen.getByText("New agent from PR…")).toBeTruthy()
+    fireEvent.click(screen.getByText("New agent from existing worktree…"))
+    expect(openNewAgentPicker).toHaveBeenCalledWith("from_worktree")
+    expect(onOpenChange).toHaveBeenCalledWith(false)
+  })
+
+  it("hides the from-PR variant when gh is unavailable", async () => {
+    ghAvailable = false
+    render(<Harness />)
+    fireEvent.click(screen.getByText("New agent"))
+    await settle()
+    expect(screen.getByText("New agent…")).toBeTruthy()
+    expect(screen.queryByText("New agent from PR…")).toBeNull()
+  })
+
+  it("drills into Add project and routes a variant to its store action", async () => {
+    const onOpenChange = vi.fn()
+    render(<AppMenuSheet open onOpenChange={onOpenChange} />)
+    fireEvent.click(screen.getByText("Add project"))
+    await settle()
+    expect(screen.getByText("Add project…")).toBeTruthy()
+    fireEvent.click(screen.getByText("Initialize a repository…"))
+    expect(openAddProjectForInit).toHaveBeenCalledOnce()
     expect(onOpenChange).toHaveBeenCalledWith(false)
   })
 

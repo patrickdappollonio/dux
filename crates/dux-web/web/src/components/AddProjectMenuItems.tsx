@@ -1,7 +1,5 @@
-import { FolderGit2, FolderPlus } from "lucide-react"
-
 import { DropdownMenuItem } from "@/components/ui/dropdown-menu"
-import { openAddProject, openAddProjectForInit } from "@/lib/store"
+import { addProjectMenuItems } from "@/lib/creationMenus"
 
 /**
  * The shared body of the add-project split button's dropdown, rendered by both
@@ -10,22 +8,23 @@ import { openAddProject, openAddProjectForInit } from "@/lib/store"
  * own <DropdownMenuContent> wrapper. Menu tenets: every item keeps a leading
  * lucide icon, neutral color, and a trailing "…" because both open a dialog.
  *
- * Both items open the SAME picker; the intent only changes a header hint, and
- * the primary-action ladder decides the real action from the server's
- * inspection, so "Initialize a repository…" stays discoverable in the menu
- * while remaining reachable through the plain picker too.
+ * The items themselves come from the shared list in creationMenus.ts, which
+ * the cog app menu's "Add project" submenu also renders, so THOSE two surfaces
+ * cannot drift either. See creationMenus.ts for why both variants open the
+ * same picker.
  */
 export function AddProjectMenuItems() {
   return (
     <>
-      <DropdownMenuItem onClick={openAddProject}>
-        <FolderGit2 />
-        Add project…
-      </DropdownMenuItem>
-      <DropdownMenuItem onClick={openAddProjectForInit}>
-        <FolderPlus />
-        Initialize a repository…
-      </DropdownMenuItem>
+      {addProjectMenuItems().map((item) => {
+        const Icon = item.icon
+        return (
+          <DropdownMenuItem key={item.id} onClick={item.run}>
+            <Icon />
+            {item.title}
+          </DropdownMenuItem>
+        )
+      })}
     </>
   )
 }

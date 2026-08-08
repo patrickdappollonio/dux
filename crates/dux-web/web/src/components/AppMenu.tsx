@@ -12,6 +12,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { appMenuModel, type AppMenuEntry } from "@/lib/appMenu"
+import { useDux } from "@/lib/store"
 
 // The desktop app menu: the cog in the header's top-right corner, replacing the
 // old "Commands…" command-palette button. It renders `appMenuModel()` and
@@ -62,6 +63,10 @@ function AppMenuEntries({ entries }: { entries: AppMenuEntry[] }) {
 }
 
 export function AppMenu() {
+  // The model's one context input: gh availability gates the from-PR agent
+  // variant, exactly as the sidebar's NewAgentSplitButton gates its copy.
+  const { bootstrap } = useDux()
+  const ghAvailable = bootstrap?.gh_available ?? false
   return (
     <DropdownMenu>
       <DropdownMenuTrigger
@@ -72,7 +77,7 @@ export function AppMenu() {
         }
       />
       <DropdownMenuContent align="end" side="bottom">
-        <AppMenuEntries entries={appMenuModel()} />
+        <AppMenuEntries entries={appMenuModel({ ghAvailable })} />
       </DropdownMenuContent>
     </DropdownMenu>
   )

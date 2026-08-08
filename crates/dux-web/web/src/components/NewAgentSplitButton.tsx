@@ -1,4 +1,4 @@
-import { Bot, EllipsisVertical, FolderGit2, GitPullRequest, Plus } from "lucide-react"
+import { EllipsisVertical, Plus } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { ButtonGroup } from "@/components/ui/button-group"
@@ -8,18 +8,17 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import { openCreateAgentFromPr, openNewAgentPicker, useDux } from "@/lib/store"
+import { newAgentMenuItems } from "@/lib/creationMenus"
+import { openNewAgentPicker, useDux } from "@/lib/store"
 import { cn } from "@/lib/utils"
 
 // The New-agent control: the one-click primary opens the picker to create a plain
-// agent, and the attached ⋯ segment offers the creation variants. Each variant
-// opens the same picker armed with an intent, so the user first picks the target
-// project and the from-worktree dialog takes over from there (that flow is
-// per-project, hence the project pick). The from-PR variant is the exception:
-// it opens its dialog directly with no project, because the reference leads and
-// dux resolves the project from it. Mirrors AddProjectSplitButton:
-// same seam-rounding fix, same touch sizing. The from-PR item is hidden when
-// GitHub / `gh` is unavailable, matching the per-project ⋯ menu.
+// agent, and the attached ⋯ segment offers the creation variants, rendered from
+// the shared list in creationMenus.ts (also the cog app menu's "New agent"
+// submenu, so the two surfaces cannot drift). See creationMenus.ts for what
+// each variant opens and why. Mirrors AddProjectSplitButton: same seam-rounding
+// fix, same touch sizing. The from-PR item is hidden when GitHub / `gh` is
+// unavailable, matching the per-project ⋯ menu.
 export function NewAgentSplitButton({ className }: { className?: string }) {
   const { bootstrap } = useDux()
   const ghAvailable = bootstrap?.gh_available ?? false
@@ -53,24 +52,15 @@ export function NewAgentSplitButton({ className }: { className?: string }) {
           }
         />
         <DropdownMenuContent align="end" side="top">
-          <DropdownMenuItem onClick={() => openNewAgentPicker("new")}>
-            <Bot />
-            New agent…
-          </DropdownMenuItem>
-          {/* The global entry point leads with the reference: no project is
-              chosen and none is asked for, because dux works out which project
-              the pull request belongs to. The project selector is still one
-              click away, inside the dialog. */}
-          {ghAvailable && (
-            <DropdownMenuItem onClick={() => openCreateAgentFromPr(null)}>
-              <GitPullRequest />
-              New agent from PR…
-            </DropdownMenuItem>
-          )}
-          <DropdownMenuItem onClick={() => openNewAgentPicker("from_worktree")}>
-            <FolderGit2 />
-            New agent from existing worktree…
-          </DropdownMenuItem>
+          {newAgentMenuItems({ ghAvailable }).map((item) => {
+            const Icon = item.icon
+            return (
+              <DropdownMenuItem key={item.id} onClick={item.run}>
+                <Icon />
+                {item.title}
+              </DropdownMenuItem>
+            )
+          })}
         </DropdownMenuContent>
       </DropdownMenu>
     </ButtonGroup>

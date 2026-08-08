@@ -14,6 +14,11 @@ vi.mock("@/lib/store", () => ({
   openGlobalEnv: vi.fn(),
   openTaskManager: vi.fn(),
   sortAgents: vi.fn(),
+  openAddProject: vi.fn(),
+  openAddProjectForInit: vi.fn(),
+  openCreateAgentFromPr: vi.fn(),
+  openNewAgentPicker: vi.fn(),
+  useDux: () => ({ bootstrap: { gh_available: true } }),
 }))
 vi.mock("@/lib/configApi", () => ({
   configApi: { reload: () => Promise.resolve() },

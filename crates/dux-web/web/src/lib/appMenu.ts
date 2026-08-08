@@ -26,11 +26,13 @@
 import {
   Activity,
   ArrowDownAZ,
+  Bot,
   PartyPopper,
   ArrowUpDown,
   CalendarPlus,
   Clock,
   FileCode,
+  FolderGit2,
   Globe,
   RefreshCw,
   Rocket,
@@ -43,6 +45,7 @@ import {
 import { toast } from "sonner"
 
 import { configApi } from "@/lib/configApi"
+import { addProjectMenuItems, newAgentMenuItems } from "@/lib/creationMenus"
 import {
   openConfigEditor,
   openReleaseNotes,
@@ -82,14 +85,27 @@ export interface AppMenuSeparator {
   id: string
 }
 
+export interface AppMenuContext {
+  /** Whether GitHub / `gh` integration is usable (`bootstrap.gh_available`).
+   *  Gates the from-PR agent variant, exactly as the sidebar's split button
+   *  and the per-project `⋯` menu gate theirs. */
+  ghAvailable: boolean
+}
+
 /**
  * The app menu, top level first.
  *
- * Takes no context today: every entry is unconditional. Resist adding gating
- * without a real reason: an entry that appears and disappears is harder to
- * learn than one that is always there and explains itself when used.
+ * The context gates the ONE conditional entry (the from-PR agent variant,
+ * which is meaningless without `gh`). Resist adding more gating without a
+ * real reason: an entry that appears and disappears is harder to learn than
+ * one that is always there and explains itself when used.
  */
-export function appMenuModel(): AppMenuEntry[] {
+export function appMenuModel(ctx: AppMenuContext): AppMenuEntry[] {
+  // The creation submenus mirror the sidebar's split-button menus: their
+  // entries are the shared lists in creationMenus.ts, spliced in verbatim so
+  // the cog menu and the sidebar cannot drift (appMenu.test.ts pins this).
+  const asItems = (items: ReturnType<typeof addProjectMenuItems>) =>
+    items.map((item): AppMenuItem => ({ kind: "item", ...item }))
   return [
     {
       kind: "item",
@@ -184,6 +200,26 @@ export function appMenuModel(): AppMenuEntry[] {
       ],
     },
     { kind: "separator", id: "sep-agents" },
+    // The two creation submenus lead the action group: they are the menu's
+    // twins of the sidebar's New-agent and Add-project split buttons, GLOBAL
+    // and parameter-free like their neighbors below (each variant opens a
+    // picker or dialog that asks for whatever it needs). No trailing "…" on
+    // the submenu titles themselves: a submenu opens a list, not a dialog;
+    // the "…" lives on the variants inside.
+    {
+      kind: "submenu",
+      id: "new-agent",
+      title: "New agent",
+      icon: Bot,
+      entries: asItems(newAgentMenuItems(ctx)),
+    },
+    {
+      kind: "submenu",
+      id: "add-project",
+      title: "Add project",
+      icon: FolderGit2,
+      entries: asItems(addProjectMenuItems()),
+    },
     {
       kind: "item",
       id: "new-standalone-terminal",
