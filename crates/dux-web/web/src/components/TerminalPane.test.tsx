@@ -349,6 +349,46 @@ describe("TerminalPane take-over device naming", () => {
   })
 })
 
+// The pane is the only surface that KNOWS a PTY's input ownership (from
+// `pty.owner` handovers on its own socket), so it publishes the verdict into
+// the store ledger the agent ⋯ menu gates its mutating entries on.
+describe("TerminalPane ownership reporting into the store", () => {
+  it("reports an agent PTY as owned-elsewhere on takeover and clears it on reclaim and unmount", async () => {
+    const store = await import("@/lib/store")
+    const { unmount } = render(
+      <TerminalPane kind="agent" id="s1" sessionId="s1" />,
+    )
+    expect(store.getSnapshot().ptyOwnedElsewhere["s1"]).toBeUndefined()
+    act(() => notifyPtyOwner("s1", "conn-other"))
+    expect(store.getSnapshot().ptyOwnedElsewhere["s1"]).toBe(true)
+    // Take over from here: the placeholder's button reclaims and the ledger
+    // entry clears with it.
+    act(() => {
+      fireEvent.click(screen.getByText("Take over"))
+    })
+    expect(store.getSnapshot().ptyOwnedElsewhere["s1"]).toBeUndefined()
+    // Owned elsewhere again, then unmount: with the pane gone this client no
+    // longer knows, so the entry must not linger and disable menus forever.
+    act(() => notifyPtyOwner("s1", "conn-other-2"))
+    expect(store.getSnapshot().ptyOwnedElsewhere["s1"]).toBe(true)
+    unmount()
+    expect(store.getSnapshot().ptyOwnedElsewhere["s1"]).toBeUndefined()
+  })
+
+  it("does not report companion-terminal PTYs (a terminal is not the agent)", async () => {
+    const store = await import("@/lib/store")
+    render(
+      <TerminalPane
+        kind="terminal"
+        id="t1"
+        owner={{ kind: "session", sessionId: "s1" }}
+      />,
+    )
+    act(() => notifyPtyOwner("t1", "conn-other"))
+    expect(store.getSnapshot().ptyOwnedElsewhere["t1"]).toBeUndefined()
+  })
+})
+
 // T9: a project terminal must resolve its OWNER (a project), not scan sessions.
 // With the old session-only resolution, its desktop notifications were titled
 // "Agent", its readiness never latched (hasOutput stayed false), and the pane

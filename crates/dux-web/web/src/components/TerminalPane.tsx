@@ -59,6 +59,7 @@ import {
   handleTabGone,
   mobileAccessoryBarVisible,
   mobileTopBarVisible,
+  noteAgentPtyOwnership,
   restoreMobileBars,
   useDux,
 } from "@/lib/store"
@@ -1527,6 +1528,19 @@ export function TerminalPane(props: TerminalPaneProps) {
       setTakeoverDevice(mine ? null : (device ?? null))
     })
   }, [id])
+
+  // Publish this pane's ownership verdict into the store ledger so surfaces
+  // OUTSIDE the pane (the agent ⋯ menu) can disable mutating actions while
+  // another device drives the agent. Agent PTYs only: a companion terminal
+  // taken over elsewhere says nothing about the agent itself. The unmount
+  // cleanup clears the entry, because with the pane gone this client no
+  // longer knows the PTY's ownership and a stale entry would gate menus
+  // forever.
+  useEffect(() => {
+    if (kind !== "agent") return
+    noteAgentPtyOwnership(id, !isOwner)
+    return () => noteAgentPtyOwnership(id, false)
+  }, [kind, id, isOwner])
 
   // Gaining ownership is a fresh "looking at it" moment: ping the server at once
   // (when visible) so the agent's attention flag drops immediately, rather than

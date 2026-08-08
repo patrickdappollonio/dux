@@ -129,6 +129,97 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
+describe("AgentActionsMenu while the agent is active on another device", () => {
+  // Ownership is per-PTY runtime state reported into the store by the mounted
+  // TerminalPane (`ptyOwnedElsewhere`). While any of the agent's tab PTYs is
+  // input-owned by another device, the entries that MUTATE the agent disable;
+  // read-only entries (info, project submenu, editor, terminals) stay usable.
+  const disabledLabels = [
+    /^New agent tab for /,
+    "Force recreate agent…",
+    "Enable agent auto-reopen",
+    "Rename agent…",
+    "Change agent provider…",
+    "Change attached pull request…",
+    "Detach pull request",
+    "Delete agent…",
+  ]
+  const enabledLabels = [
+    "Project…",
+    "Fork agent…",
+    "Agent info…",
+    "Configure startup command…",
+    "Configure environment variables…",
+    "Rerun startup command",
+    "Startup command logs…",
+    "Open editor in new tab",
+    "New terminal",
+    "Copy local path",
+  ]
+
+  function itemFor(label: string | RegExp): Element {
+    const el = screen.getByText(label).closest('[role="menuitem"]')
+    if (!el) throw new Error(`no menuitem for ${label}`)
+    return el
+  }
+
+  it("disables the mutating entries and keeps the read-only ones enabled", async () => {
+    const session = makeSession({ id: "s1", pr: prPinned })
+    seed(session, true)
+    ;(mockState as unknown as { ptyOwnedElsewhere: Record<string, true> }).ptyOwnedElsewhere =
+      { s1: true }
+    await openMenu(session)
+    for (const label of disabledLabels) {
+      expect(
+        itemFor(label).getAttribute("aria-disabled"),
+        `expected disabled: ${label}`,
+      ).toBe("true")
+    }
+    for (const label of enabledLabels) {
+      expect(
+        itemFor(label).getAttribute("aria-disabled"),
+        `expected enabled: ${label}`,
+      ).not.toBe("true")
+    }
+    // The reason is stated inline (disabled items are pointer-events-none, so
+    // a hover tooltip could never fire, and touch has no hover at all).
+    expect(
+      screen.getByText(/active on another device/i),
+    ).toBeTruthy()
+  })
+
+  it("keeps every entry enabled and shows no hint when nothing is owned elsewhere", async () => {
+    const session = makeSession({ id: "s1", pr: prPinned })
+    seed(session, true)
+    ;(mockState as unknown as { ptyOwnedElsewhere: Record<string, true> }).ptyOwnedElsewhere =
+      {}
+    await openMenu(session)
+    for (const label of [...disabledLabels, ...enabledLabels]) {
+      expect(
+        itemFor(label).getAttribute("aria-disabled"),
+        `expected enabled: ${label}`,
+      ).not.toBe("true")
+    }
+    expect(screen.queryByText(/active on another device/i)).toBeNull()
+  })
+
+  it("reads ownership through the agent's EXTRA tab ids too, not just the session slot", async () => {
+    const session = makeSession({
+      id: "s1",
+      pr: prPinned,
+      tabs: [
+        { id: "s1", provider: "claude", order: 0 },
+        { id: "tab-2", provider: "claude", order: 1 },
+      ] as unknown as SessionView["tabs"],
+    })
+    seed(session, true)
+    ;(mockState as unknown as { ptyOwnedElsewhere: Record<string, true> }).ptyOwnedElsewhere =
+      { "tab-2": true }
+    await openMenu(session)
+    expect(itemFor("Delete agent…").getAttribute("aria-disabled")).toBe("true")
+  })
+})
+
 describe("AgentActionsMenu pull-request entries", () => {
   it("hides both entries without a usable gh and no override", async () => {
     seed(makeSession({ id: "s1" }), false)

@@ -584,6 +584,16 @@ export interface DuxState {
   // (with a toast) when the settings PATCH fails.
   mobileTopBarOverride: boolean | null
   mobileAccessoryBarOverride: boolean | null
+  // Per-PTY "another device owns input" verdicts, keyed by pty id (a tab id,
+  // with the session-slot tab id equal to the session id). Reported by the
+  // mounted TerminalPane — the one surface that knows, from the `pty.owner`
+  // handovers on its own socket — so surfaces OUTSIDE the pane (the agent ⋯
+  // menu) can gate mutating actions while another device drives the agent.
+  // Only ids currently owned ELSEWHERE appear; regaining ownership or
+  // unmounting the pane removes the entry, because with the pane gone this
+  // client no longer knows. Runtime-only client state: an agent no pane here
+  // is attached to simply has no entry and gates nothing.
+  ptyOwnedElsewhere: Record<string, true>
   // The session whose code-editor overlay is open, the file to auto-open on
   // launch (null = none preselected), and the view it opens in: "file" (editable
   // Monaco buffer) or "diff" (read-only Monaco DiffEditor, HEAD vs working copy).
@@ -795,6 +805,7 @@ let state: DuxState = {
   changesPaneOverride: null,
   mobileTopBarOverride: null,
   mobileAccessoryBarOverride: null,
+  ptyOwnedElsewhere: {},
   editorTarget: null,
   editorRoute: null,
   standaloneEditor: bootIsStandaloneEditor(),
@@ -5041,6 +5052,40 @@ export function setMobileBarVisibility(
       )
       return false
     })
+}
+
+// ── Per-PTY input ownership (the `ptyOwnedElsewhere` ledger) ────────────────
+
+// TerminalPane's reporter: record whether the AGENT PTY it renders is
+// input-owned by another device. Only owned-elsewhere ids are kept (see the
+// DuxState field's doc); the pane calls this with `false` on reclaim and from
+// its unmount cleanup. Idempotent so the per-render effect churn never
+// re-publishes an unchanged verdict.
+export function noteAgentPtyOwnership(
+  ptyId: string,
+  ownedElsewhere: boolean,
+): void {
+  const has = Boolean(state.ptyOwnedElsewhere[ptyId])
+  if (has === ownedElsewhere) return
+  const next = { ...state.ptyOwnedElsewhere }
+  if (ownedElsewhere) next[ptyId] = true
+  else delete next[ptyId]
+  setState({ ptyOwnedElsewhere: next })
+}
+
+// True while any of the agent's tab PTYs this client is attached to is
+// input-owned by another device. The agent ⋯ menu disables its MUTATING
+// entries on this (deleting or relaunching an agent someone else is driving
+// is a surprise for them); read-only entries stay usable. Knowable only for
+// PTYs a pane here is attached to, so an agent nobody on this device is
+// viewing reads false and its menu stays fully enabled. The optional chain is
+// deliberate: unit-test states are built as partial mocks.
+export function sessionActiveElsewhere(
+  s: DuxState,
+  session: SessionView,
+): boolean {
+  if (s.ptyOwnedElsewhere?.[session.id]) return true
+  return (session.tabs ?? []).some((t) => s.ptyOwnedElsewhere?.[t.id])
 }
 
 // The compose bar's restore button: one tap restores BOTH bars (a deliberate

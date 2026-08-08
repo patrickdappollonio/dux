@@ -57,6 +57,7 @@ import {
   DropdownMenuContent,
   DropdownMenuGroup,
   DropdownMenuItem,
+  DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuSub,
   DropdownMenuSubContent,
@@ -125,6 +126,7 @@ import {
   reorderAgents,
   reorderTerminals,
   rerunStartupCommand,
+  sessionActiveElsewhere,
   setAgentSearch,
   setAgentSort,
   toggleSessionAutoReopen,
@@ -183,9 +185,28 @@ export function AgentActionsMenu({
   const isMobile = useIsMobile()
   const ghAvailable = bootstrap?.gh_available ?? false
   const prOverridden = session.pr?.overridden ?? false
+  // While another device input-owns one of this agent's PTYs (reported into
+  // the store by the mounted TerminalPane), the entries that MUTATE the agent
+  // disable: deleting, renaming or relaunching an agent someone else is
+  // actively driving is a surprise for them. Read-only entries (info, the
+  // project submenu, editor/terminal/copy entries) and this device's own view
+  // preferences (the bar toggles) stay usable. The reason renders as an
+  // inline label rather than a tooltip: disabled menu items are
+  // pointer-events-none, so a hover tooltip could never fire, and touch has
+  // no hover at all.
+  const activeElsewhere = sessionActiveElsewhere(duxState, session)
 
   return (
     <DropdownMenuGroup>
+      {activeElsewhere ? (
+        <>
+          <DropdownMenuLabel className="max-w-60 whitespace-normal">
+            This agent is active on another device, so actions that modify it
+            are disabled. Take over in its terminal to use them here.
+          </DropdownMenuLabel>
+          <DropdownMenuSeparator />
+        </>
+      ) : null}
       {context === "terminal" && isMobile ? (
         <>
           {/* Quick toggles for the two hideable mobile bars (`ui.mobile_top_bar`,
@@ -211,7 +232,7 @@ export function AgentActionsMenu({
         </>
       ) : null}
       <DropdownMenuSub>
-        <DropdownMenuSubTrigger disabled={atTabCap || addingTab}>
+        <DropdownMenuSubTrigger disabled={atTabCap || addingTab || activeElsewhere}>
           <Plus />
           {/* min-w-0 + truncate so a long agent name cannot blow the menu
               wide open; the full name is in the row/tooltip already. */}
@@ -250,18 +271,27 @@ export function AgentActionsMenu({
         </DropdownMenuSubContent>
       </DropdownMenuSub>
       <DropdownMenuSeparator />
-      <DropdownMenuItem onClick={() => openForceReconnect(session.id)}>
+      <DropdownMenuItem
+        disabled={activeElsewhere}
+        onClick={() => openForceReconnect(session.id)}
+      >
         <RotateCcw />
         Force recreate agent…
       </DropdownMenuItem>
-      <DropdownMenuItem onClick={() => toggleSessionAutoReopen(session.id, !session.auto_reopen_enabled)}>
+      <DropdownMenuItem
+        disabled={activeElsewhere}
+        onClick={() => toggleSessionAutoReopen(session.id, !session.auto_reopen_enabled)}
+      >
         <RefreshCw />
         {session.auto_reopen_enabled
           ? "Disable agent auto-reopen"
           : "Enable agent auto-reopen"}
       </DropdownMenuItem>
       <DropdownMenuSeparator />
-      <DropdownMenuItem onClick={() => openRename(session.id)}>
+      <DropdownMenuItem
+        disabled={activeElsewhere}
+        onClick={() => openRename(session.id)}
+      >
         <Pencil />
         Rename agent…
       </DropdownMenuItem>
@@ -269,7 +299,10 @@ export function AgentActionsMenu({
         <GitFork />
         Fork agent…
       </DropdownMenuItem>
-      <DropdownMenuItem onClick={() => openChangeProvider(session.id)}>
+      <DropdownMenuItem
+        disabled={activeElsewhere}
+        onClick={() => openChangeProvider(session.id)}
+      >
         <Cpu />
         Change agent provider…
       </DropdownMenuItem>
@@ -278,7 +311,10 @@ export function AgentActionsMenu({
           manually attached PR), not on mere PR presence, because attaching
           over an autodetected badge is still a first manual attach. */}
       {ghAvailable && (
-        <DropdownMenuItem onClick={() => openAttachPullRequest(session.id)}>
+        <DropdownMenuItem
+          disabled={activeElsewhere}
+          onClick={() => openAttachPullRequest(session.id)}
+        >
           <GitPullRequest />
           {prOverridden
             ? "Change attached pull request…"
@@ -288,7 +324,10 @@ export function AgentActionsMenu({
       {/* No confirm and no ellipsis: detaching is reversible (autodetection
           resumes, and the PR can be re-attached any time). */}
       {prOverridden && (
-        <DropdownMenuItem onClick={() => detachPullRequest(session.id)}>
+        <DropdownMenuItem
+          disabled={activeElsewhere}
+          onClick={() => detachPullRequest(session.id)}
+        >
           <Unlink />
           Detach pull request
         </DropdownMenuItem>
@@ -356,6 +395,7 @@ export function AgentActionsMenu({
       <DropdownMenuItem
         variant="destructive"
         className="not-focus:text-destructive/70! not-focus:*:[svg]:text-destructive/70!"
+        disabled={activeElsewhere}
         onClick={() => openDelete(session.id)}
       >
         <Trash2 />
