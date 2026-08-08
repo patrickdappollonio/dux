@@ -259,9 +259,9 @@ hideable. Every terminal screen's `⋯` menu (agent, project, and standalone
 terminals alike) has **Hide top bar** (which on the agent screen also takes
 the tab strip with it) and **Hide terminal keys**, each backed by its own
 preference, and the reclaimed rows go straight back to the terminal. While
-anything is hidden, an eye button appears below the terminal (next to the
-compose box, or on its own slim row if you keep the compose bar off): one tap
-brings both bars back. Both toggles live in Preferences too.
+anything is hidden, a show-bars button appears below the terminal (next to
+the compose box, or on its own slim row if you keep the compose bar off): one
+tap brings both bars back. Both toggles live in Preferences too.
 
 ## Install it like an app
 
