@@ -1358,7 +1358,11 @@ deploy = { text = \"deploy it\", surface = \"both\" }
         for (name, text, surface) in [
             ("deploy", "deploy it", crate::config::MacroSurface::Both),
             ("review", "review this", crate::config::MacroSurface::Agent),
-            ("build", "cargo build", crate::config::MacroSurface::Terminal),
+            (
+                "build",
+                "cargo build",
+                crate::config::MacroSurface::Terminal,
+            ),
         ] {
             macros.entries.insert(
                 name.to_string(),
@@ -1371,7 +1375,11 @@ deploy = { text = \"deploy it\", surface = \"both\" }
         patch_macros(&mut doc, &macros);
 
         let saved = doc.to_string();
-        let pos = |needle: &str| saved.find(needle).unwrap_or_else(|| panic!("missing {needle}"));
+        let pos = |needle: &str| {
+            saved
+                .find(needle)
+                .unwrap_or_else(|| panic!("missing {needle}"))
+        };
         assert!(
             pos("deploy") < pos("review") && pos("review") < pos("build"),
             "entries must be written in the new order, got:\n{saved}"
@@ -1420,7 +1428,10 @@ build = { text = \"cargo build\", surface = \"terminal\" }
         patch_macros(&mut doc, &macros);
 
         let saved = doc.to_string();
-        assert!(!saved.contains("gone"), "stale key must be removed:\n{saved}");
+        assert!(
+            !saved.contains("gone"),
+            "stale key must be removed:\n{saved}"
+        );
         let reparsed: Config = toml::from_str(&saved).expect("reparse");
         assert_eq!(
             reparsed.macros.entries.keys().collect::<Vec<_>>(),
