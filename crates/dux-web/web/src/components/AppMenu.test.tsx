@@ -73,8 +73,10 @@ describe("AppMenu", () => {
     fireEvent.keyDown(trigger, { key: "ArrowDown" })
     expect(await screen.findByRole("menu")).toBeTruthy()
     await settle()
+    // The first entry is the New-agent SUBMENU trigger now that the creation
+    // submenus open the menu, so keyboard focus lands on a sub-trigger.
     expect(document.activeElement?.getAttribute("data-slot")).toBe(
-      "dropdown-menu-item",
+      "dropdown-menu-sub-trigger",
     )
   })
 

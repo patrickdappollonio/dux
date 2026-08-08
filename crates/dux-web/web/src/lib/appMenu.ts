@@ -107,6 +107,28 @@ export function appMenuModel(ctx: AppMenuContext): AppMenuEntry[] {
   const asItems = (items: ReturnType<typeof addProjectMenuItems>) =>
     items.map((item): AppMenuItem => ({ kind: "item", ...item }))
   return [
+    // The two creation submenus OPEN the menu (Patrick's call): creating an
+    // agent or adding a project is the most common reason to reach for the
+    // cog, so they outrank Preferences. They are the menu's twins of the
+    // sidebar's New-agent and Add-project split buttons; their entries are
+    // the shared lists spliced in verbatim (see asItems above). No trailing
+    // "…" on the submenu titles: a submenu opens a list, not a dialog; the
+    // "…" lives on the variants inside.
+    {
+      kind: "submenu",
+      id: "new-agent",
+      title: "New agent",
+      icon: Bot,
+      entries: asItems(newAgentMenuItems(ctx)),
+    },
+    {
+      kind: "submenu",
+      id: "add-project",
+      title: "Add project",
+      icon: FolderGit2,
+      entries: asItems(addProjectMenuItems()),
+    },
+    { kind: "separator", id: "sep-create" },
     {
       kind: "item",
       id: "preferences",
@@ -200,26 +222,6 @@ export function appMenuModel(ctx: AppMenuContext): AppMenuEntry[] {
       ],
     },
     { kind: "separator", id: "sep-agents" },
-    // The two creation submenus lead the action group: they are the menu's
-    // twins of the sidebar's New-agent and Add-project split buttons, GLOBAL
-    // and parameter-free like their neighbors below (each variant opens a
-    // picker or dialog that asks for whatever it needs). No trailing "…" on
-    // the submenu titles themselves: a submenu opens a list, not a dialog;
-    // the "…" lives on the variants inside.
-    {
-      kind: "submenu",
-      id: "new-agent",
-      title: "New agent",
-      icon: Bot,
-      entries: asItems(newAgentMenuItems(ctx)),
-    },
-    {
-      kind: "submenu",
-      id: "add-project",
-      title: "Add project",
-      icon: FolderGit2,
-      entries: asItems(addProjectMenuItems()),
-    },
     {
       kind: "item",
       id: "new-standalone-terminal",

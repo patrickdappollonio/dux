@@ -55,13 +55,16 @@ describe("appMenuModel", () => {
 
   it("lists the approved top-level entries in order", () => {
     expect(appMenuModel(ctx).map((e) => [e.kind, e.id])).toEqual([
+      // The creation submenus open the menu (settled with Patrick): creating
+      // is the most common reason to reach for the cog.
+      ["submenu", "new-agent"],
+      ["submenu", "add-project"],
+      ["separator", "sep-create"],
       ["item", "preferences"],
       ["separator", "sep-preferences"],
       ["submenu", "sort-agents"],
       ["submenu", "configuration"],
       ["separator", "sep-agents"],
-      ["submenu", "new-agent"],
-      ["submenu", "add-project"],
       ["item", "new-standalone-terminal"],
       ["item", "task-manager"],
       ["separator", "sep-about"],
