@@ -200,19 +200,17 @@ pub fn ui_startup_warning() -> Option<&'static str> {
 /// manifest, the service worker, the offline page) must revalidate on every
 /// load, or a browser keeps rendering a stale bundle after the binary is
 /// rebuilt. Revalidation is cheap: responses carry a sha256 `ETag`, so an
-/// unchanged file answers `304 Not Modified` with no body. Icons and images are
-/// not content-addressed but change essentially never; they get a modest
-/// max-age so reloads stay light.
+/// unchanged file answers `304 Not Modified` with no body. Icons and images
+/// are not content-addressed either (hashing them would require generating
+/// the manifest, whose icon paths Vite does not rewrite), so they take the
+/// same no-cache-plus-ETag policy: a changed logo shows on the next load
+/// instead of up to a day late, and an unchanged one costs one empty `304`
+/// per load, which is nothing on a loopback/Tailscale server.
 fn cache_policy(path: &str) -> &'static str {
     if path.starts_with("assets/") {
         "public, max-age=31536000, immutable"
-    } else if matches!(
-        path,
-        "index.html" | "sw.js" | "manifest.webmanifest" | "offline.html"
-    ) {
-        "no-cache"
     } else {
-        "public, max-age=86400"
+        "no-cache"
     }
 }
 
@@ -585,7 +583,10 @@ mod tests {
         assert_eq!(cache_policy("sw.js"), "no-cache");
         assert_eq!(cache_policy("manifest.webmanifest"), "no-cache");
         assert_eq!(cache_policy("offline.html"), "no-cache");
-        assert_eq!(cache_policy("favicon.png"), "public, max-age=86400");
+        // Images are no-cache + ETag like the entry points: not content-
+        // addressed, so a max-age would show a changed logo up to a day late.
+        assert_eq!(cache_policy("favicon.png"), "no-cache");
+        assert_eq!(cache_policy("dux-logo.png"), "no-cache");
     }
 
     #[test]
