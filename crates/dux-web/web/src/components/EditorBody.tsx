@@ -1195,28 +1195,30 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
             carries the active file so the new tab opens on it. Absent on the
             standalone surface itself, which already is that tab. */}
         {!standalone && (
-          <SimpleTooltip content="Open editor in new tab">
-            <Button
-              size="icon-sm"
-              variant="ghost"
-              className="shrink-0 max-md:size-10"
-              aria-label="Open editor in new tab"
-              render={
-                <a
-                  href={standaloneEditorHash(
-                    sessionId,
-                    activeTab
-                      ? { mode: activeTab.mode, path: activeTab.path }
-                      : null,
-                  )}
-                  target="_blank"
-                  rel="noopener"
-                />
-              }
-            >
-              <ExternalLink />
-            </Button>
-          </SimpleTooltip>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="shrink-0 max-md:min-h-10"
+            render={
+              <a
+                href={standaloneEditorHash(
+                  sessionId,
+                  activeTab
+                    ? { mode: activeTab.mode, path: activeTab.path }
+                    : null,
+                )}
+                target="_blank"
+                rel="noopener"
+              />
+            }
+          >
+            <ExternalLink />
+            {/* A visible label, not an icon-only button: an unlabeled
+                external-link glyph reads as "some link", and this header's
+                idiom is icon + text (Save, Close). The text also makes the
+                tooltip redundant, so there is none. */}
+            Open in new tab
+          </Button>
         )}
         {/* Closes immediately, dirty tabs included: nothing is lost (tabs
             live in the store, drafts in the module cache), so there is no

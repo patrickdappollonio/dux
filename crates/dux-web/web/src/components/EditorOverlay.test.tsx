@@ -909,6 +909,17 @@ describe("file explorer collapse toggle", () => {
     vi.unstubAllGlobals()
   })
 
+  it("offers Open in new tab as a labeled anchor to the standalone address", async () => {
+    await mountWithTab(PATH)
+    // A visible label, not an icon-only button: the accessible name IS the
+    // on-screen text, and the control is a real anchor so middle-click and
+    // ctrl/cmd-click keep their native semantics.
+    const link = await screen.findByRole("link", { name: /open in new tab/i })
+    expect(link.getAttribute("href")).toContain("#/editor/agent/")
+    expect(link.getAttribute("target")).toBe("_blank")
+    expect(link.getAttribute("rel")).toBe("noopener")
+  })
+
   it("renders in the header, starts expanded, and meets the touch floor", async () => {
     await mountWithTab(PATH)
     const btn = await screen.findByRole("button", {
