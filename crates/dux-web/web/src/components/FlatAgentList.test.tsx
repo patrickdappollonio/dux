@@ -25,7 +25,8 @@ vi.mock("@dnd-kit/core", () => ({
     dragEndHandlers.push(onDragEnd)
     return children
   },
-  PointerSensor: class {},
+  MouseSensor: class {},
+  TouchSensor: class {},
   closestCenter: () => {},
   useSensor: () => ({}),
   useSensors: (...sensors: unknown[]) => sensors,

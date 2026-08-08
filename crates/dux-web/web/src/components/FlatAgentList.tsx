@@ -1,6 +1,7 @@
 import {
   DndContext,
-  PointerSensor,
+  MouseSensor,
+  TouchSensor,
   closestCenter,
   useSensor,
   useSensors,
@@ -82,6 +83,10 @@ import {
 import { changesCountFor } from "@/lib/agentVitals"
 import { DEFAULT_AGENT_TABS_MAX } from "@/lib/bootstrapApi"
 import { clipboardWorktree } from "@/lib/flatClipboard"
+import {
+  MOUSE_DRAG_ACTIVATION,
+  TOUCH_DRAG_ACTIVATION,
+} from "@/lib/dragActivation"
 import {
   displayedSessionOrder,
   FLAT_SORT_LABELS,
@@ -512,7 +517,13 @@ function AgentFlatRow({
   const dragProps = sortable ? { ...attributes, ...listeners } : {}
 
   return (
-    <div ref={setNodeRef} style={style} className="flex flex-col">
+    // While dragging, the row visibly LIFTS (shadow + stacking) so a touch
+    // hold that armed the drag reads as "grabbed" before the finger moves.
+    <div
+      ref={setNodeRef}
+      style={style}
+      className={cn("flex flex-col", isDragging && "z-10 rounded-md shadow-lg")}
+    >
       <div
         className={cn(
           // The wrapper owns the highlight (rounded, full-width) so it spans both
@@ -712,9 +723,10 @@ function TerminalFlatRow({
   const shimmer = terminal.working && !terminal.typing
 
   // Whole-row drag, exactly like AgentFlatRow: `useSortable` supplies the drag
-  // listeners spread onto the select button (the PointerSensor's 6px activation
-  // distance keeps a plain click as a select), and the wrapper carries the
-  // Y-locked transform so a row never flies out of the column.
+  // listeners spread onto the select button (the mouse sensor's 6px activation
+  // distance keeps a plain click as a select; touch arms on a hold, see
+  // lib/dragActivation.ts), and the wrapper carries the Y-locked transform so
+  // a row never flies out of the column.
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
     useSortable({ id: terminal.id })
   const style: CSSProperties = {
@@ -734,6 +746,8 @@ function TerminalFlatRow({
         "group/flat-term relative flex items-stretch rounded-md pr-1 transition-colors",
         "hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
         active && "bg-sidebar-accent text-sidebar-accent-foreground",
+        // The same drag-lift cue as the agent row wrapper.
+        isDragging && "z-10 shadow-lg",
       )}
     >
       <button
@@ -1113,8 +1127,13 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
   )
 
   const manual = agentSort === "manual"
+  // Mouse drags on a 6px pull (a click stays a select); touch drags on a
+  // HOLD, or it fights the list's scroll gesture on phones. Why this is two
+  // sensors rather than one PointerSensor, and the values themselves, live
+  // in lib/dragActivation.ts.
   const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(MouseSensor, { activationConstraint: MOUSE_DRAG_ACTIVATION }),
+    useSensor(TouchSensor, { activationConstraint: TOUCH_DRAG_ACTIVATION }),
   )
 
   // The terminal drag's twin of `handleDragEnd`: move the dragged terminal to the
