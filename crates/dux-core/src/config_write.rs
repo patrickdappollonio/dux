@@ -716,15 +716,32 @@ fn patch_macros(doc: &mut DocumentMut, macros: &MacrosConfig) {
         }
     }
 
-    // Add or update entries.
+    // Add or update entries, IN `macros.entries` ORDER. Order is meaningful
+    // (the macro bar, the web quick-picker, and the editor list all render in
+    // declaration order, and the web editor reorders by drag-and-drop through
+    // this same wholesale save), and `table[name] = ...` on an existing key
+    // keeps its OLD toml_edit position — so a pure reorder used to round-trip
+    // through the in-memory config while the file kept the old order, and a
+    // dux restart silently undid it. Removing each key first and re-inserting
+    // with `insert_formatted` appends in iteration order while carrying the
+    // key's own decor (a comment the user wrote above a macro line) with it.
     for (name, entry) in &macros.entries {
+        let existing_key = table.remove_entry(name).map(|(key, _)| key);
         let mut inline = InlineTable::new();
         inline.insert("text", Value::String(Formatted::new(entry.text.clone())));
         inline.insert(
             "surface",
             Value::String(Formatted::new(entry.surface.as_config_str().to_string())),
         );
-        table[name] = toml_edit::value(Value::InlineTable(inline));
+        let item = toml_edit::value(Value::InlineTable(inline));
+        match existing_key {
+            Some(key) => {
+                table.insert_formatted(&key, item);
+            }
+            None => {
+                table[name] = item;
+            }
+        }
     }
 }
 
@@ -1317,6 +1334,103 @@ pub fn escape_toml_multiline(value: &str) -> String {
 #[allow(deprecated)] // tests call the deprecated wrappers directly to verify their behaviour
 mod tests {
     use super::*;
+
+    /// A pure REORDER of the macro set must reach the file. `[macros]` order is
+    /// meaningful (the macro bar, quick-picker, and web editor all render in
+    /// declaration order), and the web editor now reorders by drag-and-drop
+    /// through the same wholesale `update_macros` save. Writing an existing key
+    /// with `table[name] = ...` keeps its old toml_edit position, so before this
+    /// was pinned a reorder round-tripped through the in-memory config but the
+    /// file kept the old order and a dux restart silently undid the drag.
+    #[test]
+    fn patch_macros_writes_entries_in_config_order() {
+        let raw = "\
+[macros]
+# my review macro
+review = { text = \"review this\", surface = \"agent\" }
+build = { text = \"cargo build\", surface = \"terminal\" }
+deploy = { text = \"deploy it\", surface = \"both\" }
+";
+        let mut doc: DocumentMut = raw.parse().expect("parse");
+
+        // Same three entries, reordered: deploy, review, build.
+        let mut macros = MacrosConfig::default();
+        for (name, text, surface) in [
+            ("deploy", "deploy it", crate::config::MacroSurface::Both),
+            ("review", "review this", crate::config::MacroSurface::Agent),
+            ("build", "cargo build", crate::config::MacroSurface::Terminal),
+        ] {
+            macros.entries.insert(
+                name.to_string(),
+                crate::config::MacroEntry {
+                    text: text.to_string(),
+                    surface,
+                },
+            );
+        }
+        patch_macros(&mut doc, &macros);
+
+        let saved = doc.to_string();
+        let pos = |needle: &str| saved.find(needle).unwrap_or_else(|| panic!("missing {needle}"));
+        assert!(
+            pos("deploy") < pos("review") && pos("review") < pos("build"),
+            "entries must be written in the new order, got:\n{saved}"
+        );
+        // The comment above `review` travels with its key through the reorder.
+        assert!(
+            pos("# my review macro") < pos("review ="),
+            "the key's comment must survive and stay attached, got:\n{saved}"
+        );
+
+        // The reparsed config sees the new order, so a restart keeps it.
+        let reparsed: Config = toml::from_str(&saved).expect("reparse");
+        assert_eq!(
+            reparsed.macros.entries.keys().collect::<Vec<_>>(),
+            vec!["deploy", "review", "build"]
+        );
+    }
+
+    /// The reorder rewrite must not clobber entries that changed CONTENT in the
+    /// same save, and stale keys still disappear.
+    #[test]
+    fn patch_macros_reorder_carries_edits_and_removals() {
+        let raw = "\
+[macros]
+review = { text = \"review this\", surface = \"agent\" }
+gone = { text = \"bye\", surface = \"both\" }
+build = { text = \"cargo build\", surface = \"terminal\" }
+";
+        let mut doc: DocumentMut = raw.parse().expect("parse");
+
+        let mut macros = MacrosConfig::default();
+        macros.entries.insert(
+            "build".to_string(),
+            crate::config::MacroEntry {
+                text: "cargo build --release".to_string(),
+                surface: crate::config::MacroSurface::Terminal,
+            },
+        );
+        macros.entries.insert(
+            "review".to_string(),
+            crate::config::MacroEntry {
+                text: "review this".to_string(),
+                surface: crate::config::MacroSurface::Agent,
+            },
+        );
+        patch_macros(&mut doc, &macros);
+
+        let saved = doc.to_string();
+        assert!(!saved.contains("gone"), "stale key must be removed:\n{saved}");
+        let reparsed: Config = toml::from_str(&saved).expect("reparse");
+        assert_eq!(
+            reparsed.macros.entries.keys().collect::<Vec<_>>(),
+            vec!["build", "review"]
+        );
+        assert_eq!(
+            reparsed.macros.entries["build"].text,
+            "cargo build --release"
+        );
+    }
 
     #[test]
     fn write_config_atomic_writes_0600_and_no_temp_left() {

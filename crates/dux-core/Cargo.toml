@@ -23,7 +23,12 @@ rusqlite = { version = "0.39.0", features = ["bundled", "chrono"] }
 libc.workspace = true
 rustix.workspace = true
 serde.workspace = true
-toml = "1.1.2"
+# `preserve_order` is load-bearing: `[macros]` and `[providers]` are
+# order-meaningful flattened IndexMaps, and without it `toml::from_str` hands
+# serde the keys alphabetically, so a config reload (or a `-p dux-core` test)
+# silently re-sorts them. dux-tui already enabled it; declaring it here too
+# keeps dux-core's own semantics independent of feature unification.
+toml = { version = "1.1.2", features = ["preserve_order"] }
 toml_edit = "0.25"
 serde_json.workspace = true
 sysinfo.workspace = true
