@@ -232,6 +232,25 @@ mod tests {
     }
 
     #[test]
+    fn deleted_file_whose_directory_was_pruned_has_empty_modified() {
+        // The realistic `git rm sub/only-file` shape: git prunes the now-empty
+        // parent directory too, so the working side's stat fails with a
+        // missing PARENT, not just a missing file. That must still read as a
+        // deletion (HEAD content vs empty), never an error — the web Changes
+        // pane renders a deleted file's diff from exactly this state.
+        let repo = init_repo();
+        std::fs::create_dir(repo.path().join("sub")).expect("mkdir");
+        commit_file(repo.path(), "sub/only.txt", "the only file\n");
+        std::fs::remove_file(repo.path().join("sub/only.txt")).expect("remove file");
+        std::fs::remove_dir(repo.path().join("sub")).expect("remove dir");
+
+        let c = file_diff_contents(repo.path(), "sub/only.txt").expect("contents");
+        assert!(!c.binary);
+        assert_eq!(c.original, "the only file\n");
+        assert_eq!(c.modified, "");
+    }
+
+    #[test]
     fn binary_file_is_flagged_with_empty_sides() {
         let repo = init_repo();
         commit_file(repo.path(), "f.txt", "text\n");
