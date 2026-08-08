@@ -166,6 +166,15 @@ export function AgentActionsMenu({
   const addingTab = createTabInFlight.includes(session.id)
   const providers = bootstrap?.available_providers ?? []
   const defaultProvider = defaultProviderForSession(spine, session)
+  // The two submenu labels name their subject so the menu reads unambiguously
+  // even when opened far from the row (the mobile terminal header). The agent
+  // name is the row's own display idiom (title ?? branch); the Project
+  // submenu names the PROJECT, because its actions affect the whole project,
+  // not just this agent.
+  const agentName = session.title ?? session.branch_name
+  const projectName = spine?.projects.find(
+    (p) => p.id === session.project_id,
+  )?.name
   const topBarVisible = mobileTopBarVisible(duxState)
   const accessoryBarVisible = mobileAccessoryBarVisible(duxState)
   // The quick toggles need the viewport too, not just the context: the chrome
@@ -204,7 +213,11 @@ export function AgentActionsMenu({
       <DropdownMenuSub>
         <DropdownMenuSubTrigger disabled={atTabCap || addingTab}>
           <Plus />
-          New agent tab…
+          {/* min-w-0 + truncate so a long agent name cannot blow the menu
+              wide open; the full name is in the row/tooltip already. */}
+          <span className="min-w-0 truncate">
+            New agent tab for &quot;{agentName}&quot;…
+          </span>
         </DropdownMenuSubTrigger>
         <DropdownMenuSubContent>
           {providers.map((p) => {
@@ -228,7 +241,9 @@ export function AgentActionsMenu({
       <DropdownMenuSub>
         <DropdownMenuSubTrigger>
           <Folder />
-          Project…
+          <span className="min-w-0 truncate">
+            {projectName ? <>Project &quot;{projectName}&quot;…</> : <>Project…</>}
+          </span>
         </DropdownMenuSubTrigger>
         <DropdownMenuSubContent>
           <ProjectMenuItems id={session.project_id} />

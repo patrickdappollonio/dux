@@ -210,7 +210,7 @@ describe("AppSidebar agent ⋯ menu — Add tab (G7)", () => {
       </SidebarProvider>,
     )
     fireEvent.click(screen.getByLabelText("Session actions"))
-    const item = screen.getByText("New agent tab…")
+    const item = screen.getByText(/^New agent tab for /)
     expect(
       item.closest('[role="menuitem"]')?.getAttribute("aria-disabled"),
     ).not.toBe("true")
@@ -233,7 +233,7 @@ describe("AppSidebar agent ⋯ menu — Add tab (G7)", () => {
       </SidebarProvider>,
     )
     fireEvent.click(screen.getByLabelText("Session actions"))
-    const item = screen.getByText("New agent tab…")
+    const item = screen.getByText(/^New agent tab for /)
     expect(item.closest('[role="menuitem"]')?.getAttribute("aria-disabled")).toBe(
       "true",
     )
@@ -255,7 +255,7 @@ describe("AppSidebar agent ⋯ menu — Add tab (G7)", () => {
       </SidebarProvider>,
     )
     fireEvent.click(screen.getByLabelText("Session actions"))
-    fireEvent.click(screen.getByText("New agent tab…"))
+    fireEvent.click(screen.getByText(/^New agent tab for /))
     // makeSessionSpine's project default_provider is "claude".
     expect(screen.getByText("default")).toBeTruthy()
     expect(screen.getByText("codex")).toBeTruthy()
@@ -474,7 +474,7 @@ describe("AppSidebar project terminals", () => {
     // The orphan has an agent row; its project actions live in the agent ⋯ menu
     // under the "Project…" submenu.
     fireEvent.click(screen.getByLabelText("Session actions"))
-    fireEvent.click(screen.getByText("Project…"))
+    fireEvent.click(screen.getByText(/^Project[ …]/))
     expect(screen.queryByText("New project terminal")).toBeNull()
     expect(screen.getByText("Remove project…")).toBeTruthy()
   })
@@ -550,7 +550,7 @@ describe("AppSidebar flat agent row", () => {
     expect(screen.queryByLabelText("Project actions")).toBeNull()
     // Project actions live in the agent ⋯ menu, under a "Project…" submenu.
     fireEvent.click(screen.getByLabelText("Session actions"))
-    expect(screen.getByText("Project…")).toBeTruthy()
+    expect(screen.getByText(/^Project[ …]/)).toBeTruthy()
   })
 
   it("collapses detached/exited agents into an Inactive tail", () => {
