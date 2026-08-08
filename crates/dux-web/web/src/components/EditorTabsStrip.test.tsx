@@ -159,13 +159,30 @@ describe("EditorTabsStrip", () => {
     expect(editorCloseTabMock).toHaveBeenCalledWith("s1", "t1")
   })
 
-  it("strip container is horizontally scrollable and pills meet the touch-target floor", () => {
+  it("strip container is horizontally scrollable", () => {
     seed("s1", [tab({ id: "t1" })], "t1")
     const { container } = render(<EditorTabsStrip sessionId="s1" />)
     const strip = container.firstElementChild as HTMLElement
     expect(strip.className).toContain("overflow-x-auto")
+  })
+
+  it("phone pills match the mode toggle's height, a deliberate touch-floor deviation", () => {
+    // The pill's visible phone height is pinned to the File/Diff mode
+    // toggle's rendered height (h-7 button + p-0.5 + border = 34px =
+    // min-h-8.5), NOT the 40px touch floor — a settled product decision for
+    // this surface. The close button keeps a larger-than-visual hit area
+    // (max-md:size-8 fits inside the 34px pill without adding height).
+    seed("s1", [tab({ id: "t1" })], "t1")
+    render(<EditorTabsStrip sessionId="s1" />)
+    const pill = screen.getByText("a.ts").closest('[role="tab"]') as HTMLElement
+    expect(pill.className).toContain("max-md:min-h-8.5")
+    // py-0 on the phone: the 32px close-button hit area already fills the
+    // 34px pill; keeping py-1 would push the rendered height to 42px.
+    expect(pill.className).toContain("max-md:py-0")
+    expect(pill.className).not.toContain("max-md:min-h-10")
     const closeBtn = screen.getByLabelText("Close a.ts")
-    expect(closeBtn.className).toMatch(/max-md:size-10|max-md:min-h-10/)
+    expect(closeBtn.className).toContain("max-md:size-8")
+    expect(closeBtn.className).not.toContain("max-md:size-10")
   })
 
   it("renders nothing when the session has no tabs", () => {

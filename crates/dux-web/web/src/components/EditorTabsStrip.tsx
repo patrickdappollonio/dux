@@ -80,8 +80,16 @@ function TabPill({
             onActivate()
           }
         }}
+        // max-md:min-h-8.5 (34px) pins the phone pill to the header's
+        // File/Diff mode toggle's rendered height (an h-7 button inside
+        // p-0.5 plus the border), a settled decision that deliberately
+        // deviates from the 40px touch-target floor for this surface: the
+        // strip sits between the header and Monaco, where vertical space is
+        // the scarce resource on a phone. max-md:py-0 goes with it — the
+        // 32px close-button hit area inside would otherwise add the padding
+        // back on top and overshoot the 34px (measured 42px with py-1).
         className={cn(
-          "group/etab flex shrink-0 cursor-pointer items-center gap-1.5 rounded-md border px-2 py-1 text-sm transition-colors max-md:min-h-10",
+          "group/etab flex shrink-0 cursor-pointer items-center gap-1.5 rounded-md border px-2 py-1 text-sm transition-colors max-md:min-h-8.5 max-md:py-0",
           active
             ? "border-border bg-background text-foreground"
             : "border-transparent bg-muted text-muted-foreground hover:text-foreground",
@@ -116,7 +124,10 @@ function TabPill({
             e.stopPropagation()
             onClose()
           }}
-          className="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:text-foreground max-md:size-10"
+          // max-md:size-8 keeps a larger-than-visual tap area (32px against
+          // the icon's 14px glyph) without adding to the pill's 34px height
+          // — the cheap tap forgiveness the reduced pill still affords.
+          className="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:text-foreground max-md:size-8"
         >
           <X className="size-3.5" />
         </button>
