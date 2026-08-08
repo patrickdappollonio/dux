@@ -11,6 +11,7 @@ import { sortedSessionIds, type SortKey } from "./sortSessions"
 import { nextActiveSessionId, type FlatSortKey } from "./flatList"
 import { EventsSocket } from "./eventsSocket"
 import { getActivePtySocket } from "./ptySocket"
+import { getComposeInsertSink } from "./composeInsert"
 import { notifyPtyOwner, resetPtyOwnerEpochs } from "./ptyOwnership"
 import { macroPayloadBytes } from "./macros"
 import { terminalsApi } from "./terminalsApi"
@@ -4841,26 +4842,47 @@ export function reorderProjects(orderedIds: string[]): void {
 }
 
 
-// Run a macro by name on the focused PTY. Since Phase 5 the web no longer sends a
-// server-side `run_macro` command: it resolves the macro's text from the bootstrap
-// document, applies the newline→Alt+Enter transform (`macroPayloadBytes`, an exact
-// port of the engine's), and writes the payload straight to the active PTY socket
-// as stdin — the same socket the focused terminal pane drives. The macro picker is
-// already filtered to the focused surface, so the active socket IS the macro's
-// target. No-op if the macro is unknown or no terminal is focused (no active
-// socket). The text is pasted WITHOUT a trailing submit, mirroring the TUI: the
-// user reviews it in the prompt and presses Enter to send.
-export function runMacro(name: string): void {
+// Where a picked macro landed: the compose draft, the PTY, or nowhere (unknown
+// macro, no focused target, no active socket). The macro popover reads this to
+// decide its close-focus target — a compose insert must land focus in the
+// draft, while the PTY path keeps today's focus behavior.
+export type MacroDestination = "compose" | "pty" | "none"
+
+// Run a macro by name on the focused target. Since Phase 5 the web no longer
+// sends a server-side `run_macro` command: it resolves the macro's text from the
+// bootstrap document and delivers it client-side, to one of two destinations.
+//
+// While the mobile compose bar is the rendered typing surface, `TerminalPane`
+// has a compose-insert sink registered (see `composeInsert.ts`) and the macro's
+// RAW text is inserted into the compose DRAFT at the caret — an editable draft
+// the user reviews and Sends, never an immediate wire write (the Send path owns
+// the newline→keystroke transform, which is exactly why the raw text goes in
+// verbatim).
+//
+// Otherwise (desktop, compose bar off, non-owner viewer) the macro takes the
+// direct path: the newline→Alt+Enter transform (`macroPayloadBytes`, an exact
+// port of the engine's) is written straight to the active PTY socket as stdin —
+// the same socket the focused terminal pane drives. The macro picker is already
+// filtered to the focused surface, so the active socket IS the macro's target.
+// The text is pasted WITHOUT a trailing submit, mirroring the TUI: the user
+// reviews it in the prompt and presses Enter to send.
+export function runMacro(name: string): MacroDestination {
   const macro = (state.bootstrap?.macros ?? []).find((m) => m.name === name)
-  if (!macro) return
+  if (!macro) return "none"
   // Defensive: only inject when a terminal is actually focused. During a focus
   // switch the outgoing pane may not have cleared its registration yet; without
-  // a selected target the active socket is stale, and writing to it would paste
-  // the macro into the wrong (just-detached) PTY.
-  if (state.selectedTarget === null) return
+  // a selected target the active socket (or compose sink) is stale, and writing
+  // to it would paste the macro into the wrong (just-detached) surface.
+  if (state.selectedTarget === null) return "none"
+  const compose = getComposeInsertSink()
+  if (compose !== null) {
+    compose.insert(macro.text)
+    return "compose"
+  }
   const pty = getActivePtySocket()
-  if (pty === null) return
+  if (pty === null) return "none"
   pty.sendInput(macroPayloadBytes(macro.text))
+  return "pty"
 }
 
 // Open the macro-editor dialog, seeding the draft from the current bootstrap

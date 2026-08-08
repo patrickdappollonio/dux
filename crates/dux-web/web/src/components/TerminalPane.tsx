@@ -11,7 +11,12 @@ import {
   COMPOSE_SUBMIT_DELAY_MS,
   composeSendTooLarge,
   composeSendWrites,
+  insertIntoComposeDraft,
 } from "@/lib/composebar"
+import {
+  getComposeInsertSink,
+  setComposeInsertSink,
+} from "@/lib/composeInsert"
 import {
   type ConfiguredDropPaste,
   type DropContext,
@@ -393,6 +398,19 @@ export function TerminalPane(props: TerminalPaneProps) {
   // unmount (a preference flip, a rotation past the mobile breakpoint) without
   // destroying in-progress text; the bar is a controlled input over this state.
   const [composeText, setComposeText] = useState("")
+  // Where the caret should land after a programmatic draft splice (a picked
+  // macro inserting into the draft). A controlled textarea re-renders on the
+  // value change and the browser parks the caret at the end of the new value,
+  // so the splice records its intended caret here and this effect applies it
+  // in the same commit the new draft text reaches the DOM. Null means "no
+  // pending placement" — ordinary typing never goes through this.
+  const pendingComposeCaretRef = useRef<number | null>(null)
+  useEffect(() => {
+    const caret = pendingComposeCaretRef.current
+    if (caret === null) return
+    pendingComposeCaretRef.current = null
+    composeInputRef.current?.setSelectionRange(caret, caret)
+  }, [composeText])
   // The `ui.attention_grace_seconds` preference (default 3s), converted to ms.
   // Read via a ref inside the stable mount-effect visibility handlers so
   // changing it never recreates the terminal; the fallback (3s) applies only
@@ -582,6 +600,53 @@ export function TerminalPane(props: TerminalPaneProps) {
   useEffect(() => {
     if (isOwner && composeBarEnabled) composeInputRef.current?.focus()
   }, [isOwner, composeBarEnabled])
+  // While the compose bar is actually rendered (mobile, `ui.compose_bar` on,
+  // input owner — the same gate as the render below), register the
+  // compose-insert sink the store's `runMacro` routes a picked macro through:
+  // the macro's RAW text is spliced into the DRAFT at the caret, an editable
+  // message the user reviews and Sends, never an immediate PTY write. The
+  // module-scope hand-off exists because the mobile macro picker lives in the
+  // terminal screen's header (MobileShell), outside this pane — see
+  // `composeInsert.ts`. The sink retires the moment the bar stops rendering
+  // (viewer demotion, preference flip, unmount), restoring the direct
+  // macro-to-PTY path everywhere the bar is not the typing surface.
+  useEffect(() => {
+    if (!(composeBarEnabled && isOwner)) return
+    const sink = {
+      insert: (text: string) => {
+        // The textarea's selection is read up front, once: the functional
+        // updater below may run more than once (StrictMode), and it must
+        // splice the same way each time. A missing element or selection falls
+        // back to appending (insertIntoComposeDraft treats null as "append").
+        const el = composeInputRef.current
+        const selectionStart = el === null ? null : el.selectionStart
+        const selectionEnd = el === null ? null : el.selectionEnd
+        setComposeText((prev) => {
+          const { next, caret } = insertIntoComposeDraft(
+            prev,
+            selectionStart,
+            selectionEnd,
+            text,
+          )
+          // A ref write inside the updater is idempotent: the same inputs
+          // yield the same caret on a re-run. The caret-placement effect above
+          // applies it once the new draft value reaches the DOM.
+          pendingComposeCaretRef.current = caret
+          return next
+        })
+        // The draft the macro just joined is where editing continues; the
+        // active typing surface here IS the compose textarea.
+        focusTypingSurface()
+      },
+      target: () => composeInputRef.current,
+    }
+    setComposeInsertSink(sink)
+    return () => {
+      // Only retire our own registration: a successor pane may already have
+      // replaced it (the same guard `setActivePtySocket` cleanup uses).
+      if (getComposeInsertSink() === sink) setComposeInsertSink(null)
+    }
+  }, [composeBarEnabled, isOwner])
   // This view's PTY-socket connection id, delivered as the socket's first
   // `connected` frame (and re-issued on every reconnect). Compared against each
   // `pty.owner` event's claimer id to decide ownership. Null until that frame lands.

@@ -5,6 +5,7 @@ import {
   MAX_COMPOSE_SEND_BYTES,
   composeSendTooLarge,
   composeSendWrites,
+  insertIntoComposeDraft,
 } from "./composebar"
 
 // The full write-plan matrix for the mobile compose bar's Send action. The
@@ -73,6 +74,81 @@ describe("composeSendWrites", () => {
     // submitting. 150ms is 3x that window with margin, still imperceptible
     // next to the tap that triggered the send.
     expect(COMPOSE_SUBMIT_DELAY_MS).toBe(150)
+  })
+})
+
+// The splice a picked macro performs on the compose draft: the macro's text
+// lands IN the draft at the caret (the compose bar is the phone's typing
+// surface, so a macro is an editable draft there, not an immediate wire
+// write). Pure and DOM-free: the caller reads the textarea's selection and
+// passes it in, so the whole matrix is pinned without mounting anything.
+describe("insertIntoComposeDraft", () => {
+  it("inserts at the caret, preserving the draft around it", () => {
+    expect(insertIntoComposeDraft("hello world", 5, 5, " brave")).toEqual({
+      next: "hello brave world",
+      caret: 11,
+    })
+  })
+
+  it("replaces a selection range with the inserted text", () => {
+    expect(insertIntoComposeDraft("hello world", 6, 11, "there")).toEqual({
+      next: "hello there",
+      caret: 11,
+    })
+  })
+
+  it("appends to the end when the selection is unavailable (null)", () => {
+    expect(insertIntoComposeDraft("draft", null, null, "!")).toEqual({
+      next: "draft!",
+      caret: 6,
+    })
+  })
+
+  it("appends to the end when either half of the selection is missing", () => {
+    expect(insertIntoComposeDraft("draft", 2, null, "!")).toEqual({
+      next: "draft!",
+      caret: 6,
+    })
+    expect(insertIntoComposeDraft("draft", null, 2, "!")).toEqual({
+      next: "draft!",
+      caret: 6,
+    })
+  })
+
+  it("clamps an out-of-range selection to the draft's bounds", () => {
+    // A stale selection (the DOM value briefly lagging the controlled state)
+    // must never slice past the end or below zero.
+    expect(insertIntoComposeDraft("ab", 5, 9, "X")).toEqual({
+      next: "abX",
+      caret: 3,
+    })
+    expect(insertIntoComposeDraft("ab", -3, -1, "X")).toEqual({
+      next: "Xab",
+      caret: 1,
+    })
+  })
+
+  it("orders a reversed selection before splicing", () => {
+    expect(insertIntoComposeDraft("hello world", 11, 6, "there")).toEqual({
+      next: "hello there",
+      caret: 11,
+    })
+  })
+
+  it("inserts multi-line text verbatim, newlines included", () => {
+    // The Send path already converts newlines to newline-without-submit
+    // keystrokes on the wire; the DRAFT keeps them as real newlines.
+    expect(insertIntoComposeDraft("", 0, 0, "a\nb\nc")).toEqual({
+      next: "a\nb\nc",
+      caret: 5,
+    })
+  })
+
+  it("lands in an empty draft as the whole draft", () => {
+    expect(insertIntoComposeDraft("", null, null, "run tests")).toEqual({
+      next: "run tests",
+      caret: 9,
+    })
   })
 })
 

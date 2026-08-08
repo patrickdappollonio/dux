@@ -68,3 +68,38 @@ export function composeSendWrites(text: string): Uint8Array[] {
   if (body.byteLength === 0) return [submit]
   return [body, submit]
 }
+
+/**
+ * Splices `text` into the compose draft, returning the new draft and where the
+ * caret lands (immediately after the inserted text). This is what a picked
+ * macro does while the compose bar is the typing surface: the macro becomes an
+ * editable draft the user reviews and Sends, never an immediate wire write.
+ *
+ * `selectionStart`/`selectionEnd` are the textarea's reported selection, in
+ * UTF-16 code units (the same units `String.slice` uses, so no conversion). A
+ * missing half (`null`) means the caret state is unavailable and the insert
+ * APPENDS to the end; out-of-range values (a DOM value briefly lagging the
+ * controlled state) are clamped to the draft's bounds, and a reversed
+ * selection is reordered before splicing. Multi-line text is inserted
+ * verbatim: the draft keeps real newlines, and only the Send path converts
+ * them to newline-without-submit keystrokes on the wire.
+ */
+export function insertIntoComposeDraft(
+  draft: string,
+  selectionStart: number | null,
+  selectionEnd: number | null,
+  text: string,
+): { next: string; caret: number } {
+  let start: number
+  let end: number
+  if (selectionStart === null || selectionEnd === null) {
+    start = draft.length
+    end = draft.length
+  } else {
+    start = Math.min(Math.max(selectionStart, 0), draft.length)
+    end = Math.min(Math.max(selectionEnd, 0), draft.length)
+    if (start > end) [start, end] = [end, start]
+  }
+  const next = draft.slice(0, start) + text + draft.slice(end)
+  return { next, caret: start + text.length }
+}

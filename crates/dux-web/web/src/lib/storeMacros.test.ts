@@ -250,6 +250,67 @@ describe("store macros commands", () => {
     expect(pty.sent).toHaveLength(0)
   })
 
+  // The mobile compose-bar routing: while the compose bar is the rendered
+  // typing surface (TerminalPane registers the sink for exactly that window),
+  // a picked macro is a DRAFT INSERT, never a wire write. The RAW text goes to
+  // the sink verbatim (newlines included — the compose Send path owns the
+  // newline→keystroke transform later), and the PTY receives NOTHING.
+  async function fakeComposeSink(): Promise<{ inserted: string[] }> {
+    const inserted: string[] = []
+    const { setComposeInsertSink } = await import("./composeInsert")
+    setComposeInsertSink({
+      insert: (text: string) => inserted.push(text),
+      target: () => null,
+    })
+    return { inserted }
+  }
+
+  it("runMacro routes the raw macro text into a registered compose sink, PTY untouched", async () => {
+    bootstrapMacros = [{ name: "Greet", text: "hello\nworld", surface: "both" }]
+    const mod = await loadStore()
+    const pty = await fakeActivePty()
+    const compose = await fakeComposeSink()
+    mod.selectSession("s1")
+    expect(mod.runMacro("Greet")).toBe("compose")
+    // Verbatim text, newlines preserved — NOT the Alt+Enter wire transform.
+    expect(compose.inserted).toEqual(["hello\nworld"])
+    expect(pty.sent).toHaveLength(0)
+  })
+
+  it("runMacro reports the PTY destination when no compose sink is registered", async () => {
+    bootstrapMacros = [{ name: "Greet", text: "hi", surface: "both" }]
+    const mod = await loadStore()
+    const pty = await fakeActivePty()
+    mod.selectSession("s1")
+    expect(mod.runMacro("Greet")).toBe("pty")
+    expect(pty.sent).toHaveLength(1)
+  })
+
+  it("runMacro skips a registered compose sink when no target is focused", async () => {
+    // Same stale-focus guard as the PTY path: without a selected target the
+    // sink may belong to a pane mid-teardown, so nothing is inserted.
+    bootstrapMacros = [{ name: "Greet", text: "hi", surface: "both" }]
+    const mod = await loadStore()
+    const pty = await fakeActivePty()
+    const compose = await fakeComposeSink()
+    expect(mod.runMacro("Greet")).toBe("none")
+    expect(compose.inserted).toHaveLength(0)
+    expect(pty.sent).toHaveLength(0)
+  })
+
+  it("a cleared compose sink restores the direct PTY path", async () => {
+    bootstrapMacros = [{ name: "Greet", text: "hi", surface: "both" }]
+    const mod = await loadStore()
+    const pty = await fakeActivePty()
+    const compose = await fakeComposeSink()
+    const { setComposeInsertSink } = await import("./composeInsert")
+    setComposeInsertSink(null)
+    mod.selectSession("s1")
+    expect(mod.runMacro("Greet")).toBe("pty")
+    expect(compose.inserted).toHaveLength(0)
+    expect(pty.sent).toHaveLength(1)
+  })
+
   it("saveMacros PUTs the FULL ordered entries to /api/v1/macros and closes", async () => {
     const mod = await loadStore()
     mod.openMacrosDialog()

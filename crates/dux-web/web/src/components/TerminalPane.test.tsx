@@ -3,6 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 
 import { COMPOSE_SUBMIT_DELAY_MS } from "@/lib/composebar"
+import {
+  getComposeInsertSink,
+  setComposeInsertSink,
+} from "@/lib/composeInsert"
 import type { DuxState } from "@/lib/store"
 import type { ConnState } from "@/lib/types"
 import { notifyPtyOwner, resetPtyOwnerEpochs } from "@/lib/ptyOwnership"
@@ -242,6 +246,9 @@ beforeEach(() => {
   // The `pty.owner` epoch high-water marks are module-global; reset so a handover
   // in one test is never dropped as "stale" by a prior test's epoch.
   resetPtyOwnerEpochs()
+  // The compose-insert sink is module-global too; a pane left registered by a
+  // prior test must never satisfy this test's assertions.
+  setComposeInsertSink(null)
 })
 
 afterEach(() => {
@@ -745,6 +752,116 @@ describe("TerminalPane mobile compose bar", () => {
     mockState = makeState()
     rerender(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     expect(composeTextarea().value).toBe("draft survives")
+  })
+})
+
+// The compose-insert sink: while the compose bar is the rendered typing
+// surface (mobile, preference on, input owner), the pane registers a sink the
+// store's `runMacro` routes a picked macro through, so the macro text lands in
+// the compose DRAFT (editable, sent later by Send) instead of going straight
+// to the PTY. The sink exists exactly while the bar is rendered: desktop, a
+// disabled preference, and a non-owner viewer all leave it unregistered, which
+// is what keeps today's direct-to-PTY path for those cases.
+describe("TerminalPane compose macro insert sink", () => {
+  const desktopWidth = window.innerWidth
+  const goMobile = () => {
+    Object.defineProperty(window, "innerWidth", {
+      value: 500,
+      configurable: true,
+    })
+  }
+  afterEach(() => {
+    Object.defineProperty(window, "innerWidth", {
+      value: desktopWidth,
+      configurable: true,
+    })
+  })
+
+  const composeTextarea = () =>
+    screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement
+
+  it("registers the sink while the compose bar is rendered (mobile owner)", () => {
+    goMobile()
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const sink = getComposeInsertSink()
+    expect(sink).not.toBeNull()
+    // The sink's focus target is the compose textarea itself (the macro
+    // popover hands it to Base UI as the close-focus target).
+    expect(sink?.target()).toBe(composeTextarea())
+  })
+
+  it("does not register the sink on desktop", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(getComposeInsertSink()).toBeNull()
+  })
+
+  it("does not register the sink when the ui.compose_bar preference is off", () => {
+    goMobile()
+    const state = makeState()
+    ;(state.bootstrap as unknown as { compose_bar?: boolean }).compose_bar =
+      false
+    mockState = state
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(getComposeInsertSink()).toBeNull()
+  })
+
+  it("retires the sink when a foreign device takes over, restores it on reclaim", () => {
+    goMobile()
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const pty = last()
+    act(() => pty.onConnected("conn-me"))
+    expect(getComposeInsertSink()).not.toBeNull()
+    // Demoted to a read-only viewer: the compose bar unmounts, so a picked
+    // macro must fall back to the (owner-gated) PTY path, not a hidden draft.
+    act(() => notifyPtyOwner("s1", "conn-other", undefined, undefined))
+    expect(getComposeInsertSink()).toBeNull()
+    // Our own claim echo restores ownership, the bar, and the sink.
+    act(() => notifyPtyOwner("s1", "conn-me", undefined, undefined))
+    expect(getComposeInsertSink()).not.toBeNull()
+  })
+
+  it("retires the sink on unmount", () => {
+    goMobile()
+    const { unmount } = render(
+      <TerminalPane kind="agent" id="s1" sessionId="s1" />,
+    )
+    expect(getComposeInsertSink()).not.toBeNull()
+    unmount()
+    expect(getComposeInsertSink()).toBeNull()
+  })
+
+  it("insert lands the text in the draft at the caret and writes NOTHING to the PTY", () => {
+    goMobile()
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const pty = last()
+    fireEvent.change(composeTextarea(), { target: { value: "hello world" } })
+    composeTextarea().setSelectionRange(5, 5)
+    act(() => getComposeInsertSink()?.insert(" brave"))
+    expect(composeTextarea().value).toBe("hello brave world")
+    // The caret sits after the inserted text, ready to keep editing.
+    expect(composeTextarea().selectionStart).toBe(11)
+    expect(composeTextarea().selectionEnd).toBe(11)
+    expect(pty.sendInput).not.toHaveBeenCalled()
+  })
+
+  it("insert keeps multi-line macro text verbatim in the draft", () => {
+    goMobile()
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const pty = last()
+    act(() => getComposeInsertSink()?.insert("first\nsecond\nthird"))
+    // Real newlines in the DRAFT: the Send path owns the wire transform
+    // (newline-without-submit keystrokes plus the lone submitting CR).
+    expect(composeTextarea().value).toBe("first\nsecond\nthird")
+    expect(pty.sendInput).not.toHaveBeenCalled()
+  })
+
+  it("insert moves focus to the compose textarea", () => {
+    goMobile()
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    composeTextarea().blur()
+    expect(document.activeElement).not.toBe(composeTextarea())
+    act(() => getComposeInsertSink()?.insert("run the tests"))
+    expect(document.activeElement).toBe(composeTextarea())
   })
 })
 
