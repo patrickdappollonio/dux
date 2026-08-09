@@ -9206,6 +9206,59 @@ mod tests {
     }
 
     #[test]
+    fn a_settings_patch_leaves_the_upload_settings_it_never_names_alone() {
+        // `ui.upload_directory` has no Preferences row and deliberately never
+        // will (a path needs a directory picker, not a text row), and
+        // `ui.upload_write_gitignore` has none yet. A `[ui]` field with no row
+        // is only safe if the settings PATCH carries the current value of every
+        // field it does not name, so this pins the mechanism rather than the
+        // convention: `set_settings` clones the whole running config, mutates
+        // only the fields the patch names, and persists that clone.
+        let (mut engine, _tmp) = test_engine();
+        std::fs::write(
+            &engine.paths.config_path,
+            "[ui]\nupload_directory = \"tmp/drops\"\nupload_write_gitignore = false\n",
+        )
+        .expect("seed config");
+        engine.config = crate::config::load_config(&engine.paths);
+        assert_eq!(engine.config.ui.upload_directory, "tmp/drops");
+        assert!(!engine.config.ui.upload_write_gitignore);
+
+        // An UNRELATED `[ui]` row, one the dialog really does have.
+        engine
+            .apply_wire(WireCommand::SetSettings(SettingsPatch {
+                copy_on_select: Some(false),
+                ..Default::default()
+            }))
+            .expect("apply set_settings");
+        engine.config_writer.flush();
+
+        assert_eq!(
+            engine.config.ui.upload_directory, "tmp/drops",
+            "the running config must keep the value it was not asked to change"
+        );
+        assert!(!engine.config.ui.upload_write_gitignore);
+
+        let disk =
+            std::fs::read_to_string(&engine.paths.config_path).expect("read config after flush");
+        assert!(
+            disk.contains("copy_on_select = false"),
+            "the patch itself must have landed, or this test proves nothing:\n{disk}"
+        );
+        assert!(
+            disk.contains("upload_directory = \"tmp/drops\""),
+            "a settings PATCH must not reset a [ui] field it never named:\n{disk}"
+        );
+        assert!(
+            disk.contains("upload_write_gitignore = false"),
+            "a settings PATCH must not reset a [ui] field it never named:\n{disk}"
+        );
+        let reloaded = crate::config::load_config(&engine.paths);
+        assert_eq!(reloaded.ui.upload_directory, "tmp/drops");
+        assert!(!reloaded.ui.upload_write_gitignore);
+    }
+
+    #[test]
     fn set_settings_accepts_a_valid_default_provider_patch() {
         let (mut engine, _tmp) = test_engine();
         let outcome = engine

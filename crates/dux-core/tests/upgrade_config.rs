@@ -209,6 +209,16 @@ fn keys_added_since_the_old_config_was_written_fall_back_to_their_defaults() {
         fresh.ui.terminal_font_family
     );
     assert_eq!(config.ui.terminal_font_size, fresh.ui.terminal_font_size);
+    // The upload directory and its self-ignoring `.gitignore` are newer than
+    // this fixture, so an upgraded install has to start writing dropped files
+    // into `.dux/uploads` without the user configuring anything.
+    assert_eq!(config.ui.upload_directory, fresh.ui.upload_directory);
+    assert_eq!(config.ui.upload_directory, ".dux/uploads");
+    assert_eq!(
+        config.ui.upload_write_gitignore,
+        fresh.ui.upload_write_gitignore
+    );
+    assert!(config.ui.upload_write_gitignore);
     assert_eq!(
         config.server.tailscale_enabled,
         fresh.server.tailscale_enabled

@@ -445,6 +445,41 @@ fn config_schema() -> Vec<ConfigEntry> {
             value_fn: |c| FieldValue::Bool(c.ui.mobile_accessory_bar),
         },
         ConfigEntry::Field {
+            key: "upload_directory",
+            comment: Some(CommentSource::Static(
+                "# Web UI only: where a file you drop (or paste) onto an AGENT pane is\n\
+                 # saved, relative to that agent's worktree. Handing a file to an agent\n\
+                 # means \"look at this for me\", not \"add this to my project\", so it\n\
+                 # goes somewhere out of the way and dies with the agent: the directory\n\
+                 # lives in the agent's worktree, so deleting the agent deletes it too.\n\
+                 # It is INSIDE the worktree rather than beside it because some agent\n\
+                 # CLIs refuse to read files outside their workspace.\n\
+                 # Dropping a file on a TERMINAL is unaffected: that still lands in the\n\
+                 # directory the terminal is actually in, because that is where you are\n\
+                 # working. Must be a relative path with no \"..\" in it; an absolute or\n\
+                 # traversing value falls back to \".dux/uploads\" with a warning.",
+            )),
+            value_fn: |c| FieldValue::Str(c.ui.upload_directory.clone()),
+        },
+        ConfigEntry::Field {
+            key: "upload_write_gitignore",
+            comment: Some(CommentSource::Static(
+                "# When dux creates the upload directory above, also write a .gitignore\n\
+                 # into it containing a single \"*\". That ignores everything in the\n\
+                 # directory including the .gitignore itself, so git reports nothing at\n\
+                 # all and your dropped screenshots never show up as untracked files to\n\
+                 # discard by hand. Set to false if you intend to commit what you drop.\n\
+                 #\n\
+                 # dux never edits a .gitignore that is already there: whatever you have\n\
+                 # written wins, and turning this on later will not overwrite it.\n\
+                 # dux also never touches .git/info/exclude, on purpose. In a linked\n\
+                 # worktree that file resolves to the MAIN checkout's copy, so writing\n\
+                 # it from an agent would edit your main repository and change what git\n\
+                 # ignores in every other worktree at once.",
+            )),
+            value_fn: |c| FieldValue::Bool(c.ui.upload_write_gitignore),
+        },
+        ConfigEntry::Field {
             key: "attention_grace_seconds",
             comment: Some(CommentSource::Static(
                 "# Seconds the attention indicators stay visible after dux regains your\n# attention, before the focused agent's needs-attention flag clears. Applies\n# when you return to the dux browser tab (web UI) and when your terminal\n# window regains focus (TUI). Gives you time to see which agent(s) wanted you\n# before the indicator vanishes. Set to 0 to clear the indicator immediately.\n# TUI note: requires a terminal that reports focus; under tmux, set\n# `focus-events on`. Terminals that never report focus keep the old behavior.",

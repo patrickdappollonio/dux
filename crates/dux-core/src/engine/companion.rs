@@ -185,11 +185,22 @@ impl Engine {
     /// session-slot tab), or an extra tab's id. Resolving all three here keeps
     /// the upload route from having to know how tabs relate to sessions.
     ///
-    /// The two answers are deliberately different in kind. An AGENT drops at the
-    /// root of its worktree, a fixed directory git can see, and every tab of one
-    /// agent shares that one worktree, so which tab is on screen does not
-    /// change the answer. A TERMINAL gets a PLAN rather than a path, because the
-    /// real answer needs a live process and must not be computed on this thread.
+    /// The two answers are deliberately different in kind, and they answer
+    /// different INTENTS.
+    ///
+    /// An AGENT is "look at this for me": the file goes to that agent's upload
+    /// directory (`ui.upload_directory`, inside the worktree and ignored by
+    /// git), so it never touches the user's git status and it dies with the
+    /// agent. Every tab of one agent shares one worktree, so which tab is on
+    /// screen does not change the answer.
+    ///
+    /// A TERMINAL is unchanged: it gets a PLAN rather than a path, because the
+    /// real answer is the live working directory of a shell that may have been
+    /// `cd`'d anywhere, and that must not be computed on this thread. A
+    /// terminal is where the user is working, so a file dropped on one lands
+    /// there, whoever owns the terminal. A STANDALONE terminal has no worktree
+    /// at all, and cannot reach the upload branch: it is matched here, first,
+    /// as a terminal.
     pub fn file_drop_destination(
         &self,
         pty_id: &str,
@@ -200,9 +211,15 @@ impl Engine {
             ));
         }
         let session = self.session_behind_pty(pty_id)?;
-        Some(crate::file_drop::FileDropDestination::Worktree(
-            session.worktree_path.clone().into(),
-        ))
+        Some(crate::file_drop::FileDropDestination::AgentUploads {
+            worktree: session.worktree_path.clone().into(),
+            // Normalized on every read rather than trusted: the pure normalizer
+            // is the read-path half of the warn-once-at-load pair, so a config
+            // that never went through `load_config` (a test, an in-memory
+            // Config) still resolves a usable directory.
+            relative: crate::config::normalized_upload_directory(&self.config.ui.upload_directory),
+            write_gitignore: self.config.ui.upload_write_gitignore,
+        })
     }
 
     /// The agent pane whose changed files a drop on `pty_id` could affect: its
@@ -251,7 +268,7 @@ mod tests {
     use crate::model::TerminalOwner;
 
     #[test]
-    fn a_drop_on_any_tab_of_an_agent_lands_at_that_agent_s_worktree_root() {
+    fn a_drop_on_any_tab_of_an_agent_lands_in_that_agent_s_upload_directory() {
         // Every tab of one agent shares one worktree, so which tab is on screen
         // must not change where the file lands. The session-slot tab's id equals
         // the session id; an extra tab's does not, and resolving that is the
@@ -281,10 +298,20 @@ mod tests {
                 .file_drop_destination(pty_id)
                 .unwrap_or_else(|| panic!("{pty_id} should resolve to a destination"));
             match dest {
-                crate::file_drop::FileDropDestination::Worktree(path) => {
-                    assert_eq!(path, worktree.path(), "for {pty_id}")
+                crate::file_drop::FileDropDestination::AgentUploads {
+                    worktree: root,
+                    relative,
+                    write_gitignore,
+                } => {
+                    assert_eq!(root, worktree.path(), "for {pty_id}");
+                    assert_eq!(
+                        relative,
+                        crate::config::DEFAULT_UPLOAD_DIRECTORY,
+                        "for {pty_id}"
+                    );
+                    assert!(write_gitignore, "for {pty_id}");
                 }
-                other => panic!("{pty_id} resolved to {other:?}, not the worktree root"),
+                other => panic!("{pty_id} resolved to {other:?}, not the upload directory"),
             }
         }
 
@@ -292,6 +319,85 @@ mod tests {
             engine.file_drop_destination("nobody").is_none(),
             "an unknown pty id must not resolve to a directory"
         );
+    }
+
+    #[test]
+    fn an_agent_destination_carries_the_configured_upload_directory_and_gitignore_choice() {
+        // The two settings have to reach the destination, or configuring them
+        // does nothing at all. A configured value that is unusable degrades
+        // through the pure normalizer here, since an in-memory Config never
+        // went through `load_config`'s warn-and-correct.
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "feature");
+        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        engine.sessions.push(session);
+
+        engine.config.ui.upload_directory = "tmp/dropped".to_string();
+        engine.config.ui.upload_write_gitignore = false;
+        match engine.file_drop_destination("s1") {
+            Some(crate::file_drop::FileDropDestination::AgentUploads {
+                relative,
+                write_gitignore,
+                ..
+            }) => {
+                assert_eq!(relative, "tmp/dropped");
+                assert!(!write_gitignore);
+            }
+            other => panic!("resolved to {other:?}"),
+        }
+
+        engine.config.ui.upload_directory = "/etc".to_string();
+        match engine.file_drop_destination("s1") {
+            Some(crate::file_drop::FileDropDestination::AgentUploads { relative, .. }) => {
+                assert_eq!(
+                    relative,
+                    crate::config::DEFAULT_UPLOAD_DIRECTORY,
+                    "an absolute upload directory must degrade to the default"
+                );
+            }
+            other => panic!("resolved to {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_terminal_of_every_owner_keeps_the_live_working_directory() {
+        // The narrowing has to stop at agents. A terminal is where the user is
+        // working, whoever owns it, so none of the three kinds may resolve to an
+        // upload directory. The standalone one is the case that has no worktree
+        // at all, so an upload destination could not even be built for it.
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "feature");
+        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        engine.sessions.push(session);
+        engine.config.terminal.command = "cat".to_string();
+        engine.config.terminal.args = vec![];
+
+        let (session_terminal, _) = engine
+            .create_companion_terminal("s1", 24, 80)
+            .expect("session terminal");
+        let (project_terminal, _) = engine
+            .create_project_terminal("p1", 24, 80)
+            .expect("project terminal");
+        let (standalone_terminal, _) = engine
+            .create_standalone_terminal(24, 80)
+            .expect("standalone terminal");
+
+        for pty_id in [&session_terminal, &project_terminal, &standalone_terminal] {
+            match engine.file_drop_destination(pty_id) {
+                Some(crate::file_drop::FileDropDestination::Terminal(_)) => {}
+                other => panic!("{pty_id} resolved to {other:?}, not a live lookup"),
+            }
+        }
     }
 
     #[test]

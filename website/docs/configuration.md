@@ -147,6 +147,38 @@ You don't have to edit the file: from the web UI, open the cog menu and choose
 **Preferences…**. The change is written to `[server]` in `config.toml` and applies
 to every open tab immediately, so it sticks across restarts.
 
+## Where dropped files go (`[ui]`)
+
+Two web-only settings under `[ui]` decide what happens to a file you drop or
+paste onto an **agent** pane. Dropping onto a terminal is unaffected: that
+always lands in the folder the terminal is actually in.
+
+```toml
+[ui]
+upload_directory       = ".dux/uploads"  # relative to the agent's worktree
+upload_write_gitignore = true            # hide the uploads from git
+```
+
+`upload_directory` is where the file is saved, relative to that agent's
+worktree, and the folder is created the first time you drop something. Living
+inside the worktree is what lets an agent CLI read it (several refuse to read
+outside their workspace) and what makes cleanup free: delete the agent and the
+uploads go with it. It has to be a relative path with no `..` in it; an
+absolute, traversing or empty value falls back to `.dux/uploads` and says so
+once in `dux.log`.
+
+`upload_write_gitignore` writes a `.gitignore` containing a single `*` into that
+folder when dux creates it, which ignores everything in it including itself, so
+your screenshots never turn up as untracked files. Set it to `false` if you
+intend to commit what you drop. dux never edits a `.gitignore` you already have
+there, and never writes to `.git/info/exclude` (in a linked worktree that
+resolves to the main checkout's copy, so it would change what git ignores in
+every other worktree at once).
+
+Neither of these is in the Preferences dialog; they are config-file settings.
+The full story is in
+[Dropping files onto an agent](/docs/dropping-files).
+
 ## Editing settings from the web
 
 The same **Preferences…** dialog is where every web-adjustable setting lives, a

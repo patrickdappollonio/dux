@@ -162,6 +162,12 @@ pub enum DropDirError {
     /// The folder was pinned, but its path cannot be sent to a terminal without
     /// changing what it names. See [`UnreportablePath`].
     Unreportable(UnreportablePath),
+    /// A component of the agent's upload directory is a symlink, or is a file
+    /// rather than a directory. Refused instead of followed: a symlink is the
+    /// one way a relative, traversal-free `ui.upload_directory` could still
+    /// land outside the worktree, and a file in the way means the path names
+    /// something dux did not create and must not disturb.
+    UploadPathBlocked { component: String },
     /// The process runs in a different MOUNT NAMESPACE, so the file would be
     /// saved in the right place under a name that means something else (or
     /// nothing) in the terminal's own view. Refused until a name that is
@@ -184,6 +190,12 @@ impl std::fmt::Display for DropDirError {
                 f,
                 "the file was not saved, because {why}, so the path could not be \
                  sent to the terminal"
+            ),
+            Self::UploadPathBlocked { component } => write!(
+                f,
+                "the upload folder could not be created because \"{component}\" is a \
+                 symlink, or a file rather than a folder. Remove it, or point \
+                 [ui] upload_directory somewhere else."
             ),
             Self::ForeignMountNamespace => write!(
                 f,
@@ -410,6 +422,83 @@ impl DropDir {
         Ok(Self { fd, path })
     }
 
+    /// Pin the AGENT UPLOAD DIRECTORY inside `worktree`, creating it (and every
+    /// missing parent) if it is not there yet, and seeding its self-ignoring
+    /// `.gitignore` in the same step when `write_gitignore` is on.
+    ///
+    /// This is the ONE place the upload directory comes into existence.
+    ///
+    /// `relative` must already have been through
+    /// [`crate::config::normalized_upload_directory`], which is what guarantees
+    /// it is relative and made of named components only. That check is about the
+    /// SHAPE of the path; the enforcement is here, and it is a different
+    /// mechanism: the walk opens one component at a time from the pinned
+    /// worktree handle with `O_NOFOLLOW`, so a symlink at ANY component fails
+    /// the request rather than being followed out of the worktree. Nothing is
+    /// ever resolved back to text and reopened, so there is no window in which a
+    /// component can be swapped for a link.
+    ///
+    /// Idempotent and safe to race with a concurrent upload: `mkdirat` is
+    /// allowed to report `EEXIST` (somebody else got there first) and the walk
+    /// simply opens what is there, and the `.gitignore` is created with
+    /// `O_CREAT | O_EXCL`, so exactly one writer creates it and an existing one
+    /// (whatever it holds, and even if it is a symlink) is left untouched.
+    pub fn open_uploads(
+        worktree: &Path,
+        relative: &str,
+        write_gitignore: bool,
+    ) -> Result<Self, DropDirError> {
+        let mut fd = rustix::fs::open(
+            worktree,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|e| DropDirError::Io(e.into()))?;
+
+        let mut opened_as = worktree.to_path_buf();
+        for component in Path::new(relative).components() {
+            let name = component.as_os_str();
+            // `mkdirat` applies the process umask, exactly as `create_dir_all`
+            // does, so the directory ends up with the same permissions a user
+            // creating it by hand would get. It is NOT one of the files dux
+            // keeps for itself, so `file_modes`'s owner-only rule does not
+            // apply: this lives in the user's own worktree.
+            match rustix::fs::mkdirat(&fd, name, Mode::from_bits_truncate(0o777)) {
+                Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+                Err(e) => return Err(DropDirError::Io(e.into())),
+            }
+            fd = match rustix::fs::openat(
+                &fd,
+                name,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            ) {
+                Ok(fd) => fd,
+                // A symlink reports ELOOP (Linux) or MLINK (some BSDs) under
+                // `O_NOFOLLOW`; a plain file in the way reports ENOTDIR. All
+                // three are the same refusal: something that is not the
+                // directory dux expected is sitting on the path, and following
+                // it or writing next to it would be worse than saying so.
+                Err(rustix::io::Errno::LOOP)
+                | Err(rustix::io::Errno::MLINK)
+                | Err(rustix::io::Errno::NOTDIR) => {
+                    return Err(DropDirError::UploadPathBlocked {
+                        component: name.to_string_lossy().into_owned(),
+                    });
+                }
+                Err(e) => return Err(DropDirError::Io(e.into())),
+            };
+            opened_as.push(name);
+        }
+
+        if write_gitignore {
+            seed_uploads_gitignore(&fd);
+        }
+
+        let path = reportable_path_of(&fd, &opened_as)?;
+        Ok(Self { fd, path })
+    }
+
     /// The absolute path of the pinned directory.
     ///
     /// On Linux this is read back from the HANDLE (`/proc/self/fd/<n>`), so it
@@ -472,6 +561,61 @@ impl DropDir {
     /// after a write that failed or was abandoned part-way.
     fn remove(&self, name: &str) {
         let _ = rustix::fs::unlinkat(&self.fd, name, AtFlags::empty());
+    }
+}
+
+/// The whole content of the `.gitignore` dux seeds into the upload directory.
+///
+/// A single `*` ignores everything in the directory INCLUDING ITSELF, so git
+/// reports nothing at all: not the uploads, not the `.gitignore`, and not the
+/// directory. MEASURED on git 2.55 with `git status --porcelain`, which prints
+/// nothing.
+///
+/// The alternative, appending to `.git/info/exclude`, is FORBIDDEN and this is
+/// the reason: also MEASURED on git 2.55, in a linked worktree
+/// `git rev-parse --git-path info/exclude` resolves to the COMMON directory,
+/// which is the MAIN checkout's `.git/info/exclude`. Writing it from inside an
+/// agent worktree would edit the user's main repository and affect every other
+/// worktree, which is precisely the pollution the upload directory exists to
+/// remove.
+pub const UPLOADS_GITIGNORE: &str = "*\n";
+
+/// Create the self-ignoring `.gitignore` in the pinned upload directory, unless
+/// something is already there.
+///
+/// `O_CREAT | O_EXCL | O_NOFOLLOW`, so an existing file is never opened, never
+/// truncated and never followed: whatever the user has put there wins, and two
+/// concurrent uploads cannot both write it. Attempted on every upload rather
+/// than only on the mkdir that created the directory, because that costs one
+/// syscall and also repairs a directory created while the setting was off; it
+/// can never rewrite an existing file, which is the property that matters.
+///
+/// BEST EFFORT. A directory dux can write files into but cannot create this one
+/// file in is a strange state, and refusing the upload over it would lose the
+/// user's file to protect a convenience. So it warns and the upload proceeds.
+fn seed_uploads_gitignore(dir: &OwnedFd) {
+    let created = rustix::fs::openat(
+        dir,
+        ".gitignore",
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::from_bits_truncate(0o644),
+    );
+    match created {
+        Ok(fd) => {
+            if let Err(e) = std::fs::File::from(fd).write_all(UPLOADS_GITIGNORE.as_bytes()) {
+                crate::logger::warn(&format!(
+                    "could not write the upload directory's .gitignore, so uploads will \
+                     show up as untracked files: {e}"
+                ));
+            }
+        }
+        // Already there (including as a symlink, which `O_EXCL` refuses to
+        // follow): the user's file wins and there is nothing to say.
+        Err(rustix::io::Errno::EXIST) => {}
+        Err(e) => crate::logger::warn(&format!(
+            "could not create the upload directory's .gitignore, so uploads will show \
+             up as untracked files: {e}"
+        )),
     }
 }
 
@@ -648,19 +792,53 @@ pub fn save_drop_from<R: Read>(
 /// time.
 #[derive(Debug, Clone)]
 pub enum FileDropDestination {
-    /// An AGENT pane: the root of that agent's worktree, so the file is visible
-    /// to git and can be committed alongside whatever the agent does with it.
-    Worktree(PathBuf),
+    /// An AGENT pane: the agent's upload directory inside its worktree, created
+    /// on first use.
+    ///
+    /// A file handed to an agent is "look at this for me", not "add this to my
+    /// project", so it goes somewhere git ignores rather than to the worktree
+    /// root, and it dies with the agent because it lives in the agent's own
+    /// worktree. It is INSIDE the worktree rather than beside it because the
+    /// path is handed to a CLI to read, and some CLIs will not read outside
+    /// their workspace.
+    ///
+    /// Only an agent can name one, and that is structural rather than a
+    /// convention: this variant carries the worktree it was resolved from, and
+    /// the only thing that resolves one is a pane with an agent session behind
+    /// it. A standalone terminal has no worktree at all and can only ever be a
+    /// [`Self::Terminal`].
+    AgentUploads {
+        /// The agent's worktree, the root the walk starts from.
+        worktree: PathBuf,
+        /// The upload directory relative to it, already normalized through
+        /// [`crate::config::normalized_upload_directory`].
+        relative: String,
+        /// Whether to seed the self-ignoring `.gitignore`
+        /// (`ui.upload_write_gitignore`).
+        write_gitignore: bool,
+    },
     /// A TERMINAL pane: wherever that terminal actually is right now.
+    ///
+    /// Deliberately UNCHANGED by the upload directory. A shell that has been
+    /// `cd`'d somewhere is showing the user where they are working, and a file
+    /// dropped on it is being put THERE, which is what every terminal emulator
+    /// does. This is every terminal, whoever owns it: an agent's companion
+    /// terminal is not that agent's pane.
     Terminal(WorkingDirectory),
 }
 
 impl FileDropDestination {
-    /// Pin the destination directory. Blocking: this reads `/proc` (Linux) or
-    /// runs `lsof` (macOS), so it belongs on a blocking pool.
+    /// Pin the destination directory, creating the agent's upload directory if
+    /// this is the first file to land in it. Blocking: this creates
+    /// directories, and for a terminal reads `/proc` (Linux) or runs `lsof`
+    /// (macOS), so it belongs on a blocking pool.
     pub fn open(&self) -> Result<DropDir, DropDirError> {
         match self {
-            Self::Worktree(path) => DropDir::open(path),
+            Self::AgentUploads {
+                worktree,
+                relative,
+                write_gitignore,
+            } => DropDir::open_uploads(worktree, relative, *write_gitignore),
             Self::Terminal(plan) => plan.open(),
         }
     }
@@ -2680,5 +2858,140 @@ mod independent_path_safety_check {
             std::fs::create_dir(&dir).expect("create dir");
             assert!(DropDir::open(&dir).is_ok(), "must still accept {name:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod uploads_dir {
+    use super::*;
+
+    fn worktree() -> tempfile::TempDir {
+        tempfile::tempdir().expect("worktree")
+    }
+
+    #[test]
+    fn the_upload_directory_is_created_with_its_parents_and_a_self_ignoring_gitignore() {
+        let wt = worktree();
+        let dir = DropDir::open_uploads(wt.path(), ".dux/uploads", true).expect("open uploads");
+
+        let expected = wt.path().join(".dux").join("uploads");
+        assert_eq!(
+            std::fs::canonicalize(dir.path()).unwrap(),
+            std::fs::canonicalize(&expected).unwrap(),
+            "the pinned directory must be the configured one, parents and all"
+        );
+        // A single `*` is what makes the directory invisible to git INCLUDING
+        // the ignore file itself; anything else leaves the user with untracked
+        // files to discard by hand, which is the whole problem being solved.
+        assert_eq!(
+            std::fs::read_to_string(expected.join(".gitignore")).unwrap(),
+            "*\n"
+        );
+    }
+
+    #[test]
+    fn write_gitignore_false_creates_the_directory_and_nothing_else() {
+        // The opt-out is for a user who INTENDS to commit what they drop, so
+        // the directory still has to exist and the file must stay visible.
+        let wt = worktree();
+        let dir = DropDir::open_uploads(wt.path(), ".dux/uploads", false).expect("open uploads");
+        assert!(dir.path().is_dir());
+        assert!(
+            !wt.path().join(".dux/uploads/.gitignore").exists(),
+            "no .gitignore may be written when the setting is off"
+        );
+    }
+
+    #[test]
+    fn an_existing_gitignore_is_never_overwritten() {
+        // The user's own ignore rules win. Rewriting them would silently change
+        // what git reports in a directory dux does not own the contents of.
+        let wt = worktree();
+        let uploads = wt.path().join("uploads");
+        std::fs::create_dir_all(&uploads).unwrap();
+        std::fs::write(uploads.join(".gitignore"), "!keep-me\n").unwrap();
+
+        DropDir::open_uploads(wt.path(), "uploads", true).expect("open uploads");
+
+        assert_eq!(
+            std::fs::read_to_string(uploads.join(".gitignore")).unwrap(),
+            "!keep-me\n"
+        );
+    }
+
+    #[test]
+    fn creating_the_upload_directory_twice_changes_nothing() {
+        // Every upload calls this, so it has to be idempotent: the second call
+        // must not fail, must not move the directory, and must not disturb a
+        // file already sitting in it.
+        let wt = worktree();
+        let first = DropDir::open_uploads(wt.path(), ".dux/uploads", true).expect("first");
+        std::fs::write(first.path().join("already-here.png"), b"x").unwrap();
+
+        let second = DropDir::open_uploads(wt.path(), ".dux/uploads", true).expect("second");
+
+        assert_eq!(first.path(), second.path());
+        assert_eq!(
+            std::fs::read(second.path().join("already-here.png")).unwrap(),
+            b"x"
+        );
+        assert_eq!(
+            std::fs::read_to_string(second.path().join(".gitignore")).unwrap(),
+            "*\n"
+        );
+    }
+
+    #[test]
+    fn a_symlinked_component_is_refused_rather_than_followed() {
+        // The one way a relative, traversal-free upload directory could still
+        // land outside the worktree. The shape check in `config` cannot see it;
+        // this walk is what actually stops it.
+        let wt = worktree();
+        let outside = tempfile::tempdir().expect("outside");
+        std::os::unix::fs::symlink(outside.path(), wt.path().join(".dux")).unwrap();
+
+        let err = DropDir::open_uploads(wt.path(), ".dux/uploads", true)
+            .expect_err("a symlinked component must be refused");
+        assert!(
+            matches!(&err, DropDirError::UploadPathBlocked { component } if component == ".dux"),
+            "got {err:?}"
+        );
+        assert!(
+            !outside.path().join("uploads").exists(),
+            "nothing may be created on the other side of the link"
+        );
+    }
+
+    #[test]
+    fn a_file_sitting_where_a_component_should_be_is_refused() {
+        // Not a security hazard like the symlink, but the same answer: dux did
+        // not create that file and must not write around it silently.
+        let wt = worktree();
+        std::fs::write(wt.path().join(".dux"), b"not a directory").unwrap();
+
+        let err = DropDir::open_uploads(wt.path(), ".dux/uploads", true)
+            .expect_err("a file in the way must be refused");
+        assert!(
+            matches!(&err, DropDirError::UploadPathBlocked { component } if component == ".dux"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_saved_upload_lands_in_the_upload_directory_and_inside_the_worktree() {
+        // The end-to-end shape the route depends on: the pinned handle is a
+        // normal drop destination, so the existing save path works unchanged,
+        // and the file is still inside the worktree so the Changes pane refresh
+        // check keeps answering yes.
+        let wt = worktree();
+        let dir = DropDir::open_uploads(wt.path(), ".dux/uploads", true).expect("open uploads");
+        let saved = save_drop(&dir, "shot.png", b"png", "20260809-120000").expect("save");
+
+        assert_eq!(
+            saved.path.parent().unwrap(),
+            dir.path(),
+            "the file must land in the upload directory"
+        );
+        assert!(saved_file_is_within(wt.path(), &saved.path));
     }
 }

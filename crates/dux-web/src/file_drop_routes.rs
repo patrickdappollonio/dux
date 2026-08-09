@@ -24,13 +24,33 @@
 //! upload carries THAT one, in its own `conn` parameter. Reusing the header
 //! would be checking a different thing entirely.
 //!
-//! # Where the file lands
+//! # Where the file lands, and why the two answers differ
 //!
-//! On an agent, the root of that agent's worktree, so git can see it and it can
-//! be committed. On a terminal, wherever the terminal ACTUALLY is, discovered
-//! live because a shell's directory changes the moment someone types `cd`. Both
-//! resolve through `Engine::file_drop_destination`; the probing and the writing
-//! run on a blocking pool, like every other filesystem call in this crate.
+//! The two panes carry two different intents, so they get two destinations.
+//!
+//! On an AGENT, the agent's upload directory (`ui.upload_directory`, default
+//! `.dux/uploads` inside the worktree), created on first use with a
+//! self-ignoring `.gitignore`. A file handed to an agent is "look at this for
+//! me": it should never touch the user's git status, and it should die with the
+//! agent, which it does because it lives in the agent's own worktree. It is
+//! inside the worktree rather than beside it because the path is handed to a
+//! CLI to read and some CLIs refuse to read outside their workspace.
+//!
+//! On a TERMINAL, unchanged: wherever the terminal ACTUALLY is, discovered live
+//! because a shell's directory changes the moment someone types `cd`. A
+//! terminal is where the user is working, and that is true of all three kinds,
+//! including an agent's companion terminal (a companion terminal is not that
+//! agent's pane) and a standalone terminal (which has no worktree at all, so an
+//! upload directory could not be resolved for it even in principle).
+//!
+//! Both resolve through `Engine::file_drop_destination`; the directory
+//! creation, the probing and the writing all run on a blocking pool, like every
+//! other filesystem call in this crate.
+//!
+//! There is ONE size limit on this route, `[server] file_drop_max_bytes`,
+//! applied by the `DefaultBodyLimit` layer below and reported by the handler in
+//! its own words. Uploads to an agent go through the same limit; do not add a
+//! second one for them.
 //!
 //! # A saved file tells the Changes pane, when git can see it
 //!
@@ -41,8 +61,10 @@
 //! calls, on one condition: the file has to have landed inside the owning
 //! agent's worktree, because that is the only tree git is watching.
 //!
-//! The condition is a real check, not a formality. An agent drop always lands
-//! at the worktree root, so it is trivially inside. A TERMINAL's directory comes
+//! The condition is a real check, not a formality. An agent drop lands in the
+//! upload directory, which is inside the worktree by construction (the walk
+//! that creates it refuses a symlinked component rather than following one out
+//! of the tree). A TERMINAL's directory comes
 //! from a live process and the shell may have been `cd`'d anywhere, including to
 //! a sibling directory whose path merely starts with the worktree's, so the
 //! check is made on the FINAL path written, with both sides resolved and
@@ -732,10 +754,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dropping_a_screenshot_on_an_agent_saves_it_at_the_worktree_root() {
+    async fn dropping_a_screenshot_on_an_agent_saves_it_in_the_upload_directory() {
         // The journey: someone drags a screenshot onto their agent's pane. The
-        // file has to be somewhere git can see, and the route has to hand back
-        // the path, because the path is what the browser pastes.
+        // file goes to the agent's upload directory, out of the way of git, and
+        // the route hands back the path, because the path is what the browser
+        // pastes.
         let (_tmp, wt, app) = router().await;
         let resp = app
             .oneshot(drop_req(
@@ -751,11 +774,46 @@ mod tests {
         assert_eq!(body["requested_name"], "Screen Shot.png");
         assert_eq!(body["renamed"], false);
         let path = std::path::PathBuf::from(body["path"].as_str().unwrap());
-        assert_eq!(path.parent().unwrap(), wt, "must land at the worktree root");
+        let uploads = wt.join(".dux").join("uploads");
+        assert_eq!(
+            std::fs::canonicalize(path.parent().unwrap()).unwrap(),
+            std::fs::canonicalize(&uploads).unwrap(),
+            "must land in the agent's upload directory"
+        );
         assert_eq!(
             std::fs::read(&path).unwrap(),
             b"\x89PNG-ish",
             "the file must be readable at the path the route reported"
+        );
+        // Created with the directory, so git reports nothing at all: not the
+        // screenshot, not the ignore file, not the directory.
+        assert_eq!(
+            std::fs::read_to_string(uploads.join(".gitignore")).unwrap(),
+            "*\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_on_a_terminal_still_lands_in_its_own_working_directory() {
+        // The narrowing stops at agents. This is the same worktree the agent
+        // above uploads into, so the assertion that matters is that the file
+        // did NOT go to `.dux/uploads`: a terminal is where the user is
+        // working, and that is where a dropped file belongs.
+        let world = drop_world().await;
+        let terminal = world.create_terminal("/api/v1/sessions/s1/terminals").await;
+        world.cd(&terminal, &world.wt).await;
+
+        let resp = world.drop_on(&terminal, "shot.png").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_str(&body_text(resp).await).unwrap();
+        let path = std::path::PathBuf::from(body["path"].as_str().unwrap());
+        assert_eq!(
+            std::fs::canonicalize(path.parent().unwrap()).unwrap(),
+            std::fs::canonicalize(&world.wt).unwrap(),
+        );
+        assert!(
+            !world.wt.join(".dux").exists(),
+            "a terminal drop must not create an upload directory"
         );
     }
 

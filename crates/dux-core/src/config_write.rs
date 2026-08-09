@@ -358,6 +358,13 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
         "always_show_tab_strip",
         config.ui.always_show_tab_strip,
     );
+    patch_table_str(doc, "ui", "upload_directory", &config.ui.upload_directory);
+    patch_table_bool(
+        doc,
+        "ui",
+        "upload_write_gitignore",
+        config.ui.upload_write_gitignore,
+    );
     patch_table_bool(
         doc,
         "ui",
@@ -1786,6 +1793,48 @@ build = { text = \"cargo build\", surface = \"terminal\" }
         let parsed: Config = toml::from_str(&rendered).expect("re-parse");
         assert_eq!(parsed.server.file_drop_max_bytes, 0);
         assert_eq!(parsed.server.file_drop_max_concurrency, 7);
+    }
+
+    #[test]
+    fn upload_settings_default_and_round_trip() {
+        let rendered = render_config_plain(&Config::default());
+        let parsed: Config = toml::from_str(&rendered).expect("re-parse");
+        assert_eq!(
+            parsed.ui.upload_directory,
+            crate::config::DEFAULT_UPLOAD_DIRECTORY
+        );
+        assert!(parsed.ui.upload_write_gitignore);
+
+        // The opt-out is the value that must survive: a `false` reverting to
+        // the default would silently start hiding files from git again for a
+        // user who deliberately wants to commit what they drop.
+        let mut config = Config::default();
+        config.ui.upload_directory = "tmp/drops".to_string();
+        config.ui.upload_write_gitignore = false;
+        let rendered = render_config_plain(&config);
+        let parsed: Config = toml::from_str(&rendered).expect("re-parse");
+        assert_eq!(parsed.ui.upload_directory, "tmp/drops");
+        assert!(!parsed.ui.upload_write_gitignore);
+    }
+
+    #[test]
+    fn upload_user_values_survive_patch() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            "[ui]\nupload_directory = \"old\"\nupload_write_gitignore = true\n",
+        )
+        .expect("seed config");
+
+        let mut config = Config::default();
+        config.ui.upload_directory = "tmp/drops".to_string();
+        config.ui.upload_write_gitignore = false;
+        patch_config_file_with(&path, &config, Durability::NoFsync).expect("patch");
+        let saved = fs::read_to_string(&path).expect("read back");
+        let parsed: Config = toml::from_str(&saved).expect("patched file re-parses");
+        assert_eq!(parsed.ui.upload_directory, "tmp/drops", "saved:\n{saved}");
+        assert!(!parsed.ui.upload_write_gitignore, "saved:\n{saved}");
     }
 
     #[test]

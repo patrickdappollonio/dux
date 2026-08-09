@@ -767,6 +767,29 @@ pub struct UiConfig {
     /// bars can be restored from the show-bars button below the terminal or
     /// from the web UI's Preferences dialog. Web-only behavior.
     pub mobile_accessory_bar: bool,
+    /// Directory, RELATIVE to the agent's worktree, that a file dropped or
+    /// pasted onto an AGENT pane is saved into. An absolute path, a `..`
+    /// traversal, or an empty value degrades to [`DEFAULT_UPLOAD_DIRECTORY`]
+    /// with one warning at load (see [`upload_directory_load_warning`]).
+    ///
+    /// A TERMINAL pane is deliberately not covered: a file dropped on a
+    /// terminal still lands in the directory that terminal is actually in,
+    /// because a shell that has been `cd`'d somewhere is showing the user where
+    /// they are working.
+    ///
+    /// This pair lives on `[ui]` rather than in a section of its own because a
+    /// top-level `[uploads]` section would imply the feature exists in the TUI
+    /// too, and it does not: dropping a file on a terminal window in the TUI is
+    /// the host emulator's job, and the in-browser editor is web-only. `[ui]` is
+    /// already the home for web-only preferences (`compose_bar`,
+    /// `copy_on_select`), and the `upload_` prefix groups the pair the way
+    /// `terminal_font_family` / `terminal_font_size` already do.
+    pub upload_directory: String,
+    /// Write a `.gitignore` holding a single `*` into the upload directory when
+    /// dux creates it, so the uploads (and that file itself) are invisible to
+    /// git. An existing `.gitignore` is never touched, and dux never writes to
+    /// `.git/info/exclude`. Web-only behavior, as `upload_directory` is.
+    pub upload_write_gitignore: bool,
     /// Seconds the attention indicators stay visible after dux regains your
     /// attention, before the focused agent's needs-attention flag clears.
     /// Applies when you return to the dux browser tab (web UI) and when your
@@ -864,6 +887,80 @@ impl Default for CapabilitiesConfig {
             web_notifications: true,
         }
     }
+}
+
+/// Default `ui.upload_directory`: inside the worktree (so a CLI that restricts
+/// reads to its workspace can still open the file), and self-ignoring.
+pub const DEFAULT_UPLOAD_DIRECTORY: &str = ".dux/uploads";
+
+/// Why a configured `ui.upload_directory` cannot be used, or `None` when it is
+/// usable. Pure, and phrased as a sentence fragment the warning completes.
+///
+/// **This is a check on the SHAPE of the path and nothing else.** It proves the
+/// path is relative and walks downward through named components only, so no
+/// value dux accepts can NAME somewhere outside the worktree. It cannot prove
+/// where the path RESOLVES to: a symlinked component could still point out of
+/// the tree, and no amount of string inspection would see it. That is enforced
+/// where it can actually be enforced, at creation time, by walking the path one
+/// component at a time from a pinned worktree handle with `O_NOFOLLOW`, which
+/// refuses a symlink instead of following it (see
+/// `crate::file_drop::open_uploads_dir`).
+fn upload_directory_rejection(configured: &str) -> Option<&'static str> {
+    let trimmed = configured.trim();
+    if trimmed.is_empty() {
+        return Some("it is empty");
+    }
+    let path = std::path::Path::new(trimmed);
+    let mut components = 0usize;
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(_) => components += 1,
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                return Some("it is an absolute path, and uploads are stored inside the worktree");
+            }
+            std::path::Component::ParentDir => {
+                return Some("it contains a \"..\" component, which would leave the worktree");
+            }
+            std::path::Component::CurDir => {
+                return Some("it contains a \".\" component; write the path without it");
+            }
+        }
+    }
+    if components == 0 {
+        return Some("it names no directory");
+    }
+    None
+}
+
+/// Normalize a configured `ui.upload_directory` into the relative path dux will
+/// actually create: the configured value with its components rejoined, or
+/// [`DEFAULT_UPLOAD_DIRECTORY`] when the configured one is unusable.
+///
+/// Deliberately PURE: it does not log. The on-disk value is warned about and
+/// corrected exactly once, at load, in [`load_config`]; this is then called from
+/// read paths (every upload resolves its destination through it) that run far
+/// more often than the config loads. Same split as
+/// [`normalized_terminal_font_size`].
+pub fn normalized_upload_directory(configured: &str) -> String {
+    if upload_directory_rejection(configured).is_some() {
+        return DEFAULT_UPLOAD_DIRECTORY.to_string();
+    }
+    std::path::Path::new(configured.trim())
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// The warning [`load_config`] emits for an unusable `ui.upload_directory`, or
+/// `None` for a usable one. Split out from the logging so the message can be
+/// asserted directly, mirroring [`terminal_font_size_load_warning`].
+pub fn upload_directory_load_warning(configured: &str) -> Option<String> {
+    let reason = upload_directory_rejection(configured)?;
+    Some(format!(
+        "ui.upload_directory = {configured:?} cannot be used because {reason}. Falling back \
+         to the default of {DEFAULT_UPLOAD_DIRECTORY:?}."
+    ))
 }
 
 /// The parsed form of `capabilities.clipboard_passthrough`. Stored as a string in
@@ -1088,6 +1185,8 @@ impl Default for UiConfig {
             compose_bar: true,
             mobile_top_bar: true,
             mobile_accessory_bar: true,
+            upload_directory: DEFAULT_UPLOAD_DIRECTORY.to_string(),
+            upload_write_gitignore: true,
             attention_grace_seconds: 3,
             auto_reopen_agents: false,
             show_changes_pane: true,
@@ -1639,6 +1738,8 @@ impl Default for Config {
                 compose_bar: true,
                 mobile_top_bar: true,
                 mobile_accessory_bar: true,
+                upload_directory: DEFAULT_UPLOAD_DIRECTORY.to_string(),
+                upload_write_gitignore: true,
                 attention_grace_seconds: 3,
                 auto_reopen_agents: false,
                 show_changes_pane: true,
@@ -1846,6 +1947,13 @@ pub fn load_config(paths: &DuxPaths) -> Config {
     if let Some(warning) = terminal_font_size_load_warning(config.ui.terminal_font_size) {
         crate::logger::warn(&warning);
         config.ui.terminal_font_size = DEFAULT_TERMINAL_FONT_SIZE;
+    }
+    // And once more for an upload directory that names somewhere dux will not
+    // write (absolute, traversing, or empty). Corrected in memory here so every
+    // later upload resolves the default silently rather than warning per file.
+    if let Some(warning) = upload_directory_load_warning(&config.ui.upload_directory) {
+        crate::logger::warn(&warning);
+        config.ui.upload_directory = DEFAULT_UPLOAD_DIRECTORY.to_string();
     }
     config
 }
@@ -2416,6 +2524,101 @@ mod tests {
 
         let config = load_config(&paths);
         assert_eq!(config.ui.terminal_font_size, 22);
+    }
+
+    // ── ui.upload_directory ──────────────────────────────────────────────────
+
+    #[test]
+    fn a_usable_upload_directory_is_kept_as_written() {
+        for value in [".dux/uploads", "uploads", "tmp/dux/drops", ".uploads"] {
+            assert_eq!(normalized_upload_directory(value), value);
+            assert_eq!(upload_directory_load_warning(value), None, "for {value:?}");
+        }
+    }
+
+    #[test]
+    fn an_upload_directory_is_normalized_to_its_components() {
+        // Surrounding whitespace and repeated or trailing separators are
+        // cosmetic, not a rejection: the walk that creates the directory works
+        // in components anyway, so these all name the same place.
+        assert_eq!(normalized_upload_directory("  uploads  "), "uploads");
+        assert_eq!(normalized_upload_directory("uploads/"), "uploads");
+        assert_eq!(normalized_upload_directory(".dux//uploads"), ".dux/uploads");
+    }
+
+    #[test]
+    fn an_unusable_upload_directory_degrades_to_the_default_and_says_why() {
+        // Each of these would put a dropped file somewhere the agent's worktree
+        // does not own, so each degrades rather than being obeyed. The check is
+        // on the path SHAPE; a symlinked component is refused later, at
+        // creation time, by `file_drop::DropDir::open_uploads`.
+        let cases = [
+            ("", "empty"),
+            ("   ", "empty"),
+            ("/tmp/uploads", "absolute"),
+            ("/", "absolute"),
+            ("../uploads", ".."),
+            (".dux/../../uploads", ".."),
+            ("uploads/..", ".."),
+            ("./uploads", "\".\""),
+            (".", "\".\""),
+        ];
+        for (value, expected_reason) in cases {
+            assert_eq!(
+                normalized_upload_directory(value),
+                DEFAULT_UPLOAD_DIRECTORY,
+                "{value:?} must degrade to the default"
+            );
+            let warning = upload_directory_load_warning(value)
+                .unwrap_or_else(|| panic!("{value:?} must warn"));
+            assert!(
+                warning.contains(expected_reason),
+                "the warning for {value:?} must say why ({expected_reason}), got: {warning}"
+            );
+            assert!(
+                warning.contains(DEFAULT_UPLOAD_DIRECTORY),
+                "the warning for {value:?} must name the fallback, got: {warning}"
+            );
+        }
+    }
+
+    #[test]
+    fn load_config_warns_once_for_a_bad_upload_directory_and_then_never_again() {
+        // The warn-once property, stated as the thing that actually makes it
+        // true: `load_config` CORRECTS the value in memory, so every later read
+        // (and every save) sees a usable directory and has nothing to warn
+        // about. Without the correction the pure normalizer would silently
+        // degrade on every single upload instead.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = make_test_paths(dir.path());
+        std::fs::write(
+            &paths.config_path,
+            "[ui]\nupload_directory = \"../escape\"\n",
+        )
+        .expect("write config");
+
+        let config = load_config(&paths);
+        assert_eq!(config.ui.upload_directory, DEFAULT_UPLOAD_DIRECTORY);
+        assert_eq!(
+            upload_directory_load_warning(&config.ui.upload_directory),
+            None,
+            "the corrected value must not warn a second time"
+        );
+    }
+
+    #[test]
+    fn load_config_leaves_a_usable_upload_directory_untouched() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = make_test_paths(dir.path());
+        std::fs::write(
+            &paths.config_path,
+            "[ui]\nupload_directory = \"tmp/drops\"\nupload_write_gitignore = false\n",
+        )
+        .expect("write config");
+
+        let config = load_config(&paths);
+        assert_eq!(config.ui.upload_directory, "tmp/drops");
+        assert!(!config.ui.upload_write_gitignore);
     }
 
     #[test]

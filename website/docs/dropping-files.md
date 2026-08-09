@@ -1,6 +1,6 @@
 ---
 title: Dropping files onto an agent
-description: Drag a screenshot from your desktop onto an agent or terminal in the browser and dux saves it on the server, then pastes its path into the prompt. Where files land, why nothing is ever overwritten, and why this is web-only.
+description: Drag a screenshot from your desktop onto an agent or terminal in the browser and dux saves it on the server, then pastes its path into the prompt. Where files land, why an agent's uploads stay out of git, why nothing is ever overwritten, and why this is web-only.
 group: Web UI
 order: 67
 ---
@@ -30,12 +30,35 @@ path in for you. None of them sends contents. dux does the same thing, with the
 one extra step a browser needs: it puts the file on the server first, since that
 is where the agent can actually see it.
 
+## Two drops, two intents
+
+Dropping a file means one of two things, and dux stopped pretending it was one.
+
+Handing an image to an agent is **"look at this for me"**. It is scratch: you
+want the agent to read it, and then you want it gone. Dropping a file into a
+terminal is **"put this here"**. It is a file you are placing in a folder you
+chose, and you meant it.
+
+Those want opposite things from git, so they get different destinations.
+
 ## Where the file lands
 
-**On an agent's terminal**, at the root of that agent's worktree. That is
-deliberate: the file is inside the repo, so git can see it, and the agent can
-commit it along with whatever it does with it. Every tab of one agent shares one
+**On an agent's pane**, in that agent's upload folder: `.dux/uploads` inside the
+agent's worktree, created the first time you drop something. It is **invisible
+to git**, and it is **deleted with the agent**, because it lives inside the
+worktree that gets removed along with it. Nothing to clean up, nothing sitting
+in your changed files asking to be discarded. Every tab of one agent shares one
 worktree, so it does not matter which tab you drop on.
+
+It is inside the worktree rather than tucked away somewhere neutral for a
+practical reason: some agent CLIs will not read a file outside the workspace
+they were started in, so a folder next door would be a path the agent cannot
+open.
+
+> **This changed.** Files dropped on an agent used to land at the root of the
+> worktree, visible to git, and every screenshot left an untracked file to
+> discard by hand. They now go to `.dux/uploads` instead. Dropping on a terminal
+> is unchanged. If you liked the old behavior, see the two settings below.
 
 **On a terminal**, in the folder that terminal is *actually* in right now. Not
 the folder it was opened in. If you opened a terminal at your repo root and then
@@ -64,12 +87,51 @@ The toast that appears afterwards names the folder for each file, so you never
 have to guess. Drop several onto a terminal, type `cd` in the middle, and they
 genuinely do land in different folders; the toast says which went where.
 
-If the file landed inside an agent's worktree, that agent's Changes pane picks
-it up straight away rather than on its next poll, so your screenshot is sitting
+If the file landed inside an agent's worktree, that agent's Changes pane is
+refreshed straight away rather than on its next poll. With the ignore file in
+place an upload changes nothing git can see, so the pane stays exactly as it
+was, which is the point; turn the ignore off and your screenshot is sitting
 there as an untracked file before you have finished typing the sentence about
 it. A file that landed somewhere else, a terminal you had `cd`'d out of the
 worktree, or a project or standalone terminal with no agent behind it, changes
 nothing git is watching, so nothing claims otherwise.
+
+## Keeping the uploads out of git
+
+The upload folder hides itself. When dux creates it, it writes a `.gitignore`
+into it containing a single `*`, which ignores everything in the folder
+**including the ignore file itself**. Run `git status` after dropping a
+screenshot and it prints nothing at all: not the image, not the ignore file, not
+even the folder.
+
+Two things dux deliberately will not do:
+
+- **It never edits a `.gitignore` that is already there.** If you have written
+  your own rules in that folder, they win, and turning the setting on later will
+  not overwrite them.
+- **It never touches `.git/info/exclude`.** That looks like the tidier place for
+  a local ignore, and in a worktree it is a trap: inside a linked worktree that
+  path resolves to the **main checkout's** copy, so writing it would edit your
+  main repository and change what git ignores in every other worktree at once.
+  Polluting your repo is the thing this feature exists to stop doing.
+
+Both halves are settings, on `[ui]` in `config.toml`:
+
+| Key | Default | What it does |
+|---|---|---|
+| `upload_directory` | `".dux/uploads"` | Where an agent's dropped and pasted files go, relative to that agent's worktree. Must be a relative path with no `..` in it; an absolute or traversing value falls back to the default and says so once in `dux.log`. |
+| `upload_write_gitignore` | `true` | Whether to write the self-ignoring `.gitignore` when dux creates that folder. Set it to `false` if you intend to commit what you drop, and your uploads show up as ordinary untracked files again. |
+
+Set `upload_directory = ""`, or point it at anything outside the worktree, and
+dux will not follow you: uploads have to be somewhere the agent can read and
+somewhere that dies with the agent, so an unusable value degrades to the default
+rather than being obeyed.
+
+Want the old behavior back? The nearest thing is
+`upload_write_gitignore = false`, which keeps the folder but hands the files
+back to git, so they appear in Changes and can be committed. There is
+deliberately no way to point uploads at the worktree root itself: the folder is
+what makes them easy to ignore, easy to find, and easy to throw away.
 
 ## Nothing is ever overwritten
 
