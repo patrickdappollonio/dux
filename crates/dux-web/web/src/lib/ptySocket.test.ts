@@ -248,9 +248,27 @@ describe("PtySocket", () => {
     sock.connect()
     const ws = last()
     ws.open()
-    sock.sendResize(40, 120)
+    expect(sock.sendResize(40, 120)).toBe(true)
     expect(ws.sent).toHaveLength(1)
     expect(JSON.parse(ws.sent[0] as string)).toEqual({ rows: 40, cols: 120 })
+  })
+
+  it("reports a resize it could NOT write, rather than dropping it silently", () => {
+    // Nobody re-types a resize. The caller remembers the last size it told the
+    // PTY about and skips one it believes is already there, so a frame lost to a
+    // socket that is not OPEN has to come back as false or that size is booked
+    // as delivered and never re-asserted.
+    const sock = new PtySocket("ws://x/pty")
+    expect(sock.sendResize(40, 120)).toBe(false)
+    sock.connect()
+    const ws = last()
+    // CONNECTING, not OPEN: the state every reconnect passes through.
+    expect(sock.sendResize(40, 120)).toBe(false)
+    ws.open()
+    expect(sock.sendResize(40, 120)).toBe(true)
+    sock.close()
+    expect(sock.sendResize(40, 120)).toBe(false)
+    expect(ws.sent).toHaveLength(1)
   })
 
   it("reconnects after an unexpected close and receives the replay (resends nothing)", () => {

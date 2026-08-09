@@ -24,7 +24,9 @@ class FakePtySocket {
   url: string
   connect = vi.fn()
   close = vi.fn()
-  sendResize = vi.fn()
+  // The real socket answers whether the frame actually went on the wire; a test
+  // models a dropped frame (a socket mid-reconnect) by returning false.
+  sendResize = vi.fn(() => true)
   sendInput = vi.fn()
   sendViewed = vi.fn()
   isOpen = true

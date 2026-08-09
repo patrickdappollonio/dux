@@ -46,10 +46,33 @@ class TermStub {
       return { dispose() {} }
     },
   }
-  loadAddon() {}
+  // Real xterm hands itself to an addon through `activate`; mirroring that lets
+  // FitStub re-grid the terminal the way the real FitAddon does.
+  loadAddon(addon: { activate?: (term: TermStub) => void }) {
+    addon.activate?.(this)
+  }
   open() {}
   onData() {
     return { dispose() {} }
+  }
+  // xterm's own resize event. It fires only when the grid actually CHANGES, and
+  // it is the pane's single choke point for reporting geometry to the PTY, so
+  // the stub has to be faithful about both halves.
+  resizeListeners: ((size: { cols: number; rows: number }) => void)[] = []
+  onResize(cb: (size: { cols: number; rows: number }) => void) {
+    this.resizeListeners.push(cb)
+    return {
+      dispose: () => {
+        this.resizeListeners = this.resizeListeners.filter((l) => l !== cb)
+      },
+    }
+  }
+  // xterm's signature is resize(columns, rows).
+  resize(cols: number, rows: number) {
+    if (cols === this.cols && rows === this.rows) return
+    this.cols = cols
+    this.rows = rows
+    for (const cb of [...this.resizeListeners]) cb({ cols, rows })
   }
   attachCustomKeyEventHandler() {}
   focus() {}
@@ -72,8 +95,21 @@ class FitStub {
   // Counted so the live font-preference suite can assert a settings change
   // refits the open terminal (reset in beforeEach).
   static fits = 0
+  // Arm the NEXT fit to re-grid the terminal, the way a real fit does once the
+  // cell metrics move under it (a font landing, a container change). One-shot,
+  // so mounting's own fits cannot consume a value a test armed for a later one.
+  static nextDims: { rows: number; cols: number } | null = null
+  term: TermStub | null = null
+  activate(term: TermStub) {
+    this.term = term
+  }
   fit() {
     FitStub.fits++
+    const next = FitStub.nextDims
+    if (next && this.term) {
+      FitStub.nextDims = null
+      this.term.resize(next.cols, next.rows)
+    }
   }
 }
 
@@ -86,7 +122,9 @@ class FakePtySocket {
   url: string
   connect = vi.fn()
   close = vi.fn()
-  sendResize = vi.fn()
+  // The real socket answers whether the frame actually went on the wire; a test
+  // models a dropped frame (a socket mid-reconnect) by returning false.
+  sendResize = vi.fn(() => true)
   sendInput = vi.fn()
   sendViewed = vi.fn()
   // Mirrors the real socket's `isOpen` getter; a test flips it to false to
@@ -96,7 +134,12 @@ class FakePtySocket {
   onOpen: () => void = () => {}
   onReconnecting: () => void = () => {}
   onConn: (state: ConnState) => void = () => {}
-  onBytes: (cb: (b: Uint8Array) => void) => void = () => {}
+  // Captured so a test can deliver the server's first (repaint) frame, which is
+  // what the pane's deferred initial/reconnect resize hangs off.
+  bytesCb: ((b: Uint8Array) => void) | null = null
+  onBytes = (cb: (b: Uint8Array) => void): void => {
+    this.bytesCb = cb
+  }
   shouldRetry: () => boolean = () => true
   onGone: () => void = () => {}
   constructor(url: string) {
@@ -245,6 +288,7 @@ beforeEach(() => {
   FakePtySocket.instances = []
   TermStub.instances = []
   FitStub.fits = 0
+  FitStub.nextDims = null
   notifyRegistrations.length = 0
   toastError.mockClear()
   mockState = makeState()
@@ -1479,5 +1523,242 @@ describe("TerminalPane bundled font load on mount", () => {
     expect(warn.mock.calls[0][0]).toContain("a terminal font failed to load")
     expect(warn.mock.calls[0][0]).not.toContain("Dux Mono")
     warn.mockRestore()
+  })
+})
+
+// Every LOCAL re-grid has to be reported to the PTY, whatever caused it. A fit()
+// is not only ever the ResizeObserver's doing: the bundled fonts land after the
+// terminal is already open, the cell metrics move, and the terminal re-grids with
+// no container resize anywhere in sight. Nothing watched for that, so the PTY kept
+// the size the fallback metrics produced and the child drew for one geometry while
+// the browser rendered another, which on a phone left a copy of the agent's status
+// line behind on every redraw. So the pane subscribes to xterm's own resize event
+// and that is the single choke point; these tests pin it, and pin that the paths
+// which deliberately BYPASS the dedupe still send.
+describe("TerminalPane reports every local re-grid to the PTY", () => {
+  let roCallbacks: (() => void)[]
+  const installCapturingRO = () => {
+    roCallbacks = []
+    const cbs = roCallbacks
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        constructor(cb: () => void) {
+          cbs.push(cb)
+        }
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      },
+    )
+  }
+
+  const term = () => {
+    const t = TermStub.instances.at(-1)
+    if (!t) throw new Error("no terminal constructed")
+    return t
+  }
+
+  // Mount and let the deferred first-frame resize (the 250ms fallback plus the
+  // 60ms jiggle tail) finish, so a test observes only what it triggers itself.
+  const mountSettled = () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    act(() => {
+      vi.advanceTimersByTime(400)
+    })
+    const pty = last()
+    pty.sendResize.mockClear()
+    return pty
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+    installCapturingRO()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+    // jsdom has no `document.fonts`; the font test adds it, so take it back off.
+    Reflect.deleteProperty(document, "fonts")
+  })
+
+  it("sends the resize when a FONT LOAD re-grids the terminal, with no container resize", async () => {
+    // One shared pending promise for all four faces, so nothing resolves until
+    // the test says so (Promise.all needs every one of them).
+    let landFonts: () => void = () => {}
+    const pending = new Promise<void>((resolve) => {
+      landFonts = resolve
+    })
+    const load = vi.fn(() => pending)
+    Object.defineProperty(document, "fonts", {
+      value: { load, check: () => false },
+      configurable: true,
+    })
+    const pty = mountSettled()
+    // The bundled faces land: the cell metrics change, so the refit re-grids the
+    // terminal. No ResizeObserver callback is fired anywhere in this test.
+    FitStub.nextDims = { rows: 30, cols: 100 }
+    await act(async () => {
+      landFonts()
+    })
+    expect(term().rows).toBe(30)
+    expect(term().cols).toBe(100)
+    act(() => {
+      vi.advanceTimersByTime(250)
+    })
+    expect(pty.sendResize).toHaveBeenCalledTimes(1)
+    expect(pty.sendResize).toHaveBeenCalledWith(30, 100)
+  })
+
+  it("does not record a resize the owner gate dropped, so it is re-sent once ownership returns", () => {
+    const pty = mountSettled()
+    act(() => pty.onConnected("conn-self"))
+    // Another device takes the PTY: this pane is a read-only viewer and its
+    // resizes are dropped on the floor by the owner gate.
+    act(() => notifyPtyOwner("s1", "conn-other"))
+    term().resize(100, 30)
+    act(() => {
+      roCallbacks.forEach((cb) => cb())
+      vi.advanceTimersByTime(250)
+    })
+    expect(pty.sendResize).not.toHaveBeenCalled()
+    // Ownership comes back with the grid unchanged. The PTY never learned this
+    // size, so the next size check must still send it: a send that never reached
+    // the socket must not have been recorded as sent.
+    act(() => notifyPtyOwner("s1", "conn-self"))
+    act(() => {
+      roCallbacks.forEach((cb) => cb())
+      vi.advanceTimersByTime(250)
+    })
+    expect(pty.sendResize).toHaveBeenCalledTimes(1)
+    expect(pty.sendResize).toHaveBeenCalledWith(30, 100)
+  })
+
+  it("does not record a resize the SOCKET dropped, so it is re-sent once it reopens", () => {
+    // The owner gate is only one of the two ways a resize evaporates. The other
+    // is the socket: `PtySocket.sendResize` silently discards the frame when the
+    // WebSocket is not OPEN, which is exactly the state a reconnect passes
+    // through. Recording it anyway books a size the PTY was never told, and the
+    // dedupe then suppresses the re-assert forever, leaving the child drawing
+    // for somebody else's viewport.
+    const pty = mountSettled()
+    pty.sendResize.mockReturnValue(false)
+    term().resize(100, 30)
+    act(() => {
+      vi.advanceTimersByTime(250)
+    })
+    expect(pty.sendResize).toHaveBeenCalledWith(30, 100)
+    // The socket comes back with the grid unchanged. The PTY never learned this
+    // size, so the next size check must still send it.
+    pty.sendResize.mockClear()
+    pty.sendResize.mockReturnValue(true)
+    act(() => {
+      roCallbacks.forEach((cb) => cb())
+      vi.advanceTimersByTime(250)
+    })
+    expect(pty.sendResize).toHaveBeenCalledTimes(1)
+    expect(pty.sendResize).toHaveBeenCalledWith(30, 100)
+  })
+
+  it("still jiggles on the very first open (the deliberate first-frame bypass)", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const pty = last()
+    act(() => {
+      vi.advanceTimersByTime(250)
+    })
+    expect(pty.sendResize).toHaveBeenNthCalledWith(1, 24, 79)
+    act(() => {
+      vi.advanceTimersByTime(60)
+    })
+    expect(pty.sendResize).toHaveBeenNthCalledWith(2, 24, 80)
+  })
+
+  it("reports the re-grid caused by the first-frame handler's OWN fit", () => {
+    // `sendInitialResize` calls `fit()` itself, and that fit can re-grid for
+    // exactly the reason the whole subscription exists: the bundled faces may
+    // land between mount and the first PTY frame. Everything after it must read
+    // the POST-fit grid, or the jiggle asserts a size the browser is no longer
+    // rendering.
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const pty = last()
+    FitStub.nextDims = { rows: 30, cols: 100 }
+    act(() => {
+      vi.advanceTimersByTime(250)
+    })
+    expect(term().rows).toBe(30)
+    expect(pty.sendResize).toHaveBeenNthCalledWith(1, 30, 99)
+    act(() => {
+      vi.advanceTimersByTime(60)
+    })
+    expect(pty.sendResize).toHaveBeenNthCalledWith(2, 30, 100)
+    // The re-grid also scheduled a debounced size check. It must find the PTY
+    // already at this size and say nothing, rather than a third frame.
+    act(() => {
+      vi.advanceTimersByTime(250)
+    })
+    expect(pty.sendResize).toHaveBeenCalledTimes(2)
+  })
+
+  it("carries a re-grid landing INSIDE the jiggle window through to the PTY", () => {
+    // The nastiest window: the fonts land between the jiggle's `cols - 1` frame
+    // and its `cols` tail 60ms later. The tail must send the size the terminal
+    // has NOW, not the one it had when the jiggle was armed, and the debounced
+    // check behind it must not then contradict the tail.
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const pty = last()
+    act(() => {
+      vi.advanceTimersByTime(250)
+    })
+    expect(pty.sendResize).toHaveBeenNthCalledWith(1, 24, 79)
+    act(() => {
+      term().resize(100, 30)
+    })
+    act(() => {
+      vi.advanceTimersByTime(60)
+    })
+    expect(pty.sendResize).toHaveBeenNthCalledWith(2, 30, 100)
+    act(() => {
+      vi.advanceTimersByTime(250)
+    })
+    expect(pty.sendResize).toHaveBeenCalledTimes(2)
+  })
+
+  it("still sends one plain resize on a RECONNECT's first frame, and does not jiggle", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const pty = last()
+    act(() => pty.onOpen())
+    act(() => pty.bytesCb?.(new Uint8Array([1])))
+    act(() => {
+      vi.advanceTimersByTime(100)
+    })
+    pty.sendResize.mockClear()
+    // The socket drops and reopens: the server replays a repaint as the first
+    // frame and the pane re-asserts its size exactly once.
+    act(() => pty.onOpen())
+    act(() => pty.bytesCb?.(new Uint8Array([1])))
+    act(() => {
+      vi.advanceTimersByTime(100)
+    })
+    expect(pty.sendResize).toHaveBeenCalledTimes(1)
+    expect(pty.sendResize).toHaveBeenCalledWith(24, 80)
+  })
+
+  it("still claims by sending this viewport's size on TAKE OVER", () => {
+    const pty = mountSettled()
+    act(() => pty.onConnected("conn-self"))
+    act(() => notifyPtyOwner("s1", "conn-other"))
+    pty.sendResize.mockClear()
+    fireEvent.click(screen.getByText("Take over"))
+    expect(pty.sendResize).toHaveBeenCalledTimes(1)
+    expect(pty.sendResize).toHaveBeenCalledWith(24, 80)
+  })
+
+  it("still re-asserts an UNCHANGED size on a foreground return (the dedupe bypass)", () => {
+    const pty = mountSettled()
+    act(() => {
+      window.dispatchEvent(new Event("focus"))
+      vi.advanceTimersByTime(200)
+    })
+    expect(pty.sendResize).toHaveBeenCalledTimes(1)
+    expect(pty.sendResize).toHaveBeenCalledWith(24, 80)
   })
 })

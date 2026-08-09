@@ -262,10 +262,19 @@ export class PtySocket extends ReconnectingSocket {
 
   // Send a resize control frame as Text. The server parses `{rows, cols}` (u16)
   // and issues the SIGWINCH; an unchanged size is a kernel no-op server-side.
-  sendResize(rows: number, cols: number): void {
+  //
+  // Returns whether the frame actually went on the wire. Unlike a keystroke, a
+  // dropped resize is not re-typed by anybody: the caller remembers the last
+  // size it told the PTY about and skips a size it believes is already there,
+  // so a frame silently discarded here (the socket is CONNECTING or CLOSED,
+  // which is every reconnect) must be reported rather than swallowed, or the
+  // size is booked as delivered and never re-asserted.
+  sendResize(rows: number, cols: number): boolean {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify({ rows, cols }))
+      return true
     }
+    return false
   }
 
   // Send a "user is looking at this tab" ping as a Text frame. Unlike a resize,

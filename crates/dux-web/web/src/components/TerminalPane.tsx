@@ -1293,9 +1293,32 @@ export function TerminalPane(props: TerminalPaneProps) {
     // owner does NOT change the owner (no `pty.owner` echo), so it deliberately
     // does not arm one here — only the ownership-ACQUIRING claim below (and
     // take-over) notes a claim.
-    const sendOwnedResize = (rows: number, cols: number) => {
-      if (!isOwnerRef.current) return
-      pty.sendResize(rows, cols)
+    //
+    // It records what the PTY has been told, and it records only what actually
+    // went out. TWO things can swallow a resize and neither raises anything: the
+    // owner gate here, and the socket, which discards a frame whenever the
+    // WebSocket is not OPEN (every reconnect passes through that state). A
+    // swallowed send booked as sent is worse than no send at all, because the
+    // dedupe below then suppresses the re-assert forever and the child keeps
+    // drawing for a viewport nobody is looking at. What the server DOES with a
+    // frame it received is its own business (it may drop one when its actor
+    // channel is full), so this records "written to the socket" and claims
+    // nothing more.
+    //
+    // It is not the only caller of `pty.sendResize`, and deliberately so: the
+    // ownership CLAIM (take-over, and the deferred claim once `onConnected`
+    // learns our connection id) sends directly, because a claim must go out
+    // whatever this pane last recorded and it happens while `isOwnerRef` still
+    // says somebody else owns the PTY. Those two therefore leave the record
+    // untouched. The direction of that error is the safe one: the next size
+    // check may send a same-size frame the PTY already has, which is a kernel
+    // no-op.
+    const sendOwnedResize = (rows: number, cols: number): boolean => {
+      if (!isOwnerRef.current) return false
+      if (!pty.sendResize(rows, cols)) return false
+      lastRows = rows
+      lastCols = cols
+      return true
     }
     const sendSize = () => {
       // Never land a SIGWINCH inside an active touch-scroll's wheel-report
@@ -1306,11 +1329,33 @@ export function TerminalPane(props: TerminalPaneProps) {
         return
       }
       if (term.rows !== lastRows || term.cols !== lastCols) {
-        lastRows = term.rows
-        lastCols = term.cols
         sendOwnedResize(term.rows, term.cols)
       }
     }
+    // Geometry is reported to the PTY from exactly one place: xterm's own resize
+    // event. A local re-grid has more causes than the ResizeObserver, and every
+    // one of them has to reach the child or it draws for a geometry the browser
+    // is not rendering. The case that shipped broken is the font-load refit: the
+    // bundled faces arrive after the terminal is already open, the cell metrics
+    // move, the terminal re-grids with no container resize anywhere, and nothing
+    // was watching, so the PTY kept the size the fallback metrics produced. On a
+    // phone that left a copy of the agent's cursor-relative status line behind on
+    // every redraw. Be precise about what did and did not heal, because the
+    // obvious reading is wrong: the SIZE MISMATCH did fix itself at the next
+    // container resize, since `lastRows`/`lastCols` still held the pre-font
+    // values and the next ResizeObserver fit therefore failed the dedupe and
+    // sent. What never healed is the duplicated output already written into the
+    // scrollback, and a hard reload cured that by rebuilding the buffer from the
+    // server's replay (the warm font cache is why the reloaded page then fits
+    // correctly on its first try, not why the mess went away). Subscribing here
+    // covers that cause and any future one, instead of teaching each call site
+    // to report. xterm
+    // fires this only when the grid really changed, and the debounce plus the
+    // dedupe in sendSize keep a no-op fit off the wire.
+    const resizeSub = term.onResize(() => {
+      clearTimeout(sendTimer)
+      sendTimer = setTimeout(sendSize, RESIZE_SEND_DEBOUNCE_MS)
+    })
     // Local fit so the canvas matches this viewport right away, and seed
     // lastRows/lastCols so the ResizeObserver's initial observe callback does NOT
     // send a (racing) resize before the first paint. The initial PTY resize is
@@ -1344,8 +1389,6 @@ export function TerminalPane(props: TerminalPaneProps) {
       if (initialResizeDone) return
       initialResizeDone = true
       fit.fit()
-      lastRows = term.rows
-      lastCols = term.cols
       // Attaching while foregrounded claims ownership by sending our size. The
       // server broadcasts a `pty.owner` carrying our connection id; the handover
       // handler recognises it as ours by id, so no echo bookkeeping is needed here.
@@ -1643,8 +1686,6 @@ export function TerminalPane(props: TerminalPaneProps) {
       resyncTimer = setTimeout(() => {
         term.write("", () => {
           fit.fit()
-          lastRows = term.rows
-          lastCols = term.cols
           sendOwnedResize(term.rows, term.cols)
         })
       }, 150)
@@ -1654,6 +1695,7 @@ export function TerminalPane(props: TerminalPaneProps) {
 
     return () => {
       cancelAnimationFrame(fitFrame)
+      resizeSub.dispose()
       clearTimeout(sendTimer)
       clearTimeout(initialResizeFallback)
       clearTimeout(jiggleTimer)
