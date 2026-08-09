@@ -27,9 +27,22 @@ export default defineConfig([
       // narrow: it exempts ONLY a binding that sits next to a rest element in
       // the same destructure, so an ordinary unused variable, parameter or
       // import is still an error everywhere.
+      // A leading underscore is this codebase's way of saying a parameter or a
+      // caught error is deliberately unused, which a test double relies on
+      // constantly (a stub has to accept the arguments the real function takes
+      // whether or not it reads them). Naming the options here REPLACES the
+      // preset's defaults wholesale rather than extending them, so both
+      // patterns have to be restated or the convention silently starts
+      // erroring. An unused local VARIABLE is left an error on purpose: unlike
+      // a parameter, nothing forces it to exist, so it is far likelier to be a
+      // mistake than a marker.
       '@typescript-eslint/no-unused-vars': [
         'error',
-        { ignoreRestSiblings: true },
+        {
+          ignoreRestSiblings: true,
+          argsIgnorePattern: '^_',
+          caughtErrorsIgnorePattern: '^_',
+        },
       ],
     },
   },
