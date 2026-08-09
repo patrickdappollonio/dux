@@ -19,7 +19,8 @@
     font-display: block;
 }
 
-/* "Dux Mono" and "Dux Mono Symbols": the bundled web terminal font stack.
+/* "Dux Mono" and "Dux Mono Symbols": the first two faces of the bundled web
+   terminal font stack ("Dux Mono Fill", declared below, is the third).
    "Dux Mono" is Roboto Mono, used for ordinary text glyphs. "Dux Mono Symbols"
    is a small subset of JetBrains Mono Nerd Font Mono covering the ranges a TUI
    actually draws with: arrows, box drawing, block elements, braille, misc
@@ -54,6 +55,39 @@
     font-weight: 700;
     font-style: normal;
     font-display: swap;
+}
+
+/* "Dux Mono Fill": the last-resort backstop, a subset of Adwaita Mono Regular
+   holding the symbol-block glyphs the two faces above lack, restricted to the
+   same 0.60 cell advance ratio. Without it a code point neither bundled face
+   carries falls through to the system tail, and a device with no suitable
+   installed font draws tofu. Measured: a Linux desktop with Adwaita Mono and
+   Noto Sans Symbols 2 installed renders them, an Android phone with neither
+   does not.
+
+   The motivating code points are ones agent CLIs really do emit, read off the
+   permission-mode and status icon table in the Claude Code 2.1.226 bundle:
+   U+23F5 is the accept-edits/bypass/auto mode symbol, U+23F8 the manual/plan
+   mode symbol, and U+2714 the check marker.
+
+   It is listed AFTER both curated faces in the terminal font stack (see
+   lib/terminalFont.ts) so it can only ever catch what the faces ahead of it
+   lack.
+
+   Known trade, measured, accepted rather than fixed: the symbols face draws
+   Block Elements (U+2580-259F) on a 1.320 em cell box while this face draws
+   Symbols for Legacy Computing (U+1FB00-1FBFF, 247 glyphs, kept deliberately)
+   on 1.250 em. Art mixing the two blocks, for example chafa sextant output
+   sitting next to U+2588, therefore shows a seam of about 0.77 px at a 14 px
+   font size. Those code points stay, because a hairline seam beats the tofu
+   they produced before. */
+@font-face {
+    font-family: "Dux Mono Fill";
+    src: url("./assets/fonts/dux-mono-fill.woff2") format("woff2");
+    font-weight: 400;
+    font-style: normal;
+    font-display: swap;
+    unicode-range: U+2000-2BFF, U+2E00-2E7F, U+1F000-1FBFF;
 }
 
 html, body, #root { height: 100%; }

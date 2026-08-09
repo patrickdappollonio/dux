@@ -6,6 +6,14 @@ import {
   terminalFontFamily,
 } from "./terminalFont"
 
+describe("DUX_TERMINAL_FONT_STACK", () => {
+  it("lists the symbols face, the text face, the fill face, then the system tail", () => {
+    expect(DUX_TERMINAL_FONT_STACK).toBe(
+      '"Dux Mono Symbols", "Dux Mono", "Dux Mono Fill", ui-monospace, SFMono-Regular, Menlo, monospace',
+    )
+  })
+})
+
 describe("terminalFontFamily", () => {
   it("returns the bundled default stack for null", () => {
     expect(terminalFontFamily(null)).toBe(DUX_TERMINAL_FONT_STACK)

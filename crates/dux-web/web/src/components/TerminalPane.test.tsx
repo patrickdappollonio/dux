@@ -1367,7 +1367,9 @@ describe("TerminalPane live font preferences", () => {
     if (!term) throw new Error("no terminal constructed")
     // Construction-time defaults: the bundled stack (symbols face first) and
     // the default size.
-    expect(String(term.options.fontFamily)).toMatch(/^"Dux Mono Symbols", "Dux Mono", /)
+    expect(String(term.options.fontFamily)).toMatch(
+      /^"Dux Mono Symbols", "Dux Mono", "Dux Mono Fill", /,
+    )
     expect(term.options.fontSize).toBe(14)
     const fitsBefore = FitStub.fits
     mockState = {
@@ -1437,6 +1439,24 @@ describe("TerminalPane bundled font load on mount", () => {
       expect.stringContaining('"Dux Mono"'),
       expect.any(String),
     )
+    // The fill face is deliberately absent from the eager load, and this
+    // assertion exists so re-adding it has to argue with a test. It is a
+    // rarely hit backstop of ~79 KB; its `unicode-range` already makes the
+    // browser fetch it lazily on first use of a code point the earlier faces
+    // lack, and it cannot affect the cell grid, which xterm measures from a
+    // `"W".repeat(32)` span whose code points fall outside every restricted
+    // face's range. Forcing it here would cost every terminal mount, phones
+    // included, a download nothing was waiting on.
+    // Matched on the fill family leading the shorthand, which is what asks
+    // for that face by name. The user-family call passes the whole stack, so
+    // it mentions the fill family too, but its sample is the symbols sample:
+    // CSS font matching hands U+2588 and U+28FF to "Dux Mono Symbols", which
+    // leads the stack and really carries them, so the fill face is never
+    // selected and never fetched.
+    const fillCall = load.mock.calls.find(([shorthand]: [string]) =>
+      /^\d+px "Dux Mono Fill"/.test(String(shorthand)),
+    )
+    expect(fillCall).toBeUndefined()
     // The font-load promise resolving triggers a refit on top of whatever
     // synchronous fits mounting itself already performed.
     expect(FitStub.fits).toBeGreaterThan(fitsAfterMount)
@@ -1453,7 +1473,11 @@ describe("TerminalPane bundled font load on mount", () => {
     expect(TermStub.instances).toHaveLength(1)
     await act(async () => {})
     expect(warn).toHaveBeenCalledTimes(1)
-    expect(warn.mock.calls[0][0]).toContain("Dux Mono")
+    // The warning must not name a font: several faces load together and a
+    // rejection does not say which one failed, so naming the configured
+    // family would accuse it of a bundled face's failure.
+    expect(warn.mock.calls[0][0]).toContain("a terminal font failed to load")
+    expect(warn.mock.calls[0][0]).not.toContain("Dux Mono")
     warn.mockRestore()
   })
 })

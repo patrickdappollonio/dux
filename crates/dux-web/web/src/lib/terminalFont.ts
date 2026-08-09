@@ -5,10 +5,12 @@
 import type { FitAddon } from "@xterm/addon-fit"
 import type { Terminal } from "@xterm/xterm"
 
-// The two bundled font-family names, matching the `@font-face` declarations
-// in index.css (see terminalFonts.test.ts, which pins both against the CSS).
+// The three bundled font-family names, matching the `@font-face` declarations
+// in index.css (see terminalFonts.test.ts, which pins all three against the
+// CSS).
 export const DUX_MONO_FAMILY = "Dux Mono"
 export const DUX_MONO_SYMBOLS_FAMILY = "Dux Mono Symbols"
+export const DUX_MONO_FILL_FAMILY = "Dux Mono Fill"
 
 // The exact `unicode-range` value on the "Dux Mono Symbols" `@font-face` in
 // index.css, exported so terminalFonts.test.ts can pin the two against each
@@ -16,14 +18,42 @@ export const DUX_MONO_SYMBOLS_FAMILY = "Dux Mono Symbols"
 export const UNICODE_RANGES =
   "U+2190-21FF, U+2300-23FF, U+2500-25FF, U+2600-27BF, U+2800-28FF, U+E0A0-E0D7"
 
+// The same, for the "Dux Mono Fill" `@font-face`: the symbol blocks its subset
+// of Adwaita Mono covers.
+export const FILL_UNICODE_RANGES =
+  "U+2000-2BFF, U+2E00-2E7F, U+1F000-1FBFF"
+
 // The bundled fallback stack. "Dux Mono Symbols" is listed first so structural
 // glyphs (box drawing, blocks, braille, arrows, powerline) always come from a
 // verified single-cell-advance font rather than whatever the browser picks;
 // "Dux Mono" (Roboto Mono) is the ordinary text face and carries none of those
-// glyphs itself. The system-font tail is a last-resort backstop for any
-// remaining code point neither bundled face covers.
+// glyphs itself.
+//
+// "Dux Mono Fill" comes third, AFTER both curated faces, and that order is
+// load-bearing rather than incidental. It is a backstop for code points
+// neither face ahead of it carries (U+23F5, U+23F8, U+2714 and the rest of the
+// symbol blocks a device with no suitable installed font would otherwise draw
+// as tofu), and its declared `unicode-range` is far wider than the handful of
+// glyphs that motivated it: it takes in all of U+2000-2BFF, including General
+// Punctuation (U+2000-206F).
+//
+// The ordering rule is simply that the two curated faces win wherever they
+// overlap the backstop: the symbols face owns the structural glyphs it was cut
+// for, the text face owns ordinary punctuation, and only what both lack may
+// reach the fill. What the rule does NOT buy is a single typeface on screen.
+// The honest cost is ADJACENCY: the fill supplies code points sitting in the
+// very blocks the symbols face already draws, so they render in a different
+// typeface right next to their neighbours. Measured against the current cuts,
+// the fill adds 77 more Arrows, 94 more Misc Technical, 51 more Box Drawing
+// and Geometric Shapes, and 159 more Misc Symbols and Dingbats, so 383 code
+// points draw mixed with symbols-face neighbours (braille is untouched, 0
+// added). That is accepted: a glyph in a mismatched typeface is readable and
+// tofu is not.
+//
+// The system-font tail is the final backstop for any remaining code point no
+// bundled face covers.
 export const DUX_TERMINAL_FONT_STACK =
-  `"${DUX_MONO_SYMBOLS_FAMILY}", "${DUX_MONO_FAMILY}", ui-monospace, SFMono-Regular, Menlo, monospace`
+  `"${DUX_MONO_SYMBOLS_FAMILY}", "${DUX_MONO_FAMILY}", "${DUX_MONO_FILL_FAMILY}", ui-monospace, SFMono-Regular, Menlo, monospace`
 
 export const MIN_TERMINAL_FONT_SIZE = 8
 export const MAX_TERMINAL_FONT_SIZE = 32
@@ -130,6 +160,21 @@ export function loadTerminalFontsThenRefit(
   // symbols face (█⣿) so the browser actually loads THAT face rather than
   // only the always-matched text face.
   const sample = "█⣿"
+  // "Dux Mono Fill" is deliberately NOT in this eager load. It is the rarely
+  // hit backstop, and forcing it here would fetch ~79 KB on every terminal
+  // mount, including on the phones this face exists to serve. Three reasons
+  // it is safe to leave lazy: its `unicode-range` already makes the browser
+  // fetch it on first use of a code point the earlier faces do not cover; the
+  // cell grid cannot depend on it, because xterm measures the cell from a
+  // `"W".repeat(32)` span and both U+0057 and U+0020 fall outside every
+  // restricted face's range, so the metrics come from the text face; and
+  // `font-display: swap` means the worst case for a rare glyph is one frame
+  // drawn in a fallback before the face arrives.
+  //
+  // The `family` shorthand below is the whole stack, so it does mention the
+  // fill face, but that costs nothing: CSS font matching hands both sample
+  // characters to "Dux Mono Symbols", which leads the stack and really
+  // carries them, so the fill face is never selected and never fetched.
   const refit = () => {
     if (termRef.current === term) fitAddonRef.current?.fit()
   }
@@ -144,7 +189,11 @@ export function loadTerminalFontsThenRefit(
   ])
     .then(refit)
     .catch(() => {
-      console.warn(`dux: terminal font "${family}" failed to load; keeping current metrics`)
+      // Several faces are loaded together, so a rejection says only that one
+      // of them failed, never which. Naming the configured family here would
+      // accuse the user's font of a failure that was just as likely a bundled
+      // face.
+      console.warn("dux: a terminal font failed to load; keeping current metrics")
       refit()
     })
 }

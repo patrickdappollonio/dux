@@ -13,16 +13,55 @@ miscellaneous technical (U+2300-23FF), box drawing and block elements
 patterns (U+2800-28FF), and the Powerline private-use glyphs
 (U+E0A0-E0D7). Licensed OFL-1.1.
 
-Neither upstream OFL.txt file declares a Reserved Font Name after its
-copyright statement, so OFL clause 3 does not, on its own, require either
-of these files to be renamed. Every file bundled here is renamed anyway, as
-a precaution: each is either instanced (Roboto Mono) or subset (the
-JetBrains Mono Nerd Font Mono cut), which OFL treats as a Modified Version,
-and renaming avoids any appearance that a modified, subsetted build is the
-certified upstream font. Each file's name table (IDs 1, 2, 3, 4, 6, 16, 17)
-was rewritten to a family dux owns instead: the two Roboto Mono weights
-become "Dux Mono" (Regular / Bold), and the JetBrains subset becomes
-"Dux Mono Symbols".
+dux-mono-fill.woff2 is a subset of Adwaita Mono Regular, name-table version
+34.1.0, taken from the Arch package adwaita-fonts 50.0-1
+(/usr/share/fonts/Adwaita/AdwaitaMono-Regular.ttf). Upstream is
+GNOME/adwaita-fonts (https://gitlab.gnome.org/GNOME/adwaita-fonts), a build
+of Iosevka. Note this is a weaker provenance claim than the two faces
+above, which name exact upstream release tags; 34.1.0 is the font's own
+internal version string, not an adwaita-fonts tag.
+
+It is the backstop face: it carries the symbol-block glyphs Adwaita Mono
+has that neither of the two faces above covers, so a device whose own
+installed fonts lack a glyph still gets one. Four deliberate exclusions,
+which together give the face one invariant worth stating plainly, that
+every glyph in it occupies exactly one terminal cell:
+
+  - Glyphs whose advance is not 600/1000 are dropped, so nothing lands off
+    the cell grid. That is very nearly, but not exactly, the ratio the text
+    face uses: Roboto Mono is 1229/2048 = 0.6000977 and this face is 0.6000
+    even, a 0.016% difference, 0.0014 px at 14 px. It does not accumulate,
+    because xterm measures each rendered character and compensates with
+    per-span letter-spacing.
+  - Code points with Unicode Emoji_Presentation=Yes are dropped: those are
+    grid-width-2 and belong to the platform colour-emoji font.
+  - Code points with East_Asian_Width W or F are dropped, for the same
+    reason read the other way round: the terminal allots them two cells,
+    this face would draw them one cell wide, and they would sit in the left
+    half of their slot. Dropping them lets a font that can draw them at
+    full width have them. This empties the Yijing hexagram block, which is
+    therefore not in the declared unicode-range at all.
+  - The whole Private Use Area is dropped. The PUA exists precisely so that
+    other people's fonts can put things there, so a bundled backstop has no
+    business claiming it: those slots belong to whatever Nerd Font the
+    visitor has installed. Two of Iosevka's own PUA glyphs were ink-less,
+    which would have rendered as nothing at all where a visitor's font had
+    a real glyph.
+
+Licensed OFL-1.1.
+
+None of the three upstream OFL.txt files declares a Reserved Font Name
+after its copyright statement, so OFL clause 3 does not, on its own,
+require any of these files to be renamed. Every file bundled here is
+renamed anyway, as a precaution: each is either instanced (Roboto Mono) or
+subset (the JetBrains Mono Nerd Font Mono and Adwaita Mono cuts), which OFL
+treats as a Modified Version, and renaming avoids any appearance that a
+modified, subsetted build is the certified upstream font. Each file's name
+table (IDs 1, 2, 3, 4, 6, 16, 17, and 21 where present) was rewritten to a
+family dux owns instead: the two Roboto Mono weights become "Dux Mono"
+(Regular / Bold), the JetBrains subset becomes "Dux Mono Symbols", and the
+Adwaita subset becomes "Dux Mono Fill". The copyright, author and license
+records (IDs 0, 8, 9, 13, 14) are preserved untouched in every file.
 
 Reproduction, from the exact upstream files named above:
 
@@ -43,13 +82,46 @@ Reproduction, from the exact upstream files named above:
     --recommended-glyphs --name-IDs='*' --name-legacy --name-languages='*'
   # (rename + woff2 compress as described above)
 
-The original license follows verbatim (both source projects ship the
-identical OFL-1.1 body; only the copyright line differs, and both are
+  # Adwaita Mono: the code point list is DERIVED rather than hand-written,
+  # so unlike the two recipes above this one is not self-contained: it
+  # needs the two shipped faces to compute against, and the four exclusion
+  # filters cannot be expressed to pyftsubset. Take every code point in
+  # U+2000-2BFF, U+2E00-2E7F and U+1F000-1FBFF that AdwaitaMono-Regular.ttf
+  # maps, subtract everything already in dux-mono-regular.woff2's and
+  # dux-mono-symbols.woff2's cmaps, then drop advance != 600,
+  # Emoji_Presentation=Yes, and East_Asian_Width W or F. That yields 2267
+  # code points. pyftsubset retains a small closure beyond what it is
+  # asked for (it kept U+2215, which the text face already has), so the
+  # cmap is pruned back to exactly the requested list afterwards, in the
+  # same pass that rewrites the name table.
+  pyftsubset AdwaitaMono-Regular.ttf \
+    --unicodes-file=derived-codepoints.txt \
+    --output-file=fill-subset.ttf \
+    --no-hinting --desubroutinize --layout-features= \
+    --drop-tables+=GSUB,GPOS,GDEF \
+    --glyph-names --symbol-cmap --legacy-cmap --notdef-glyph --notdef-outline \
+    --recommended-glyphs --name-IDs='*' --name-legacy --name-languages='*'
+  # (prune the cmap to the requested list, rename, compress as above)
+
+The original license follows verbatim (all three source projects ship the
+identical OFL-1.1 body; only the copyright lines differ, and all are
 reproduced below).
 
 
 Copyright 2015 The Roboto Mono Project Authors (https://github.com/googlefonts/robotomono)
 Copyright 2020 The JetBrains Mono Project Authors (https://github.com/JetBrains/JetBrainsMono)
+Copyright (c) 2015-2025, Renzhi Li (aka. Belleve Invis, belleve@typeof.net)
+Copyright (c) 2025, Jamie Gravendeel (https://jamie.garden)
+Copyright (c) 2025, Florian Müllner
+
+(The three Adwaita lines are reproduced verbatim from adwaita-fonts' own
+LICENSE. Renzhi Li holds the Iosevka copyright the Mono outlines come from;
+Gravendeel and Müllner hold copyright in the adwaita-fonts Font Software,
+the build plan and patches that produced the binary subset here, and OFL
+clause 2 carries their notices with any redistributed copy. The fourth
+upstream line, The Inter Project Authors, is deliberately omitted: Inter is
+the source of Adwaita SANS, which dux does not ship, and it contributes
+nothing to AdwaitaMono-Regular.ttf.)
 
 This Font Software is licensed under the SIL Open Font License, Version 1.1.
 This license is copied below, and is also available with a FAQ at:
