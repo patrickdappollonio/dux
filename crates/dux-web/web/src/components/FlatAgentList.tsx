@@ -555,9 +555,6 @@ function AgentFlatRow({
                 >
                   <HighlightedText text={label} query={query} />
                 </span>
-                {/* Typing cue: the violet caret next to the name (working's bob +
-                    shimmer are suppressed while typing, so this is the sole cue). */}
-                {typing ? <TypingCaret /> : null}
                 {session.pr ? (
                   <SimpleTooltip
                     content={`#${session.pr.number} · ${session.pr.title} (${prStateLabel(session.pr.state)})`}
@@ -594,6 +591,11 @@ function AgentFlatRow({
                     </a>
                   </SimpleTooltip>
                 ) : null}
+                {/* Typing cue: the violet caret, kept as the RIGHTMOST indicator so
+                    its position is stable whether or not a PR badge is shown (the PR
+                    sits to its left). Working's bob + shimmer are suppressed while
+                    typing, so this is the sole cue. */}
+                {typing ? <TypingCaret /> : null}
               </span>
               {/* Line two: display-only project + state word + branch + tabs.
                   Sans throughout to match the app; only the branch is mono. */}
