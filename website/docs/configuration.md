@@ -20,12 +20,13 @@ Themes are preselected, keybindings are ready to remap, and the default provider
 are already wired in. Open it, read the comments, change what you like.
 
 Each provider block carries its own settings, including `web_dragdrop_paste`,
-which decides what a dragged and dropped file's path looks like when the web UI
-writes it into that agent's prompt. dux ships a measured value for every CLI it
+which decides what a dragged, dropped or pasted file's path looks like when the
+web UI writes it into that agent's prompt. dux ships a measured value for every CLI it
 knows about, so it is not something you normally set; see
 [Custom agents and providers](/docs/custom-agents) for the anatomy of a provider
-block and [Dropping files onto an agent](/docs/dropping-files) for what each value
-sends and which CLI wants which.
+block and
+[Dropping and pasting files onto an agent](/docs/dropping-files) for what each
+value sends and which CLI wants which.
 
 ## Managing the config
 
@@ -213,11 +214,11 @@ You don't have to edit the file: from the web UI, open the cog menu and choose
 **Preferences…**. The change is written to `[server]` in `config.toml` and applies
 to every open tab immediately, so it sticks across restarts.
 
-## Where dropped files go (`[ui]`)
+## Where dropped and pasted files go (`[ui]`)
 
 Two web-only settings under `[ui]` decide what happens to a file you drop or
-paste onto an **agent** pane. Dropping onto a terminal is unaffected: that
-always lands in the folder the terminal is actually in.
+paste onto an **agent** pane. Dropping or pasting onto a terminal is unaffected:
+that always lands in the folder the terminal is actually in.
 
 ```toml
 [ui]
@@ -238,14 +239,17 @@ folder, which ignores everything in it including itself, so your screenshots
 never turn up as untracked files. dux tries to write it on every upload, not
 only when it first creates the folder, so the file comes back if you delete it
 or if the folder was created while the setting was off. Set it to `false` if you
-intend to commit what you drop. dux never edits a `.gitignore` you already have
-there, and never writes to `.git/info/exclude` (in a linked worktree that
+intend to commit what you drop or paste. dux never edits a `.gitignore` you
+already have there, and never writes to `.git/info/exclude` (in a linked worktree that
 resolves to the main checkout's copy, so it would change what git ignores in
 every other worktree at once).
 
-Neither of these is in the Preferences dialog; they are config-file settings.
-The full story is in
-[Dropping files onto an agent](/docs/dropping-files).
+`upload_write_gitignore` is also a row in the web UI's **Preferences** dialog,
+as *Hide dropped and pasted files from git*. `upload_directory` deliberately is
+not: it is a path, and a free-text box is a poor way to pick one, so it stays a
+config-file setting until there is a directory picker worth pointing at it. The
+full story is in
+[Dropping and pasting files onto an agent](/docs/dropping-files).
 
 ## Editing settings from the web
 
@@ -255,7 +259,8 @@ have to hand-edit `config.toml` for the common ones. Rows are grouped by which
 surface they affect:
 
 - **This browser (Web)**: the instance name/favicon above, plus
-  copy-on-select, desktop notifications, and the Changes pane default.
+  copy-on-select, desktop notifications, the Changes pane default, and whether
+  dropped and pasted files stay hidden from git.
 - **Both surfaces**: status-message auto-clear, the attention indicator and
   its grace period, the always-show-tab-strip preference, the PR banner
   position, clickable hyperlinks, GitHub integration, and whether new agents

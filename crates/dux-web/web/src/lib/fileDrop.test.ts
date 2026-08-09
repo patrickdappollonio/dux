@@ -1258,3 +1258,52 @@ describe("what a refused upload is reported as", () => {
     )
   })
 })
+
+// Where the path went. A drop on a terminal pane writes it to the PTY, so
+// "sent" is the honest word; a paste on a phone puts it in the compose DRAFT
+// instead, where nothing has been sent to anything yet and the user still has
+// to press Send. Reporting a draft insert as "sent its path" told the user the
+// agent had it when it did not.
+describe("the toast says where the path actually went", () => {
+  const draftAgent = { kind: "agent" as const, delivery: "draft" as const }
+
+  it("says the path joined the message, not that it was sent", () => {
+    const t = dropToastFor([sent("shot.png")], draftAgent)
+    expect(t.tone).toBe("success")
+    expect(t.message).toContain("message")
+    expect(t.message).not.toContain("sent")
+  })
+
+  it("says it for several files too", () => {
+    const t = dropToastFor([sent("a.png"), sent("b.png")], draftAgent)
+    expect(t.message).not.toContain("sent")
+    expect(t.message).toContain("message")
+  })
+
+  it("says a stranded file was not ADDED rather than not sent", () => {
+    const t = dropToastFor(
+      [
+        {
+          kind: "saved-not-sent",
+          requestedName: "shot.png",
+          savedName: "shot.png",
+          path: "/home/p/code/app/shot.png",
+          folderLabel: "~/code/app",
+          reason: "another device took over input",
+        },
+      ],
+      draftAgent,
+    )
+    expect(t.tone).toBe("warning")
+    expect(t.message).toContain("not added")
+    expect(t.message).toContain("/home/p/code/app/shot.png")
+  })
+
+  it("keeps saying 'sent' when nothing says otherwise", () => {
+    // The default is the terminal write, so every existing call site is
+    // unchanged by the field's existence.
+    expect(dropToastFor([sent("shot.png")], { kind: "agent" }).message).toContain(
+      "sent its path",
+    )
+  })
+})

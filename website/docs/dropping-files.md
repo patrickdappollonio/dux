@@ -1,6 +1,6 @@
 ---
-title: Dropping files onto an agent
-description: Drag a screenshot from your desktop onto an agent or terminal in the browser and dux saves it on the server, then pastes its path into the prompt. Where files land, why an agent's uploads stay out of git, why nothing is ever overwritten, and why this is web-only.
+title: Dropping and pasting files onto an agent
+description: Drag a screenshot from your desktop onto an agent or terminal in the browser, or just press paste, and dux saves it on the server and pastes its path into the prompt. Where files land, why an agent's uploads stay out of git, why nothing is ever overwritten, and why this is web-only.
 group: Web UI
 order: 67
 ---
@@ -11,6 +11,53 @@ agent used to mean copying it to the server by hand and typing out the path.
 
 Now you drag it onto the terminal and let go. dux saves the file on the server
 and pastes its path into the prompt, ready for you to finish the sentence.
+
+## Or just paste it
+
+You do not have to find the file first. Take the screenshot, press
+`Ctrl+v` (`Cmd+v` on a Mac), and the image on your clipboard takes exactly the
+same route: saved on the server, path pasted into the prompt. It is the shorter
+gesture and it is the one most people reach for, because a screenshot is already
+on the clipboard the moment you take it.
+
+Everything below applies to a paste as much as to a drop: the same folders, the
+same ignore file, the same collision-safe naming, the same per-provider path
+shape, the same one toast at the end.
+
+A few specifics worth knowing:
+
+- **Images only.** A clipboard carrying an image is taken over; anything else,
+  text included, is left completely alone and pastes exactly as it always has.
+  When the clipboard carries *both* (copying a screenshot out of an application
+  routinely does), the image wins and the text is not pasted, because pasting
+  both would drop the markup into your prompt beside the path.
+- **`Ctrl+Shift+v` forces the text.** Image-wins is the right default for a
+  screenshot and the wrong one for rich content: copy a range of spreadsheet
+  cells and the clipboard carries a picture of the cells alongside the numbers,
+  and you almost certainly wanted the numbers. `Ctrl+Shift+v` (`Cmd+Shift+v` on
+  a Mac) skips image handling entirely and pastes the text, exactly as that
+  chord does elsewhere. It applies to that one keystroke; the next `Ctrl+v` is
+  image-wins again.
+- **On a phone, the path joins your draft.** With the compose bar up, a pasted
+  image puts its path into the message you are composing rather than sending
+  anything. You finish the sentence and press Send, as usual. The toast says so
+  too, rather than claiming the agent already has it.
+- **A screenshot usually has no name of its own.** Browsers hand one over as
+  `image.png`, so several pastes collide, and dux does what it does for any
+  collision: saves the next one under a new name and tells you what that name
+  is. When the clipboard supplies no name at all, dux invents one from the
+  clock, like `pasted-2026-08-09-141530.png`.
+
+### Why paste and not "read my clipboard"
+
+Browsers have an API for reading the clipboard on demand, and dux deliberately
+does not use it. It is blocked outside a **secure context**, and dux is routinely
+served over plain HTTP on a Tailscale address, which is exactly the deployment
+this feature is for. The `paste` event has no such requirement, because your
+keystroke *is* the permission: the browser hands the bytes to the page precisely
+because you asked it to. That is the same reasoning behind `Ctrl+v` being the
+reliable paste chord in the web terminal (see
+[The workspace in the browser](/docs/web-workspace)).
 
 ## Why a path and not the file itself
 
@@ -126,7 +173,11 @@ Both halves are settings, on `[ui]` in `config.toml`:
 | Key | Default | What it does |
 |---|---|---|
 | `upload_directory` | `".dux/uploads"` | Where an agent's dropped and pasted files go, relative to that agent's worktree. Must be a relative path with no `..` in it that a filesystem could actually hold; anything else falls back to the default and says so once in `dux.log`. |
-| `upload_write_gitignore` | `true` | Whether to keep the self-ignoring `.gitignore` in that folder, attempted on every upload. Set it to `false` if you intend to commit what you drop, and your uploads show up as ordinary untracked files again. |
+| `upload_write_gitignore` | `true` | Whether to keep the self-ignoring `.gitignore` in that folder, attempted on every upload. Set it to `false` if you intend to commit what you drop or paste, and your uploads show up as ordinary untracked files again. This one is also a row in the web UI's **Preferences** dialog, as *Hide dropped and pasted files from git*. |
+
+`upload_directory` deliberately has **no** Preferences row. It is a path, and a
+free-text box is a poor way to pick one; doing it properly needs a directory
+picker the dialog does not have. Edit it in `config.toml`.
 
 Set `upload_directory = ""`, or point it at anything outside the worktree, and
 dux will not follow you: uploads have to be somewhere the agent can read and
@@ -334,17 +385,24 @@ counting through the drop, so a large file or a busy server never looks like
 nothing happened. It is replaced, in place, by **one** toast reporting the whole
 drop rather than one per file.
 
-## Who can drop
+## Who can drop, and who can paste
 
 Only the device that currently holds input. Terminals in dux are one-writer,
 many-watchers (see [The workspace in the browser](/docs/web-workspace)), and the
 drop target only appears for the writer, because a watcher could not paste the
 path afterwards anyway.
 
+A watcher who pastes an image is told rather than ignored: nothing is uploaded,
+and a toast says the image was not saved and that taking over is the way to
+paste it here. Nothing is left on the server to clean up.
+
 If you lose input to another device in the moment between the file being saved
 and its path being pasted, dux tells you plainly: the file **was** saved, here
 is its full path, and the path was not sent. You can then take over input and
-paste it yourself.
+paste it yourself. The same honesty applies on a phone: if the compose box goes
+away mid-upload (you rotated to a wide layout, or switched the box off), dux
+reports the file as saved-but-not-added with its full path rather than claiming
+it joined a message you can no longer see.
 
 ## Limits, and switching it off
 
@@ -368,6 +426,7 @@ it: Alacritty, kitty, Ghostty and the rest all type the path in for you, and the
 file is already on the machine the agent is running on. There is nothing for dux
 to add. This feature exists to close the gap that only a browser has.
 
-There is no drag gesture on a phone, so there is no phone surface either. On a
-phone, the compose bar is your typing surface (see
-[The workspace in the browser](/docs/web-workspace)).
+There is no drag gesture on a phone, so dropping is a desktop gesture. Pasting
+is not: on a phone the compose bar is your typing surface (see
+[The workspace in the browser](/docs/web-workspace)), and pasting an image into
+it puts the saved file's path into your draft.

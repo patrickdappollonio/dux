@@ -472,7 +472,9 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # above. That ignores everything in the directory including the\n\
                  # .gitignore itself, so git reports nothing at all and your dropped\n\
                  # screenshots never show up as untracked files to discard by hand.\n\
-                 # Set to false if you intend to commit what you drop.\n\
+                 # Set to false if you intend to commit what you drop (or paste).\n\
+                 # Change it at runtime from the web UI's Preferences dialog, where it\n\
+                 # reads \"Hide dropped and pasted files from git\".\n\
                  #\n\
                  # dux tries this on every upload, not only when it first creates the\n\
                  # directory. That costs one syscall and means the file comes back if\n\
@@ -1471,8 +1473,8 @@ fn render_provider_config(out: &mut String, name: &str, config: &ProviderCommand
         None => out.push_str("# forward_scroll = true\n"),
     }
     out.push_str(
-        "# What a dragged and dropped file's path looks like when the web UI writes it\n\
-         # into this provider's prompt.\n\
+        "# What a dragged, dropped or pasted file's path looks like when the web UI\n\
+         # writes it into this provider's prompt.\n\
          #\n\
          # You almost certainly do not need to touch this. dux ships the value it\n\
          # measured for each CLI it knows about.\n\

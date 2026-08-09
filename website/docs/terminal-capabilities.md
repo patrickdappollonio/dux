@@ -170,11 +170,12 @@ reach back into the app.
 ## Getting a file to the agent
 
 Capabilities are about what an agent can reach out and do. The other direction,
-getting something from your machine INTO the agent, is covered by file drop in
-the browser: drag a file onto the terminal and dux saves it on the server and
-pastes its path. That is web-only, because a real terminal emulator already
-types a dropped file's path in for you. See
-[Dropping files onto an agent](/docs/dropping-files).
+getting something from your machine INTO the agent, is covered by file drop and
+image paste in the browser: drag a file onto the terminal, or paste a screenshot
+into it, and dux saves it on the server and pastes its path. That is web-only,
+because a real terminal emulator already types a dropped file's path in for you.
+See
+[Dropping and pasting files onto an agent](/docs/dropping-files).
 
 ## The fine print
 

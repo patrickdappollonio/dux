@@ -117,6 +117,33 @@ export type DropContext = {
   /// files can scatter; an agent's cannot, because every tab of one agent
   /// shares one worktree and therefore one upload folder).
   kind: "agent" | "terminal"
+  /// Where the path was put, which decides one verb and nothing else.
+  ///
+  /// `"sent"` (the default, and every drop) means it was written to the PTY.
+  /// `"draft"` means it was spliced into the mobile compose bar's draft, where
+  /// NOTHING has gone to the agent yet and the user still has to press Send.
+  /// Reporting that as "sent its path" claimed the agent had the file when it
+  /// did not, which is the one thing this whole toast exists to be exact about.
+  delivery?: "sent" | "draft"
+}
+
+/// "sent its path" / "added its path to your message", for one file.
+function deliveredOne(ctx: DropContext): string {
+  return ctx.delivery === "draft"
+    ? "added its path to your message"
+    : "sent its path"
+}
+
+/// The same, for several.
+function deliveredMany(ctx: DropContext): string {
+  return ctx.delivery === "draft"
+    ? "added their paths to your message"
+    : "sent their paths"
+}
+
+/// The negative form, used by the stranded-file rung.
+function notDelivered(ctx: DropContext): string {
+  return ctx.delivery === "draft" ? "not added" : "not sent"
 }
 
 export type DropToast = {
@@ -678,9 +705,9 @@ export function dropToastFor(
     // stranded file's reason and applying it to every one of them.
     const head =
       groups.length === 1
-        ? `Saved${toPhrase(savedFiles, ctx)}, but the path was not sent: ${endSentence(groups[0].reason)} ` +
+        ? `Saved${toPhrase(savedFiles, ctx)}, but the path was ${notDelivered(ctx)}: ${endSentence(groups[0].reason)} ` +
           `The file is at ${strandedList(groups[0].files)}.`
-        : `Saved${toPhrase(savedFiles, ctx)}, but ${notSent.length} paths were not sent: ` +
+        : `Saved${toPhrase(savedFiles, ctx)}, but ${notSent.length} paths were ${notDelivered(ctx)}: ` +
           `${groups
             .map((g) => `${strandedList(g.files)} because ${asClause(g.reason)}`)
             .join("; ")}.`
@@ -700,7 +727,7 @@ export function dropToastFor(
     return {
       tone: "warning",
       message:
-        `Saved ${savedFiles.length} of ${total} files${toPhrase(savedFiles, ctx)} and sent their paths. ` +
+        `Saved ${savedFiles.length} of ${total} files${toPhrase(savedFiles, ctx)} and ${deliveredMany(ctx)}. ` +
         `Refused: ${endSentence(reasonList(refused))}` +
         renameNote(savedFiles, ctx) +
         folderBreakdown(savedFiles, ctx),
@@ -713,14 +740,14 @@ export function dropToastFor(
     const where = toPhrase(savedFiles, ctx)
     const named =
       one.requestedName === one.savedName
-        ? `Saved ${one.savedName}${where} and sent its path.`
-        : `Saved ${one.requestedName}${where} as ${one.savedName}, so nothing was overwritten, and sent its path.`
+        ? `Saved ${one.savedName}${where} and ${deliveredOne(ctx)}.`
+        : `Saved ${one.requestedName}${where} as ${one.savedName}, so nothing was overwritten, and ${deliveredOne(ctx)}.`
     return { tone: "success", message: named }
   }
   return {
     tone: "success",
     message:
-      `Saved ${savedFiles.length} files${toPhrase(savedFiles, ctx)} and sent their paths.` +
+      `Saved ${savedFiles.length} files${toPhrase(savedFiles, ctx)} and ${deliveredMany(ctx)}.` +
       renameNote(savedFiles, ctx) +
       folderBreakdown(savedFiles, ctx),
   }

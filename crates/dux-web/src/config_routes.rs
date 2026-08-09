@@ -301,6 +301,10 @@ struct UiSettingsPatch {
     compose_bar: Option<bool>,
     mobile_top_bar: Option<bool>,
     mobile_accessory_bar: Option<bool>,
+    /// Whether the agent upload directory keeps a self-ignoring `.gitignore`.
+    /// Its companion `upload_directory` is deliberately not settable here: it
+    /// is a path, and the web has no directory picker to edit one with.
+    upload_write_gitignore: Option<bool>,
     auto_reopen_agents: Option<bool>,
     show_changes_pane: Option<bool>,
     always_show_tab_strip: Option<bool>,
@@ -420,6 +424,7 @@ async fn set_settings(
             compose_bar: body.ui.compose_bar,
             mobile_top_bar: body.ui.mobile_top_bar,
             mobile_accessory_bar: body.ui.mobile_accessory_bar,
+            upload_write_gitignore: body.ui.upload_write_gitignore,
             auto_reopen_agents: body.ui.auto_reopen_agents,
             show_changes_pane: body.ui.show_changes_pane,
             web_notifications: body.capabilities.web_notifications,
@@ -936,6 +941,7 @@ mod tests {
                         "compose_bar": false,
                         "mobile_top_bar": false,
                         "mobile_accessory_bar": false,
+                        "upload_write_gitignore": false,
                         "auto_reopen_agents": true,
                         "always_show_tab_strip": true,
                         "status_clear_seconds": 42,
@@ -972,6 +978,7 @@ mod tests {
             "compose_bar = false",
             "mobile_top_bar = false",
             "mobile_accessory_bar = false",
+            "upload_write_gitignore = false",
             "auto_reopen_agents = true",
             "always_show_tab_strip = true",
             "status_clear_seconds = 42",

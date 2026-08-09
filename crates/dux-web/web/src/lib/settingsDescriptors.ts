@@ -19,6 +19,11 @@
 // `branch_sync_interval`, `pr_poll_interval_seconds`, `agent_tabs_max`) are
 // deliberately deferred.
 //
+// `ui.upload_directory` is deliberately excluded and is not merely deferred:
+// it is a PATH, editing one in a free-text row is a poor affordance, and doing
+// it properly needs a directory picker this dialog does not have. Its
+// companion `ui.upload_write_gitignore` is a plain toggle and IS here.
+//
 // THIS IS WHERE SETTINGS LIVE. A user preference is a row here, never an app-menu
 // item: the menu carries actions and dialogs. The web command palette used to
 // carry six preference-shaped toggles, four of which already existed here under a
@@ -230,6 +235,17 @@ export const SETTING_GROUPS: SettingGroup[] = [
         default: true,
         writeTarget: "settings",
         read: (b) => b.mobile_accessory_bar ?? true,
+      },
+      {
+        key: "ui.upload_write_gitignore",
+        label: "Hide dropped and pasted files from git",
+        description:
+          "Files you drop or paste onto an agent are saved inside its worktree, so git would otherwise show them as untracked changes. This keeps a .gitignore in that upload folder so they stay invisible. Turn it off if you mean to commit what you hand the agent. An existing .gitignore is never touched.",
+        surface: "web",
+        control: { kind: "bool" },
+        default: true,
+        writeTarget: "settings",
+        read: (b) => b.upload_write_gitignore ?? true,
       },
       {
         key: "capabilities.web_notifications",

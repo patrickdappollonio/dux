@@ -29,6 +29,7 @@ import {
   tooLongToAttachReason,
 } from "@/lib/fileDrop"
 import { FileDropApiError, uploadDroppedFile } from "@/lib/fileDropApi"
+import { clipboardPasteAction } from "@/lib/clipboardPaste"
 import { showBusyToast } from "@/lib/busyToast"
 import { showFinalToast } from "@/lib/finalToast"
 import { MacroPopover } from "@/components/MacroPopover"
@@ -51,6 +52,7 @@ import {
   classifyClipboardKey,
   copyOnSelectAction,
   ESC,
+  forcesTextPaste,
   LF,
   linkActivateAction,
   pageKeySeq,
@@ -402,6 +404,30 @@ export function TerminalPane(props: TerminalPaneProps) {
   // overlay and still uploaded. There is nothing to lose by waiting, because
   // the window closes in one fetch and the drag surface simply appears then.
   const fileDropEnabled = (bootstrap?.file_drop_max_bytes ?? 0) > 0
+  // The same answer, mirrored for the CLIPBOARD path. A paste is handled by a
+  // listener registered in the mount effect, which closes over the value it saw
+  // at mount, so unlike the rendered drag props it needs the ref to see a
+  // bootstrap document (or a config change) that landed afterwards.
+  const fileDropEnabledRef = useRef(fileDropEnabled)
+  useEffect(() => {
+    fileDropEnabledRef.current = fileDropEnabled
+  }, [fileDropEnabled])
+  // The user's configured toast window, mirrored for exactly the same reason.
+  // The upload path is entered from a mount-effect listener as well as from a
+  // JSX handler, and the listener closes over the MOUNT render, where the
+  // bootstrap document has usually not arrived yet: read directly, every
+  // clipboard-paste toast would be pinned to the 6s default for the life of the
+  // pane and a later config change would never reach it, so a drop and a paste
+  // would disagree about how long their report stays up.
+  const statusClearSecondsRef = useRef(bootstrap?.status_clear_seconds)
+  useEffect(() => {
+    statusClearSecondsRef.current = bootstrap?.status_clear_seconds
+  }, [bootstrap?.status_clear_seconds])
+  // The `Ctrl+Shift+v` / `Cmd+Shift+v` text-paste hatch, armed by the key
+  // handler and consumed by the `paste` listener the browser fires immediately
+  // afterwards. A one-shot LATCH rather than a lasting preference: it describes
+  // one keystroke.
+  const forcedTextPasteRef = useRef(false)
   // The per-provider drop-paste config, mirrored into a ref so the drop loop can
   // read the CURRENT map rather than the one that happened to be in the closure
   // when the drag landed. A drop's uploads run one at a time and a multi-file
@@ -675,31 +701,7 @@ export function TerminalPane(props: TerminalPaneProps) {
   useEffect(() => {
     if (!(composeBarEnabled && isOwner)) return
     const sink = {
-      insert: (text: string) => {
-        // The textarea's selection is read up front, once: the functional
-        // updater below may run more than once (StrictMode), and it must
-        // splice the same way each time. A missing element or selection falls
-        // back to appending (insertIntoComposeDraft treats null as "append").
-        const el = composeInputRef.current
-        const selectionStart = el === null ? null : el.selectionStart
-        const selectionEnd = el === null ? null : el.selectionEnd
-        setComposeText((prev) => {
-          const { next, caret } = insertIntoComposeDraft(
-            prev,
-            selectionStart,
-            selectionEnd,
-            text,
-          )
-          // A ref write inside the updater is idempotent: the same inputs
-          // yield the same caret on a re-run. The caret-placement effect above
-          // applies it once the new draft value reaches the DOM.
-          pendingComposeCaretRef.current = caret
-          return next
-        })
-        // The draft the macro just joined is where editing continues; the
-        // active typing surface here IS the compose textarea.
-        focusTypingSurface()
-      },
+      insert: insertComposeText,
       target: () => composeInputRef.current,
     }
     setComposeInsertSink(sink)
@@ -708,6 +710,30 @@ export function TerminalPane(props: TerminalPaneProps) {
       // replaced it (the same guard `setActivePtySocket` cleanup uses).
       if (getComposeInsertSink() === sink) setComposeInsertSink(null)
     }
+    // `insertComposeText` is a component-body function that reads only refs and
+    // the (stable) state setter, so a new identity every render says nothing new
+    // and listing it would re-register the sink on every keystroke.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [composeBarEnabled, isOwner])
+  // The compose textarea's own image-paste listener. The compose bar renders
+  // OUTSIDE the terminal container (it is a sibling row of the mobile shell),
+  // so the container's capture listener cannot see a paste that lands in it,
+  // and on a phone the compose box is where a paste lands: the tap redirect
+  // puts focus there. Registered on the element rather than passed as an
+  // `onPaste` prop so `ComposeBar` stays presentational, and no capture phase
+  // is needed because this IS the target. The same gate as the render below,
+  // so the listener exists exactly while the box does.
+  useEffect(() => {
+    if (!(composeBarEnabled && isOwner)) return
+    const el = composeInputRef.current
+    if (el === null) return
+    const handler = (e: ClipboardEvent) => onClipboardPaste(e)
+    el.addEventListener("paste", handler)
+    return () => el.removeEventListener("paste", handler)
+    // Same reason as the sink above: `onClipboardPaste` reads refs and the live
+    // bootstrap document at call time, so re-registering the listener whenever
+    // its identity changes would buy nothing.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [composeBarEnabled, isOwner])
   // This view's PTY-socket connection id, delivered as the socket's first
   // `connected` frame (and re-issued on every reconnect). Compared against each
@@ -992,7 +1018,7 @@ export function TerminalPane(props: TerminalPaneProps) {
       }
       // Clipboard chords (keydown only).
       if (e.type !== "keydown") return true
-      const clip = classifyClipboardKey({
+      const chord = {
         ctrlKey: e.ctrlKey,
         shiftKey: e.shiftKey,
         altKey: e.altKey,
@@ -1000,7 +1026,14 @@ export function TerminalPane(props: TerminalPaneProps) {
         code: e.code,
         keyCode: e.keyCode,
         isMac,
-      })
+      }
+      // Arm the text-paste hatch BEFORE the classification and independently of
+      // it: on a Mac `Cmd+Shift+v` classifies as `passthrough` (the whole
+      // Cmd-anything branch is deliberately the browser's), so folding this
+      // into the classifier would have given the hatch to Linux only. Armed
+      // here, consumed by the `paste` listener the browser is about to fire.
+      if (forcesTextPaste(chord)) armForcedTextPaste()
+      const clip = classifyClipboardKey(chord)
       if (clip === "passthrough") return true
       if (clip === "copy") {
         // The chord is not a browser copy event, so we copy the selection
@@ -1010,16 +1043,21 @@ export function TerminalPane(props: TerminalPaneProps) {
         e.preventDefault()
         return false
       }
-      // clip === "paste":
-      if (!isOwnerRef.current) {
-        // Read-only viewer: swallow at the source so no native paste event fires.
-        e.preventDefault()
-        return false
-      }
-      // Owner: return false WITHOUT preventDefault so xterm emits no \x16 and the
-      // browser's default Ctrl+v fires a native `paste` event, which xterm's own
-      // handler reads from clipboardData (secure-context-free) and forwards as
-      // (bracketed) onData.
+      // clip === "paste": return false WITHOUT preventDefault so xterm emits no
+      // \x16 and the browser's default Ctrl+v fires a native `paste` event,
+      // which xterm's own handler reads from clipboardData (secure-context-free)
+      // and forwards as (bracketed) onData.
+      //
+      // A NON-OWNER takes the same path, deliberately. Swallowing the chord here
+      // used to look like the safe thing, and it was the bug: no native paste
+      // event fired, so the capture listener never ran, so an image paste from a
+      // viewer was silently inert instead of saying why (and only on Linux and
+      // Windows, since `Cmd+v` classifies as passthrough and never reached this
+      // branch at all). Nothing is lost by letting it through, because a
+      // viewer's TEXT paste still cannot reach the PTY: xterm's own paste
+      // handler ends in `triggerDataEvent`, which is the `onData` subscription
+      // above, and that returns early for a non-owner. The server's `may_write`
+      // denies a non-owner's stdin as well, so the gate is two-deep.
       return false
     })
 
@@ -1089,6 +1127,13 @@ export function TerminalPane(props: TerminalPaneProps) {
       if (term.textarea) term.textarea.value = ""
     }
     container.addEventListener("contextmenu", onContextMenuPasteGuard)
+
+    // Image paste. CAPTURE, and that is the whole trick: xterm's own paste
+    // handler sits on the hidden textarea inside this container, and a capture
+    // listener on an ancestor runs before it, so dux decides first and an
+    // ordinary text paste is passed through untouched. See `onClipboardPaste`.
+    const onPasteCapture = (e: ClipboardEvent) => onClipboardPaste(e)
+    container.addEventListener("paste", onPasteCapture, true)
 
     // Touch gestures over the terminal, mapped to the natural mobile model:
     //   - a one-finger DRAG scrolls the scrollback,
@@ -1723,6 +1768,7 @@ export function TerminalPane(props: TerminalPaneProps) {
       container.removeEventListener("mousedown", onMouseDown)
       container.removeEventListener("mouseup", onMouseUp)
       container.removeEventListener("contextmenu", onContextMenuPasteGuard)
+      container.removeEventListener("paste", onPasteCapture, true)
       container.removeEventListener("touchstart", onTouchStart)
       container.removeEventListener("touchmove", onTouchMove)
       container.removeEventListener("touchend", onTouchEnd)
@@ -1752,6 +1798,11 @@ export function TerminalPane(props: TerminalPaneProps) {
       disposeOsc8Gate.dispose()
       term.dispose()
     }
+    // The mount effect owns the terminal's whole lifetime and must re-run ONLY
+    // when the streamed target changes; `onClipboardPaste` is a component-body
+    // function reading refs, and listing it would tear the terminal down and
+    // rebuild it on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [kind, id, sessionId, ptyUrl])
 
   // React to ownership handovers. The server broadcasts a `pty.owner` carrying the
@@ -1864,7 +1915,89 @@ export function TerminalPane(props: TerminalPaneProps) {
     if (term && isOwnerRef.current) pasteIntoTerm(term, focusTypingSurface)
   }
 
-  // Save each dropped file, then paste its path.
+  // WHERE a saved file's path is written, and whether it can be written right
+  // now. The upload loop below is identical for a drop and for a clipboard
+  // paste; the only thing that differs is this, so it is the only thing passed
+  // in. Two implementations exist (`terminalUploadSink`, `composeUploadSink`)
+  // and `activeUploadSink` picks between them exactly as `focusTypingSurface`
+  // picks a focus target, because the question is the same one: which surface
+  // is the user typing into.
+  type UploadSink = {
+    /// Fills `DropContext.delivery`, which is the one word the toast changes.
+    delivery: "sent" | "draft"
+    /// Why the path cannot be delivered right now, in the words the
+    /// stranded-file toast shows, or null when it can. Called IMMEDIATELY
+    /// BEFORE each delivery, never once per drop: ownership can move and a
+    /// socket can close between two files.
+    unavailable: () => string | null
+    deliver: (payload: string) => void
+  }
+
+  function terminalUploadSink(): UploadSink {
+    return {
+      delivery: "sent",
+      unavailable: () => {
+        if (!isOwnerRef.current) return "another device took over input"
+        // A write to a closed socket is dropped SILENTLY, so without this the
+        // file would be reported as sent with nothing written.
+        if (!termRef.current || !(ptyRef.current?.isOpen ?? false)) {
+          return "the connection dropped"
+        }
+        return null
+      },
+      // xterm's own paste, which applies bracketed paste (DECSET 2004) when
+      // the running program asked for it and sends plain text when it did not.
+      // Building the bracket markers by hand here would be a second
+      // implementation of something that already works.
+      //
+      // This deliberately differs from the compose bar, which refuses
+      // bracketed paste. That rule exists because compose text has to keep a
+      // soft line break and a submitting Enter distinct on the wire. A saved
+      // file's path contains neither, so the reason does not apply here.
+      deliver: (payload) => termRef.current?.paste(payload),
+    }
+  }
+
+  function composeUploadSink(): UploadSink {
+    return {
+      delivery: "draft",
+      // No socket check: nothing is going on the wire. The draft is text the
+      // user reviews and then Sends, and `sendCompose` does its own gating at
+      // that point. Ownership is still checked, because the compose bar only
+      // exists for the input owner and a demotion mid-upload must not quietly
+      // stage input at a session this device no longer drives.
+      //
+      // And the BAR ITSELF is checked, because it can go away mid-upload (a
+      // rotation past the mobile breakpoint, `ui.compose_bar` switched off).
+      // The draft state survives that, so the insert would still work; what
+      // would not survive is the REPORT, which would say the path was added to
+      // a message with no message box on screen to look at. Reporting the file
+      // as saved-but-not-sent, with its full path, is the truthful outcome.
+      // Deliberately not a fallback to the terminal sink: the toast's wording
+      // was fixed when the sink was chosen at the gesture, and a batch that
+      // quietly changed destination halfway would report the wrong one for
+      // every file either side of the switch.
+      unavailable: () => {
+        if (!isOwnerRef.current) return "another device took over input"
+        if (!composeActiveRef.current || composeInputRef.current === null) {
+          return "the message box closed"
+        }
+        return null
+      },
+      deliver: insertComposeText,
+    }
+  }
+
+  /// The surface a saved path should land in right now: the compose draft while
+  /// the mobile compose bar is up, the terminal otherwise. Same rule, and the
+  /// same refs, as `focusTypingSurface`.
+  function activeUploadSink(): UploadSink {
+    return composeActiveRef.current && composeInputRef.current !== null
+      ? composeUploadSink()
+      : terminalUploadSink()
+  }
+
+  // Save each dropped or pasted file, then write its path to the sink.
   //
   // Sequential on purpose. The list of outcomes is in DROPPED order, and that is
   // also the order the paths are sent, which must not become whichever order the
@@ -1888,10 +2021,14 @@ export function TerminalPane(props: TerminalPaneProps) {
   // so a config reload or a provider retarget can land between two files, and a
   // form snapshotted once at the top of the drop would silently outlive it.
   //
-  // `toastId` is THIS drop's own sonner id, minted by `runDrop`. See
+  // `toastId` is THIS batch's own sonner id, minted by `runUpload`. See
   // `nextFileDropToastId`: two quick drops sharing one id lose the first one's
   // report under the second one's spinner.
-  async function handleDroppedFiles(files: File[], toastId: string) {
+  async function handleUploadedFiles(
+    files: File[],
+    toastId: string,
+    sink: UploadSink,
+  ) {
     if (files.length === 0) return
     const outcomes: DropOutcome[] = []
 
@@ -1946,25 +2083,11 @@ export function TerminalPane(props: TerminalPaneProps) {
         folderLabel: saved.folder_label,
       }
 
-      // Both checks happen IMMEDIATELY BEFORE this paste, not once at the start
-      // of the drop: ownership can move and the socket can close between two
-      // files. A write to a closed socket is dropped silently, so without the
-      // second check a file would be reported as sent with nothing written.
-      const term = termRef.current
-      if (!isOwnerRef.current) {
-        outcomes.push({
-          kind: "saved-not-sent",
-          ...where,
-          reason: "another device took over input",
-        })
-        continue
-      }
-      if (!term || !(ptyRef.current?.isOpen ?? false)) {
-        outcomes.push({
-          kind: "saved-not-sent",
-          ...where,
-          reason: "the connection dropped",
-        })
+      // Asked IMMEDIATELY BEFORE this delivery, not once at the start of the
+      // drop: ownership can move and the socket can close between two files.
+      const unavailable = sink.unavailable()
+      if (unavailable !== null) {
+        outcomes.push({ kind: "saved-not-sent", ...where, reason: unavailable })
         continue
       }
 
@@ -1999,16 +2122,7 @@ export function TerminalPane(props: TerminalPaneProps) {
         continue
       }
 
-      // xterm's own paste, which applies bracketed paste (DECSET 2004) when the
-      // running program asked for it and sends plain text when it did not.
-      // Building the bracket markers by hand here would be a second
-      // implementation of something that already works.
-      //
-      // This deliberately differs from the compose bar, which refuses bracketed
-      // paste. That rule exists because compose text has to keep a soft line
-      // break and a submitting Enter distinct on the wire. A dropped path
-      // contains neither, so the reason does not apply here.
-      term.paste(payload)
+      sink.deliver(payload)
       // SENT, not "arrived". This is a socket write like any keystroke and
       // nothing acknowledges it: a take-over landing between the upload's
       // courtesy check and this frame reaching the server makes the server drop
@@ -2018,6 +2132,7 @@ export function TerminalPane(props: TerminalPaneProps) {
 
     const ctx: DropContext = {
       kind: props.kind === "agent" ? "agent" : "terminal",
+      delivery: sink.delivery,
     }
     const report = dropToastFor(outcomes, ctx)
     // Through the SHARED final-toast raiser, so the user's configured dismiss
@@ -2025,14 +2140,16 @@ export function TerminalPane(props: TerminalPaneProps) {
     // It also retires the spinner's leak guard, since it lands on the same id.
     showFinalToast(report.tone, report.message, {
       id: toastId,
-      statusClearSeconds: bootstrap?.status_clear_seconds,
+      statusClearSeconds: statusClearSecondsRef.current,
     })
   }
 
-  /// Raise the drop's spinner and make sure something final always replaces it.
+  /// Raise the batch's spinner and make sure something final always replaces it.
+  /// Shared by the drop gesture and the clipboard paste, which differ only in
+  /// the sink they hand over.
   ///
   /// The loop's per-file failures are already outcomes, so the only way out
-  /// without a report is an unexpected throw. `handleDroppedFiles` is called
+  /// without a report is an unexpected throw. `handleUploadedFiles` is called
   /// with `void`, so that throw would become an unhandled rejection and leave
   /// the spinner on screen until its leak guard expires a minute later, still
   /// claiming the upload is running.
@@ -2040,20 +2157,101 @@ export function TerminalPane(props: TerminalPaneProps) {
   /// The id is minted HERE, once per drop, and handed to both halves, so a
   /// second drop starting while this one is still uploading cannot land its
   /// spinner on this drop's report.
-  async function runDrop(files: File[]) {
+  async function runUpload(files: File[], sink: UploadSink) {
     const toastId = nextFileDropToastId()
     try {
-      await handleDroppedFiles(files, toastId)
+      await handleUploadedFiles(files, toastId, sink)
     } catch (e) {
       showFinalToast(
         "error",
-        `The drop failed unexpectedly: ${e instanceof Error ? e.message : String(e)}`,
+        `The upload failed unexpectedly: ${e instanceof Error ? e.message : String(e)}`,
         {
           id: toastId,
-          statusClearSeconds: bootstrap?.status_clear_seconds,
+          statusClearSeconds: statusClearSecondsRef.current,
         },
       )
     }
+  }
+
+  // An image on the clipboard, pasted. The same journey as a drop, entered by
+  // the gesture people actually use: screenshot, paste, hand it to the agent.
+  //
+  // WHY THE `paste` EVENT AND NOT `navigator.clipboard.read()`. dux is
+  // routinely served over plain HTTP on a Tailscale address, where the async
+  // Clipboard API's read is blocked outright; the paste event's `clipboardData`
+  // needs no secure context, because the user gesture IS the permission. Same
+  // constraint, same answer as the Ctrl+v path below (and the CLAUDE.md
+  // clipboard tenet).
+  //
+  // HOW THIS COEXISTS WITH THE Ctrl+v INTERCEPT, which is the fiddly part.
+  // `attachCustomKeyEventHandler` deliberately returns false WITHOUT
+  // preventDefault for a paste chord, precisely so the browser's native paste
+  // event still fires and xterm's own handler reads the text out of
+  // `clipboardData`. That is the text path and it must not change. So image
+  // handling cannot live in the key handler at all (a key event carries no
+  // clipboard contents); it lives in a `paste` listener registered on the
+  // CONTAINER in the CAPTURE phase. Capture runs on ancestors before the
+  // target, and xterm's handler is on the hidden textarea INSIDE the
+  // container, so dux sees every paste first and can decide. For an image it
+  // cancels the event and stops propagation, so xterm's handler never runs and
+  // the browser inserts nothing; for anything else it does nothing whatsoever
+  // and the event continues to xterm exactly as before. The image bytes never
+  // reach xterm on either path.
+  ///
+  /// THE TEXT-PASTE HATCH. `Ctrl+v` is image-wins; `Ctrl+Shift+v` (and
+  /// `Cmd+Shift+v`) forces the text. The key handler arms the latch and this
+  /// consumes it, because a key event carries no clipboard contents and a paste
+  /// event carries no modifiers, so the two halves of the gesture can only meet
+  /// through a latch.
+  ///
+  /// Armed with a task-queue expiry rather than left to be consumed: a chord
+  /// that produces no paste event at all (an empty clipboard on some browsers,
+  /// a read the OS refuses) would otherwise leave the latch set and quietly
+  /// disarm image handling for whatever pasted next.
+  function armForcedTextPaste() {
+    forcedTextPasteRef.current = true
+    // The browser dispatches the native paste as the keydown's default action,
+    // before yielding to the task queue, so this always lands after it.
+    setTimeout(() => {
+      forcedTextPasteRef.current = false
+    }, 0)
+  }
+
+  function onClipboardPaste(e: ClipboardEvent) {
+    const forceText = forcedTextPasteRef.current
+    forcedTextPasteRef.current = false
+    const items = Array.from(e.clipboardData?.items ?? [])
+    const action = clipboardPasteAction(
+      items,
+      {
+        uploadsEnabled: fileDropEnabledRef.current,
+        isOwner: isOwnerRef.current,
+        forceText,
+      },
+      new Date(),
+    )
+    if (action.kind === "upload") {
+      e.preventDefault()
+      e.stopPropagation()
+      // Resolved HERE, at the gesture, so a paste into the compose box goes to
+      // the draft and a paste into the terminal goes to the PTY.
+      void runUpload(action.files, activeUploadSink())
+      return
+    }
+    if (action.kind === "refused") {
+      // Cancel it too: a viewer's image paste must not fall through to xterm
+      // (it would insert nothing, but silently), and the toast is the whole
+      // point of refusing out loud rather than ignoring it.
+      e.preventDefault()
+      e.stopPropagation()
+      showFinalToast("error", action.reason, {
+        id: "clipboard-image-paste",
+        statusClearSeconds: statusClearSecondsRef.current,
+      })
+      return
+    }
+    // "xterm" and "ignore": touch nothing. Ordinary text paste is xterm's, and
+    // an empty clipboard has nothing to do.
   }
 
   // A drag from a non-owner, on a phone (where there is no drag), or while file
@@ -2073,6 +2271,37 @@ export function TerminalPane(props: TerminalPaneProps) {
       !isMobile &&
       Array.from(e.dataTransfer.types).includes("Files")
     )
+  }
+
+  // Splice text into the mobile compose bar's DRAFT at the caret. Shared by
+  // the two things that put text there without typing it: a picked macro (via
+  // the module-scope `composeInsert` sink) and the path of an image pasted
+  // while the bar is the typing surface. One implementation, so the caret
+  // handling and the refocus cannot drift between them.
+  function insertComposeText(text: string) {
+    // The textarea's selection is read up front, once: the functional updater
+    // below may run more than once (StrictMode), and it must splice the same
+    // way each time. A missing element or selection falls back to appending
+    // (insertIntoComposeDraft treats null as "append").
+    const el = composeInputRef.current
+    const selectionStart = el === null ? null : el.selectionStart
+    const selectionEnd = el === null ? null : el.selectionEnd
+    setComposeText((prev) => {
+      const { next, caret } = insertIntoComposeDraft(
+        prev,
+        selectionStart,
+        selectionEnd,
+        text,
+      )
+      // A ref write inside the updater is idempotent: the same inputs yield
+      // the same caret on a re-run. The caret-placement effect applies it once
+      // the new draft value reaches the DOM.
+      pendingComposeCaretRef.current = caret
+      return next
+    })
+    // The draft the text just joined is where editing continues; the active
+    // typing surface here IS the compose textarea.
+    focusTypingSurface()
   }
 
   // Where typing focus belongs right now: the compose textarea while the
@@ -2355,7 +2584,11 @@ export function TerminalPane(props: TerminalPaneProps) {
         e.preventDefault()
         dragDepthRef.current = 0
         setDragActive(false)
-        void runDrop(Array.from(e.dataTransfer.files))
+        // Desktop only (`dragCarriesFiles` refuses a drag on a phone), so this
+        // always resolves to the terminal today. It still asks rather than
+        // assuming, so a drop and a paste can never disagree about where a
+        // path belongs.
+        void runUpload(Array.from(e.dataTransfer.files), activeUploadSink())
       }}
     >
       {/* The drop target. Shown only while a file is actually over the pane and

@@ -84,6 +84,13 @@ export interface Bootstrap {
    * render-gate/restore story as `mobile_top_bar`; older servers omit it, so
    * consumers fall back to true. */
   mobile_accessory_bar?: boolean
+  /** Mirrors `config.ui.upload_write_gitignore`: whether the agent upload
+   * directory keeps a `.gitignore` holding a single `*`, so a file dropped or
+   * pasted onto an agent stays invisible to git. Read by the Preferences
+   * dialog; older servers omit it, so consumers fall back to true. Its
+   * companion `ui.upload_directory` is deliberately not published as a
+   * preference: it is a path, and there is no directory picker to edit it. */
+  upload_write_gitignore?: boolean
   /** Mirrors `config.ui.auto_reopen_agents`: the GLOBAL startup auto-reopen
    * switch. When on, agents that were still running when dux last exited (and
    * have their per-agent opt-in) relaunch at the next startup, on the TUI and

@@ -207,13 +207,13 @@ The rest tune presentation and limits:
 | `max_websocket_terminal_connections` | `64` | Cap on companion-terminal PTY sockets. |
 | `max_websocket_tab_connections` | `64` | Cap on extra-tab PTY sockets across all agents (its own pool, so many-tab agents cannot starve others). |
 | `max_websocket_tabs_per_agent` | `8` | Per-agent fairness sub-quota on that tab pool. |
-| `file_drop_max_bytes` | `104857600` | Largest single file you can drag onto a terminal or agent pane in the browser (100 MiB). A bigger file is refused and nothing is written. `0` switches file drop off. |
+| `file_drop_max_bytes` | `104857600` | Largest single file you can drag, or image you can paste, onto a terminal or agent pane in the browser (100 MiB). A bigger file is refused and nothing is written. `0` switches file drop and image paste off. |
 | `file_drop_max_concurrency` | `2` | How many dropped-file uploads are accepted at once. Bounds buffered upload memory, not just queued work. An upload beyond the limit waits up to 30 seconds for a slot, then is refused with a `503` rather than queueing indefinitely. `0` clamps to `1`. |
 
 The two `file_drop_*` keys are read at startup like the connection caps, so
-changing either needs a server restart. The full story of what dropping a file
-does, and where it lands, is in
-[Dropping files onto an agent](/docs/dropping-files).
+changing either needs a server restart. The full story of what dropping or
+pasting a file does, and where it lands, is in
+[Dropping and pasting files onto an agent](/docs/dropping-files).
 
 The connection caps exist so a runaway number of tabs cannot exhaust the server.
 Going over a cap returns HTTP `503` until a slot frees. Setting a cap to `0`

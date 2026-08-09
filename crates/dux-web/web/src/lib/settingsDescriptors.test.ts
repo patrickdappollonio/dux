@@ -19,6 +19,7 @@ const sampleBootstrap: Bootstrap = {
   compose_bar: false,
   mobile_top_bar: false,
   mobile_accessory_bar: false,
+  upload_write_gitignore: false,
   auto_reopen_agents: true,
   attention_grace_seconds: 11,
   web_notifications: false,
@@ -67,6 +68,7 @@ describe("settingsDescriptors", () => {
         "ui.compose_bar",
         "ui.mobile_top_bar",
         "ui.mobile_accessory_bar",
+        "ui.upload_write_gitignore",
         "ui.auto_reopen_agents",
         "capabilities.web_notifications",
         "ui.status_clear_seconds",
@@ -242,6 +244,7 @@ describe("settingsDescriptors", () => {
       "ui.status_clear_seconds",
       "ui.terminal_font_family",
       "ui.terminal_font_size",
+      "ui.upload_write_gitignore",
     ])
   })
 

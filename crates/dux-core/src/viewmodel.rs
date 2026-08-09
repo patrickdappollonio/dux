@@ -123,6 +123,15 @@ pub struct BootstrapView {
     /// default true. A pure render gate read by the terminal pane and by the
     /// web's Preferences dialog. Web-only.
     pub mobile_accessory_bar: bool,
+    /// Mirrors `config.ui.upload_write_gitignore`: whether the agent upload
+    /// directory keeps a `.gitignore` holding a single `*`, so a file dropped
+    /// or pasted onto an agent stays invisible to git. Published so the web's
+    /// Preferences dialog can show the row's real current value rather than
+    /// its documented default. Its companion `ui.upload_directory` is
+    /// deliberately NOT exposed as a preference row: editing a path in a text
+    /// field is a poor affordance, and doing it properly needs a directory
+    /// picker. Web-only behavior, as the setting itself is.
+    pub upload_write_gitignore: bool,
     /// Mirrors `config.ui.auto_reopen_agents`: the GLOBAL startup auto-reopen
     /// switch (default false). When on, agents that were running when dux last
     /// exited (and have their per-agent opt-in) are relaunched at startup, by
@@ -1181,6 +1190,7 @@ impl Engine {
             compose_bar: self.config.ui.compose_bar,
             mobile_top_bar: self.config.ui.mobile_top_bar,
             mobile_accessory_bar: self.config.ui.mobile_accessory_bar,
+            upload_write_gitignore: self.config.ui.upload_write_gitignore,
             auto_reopen_agents: self.config.ui.auto_reopen_agents,
             attention_grace_seconds: self.config.ui.attention_grace_seconds,
             web_notifications: self.config.capabilities.web_notifications,
@@ -2175,6 +2185,20 @@ mod tests {
     }
 
     #[test]
+    fn the_upload_gitignore_choice_is_projected_from_config() {
+        // The web's Preferences dialog reads every row's current value off the
+        // bootstrap document, so a row with no field here can only ever show
+        // its documented default and would silently misreport a user who had
+        // turned it off in `config.toml`.
+        let (mut engine, _tmp) = test_engine();
+
+        assert!(engine.bootstrap().upload_write_gitignore);
+
+        engine.config.ui.upload_write_gitignore = false;
+        assert!(!engine.bootstrap().upload_write_gitignore);
+    }
+
+    #[test]
     fn auto_reopen_agents_is_projected_from_config() {
         let (mut engine, _tmp) = test_engine();
 
@@ -2517,6 +2541,7 @@ mod tests {
             "compose_bar",
             "mobile_top_bar",
             "mobile_accessory_bar",
+            "upload_write_gitignore",
             "auto_reopen_agents",
             "attention_grace_seconds",
             "web_notifications",

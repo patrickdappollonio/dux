@@ -9,6 +9,7 @@ import {
   type CopyOnSelectContext,
   ctrlByte,
   ESC,
+  forcesTextPaste,
   LF,
   linkActivateAction,
   type LinkActivateContext,
@@ -458,6 +459,59 @@ describe("classifyClipboardKey", () => {
     expect(classifyClipboardKey(ev({ ctrlKey: true, code: "", keyCode: 0 }))).toBe(
       "passthrough",
     )
+  })
+})
+
+describe("forcesTextPaste", () => {
+  const ev = (over: Partial<ClipboardKeyEvent>): ClipboardKeyEvent => ({
+    ctrlKey: false,
+    shiftKey: false,
+    altKey: false,
+    metaKey: false,
+    code: "",
+    keyCode: 0,
+    isMac: false,
+    ...over,
+  })
+
+  it("matches Ctrl-Shift-v", () => {
+    expect(forcesTextPaste(ev({ ctrlKey: true, shiftKey: true, code: "KeyV" }))).toBe(
+      true,
+    )
+  })
+
+  it("matches Cmd-Shift-v, which the classifier never sees", () => {
+    // `classifyClipboardKey` returns `passthrough` for every Cmd combo before
+    // any other rule, so a mac user would have no hatch if this lived inside
+    // it. Both platforms get the same chord.
+    expect(classifyClipboardKey(ev({ metaKey: true, shiftKey: true, code: "KeyV" }))).toBe(
+      "passthrough",
+    )
+    expect(forcesTextPaste(ev({ metaKey: true, shiftKey: true, code: "KeyV" }))).toBe(true)
+  })
+
+  it("does not match a plain paste chord, which stays image-wins", () => {
+    expect(forcesTextPaste(ev({ ctrlKey: true, code: "KeyV" }))).toBe(false)
+    expect(forcesTextPaste(ev({ metaKey: true, code: "KeyV" }))).toBe(false)
+    expect(forcesTextPaste(ev({ shiftKey: true, code: "KeyV" }))).toBe(false)
+  })
+
+  it("does not match another key, or the chord with Alt in it", () => {
+    expect(forcesTextPaste(ev({ ctrlKey: true, shiftKey: true, code: "KeyC" }))).toBe(
+      false,
+    )
+    expect(
+      forcesTextPaste(ev({ ctrlKey: true, shiftKey: true, altKey: true, code: "KeyV" })),
+    ).toBe(false)
+  })
+
+  it("falls back to keyCode on a layout that reports no code", () => {
+    expect(
+      forcesTextPaste(ev({ ctrlKey: true, shiftKey: true, code: "", keyCode: 86 })),
+    ).toBe(true)
+    expect(
+      forcesTextPaste(ev({ ctrlKey: true, shiftKey: true, code: "", keyCode: 0 })),
+    ).toBe(false)
   })
 })
 

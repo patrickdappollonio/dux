@@ -368,6 +368,35 @@ export function classifyClipboardKey(ev: ClipboardKeyEvent): ClipboardKeyAction 
   return "passthrough"
 }
 
+/**
+ * Whether this chord asks for a TEXT paste specifically, skipping dux's
+ * image-wins handling.
+ *
+ * The escape hatch exists because "an image on the clipboard wins over the text
+ * beside it" is right for a screenshot and wrong for rich content: copying a
+ * spreadsheet range puts an `image/png` flavour next to the `text/plain` one,
+ * and without a way out the numbers are unreachable. `Ctrl+Shift+v` is the
+ * natural key for it, since paste-as-plain-text is what that chord means in a
+ * browser, an editor and a chat client alike.
+ *
+ * Deliberately SEPARATE from `classifyClipboardKey` rather than a fourth action
+ * of it, for one reason: `Cmd`-anything is classified `passthrough` before any
+ * other rule, on purpose (the mac clipboard is the browser's job), so a mac
+ * user's `Cmd+Shift+v` never reaches the paste branch and would have lost the
+ * hatch. This predicate is asked independently of the classification, so both
+ * platforms get the same chord. It only ARMS a preference; the native paste
+ * event still flows exactly as it would have.
+ *
+ * Matched by physical key for the same reason the classifier is: a `key`-based
+ * match misses on a non-Latin layout.
+ */
+export function forcesTextPaste(ev: ClipboardKeyEvent): boolean {
+  if (ev.altKey) return false
+  if (!ev.shiftKey) return false
+  if (!(ev.ctrlKey || ev.metaKey)) return false
+  return ev.code === "KeyV" || (ev.code === "" && ev.keyCode === 86)
+}
+
 /** What a copy-on-select `mouseup` should do. */
 export type CopyOnSelectAction = "copy" | "hint" | "ignore"
 

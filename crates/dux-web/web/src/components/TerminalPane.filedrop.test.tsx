@@ -1108,7 +1108,7 @@ describe("what the user sees while a drop is uploading", () => {
   })
 
   it("still ends in a final toast when something throws unexpectedly", async () => {
-    // handleDroppedFiles is called with `void`, so an unexpected throw would
+    // handleUploadedFiles is called with `void`, so an unexpected throw would
     // otherwise be an unhandled rejection with the spinner left on screen
     // claiming the upload is still running.
     uploadDroppedFile.mockResolvedValue(saved("shot.png"))

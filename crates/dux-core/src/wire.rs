@@ -718,6 +718,12 @@ pub struct SettingsPatch {
     /// effects (a pure render gate), so it rides the generic settings path
     /// like `compose_bar`.
     pub mobile_accessory_bar: Option<bool>,
+    /// `ui.upload_write_gitignore`: whether the agent upload directory keeps a
+    /// self-ignoring `.gitignore`. A plain field write with no side effects
+    /// (the next upload reads it), so it rides the generic settings path. Its
+    /// companion `ui.upload_directory` is deliberately absent: it is a PATH,
+    /// and the web has no directory picker to edit one with.
+    pub upload_write_gitignore: Option<bool>,
     /// `ui.auto_reopen_agents`: the global startup auto-reopen switch. A plain
     /// field write with no side effects (the reopen pass reads it at the NEXT
     /// startup), so it rides the generic settings path.
@@ -1526,6 +1532,7 @@ impl Engine {
             compose_bar,
             mobile_top_bar,
             mobile_accessory_bar,
+            upload_write_gitignore,
             auto_reopen_agents,
             show_changes_pane,
             web_notifications,
@@ -1576,6 +1583,9 @@ impl Engine {
         }
         if let Some(v) = mobile_accessory_bar {
             candidate.ui.mobile_accessory_bar = v;
+        }
+        if let Some(v) = upload_write_gitignore {
+            candidate.ui.upload_write_gitignore = v;
         }
         if let Some(v) = auto_reopen_agents {
             candidate.ui.auto_reopen_agents = v;
@@ -9208,12 +9218,14 @@ mod tests {
     #[test]
     fn a_settings_patch_leaves_the_upload_settings_it_never_names_alone() {
         // `ui.upload_directory` has no Preferences row and deliberately never
-        // will (a path needs a directory picker, not a text row), and
-        // `ui.upload_write_gitignore` has none yet. A `[ui]` field with no row
-        // is only safe if the settings PATCH carries the current value of every
-        // field it does not name, so this pins the mechanism rather than the
-        // convention: `set_settings` clones the whole running config, mutates
-        // only the fields the patch names, and persists that clone.
+        // will (a path needs a directory picker, not a text row).
+        // `ui.upload_write_gitignore` now has one, and is kept here as the
+        // other half of the same check: a patch that names NEITHER must leave
+        // both exactly as they were. A `[ui]` field is only safe if the
+        // settings PATCH carries the current value of every field it does not
+        // name, so this pins the mechanism rather than the convention:
+        // `set_settings` clones the whole running config, mutates only the
+        // fields the patch names, and persists that clone.
         let (mut engine, _tmp) = test_engine();
         std::fs::write(
             &engine.paths.config_path,
@@ -9653,6 +9665,13 @@ mod tests {
                 expect: "false",
             },
             SettingsFieldRow {
+                key: "upload_write_gitignore",
+                seed: |c| c.ui.upload_write_gitignore = true,
+                sent: serde_json::json!(false),
+                read: |c| c.ui.upload_write_gitignore.to_string(),
+                expect: "false",
+            },
+            SettingsFieldRow {
                 key: "auto_reopen_agents",
                 seed: |c| c.ui.auto_reopen_agents = false,
                 sent: serde_json::json!(true),
@@ -9782,7 +9801,7 @@ mod tests {
         let rows = settings_field_rows();
         assert_eq!(
             rows.len(),
-            20,
+            21,
             "add a row when you add a field to SettingsPatch"
         );
         for row in rows {
@@ -9828,6 +9847,7 @@ mod tests {
             compose_bar: Some(!before.ui.compose_bar),
             mobile_top_bar: Some(!before.ui.mobile_top_bar),
             mobile_accessory_bar: Some(!before.ui.mobile_accessory_bar),
+            upload_write_gitignore: Some(!before.ui.upload_write_gitignore),
             auto_reopen_agents: Some(!before.ui.auto_reopen_agents),
             show_changes_pane: Some(!before.ui.show_changes_pane),
             web_notifications: Some(!before.capabilities.web_notifications),
@@ -9865,6 +9885,10 @@ mod tests {
         assert_eq!(
             after.ui.mobile_accessory_bar,
             !before.ui.mobile_accessory_bar
+        );
+        assert_eq!(
+            after.ui.upload_write_gitignore,
+            !before.ui.upload_write_gitignore
         );
         assert_eq!(after.ui.auto_reopen_agents, !before.ui.auto_reopen_agents);
         assert_eq!(after.ui.show_changes_pane, !before.ui.show_changes_pane);

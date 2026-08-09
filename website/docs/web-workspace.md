@@ -1,6 +1,6 @@
 ---
 title: The workspace in the browser
-description: The three-pane web layout, deep links, the browser terminals, the one-writer take-over model, copy-on-select and right-click paste, Shift-Enter soft newlines, companion terminals, and the mobile hub-and-spoke shell.
+description: The three-pane web layout, deep links, the browser terminals, the one-writer take-over model, copy-on-select, right-click paste and image paste, Shift-Enter soft newlines, companion terminals, and the mobile hub-and-spoke shell.
 group: Web UI
 order: 61
 ---
@@ -149,6 +149,13 @@ The web terminal copies and pastes the way a real terminal does, no menu require
 - A fixed set of chords works too, and it is not user-configurable: `Ctrl+Shift+c`,
   `Ctrl+Insert`, or `Cmd+c` to copy, and `Ctrl+v`, `Ctrl+Shift+v`, or `Cmd+v` to
   paste, with `Ctrl+c` staying SIGINT as it should.
+- **Paste an image with the keyboard and dux uploads it.** When what you paste is
+  a picture rather than text, dux saves it on the server and pastes its **path**
+  into the prompt, the same journey a dropped file takes. Text paste is
+  untouched, and `Ctrl+Shift+v` (`Cmd+Shift+v`) forces the text when the
+  clipboard carries both. This is the keyboard chords only: right-click paste
+  reads text from your clipboard and can never carry an image. See
+  [Dropping and pasting files onto an agent](/docs/dropping-files).
 
 There is deliberately no right-click context menu, because select-to-copy and
 right-click-paste already cover both directions and a menu would only fight the
@@ -165,16 +172,18 @@ sequence, and that write lands on **your** browser's clipboard, not the server's
 governed by the `clipboard_passthrough` capability. That story lives in
 [Terminal capabilities](/docs/terminal-capabilities).
 
-### Drag a file in
+### Drag a file in, or paste one
 
-Drag a screenshot (or any file) from your desktop onto the terminal and dux
+Drag a screenshot (or any file) from your desktop onto the terminal, or simply
+paste an image from your clipboard, and dux
 saves it on the server, then pastes its path into the prompt. Dropped on an
 agent it goes to that agent's upload folder (`.dux/uploads` in its worktree),
 invisible to git and deleted along with the agent; dropped on a terminal it goes
 to the folder that terminal is actually in right now. Nothing is ever
 overwritten, your filename is kept as you had it, and only the device holding
-input can drop. See
-[Dropping files onto an agent](/docs/dropping-files).
+input can drop or paste. On a phone, where there is no drag gesture, pasting an
+image puts its path into your compose draft. See
+[Dropping and pasting files onto an agent](/docs/dropping-files).
 
 ### Shift-Enter for a soft newline
 
