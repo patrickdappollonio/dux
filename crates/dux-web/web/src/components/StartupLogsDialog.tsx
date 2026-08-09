@@ -23,6 +23,7 @@ import {
   selectStartupLog,
   useDux,
 } from "@/lib/store"
+import { DUX_TERMINAL_FONT_STACK } from "@/lib/terminalFont"
 
 // View startup-command logs (the web counterpart to the TUI's
 // `read-startup-command-logs`). Each run of the project startup command writes a
@@ -105,7 +106,13 @@ function StartupLogsBody({
             {/* The relative positioning anchors the in-flight spinner over the
                 content while switching to a different log file. */}
             <div className="relative">
-              <pre className="whitespace-pre-wrap break-words p-3 font-mono text-xs leading-relaxed">
+              {/* The bundled terminal stack (not bare font-mono) so startup-command
+                  output gets the same box-drawing/block/braille glyph coverage as
+                  the live terminal. */}
+              <pre
+                className="whitespace-pre-wrap break-words p-3 font-mono text-xs leading-relaxed"
+                style={{ fontFamily: DUX_TERMINAL_FONT_STACK }}
+              >
                 {startupLogsSelected?.content ?? ""}
               </pre>
               {startupLogsLoading ? (

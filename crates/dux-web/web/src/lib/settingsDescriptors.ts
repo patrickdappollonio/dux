@@ -27,6 +27,10 @@
 // removed.
 
 import type { Bootstrap } from "./bootstrapApi"
+import {
+  MAX_TERMINAL_FONT_SIZE,
+  MIN_TERMINAL_FONT_SIZE,
+} from "./terminalFont"
 
 export type SettingSurface = "web" | "both"
 
@@ -114,6 +118,10 @@ export interface SettingGroup {
 // the post-save bootstrap refetch reflects whatever it actually saved.
 const MAX_STATUS_CLEAR_SECONDS = 3_600
 const MAX_ATTENTION_GRACE_SECONDS = 300
+// MIN_TERMINAL_FONT_SIZE/MAX_TERMINAL_FONT_SIZE are imported above from
+// terminalFont.ts rather than redeclared here (that file mirrors the
+// server-side bounds in `crates/dux-core/src/config.rs`). UX bounds only; the
+// server re-clamps.
 
 export const SETTING_GROUPS: SettingGroup[] = [
   {
@@ -163,6 +171,32 @@ export const SETTING_GROUPS: SettingGroup[] = [
         default: true,
         writeTarget: "settings",
         read: (b) => b.copy_on_select ?? true,
+      },
+      {
+        key: "ui.terminal_font_family",
+        label: "Terminal font",
+        description:
+          "Name a font installed on THIS device (e.g. \"Fira Code\" or \"Cascadia Code\") to use in the web terminal. It is placed ahead of dux's bundled terminal font, so the bundled font still fills in any glyph (box drawing, blocks, braille, arrows) your chosen font lacks. Leave blank to use only the bundled font.",
+        surface: "web",
+        control: { kind: "text", maxLen: 200 },
+        default: "",
+        writeTarget: "settings",
+        read: (b) => b.terminal_font_family ?? "",
+      },
+      {
+        key: "ui.terminal_font_size",
+        label: "Terminal font size",
+        description: "The web terminal's font size, in pixels.",
+        surface: "web",
+        control: {
+          kind: "number",
+          min: MIN_TERMINAL_FONT_SIZE,
+          max: MAX_TERMINAL_FONT_SIZE,
+          unit: "px",
+        },
+        default: 14,
+        writeTarget: "settings",
+        read: (b) => b.terminal_font_size ?? 14,
       },
       {
         key: "ui.compose_bar",

@@ -125,6 +125,15 @@ function FaviconControl({
   )
 }
 
+// Clamps to the nearer bound WHILE THE USER IS TYPING: an input affordance so
+// a number field never rejects a keystroke mid-edit. This is deliberately
+// different from how an out-of-range value from config/bootstrap is handled
+// once it lands in the running app: `clampTerminalFontSize` in
+// `lib/terminalFont.ts` (and its server-side twin,
+// `normalized_terminal_font_size` in `crates/dux-core/src/config.rs`) DEGRADE
+// such a value to the documented default instead of nudging it to the nearest
+// bound, so a value that is merely wrong reads as an obviously-reset default.
+// Both behaviors are intentional; they simply answer different questions.
 function clampToControl(n: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, n))
 }

@@ -55,6 +55,17 @@ export interface Bootstrap {
   /** Mirrors `config.ui.copy_on_select`: whether selecting text in the web
    * terminal auto-copies it to the clipboard (default true). */
   copy_on_select: boolean
+  /** Mirrors `config.ui.terminal_font_family`: a font name installed on the
+   * VIEWING device, placed ahead of dux's bundled terminal font stack so the
+   * bundled faces still fill in glyphs it lacks. Empty string (the default)
+   * means "use the bundled stack only." Web UI only; the TUI uses the host
+   * terminal's own font. Older servers omit it, so consumers fall back to "". */
+  terminal_font_family?: string
+  /** Mirrors `config.ui.terminal_font_size`: the web terminal's font size in
+   * pixels (default 14, valid 8..=32; an out-of-range or invalid config value
+   * degrades to the default at load time). Older servers omit it, so
+   * consumers fall back to 14. */
+  terminal_font_size?: number
   /** Mirrors `config.ui.compose_bar`: whether the mobile terminal shows the
    * compose bar (a buffered textarea with native autocorrect whose Send
    * delivers the message plus a submitting Enter) and redirects a tap on the

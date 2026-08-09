@@ -69,7 +69,12 @@ class TermStub {
 }
 
 class FitStub {
-  fit() {}
+  // Counted so the live font-preference suite can assert a settings change
+  // refits the open terminal (reset in beforeEach).
+  static fits = 0
+  fit() {
+    FitStub.fits++
+  }
 }
 
 // The fake PtySocket. TerminalPane overwrites `onConn`/`onOpen`/`onReconnecting`/
@@ -239,6 +244,7 @@ function last(): FakePtySocket {
 beforeEach(() => {
   FakePtySocket.instances = []
   TermStub.instances = []
+  FitStub.fits = 0
   notifyRegistrations.length = 0
   toastError.mockClear()
   mockState = makeState()
@@ -1350,5 +1356,104 @@ describe("TerminalPane holds the PTY resize while a touch-scroll gesture is acti
     })
     expect(pty.sendResize).toHaveBeenCalledTimes(1)
     expect(pty.sendResize).toHaveBeenCalledWith(40, 80)
+  })
+})
+
+describe("TerminalPane live font preferences", () => {
+  it("applies a Preferences font change to the OPEN terminal and refits", async () => {
+    const { rerender } = render(<TerminalPane {...paneProps("agent", "s1")} />)
+    await act(async () => {})
+    const term = TermStub.instances.at(-1)
+    if (!term) throw new Error("no terminal constructed")
+    // Construction-time defaults: the bundled stack (symbols face first) and
+    // the default size.
+    expect(String(term.options.fontFamily)).toMatch(/^"Dux Mono Symbols", "Dux Mono", /)
+    expect(term.options.fontSize).toBe(14)
+    const fitsBefore = FitStub.fits
+    mockState = {
+      ...mockState,
+      bootstrap: {
+        ...(mockState.bootstrap as unknown as Record<string, unknown>),
+        terminal_font_family: "Iosevka",
+        terminal_font_size: 20,
+      },
+    } as unknown as DuxState
+    rerender(<TerminalPane {...paneProps("agent", "s1")} />)
+    // The change lands on the SAME terminal instance (no remount) with the
+    // user family prepended to the bundled stack, and a refit follows so
+    // rows/cols track the new cell metrics.
+    expect(TermStub.instances.at(-1)).toBe(term)
+    expect(String(term.options.fontFamily)).toMatch(/^Iosevka, "Dux Mono Symbols", /)
+    expect(term.options.fontSize).toBe(20)
+    expect(FitStub.fits).toBeGreaterThan(fitsBefore)
+  })
+
+  it("degrades an out-of-range live size to the default instead of applying it raw", async () => {
+    const { rerender } = render(<TerminalPane {...paneProps("terminal", "t1")} />)
+    await act(async () => {})
+    const term = TermStub.instances.at(-1)
+    if (!term) throw new Error("no terminal constructed")
+    mockState = {
+      ...mockState,
+      bootstrap: {
+        ...(mockState.bootstrap as unknown as Record<string, unknown>),
+        terminal_font_size: 500,
+      },
+    } as unknown as DuxState
+    rerender(<TerminalPane {...paneProps("terminal", "t1")} />)
+    expect(term.options.fontSize).toBe(14)
+  })
+
+  it("an unchanged rerender does not churn the options or refit", async () => {
+    const { rerender } = render(<TerminalPane {...paneProps("agent", "s1")} />)
+    await act(async () => {})
+    const fitsBefore = FitStub.fits
+    rerender(<TerminalPane {...paneProps("agent", "s1")} />)
+    expect(FitStub.fits).toBe(fitsBefore)
+  })
+})
+
+describe("TerminalPane bundled font load on mount", () => {
+  afterEach(() => {
+    // jsdom has no `document.fonts` by default; tests here add it, so remove
+    // it again rather than leaking it into a later test's guard check.
+    Reflect.deleteProperty(document, "fonts")
+  })
+
+  it("opens synchronously against fallback metrics, then loads the bundled fonts and refits", async () => {
+    const load = vi.fn().mockResolvedValue([])
+    Object.defineProperty(document, "fonts", {
+      value: { load, check: () => false },
+      configurable: true,
+    })
+    render(<TerminalPane {...paneProps("agent", "s1")} />)
+    // The terminal is open (and its options set) even before the font-load
+    // promise below has been given a chance to settle: opening never awaits
+    // fonts.
+    expect(TermStub.instances).toHaveLength(1)
+    const fitsAfterMount = FitStub.fits
+    await act(async () => {})
+    expect(load).toHaveBeenCalledWith(
+      expect.stringContaining('"Dux Mono"'),
+      expect.any(String),
+    )
+    // The font-load promise resolving triggers a refit on top of whatever
+    // synchronous fits mounting itself already performed.
+    expect(FitStub.fits).toBeGreaterThan(fitsAfterMount)
+  })
+
+  it("still opens the terminal, and warns once, when the font load rejects", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    const load = vi.fn().mockRejectedValue(new Error("offline"))
+    Object.defineProperty(document, "fonts", {
+      value: { load, check: () => false },
+      configurable: true,
+    })
+    render(<TerminalPane {...paneProps("agent", "s1")} />)
+    expect(TermStub.instances).toHaveLength(1)
+    await act(async () => {})
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(warn.mock.calls[0][0]).toContain("Dux Mono")
+    warn.mockRestore()
   })
 })

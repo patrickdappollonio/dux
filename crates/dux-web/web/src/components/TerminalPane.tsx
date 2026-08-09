@@ -84,6 +84,11 @@ import {
   terminalSocketUrl,
 } from "@/lib/ptySocket"
 import { matchOwner, ownerProjectId, ownerSessionId } from "@/lib/terminalOwner"
+import {
+  clampTerminalFontSize,
+  loadTerminalFontsThenRefit,
+  terminalFontFamily,
+} from "@/lib/terminalFont"
 import { terminalsForOwner } from "@/lib/terminals"
 import {
   isForeground,
@@ -270,6 +275,10 @@ export function TerminalPane(props: TerminalPaneProps) {
   // box, so FitAddon's measurement is exact.
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
+  // The FitAddon of the open terminal, kept in a ref (and cleared alongside
+  // termRef) so the live font-settings effect below can refit after changing
+  // the xterm options in place.
+  const fitAddonRef = useRef<FitAddon | null>(null)
   // The dedicated PTY socket for the focused target. Created in the wiring effect
   // and read by the accessory-bar key handlers (defined at component scope) so
   // they send stdin to the same socket xterm's `onData` does.
@@ -326,6 +335,42 @@ export function TerminalPane(props: TerminalPaneProps) {
   useEffect(() => {
     copyOnSelectRef.current = bootstrap?.copy_on_select ?? true
   }, [bootstrap?.copy_on_select])
+  // The two `ui.terminal_font_*` preferences (web UI only). Read reactively so
+  // a live change (Preferences dialog) resizes/refonts the open terminal (see
+  // the dedicated effect below); the mount effect itself reads the CURRENT
+  // value once via these refs so a change never recreates the terminal.
+  const terminalFontFamilySetting = bootstrap?.terminal_font_family ?? ""
+  const terminalFontSizeSetting = bootstrap?.terminal_font_size ?? 14
+  const terminalFontFamilyRef = useRef(terminalFontFamilySetting)
+  const terminalFontSizeRef = useRef(terminalFontSizeSetting)
+  useEffect(() => {
+    terminalFontFamilyRef.current = terminalFontFamilySetting
+  }, [terminalFontFamilySetting])
+  useEffect(() => {
+    terminalFontSizeRef.current = terminalFontSizeSetting
+  }, [terminalFontSizeSetting])
+  // Live-apply a font preference change to the OPEN terminal: set the xterm
+  // options in place and refit so rows/cols track the new cell metrics (the
+  // refit flows through the pane's existing resize plumbing to the PTY). The
+  // mount effect reads the refs above, so this effect only ever has to touch
+  // an already-open terminal; before mount finishes, termRef is null and this
+  // is a no-op. A user-named family may not be loaded yet when the option is
+  // set, so after the browser fetches it, refit once more against the real
+  // metrics; the guard keeps that late refit from touching a successor
+  // terminal after a remount.
+  useEffect(() => {
+    const term = termRef.current
+    if (!term) return
+    const family = terminalFontFamily(terminalFontFamilySetting)
+    const size = clampTerminalFontSize(terminalFontSizeSetting)
+    if (term.options.fontFamily === family && term.options.fontSize === size) {
+      return
+    }
+    term.options.fontFamily = family
+    term.options.fontSize = size
+    fitAddonRef.current?.fit()
+    loadTerminalFontsThenRefit(term, termRef, fitAddonRef, size, family)
+  }, [terminalFontFamilySetting, terminalFontSizeSetting])
   // The mobile compose bar (the `ui.compose_bar` preference, default on): the
   // phone's typing surface, a buffered textarea below the accessory bar whose
   // Send delivers the message in one write. Rendering reads the reactive value;
@@ -739,9 +784,11 @@ export function TerminalPane(props: TerminalPaneProps) {
         10
       ) || 8
 
+    const fontFamily = terminalFontFamily(terminalFontFamilyRef.current)
+    const fontSize = clampTerminalFontSize(terminalFontSizeRef.current)
     const term = new Terminal({
-      fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-      fontSize: 14,
+      fontFamily,
+      fontSize,
       cursorBlink: true,
       convertEol: false,
       scrollback: scrollbackRef.current,
@@ -805,6 +852,7 @@ export function TerminalPane(props: TerminalPaneProps) {
     )
     const fit = new FitAddon()
     term.loadAddon(fit)
+
     term.open(container)
     // A virtual keyboard must never autocorrect, autocomplete, autocapitalize, or
     // spellcheck into the PTY stream: a shell has no editable buffer for those to
@@ -820,6 +868,14 @@ export function TerminalPane(props: TerminalPaneProps) {
     }
     fit.fit()
     termRef.current = term
+    fitAddonRef.current = fit
+    // Open synchronously against fallback metrics (above), then refit once the
+    // bundled faces (and any user-named family) are ready. See
+    // `loadTerminalFontsThenRefit` for why this happens AFTER open rather than
+    // before it: awaiting fonts before opening would delay the PTY connection
+    // on every mount for a benefit (correct first-frame metrics) that only
+    // matters on a cold font cache.
+    loadTerminalFontsThenRefit(term, termRef, fitAddonRef, fontSize, fontFamily)
 
     // The dedicated PTY socket for THIS target: the agent's main provider PTY, or
     // a companion terminal's PTY (nested under its owning session). Opening it IS
@@ -1632,6 +1688,7 @@ export function TerminalPane(props: TerminalPaneProps) {
       if (ptyRef.current === pty) ptyRef.current = null
       if (getActivePtySocket() === pty) setActivePtySocket(null)
       termRef.current = null
+      fitAddonRef.current = null
       disposeAgentNotifications()
       disposeOsc8Gate.dispose()
       term.dispose()

@@ -14,6 +14,8 @@ const sampleBootstrap: Bootstrap = {
   gh_available: false,
   github_integration: false,
   copy_on_select: false,
+  terminal_font_family: "Fira Code",
+  terminal_font_size: 18,
   compose_bar: false,
   mobile_top_bar: false,
   mobile_accessory_bar: false,
@@ -60,6 +62,8 @@ describe("settingsDescriptors", () => {
         "server.favicon",
         "ui.show_changes_pane",
         "ui.copy_on_select",
+        "ui.terminal_font_family",
+        "ui.terminal_font_size",
         "ui.compose_bar",
         "ui.mobile_top_bar",
         "ui.mobile_accessory_bar",
@@ -121,6 +125,8 @@ describe("settingsDescriptors", () => {
     expect(byKey["server.favicon"]).toBe("amber")
     expect(byKey["ui.show_changes_pane"]).toBe(false)
     expect(byKey["ui.copy_on_select"]).toBe(false)
+    expect(byKey["ui.terminal_font_family"]).toBe("Fira Code")
+    expect(byKey["ui.terminal_font_size"]).toBe(18)
     expect(byKey["ui.compose_bar"]).toBe(false)
     expect(byKey["ui.mobile_top_bar"]).toBe(false)
     expect(byKey["ui.mobile_accessory_bar"]).toBe(false)
@@ -178,6 +184,17 @@ describe("settingsDescriptors", () => {
     ])
   })
 
+  it("read() falls back to the terminal font defaults on an older bootstrap", () => {
+    const bare = { ...sampleBootstrap } as Partial<Bootstrap>
+    delete bare.terminal_font_family
+    delete bare.terminal_font_size
+    const byKey = Object.fromEntries(
+      allSettingDescriptors().map((d) => [d.key, d.read(bare as Bootstrap)]),
+    )
+    expect(byKey["ui.terminal_font_family"]).toBe("")
+    expect(byKey["ui.terminal_font_size"]).toBe(14)
+  })
+
   it("read() falls back to showing both first-load screens on an older bootstrap", () => {
     const bare = { ...sampleBootstrap } as Partial<Bootstrap>
     delete bare.disable_automated_welcome_screen
@@ -223,6 +240,8 @@ describe("settingsDescriptors", () => {
       "ui.mobile_top_bar",
       "ui.pr_banner_position",
       "ui.status_clear_seconds",
+      "ui.terminal_font_family",
+      "ui.terminal_font_size",
     ])
   })
 

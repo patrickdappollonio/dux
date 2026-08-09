@@ -637,6 +637,26 @@ pub fn normalize_instance_title(raw: &str) -> String {
     }
 }
 
+/// Sanitize a `ui.terminal_font_family` settings-PATCH value: drop every ASCII
+/// control character and cap the result to 200 characters (counted by `char`,
+/// never bytes, so a multi-byte glyph can't be sliced mid-codepoint).
+///
+/// This is defense in depth alongside the web's own sanitizing
+/// (`terminalFontFamily` in `crates/dux-web/web/src/lib/terminalFont.ts`),
+/// which strips a wider set of characters because the value there is
+/// concatenated directly into a CSS `font-family: <x>;` declaration and into a
+/// `document.fonts.load` shorthand string. Here the goal is narrower: a stray
+/// control character (in particular a literal newline) must never survive
+/// into `config.toml`, and the field must not grow unbounded. Degrades
+/// quietly rather than rejecting the patch, matching this settings API's
+/// tolerant style elsewhere (e.g. [`normalize_instance_title`]).
+pub fn sanitize_terminal_font_family(raw: &str) -> String {
+    raw.chars()
+        .filter(|ch| !ch.is_ascii_control())
+        .take(200)
+        .collect()
+}
+
 /// Clamp a numeric settings-PATCH field to `[0, max]`, preserving `0`
 /// unclamped: several of these fields document `0` as a distinct "disable"/
 /// "never" meaning (`status_clear_seconds`, `attention_grace_seconds`), not
@@ -737,6 +757,23 @@ pub struct SettingsPatch {
     /// `disable_automated_welcome_screen`, and likewise leaves the on-demand
     /// "What's new…" menu entry working.
     pub disable_release_notes: Option<bool>,
+    /// `ui.terminal_font_family`: a font name installed on the viewing device,
+    /// placed ahead of the bundled web terminal font stack. Sanitized by
+    /// [`crate::wire::sanitize_terminal_font_family`] before being stored:
+    /// ASCII control characters are dropped and the result is capped to 200
+    /// characters, defense in depth alongside the web `terminalFont.ts`
+    /// sanitizing (the value is concatenated into a CSS `font-family`
+    /// declaration client-side). Degrades quietly rather than rejecting the
+    /// patch. Empty string is a valid value (it means "use the bundled stack
+    /// only").
+    pub terminal_font_family: Option<String>,
+    /// `ui.terminal_font_size`: the web terminal's font size in pixels.
+    /// Normalized through [`crate::config::normalized_terminal_font_size`]
+    /// (pure: no warning here, since a value corrected here is a live PATCH
+    /// from the Preferences dialog, not a value read off disk; see that
+    /// function's doc comment), which resets an out-of-range value to the
+    /// default rather than clamping to the nearer bound.
+    pub terminal_font_size: Option<u16>,
     /// Presentation-only, NOT a settings field: when true, and the patch is
     /// confined to the two mobile-bar fields, the engine emits no info status
     /// for this request. Those two fields gate chrome the user is looking
@@ -1503,6 +1540,8 @@ impl Engine {
             default_provider,
             disable_automated_welcome_screen,
             disable_release_notes,
+            terminal_font_family,
+            terminal_font_size,
         } = patch;
 
         // Validate enums BEFORE mutating the candidate, so a rejected value
@@ -1581,6 +1620,12 @@ impl Engine {
         }
         if let Some(v) = disable_release_notes {
             candidate.ui.disable_release_notes = v;
+        }
+        if let Some(v) = terminal_font_family {
+            candidate.ui.terminal_font_family = sanitize_terminal_font_family(&v);
+        }
+        if let Some(v) = terminal_font_size {
+            candidate.ui.terminal_font_size = crate::config::normalized_terminal_font_size(v);
         }
 
         // Idempotent: skip the write (and the fan-out) when nothing changed
@@ -9256,6 +9301,49 @@ mod tests {
     }
 
     #[test]
+    fn set_settings_degrades_an_out_of_range_terminal_font_size_to_the_default() {
+        let (mut engine, _tmp) = test_engine();
+        engine
+            .apply_wire(WireCommand::SetSettings(SettingsPatch {
+                terminal_font_size: Some(200),
+                ..Default::default()
+            }))
+            .expect("dispatch ok");
+        assert_eq!(
+            engine.config.ui.terminal_font_size,
+            crate::config::DEFAULT_TERMINAL_FONT_SIZE
+        );
+    }
+
+    #[test]
+    fn set_settings_sanitizes_a_terminal_font_family_containing_control_characters() {
+        let (mut engine, _tmp) = test_engine();
+        engine
+            .apply_wire(WireCommand::SetSettings(SettingsPatch {
+                terminal_font_family: Some("Fira Code\n; color: red".to_string()),
+                ..Default::default()
+            }))
+            .expect("dispatch ok");
+        assert_eq!(
+            engine.config.ui.terminal_font_family,
+            "Fira Code; color: red"
+        );
+    }
+
+    #[test]
+    fn set_settings_caps_an_overlong_terminal_font_family_to_200_chars() {
+        let (mut engine, _tmp) = test_engine();
+        let huge = "a".repeat(10_000);
+        engine
+            .apply_wire(WireCommand::SetSettings(SettingsPatch {
+                terminal_font_family: Some(huge),
+                ..Default::default()
+            }))
+            .expect("dispatch ok");
+        assert_eq!(engine.config.ui.terminal_font_family.chars().count(), 200);
+    }
+
+    #[test]
     fn set_settings_accepts_zero_for_attention_grace_seconds() {
         let (mut engine, _tmp) = test_engine();
         engine.config.ui.attention_grace_seconds = 3;
@@ -9612,6 +9700,20 @@ mod tests {
                 read: |c| c.defaults.provider.clone(),
                 expect: "codex",
             },
+            SettingsFieldRow {
+                key: "terminal_font_family",
+                seed: |c| c.ui.terminal_font_family = "Fira Code".to_string(),
+                sent: serde_json::json!("Cascadia Code"),
+                read: |c| c.ui.terminal_font_family.clone(),
+                expect: "Cascadia Code",
+            },
+            SettingsFieldRow {
+                key: "terminal_font_size",
+                seed: |c| c.ui.terminal_font_size = 14,
+                sent: serde_json::json!(18),
+                read: |c| c.ui.terminal_font_size.to_string(),
+                expect: "18",
+            },
         ]
     }
 
@@ -9627,7 +9729,7 @@ mod tests {
         let rows = settings_field_rows();
         assert_eq!(
             rows.len(),
-            18,
+            20,
             "add a row when you add a field to SettingsPatch"
         );
         for row in rows {
@@ -9695,6 +9797,8 @@ mod tests {
             default_provider: Some("codex".to_string()),
             disable_automated_welcome_screen: Some(!before.ui.disable_automated_welcome_screen),
             disable_release_notes: Some(!before.ui.disable_release_notes),
+            terminal_font_family: Some(format!("{}-x", before.ui.terminal_font_family)),
+            terminal_font_size: Some(before.ui.terminal_font_size + 1),
             // Presentation flag, maps to no config field; false keeps this
             // full-patch round trip on the normal (status-emitting) path.
             quiet: false,
@@ -9747,6 +9851,14 @@ mod tests {
             after.ui.disable_release_notes,
             !before.ui.disable_release_notes
         );
+        assert_eq!(
+            after.ui.terminal_font_family,
+            format!("{}-x", before.ui.terminal_font_family)
+        );
+        assert_eq!(
+            after.ui.terminal_font_size,
+            before.ui.terminal_font_size + 1
+        );
 
         // Disk must agree with memory. Asserting only one of the two is what
         // let the copy-back drift out of step with the eager write.
@@ -9789,6 +9901,8 @@ mod tests {
             disk.ui.disable_release_notes,
             after.ui.disable_release_notes
         );
+        assert_eq!(disk.ui.terminal_font_family, after.ui.terminal_font_family);
+        assert_eq!(disk.ui.terminal_font_size, after.ui.terminal_font_size);
     }
 
     /// CROSS-LANGUAGE PIN: the curated favicon color names live twice — here in
@@ -9895,6 +10009,34 @@ mod tests {
         // byte boundary inside a codepoint.
         let input: String = "é".repeat(300);
         let out = normalize_instance_title(&input);
+        assert_eq!(out.chars().count(), 200);
+        assert!(out.chars().all(|c| c == 'é'));
+    }
+
+    #[test]
+    fn sanitize_terminal_font_family_drops_ascii_control_characters() {
+        assert_eq!(
+            sanitize_terminal_font_family("Fira Code\n; color: red"),
+            "Fira Code; color: red"
+        );
+        assert_eq!(sanitize_terminal_font_family("\u{0007}\u{0000}"), "");
+        assert_eq!(sanitize_terminal_font_family("a\tb\rc"), "abc");
+    }
+
+    #[test]
+    fn sanitize_terminal_font_family_leaves_ordinary_values_untouched() {
+        assert_eq!(sanitize_terminal_font_family("Fira Code"), "Fira Code");
+        assert_eq!(
+            sanitize_terminal_font_family("\"Cascadia Code\", Consolas"),
+            "\"Cascadia Code\", Consolas"
+        );
+        assert_eq!(sanitize_terminal_font_family(""), "");
+    }
+
+    #[test]
+    fn sanitize_terminal_font_family_caps_length_by_chars_not_bytes() {
+        let input: String = "é".repeat(300);
+        let out = sanitize_terminal_font_family(&input);
         assert_eq!(out.chars().count(), 200);
         assert!(out.chars().all(|c| c == 'é'));
     }

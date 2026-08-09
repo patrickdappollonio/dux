@@ -319,6 +319,18 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
         config.ui.pr_poll_interval_seconds,
     );
     patch_table_bool(doc, "ui", "copy_on_select", config.ui.copy_on_select);
+    patch_table_str(
+        doc,
+        "ui",
+        "terminal_font_family",
+        &config.ui.terminal_font_family,
+    );
+    patch_table_u16(
+        doc,
+        "ui",
+        "terminal_font_size",
+        config.ui.terminal_font_size,
+    );
     patch_table_bool(doc, "ui", "compose_bar", config.ui.compose_bar);
     patch_table_bool(doc, "ui", "mobile_top_bar", config.ui.mobile_top_bar);
     patch_table_bool(

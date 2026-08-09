@@ -315,6 +315,14 @@ struct UiSettingsPatch {
     /// Suppresses the AUTOMATIC what's-new screen only; the app menu's on-demand
     /// entry still opens it.
     disable_release_notes: Option<bool>,
+    /// A font name installed on the viewing device, placed ahead of dux's
+    /// bundled web terminal font stack. Empty string is a valid value (it
+    /// means "use the bundled stack only"). Web UI only.
+    terminal_font_family: Option<String>,
+    /// The web terminal's font size in pixels. Out-of-range values are
+    /// normalized engine-side (see `normalized_terminal_font_size`), not
+    /// rejected here.
+    terminal_font_size: Option<u16>,
 }
 
 /// The `[capabilities]` half of a settings-PATCH body. Same optional/
@@ -428,6 +436,8 @@ async fn set_settings(
             default_provider: body.defaults.provider,
             disable_automated_welcome_screen: body.ui.disable_automated_welcome_screen,
             disable_release_notes: body.ui.disable_release_notes,
+            terminal_font_family: body.ui.terminal_font_family,
+            terminal_font_size: body.ui.terminal_font_size,
             quiet: body.quiet,
         }),
     )
@@ -850,6 +860,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn set_settings_degrades_an_out_of_range_terminal_font_size_to_the_default() {
+        let (_tmp, app) = router_no_auth();
+        let resp = app
+            .clone()
+            .oneshot(json_req(
+                "PATCH",
+                "/api/v1/config/settings",
+                r#"{"ui":{"terminal_font_size":200}}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let raw = read_raw_config_text(&app).await;
+        assert!(
+            raw.contains(&format!(
+                "terminal_font_size = {}",
+                dux_core::config::DEFAULT_TERMINAL_FONT_SIZE
+            )),
+            "expected the out-of-range value to degrade to the default: {raw}"
+        );
+    }
+
+    #[tokio::test]
     async fn set_settings_accepts_zero_for_attention_grace_seconds() {
         let (_tmp, app) = router_no_auth();
         let resp = app
@@ -910,7 +944,9 @@ mod tests {
                         "attention_on_bell": false,
                         "pr_banner_position": "top",
                         "disable_automated_welcome_screen": true,
-                        "disable_release_notes": true
+                        "disable_release_notes": true,
+                        "terminal_font_family": "Fira Code",
+                        "terminal_font_size": 18
                     },
                     "capabilities": {
                         "web_notifications": true,
@@ -949,6 +985,8 @@ mod tests {
             "provider = \"codex\"",
             "disable_automated_welcome_screen = true",
             "disable_release_notes = true",
+            "terminal_font_family = \"Fira Code\"",
+            "terminal_font_size = 18",
         ] {
             assert!(
                 raw.contains(expected),

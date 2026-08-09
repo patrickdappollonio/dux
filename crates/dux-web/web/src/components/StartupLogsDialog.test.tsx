@@ -94,6 +94,12 @@ describe("StartupLogsDialog", () => {
     expect(screen.getByText("install ok")).toBeTruthy()
   })
 
+  it("renders the log body in the bundled terminal font, not bare system mono", () => {
+    renderOpen({ startupLogsTarget: "s1", startupLogsScope: "agent", ...ONE_RUN })
+    const body = screen.getByText("install ok")
+    expect(body.style.fontFamily).toContain("Dux Mono")
+  })
+
   it("names the PROJECT and says it spans every agent in project scope", () => {
     renderOpen({ startupLogsTarget: "p1", startupLogsScope: "project", ...ONE_RUN })
     expect(screen.getByText(/Startup command logs: Repo \(all agents\)/)).toBeTruthy()

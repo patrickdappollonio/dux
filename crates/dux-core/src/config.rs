@@ -298,6 +298,36 @@ pub fn normalized_pr_poll_interval(seconds: u16) -> u16 {
 /// caller before clamping.
 pub const MAX_STATUS_CLEAR_SECONDS: u16 = 3_600;
 
+/// Default `ui.terminal_font_size`, in pixels. Matches xterm's own default and
+/// the web `terminalFont.ts` helper's fallback.
+pub const DEFAULT_TERMINAL_FONT_SIZE: u16 = 14;
+
+/// Floor on `ui.terminal_font_size`. Below this the glyphs are unreadable.
+pub const MIN_TERMINAL_FONT_SIZE: u16 = 8;
+
+/// Ceiling on `ui.terminal_font_size`. Above this a terminal pane can no
+/// longer usefully fit any real width.
+pub const MAX_TERMINAL_FONT_SIZE: u16 = 32;
+
+/// Normalize a configured `terminal_font_size`: a value outside
+/// [`MIN_TERMINAL_FONT_SIZE`, `MAX_TERMINAL_FONT_SIZE`] degrades to
+/// [`DEFAULT_TERMINAL_FONT_SIZE`] rather than being clamped to the nearer
+/// bound, so a config value that is merely wrong (not almost right) reads as
+/// an obviously-reset default instead of a silently-nudged number.
+///
+/// Deliberately PURE: it does not log. The on-disk value is warned about and
+/// corrected exactly once, at load, in [`load_config`]; this function is then
+/// called from read paths (bootstrap projection, `set_settings`) that run far
+/// more often than the config loads, and logging from here would spam a
+/// warning on every one of those reads for a value that was already reported
+/// once. Mirrors `clampTerminalFontSize` in the web's `lib/terminalFont.ts`.
+pub fn normalized_terminal_font_size(size: u16) -> u16 {
+    if !(MIN_TERMINAL_FONT_SIZE..=MAX_TERMINAL_FONT_SIZE).contains(&size) {
+        return DEFAULT_TERMINAL_FONT_SIZE;
+    }
+    size
+}
+
 /// Hard ceiling on `ui.attention_grace_seconds` (the settings-PATCH endpoint
 /// clamps to this). Five minutes is far longer than any useful "just came
 /// back" grace window; `0` ("clear immediately") is a separate, always-allowed
@@ -701,6 +731,20 @@ pub struct UiConfig {
     /// clipboard (X11-style "highlight to copy"). Changing it from the web's
     /// Preferences dialog persists the new value here. Web-only behavior.
     pub copy_on_select: bool,
+    /// A font name installed on the VIEWING device, placed ahead of dux's
+    /// bundled web terminal font stack so the bundled faces still fill in
+    /// glyphs it lacks (box drawing, blocks, braille, arrows, powerline).
+    /// Empty (the default) means use the bundled stack only. Web UI only; the
+    /// TUI always uses the host terminal's own font. Changing it from the
+    /// web's Preferences dialog persists the new value here.
+    pub terminal_font_family: String,
+    /// The web terminal's font size in pixels. Valid range
+    /// [`MIN_TERMINAL_FONT_SIZE`, `MAX_TERMINAL_FONT_SIZE`]; a value outside
+    /// it is reset to [`DEFAULT_TERMINAL_FONT_SIZE`] (with a warning) when the
+    /// bootstrap document is built, so a bad config value can never reach the
+    /// browser's terminal. Web UI only. Changing it from the web's
+    /// Preferences dialog persists the new value here.
+    pub terminal_font_size: u16,
     /// Whether the web UI's mobile terminal shows the compose bar: a buffered
     /// text box below the accessory-bar keys where the phone keyboard's
     /// autocorrect/swipe input work, with a Send button that delivers the
@@ -1039,6 +1083,8 @@ impl Default for UiConfig {
             github_integration: true,
             pr_poll_interval_seconds: DEFAULT_PR_POLL_INTERVAL_SECONDS,
             copy_on_select: true,
+            terminal_font_family: String::new(),
+            terminal_font_size: DEFAULT_TERMINAL_FONT_SIZE,
             compose_bar: true,
             mobile_top_bar: true,
             mobile_accessory_bar: true,
@@ -1588,6 +1634,8 @@ impl Default for Config {
                 github_integration: true,
                 pr_poll_interval_seconds: DEFAULT_PR_POLL_INTERVAL_SECONDS,
                 copy_on_select: true,
+                terminal_font_family: String::new(),
+                terminal_font_size: DEFAULT_TERMINAL_FONT_SIZE,
                 compose_bar: true,
                 mobile_top_bar: true,
                 mobile_accessory_bar: true,
@@ -1790,7 +1838,31 @@ pub fn load_config(paths: &DuxPaths) -> Config {
     // Same idea for a misspelled provider drag-and-drop paste form: warn ONCE here
     // rather than on every dropped file, and let the resolution itself stay silent.
     warn_on_unknown_web_dragdrop_paste_forms(&config.providers);
+    // Same idea again for an out-of-range terminal_font_size: warn ONCE here and
+    // correct it IN MEMORY, rather than letting `normalized_terminal_font_size`
+    // (now pure, see its doc comment) warn on every bootstrap read. Correcting it
+    // here also fixes on-disk persistence: a later save writes back the
+    // already-valid in-memory value instead of re-persisting the bad one.
+    if let Some(warning) = terminal_font_size_load_warning(config.ui.terminal_font_size) {
+        crate::logger::warn(&warning);
+        config.ui.terminal_font_size = DEFAULT_TERMINAL_FONT_SIZE;
+    }
     config
+}
+
+/// The warning [`load_config`] emits when `ui.terminal_font_size` is outside
+/// [`MIN_TERMINAL_FONT_SIZE`, `MAX_TERMINAL_FONT_SIZE`], or `None` for a value
+/// already in range. Split out from the logging so the message can be asserted
+/// directly, mirroring [`web_dragdrop_paste_warnings`].
+fn terminal_font_size_load_warning(size: u16) -> Option<String> {
+    if (MIN_TERMINAL_FONT_SIZE..=MAX_TERMINAL_FONT_SIZE).contains(&size) {
+        return None;
+    }
+    Some(format!(
+        "ui.terminal_font_size = {size} is outside the valid range \
+         {MIN_TERMINAL_FONT_SIZE}..={MAX_TERMINAL_FONT_SIZE} and is being reset to \
+         the default of {DEFAULT_TERMINAL_FONT_SIZE}."
+    ))
 }
 
 /// Warn once per unrecognized `providers.<name>.web_dragdrop_paste` value, at load.
@@ -2262,6 +2334,88 @@ mod tests {
             shutdown_grace(u16::MAX),
             Duration::from_secs(u64::from(MAX_SHUTDOWN_TIMEOUT_SECONDS))
         );
+    }
+
+    #[test]
+    fn ui_config_default_terminal_font_settings() {
+        let ui = UiConfig::default();
+        assert_eq!(ui.terminal_font_family, "");
+        assert_eq!(ui.terminal_font_size, DEFAULT_TERMINAL_FONT_SIZE);
+    }
+
+    #[test]
+    fn normalized_terminal_font_size_passes_through_in_range_values() {
+        assert_eq!(
+            normalized_terminal_font_size(MIN_TERMINAL_FONT_SIZE),
+            MIN_TERMINAL_FONT_SIZE
+        );
+        assert_eq!(
+            normalized_terminal_font_size(MAX_TERMINAL_FONT_SIZE),
+            MAX_TERMINAL_FONT_SIZE
+        );
+        assert_eq!(normalized_terminal_font_size(18), 18);
+    }
+
+    #[test]
+    fn normalized_terminal_font_size_degrades_out_of_range_values_to_the_default() {
+        assert_eq!(
+            normalized_terminal_font_size(MIN_TERMINAL_FONT_SIZE - 1),
+            DEFAULT_TERMINAL_FONT_SIZE
+        );
+        assert_eq!(
+            normalized_terminal_font_size(MAX_TERMINAL_FONT_SIZE + 1),
+            DEFAULT_TERMINAL_FONT_SIZE
+        );
+        assert_eq!(normalized_terminal_font_size(0), DEFAULT_TERMINAL_FONT_SIZE);
+        assert_eq!(
+            normalized_terminal_font_size(u16::MAX),
+            DEFAULT_TERMINAL_FONT_SIZE
+        );
+    }
+
+    #[test]
+    fn terminal_font_size_load_warning_is_none_for_in_range_values() {
+        assert_eq!(
+            terminal_font_size_load_warning(MIN_TERMINAL_FONT_SIZE),
+            None
+        );
+        assert_eq!(
+            terminal_font_size_load_warning(MAX_TERMINAL_FONT_SIZE),
+            None
+        );
+        assert_eq!(terminal_font_size_load_warning(18), None);
+    }
+
+    #[test]
+    fn terminal_font_size_load_warning_names_the_bad_value_and_the_default() {
+        let warning = terminal_font_size_load_warning(500).expect("warning expected");
+        assert!(warning.contains("500"));
+        assert!(warning.contains(&DEFAULT_TERMINAL_FONT_SIZE.to_string()));
+    }
+
+    #[test]
+    fn load_config_degrades_an_out_of_range_terminal_font_size_and_persists_the_default() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = make_test_paths(dir.path());
+        std::fs::write(&paths.config_path, "[ui]\nterminal_font_size = 500\n")
+            .expect("write config");
+
+        let config = load_config(&paths);
+        // The in-memory value is corrected at load, so `normalized_terminal_font_size`
+        // (now a pure clamp used elsewhere) never has to run to reach a valid value,
+        // and a later save persists the corrected default rather than 500.
+        assert_eq!(config.ui.terminal_font_size, DEFAULT_TERMINAL_FONT_SIZE);
+    }
+
+    #[test]
+    fn load_config_leaves_an_in_range_terminal_font_size_untouched() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = make_test_paths(dir.path());
+        std::fs::write(&paths.config_path, "[ui]\nterminal_font_size = 22\n")
+            .expect("write config");
+
+        let config = load_config(&paths);
+        assert_eq!(config.ui.terminal_font_size, 22);
     }
 
     #[test]

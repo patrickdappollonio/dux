@@ -410,6 +410,20 @@ fn config_schema() -> Vec<ConfigEntry> {
             value_fn: |c| FieldValue::Bool(c.ui.copy_on_select),
         },
         ConfigEntry::Field {
+            key: "terminal_font_family",
+            comment: Some(CommentSource::Static(
+                "# Web UI only: name a font installed on the VIEWING device (the browser's\n# machine, not the server's) to use in the web terminal, e.g. \"Fira Code\" or\n# \"Cascadia Code\". It is placed AHEAD of dux's own bundled terminal font, so\n# the bundled font still fills in any glyph (box drawing, blocks, braille,\n# arrows, powerline) your chosen font lacks. Leave empty (the default) to use\n# only the bundled font. The TUI is unaffected: it always uses your host\n# terminal's own font. Change it at runtime from the web UI's Preferences\n# dialog.",
+            )),
+            value_fn: |c| FieldValue::Str(c.ui.terminal_font_family.clone()),
+        },
+        ConfigEntry::Field {
+            key: "terminal_font_size",
+            comment: Some(CommentSource::Static(
+                "# Web UI only: the web terminal's font size, in pixels. Valid range is\n# 8-32; a value outside it is reset to the default of 14 (with a warning in\n# dux.log) rather than clamped to the nearer bound. The TUI is unaffected: it\n# always uses your host terminal's own font size. Change it at runtime from\n# the web UI's Preferences dialog.",
+            )),
+            value_fn: |c| FieldValue::U16(c.ui.terminal_font_size),
+        },
+        ConfigEntry::Field {
             key: "compose_bar",
             comment: Some(CommentSource::Static(
                 "# Web UI only: on a phone, show a compose box below the terminal keys.\n# You type into it with your keyboard's autocorrect and swipe input, then\n# the Send button delivers the whole message and presses Enter for you\n# (Enter inside the box just adds a newline). While enabled, tapping the\n# terminal focuses the compose box so the soft keyboard always types into\n# it. Set to false to hide the box and type directly into the terminal.\n# Change it at runtime from the web UI's Preferences dialog.",
@@ -1970,6 +1984,8 @@ mod tests {
         assert!(rendered.contains("pr_poll_interval_seconds = 180"));
         assert!(rendered.contains("empty_project_separator_min_projects = 5"));
         assert!(rendered.contains("copy_on_select = true"));
+        assert!(rendered.contains("terminal_font_family = \"\""));
+        assert!(rendered.contains("terminal_font_size = 14"));
         assert!(rendered.contains("compose_bar = true"));
         assert!(rendered.contains("mobile_top_bar = true"));
         assert!(rendered.contains("mobile_accessory_bar = true"));

@@ -100,6 +100,14 @@ pub struct BootstrapView {
     /// terminal auto-copies it (default true). Read by the terminal pane and by
     /// the web's Preferences dialog.
     pub copy_on_select: bool,
+    /// Mirrors `config.ui.terminal_font_family`: a font name installed on the
+    /// viewing device, placed ahead of dux's bundled terminal font stack.
+    /// Empty means "use the bundled stack only." Web UI only.
+    pub terminal_font_family: String,
+    /// Mirrors `config.ui.terminal_font_size`, already normalized through
+    /// [`crate::config::normalized_terminal_font_size`] so the browser never
+    /// receives an out-of-range value. Web UI only.
+    pub terminal_font_size: u16,
     /// Mirrors `config.ui.compose_bar`: whether the web's mobile terminal shows
     /// the compose bar (the buffered phone typing surface with native
     /// autocorrect) and redirects a terminal tap into it (default true). Read
@@ -1166,6 +1174,10 @@ impl Engine {
             gh_available: self.pr_agent_command_available(),
             github_integration: self.config.ui.github_integration,
             copy_on_select: self.config.ui.copy_on_select,
+            terminal_font_family: self.config.ui.terminal_font_family.clone(),
+            terminal_font_size: crate::config::normalized_terminal_font_size(
+                self.config.ui.terminal_font_size,
+            ),
             compose_bar: self.config.ui.compose_bar,
             mobile_top_bar: self.config.ui.mobile_top_bar,
             mobile_accessory_bar: self.config.ui.mobile_accessory_bar,
@@ -1985,6 +1997,28 @@ mod tests {
     }
 
     #[test]
+    fn terminal_font_settings_are_projected() {
+        let (mut engine, _tmp) = test_engine();
+
+        // Defaults ship empty family / 14px.
+        assert_eq!(engine.bootstrap().terminal_font_family, "");
+        assert_eq!(engine.bootstrap().terminal_font_size, 14);
+
+        engine.config.ui.terminal_font_family = "Fira Code".to_string();
+        engine.config.ui.terminal_font_size = 18;
+        let bootstrap = engine.bootstrap();
+        assert_eq!(bootstrap.terminal_font_family, "Fira Code");
+        assert_eq!(bootstrap.terminal_font_size, 18);
+    }
+
+    #[test]
+    fn terminal_font_size_out_of_range_degrades_to_the_default_in_bootstrap() {
+        let (mut engine, _tmp) = test_engine();
+        engine.config.ui.terminal_font_size = 200;
+        assert_eq!(engine.bootstrap().terminal_font_size, 14);
+    }
+
+    #[test]
     fn server_title_is_projected() {
         let (mut engine, _tmp) = test_engine();
         // Defaults flow through unchanged.
@@ -2478,6 +2512,8 @@ mod tests {
             "gh_available",
             "github_integration",
             "copy_on_select",
+            "terminal_font_family",
+            "terminal_font_size",
             "compose_bar",
             "mobile_top_bar",
             "mobile_accessory_bar",

@@ -19,6 +19,43 @@
     font-display: block;
 }
 
+/* "Dux Mono" and "Dux Mono Symbols": the bundled web terminal font stack.
+   "Dux Mono" is Roboto Mono, used for ordinary text glyphs. "Dux Mono Symbols"
+   is a small subset of JetBrains Mono Nerd Font Mono covering the ranges a TUI
+   actually draws with: arrows, box drawing, block elements, braille, misc
+   symbols/dingbats, and Powerline glyphs. See src/assets/fonts/dux-mono.LICENSE
+   for provenance and the exact reproduction commands.
+
+   The symbols face is listed BEFORE the text face in the terminal font stack
+   (see lib/terminalFont.ts) so structural glyphs always come from a verified
+   single-cell-advance font, never from whatever fallback the browser happens
+   to pick; the text face carries no box drawing, block, or braille glyphs of
+   its own, so it never competes for those code points. */
+@font-face {
+    font-family: "Dux Mono Symbols";
+    src: url("./assets/fonts/dux-mono-symbols.woff2") format("woff2");
+    font-weight: 400;
+    font-style: normal;
+    font-display: swap;
+    unicode-range: U+2190-21FF, U+2300-23FF, U+2500-25FF, U+2600-27BF, U+2800-28FF, U+E0A0-E0D7;
+}
+
+@font-face {
+    font-family: "Dux Mono";
+    src: url("./assets/fonts/dux-mono-regular.woff2") format("woff2");
+    font-weight: 400;
+    font-style: normal;
+    font-display: swap;
+}
+
+@font-face {
+    font-family: "Dux Mono";
+    src: url("./assets/fonts/dux-mono-bold.woff2") format("woff2");
+    font-weight: 700;
+    font-style: normal;
+    font-display: swap;
+}
+
 html, body, #root { height: 100%; }
 body { overflow: hidden; user-select: none; }
 button, a, [role="button"], [role="menuitem"], [role="option"], [role="tab"], .cursor-pointer { cursor: pointer; }

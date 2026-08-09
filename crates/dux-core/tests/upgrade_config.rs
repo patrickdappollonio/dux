@@ -205,6 +205,11 @@ fn keys_added_since_the_old_config_was_written_fall_back_to_their_defaults() {
         fresh.ui.status_clear_seconds
     );
     assert_eq!(
+        config.ui.terminal_font_family,
+        fresh.ui.terminal_font_family
+    );
+    assert_eq!(config.ui.terminal_font_size, fresh.ui.terminal_font_size);
+    assert_eq!(
         config.server.tailscale_enabled,
         fresh.server.tailscale_enabled
     );
