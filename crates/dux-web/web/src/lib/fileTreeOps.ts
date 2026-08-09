@@ -38,6 +38,39 @@ export function renameTarget(from: string, newName: string): string {
   return joinName(parentDir(from), newName)
 }
 
+// The final worktree-relative target of a MOVE: the destination directory
+// plus the source's own basename. A move is a rename that changes the folder
+// and keeps the name, which is why it goes to the same server route.
+export function moveTarget(from: string, destDir: string): string {
+  return joinName(destDir, basename(from))
+}
+
+// "a/b/c.ts" -> "c.ts"; "x" -> "x".
+export function basename(path: string): string {
+  const idx = path.lastIndexOf("/")
+  return idx === -1 ? path : path.slice(idx + 1)
+}
+
+// Whether a chosen destination directory is a legal target for moving `from`.
+// UX only: the server is still the authority on containment and on refusing an
+// occupied destination. This just stops the two moves that are obviously
+// pointless or impossible before a round trip.
+export function validateMove(
+  from: string,
+  destDir: string,
+): { ok: true } | { ok: false; error: string } {
+  if (destDir === parentDir(from)) {
+    return { ok: false, error: "This is already the folder it is in." }
+  }
+  // A folder cannot contain itself. Compare on a path-segment boundary so a
+  // sibling that merely shares a name prefix ("src-old" next to "src") is not
+  // mistaken for a descendant.
+  if (destDir === from || destDir.startsWith(`${from}/`)) {
+    return { ok: false, error: "A folder cannot be moved inside itself." }
+  }
+  return { ok: true }
+}
+
 // eslint-disable-next-line no-control-regex
 const CONTROL_CHAR_RE = /[\x00-\x1f\x7f]/
 

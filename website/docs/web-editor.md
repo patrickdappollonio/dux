@@ -1,6 +1,6 @@
 ---
 title: The code editor
-description: A real Monaco editor in the browser for any file in a worktree, with syntax highlighting, JSON and TOML help, Markdown and SVG previews, image viewing, path search, diffs against HEAD, and open-in-local-editor.
+description: A real Monaco editor in the browser for any file in a worktree, with syntax highlighting, JSON and TOML help, Markdown and SVG previews, image viewing, path search, diffs against HEAD, file management including moving and inspecting files, and open-in-local-editor.
 group: Web UI
 order: 62
 ---
@@ -143,7 +143,7 @@ is and **your text is kept**: the tab stays dirty with everything you typed stil
 in it, so you can trim it down and save again, or copy it out. Nothing is
 discarded.
 
-## Creating, renaming, and deleting files
+## Creating, renaming, moving, and deleting files
 
 Right-click anywhere in the file tree to manage files and folders without leaving
 the editor:
@@ -156,13 +156,40 @@ the editor:
 - **Rename…** works on files and folders alike. If the file has unsaved changes,
   dux blocks the rename until you save or discard them first, rather than
   silently reloading your edits away.
+- **Move…** puts the entry in a different folder, name unchanged. There is no
+  cut and paste to remember: you get a little folder browser instead, opening on
+  the folder the entry is already in, one click to step into a subfolder and one
+  to climb back out. The line above the browser always spells out exactly where
+  the thing will land, so nothing hinges on you reading a breadcrumb correctly.
+  Same unsaved-changes rule as Rename, and the same tab bookkeeping. A move that
+  would land on a name that is already taken is **refused outright**, not offered
+  as an "are you sure?": there is no trash on the server, so an overwrite here
+  would destroy the file that was already there with nothing to undo it. Rename
+  one of the two first, then move.
 - **Delete…** is permanent. There is no trash on the server: confirming deletes
   the file, or the folder and everything inside it, straight from disk. If the
   file you deleted was open, its tab closes along with it.
+- **File info…** (**Folder info…** on a folder) is the read-only one: full path,
+  whether it is a file, a folder or a symlink (and for a symlink, what it points
+  at), size in both human units and exact bytes, when it was last modified in
+  your own timezone, the permission bits both as `rw-r--r--` and as `644`, and
+  what git currently makes of it. Git gets its own answer rather than a guess:
+  unmodified, the exact change and which side it is on, ignored, inside a
+  different repository (a nested clone or a submodule), or no repository at all.
+  Ignored and nested get named explicitly because `git status` says nothing
+  whatsoever about either, so anything less would report your `node_modules` as
+  a tracked, unmodified file.
 
-Renaming or deleting a file that has other open editor tabs pointed at it (or, for
-a folder, tabs pointed anywhere underneath it) keeps everything in sync: a rename
-retargets those tabs to the new path, and a delete closes them.
+  The panel reads the file once when it opens and again whenever you come back
+  to the browser tab, and that is all: there is no polling. So if you delete the
+  file somewhere else and switch back, the panel notices it is gone and closes
+  itself instead of describing something that is not there. If it vanishes while
+  you are sitting on this tab watching it, the panel will not know until the tab
+  regains focus.
+
+Renaming, moving, or deleting a file that has other open editor tabs pointed at it
+(or, for a folder, tabs pointed anywhere underneath it) keeps everything in sync: a
+rename or a move retargets those tabs to the new path, and a delete closes them.
 
 ## Syntax highlighting and language niceties
 

@@ -43,7 +43,9 @@ interface FileTreeProps {
   onNewFile?: (dir: string) => void
   onNewFolder?: (dir: string) => void
   onRename?: (path: string, isDir: boolean) => void
+  onMove?: (path: string, isDir: boolean) => void
   onDelete?: (path: string, isDir: boolean) => void
+  onInfo?: (path: string, isDir: boolean) => void
   // Bump the nonce (with the affected dir(s)) to force a refetch of those
   // directories after a create/rename/delete mutation lands.
   revalidate?: { dirs: string[]; nonce: number } | null
@@ -58,7 +60,9 @@ export function FileTree({
   onNewFile = noop,
   onNewFolder = noop,
   onRename = noop,
+  onMove = noop,
   onDelete = noop,
+  onInfo = noop,
   revalidate = null,
 }: FileTreeProps) {
   // The lazy loaded-directory cache: dirPath ("" = root) → DirState.
@@ -404,7 +408,9 @@ export function FileTree({
                       )
                     }
                     onRename={() => onRename(row.path, true)}
+                    onMove={() => onMove(row.path, true)}
                     onDelete={() => onDelete(row.path, true)}
+                    onInfo={() => onInfo(row.path, true)}
                   />
                 </ContextMenu>
               </li>
@@ -482,7 +488,9 @@ export function FileTree({
                       )
                     }
                     onRename={() => onRename(row.path, false)}
+                    onMove={() => onMove(row.path, false)}
                     onDelete={() => onDelete(row.path, false)}
+                    onInfo={() => onInfo(row.path, false)}
                   />
                 </ContextMenu>
               </li>
@@ -497,7 +505,9 @@ export function FileTree({
         onNewFile={() => onNewFile(targetDirForCreate({ kind: "root" }))}
         onNewFolder={() => onNewFolder(targetDirForCreate({ kind: "root" }))}
         onRename={noop}
+        onMove={noop}
         onDelete={noop}
+        onInfo={noop}
       />
       </ContextMenu>
     </ScrollArea>

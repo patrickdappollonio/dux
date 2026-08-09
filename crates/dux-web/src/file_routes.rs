@@ -159,6 +159,7 @@ pub fn routes() -> Router<AppState> {
             // read cap.
             post(write_file).layer(DefaultBodyLimit::max(MAX_EDIT_WRITE_BYTES)),
         )
+        .route(&format!("{prefix}/info"), post(entry_info))
         .route(&format!("{prefix}/create-file"), post(create_file))
         .route(&format!("{prefix}/create-dir"), post(create_dir))
         .route(&format!("{prefix}/rename"), post(rename_entry))
@@ -516,6 +517,52 @@ fn write_rejection(rejection: JsonRejection) -> Response {
             .into_response();
     }
     (rejection.status(), rejection.body_text()).into_response()
+}
+
+/// Describe one worktree entry for the editor's read-only file-info panel:
+/// path, kind, size, modified time, permissions, and what git says about it.
+/// Read-only and side-effect free, so unlike every mutating route below it does
+/// NOT touch the changed-files cache. Containment is
+/// `dux_core::worktree_file::entry_info`'s, which is the same boundary the
+/// write path uses. The git lookup shells out, so the whole thing runs off the
+/// async reactor.
+async fn entry_info(
+    State(state): State<AppState>,
+    ApiPath(id): ApiPath<String>,
+    Json(op): Json<PathOp>,
+) -> Response {
+    if !id_within_bound(&id) {
+        return unknown_session();
+    }
+    let worktree = match resolve_worktree(&state, id).await {
+        Ok(w) => w,
+        Err(r) => return r,
+    };
+    let path = op.path;
+    match tokio::task::spawn_blocking(move || dux_core::worktree_file::entry_info(&worktree, &path))
+        .await
+    {
+        Ok(Ok(info)) => Json(info).into_response(),
+        // A path that resolved cleanly but is GONE answers 404, while a path
+        // that was refused (traversal, `.git`, an escaping symlink) answers
+        // 400. The browser's info panel self-dismisses on the 404 only.
+        Ok(Err(e)) => {
+            let status = if e
+                .downcast_ref::<dux_core::worktree_file::EntryMissing>()
+                .is_some()
+            {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            (status, e.to_string()).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("info task failed: {e}"),
+        )
+            .into_response(),
+    }
 }
 
 /// Create a new empty file at `op.path`. Refuses an already-existing entry and
