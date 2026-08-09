@@ -383,14 +383,23 @@ pub fn create_dir(worktree: &Path, rel_path: &str) -> anyhow::Result<()> {
 /// source, an existing destination (no overwrite), `.git`/traversal/escape on
 /// either side, and a destination whose parent is missing or escapes the
 /// worktree or resolves into `.git`.
+///
+/// The SOURCE is resolved WITHOUT following it, exactly as [`delete_entry`]
+/// does and for the same reason: `rename(2)` moves the directory ENTRY, so
+/// moving a symlink moves the link and never touches whatever it points at.
+/// Resolving through it would refuse to move a link whose target escapes the
+/// worktree, an entry the tree already shows and the user can already delete,
+/// and that refusal would have named a file the user never touched. Only the
+/// literal path and its PARENT's containment matter for the source.
+///
+/// The DESTINATION keeps the following resolver, because a destination reached
+/// through a symlinked directory really would write outside the tree.
 pub fn rename_entry(worktree: &Path, from_rel: &str, to_rel: &str) -> anyhow::Result<()> {
-    let src = resolve_worktree_path(worktree, from_rel)?;
+    let src = entry_literal_path(worktree, from_rel)?;
     let dst = resolve_worktree_path(worktree, to_rel)?;
     src.symlink_metadata()
         .map_err(|e| anyhow::anyhow!("rename source does not exist: {from_rel}: {e}"))?;
-    if dst.symlink_metadata().is_ok() {
-        anyhow::bail!("refusing to rename, destination already exists: {to_rel}");
-    }
+    check_entry_parent_contained(worktree, &src, from_rel)?;
     let dst_parent = dst.parent().unwrap_or(worktree);
     if !is_under(worktree, dst_parent) {
         anyhow::bail!(
@@ -400,24 +409,72 @@ pub fn rename_entry(worktree: &Path, from_rel: &str, to_rel: &str) -> anyhow::Re
     if resolves_into_git_dir(worktree, dst_parent) {
         anyhow::bail!("refusing to rename into the git directory: {to_rel}");
     }
-    std::fs::rename(&src, &dst)
-        .map_err(|e| anyhow::anyhow!("cannot rename {from_rel} to {to_rel}: {e}"))?;
-    Ok(())
+    rename_no_replace(&src, &dst).map_err(|e| match e {
+        RenameNoReplaceError::DestinationExists => {
+            anyhow::anyhow!("refusing to rename, destination already exists: {to_rel}")
+        }
+        RenameNoReplaceError::Failed(err) => {
+            anyhow::anyhow!("cannot rename {from_rel} to {to_rel}: {err}")
+        }
+    })
 }
 
-/// Delete `rel_path`: a file or symlink is removed with `remove_file` (a
-/// symlink removes the LINK, never its target); a directory is removed
-/// recursively with `remove_dir_all`. Refuses `.git`/traversal/escape and
-/// refuses to delete the worktree root itself. Permanent: there is no trash on
-/// the server (CLAUDE.md: worktrees are user data, but deletion here is the
-/// explicit, confirmed action the caller asked for).
+/// Why [`rename_no_replace`] did not rename. The occupied-destination case is
+/// its own variant because the caller phrases it differently: it is a refusal
+/// dux promises, not an I/O failure.
+#[derive(Debug)]
+enum RenameNoReplaceError {
+    DestinationExists,
+    Failed(std::io::Error),
+}
+
+/// Rename `src` onto `dst`, refusing an occupied destination ATOMICALLY.
 ///
-/// Deliberately does NOT call `resolve_worktree_path`: that resolver checks
-/// containment of the FOLLOWED realpath, which is the wrong check for delete.
-/// Deleting a symlink removes the directory entry (the link), never its
-/// target, so an escaping-target symlink is a legitimate delete target: only
-/// the literal path and its PARENT's containment matter here.
-pub fn delete_entry(worktree: &Path, rel_path: &str) -> anyhow::Result<()> {
+/// A stat followed by [`std::fs::rename`] is not the same promise: `rename(2)`
+/// silently OVERWRITES (measured: file-onto-file and directory-onto-empty-
+/// directory both succeed), so another client can create the destination in
+/// the window between the two calls and lose it, and dux is explicitly
+/// multi-client with no trash to recover from.
+/// `renameat_with(RenameFlags::NOREPLACE)` makes the refusal the kernel's, in
+/// the same syscall. rustix maps that flag to `RENAME_NOREPLACE` on Linux and
+/// to `renameatx_np`'s `RENAME_EXCL` on macOS, which are dux's two supported
+/// targets.
+///
+/// The fallback is narrow and stated rather than hidden: a filesystem with no
+/// `renameat2` (and macOS before 10.12, where rustix finds no `renameatx_np`
+/// and answers `ENOSYS`) reports `ENOSYS`/`EINVAL`/`ENOTSUP`, and only there
+/// does this stat first and rename after, which is the older racy pair. There
+/// and only there does the TOCTOU window still exist.
+fn rename_no_replace(src: &Path, dst: &Path) -> Result<(), RenameNoReplaceError> {
+    use rustix::fs::{CWD, RenameFlags, renameat_with};
+    use rustix::io::Errno;
+
+    match renameat_with(CWD, src, CWD, dst, RenameFlags::NOREPLACE) {
+        Ok(()) => Ok(()),
+        Err(err) if err == Errno::EXIST || err == Errno::NOTEMPTY => {
+            Err(RenameNoReplaceError::DestinationExists)
+        }
+        Err(err)
+            if err == Errno::NOSYS
+                || err == Errno::INVAL
+                || err == Errno::NOTSUP
+                || err == Errno::OPNOTSUPP =>
+        {
+            if dst.symlink_metadata().is_ok() {
+                return Err(RenameNoReplaceError::DestinationExists);
+            }
+            std::fs::rename(src, dst).map_err(RenameNoReplaceError::Failed)
+        }
+        Err(err) => Err(RenameNoReplaceError::Failed(err.into())),
+    }
+}
+
+/// Join `rel_path` onto the worktree for an operation that acts on the
+/// directory ENTRY rather than on what it points at (delete, and a rename's
+/// source). Applies the literal guards only, and deliberately does NOT follow
+/// the leaf: see [`delete_entry`] and [`rename_entry`] for why the leaf may
+/// legitimately be a symlink pointing anywhere at all.
+fn entry_literal_path(worktree: &Path, rel_path: &str) -> anyhow::Result<PathBuf> {
     use std::path::Component;
     let rp = Path::new(rel_path);
     if rp.as_os_str().is_empty()
@@ -450,15 +507,18 @@ pub fn delete_entry(worktree: &Path, rel_path: &str) -> anyhow::Result<()> {
     {
         anyhow::bail!("refusing to access the git directory: {rel_path}");
     }
-    let path = worktree.join(rel_path);
-    // No-follow stat on the literal path: existence and kind of the entry
-    // ITSELF, never its symlink target.
-    let meta = path
-        .symlink_metadata()
-        .map_err(|e| anyhow::anyhow!("delete target does not exist: {rel_path}: {e}"))?;
-    // Containment is checked on the PARENT directory (canonicalized, so an
-    // intermediate symlink that escapes the worktree is still caught), not on
-    // the leaf, since the leaf may legitimately be an escaping symlink.
+    Ok(worktree.join(rel_path))
+}
+
+/// Containment for an entry resolved by [`entry_literal_path`]: checked on the
+/// PARENT directory (canonicalized, so an intermediate symlink that escapes
+/// the worktree is still caught), not on the leaf, since the leaf may
+/// legitimately be an escaping symlink.
+fn check_entry_parent_contained(
+    worktree: &Path,
+    path: &Path,
+    rel_path: &str,
+) -> anyhow::Result<()> {
     let parent = path.parent().unwrap_or(worktree);
     if !is_under(worktree, parent) {
         anyhow::bail!("path escapes worktree: {rel_path}");
@@ -466,6 +526,29 @@ pub fn delete_entry(worktree: &Path, rel_path: &str) -> anyhow::Result<()> {
     if resolves_into_git_dir(worktree, parent) {
         anyhow::bail!("refusing to access the git directory: {rel_path}");
     }
+    Ok(())
+}
+
+/// Delete `rel_path`: a file or symlink is removed with `remove_file` (a
+/// symlink removes the LINK, never its target); a directory is removed
+/// recursively with `remove_dir_all`. Refuses `.git`/traversal/escape and
+/// refuses to delete the worktree root itself. Permanent: there is no trash on
+/// the server (CLAUDE.md: worktrees are user data, but deletion here is the
+/// explicit, confirmed action the caller asked for).
+///
+/// Deliberately does NOT call `resolve_worktree_path`: that resolver checks
+/// containment of the FOLLOWED realpath, which is the wrong check for delete.
+/// Deleting a symlink removes the directory entry (the link), never its
+/// target, so an escaping-target symlink is a legitimate delete target: only
+/// the literal path and its PARENT's containment matter here.
+pub fn delete_entry(worktree: &Path, rel_path: &str) -> anyhow::Result<()> {
+    let path = entry_literal_path(worktree, rel_path)?;
+    // No-follow stat on the literal path: existence and kind of the entry
+    // ITSELF, never its symlink target.
+    let meta = path
+        .symlink_metadata()
+        .map_err(|e| anyhow::anyhow!("delete target does not exist: {rel_path}: {e}"))?;
+    check_entry_parent_contained(worktree, &path, rel_path)?;
     let canon_worktree = worktree
         .canonicalize()
         .map_err(|e| anyhow::anyhow!("cannot canonicalize worktree: {e}"))?;
@@ -482,6 +565,230 @@ pub fn delete_entry(worktree: &Path, rel_path: &str) -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!("cannot delete {rel_path}: {e}"))?;
     }
     Ok(())
+}
+
+/// What kind of thing the info panel is describing. A no-follow stat decides
+/// this, so a symlink is a `Symlink` and never silently the file it points at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EntryKind {
+    File,
+    Dir,
+    Symlink,
+    /// A fifo, socket, or device node. Rare inside a worktree, but real, and
+    /// calling one a file would be wrong.
+    Other,
+}
+
+/// What git has to say about the entry. An enum rather than an `Option` of
+/// codes because these are genuinely different answers and collapsing any two
+/// of them into `null` makes the panel lie.
+///
+/// Two of the variants exist because of the SAME failure: `git status` lists
+/// nothing at all for an ignored path or for anything inside a nested
+/// repository, so with only `Clean` to fall back on the panel called every
+/// file under `node_modules`, `target` and every vendored subrepo "tracked and
+/// unmodified". The editor's tree is a plain filesystem browser with no ignore
+/// filter, so those paths are one right-click away.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum GitStatusView {
+    /// There is no repository here at all.
+    NotARepository,
+    /// The path belongs to a DIFFERENT repository than this worktree: a nested
+    /// clone or a submodule. This worktree's git has nothing to say about it.
+    OtherRepository,
+    /// Git tracks files, not directories.
+    NotApplicable,
+    /// Matched by an ignore rule, so it is untracked ON PURPOSE and appears in
+    /// no status listing.
+    Ignored,
+    /// Tracked, with nothing pending.
+    Clean,
+    Changed {
+        staged: Option<String>,
+        unstaged: Option<String>,
+    },
+}
+
+/// The read-only facts the web editor's file-info panel shows. Everything here
+/// comes from one no-follow stat plus one git status lookup.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WorktreeEntryInfo {
+    /// Echoed back exactly as the caller wrote it, never re-encoded or
+    /// normalized, so a non-Latin name survives the round trip.
+    pub path: String,
+    pub kind: EntryKind,
+    /// `None` for a directory: the on-disk size of a directory entry is an
+    /// implementation detail of the filesystem, not something a user wants.
+    pub size: Option<u64>,
+    /// RFC 3339, UTC. `None` when the filesystem does not report an mtime.
+    pub modified: Option<String>,
+    /// The permission bits in octal, without a leading zero (`"644"`).
+    pub mode: String,
+    /// The same bits as `ls -l` prints them (`"rw-r--r--"`).
+    pub permissions: String,
+    /// The symlink's target as stored on disk (not resolved), for a symlink.
+    pub symlink_target: Option<String>,
+    pub git: GitStatusView,
+}
+
+/// Render permission bits the way `ls -l` does: three rwx triplets, with
+/// setuid/setgid/sticky folded onto the matching execute position (lower-case
+/// when that execute bit is also set, upper-case when it is not).
+pub fn symbolic_permissions(mode: u32) -> String {
+    let mut out = String::with_capacity(9);
+    let triplet = |shift: u32, special: bool, special_lower: char, special_upper: char| {
+        let bits = (mode >> shift) & 0o7;
+        let exec = bits & 0o1 != 0;
+        let last = match (special, exec) {
+            (true, true) => special_lower,
+            (true, false) => special_upper,
+            (false, true) => 'x',
+            (false, false) => '-',
+        };
+        [
+            if bits & 0o4 != 0 { 'r' } else { '-' },
+            if bits & 0o2 != 0 { 'w' } else { '-' },
+            last,
+        ]
+    };
+    out.extend(triplet(6, mode & 0o4000 != 0, 's', 'S'));
+    out.extend(triplet(3, mode & 0o2000 != 0, 's', 'S'));
+    out.extend(triplet(0, mode & 0o1000 != 0, 't', 'T'));
+    out
+}
+
+/// Returned by [`entry_info`] when the path resolved cleanly but nothing is
+/// there. A distinct type, not just a message, so the HTTP layer can answer
+/// 404 for it and 400 for a REFUSED path: "it is gone" and "you may not look
+/// at that" are different answers, and the browser's info panel only
+/// self-dismisses on the first.
+#[derive(Debug)]
+pub struct EntryMissing(pub String);
+
+impl std::fmt::Display for EntryMissing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "no such entry in the worktree: {}", self.0)
+    }
+}
+
+impl std::error::Error for EntryMissing {}
+
+/// Describe one worktree entry for the editor's read-only info panel.
+///
+/// Containment is the SAME boundary every other editor operation uses:
+/// `resolve_worktree_path` refuses an absolute path, any `..` or `.` segment,
+/// a `.git` component anywhere, and (for a path that exists, or a dangling
+/// symlink) anything whose realpath escapes the worktree or lands inside a
+/// `.git` directory.
+///
+/// That last check is what refuses a symlink escaping the tree, and the reason
+/// is the TARGET PATH STRING, not the target's contents: the stat below is
+/// `symlink_metadata`, which reports the LINK's own lstat and never the
+/// target's size, mode or mtime, so nothing about the host file leaks that
+/// way. What does leak is `symlink_target`, which the panel prints verbatim,
+/// and `/root/.ssh/id_ed25519` is a disclosure on its own.
+///
+/// The stat is `symlink_metadata`, so nothing is followed and a symlink is
+/// described as itself.
+pub fn entry_info(worktree: &Path, rel_path: &str) -> anyhow::Result<WorktreeEntryInfo> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = resolve_worktree_path(worktree, rel_path)?;
+    let meta = std::fs::symlink_metadata(&path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            anyhow::Error::new(EntryMissing(rel_path.to_string()))
+        } else {
+            anyhow::anyhow!("cannot stat {rel_path}: {e}")
+        }
+    })?;
+    let ft = meta.file_type();
+    let kind = if ft.is_symlink() {
+        EntryKind::Symlink
+    } else if ft.is_dir() {
+        EntryKind::Dir
+    } else if ft.is_file() {
+        EntryKind::File
+    } else {
+        EntryKind::Other
+    };
+    let size = match kind {
+        EntryKind::Dir => None,
+        _ => Some(meta.len()),
+    };
+    let modified = meta
+        .modified()
+        .ok()
+        .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339());
+    let bits = meta.permissions().mode() & 0o7777;
+    let symlink_target = if ft.is_symlink() {
+        std::fs::read_link(&path)
+            .ok()
+            .map(|t| t.to_string_lossy().into_owned())
+    } else {
+        None
+    };
+    // Git tracks files, not directories, so asking about a directory would
+    // report on its children instead of on the thing the panel is describing.
+    let git = if kind == EntryKind::Dir {
+        GitStatusView::NotApplicable
+    } else {
+        entry_git_status(worktree, rel_path, &path)?
+    };
+    Ok(WorktreeEntryInfo {
+        path: rel_path.to_string(),
+        kind,
+        size,
+        modified,
+        mode: format!("{bits:o}"),
+        permissions: symbolic_permissions(bits),
+        symlink_target,
+        git,
+    })
+}
+
+/// What git says about ONE non-directory entry, asked in the order that keeps
+/// each answer honest.
+///
+/// The order matters, and each step exists because the step after it cannot
+/// tell the difference on its own:
+///
+/// 1. Who OWNS this path? A nested clone or a submodule is opaque to the
+///    worktree's repository, which lists nothing for anything inside one.
+/// 2. What does `git status` say? A code here is the definitive answer.
+/// 3. Nothing from status means one of two things, and only one of them is
+///    "clean": an ignored path is listed nowhere either.
+fn entry_git_status(
+    worktree: &Path,
+    rel_path: &str,
+    abs_path: &Path,
+) -> anyhow::Result<GitStatusView> {
+    let dir = abs_path.parent().unwrap_or(worktree);
+    let Some(owner) = crate::git::repository_root(dir)? else {
+        return Ok(GitStatusView::NotARepository);
+    };
+    let same_repository = match (owner.canonicalize(), worktree.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => owner == worktree,
+    };
+    if !same_repository {
+        return Ok(GitStatusView::OtherRepository);
+    }
+    match crate::git::file_status(worktree, rel_path)? {
+        None => Ok(GitStatusView::NotARepository),
+        Some(codes) if codes.staged.is_none() && codes.unstaged.is_none() => {
+            if crate::git::path_is_ignored(worktree, rel_path)? {
+                Ok(GitStatusView::Ignored)
+            } else {
+                Ok(GitStatusView::Clean)
+            }
+        }
+        Some(codes) => Ok(GitStatusView::Changed {
+            staged: codes.staged,
+            unstaged: codes.unstaged,
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -1224,5 +1531,351 @@ mod tests {
             outside.path().join("secret.txt").exists(),
             "the outside target must survive"
         );
+    }
+
+    /// The read-only entry-info panel: one no-follow stat plus a git status
+    /// lookup, behind the same containment boundary as every other editor
+    /// operation.
+    mod entry_info_tests {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+
+        #[test]
+        fn symbolic_permissions_renders_the_usual_triplets() {
+            assert_eq!(symbolic_permissions(0o644), "rw-r--r--");
+            assert_eq!(symbolic_permissions(0o755), "rwxr-xr-x");
+            assert_eq!(symbolic_permissions(0o000), "---------");
+            assert_eq!(symbolic_permissions(0o777), "rwxrwxrwx");
+        }
+
+        /// setuid/setgid/sticky replace the matching execute bit, upper-case
+        /// when that execute bit is NOT also set. This is what `ls -l` prints,
+        /// and getting it wrong makes a setuid binary look ordinary.
+        #[test]
+        fn symbolic_permissions_folds_in_setuid_setgid_and_sticky() {
+            assert_eq!(symbolic_permissions(0o4755), "rwsr-xr-x");
+            assert_eq!(symbolic_permissions(0o4644), "rwSr--r--");
+            assert_eq!(symbolic_permissions(0o2755), "rwxr-sr-x");
+            assert_eq!(symbolic_permissions(0o2745), "rwxr-Sr-x");
+            assert_eq!(symbolic_permissions(0o1777), "rwxrwxrwt");
+            assert_eq!(symbolic_permissions(0o1666), "rw-rw-rwT");
+        }
+
+        #[test]
+        fn reports_size_mode_and_kind_for_a_plain_file() {
+            let dir = worktree();
+            std::fs::set_permissions(
+                dir.path().join("hello.txt"),
+                std::fs::Permissions::from_mode(0o640),
+            )
+            .unwrap();
+            let info = entry_info(dir.path(), "hello.txt").unwrap();
+            assert_eq!(info.path, "hello.txt");
+            assert_eq!(info.kind, EntryKind::File);
+            assert_eq!(info.size, Some(9));
+            assert_eq!(info.mode, "640");
+            assert_eq!(info.permissions, "rw-r-----");
+            assert!(info.modified.is_some(), "a real file has an mtime");
+            assert_eq!(info.symlink_target, None);
+        }
+
+        /// A name that is not ASCII must come back byte-for-byte: the info
+        /// panel echoes the path the caller asked about and never re-encodes,
+        /// transliterates or normalizes it.
+        #[test]
+        fn a_non_latin_name_survives_unchanged() {
+            let dir = worktree();
+            let name = "документы/日本語 файл.txt";
+            std::fs::create_dir(dir.path().join("документы")).unwrap();
+            std::fs::write(dir.path().join(name), "содержимое\n").unwrap();
+            let info = entry_info(dir.path(), name).unwrap();
+            assert_eq!(info.path, name);
+            assert_eq!(info.kind, EntryKind::File);
+        }
+
+        /// A directory has no meaningful byte size and git tracks files, not
+        /// directories, so both are reported as inapplicable rather than as a
+        /// number and a state that would both be lies.
+        #[test]
+        fn a_directory_reports_no_size_and_no_git_state() {
+            let dir = worktree();
+            std::fs::create_dir(dir.path().join("sub")).unwrap();
+            let info = entry_info(dir.path(), "sub").unwrap();
+            assert_eq!(info.kind, EntryKind::Dir);
+            assert_eq!(info.size, None);
+            assert_eq!(info.git, GitStatusView::NotApplicable);
+        }
+
+        /// The stat is NO-FOLLOW: a symlink is reported as a symlink with its
+        /// own target, never silently as the file it points at.
+        #[test]
+        fn a_symlink_is_reported_as_a_symlink_not_its_target() {
+            let dir = worktree();
+            std::os::unix::fs::symlink("hello.txt", dir.path().join("link.txt")).unwrap();
+            let info = entry_info(dir.path(), "link.txt").unwrap();
+            assert_eq!(info.kind, EntryKind::Symlink);
+            assert_eq!(info.symlink_target.as_deref(), Some("hello.txt"));
+        }
+
+        #[test]
+        fn refuses_traversal_and_the_git_directory() {
+            let dir = worktree();
+            assert!(entry_info(dir.path(), "../evil").is_err());
+            assert!(entry_info(dir.path(), ".git/config").is_err());
+        }
+
+        /// A symlink whose target escapes the worktree is refused outright,
+        /// exactly as the write path refuses it: reporting a size and mode for
+        /// a host file outside the tree would leak what is there.
+        #[test]
+        fn refuses_a_symlink_that_escapes_the_worktree() {
+            let dir = worktree();
+            let outside = tempfile::tempdir().unwrap();
+            std::fs::write(outside.path().join("secret.txt"), "top secret\n").unwrap();
+            std::os::unix::fs::symlink(
+                outside.path().join("secret.txt"),
+                dir.path().join("escape-link"),
+            )
+            .unwrap();
+            assert!(entry_info(dir.path(), "escape-link").is_err());
+        }
+
+        #[test]
+        fn a_missing_entry_is_an_error() {
+            let dir = worktree();
+            assert!(entry_info(dir.path(), "nope.txt").is_err());
+        }
+
+        /// Outside a repository there is nothing for git to say, and the panel
+        /// must say THAT rather than pretending the file is clean.
+        #[test]
+        fn outside_a_repository_the_git_state_says_so() {
+            let dir = worktree();
+            let info = entry_info(dir.path(), "hello.txt").unwrap();
+            assert_eq!(info.git, GitStatusView::NotARepository);
+        }
+
+        /// A DANGLING symlink escaping the worktree must be refused exactly as
+        /// a live one is. `exists()` follows the link, so a link whose target
+        /// was removed skipped every containment check and the panel answered
+        /// 200 with `symlink_target: "/root/.ssh/id_ed25519"` printed in full.
+        #[test]
+        fn refuses_a_dangling_symlink_that_escapes_the_worktree() {
+            let dir = worktree();
+            std::os::unix::fs::symlink("/root/.ssh/id_ed25519", dir.path().join("stolen")).unwrap();
+            let err = entry_info(dir.path(), "stolen").unwrap_err();
+            assert!(
+                err.to_string().contains("escapes worktree"),
+                "unexpected error: {err}"
+            );
+        }
+
+        /// A dangling link that stays inside the worktree is ordinary and is
+        /// still described.
+        #[test]
+        fn describes_a_dangling_symlink_that_stays_inside_the_worktree() {
+            let dir = worktree();
+            std::os::unix::fs::symlink("not-yet.txt", dir.path().join("pending")).unwrap();
+            let info = entry_info(dir.path(), "pending").unwrap();
+            assert_eq!(info.kind, EntryKind::Symlink);
+            assert_eq!(info.symlink_target.as_deref(), Some("not-yet.txt"));
+        }
+
+        /// A repository with one committed file, for the git-state cases.
+        fn repo_worktree() -> tempfile::TempDir {
+            let dir = tempfile::tempdir().unwrap();
+            let run = |args: &[&str], cwd: &Path| {
+                let out = crate::git::test_support::git_command()
+                    .args(args)
+                    .current_dir(cwd)
+                    .output()
+                    .unwrap();
+                assert!(
+                    out.status.success(),
+                    "git {:?} failed: {}",
+                    args,
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            };
+            run(&["init", "-b", "main"], dir.path());
+            run(&["config", "user.name", "test"], dir.path());
+            run(&["config", "user.email", "t@t"], dir.path());
+            std::fs::write(dir.path().join("tracked.txt"), "one\n").unwrap();
+            run(&["add", "tracked.txt"], dir.path());
+            run(&["commit", "-m", "init"], dir.path());
+            dir
+        }
+
+        #[test]
+        fn a_clean_tracked_file_reports_clean() {
+            let dir = repo_worktree();
+            let info = entry_info(dir.path(), "tracked.txt").unwrap();
+            assert_eq!(info.git, GitStatusView::Clean);
+        }
+
+        /// The lie this state exists to stop: an IGNORED file is listed by no
+        /// `git status`, so it used to report as tracked and unmodified. The
+        /// editor's tree is a plain filesystem browser with no ignore filter,
+        /// so `node_modules` is one right-click away from that answer.
+        #[test]
+        fn an_ignored_file_is_reported_as_ignored_not_unmodified() {
+            let dir = repo_worktree();
+            std::fs::write(dir.path().join(".gitignore"), "node_modules/\n").unwrap();
+            std::fs::create_dir(dir.path().join("node_modules")).unwrap();
+            std::fs::write(dir.path().join("node_modules/a.js"), "x\n").unwrap();
+            let info = entry_info(dir.path(), "node_modules/a.js").unwrap();
+            assert_eq!(info.git, GitStatusView::Ignored);
+        }
+
+        /// A file inside a NESTED repository is invisible to the outer one's
+        /// status for the same reason, and answering "unmodified" about a
+        /// vendored subrepo is the same lie.
+        #[test]
+        fn a_file_in_a_nested_repository_says_it_belongs_to_another_one() {
+            let dir = repo_worktree();
+            let nested = dir.path().join("vendor");
+            std::fs::create_dir(&nested).unwrap();
+            let out = crate::git::test_support::git_command()
+                .args(["init", "-b", "main"])
+                .current_dir(&nested)
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+            std::fs::write(nested.join("inner.txt"), "x\n").unwrap();
+            let info = entry_info(dir.path(), "vendor/inner.txt").unwrap();
+            assert_eq!(info.git, GitStatusView::OtherRepository);
+        }
+
+        /// A tracked file that a rule would otherwise ignore is NOT ignored,
+        /// so the ignore probe must not override a real status answer either.
+        #[test]
+        fn a_modified_tracked_file_keeps_its_status_codes() {
+            let dir = repo_worktree();
+            std::fs::write(dir.path().join(".gitignore"), "tracked.txt\n").unwrap();
+            std::fs::write(dir.path().join("tracked.txt"), "two\n").unwrap();
+            let info = entry_info(dir.path(), "tracked.txt").unwrap();
+            assert_eq!(
+                info.git,
+                GitStatusView::Changed {
+                    staged: None,
+                    unstaged: Some("M".to_string()),
+                }
+            );
+        }
+    }
+
+    /// The rename/move primitive: the occupied-destination refusal, and the
+    /// symlink source that delete already allows.
+    mod rename_entry_tests {
+        use super::*;
+
+        /// The refusal is the KERNEL's, in the same syscall as the rename,
+        /// with no stat in front of it: `rename(2)` on its own silently
+        /// overwrites, so a stat-then-rename pair is a race two clients can
+        /// lose a file to. This calls the primitive directly, precisely so
+        /// nothing stats first.
+        #[test]
+        fn the_rename_primitive_itself_refuses_an_occupied_destination() {
+            let dir = tempfile::tempdir().unwrap();
+            let src = dir.path().join("a.txt");
+            let dst = dir.path().join("b.txt");
+            std::fs::write(&src, "source\n").unwrap();
+            std::fs::write(&dst, "do not lose me\n").unwrap();
+            let err = rename_no_replace(&src, &dst).unwrap_err();
+            assert!(
+                matches!(err, RenameNoReplaceError::DestinationExists),
+                "unexpected error: {err:?}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&dst).unwrap(),
+                "do not lose me\n",
+                "not a single byte of the destination may change"
+            );
+            assert!(src.exists(), "a refused rename leaves the source alone");
+        }
+
+        /// A directory onto an EMPTY directory is the other shape `rename(2)`
+        /// overwrites silently.
+        #[test]
+        fn the_rename_primitive_refuses_a_directory_onto_an_empty_directory() {
+            let dir = tempfile::tempdir().unwrap();
+            let src = dir.path().join("from");
+            let dst = dir.path().join("onto");
+            std::fs::create_dir(&src).unwrap();
+            std::fs::write(src.join("inside.txt"), "x\n").unwrap();
+            std::fs::create_dir(&dst).unwrap();
+            let err = rename_no_replace(&src, &dst).unwrap_err();
+            assert!(
+                matches!(err, RenameNoReplaceError::DestinationExists),
+                "unexpected error: {err:?}"
+            );
+            assert!(src.join("inside.txt").exists());
+        }
+
+        #[test]
+        fn the_rename_primitive_moves_an_entry_when_the_destination_is_free() {
+            let dir = tempfile::tempdir().unwrap();
+            let src = dir.path().join("a.txt");
+            let dst = dir.path().join("sub/b.txt");
+            std::fs::create_dir(dir.path().join("sub")).unwrap();
+            std::fs::write(&src, "moved\n").unwrap();
+            rename_no_replace(&src, &dst).unwrap();
+            assert!(!src.exists());
+            assert_eq!(std::fs::read_to_string(&dst).unwrap(), "moved\n");
+        }
+
+        /// A symlink whose target escapes the worktree can be DELETED, so it
+        /// can be moved too: both act on the directory entry and neither
+        /// touches the target. Refusing it named a file the user never
+        /// touched.
+        #[test]
+        fn moving_a_symlink_whose_target_escapes_the_worktree_moves_the_link() {
+            let dir = worktree();
+            let outside = tempfile::tempdir().unwrap();
+            let secret = outside.path().join("secret.txt");
+            std::fs::write(&secret, "top secret\n").unwrap();
+            std::fs::create_dir(dir.path().join("sub")).unwrap();
+            std::os::unix::fs::symlink(&secret, dir.path().join("escape-link")).unwrap();
+
+            rename_entry(dir.path(), "escape-link", "sub/escape-link").unwrap();
+
+            let moved = dir.path().join("sub/escape-link");
+            assert!(
+                moved.symlink_metadata().unwrap().file_type().is_symlink(),
+                "the LINK moves, as itself"
+            );
+            assert_eq!(std::fs::read_link(&moved).unwrap(), secret);
+            assert!(
+                dir.path().join("escape-link").symlink_metadata().is_err(),
+                "the old entry is gone"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&secret).unwrap(),
+                "top secret\n",
+                "the target outside the worktree is untouched"
+            );
+        }
+
+        /// The source's PARENT is still contained: a source reached THROUGH an
+        /// escaping symlinked directory is a different thing entirely and
+        /// stays refused.
+        #[test]
+        fn a_source_reached_through_an_escaping_directory_symlink_is_refused() {
+            let dir = worktree();
+            let outside = tempfile::tempdir().unwrap();
+            std::fs::write(outside.path().join("prize.txt"), "outside\n").unwrap();
+            std::os::unix::fs::symlink(outside.path(), dir.path().join("escape")).unwrap();
+            assert!(rename_entry(dir.path(), "escape/prize.txt", "prize.txt").is_err());
+            assert!(!dir.path().join("prize.txt").exists());
+        }
+
+        #[test]
+        fn a_rename_source_in_the_git_directory_is_still_refused() {
+            let dir = worktree();
+            std::fs::create_dir(dir.path().join(".git")).unwrap();
+            std::fs::write(dir.path().join(".git/config"), "x\n").unwrap();
+            assert!(rename_entry(dir.path(), ".git/config", "config").is_err());
+            assert!(!dir.path().join("config").exists());
+        }
     }
 }

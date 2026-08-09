@@ -3,7 +3,9 @@ import { describe, expect, it } from "vitest"
 import {
   joinName,
   parentDir,
+  moveTarget,
   renameTarget,
+  validateMove,
   targetDirForCreate,
   validateEntryName,
 } from "@/lib/fileTreeOps"
@@ -105,5 +107,58 @@ describe("renameTarget", () => {
 
   it("works at the root", () => {
     expect(renameTarget("old.ts", "new.ts")).toBe("new.ts")
+  })
+})
+
+describe("moveTarget", () => {
+  it("joins the destination directory with the source's own basename", () => {
+    expect(moveTarget("src/a/old.ts", "lib/util")).toBe("lib/util/old.ts")
+  })
+
+  it("moving to the worktree root drops the directory prefix entirely", () => {
+    expect(moveTarget("src/a/old.ts", "")).toBe("old.ts")
+  })
+
+  it("keeps a non-Latin basename byte-for-byte", () => {
+    expect(moveTarget("src/файл.txt", "dest")).toBe("dest/файл.txt")
+  })
+
+  it("moving a folder carries the folder's own name into the destination", () => {
+    expect(moveTarget("src/a", "lib")).toBe("lib/a")
+  })
+})
+
+describe("validateMove", () => {
+  it("accepts a move into a different directory", () => {
+    expect(validateMove("src/a.ts", "lib")).toEqual({ ok: true })
+  })
+
+  it("rejects a move into the folder the entry is already in", () => {
+    const result = validateMove("src/a.ts", "src")
+    expect(result.ok).toBe(false)
+    expect(result.ok === false && result.error).toMatch(/already/i)
+  })
+
+  it("rejects a root-level entry being moved to the root", () => {
+    expect(validateMove("a.ts", "").ok).toBe(false)
+  })
+
+  // A folder cannot contain itself: `mv src src/inner` is a rename onto a
+  // subpath of the source, which the server refuses and which would be
+  // meaningless anyway.
+  it("rejects moving a folder into itself", () => {
+    expect(validateMove("src", "src").ok).toBe(false)
+  })
+
+  it("rejects moving a folder into one of its own descendants", () => {
+    const result = validateMove("src", "src/nested/deep")
+    expect(result.ok).toBe(false)
+    expect(result.ok === false && result.error).toMatch(/inside itself/i)
+  })
+
+  // A sibling whose name merely STARTS with the source's name is not a
+  // descendant: "src-old" is not inside "src".
+  it("accepts a destination whose name only shares a prefix with the source", () => {
+    expect(validateMove("src", "src-old").ok).toBe(true)
   })
 })

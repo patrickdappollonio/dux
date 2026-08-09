@@ -56,6 +56,7 @@ import {
   parentDir,
   renameTarget as computeRenameTarget,
 } from "@/lib/fileTreeOps"
+import { performMove } from "@/lib/moveEntry"
 import { isLocalAccessHost } from "@/lib/localAccess"
 import {
   EDITOR_CONTENT_MIN_SIZE_PROP,
@@ -83,6 +84,10 @@ import { FileStatusIcon } from "@/components/FileStatusIcon"
 import { Button } from "@/components/ui/button"
 import { ChunkBoundary } from "@/components/ChunkBoundary"
 import { FileTree } from "@/components/FileTree"
+import { FileInfoDialog } from "@/components/FileInfoDialog"
+import type { FileInfoTarget } from "@/components/FileInfoDialog"
+import { MoveEntryDialog } from "@/components/MoveEntryDialog"
+import type { MoveEntryTarget } from "@/components/MoveEntryDialog"
 import { NewEntryDialog } from "@/components/NewEntryDialog"
 import type { NewEntryTarget } from "@/components/NewEntryDialog"
 import { RenameEntryDialog } from "@/components/RenameEntryDialog"
@@ -242,6 +247,15 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
     useState<RenameEntryTarget | null>(null)
   const [deleteEntryTarget, setDeleteEntryTarget] =
     useState<DeleteEntryTarget | null>(null)
+  const [moveEntryTarget, setMoveEntryTarget] =
+    useState<MoveEntryTarget | null>(null)
+  // The info panel is the one editor dialog with a live server-side truth to
+  // key on, so unlike the four above it DOES close itself when its entry
+  // vanishes; the guard lives inside the dialog, next to the fetch that
+  // learns about it.
+  const [fileInfoTarget, setFileInfoTarget] = useState<FileInfoTarget | null>(
+    null,
+  )
   // Bumped by `revalidateDirs` after a create/rename/delete lands, so
   // `FileTree` force-refetches the affected dir(s) past its lazy-load cache.
   const [treeRevalidate, setTreeRevalidate] = useState<{
@@ -989,6 +1003,25 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
       })
   }
 
+  // Move…: a move IS a rename on disk, so it goes to the same server route
+  // with a destination in a different folder, and reuses the rename's tab
+  // retargeting and two-directory revalidation. Overwriting is REFUSED rather
+  // than confirmed (see the dialog and CLAUDE.md): the server rejects an
+  // occupied destination and the toast says so. The composition itself lives
+  // in `lib/moveEntry`, so its ordering is testable without mounting the
+  // editor; this is only the wiring.
+  function handleMoveSubmit(destDir: string): Promise<void> {
+    if (!moveEntryTarget) return Promise.resolve()
+    return performMove(moveEntryTarget.path, destDir, {
+      rename: (from, to) => fileApi.rename(sessionId, from, to),
+      clearTarget: () => setMoveEntryTarget(null),
+      retargetTabs: (from, to) => editorRenameTabPaths(sessionId, from, to),
+      revalidateDirs,
+      refreshSearchIndex,
+      reportError: (message) => toast.error(message),
+    })
+  }
+
   // Delete…: fire-and-forget once confirmed, mirroring
   // ConfirmDiscardFileDialog's handleConfirm (closes immediately rather than
   // waiting on the request; the destructive confirm dialog already gated the
@@ -1477,6 +1510,8 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
                   onRename={(path, isDir) =>
                     setRenameEntryTarget({ path, isDir })
                   }
+                  onMove={(path, isDir) => setMoveEntryTarget({ path, isDir })}
+                  onInfo={(path) => setFileInfoTarget({ path })}
                   onDelete={(path, isDir) =>
                     setDeleteEntryTarget({ path, isDir })
                   }
@@ -1672,6 +1707,24 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
         }
         onClose={() => setRenameEntryTarget(null)}
         onSubmit={handleRenameSubmit}
+      />
+      <MoveEntryDialog
+        sessionId={sessionId}
+        target={moveEntryTarget}
+        isDirty={
+          moveEntryTarget !== null &&
+          hasDirtyUnderPath(
+            tabsState ?? { tabs: [], activeId: null },
+            moveEntryTarget.path,
+          )
+        }
+        onClose={() => setMoveEntryTarget(null)}
+        onSubmit={handleMoveSubmit}
+      />
+      <FileInfoDialog
+        sessionId={sessionId}
+        target={fileInfoTarget}
+        onClose={() => setFileInfoTarget(null)}
       />
       <DeleteEntryDialog
         target={deleteEntryTarget}

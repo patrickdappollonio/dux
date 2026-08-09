@@ -10,6 +10,7 @@
 // WebSocket.
 
 import type { DirEntry } from "@/lib/fileTree"
+import type { WorktreeEntryInfo } from "@/lib/fileInfo"
 
 export interface WorktreeFile {
   path: string
@@ -31,6 +32,20 @@ export interface FileDiffContents {
   binary: boolean
 }
 
+// A failed file request, carrying the HTTP status. The status is load-bearing
+// for exactly one caller so far: the info panel treats a 404 ("the entry is
+// gone") as a reason to dismiss itself and a 400 ("that path is refused") as a
+// reason to stay put and show why. Every other caller can keep reading
+// `.message` as before, because this still IS an Error.
+export class FileApiError extends Error {
+  readonly status: number
+  constructor(status: number, message: string) {
+    super(message)
+    this.name = "FileApiError"
+    this.status = status
+  }
+}
+
 async function postFile<T>(path: string, body: Record<string, unknown>): Promise<T> {
   const resp = await fetch(path, {
     method: "POST",
@@ -40,7 +55,10 @@ async function postFile<T>(path: string, body: Record<string, unknown>): Promise
   })
   if (!resp.ok) {
     const detail = (await resp.text().catch(() => "")).trim()
-    throw new Error(detail || `request failed (${resp.status})`)
+    throw new FileApiError(
+      resp.status,
+      detail || `request failed (${resp.status})`,
+    )
   }
   return (await resp.json()) as T
 }
@@ -57,7 +75,10 @@ async function postFileNoContent(
   })
   if (!resp.ok) {
     const detail = (await resp.text().catch(() => "")).trim()
-    throw new Error(detail || `request failed (${resp.status})`)
+    throw new FileApiError(
+      resp.status,
+      detail || `request failed (${resp.status})`,
+    )
   }
 }
 
@@ -84,6 +105,12 @@ export const fileApi = {
     postFile<{ dir: string; entries: DirEntry[] }>(fileUrl(sessionId, "tree"), {
       dir,
     }),
+  // The read-only facts behind the editor's "File info…" panel: kind, size,
+  // modified time, permissions, and what git says about this one path. A
+  // missing entry answers 404 (the panel dismisses itself); a refused path
+  // answers 400 (the panel says why).
+  info: (sessionId: string, path: string) =>
+    postFile<WorktreeEntryInfo>(fileUrl(sessionId, "info"), { path }),
   read: (sessionId: string, path: string) =>
     postFile<WorktreeFile>(fileUrl(sessionId, "read"), { path }),
   // The GET URL that serves a file's raw bytes (same route the markdown

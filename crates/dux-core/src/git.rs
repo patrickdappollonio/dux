@@ -1608,6 +1608,158 @@ fn parse_numstat_line(line: &str) -> Option<DiffStat> {
     }
 }
 
+/// The porcelain status codes git reports for ONE worktree-relative path.
+/// Both halves are `None` for a tracked file with nothing pending, which is
+/// how "unmodified" is expressed; an untracked file carries `unstaged: "?"`.
+/// The codes are the raw single-character porcelain v1 codes so the surfaces
+/// can reuse the status vocabulary they already render (`FileStatusIcon` and
+/// `fileStatusMeta` on the web).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct FileStatusCodes {
+    pub staged: Option<String>,
+    pub unstaged: Option<String>,
+}
+
+/// Ask git for the status of exactly one path, for the web editor's file-info
+/// panel. `Ok(None)` means the directory is not a git repository at all, which
+/// is a real answer the panel shows rather than an error.
+///
+/// Two things about the command line are load-bearing:
+///
+/// - The `--` separator, per CLAUDE.md's positional rule, so a path beginning
+///   with a dash (`--force`) is read as a path and not as an option.
+/// - The `:(literal)` pathspec magic, so a name containing a glob
+///   metacharacter (`star[1].txt`) matches ITSELF. Git pathspecs are globs by
+///   default, so without it dux would answer about a different file.
+///
+/// A failure is classified rather than assumed: a second, cheap `rev-parse`
+/// decides whether git failed because there is no repository (answer `None`)
+/// or for some other reason (a real error the caller surfaces).
+pub fn file_status(worktree: &Path, rel_path: &str) -> Result<Option<FileStatusCodes>> {
+    let wt = worktree.to_string_lossy();
+    let output = Command::new("git")
+        .args([
+            "-C",
+            wt.as_ref(),
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--",
+        ])
+        .arg(format!(":(literal){rel_path}"))
+        .output()?;
+    if !output.status.success() {
+        if !is_inside_work_tree(worktree)? {
+            return Ok(None);
+        }
+        return Err(anyhow!(
+            "git status failed for {rel_path}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let entry = parse_status_porcelain_z(&output.stdout)
+        .into_iter()
+        .find(|e| e.path == rel_path);
+    let Some(entry) = entry else {
+        return Ok(Some(FileStatusCodes {
+            staged: None,
+            unstaged: None,
+        }));
+    };
+    // An untracked entry is `??`; report it once, on the worktree side, the
+    // same way `changed_files` files it under `unstaged`.
+    if entry.index_status == '?' && entry.worktree_status == '?' {
+        return Ok(Some(FileStatusCodes {
+            staged: None,
+            unstaged: Some("?".to_string()),
+        }));
+    }
+    let code = |c: char| (c != ' ').then(|| c.to_string());
+    Ok(Some(FileStatusCodes {
+        staged: code(entry.index_status),
+        unstaged: code(entry.worktree_status),
+    }))
+}
+
+/// True when `path` sits inside a git working tree. Used only to classify a
+/// failed `git status` (no repository vs. a real failure).
+///
+/// A SPAWN failure propagates rather than answering `false`: "git is not
+/// installed" and "this is not a repository" are different facts, and the
+/// info panel renders the second as a sentence the user will believe.
+fn is_inside_work_tree(path: &Path) -> Result<bool> {
+    let output = Command::new("git")
+        .args([
+            "-C",
+            path.to_string_lossy().as_ref(),
+            "rev-parse",
+            "--is-inside-work-tree",
+        ])
+        .output()?;
+    Ok(output.status.success())
+}
+
+/// Which repository owns `dir`, as its top-level working-tree path.
+/// `Ok(None)` means `dir` is in no repository at all; a spawn failure is an
+/// error for the same reason as in [`is_inside_work_tree`].
+///
+/// This is how a NESTED repository is told apart from the worktree it happens
+/// to sit inside. It matters because a nested clone or a submodule is opaque
+/// to the outer repository: `git status` in the worktree lists nothing for
+/// anything under it, which is indistinguishable from "clean" unless somebody
+/// asks this question.
+pub fn repository_root(dir: &Path) -> Result<Option<PathBuf>> {
+    let output = Command::new("git")
+        .args([
+            "-C",
+            dir.to_string_lossy().as_ref(),
+            "rev-parse",
+            "--show-toplevel",
+        ])
+        .output()?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if root.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(PathBuf::from(root)))
+}
+
+/// True when `rel_path` is ignored by `worktree`'s ignore rules.
+///
+/// An ignored path appears in NO `git status` listing, so without this
+/// question everything under `node_modules`, `target` or `dist` answers
+/// "tracked and unmodified", which is a lie the info panel would print.
+///
+/// The exit status is the whole result: 0 means ignored, 1 means not, and
+/// anything else is a real failure. `--` still guards a dash-leading name, but
+/// the `:(literal)` magic used by [`file_status`] is deliberately absent:
+/// MEASURED on git 2.55, `git check-ignore` rejects pathspec magic outright
+/// ("pathspec magic not supported by this command: 'literal'", exit 128). Its
+/// arguments are plain PATHNAMES rather than pathspecs, so a glob
+/// metacharacter in a name is already matched literally and needs no magic.
+///
+/// `check-ignore` consults the index by default, which is what we want: a
+/// TRACKED file that also matches an ignore rule answers "not ignored".
+pub fn path_is_ignored(worktree: &Path, rel_path: &str) -> Result<bool> {
+    let wt = worktree.to_string_lossy();
+    let output = Command::new("git")
+        .args(["-C", wt.as_ref(), "check-ignore", "-q", "--"])
+        .arg(rel_path)
+        .output()?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(anyhow!(
+            "git check-ignore failed for {rel_path}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )),
+    }
+}
+
 fn parse_status_porcelain_z(raw: &[u8]) -> Vec<StatusEntry> {
     let mut entries = Vec::new();
     let mut records = raw.split(|byte| *byte == 0).peekable();
@@ -2046,9 +2198,14 @@ pub fn is_under(base: &Path, candidate: &Path) -> bool {
 /// real (possibly escaping) location. UI-supplied paths never legitimately need
 /// `.`, so it is refused outright rather than specially handled. Returns
 /// the joined path, which may not yet exist — existence/file-kind is the caller's
-/// concern. (Callers that read/write should additionally refuse symlinks via a
-/// no-follow stat to close the dangling-symlink window this existence check can
-/// miss — see `worktree_file`.)
+/// concern.
+///
+/// A DANGLING symlink is checked on its own branch: `exists()` FOLLOWS the link
+/// and so answers false for one, which used to skip the containment checks
+/// entirely and let an escaping link through purely because its target had been
+/// removed. Its destination is resolved through the link's canonicalized
+/// directory and normalized textually, and an escaping or `.git`-bound one is
+/// refused exactly as a live link's is.
 ///
 /// Used by every surface that reads or writes a file from a client path (the
 /// diff engine, the web editor endpoints) so the escape check lives in one
@@ -2096,8 +2253,75 @@ pub fn resolve_worktree_path(worktree: &Path, rel_path: &str) -> anyhow::Result<
         if resolves_into_git_dir(worktree, &joined) {
             anyhow::bail!("refusing to access the git directory: {rel_path}");
         }
+    } else if std::fs::symlink_metadata(&joined).is_ok_and(|m| m.file_type().is_symlink()) {
+        // A DANGLING symlink. `exists()` FOLLOWS the link, so it answers false
+        // and the containment checks above never ran, which let an escaping
+        // link through purely because its target had been removed: the info
+        // panel then described `secret -> /root/.ssh/id_ed25519` in full,
+        // target string included. `canonicalize` cannot answer for a target
+        // that is not there, so resolve it as far as the filesystem allows and
+        // normalize the missing tail textually.
+        match dangling_link_destination(&joined) {
+            Some(target) => {
+                let root = worktree
+                    .canonicalize()
+                    .unwrap_or_else(|_| worktree.to_path_buf());
+                match target.strip_prefix(&root) {
+                    Ok(rel) => {
+                        if rel.components().any(|comp| {
+                            comp.as_os_str()
+                                .to_str()
+                                .is_some_and(|s| s.eq_ignore_ascii_case(".git"))
+                        }) {
+                            anyhow::bail!("refusing to access the git directory: {rel_path}");
+                        }
+                    }
+                    Err(_) => anyhow::bail!("path escapes worktree: {rel_path}"),
+                }
+            }
+            // The link cannot be read, or its own directory cannot be
+            // resolved: refuse rather than guess, since the only alternative
+            // is to answer about a location we could not establish.
+            None => anyhow::bail!("path escapes worktree: {rel_path}"),
+        }
     }
     Ok(joined)
+}
+
+/// Where a DANGLING symlink points, resolved as far as the filesystem allows:
+/// the link's own directory is canonicalized (so every real component on the
+/// way to it is followed), and only the target, whose tail does not exist, is
+/// normalized textually. `None` when the link cannot be read or its directory
+/// cannot be canonicalized.
+fn dangling_link_destination(link: &Path) -> Option<PathBuf> {
+    let target = std::fs::read_link(link).ok()?;
+    let joined = if target.is_absolute() {
+        target
+    } else {
+        link.parent()?.canonicalize().ok()?.join(target)
+    };
+    Some(lexically_normalize(&joined))
+}
+
+/// Collapse `.` and `..` segments textually. Only sound for a path whose
+/// existing prefix has already been canonicalized (see
+/// [`dangling_link_destination`]); on a raw path a `..` after a symlink means
+/// something else entirely.
+fn lexically_normalize(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    out.push("..");
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 /// True when `candidate`'s realpath lies inside a `.git` directory under the
@@ -7234,6 +7458,282 @@ mod tests {
                 crate::pr_reference::parse_typed_reference(both).is_ok(),
                 "and a person may equally type it: {both}"
             );
+        }
+    }
+
+    /// `file_status`: the per-path porcelain lookup behind the web editor's
+    /// file-info panel.
+    mod file_status_tests {
+        use super::*;
+
+        /// A repository with one committed file, so a status lookup has both a
+        /// clean and a dirty case to report on.
+        fn repo_with_commit() -> tempfile::TempDir {
+            let dir = tempfile::tempdir().unwrap();
+            let p = dir.path().to_path_buf();
+            let run = |args: &[&str]| {
+                let out = test_support::git_command()
+                    .args(args)
+                    .current_dir(&p)
+                    .output()
+                    .unwrap();
+                assert!(
+                    out.status.success(),
+                    "git {:?} failed: {}",
+                    args,
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            };
+            run(&["init", "-b", "main"]);
+            run(&["config", "user.name", "test"]);
+            run(&["config", "user.email", "t@t"]);
+            std::fs::write(dir.path().join("tracked.txt"), "one\n").unwrap();
+            run(&["add", "tracked.txt"]);
+            run(&["commit", "-m", "init"]);
+            dir
+        }
+
+        #[test]
+        fn a_directory_that_is_not_a_repository_reports_none() {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("a.txt"), "x\n").unwrap();
+            assert_eq!(file_status(dir.path(), "a.txt").unwrap(), None);
+        }
+
+        #[test]
+        fn an_unmodified_tracked_file_reports_no_codes() {
+            let dir = repo_with_commit();
+            let st = file_status(dir.path(), "tracked.txt").unwrap().unwrap();
+            assert_eq!(st.staged, None);
+            assert_eq!(st.unstaged, None);
+        }
+
+        #[test]
+        fn a_modified_file_reports_an_unstaged_code() {
+            let dir = repo_with_commit();
+            std::fs::write(dir.path().join("tracked.txt"), "two\n").unwrap();
+            let st = file_status(dir.path(), "tracked.txt").unwrap().unwrap();
+            assert_eq!(st.staged, None);
+            assert_eq!(st.unstaged.as_deref(), Some("M"));
+        }
+
+        #[test]
+        fn an_untracked_file_reports_the_question_mark_code() {
+            let dir = repo_with_commit();
+            std::fs::write(dir.path().join("fresh.txt"), "new\n").unwrap();
+            let st = file_status(dir.path(), "fresh.txt").unwrap().unwrap();
+            assert_eq!(st.unstaged.as_deref(), Some("?"));
+        }
+
+        /// The lookup is scoped to the ONE path asked about: a sibling being
+        /// dirty must never colour this file's answer.
+        #[test]
+        fn the_lookup_is_scoped_to_the_requested_path() {
+            let dir = repo_with_commit();
+            std::fs::write(dir.path().join("noisy.txt"), "unrelated\n").unwrap();
+            let st = file_status(dir.path(), "tracked.txt").unwrap().unwrap();
+            assert_eq!(st.unstaged, None, "a dirty sibling must not leak in");
+        }
+
+        /// The pathspec is passed with the `:(literal)` magic prefix, so a name
+        /// containing a glob metacharacter matches ITSELF and not whatever the
+        /// glob would have matched. Without it, asking about `star[1].txt`
+        /// silently answers about `star1.txt`.
+        #[test]
+        fn a_glob_metacharacter_in_the_name_matches_only_that_file() {
+            let dir = repo_with_commit();
+            std::fs::write(dir.path().join("star1.txt"), "decoy\n").unwrap();
+            let st = file_status(dir.path(), "star[1].txt").unwrap().unwrap();
+            assert_eq!(
+                st.unstaged, None,
+                "a literal pathspec must not match the decoy the glob would"
+            );
+            std::fs::write(dir.path().join("star[1].txt"), "real\n").unwrap();
+            let st = file_status(dir.path(), "star[1].txt").unwrap().unwrap();
+            assert_eq!(st.unstaged.as_deref(), Some("?"));
+        }
+
+        /// A leading dash must be read as a PATH, not as an option. The `--`
+        /// separator is what guarantees it (CLAUDE.md's refname/positional
+        /// rule); without it git would try to parse `--force` as a flag.
+        #[test]
+        fn a_name_that_looks_like_an_option_is_read_as_a_path() {
+            let dir = repo_with_commit();
+            std::fs::write(dir.path().join("--force"), "dashy\n").unwrap();
+            let st = file_status(dir.path(), "--force").unwrap().unwrap();
+            assert_eq!(st.unstaged.as_deref(), Some("?"));
+        }
+
+        #[test]
+        fn a_non_latin_name_is_reported_unchanged() {
+            let dir = repo_with_commit();
+            std::fs::write(dir.path().join("файл.txt"), "текст\n").unwrap();
+            let st = file_status(dir.path(), "файл.txt").unwrap().unwrap();
+            assert_eq!(st.unstaged.as_deref(), Some("?"));
+        }
+
+        /// An IGNORED file is listed by no `git status` at all, so a status
+        /// lookup alone cannot tell it apart from a clean tracked file. This
+        /// is the measurement the separate ignore probe exists for.
+        #[test]
+        fn an_ignored_file_is_invisible_to_the_status_lookup() {
+            let dir = repo_with_commit();
+            std::fs::write(dir.path().join(".gitignore"), "node_modules/\n").unwrap();
+            std::fs::create_dir(dir.path().join("node_modules")).unwrap();
+            std::fs::write(dir.path().join("node_modules/a.js"), "x\n").unwrap();
+            let st = file_status(dir.path(), "node_modules/a.js")
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                (st.staged, st.unstaged),
+                (None, None),
+                "status says nothing about an ignored file, which is why it needs its own probe"
+            );
+        }
+
+        #[test]
+        fn path_is_ignored_answers_yes_for_an_ignored_file_and_no_for_a_tracked_one() {
+            let dir = repo_with_commit();
+            std::fs::write(dir.path().join(".gitignore"), "node_modules/\n*.log\n").unwrap();
+            std::fs::create_dir(dir.path().join("node_modules")).unwrap();
+            std::fs::write(dir.path().join("node_modules/a.js"), "x\n").unwrap();
+            std::fs::write(dir.path().join("debug.log"), "x\n").unwrap();
+            assert!(path_is_ignored(dir.path(), "node_modules/a.js").unwrap());
+            assert!(path_is_ignored(dir.path(), "debug.log").unwrap());
+            assert!(!path_is_ignored(dir.path(), "tracked.txt").unwrap());
+            assert!(!path_is_ignored(dir.path(), ".gitignore").unwrap());
+        }
+
+        /// A TRACKED file that also matches an ignore rule is not ignored, and
+        /// `check-ignore` says so because it consults the index by default.
+        #[test]
+        fn a_tracked_file_matching_an_ignore_rule_is_not_ignored() {
+            let dir = repo_with_commit();
+            std::fs::write(dir.path().join(".gitignore"), "tracked.txt\n").unwrap();
+            assert!(!path_is_ignored(dir.path(), "tracked.txt").unwrap());
+        }
+
+        /// A leading dash must be read as a PATH here too: `--` is what
+        /// guarantees it, and `check-ignore` cannot take the `:(literal)`
+        /// magic `file_status` uses (MEASURED: git 2.55 answers "pathspec
+        /// magic not supported by this command" and exits 128).
+        #[test]
+        fn path_is_ignored_reads_a_dash_leading_name_as_a_path() {
+            let dir = repo_with_commit();
+            std::fs::write(dir.path().join(".gitignore"), "--force\n").unwrap();
+            std::fs::write(dir.path().join("--force"), "x\n").unwrap();
+            assert!(path_is_ignored(dir.path(), "--force").unwrap());
+        }
+
+        #[test]
+        fn repository_root_names_the_repository_that_owns_a_directory() {
+            let dir = repo_with_commit();
+            let root = repository_root(dir.path()).unwrap().unwrap();
+            assert_eq!(
+                root.canonicalize().unwrap(),
+                dir.path().canonicalize().unwrap()
+            );
+        }
+
+        #[test]
+        fn repository_root_is_none_outside_any_repository() {
+            let dir = tempfile::tempdir().unwrap();
+            assert_eq!(repository_root(dir.path()).unwrap(), None);
+        }
+
+        /// A NESTED repository is what makes this question load-bearing: the
+        /// outer repository lists nothing for anything inside it, so without
+        /// asking who owns the path a vendored clone reads as unmodified.
+        #[test]
+        fn a_nested_repository_reports_its_own_root_not_the_outer_one() {
+            let outer = repo_with_commit();
+            let inner = outer.path().join("vendor");
+            std::fs::create_dir(&inner).unwrap();
+            let out = test_support::git_command()
+                .args(["init", "-b", "main"])
+                .current_dir(&inner)
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+            std::fs::write(inner.join("inner.txt"), "x\n").unwrap();
+
+            let st = file_status(outer.path(), "vendor/inner.txt")
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                (st.staged, st.unstaged),
+                (None, None),
+                "the outer repository sees nothing inside a nested one"
+            );
+            let root = repository_root(&inner).unwrap().unwrap();
+            assert_eq!(root.canonicalize().unwrap(), inner.canonicalize().unwrap());
+            assert_ne!(
+                root.canonicalize().unwrap(),
+                outer.path().canonicalize().unwrap()
+            );
+        }
+    }
+
+    /// The dangling-symlink branch of [`resolve_worktree_path`]: `exists()`
+    /// follows the link, so a link whose target has been removed skipped every
+    /// containment check.
+    mod dangling_symlink_tests {
+        use super::*;
+
+        #[test]
+        fn a_dangling_symlink_pointing_out_of_the_worktree_is_refused() {
+            let wt = tempfile::tempdir().unwrap();
+            std::os::unix::fs::symlink("/root/.ssh/id_ed25519", wt.path().join("secret")).unwrap();
+            let err = resolve_worktree_path(wt.path(), "secret").unwrap_err();
+            assert!(
+                err.to_string().contains("escapes worktree"),
+                "unexpected error: {err}"
+            );
+        }
+
+        /// A relative target is resolved against the LINK's directory, not the
+        /// worktree root, or `../../etc/shadow` from a subdirectory would look
+        /// contained.
+        #[test]
+        fn a_dangling_relative_symlink_climbing_out_is_refused() {
+            let wt = tempfile::tempdir().unwrap();
+            std::fs::create_dir(wt.path().join("sub")).unwrap();
+            std::os::unix::fs::symlink("../../elsewhere/gone.txt", wt.path().join("sub/link"))
+                .unwrap();
+            let err = resolve_worktree_path(wt.path(), "sub/link").unwrap_err();
+            assert!(
+                err.to_string().contains("escapes worktree"),
+                "unexpected error: {err}"
+            );
+        }
+
+        /// A dangling link that stays INSIDE the worktree is legitimate (the
+        /// file it names may be about to be created) and must still resolve.
+        #[test]
+        fn a_dangling_symlink_staying_inside_the_worktree_still_resolves() {
+            let wt = tempfile::tempdir().unwrap();
+            std::os::unix::fs::symlink("not-yet.txt", wt.path().join("link")).unwrap();
+            assert!(resolve_worktree_path(wt.path(), "link").is_ok());
+        }
+
+        #[test]
+        fn a_dangling_symlink_into_the_git_directory_is_refused() {
+            let wt = tempfile::tempdir().unwrap();
+            std::fs::create_dir(wt.path().join(".git")).unwrap();
+            std::os::unix::fs::symlink(".git/gone", wt.path().join("link")).unwrap();
+            let err = resolve_worktree_path(wt.path(), "link").unwrap_err();
+            assert!(
+                err.to_string().contains("git directory"),
+                "unexpected error: {err}"
+            );
+        }
+
+        /// A path that simply does not exist is not a symlink and keeps taking
+        /// the permissive branch: creating a new file depends on it.
+        #[test]
+        fn a_plain_missing_path_is_still_allowed_through() {
+            let wt = tempfile::tempdir().unwrap();
+            assert!(resolve_worktree_path(wt.path(), "brand-new.txt").is_ok());
         }
     }
 }
