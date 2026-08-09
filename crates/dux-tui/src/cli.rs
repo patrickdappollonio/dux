@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -65,8 +65,12 @@ dux config — manage the dux configuration file
 
 Subcommands:
   dux config path          Print the config file path
-  dux config diff          Show settings that differ from defaults (summary)
-  dux config diff --raw    Show a unified diff against the default config
+  dux config diff          Show settings that differ from defaults (summary;
+                           [env] and project details are summarized, never
+                           printed, so it is safe to paste into a bug report)
+  dux config diff --raw    Show a unified diff against the default config.
+                           This prints the WHOLE config, [env] values included:
+                           redact it before sharing.
   dux config reset         Remove config and logs (keeps agents and worktrees)
   dux config reset --all   Full factory reset: remove config, logs, sessions, and worktrees
   dux config regenerate    Preview a fresh default config (shows diff)
@@ -162,352 +166,242 @@ fn run_diff_summary(current: &Config) -> Result<()> {
 
 /// Every setting whose current value differs from the default, as display lines.
 ///
-/// Extracted from the printer so it can be tested: this list is maintained by
-/// hand, and a key that is missing from it is a key `dux config diff` silently
-/// ignores. When you add a config key, add it here too.
+/// DERIVED, never hand-maintained. `current` and [`Config::default()`] are both
+/// projected to `serde_json::Value` and walked structurally, so a config key
+/// added anywhere in the struct tree is reported without anyone registering it
+/// here. The previous version was a hand-written list, and it had already
+/// drifted: every web-only `[ui]` field was missing from it and therefore
+/// silently absent from `dux config diff`.
+///
+/// `serde_json` and not `toml` on purpose. TOML has no null and its serializer
+/// simply omits a `None` struct field, which would make every default-`None`
+/// setting (`defaults.start_directory`, the optional provider fields) invisible
+/// to the comparison. JSON keeps them as an explicit null.
+///
+/// WHAT IS COMPARED is the PARSED FILE against [`Config::default()`]. This
+/// deliberately does not call `load_config` or `ProvidersConfig::ensure_defaults`,
+/// so the summary reports what the file says rather than what dux normalizes it
+/// into: no value clamping, and no shipped provider injected into a config that
+/// does not name it. That was the old behavior too; it is stated here so it is a
+/// decision rather than an accident.
 fn collect_config_changes(current: &Config) -> Vec<String> {
-    let defaults = Config::default();
-    let mut changes = Vec::new();
+    let (Ok(default_json), Ok(current_json)) = (
+        serde_json::to_value(Config::default()),
+        serde_json::to_value(current),
+    ) else {
+        return Vec::new();
+    };
 
-    // top-level (no table)
-    diff_u16(
-        &mut changes,
-        "shutdown_timeout_seconds",
-        defaults.shutdown_timeout_seconds,
-        current.shutdown_timeout_seconds,
-    );
+    let mut found: Vec<(String, String)> = Vec::new();
+    let mut path: Vec<String> = Vec::new();
+    diff_node(&mut found, &mut path, &default_json, &current_json);
 
-    // [defaults]
-    diff_str(
-        &mut changes,
-        "defaults.provider",
-        &defaults.defaults.provider,
-        &current.defaults.provider,
-    );
-    diff_opt_str(
-        &mut changes,
-        "defaults.start_directory",
-        defaults.defaults.start_directory.as_deref(),
-        current.defaults.start_directory.as_deref(),
-    );
+    // Map iteration order differs by container (`IndexMap` for providers and
+    // macros, `BTreeMap` for env and keys), so the order must be imposed here
+    // rather than inherited. Sorting on the structural path, not on the rendered
+    // line, keeps the ordering a property of the setting and not of its value.
+    found.sort();
+    found.into_iter().map(|(_, line)| line).collect()
+}
 
-    // [logging]
-    diff_str(
-        &mut changes,
-        "logging.level",
-        &defaults.logging.level,
-        &current.logging.level,
-    );
-    diff_str(
-        &mut changes,
-        "logging.path",
-        &defaults.logging.path,
-        &current.logging.path,
-    );
+/// What the differ does with one subtree.
+///
+/// There is deliberately no third "ignore this subtree" policy: a setting dux
+/// reads and never reports is exactly the silent drift this rewrite removed.
+/// Something too sensitive or too unstable to print is [`Policy::Summarize`]d,
+/// which still tells the user that it changed.
+enum Policy {
+    /// An ordinary settings subtree: descend and report the leaves that differ.
+    Recurse,
+    /// Report that the subtree changed, never descend, never format its values.
+    Summarize(Summary),
+}
 
-    // [ui]
-    diff_u16(
-        &mut changes,
-        "ui.left_width_pct",
-        defaults.ui.left_width_pct,
-        current.ui.left_width_pct,
-    );
-    diff_u16(
-        &mut changes,
-        "ui.right_width_pct",
-        defaults.ui.right_width_pct,
-        current.ui.right_width_pct,
-    );
-    diff_u16(
-        &mut changes,
-        "ui.terminal_pane_height_pct",
-        defaults.ui.terminal_pane_height_pct,
-        current.ui.terminal_pane_height_pct,
-    );
-    diff_u16(
-        &mut changes,
-        "ui.staged_pane_height_pct",
-        defaults.ui.staged_pane_height_pct,
-        current.ui.staged_pane_height_pct,
-    );
-    diff_u16(
-        &mut changes,
-        "ui.commit_pane_height_pct",
-        defaults.ui.commit_pane_height_pct,
-        current.ui.commit_pane_height_pct,
-    );
-    diff_usize(
-        &mut changes,
-        "ui.agent_scrollback_lines",
-        defaults.ui.agent_scrollback_lines,
-        current.ui.agent_scrollback_lines,
-    );
-    diff_u16(
-        &mut changes,
-        "ui.status_clear_seconds",
-        defaults.ui.status_clear_seconds,
-        current.ui.status_clear_seconds,
-    );
-    diff_u16(
-        &mut changes,
-        "ui.branch_sync_interval",
-        defaults.ui.branch_sync_interval,
-        current.ui.branch_sync_interval,
-    );
-    diff_bool(
-        &mut changes,
-        "ui.show_diff_line_numbers",
-        defaults.ui.show_diff_line_numbers,
-        current.ui.show_diff_line_numbers,
-    );
-    diff_u16(
-        &mut changes,
-        "ui.diff_tab_width",
-        defaults.ui.diff_tab_width,
-        current.ui.diff_tab_width,
-    );
-    diff_bool(
-        &mut changes,
-        "ui.github_integration",
-        defaults.ui.github_integration,
-        current.ui.github_integration,
-    );
-    diff_u16(
-        &mut changes,
-        "ui.pr_poll_interval_seconds",
-        defaults.ui.pr_poll_interval_seconds,
-        current.ui.pr_poll_interval_seconds,
-    );
-    diff_bool(
-        &mut changes,
-        "ui.auto_reopen_agents",
-        defaults.ui.auto_reopen_agents,
-        current.ui.auto_reopen_agents,
-    );
-    diff_bool(
-        &mut changes,
-        "ui.show_changes_pane",
-        defaults.ui.show_changes_pane,
-        current.ui.show_changes_pane,
-    );
-    diff_bool(
-        &mut changes,
-        "ui.always_show_tab_strip",
-        defaults.ui.always_show_tab_strip,
-        current.ui.always_show_tab_strip,
-    );
-    diff_bool(
-        &mut changes,
-        "ui.attention_indicator",
-        defaults.ui.attention_indicator,
-        current.ui.attention_indicator,
-    );
-    diff_bool(
-        &mut changes,
-        "ui.attention_on_bell",
-        defaults.ui.attention_on_bell,
-        current.ui.attention_on_bell,
-    );
-    diff_bool(
-        &mut changes,
-        "ui.disable_automated_welcome_screen",
-        defaults.ui.disable_automated_welcome_screen,
-        current.ui.disable_automated_welcome_screen,
-    );
-    diff_bool(
-        &mut changes,
-        "ui.disable_release_notes",
-        defaults.ui.disable_release_notes,
-        current.ui.disable_release_notes,
-    );
-    diff_str(
-        &mut changes,
-        "ui.pr_banner_position",
-        &defaults.ui.pr_banner_position,
-        &current.ui.pr_banner_position,
-    );
-    diff_str(
-        &mut changes,
-        "ui.agent_sort",
-        &defaults.ui.agent_sort,
-        &current.ui.agent_sort,
-    );
-    diff_str(
-        &mut changes,
-        "ui.theme",
-        &defaults.ui.theme,
-        &current.ui.theme,
-    );
+/// How a summarized subtree describes itself.
+enum Summary {
+    /// `env: changed`. The bare fact, with no shape to it at all.
+    Changed,
+    /// `macros: 2 macro(s) configured`, for the given singular noun.
+    Count(&'static str),
+}
 
-    // [capabilities]
-    diff_str(
-        &mut changes,
-        "capabilities.terminal_identity",
-        &defaults.capabilities.terminal_identity,
-        &current.capabilities.terminal_identity,
-    );
-    diff_bool(
-        &mut changes,
-        "capabilities.passthrough",
-        defaults.capabilities.passthrough,
-        current.capabilities.passthrough,
-    );
-    diff_str(
-        &mut changes,
-        "capabilities.clipboard_passthrough",
-        &defaults.capabilities.clipboard_passthrough,
-        &current.capabilities.clipboard_passthrough,
-    );
-    diff_bool(
-        &mut changes,
-        "capabilities.hyperlinks",
-        defaults.capabilities.hyperlinks,
-        current.capabilities.hyperlinks,
-    );
-    diff_bool(
-        &mut changes,
-        "capabilities.web_notifications",
-        defaults.capabilities.web_notifications,
-        current.capabilities.web_notifications,
-    );
+/// How a key present on only one side is reported.
+enum MissingStyle {
+    /// `providers.foo: (added)` / `providers.foo: (removed)`. For a table whose
+    /// entries are whole settings blocks, where printing the block would be
+    /// noise.
+    Marker,
+    /// `keys.quit: (new) -> [ctrl-q]` / `keys.quit: [ctrl-q] -> (removed)`.
+    Valued,
+}
 
-    // [editor]
-    diff_str(
-        &mut changes,
-        "editor.default",
-        &defaults.editor.default,
-        &current.editor.default,
-    );
+/// The policy for the subtree at `path`.
+fn policy_for(path: &[String]) -> Policy {
+    let segments: Vec<&str> = path.iter().map(String::as_str).collect();
+    match segments.as_slice() {
+        // Holds API tokens. The value must never reach the terminal, a log, or a
+        // pasted bug report, so this reports the fact and nothing else.
+        ["env"] => Policy::Summarize(Summary::Changed),
+        // An array index is not a stable identity and `ProjectConfig::id` can be
+        // generated at deserialize time, so there is no honest per-project path
+        // to print. Projects also carry their own `env`, which must stay
+        // unprinted for the reason above.
+        ["projects"] => Policy::Summarize(Summary::Count("project")),
+        // A macro body is arbitrary user prose, frequently long and multi-line.
+        // Counting them is what this command has always done.
+        ["macros"] => Policy::Summarize(Summary::Count("macro")),
+        _ => Policy::Recurse,
+    }
+}
 
-    // [server]
-    diff_str(
-        &mut changes,
-        "server.host",
-        &defaults.server.host,
-        &current.server.host,
-    );
-    diff_u16(
-        &mut changes,
-        "server.port",
-        defaults.server.port,
-        current.server.port,
-    );
-    diff_bool(
-        &mut changes,
-        "server.tailscale_enabled",
-        defaults.server.tailscale_enabled,
-        current.server.tailscale_enabled,
-    );
-    let default_allowed = defaults.server.allowed_hosts.join(", ");
-    let current_allowed = current.server.allowed_hosts.join(", ");
-    diff_str(
-        &mut changes,
-        "server.allowed_hosts",
-        &format!("[{default_allowed}]"),
-        &format!("[{current_allowed}]"),
-    );
-    diff_str(
-        &mut changes,
-        "server.color",
-        &defaults.server.color,
-        &current.server.color,
-    );
-    diff_bool(
-        &mut changes,
-        "server.access_log",
-        defaults.server.access_log,
-        current.server.access_log,
-    );
-    diff_usize(
-        &mut changes,
-        "server.max_websocket_events_connections",
-        defaults.server.max_websocket_events_connections as usize,
-        current.server.max_websocket_events_connections as usize,
-    );
-    diff_usize(
-        &mut changes,
-        "server.max_websocket_agent_connections",
-        defaults.server.max_websocket_agent_connections as usize,
-        current.server.max_websocket_agent_connections as usize,
-    );
-    diff_usize(
-        &mut changes,
-        "server.max_websocket_terminal_connections",
-        defaults.server.max_websocket_terminal_connections as usize,
-        current.server.max_websocket_terminal_connections as usize,
-    );
-    diff_u16(
-        &mut changes,
-        "server.shutdown_timeout_seconds",
-        defaults.server.shutdown_timeout_seconds,
-        current.server.shutdown_timeout_seconds,
-    );
-    diff_usize(
-        &mut changes,
-        "server.search_index_max_files",
-        defaults.server.search_index_max_files,
-        current.server.search_index_max_files,
-    );
-    diff_usize(
-        &mut changes,
-        "server.tree_list_max_concurrency",
-        defaults.server.tree_list_max_concurrency as usize,
-        current.server.tree_list_max_concurrency as usize,
-    );
+/// How a key missing from one side of the subtree at `path` is reported.
+fn missing_style_for(path: &[String]) -> MissingStyle {
+    let segments: Vec<&str> = path.iter().map(String::as_str).collect();
+    match segments.as_slice() {
+        ["providers"] => MissingStyle::Marker,
+        _ => MissingStyle::Valued,
+    }
+}
 
-    // [terminal]
-    diff_str(
-        &mut changes,
-        "terminal.command",
-        &defaults.terminal.command,
-        &current.terminal.command,
-    );
-    let default_args = defaults
-        .terminal
-        .args
-        .iter()
-        .map(|s| s.as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let current_args = current
-        .terminal
-        .args
-        .iter()
-        .map(|s| s.as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
-    diff_str(
-        &mut changes,
-        "terminal.args",
-        &format!("[{default_args}]"),
-        &format!("[{current_args}]"),
-    );
-
-    // [keys]
-    diff_bool(
-        &mut changes,
-        "keys.show_terminal_keys",
-        defaults.keys.show_terminal_keys,
-        current.keys.show_terminal_keys,
-    );
-    diff_keybindings(
-        &mut changes,
-        &defaults.keys.bindings,
-        &current.keys.bindings,
-    );
-
-    // [providers.*]
-    diff_providers(&mut changes, &defaults, current);
-
-    // [macros]
-    if !current.macros.entries.is_empty() {
-        changes.push(format!(
-            "macros: {} macro(s) configured",
-            current.macros.entries.len()
-        ));
+fn diff_node(
+    found: &mut Vec<(String, String)>,
+    path: &mut Vec<String>,
+    default: &serde_json::Value,
+    current: &serde_json::Value,
+) {
+    if default == current {
+        return;
     }
 
-    changes
+    match policy_for(path) {
+        Policy::Summarize(summary) => {
+            let dotted = join_path(path);
+            let line = match summary {
+                Summary::Changed => format!("{dotted}: changed"),
+                Summary::Count(noun) => {
+                    format!("{dotted}: {} {noun}(s) configured", collection_len(current))
+                }
+            };
+            found.push((dotted, line));
+        }
+        Policy::Recurse => match (default, current) {
+            (serde_json::Value::Object(default_map), serde_json::Value::Object(current_map)) => {
+                let style = missing_style_for(path);
+                let names: BTreeSet<&String> =
+                    default_map.keys().chain(current_map.keys()).collect();
+                for name in names {
+                    path.push(name.clone());
+                    match (default_map.get(name), current_map.get(name)) {
+                        (Some(d), Some(c)) => diff_node(found, path, d, c),
+                        (Some(d), None) => push_missing(found, path, &style, Side::DefaultOnly, d),
+                        (None, Some(c)) => push_missing(found, path, &style, Side::CurrentOnly, c),
+                        (None, None) => {}
+                    }
+                    path.pop();
+                }
+            }
+            // Every other shape, arrays included, is one value. `terminal.args`
+            // and `server.allowed_hosts` are settings in their own right, not
+            // parents of a `terminal.args.0`.
+            _ => {
+                let dotted = join_path(path);
+                let line = format!(
+                    "{dotted}: {} -> {}",
+                    format_value(default),
+                    format_value(current)
+                );
+                found.push((dotted, line));
+            }
+        },
+    }
+}
+
+/// Which side of the comparison holds a key the other side lacks.
+enum Side {
+    DefaultOnly,
+    CurrentOnly,
+}
+
+fn push_missing(
+    found: &mut Vec<(String, String)>,
+    path: &[String],
+    style: &MissingStyle,
+    side: Side,
+    value: &serde_json::Value,
+) {
+    let dotted = join_path(path);
+    let line = match (style, side) {
+        (MissingStyle::Marker, Side::CurrentOnly) => format!("{dotted}: (added)"),
+        (MissingStyle::Marker, Side::DefaultOnly) => format!("{dotted}: (removed)"),
+        (MissingStyle::Valued, Side::CurrentOnly) => {
+            format!("{dotted}: (new) -> {}", format_value(value))
+        }
+        (MissingStyle::Valued, Side::DefaultOnly) => {
+            format!("{dotted}: {} -> (removed)", format_value(value))
+        }
+    };
+    found.push((dotted, line));
+}
+
+fn collection_len(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::Array(items) => items.len(),
+        serde_json::Value::Object(map) => map.len(),
+        _ => 0,
+    }
+}
+
+/// Join structural segments into a dotted path.
+///
+/// Segments are structural and are never reparsed out of a rendered string:
+/// provider and macro names are user-controlled keys and may contain a dot
+/// themselves. A segment that is not a bare TOML key (ASCII letters, digits,
+/// `_`, `-`) is quoted, so `providers."my agent.v2".command` reads
+/// unambiguously. The quoting is JSON string quoting, which escapes the quote
+/// and the backslash the same way a TOML basic string does.
+fn join_path(path: &[String]) -> String {
+    path.iter()
+        .map(|segment| quote_segment(segment))
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+fn quote_segment(segment: &str) -> String {
+    let bare = !segment.is_empty()
+        && segment
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    if bare {
+        segment.to_string()
+    } else {
+        serde_json::Value::String(segment.to_string()).to_string()
+    }
+}
+
+/// Render one value the way the summary shows it: unquoted, one line, truncated.
+fn format_value(value: &serde_json::Value) -> String {
+    let rendered = match value {
+        serde_json::Value::Array(items) => format!(
+            "[{}]",
+            items
+                .iter()
+                .map(format_element)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        other => format_element(other),
+    };
+    truncate_display(&rendered, 40)
+}
+
+fn format_element(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => text.clone(),
+        // An absent optional setting. Matches what this command has always
+        // printed for an unset `defaults.start_directory`.
+        serde_json::Value::Null => "(unset)".to_string(),
+        other => other.to_string(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -662,101 +556,6 @@ fn backup_config(config_path: &Path, raw: &str) -> Result<PathBuf> {
 // ---------------------------------------------------------------------------
 // Diff helpers
 // ---------------------------------------------------------------------------
-
-fn diff_str(changes: &mut Vec<String>, key: &str, default: &str, current: &str) {
-    if default != current {
-        let d = truncate_display(default, 40);
-        let c = truncate_display(current, 40);
-        changes.push(format!("{key}: {d} -> {c}"));
-    }
-}
-
-fn diff_opt_str(
-    changes: &mut Vec<String>,
-    key: &str,
-    default: Option<&str>,
-    current: Option<&str>,
-) {
-    let d = default.unwrap_or("(unset)");
-    let c = current.unwrap_or("(unset)");
-    if d != c {
-        let d = truncate_display(d, 40);
-        let c = truncate_display(c, 40);
-        changes.push(format!("{key}: {d} -> {c}"));
-    }
-}
-
-fn diff_u16(changes: &mut Vec<String>, key: &str, default: u16, current: u16) {
-    if default != current {
-        changes.push(format!("{key}: {default} -> {current}"));
-    }
-}
-
-fn diff_usize(changes: &mut Vec<String>, key: &str, default: usize, current: usize) {
-    if default != current {
-        changes.push(format!("{key}: {default} -> {current}"));
-    }
-}
-
-fn diff_bool(changes: &mut Vec<String>, key: &str, default: bool, current: bool) {
-    if default != current {
-        changes.push(format!("{key}: {default} -> {current}"));
-    }
-}
-
-fn diff_keybindings(
-    changes: &mut Vec<String>,
-    default: &BTreeMap<String, Vec<String>>,
-    current: &BTreeMap<String, Vec<String>>,
-) {
-    for (action, default_keys) in default {
-        match current.get(action) {
-            Some(current_keys) if current_keys != default_keys => {
-                changes.push(format!(
-                    "keys.{action}: [{}] -> [{}]",
-                    default_keys.join(", "),
-                    current_keys.join(", "),
-                ));
-            }
-            None => {
-                changes.push(format!(
-                    "keys.{action}: [{}] -> (removed)",
-                    default_keys.join(", ")
-                ));
-            }
-            _ => {}
-        }
-    }
-    for action in current.keys() {
-        if !default.contains_key(action) {
-            let keys = &current[action];
-            changes.push(format!("keys.{action}: (new) -> [{}]", keys.join(", "),));
-        }
-    }
-}
-
-fn diff_providers(changes: &mut Vec<String>, defaults: &Config, current: &Config) {
-    for (name, default_cfg) in &defaults.providers.commands {
-        match current.providers.get(name) {
-            Some(current_cfg) => {
-                if default_cfg.command != current_cfg.command {
-                    changes.push(format!(
-                        "providers.{name}.command: {} -> {}",
-                        default_cfg.command, current_cfg.command
-                    ));
-                }
-            }
-            None => {
-                changes.push(format!("providers.{name}: (removed)"));
-            }
-        }
-    }
-    for name in current.providers.commands.keys() {
-        if !defaults.providers.commands.contains_key(name) {
-            changes.push(format!("providers.{name}: (added)"));
-        }
-    }
-}
 
 /// Truncate a display string, replacing the end with "..." if too long.
 fn truncate_display(s: &str, max: usize) -> String {
@@ -954,6 +753,7 @@ impl<T, E: std::fmt::Display> WithContextPath<T> for std::result::Result<T, E> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::fs;
 
     use chrono::Utc;
@@ -994,6 +794,384 @@ mod tests {
             "{changes:#?}"
         );
         assert_eq!(changes.len(), 2, "nothing else should have changed");
+    }
+
+    // -----------------------------------------------------------------------
+    // dux config diff (summary)
+    // -----------------------------------------------------------------------
+
+    /// A string no default value contains, so its presence in the output can
+    /// only have come from the fixture that planted it.
+    const SENTINEL: &str = "sentinel-do-not-print-me-9f3a";
+
+    /// Every path the differ must be able to report, discovered by walking the
+    /// serialized default config rather than by anyone listing them.
+    ///
+    /// Returns `(dotted path, config with exactly that leaf mutated)`.
+    fn mutated_leaf_fixtures() -> Vec<(String, Config)> {
+        let default = serde_json::to_value(Config::default()).expect("serialize default config");
+        assert_eq!(
+            serde_json::from_value::<Config>(default.clone()).expect("round-trip default config"),
+            Config::default(),
+            "the differ compares a JSON projection, so the projection must be lossless"
+        );
+
+        let mut fixtures = Vec::new();
+        let mut path = Vec::new();
+        walk_default_leaves(&default, &default, &mut path, &mut fixtures);
+        assert!(
+            fixtures.len() > 40,
+            "the walk found only {} leaves; the config is much bigger than that",
+            fixtures.len()
+        );
+        fixtures
+    }
+
+    /// Top-level subtrees the differ deliberately summarizes instead of
+    /// descending into. They are covered by their own fixtures below, because
+    /// their reported line is not a leaf path.
+    const SUMMARIZED_SUBTREES: &[&str] = &["env", "projects", "macros"];
+
+    fn walk_default_leaves(
+        root: &serde_json::Value,
+        node: &serde_json::Value,
+        path: &mut Vec<String>,
+        out: &mut Vec<(String, Config)>,
+    ) {
+        if path.len() == 1 && SUMMARIZED_SUBTREES.contains(&path[0].as_str()) {
+            return;
+        }
+        match node {
+            serde_json::Value::Object(map) => {
+                assert!(
+                    !map.is_empty(),
+                    "no mutation policy for the empty object at {}: decide whether it \
+                     recurses or is summarized, then teach this walk about it",
+                    path.join(".")
+                );
+                for (name, child) in map {
+                    path.push(name.clone());
+                    walk_default_leaves(root, child, path, out);
+                    path.pop();
+                }
+            }
+            other => {
+                let dotted = path.join(".");
+                let mutated = mutate_leaf(root, path, other).unwrap_or_else(|| {
+                    panic!(
+                        "no candidate mutation for the leaf at {dotted} ({other}); \
+                         add one so this exhaustiveness check keeps working"
+                    )
+                });
+                out.push((dotted, mutated));
+            }
+        }
+    }
+
+    /// Replace the leaf at `path` with a different value of the same shape and
+    /// deserialize the result. `None` when nothing produced a valid `Config`.
+    fn mutate_leaf(
+        root: &serde_json::Value,
+        path: &[String],
+        leaf: &serde_json::Value,
+    ) -> Option<Config> {
+        let candidates: Vec<serde_json::Value> = match leaf {
+            serde_json::Value::Bool(b) => vec![serde_json::Value::Bool(!b)],
+            serde_json::Value::Number(n) => {
+                let raised = n.as_u64().map(|v| serde_json::json!(v + 1));
+                let lowered = n
+                    .as_u64()
+                    .and_then(|v| v.checked_sub(1))
+                    .map(|v| serde_json::json!(v));
+                raised.into_iter().chain(lowered).collect()
+            }
+            serde_json::Value::String(s) => vec![serde_json::json!(format!("{s}-mutated"))],
+            serde_json::Value::Array(items) => {
+                let mut grown = items.clone();
+                grown.push(serde_json::json!("dux-diff-probe"));
+                vec![serde_json::Value::Array(grown)]
+            }
+            // A null carries no type, so try each shape an `Option` field can take.
+            serde_json::Value::Null => vec![
+                serde_json::json!("dux-diff-probe"),
+                serde_json::json!(4321),
+                serde_json::json!(true),
+                serde_json::json!(["dux-diff-probe"]),
+            ],
+            serde_json::Value::Object(_) => Vec::new(),
+        };
+
+        for candidate in candidates {
+            let mut document = root.clone();
+            let mut cursor = &mut document;
+            for segment in path {
+                cursor = cursor
+                    .get_mut(segment)
+                    .expect("path exists in the default document");
+            }
+            *cursor = candidate;
+            if let Ok(config) = serde_json::from_value::<Config>(document) {
+                return Some(config);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn config_diff_reports_every_leaf_of_the_default_config() {
+        let mut unreported = Vec::new();
+        for (dotted, config) in mutated_leaf_fixtures() {
+            let changes = collect_config_changes(&config);
+            let prefix = format!("{dotted}: ");
+            let matching: Vec<&String> =
+                changes.iter().filter(|l| l.starts_with(&prefix)).collect();
+            if matching.len() != 1 {
+                unreported.push(format!("{dotted} -> {changes:?}"));
+            }
+        }
+        assert!(
+            unreported.is_empty(),
+            "these settings are not reported by `dux config diff`:\n{}",
+            unreported.join("\n")
+        );
+    }
+
+    #[test]
+    fn config_diff_marks_a_provider_present_only_in_the_current_config() {
+        let mut config = Config::default();
+        config.providers.commands.insert(
+            "mine".to_string(),
+            config::ProviderCommandConfig {
+                command: "mine".to_string(),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            collect_config_changes(&config),
+            vec!["providers.mine: (added)".to_string()]
+        );
+    }
+
+    #[test]
+    fn config_diff_marks_a_provider_present_only_in_the_default_config() {
+        let mut config = Config::default();
+        let removed = config
+            .providers
+            .commands
+            .keys()
+            .next()
+            .expect("the default config ships providers")
+            .clone();
+        config.providers.commands.shift_remove(&removed);
+
+        assert_eq!(
+            collect_config_changes(&config),
+            vec![format!("providers.{removed}: (removed)")]
+        );
+    }
+
+    #[test]
+    fn config_diff_recurses_into_a_provider_present_on_both_sides() {
+        let mut config = Config::default();
+        let entry = config
+            .providers
+            .commands
+            .get_mut("claude")
+            .expect("the default config ships a claude provider");
+        entry.command = "claude-next".to_string();
+        entry.args = vec!["--dangerously".to_string()];
+
+        assert_eq!(
+            collect_config_changes(&config),
+            vec![
+                "providers.claude.args: [] -> [--dangerously]".to_string(),
+                "providers.claude.command: claude -> claude-next".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn config_diff_quotes_a_provider_name_that_is_not_a_bare_key() {
+        let mut config = Config::default();
+        config.providers.commands.insert(
+            "my agent.v2".to_string(),
+            config::ProviderCommandConfig::default(),
+        );
+
+        assert_eq!(
+            collect_config_changes(&config),
+            vec!["providers.\"my agent.v2\": (added)".to_string()]
+        );
+    }
+
+    #[test]
+    fn config_diff_reports_an_array_as_one_value_not_as_indexed_paths() {
+        let mut config = Config::default();
+        config.server.allowed_hosts = vec!["dux.local".to_string(), "dux.lan".to_string()];
+        config.terminal.args = vec!["-l".to_string(), "-i".to_string()];
+
+        let changes = collect_config_changes(&config);
+        assert!(
+            changes.contains(&"server.allowed_hosts: [] -> [dux.local, dux.lan]".to_string()),
+            "{changes:#?}"
+        );
+        assert!(
+            changes.contains(&"terminal.args: [-l] -> [-l, -i]".to_string()),
+            "{changes:#?}"
+        );
+        assert!(
+            !changes
+                .iter()
+                .any(|l| l.contains(".0:") || l.contains(".1:")),
+            "an array must never be reported as indexed paths: {changes:#?}"
+        );
+    }
+
+    #[test]
+    fn config_diff_never_prints_a_global_env_value() {
+        let mut config = Config::default();
+        config
+            .env
+            .insert("ANTHROPIC_API_KEY".to_string(), SENTINEL.to_string());
+
+        let changes = collect_config_changes(&config);
+        assert_eq!(changes, vec!["env: changed".to_string()]);
+        assert!(
+            !changes.join("\n").contains(SENTINEL),
+            "an env value must never reach the summary"
+        );
+    }
+
+    #[test]
+    fn config_diff_never_prints_a_project_env_value() {
+        let mut config = Config::default();
+        let mut env = BTreeMap::new();
+        env.insert("PROJECT_TOKEN".to_string(), SENTINEL.to_string());
+        config.projects.push(config::ProjectConfig {
+            id: "p1".to_string(),
+            path: "/tmp/project".to_string(),
+            name: None,
+            default_provider: None,
+            leading_branch: None,
+            auto_reopen_agents: None,
+            startup_command: None,
+            env,
+        });
+
+        let changes = collect_config_changes(&config);
+        assert_eq!(
+            changes,
+            vec!["projects: 1 project(s) configured".to_string()]
+        );
+        assert!(
+            !changes.join("\n").contains(SENTINEL),
+            "a project env value must never reach the summary"
+        );
+    }
+
+    #[test]
+    fn config_diff_reports_macros_by_count_and_never_their_bodies() {
+        let mut config = Config::default();
+        config.macros.entries.insert(
+            "review".to_string(),
+            config::MacroEntry {
+                text: SENTINEL.to_string(),
+                surface: config::MacroSurface::Both,
+            },
+        );
+
+        let changes = collect_config_changes(&config);
+        assert_eq!(changes, vec!["macros: 1 macro(s) configured".to_string()]);
+        assert!(!changes.join("\n").contains(SENTINEL));
+    }
+
+    #[test]
+    fn config_diff_reports_a_rebound_and_an_unbound_key_action() {
+        let mut config = Config::default();
+        config
+            .keys
+            .bindings
+            .insert("quit".to_string(), vec!["ctrl-q".to_string()]);
+
+        assert_eq!(
+            collect_config_changes(&config),
+            vec!["keys.quit: (new) -> [ctrl-q]".to_string()]
+        );
+    }
+
+    #[test]
+    fn config_diff_truncates_a_long_value_at_forty_characters() {
+        let mut config = Config::default();
+        config.editor.default = "e".repeat(45);
+
+        let changes = collect_config_changes(&config);
+        assert_eq!(
+            changes,
+            vec![format!(
+                "editor.default: {} -> {}...",
+                Config::default().editor.default,
+                "e".repeat(40)
+            )]
+        );
+    }
+
+    #[test]
+    fn config_diff_output_is_sorted_and_repeatable() {
+        let mut config = Config::default();
+        config.server.port = 9999;
+        config.editor.default = "hx".to_string();
+        config.ui.theme = "gruvbox".to_string();
+        config.defaults.provider = "codex".to_string();
+
+        let changes = collect_config_changes(&config);
+        let mut sorted = changes.clone();
+        sorted.sort();
+        assert_eq!(changes, sorted, "output must be sorted by path");
+        assert_eq!(
+            changes,
+            collect_config_changes(&config),
+            "output must not depend on map iteration order"
+        );
+    }
+
+    /// CHARACTERIZATION of a known inconsistency, not an endorsement of it.
+    ///
+    /// The two ways a `[ui]` width default can be reached must agree.
+    ///
+    /// `[ui]` carries `#[serde(default)]`, so a config whose `[ui]` table omits a
+    /// width fills it from `UiConfig::default()`, while a fresh install gets the
+    /// value the canonical template renders from `Config::default()`. These
+    /// disagreed once (17/19 against 20/23), which gave the same setting two
+    /// defaults depending on how the user arrived and made this command report a
+    /// width the user had never written as changed. Both halves are asserted, and
+    /// then the behaviour that actually matters: a sparse `[ui]` table reports no
+    /// width at all.
+    #[test]
+    fn a_sparse_ui_table_reports_no_width_because_both_defaults_agree() {
+        assert_eq!(
+            (
+                config::UiConfig::default().left_width_pct,
+                config::UiConfig::default().right_width_pct
+            ),
+            (
+                Config::default().ui.left_width_pct,
+                Config::default().ui.right_width_pct
+            ),
+            "UiConfig::default() and the literal in Config::default() must not drift apart"
+        );
+
+        let sparse: Config =
+            toml::from_str("[ui]\ntheme = \"dux\"\n").expect("parse sparse config");
+        let changes = collect_config_changes(&sparse);
+        let widths: Vec<&String> = changes
+            .iter()
+            .filter(|l| l.starts_with("ui.left_width_pct") || l.starts_with("ui.right_width_pct"))
+            .collect();
+        assert!(
+            widths.is_empty(),
+            "a width the user never wrote must not be reported as changed: {widths:#?}"
+        );
     }
 
     #[test]
@@ -1060,21 +1238,6 @@ mod tests {
         // Just verify it runs without error on defaults.
         let defaults = Config::default();
         run_diff_summary(&defaults).expect("diff summary");
-    }
-
-    #[test]
-    fn diff_str_records_change() {
-        let mut changes = Vec::new();
-        diff_str(&mut changes, "test.key", "old", "new");
-        assert_eq!(changes.len(), 1);
-        assert!(changes[0].contains("old -> new"));
-    }
-
-    #[test]
-    fn diff_str_ignores_equal() {
-        let mut changes = Vec::new();
-        diff_str(&mut changes, "test.key", "same", "same");
-        assert!(changes.is_empty());
     }
 
     #[test]

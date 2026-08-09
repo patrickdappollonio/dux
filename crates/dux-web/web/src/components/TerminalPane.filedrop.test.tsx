@@ -49,6 +49,11 @@ class TermStub {
   }
   loadAddon() {}
   open() {}
+  // The pane reports every local re-grid to the PTY through xterm's own resize
+  // event; this suite never re-grids, so the stub only has to be subscribable.
+  onResize() {
+    return { dispose() {} }
+  }
   onData(cb: (s: string) => void) {
     this.dataHandler = cb
     return { dispose() {} }
@@ -87,7 +92,9 @@ class FakePtySocket {
   url: string
   connect = vi.fn()
   close = vi.fn()
-  sendResize = vi.fn()
+  // The real socket answers whether the frame actually went on the wire; a test
+  // models a dropped frame (a socket mid-reconnect) by returning false.
+  sendResize = vi.fn(() => true)
   sendInput = vi.fn()
   sendViewed = vi.fn()
   isOpen = true
@@ -1131,7 +1138,12 @@ describe("the drop overlay", () => {
     expect(screen.queryByTestId("file-drop-overlay")).toBeNull()
     fireEvent.dragEnter(pane, { dataTransfer: fileTransfer([]) })
     expect(screen.getByTestId("file-drop-overlay")).toBeTruthy()
-    expect(screen.getByText(/worktree root/)).toBeTruthy()
+    // The upload folder, and the two things about it the user needs to know:
+    // git does not see it, and it goes when the agent goes. "Worktree root" was
+    // the OLD destination and its "where git can see it" tail is now the exact
+    // opposite of what happens.
+    expect(screen.getByText(/upload folder/)).toBeTruthy()
+    expect(screen.queryByText(/worktree root/)).toBeNull()
     fireEvent.dragLeave(pane, { dataTransfer: fileTransfer([]) })
     expect(screen.queryByTestId("file-drop-overlay")).toBeNull()
   })
@@ -1211,6 +1223,25 @@ describe("the drop overlay", () => {
     act(() => {
       rerender(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     })
+    expect(screen.queryByTestId("file-drop-overlay")).toBeNull()
+
+    // And switching the feature back on must not revive the retired drag. The
+    // drag that was in flight ended while the feature was off, so no
+    // dragleave/drop is ever coming for it, and a revived overlay would sit on
+    // the pane until the user started an unrelated drag over it.
+    mockState = makeState()
+    mockState.bootstrap!.file_drop_max_bytes = 1024
+    act(() => {
+      rerender(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    })
+    expect(screen.queryByTestId("file-drop-overlay")).toBeNull()
+
+    // The pane is still usable: a fresh drag opens and closes the overlay with
+    // a single enter/leave pair, proving the depth counter went back to zero
+    // rather than keeping the count from the drag that was retired.
+    fireEvent.dragEnter(pane, { dataTransfer: fileTransfer([]) })
+    expect(screen.getByTestId("file-drop-overlay")).toBeTruthy()
+    fireEvent.dragLeave(pane, { dataTransfer: fileTransfer([]) })
     expect(screen.queryByTestId("file-drop-overlay")).toBeNull()
   })
 

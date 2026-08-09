@@ -276,12 +276,20 @@ The config file at `~/.config/dux/config.toml` (Linux) or `~/.dux/config.toml` (
 ```bash
 dux config path          # Print the config file path
 dux config diff          # Show what you've changed from defaults
-dux config diff --raw    # Unified diff against the default config
+dux config diff --raw    # Unified diff against the default config (prints [env])
 dux config reset         # Remove config and logs (keeps agents)
 dux config reset --all   # Full factory reset
 dux config regenerate    # Preview a fresh default config
 dux config restore-docs  # Preview re-adding the comments, keeping your values
 ```
+
+`dux config diff` is derived from the config structure rather than from a list
+somebody has to remember to update, so a new setting shows up in it the day it
+ships. It summarizes instead of printing two things: `[env]` reports only that it
+changed, and `[[projects]]` reports only a count. That keeps tokens and local
+paths out of the output, which makes the summary safe to paste into a bug report.
+`--raw` is the opposite: it prints your whole config, `[env]` values and all, so
+redact it before you share it.
 
 If your `config.toml` is missing its explanatory comments (older versions could
 create one without them), `dux config restore-docs` puts them back without

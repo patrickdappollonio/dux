@@ -98,11 +98,17 @@ nothing git is watching, so nothing claims otherwise.
 
 ## Keeping the uploads out of git
 
-The upload folder hides itself. When dux creates it, it writes a `.gitignore`
-into it containing a single `*`, which ignores everything in the folder
-**including the ignore file itself**. Run `git status` after dropping a
+The upload folder hides itself. dux keeps a `.gitignore` in it containing a
+single `*`, which ignores everything in the folder **including the ignore file
+itself**. Run `git status` after dropping a
 screenshot and it prints nothing at all: not the image, not the ignore file, not
 even the folder.
+
+dux tries to write that file on **every** upload, not only on the drop that
+first creates the folder. It costs one exclusive-create syscall that does
+nothing when the file is already there, and it means the folder repairs itself:
+delete the ignore file, or create the folder while the setting is off and turn
+it on later, and the next dropped file puts it back.
 
 Two things dux deliberately will not do:
 
@@ -119,13 +125,32 @@ Both halves are settings, on `[ui]` in `config.toml`:
 
 | Key | Default | What it does |
 |---|---|---|
-| `upload_directory` | `".dux/uploads"` | Where an agent's dropped and pasted files go, relative to that agent's worktree. Must be a relative path with no `..` in it; an absolute or traversing value falls back to the default and says so once in `dux.log`. |
-| `upload_write_gitignore` | `true` | Whether to write the self-ignoring `.gitignore` when dux creates that folder. Set it to `false` if you intend to commit what you drop, and your uploads show up as ordinary untracked files again. |
+| `upload_directory` | `".dux/uploads"` | Where an agent's dropped and pasted files go, relative to that agent's worktree. Must be a relative path with no `..` in it that a filesystem could actually hold; anything else falls back to the default and says so once in `dux.log`. |
+| `upload_write_gitignore` | `true` | Whether to keep the self-ignoring `.gitignore` in that folder, attempted on every upload. Set it to `false` if you intend to commit what you drop, and your uploads show up as ordinary untracked files again. |
 
 Set `upload_directory = ""`, or point it at anything outside the worktree, and
 dux will not follow you: uploads have to be somewhere the agent can read and
 somewhere that dies with the agent, so an unusable value degrades to the default
-rather than being obeyed.
+rather than being obeyed. The same goes for a value the filesystem itself could
+not store, one holding a control character or a null byte (a TOML `"\n"` escape
+will get you one), or one longer than a path is allowed to be. Every one of them
+is caught when the config loads, warned about once in `dux.log`, and replaced.
+
+**A rejected value does not survive in your config file.** The replacement
+happens in memory as the config loads, so the next time dux saves `config.toml`
+for any reason the corrected value is what gets written and the one you typed is
+gone. That is the same treatment `terminal_font_size` gets for an out-of-range
+number. If you want to keep the value you wrote while you work out why it was
+refused, keep a copy of it somewhere other than `config.toml`.
+
+## Dropped files do not follow a fork
+
+Forking an agent copies its uncommitted work into the new worktree, and it does
+that by asking git what has changed. Uploads are invisible to git by design, so
+git does not mention them and the fork does not get them: the new agent starts
+with an empty upload folder. Turn `upload_write_gitignore` off and they are
+ordinary untracked files again, which a fork does carry across. If you want a
+particular screenshot in both, drop it onto both.
 
 Want the old behavior back? The nearest thing is
 `upload_write_gitignore = false`, which keeps the folder but hands the files

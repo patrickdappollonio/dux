@@ -302,9 +302,11 @@ async fn upload_dropped_file(
         let saved = dux_core::file_drop::save_drop(&dir, &filename, &bytes, &stamp)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
         // On the FINAL path, once it exists, and resolved on both sides. An
-        // agent drop always lands at the worktree root so this is trivially
-        // true; a terminal's shell may have been `cd`'d anywhere, including to a
-        // sibling directory whose path merely starts with the worktree's.
+        // agent drop lands in the agent's upload directory, which the walk in
+        // `open_uploads` guarantees is reached by named components from the
+        // worktree with no symlink followed, so this stays true for it; a
+        // terminal's shell may have been `cd`'d anywhere, including to a sibling
+        // directory whose path merely starts with the worktree's.
         let inside = worktree
             .as_deref()
             .is_some_and(|w| dux_core::file_drop::saved_file_is_within(w, &saved.path));
@@ -380,10 +382,33 @@ mod tests {
         max_bytes: usize,
         max_concurrency: u32,
     ) -> (tempfile::TempDir, std::path::PathBuf, axum::Router) {
+        router_with(max_bytes, max_concurrency, None).await
+    }
+
+    /// The same router with `ui.upload_directory` written into the config the
+    /// engine boots from, so a test can prove the setting reaches the drop.
+    async fn router_with_upload_directory(
+        directory: &str,
+    ) -> (tempfile::TempDir, std::path::PathBuf, axum::Router) {
+        router_with(1024 * 1024, 4, Some(directory)).await
+    }
+
+    async fn router_with(
+        max_bytes: usize,
+        max_concurrency: u32,
+        upload_directory: Option<&str>,
+    ) -> (tempfile::TempDir, std::path::PathBuf, axum::Router) {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().to_path_buf();
         let wt = root.join("wt");
         std::fs::create_dir_all(&wt).unwrap();
+        if let Some(directory) = upload_directory {
+            std::fs::write(
+                root.join("config.toml"),
+                format!("[ui]\nupload_directory = \"{directory}\"\n"),
+            )
+            .unwrap();
+        }
 
         let paths = DuxPaths {
             root: root.clone(),
@@ -790,6 +815,40 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(uploads.join(".gitignore")).unwrap(),
             "*\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_configured_upload_directory_is_where_an_agent_drop_actually_lands() {
+        // Every other test in this file exercises the DEFAULT `.dux/uploads`,
+        // so nothing proved the configured value reaches the drop at all: the
+        // whole chain from `config.toml` through the engine's destination to
+        // the walk that creates the directory could have been ignoring it and
+        // every one of them would still pass. A nested, multi-component,
+        // non-hidden path so the parent-creating walk is exercised too.
+        let (_tmp, wt, app) = router_with_upload_directory("tmp/dux/drops").await;
+        let resp = app
+            .oneshot(drop_req("pty=s1&filename=shot.png", b"png".to_vec()))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_str(&body_text(resp).await).unwrap();
+
+        let path = std::path::PathBuf::from(body["path"].as_str().unwrap());
+        let uploads = wt.join("tmp").join("dux").join("drops");
+        assert_eq!(
+            std::fs::canonicalize(path.parent().unwrap()).unwrap(),
+            std::fs::canonicalize(&uploads).unwrap(),
+            "the configured directory is the one that must be used"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"png");
+        assert_eq!(
+            std::fs::read_to_string(uploads.join(".gitignore")).unwrap(),
+            "*\n"
+        );
+        assert!(
+            !wt.join(".dux").exists(),
+            "the default must not be created alongside the configured one"
         );
     }
 

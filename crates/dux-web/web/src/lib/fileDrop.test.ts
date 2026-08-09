@@ -777,10 +777,14 @@ describe("dropToastFor", () => {
     expect(t.message).toContain("~/code/app")
   })
 
-  it("describes an agent's destination as the worktree root, not a long path", () => {
-    const t = dropToastFor([sent("shot.png")], agent)
+  it("names the folder an agent's file actually landed in, from the wire", () => {
+    // The destination is the agent's UPLOAD folder, not its worktree root, and
+    // the server already tells us which folder that is. A hardcoded phrase here
+    // sent the user to a directory their file is not in.
+    const t = dropToastFor([sent("shot.png", "shot.png", "~/wt/.dux/uploads")], agent)
     expect(t.tone).toBe("success")
-    expect(t.message).toContain("worktree root")
+    expect(t.message).toContain("~/wt/.dux/uploads")
+    expect(t.message).not.toContain("worktree root")
   })
 
   it("gives a count rather than a list for several successes", () => {
@@ -1017,15 +1021,33 @@ describe("a drop whose files did not all end the same way", () => {
     expect(t.message).toContain("c.png to ~/two")
   })
 
-  it("an agent's files are described by the worktree root and never broken down", () => {
-    // Every tab of one agent shares one worktree, so there is nothing to break
-    // down even though each outcome carries a label.
+  it("an agent's files share one folder and are never broken down", () => {
+    // Every tab of one agent shares one worktree and therefore one upload
+    // folder, so there is nothing to break down even though each outcome
+    // carries a label of its own.
     const t = dropToastFor(
-      [sent("a.png", "a.png", "~/wt"), sent("b.png", "b.png", "~/wt")],
+      [
+        sent("a.png", "a.png", "~/wt/.dux/uploads"),
+        sent("b.png", "b.png", "~/wt/.dux/uploads"),
+      ],
       agent,
     )
-    expect(t.message).toContain("the agent's worktree root")
+    expect(t.message).toContain("~/wt/.dux/uploads")
     expect(t.message).not.toContain("did not all land together")
+  })
+
+  it("sends renamed agent files to the folder they are actually in", () => {
+    // The rename note names a folder too, once there are too many renames to
+    // list, and it named the wrong one: a user told to look in the worktree
+    // root for `a-1.png` will not find it.
+    const t = dropToastFor(
+      "abcdefg"
+        .split("")
+        .map((n) => sent(`${n}.png`, `${n}-1.png`, "~/wt/.dux/uploads")),
+      agent,
+    )
+    expect(t.message).toContain("listed in ~/wt/.dux/uploads")
+    expect(t.message).not.toContain("worktree root")
   })
 
   it("claims only that the path was SENT, never that it was pasted", () => {

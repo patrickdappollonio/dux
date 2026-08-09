@@ -105,10 +105,17 @@ export function dropRefusalReason(status: number, detail: string): string {
 /// How the destination should be DESCRIBED, which is the one thing that is a
 /// property of the whole drop rather than of a file.
 export type DropContext = {
-  /// An agent's destination is described as its worktree root, which reads
-  /// better than a long path and is the same for every file, because every tab
-  /// of one agent shares one worktree. A terminal's is the real directory, which
-  /// each saved file carries for itself.
+  /// Only for the WORDING, never for the folder itself. Both kinds name the
+  /// real directory the server reported on each saved file, because that is the
+  /// only thing that is true: an agent's files go to its upload folder, which
+  /// is a configured path inside the worktree and not the worktree root, and
+  /// hardcoding a phrase here sent the user somewhere their file was not.
+  ///
+  /// What the kind still decides is two things a label cannot say: what to call
+  /// the destination when the server sent no label at all, and whether several
+  /// folders in one drop need explaining (a terminal MOVES, which is why its
+  /// files can scatter; an agent's cannot, because every tab of one agent
+  /// shares one worktree and therefore one upload folder).
   kind: "agent" | "terminal"
 }
 
@@ -474,12 +481,16 @@ function foldersOf(saved: SavedFile[]): string[] {
 /// phrase is true then, and claiming one is the bug this exists to prevent. The
 /// caller reaches for `folderBreakdown` instead.
 function folderPhrase(saved: SavedFile[], ctx: DropContext): string {
-  if (ctx.kind === "agent") return "the agent's worktree root"
   const folders = foldersOf(saved)
   if (folders.length === 1) return folders[0]
   // No folder at all can only happen if the server sent an empty label; say
   // something true rather than "undefined".
-  return folders.length === 0 ? "the terminal's folder" : ""
+  if (folders.length === 0) {
+    return ctx.kind === "agent"
+      ? "the agent's upload folder"
+      : "the terminal's folder"
+  }
+  return ""
 }
 
 /// The per-folder listing used when one phrase cannot cover the drop.
@@ -506,7 +517,12 @@ function folderBreakdown(saved: SavedFile[], ctx: DropContext): string {
         : names.join(" and ")
     return `${listed} to ${folder}`
   })
-  return ` A terminal moves, so they did not all land together: ${clauses.join(", ")}.`
+  // Only a terminal can scatter a drop across folders, and saying WHY is worth
+  // a clause; an agent's cannot, so if one somehow did there is no explanation
+  // to offer and the listing has to stand on its own.
+  const why =
+    ctx.kind === "terminal" ? "A terminal moves, so they" : "They"
+  return ` ${why} did not all land together: ${clauses.join(", ")}.`
 }
 
 /// `to <somewhere>` when one phrase covers the drop, and nothing when it does

@@ -138,7 +138,10 @@ references. See
 ### How do I see what I've changed, or get the latest defaults?
 
 `dux config diff` shows your changes; `dux config regenerate` previews the latest
-template. See [managing the config](/docs/configuration#managing-the-config).
+template. The summary holds back `[env]` values and project details, so it is
+safe to share, but `dux config diff --raw` prints your whole config including
+those values. See
+[what `dux config diff` shows](/docs/configuration#what-dux-config-diff-shows-and-what-it-holds-back).
 
 ### How do I run setup before an agent starts?
 

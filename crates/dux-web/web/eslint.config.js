@@ -18,6 +18,20 @@ export default defineConfig([
     languageOptions: {
       globals: globals.browser,
     },
+    rules: {
+      // `const { omitted, ...rest } = obj` is the standard way to build an
+      // object without one of its keys, and the name being bound is the whole
+      // point: it exists so the rest element can leave it behind. Turning it
+      // into anything else (a delete on a copy, a manual key list) is worse
+      // code. `ignoreRestSiblings` exists precisely for this idiom and is
+      // narrow: it exempts ONLY a binding that sits next to a rest element in
+      // the same destructure, so an ordinary unused variable, parameter or
+      // import is still an error everywhere.
+      '@typescript-eslint/no-unused-vars': [
+        'error',
+        { ignoreRestSiblings: true },
+      ],
+    },
   },
   // Vendored shadcn/base-ui primitives in `components/ui/**` intentionally export
   // a component alongside its `cva` variants object (or a context hook such as

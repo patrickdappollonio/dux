@@ -474,9 +474,15 @@ impl DropDir {
                 Mode::empty(),
             ) {
                 Ok(fd) => fd,
-                // A symlink reports ELOOP (Linux) or MLINK (some BSDs) under
-                // `O_NOFOLLOW`; a plain file in the way reports ENOTDIR. All
-                // three are the same refusal: something that is not the
+                // Which errno a symlink produces depends on the platform AND on
+                // `O_DIRECTORY`, which this open also sets. MEASURED on Linux
+                // 7.1: with `O_DIRECTORY | O_NOFOLLOW` a symlink reports
+                // ENOTDIR, exactly like a plain file in the way, and ELOOP is
+                // what comes back only when `O_DIRECTORY` is absent (which is
+                // the shape `save_drop`'s create uses further down). macOS
+                // documents ELOOP for `O_NOFOLLOW`, and some BSDs answer
+                // EMLINK; neither is measurable here, so all three stay in the
+                // arm. They are one refusal anyway: something that is not the
                 // directory dux expected is sitting on the path, and following
                 // it or writing next to it would be worse than saying so.
                 Err(rustix::io::Errno::LOOP)
@@ -2938,6 +2944,77 @@ mod uploads_dir {
         assert_eq!(
             std::fs::read_to_string(second.path().join(".gitignore")).unwrap(),
             "*\n"
+        );
+    }
+
+    #[test]
+    fn a_deleted_gitignore_is_written_again_by_the_next_upload() {
+        // The headline reason the seeding runs on EVERY upload rather than only
+        // on the mkdir that created the directory. Without this the setting
+        // would be true of the folder's first moment and of nothing after it:
+        // delete the file (or turn the setting on for a folder created while it
+        // was off) and every upload from then on would be visible to git while
+        // the config still said otherwise.
+        let wt = worktree();
+        let first = DropDir::open_uploads(wt.path(), ".dux/uploads", true).expect("first");
+        let ignore = first.path().join(".gitignore");
+        std::fs::remove_file(&ignore).expect("remove the ignore file");
+
+        DropDir::open_uploads(wt.path(), ".dux/uploads", true).expect("second");
+
+        assert_eq!(std::fs::read_to_string(&ignore).unwrap(), UPLOADS_GITIGNORE);
+    }
+
+    #[test]
+    fn a_directory_created_while_the_setting_was_off_is_repaired_when_it_is_turned_on() {
+        // The same repair from the other direction, and the one a user actually
+        // hits: they dropped a file with `upload_write_gitignore = false`, saw
+        // the untracked screenshot, and turned the setting on.
+        let wt = worktree();
+        let first = DropDir::open_uploads(wt.path(), "uploads", false).expect("first");
+        assert!(!first.path().join(".gitignore").exists());
+
+        let second = DropDir::open_uploads(wt.path(), "uploads", true).expect("second");
+
+        assert_eq!(
+            std::fs::read_to_string(second.path().join(".gitignore")).unwrap(),
+            UPLOADS_GITIGNORE
+        );
+    }
+
+    #[test]
+    fn two_concurrent_opens_both_succeed_and_leave_exactly_one_gitignore() {
+        // Two files dropped at once really do race here: `mkdirat` may report
+        // EEXIST to the loser and both writers reach for the same `.gitignore`.
+        // `O_CREAT | O_EXCL` is what makes that safe, and the observable proof
+        // is the file's CONTENT: a second writer appending or truncating would
+        // leave something other than one copy of the ignore rule behind.
+        let wt = worktree();
+        let root = wt.path().to_path_buf();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let root = root.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    DropDir::open_uploads(&root, ".dux/uploads", true)
+                        .map(|dir| dir.path().to_path_buf())
+                })
+            })
+            .collect();
+
+        let paths: Vec<PathBuf> = handles
+            .into_iter()
+            .map(|h| h.join().expect("thread").expect("open uploads"))
+            .collect();
+
+        assert_eq!(paths[0], paths[1], "both must pin the same directory");
+        assert_eq!(
+            std::fs::read_to_string(paths[0].join(".gitignore")).unwrap(),
+            UPLOADS_GITIGNORE,
+            "exactly one writer may have written it"
         );
     }
 

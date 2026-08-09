@@ -456,20 +456,27 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # CLIs refuse to read files outside their workspace.\n\
                  # Dropping a file on a TERMINAL is unaffected: that still lands in the\n\
                  # directory the terminal is actually in, because that is where you are\n\
-                 # working. Must be a relative path with no \"..\" in it; an absolute or\n\
-                 # traversing value falls back to \".dux/uploads\" with a warning.",
+                 # working. Must be a relative path with no \"..\" in it that a\n\
+                 # filesystem could actually hold; an absolute, traversing, empty,\n\
+                 # over-long value, or one carrying a control character or a null byte,\n\
+                 # falls back to \".dux/uploads\" with one warning in dux.log. That\n\
+                 # correction happens in memory as the config loads, so the next time\n\
+                 # dux saves this file the corrected value is what gets written.",
             )),
             value_fn: |c| FieldValue::Str(c.ui.upload_directory.clone()),
         },
         ConfigEntry::Field {
             key: "upload_write_gitignore",
             comment: Some(CommentSource::Static(
-                "# When dux creates the upload directory above, also write a .gitignore\n\
-                 # into it containing a single \"*\". That ignores everything in the\n\
-                 # directory including the .gitignore itself, so git reports nothing at\n\
-                 # all and your dropped screenshots never show up as untracked files to\n\
-                 # discard by hand. Set to false if you intend to commit what you drop.\n\
+                "# Keep a .gitignore containing a single \"*\" in the upload directory\n\
+                 # above. That ignores everything in the directory including the\n\
+                 # .gitignore itself, so git reports nothing at all and your dropped\n\
+                 # screenshots never show up as untracked files to discard by hand.\n\
+                 # Set to false if you intend to commit what you drop.\n\
                  #\n\
+                 # dux tries this on every upload, not only when it first creates the\n\
+                 # directory. That costs one syscall and means the file comes back if\n\
+                 # you delete it, or if the directory was created while this was off.\n\
                  # dux never edits a .gitignore that is already there: whatever you have\n\
                  # written wins, and turning this on later will not overwrite it.\n\
                  # dux also never touches .git/info/exclude, on purpose. In a linked\n\
@@ -1352,7 +1359,13 @@ fn render_env_config(out: &mut String, env: &BTreeMap<String, String>) {
     out.push_str(
         "# Environment variables passed to every agent PTY, companion terminal,\n\
          # and startup command. Project-level env overrides keys defined here.\n\
-         # Values may reference existing environment variables with $VAR or ${VAR}.\n",
+         # Values may reference existing environment variables with $VAR or ${VAR},\n\
+         # expanded from dux's own environment when a session is spawned (an unset\n\
+         # variable is left alone, so the agent receives the literal text).\n\
+         # Secrets: agents inherit dux's environment already, so a variable exported\n\
+         # in the shell you launch dux from needs no entry here at all. When you do\n\
+         # need one, reference it rather than pasting the value: anything literal is\n\
+         # stored in this file and printed by `dux config diff --raw`.\n",
     );
     if env.is_empty() {
         out.push_str(

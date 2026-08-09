@@ -421,11 +421,28 @@ export function TerminalPane(props: TerminalPaneProps) {
   // sit on screen until the pane unmounted. This is reachable in the ordinary
   // case: the bootstrap document can land, saying the feature is off, while a
   // drag is already over the pane.
-  useEffect(() => {
-    if (fileDropEnabled) return
-    dragDepthRef.current = 0
+  //
+  // This is the documented "adjust state when a prop changes" pattern (a
+  // comparison against the previously seen value, resolved during render)
+  // rather than an effect. An effect setting state synchronously runs AFTER
+  // the commit, so the stale overlay is painted once and then removed, and it
+  // costs a second render pass to do it; this form is caught before the
+  // browser sees anything. It reads BOTH directions of the flip on purpose: a
+  // feature switched off and then back on must not revive a drag that ended
+  // while it was off, since no drag event would ever arrive to clear it.
+  const [dropEnabledSeen, setDropEnabledSeen] = useState(fileDropEnabled)
+  if (dropEnabledSeen !== fileDropEnabled) {
+    setDropEnabledSeen(fileDropEnabled)
     setDragActive(false)
-  }, [fileDropEnabled])
+  }
+  // The depth counter only means anything while a drag is actually active, so
+  // it is pinned back to zero whenever one is not. Without this a count left
+  // over from a retired drag would demand that many extra `dragleave`s before
+  // the next overlay would close. It lives in an effect rather than in the
+  // branch above because a ref must not be written during render.
+  useEffect(() => {
+    if (!dragActive) dragDepthRef.current = 0
+  }, [dragActive])
   // The ref lags the rendered value by one commit (it is synced in an effect),
   // so an event firing inside that window can see the previous state. Both
   // mismatch directions degrade gracefully: a stale `false` falls through to
@@ -2358,7 +2375,7 @@ export function TerminalPane(props: TerminalPaneProps) {
           </p>
           <p className="text-xs text-muted-foreground">
             {props.kind === "agent"
-              ? "It lands in this agent's worktree root, where git can see it."
+              ? "It lands in this agent's upload folder, hidden from git and removed with the agent."
               : "It lands in the folder this terminal is currently in."}
           </p>
         </div>

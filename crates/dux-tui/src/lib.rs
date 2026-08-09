@@ -178,8 +178,12 @@ pub fn help_text() -> &'static str {
           workspace, so keep a non-loopback bind on a network you trust.\n\n\
          Config subcommands:\n\
           dux config path          Print the config file path\n\
-          dux config diff          Show settings that differ from defaults\n\
-          dux config diff --raw    Show a unified diff against the default config\n\
+          dux config diff          Show settings that differ from defaults.\n\
+                                   [env] and project details are summarized,\n\
+                                   never printed: safe to paste into a report.\n\
+          dux config diff --raw    Show a unified diff against the default\n\
+                                   config. Prints the WHOLE config, [env]\n\
+                                   values included: redact before sharing.\n\
           dux config reset         Remove config and logs (keeps agents and worktrees)\n\
           dux config reset --all   Full factory reset (config, logs, sessions, worktrees)\n\
           dux config regenerate    Preview a fresh default config (shows diff)\n\

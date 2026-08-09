@@ -785,10 +785,14 @@ pub struct UiConfig {
     /// `copy_on_select`), and the `upload_` prefix groups the pair the way
     /// `terminal_font_family` / `terminal_font_size` already do.
     pub upload_directory: String,
-    /// Write a `.gitignore` holding a single `*` into the upload directory when
-    /// dux creates it, so the uploads (and that file itself) are invisible to
-    /// git. An existing `.gitignore` is never touched, and dux never writes to
-    /// `.git/info/exclude`. Web-only behavior, as `upload_directory` is.
+    /// Keep a `.gitignore` holding a single `*` in the upload directory, so the
+    /// uploads (and that file itself) are invisible to git. Attempted on every
+    /// upload rather than only on the creation of the directory: it costs one
+    /// exclusive-create syscall, and it puts the file back for a directory that
+    /// was created while this setting was off, or whose ignore file was
+    /// deleted. An existing `.gitignore` is never touched, whatever it holds,
+    /// and dux never writes to `.git/info/exclude`. Web-only behavior, as
+    /// `upload_directory` is.
     pub upload_write_gitignore: bool,
     /// Seconds the attention indicators stay visible after dux regains your
     /// attention, before the focused agent's needs-attention flag clears.
@@ -893,6 +897,16 @@ impl Default for CapabilitiesConfig {
 /// reads to its workspace can still open the file), and self-ignoring.
 pub const DEFAULT_UPLOAD_DIRECTORY: &str = ".dux/uploads";
 
+/// The most a configured `ui.upload_directory` may measure, in bytes.
+///
+/// This is the platform's own `PATH_MAX` (4096 on Linux, 1024 on macOS), and it
+/// is a conservative bound rather than an exact one: the value is only the
+/// RELATIVE tail of a path that also carries a worktree in front of it, so a
+/// relative tail that already fills `PATH_MAX` cannot fit under any worktree
+/// whatsoever. How much of the remaining room a particular worktree leaves is
+/// not knowable at load, and is left to the syscall.
+pub const MAX_UPLOAD_DIRECTORY_BYTES: usize = libc::PATH_MAX as usize;
+
 /// Why a configured `ui.upload_directory` cannot be used, or `None` when it is
 /// usable. Pure, and phrased as a sentence fragment the warning completes.
 ///
@@ -905,25 +919,58 @@ pub const DEFAULT_UPLOAD_DIRECTORY: &str = ".dux/uploads";
 /// component at a time from a pinned worktree handle with `O_NOFOLLOW`, which
 /// refuses a symlink instead of following it (see
 /// `crate::file_drop::open_uploads_dir`).
+///
+/// The last three refusals are a different kind, and they are here for a
+/// different reason: they name a shape the FILESYSTEM will refuse. A value
+/// holding a control character (reachable from TOML through a `\n` escape) used
+/// to pass, and the directory really was created, but every drop into it then
+/// failed; a NUL failed with an opaque `Invalid argument`; an over-long one
+/// failed with `File name too long`. All three per drop, in a message about the
+/// wrong subject. Refusing them at load is what the warn-once-and-degrade design
+/// exists to do.
 fn upload_directory_rejection(configured: &str) -> Option<&'static str> {
     let trimmed = configured.trim();
     if trimmed.is_empty() {
         return Some("it is empty");
     }
+    if trimmed.contains('\0') {
+        return Some("it contains a null byte, which no filesystem can store");
+    }
+    if trimmed.chars().any(char::is_control) {
+        return Some(
+            "it contains a control character, which cannot be typed back and would scramble \
+             any terminal the path is printed to",
+        );
+    }
+    if trimmed.len() > MAX_UPLOAD_DIRECTORY_BYTES {
+        return Some("it is longer than this platform allows a path to be");
+    }
     let path = std::path::Path::new(trimmed);
     let mut components = 0usize;
     for component in path.components() {
         match component {
-            std::path::Component::Normal(_) => components += 1,
+            std::path::Component::Normal(name) => {
+                if name.len() > crate::file_drop::FALLBACK_NAME_MAX_BYTES {
+                    return Some(
+                        "one of its path components is longer than a filesystem will accept",
+                    );
+                }
+                components += 1;
+            }
             std::path::Component::RootDir | std::path::Component::Prefix(_) => {
                 return Some("it is an absolute path, and uploads are stored inside the worktree");
             }
             std::path::Component::ParentDir => {
                 return Some("it contains a \"..\" component, which would leave the worktree");
             }
-            std::path::Component::CurDir => {
-                return Some("it contains a \".\" component; write the path without it");
-            }
+            // `.` names the directory it sits in, so it changes nothing and is
+            // simply dropped. Refusing it was inconsistent as well as useless:
+            // MEASURED, `Path::components()` preserves a CurDir only in LEADING
+            // position, so `uploads/./x` was already accepted and normalized
+            // while `./uploads`, an ordinary way to write a relative path, was
+            // turned away. A value that is NOTHING but `.` still falls to the
+            // "names no directory" refusal below.
+            std::path::Component::CurDir => {}
         }
     }
     if components == 0 {
@@ -945,9 +992,15 @@ pub fn normalized_upload_directory(configured: &str) -> String {
     if upload_directory_rejection(configured).is_some() {
         return DEFAULT_UPLOAD_DIRECTORY.to_string();
     }
+    // NORMAL components only. Anything a usable value can still hold at this
+    // point is a `.`, which names the directory it sits in and so contributes
+    // nothing to the walk that creates the path.
     std::path::Path::new(configured.trim())
         .components()
-        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .filter_map(|c| match c {
+            std::path::Component::Normal(name) => Some(name.to_string_lossy().into_owned()),
+            _ => None,
+        })
         .collect::<Vec<_>>()
         .join("/")
 }
@@ -1165,8 +1218,15 @@ impl Default for ServerConfig {
 impl Default for UiConfig {
     fn default() -> Self {
         Self {
-            left_width_pct: 17,
-            right_width_pct: 19,
+            // These must stay equal to the `UiConfig` literal inside
+            // `Config::default()`. `[ui]` carries `#[serde(default)]`, so a config
+            // whose `[ui]` table omits a width fills it from here, while a fresh
+            // install writes the value the canonical template renders from
+            // `Config::default()`. When the two disagree the same setting has two
+            // defaults depending on how the user arrived, and `dux config diff`
+            // reports a width the user never wrote as changed.
+            left_width_pct: 20,
+            right_width_pct: 23,
             terminal_pane_height_pct: 35,
             empty_project_separator_min_projects: 5,
             staged_pane_height_pct: 50,
@@ -2547,11 +2607,42 @@ mod tests {
     }
 
     #[test]
+    fn a_curdir_component_is_normalized_away_wherever_it_sits() {
+        // `./uploads` is an ordinary way to write a relative path and names
+        // exactly the same directory as `uploads`, so rejecting it bought no
+        // safety at all. It was also INCONSISTENT, which is how the defect
+        // showed: MEASURED, `Path::components()` keeps a CurDir only in LEADING
+        // position and drops it everywhere else, so `uploads/./x` was already
+        // being accepted and quietly normalized to `uploads/x` while the
+        // leading form was refused.
+        assert_eq!(normalized_upload_directory("./uploads"), "uploads");
+        assert_eq!(normalized_upload_directory("./"), DEFAULT_UPLOAD_DIRECTORY);
+        assert_eq!(upload_directory_load_warning("./uploads"), None);
+        assert_eq!(normalized_upload_directory("uploads/./x"), "uploads/x");
+        assert_eq!(upload_directory_load_warning("uploads/./x"), None);
+        // A trailing `.` is dropped by `components()` too, leaving the named
+        // directory behind, so it names a real place and is kept.
+        assert_eq!(normalized_upload_directory("uploads/."), "uploads");
+        assert_eq!(upload_directory_load_warning("uploads/."), None);
+    }
+
+    #[test]
     fn an_unusable_upload_directory_degrades_to_the_default_and_says_why() {
         // Each of these would put a dropped file somewhere the agent's worktree
         // does not own, so each degrades rather than being obeyed. The check is
         // on the path SHAPE; a symlinked component is refused later, at
         // creation time, by `file_drop::DropDir::open_uploads`.
+        //
+        // The last three are a different kind of unusable: they name a shape
+        // the filesystem itself will refuse. They are checked HERE, at load,
+        // because the alternative is what shipped: the value passes, the
+        // directory is even created for the control-character case, and then
+        // every single drop fails at the syscall with a message about the wrong
+        // thing entirely (`Invalid argument` for a NUL, `File name too long`
+        // for an over-long one). Catching them at load is the whole point of
+        // the warn-once-and-degrade design.
+        let long_component = "a".repeat(crate::file_drop::FALLBACK_NAME_MAX_BYTES + 1);
+        let long_path = "ab/".repeat(MAX_UPLOAD_DIRECTORY_BYTES / 3 + 1);
         let cases = [
             ("", "empty"),
             ("   ", "empty"),
@@ -2560,8 +2651,13 @@ mod tests {
             ("../uploads", ".."),
             (".dux/../../uploads", ".."),
             ("uploads/..", ".."),
-            ("./uploads", "\".\""),
-            (".", "\".\""),
+            (".", "names no directory"),
+            ("./", "names no directory"),
+            ("uploads\nx", "control character"),
+            ("uploads\u{1b}x", "control character"),
+            ("uploads\u{0}x", "null byte"),
+            (long_component.as_str(), "component"),
+            (long_path.as_str(), "longer than"),
         ];
         for (value, expected_reason) in cases {
             assert_eq!(
@@ -2583,12 +2679,19 @@ mod tests {
     }
 
     #[test]
-    fn load_config_warns_once_for_a_bad_upload_directory_and_then_never_again() {
-        // The warn-once property, stated as the thing that actually makes it
-        // true: `load_config` CORRECTS the value in memory, so every later read
-        // (and every save) sees a usable directory and has nothing to warn
-        // about. Without the correction the pure normalizer would silently
-        // degrade on every single upload instead.
+    fn load_config_corrects_a_bad_upload_directory_so_nothing_can_warn_about_it_again() {
+        // What this pins is the CORRECTION, which is the thing that makes the
+        // warn-once property true: `load_config` replaces the value in memory,
+        // so every later read (and every save) sees a usable directory and has
+        // nothing left to warn about. Without it the pure normalizer would
+        // silently degrade on every single upload instead.
+        //
+        // It deliberately does NOT observe the log line, and the name no longer
+        // claims to. `logger::warn` writes through a process-wide `OnceLock`
+        // that any other test may already have set, so watching it from here
+        // would be order-dependent. The line itself is asserted directly, from
+        // the pure `upload_directory_load_warning`, by
+        // `an_unusable_upload_directory_degrades_to_the_default_and_says_why`.
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = make_test_paths(dir.path());
         std::fs::write(
@@ -2597,6 +2700,10 @@ mod tests {
         )
         .expect("write config");
 
+        assert!(
+            upload_directory_load_warning("../escape").is_some(),
+            "the value on disk must be one that warns, or this proves nothing"
+        );
         let config = load_config(&paths);
         assert_eq!(config.ui.upload_directory, DEFAULT_UPLOAD_DIRECTORY);
         assert_eq!(

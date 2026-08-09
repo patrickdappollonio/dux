@@ -41,6 +41,31 @@ A handful of subcommands handle the file without you having to hunt for it:
 Hand-edits are preserved across saves: dux rewrites the file with `toml_edit`, so
 your comments and ordering survive.
 
+### What `dux config diff` shows, and what it holds back
+
+The summary is derived from the shape of the config itself, not from a list
+somebody has to remember to extend, so a setting added in a new release turns up
+in your diff the day it ships. It compares the file as written against the
+built-in defaults, which means it reports what you typed rather than what dux
+normalizes it into: no clamping of out-of-range numbers, and no default provider
+block quietly folded into a config that does not name one.
+
+Two things are summarized rather than printed:
+
+- `[env]` reports only `env: changed`. Those values are frequently API tokens,
+  and a token that ends up in a terminal scrollback is a token you have to
+  rotate.
+- `[[projects]]` reports only a count. A project's index is not a stable name, a
+  project id can be generated on load, and projects carry their own `env`.
+
+Macros report a count too, since a macro body is arbitrary prose. Everything else
+is shown as `setting: default -> yours`, with long values cut off at 40
+characters. That makes the summary safe to paste into a bug report.
+
+> **`dux config diff --raw` is not safe to paste.** It prints a unified diff of
+> your entire config against the default one, which includes every value in your
+> `[env]` table verbatim. Redact it before you share it anywhere.
+
 ### Getting the comments back
 
 Older versions of dux could create a `config.toml` with no comments at all, and
@@ -82,6 +107,47 @@ env  = { EDITOR = "true", API_KEY = "${FOO_KEY}" }
 Because the file holds portable intent (projects, providers, themes, keybindings)
 rather than runtime state, it's **safe to commit to git.** Drop it in your dotfiles
 and it travels between machines without leaking your username or your secrets.
+
+### Keeping secrets out of `[env]`
+
+Anything you type literally into `[env]` (or a project's `env`) is exactly that:
+a literal. It sits in `config.toml` on disk, it shows up in
+`dux config diff --raw`, and it travels with the file into your dotfiles repo.
+Two mechanisms let you avoid that, and both are worth knowing.
+
+**The simplest one is to write nothing at all.** Every agent and every terminal
+dux spawns inherits dux's own environment, so a variable that is already
+exported in the shell you launched dux from is already there. If `ANTHROPIC_API_KEY`
+comes out of your shell profile or a secrets agent, your provider CLI will find
+it without `[env]` ever mentioning it. Use `[env]` for the things dux has to add
+or override, not for the things you already have.
+
+**When you do need an entry, reference the variable instead of pasting the
+value.** `$VAR` and `${VAR}` inside an env value are expanded from *dux's own*
+process environment, at the moment a session or terminal is spawned:
+
+```toml
+[env]
+API_KEY = "${FOO_KEY}"   # resolved from the environment dux itself was launched in
+```
+
+Three details that matter:
+
+- The lookup happens in dux's environment, not in the agent's shell, so the
+  variable has to be exported *before* dux starts. Launching dux from a shell
+  where it is set, or from a wrapper that sources your secrets first, is the
+  usual way.
+- If the variable is not set, dux does not fail and does not blank the value: it
+  leaves the text alone, and the agent receives the literal string `${FOO_KEY}`.
+  If a tool starts complaining about a nonsense credential, that is the first
+  thing to check.
+- `~` is not expanded in an env *value*. Tilde works in a project `path`; for a
+  home-relative env value, write `$HOME/...`.
+
+None of this is encryption. It keeps the secret out of the file, which is the
+part that gets committed, pasted into issues and synced between machines; the
+value still reaches every agent and terminal dux spawns, and dux is a
+trusted-access tool with no per-user isolation.
 
 ## Keybindings
 
@@ -167,9 +233,11 @@ uploads go with it. It has to be a relative path with no `..` in it; an
 absolute, traversing or empty value falls back to `.dux/uploads` and says so
 once in `dux.log`.
 
-`upload_write_gitignore` writes a `.gitignore` containing a single `*` into that
-folder when dux creates it, which ignores everything in it including itself, so
-your screenshots never turn up as untracked files. Set it to `false` if you
+`upload_write_gitignore` keeps a `.gitignore` containing a single `*` in that
+folder, which ignores everything in it including itself, so your screenshots
+never turn up as untracked files. dux tries to write it on every upload, not
+only when it first creates the folder, so the file comes back if you delete it
+or if the folder was created while the setting was off. Set it to `false` if you
 intend to commit what you drop. dux never edits a `.gitignore` you already have
 there, and never writes to `.git/info/exclude` (in a linked worktree that
 resolves to the main checkout's copy, so it would change what git ignores in
