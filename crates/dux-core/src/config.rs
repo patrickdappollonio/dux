@@ -794,6 +794,31 @@ pub struct UiConfig {
     /// and dux never writes to `.git/info/exclude`. Web-only behavior, as
     /// `upload_directory` is.
     pub upload_write_gitignore: bool,
+    /// How many CHARACTERS a text paste onto an AGENT pane may run to before
+    /// the web UI saves it as a `.txt` file in [`UiConfig::upload_directory`]
+    /// and pastes that file's path instead of typing the text.
+    ///
+    /// The reason is the agent's context window. It is finite, but an agent can
+    /// read or scan a document efficiently when it needs to; a wall of pasted
+    /// text spends the window whether the agent needed all of it or not, while
+    /// a path costs almost nothing.
+    ///
+    /// `0` switches the behaviour off. A value below
+    /// [`MIN_UPLOAD_PASTED_TEXT_CHARS`] or above
+    /// [`MAX_UPLOAD_PASTED_TEXT_CHARS`] is clamped with one warning at load
+    /// (see [`upload_pasted_text_chars_load_warning`]).
+    ///
+    /// A TERMINAL pane never consults this, structurally: a long paste into a
+    /// shell is a command or a heredoc, and turning that into a file would
+    /// destroy what the user meant.
+    ///
+    /// The mobile compose bar IS in scope, deliberately. A paste that large is
+    /// a document whichever surface receives it, and the draft is the better
+    /// place for the path rather than a reason to skip the rule: the text would
+    /// otherwise fill the message box, and the user can write around a path
+    /// before pressing Send. Web-only behavior, as its `upload_` companions
+    /// are.
+    pub upload_pasted_text_chars: usize,
     /// Seconds the attention indicators stay visible after dux regains your
     /// attention, before the focused agent's needs-attention flag clears.
     /// Applies when you return to the dux browser tab (web UI) and when your
@@ -1003,6 +1028,81 @@ pub fn normalized_upload_directory(configured: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("/")
+}
+
+/// Default `ui.upload_pasted_text_chars`, and it is CONSERVATIVE on purpose.
+///
+/// Two measurements say what the SCALE of a "this is a document, not a message"
+/// paste is, for the CLIs whose source could be read. Codex's
+/// `LARGE_PASTE_CHAR_THRESHOLD` is 1000 characters, the figure already recorded
+/// in the web's `COMMAND_ATTACHMENT_CHAR_LIMITS` table: past it, its composer
+/// stops treating a paste as text you typed and files it away as generic large
+/// content. Claude Code's bundle force-classifies any single key event over 800
+/// characters as a paste. So a low four-figure number is the region where CLIs
+/// themselves start reclassifying, which is what these figures are evidence of.
+///
+/// They are NOT the reason for this number, and must not be read as one: those
+/// two thresholds answer a different question (what that CLI does with a paste
+/// it received) and neither of them chose dux's default. dux aims to be
+/// one-size-fits-most, and any CLI can be a provider here, including ones
+/// nobody has measured and which may cut a paste off SOONER than the two above.
+/// So the default sits at the low end of the measured region rather than above
+/// it: a user who wants more text going through as text raises it, which is
+/// exactly what the setting is for, while nobody's unmeasured CLI silently
+/// swallows a paste dux decided to type out.
+///
+/// An error log, a stack trace or a diff runs well past this and is exactly
+/// what the feature is for.
+pub const DEFAULT_UPLOAD_PASTED_TEXT_CHARS: usize = 1_000;
+
+/// Floor on a *nonzero* `ui.upload_pasted_text_chars`.
+///
+/// A typical multi-sentence prompt runs a few hundred characters, so a mistyped
+/// tiny value would turn ordinary instructions into files and make the agent
+/// feel broken in a way that names nothing. `0` remains the way to switch the
+/// behaviour off, and the warning says so.
+pub const MIN_UPLOAD_PASTED_TEXT_CHARS: usize = 200;
+
+/// Ceiling on `ui.upload_pasted_text_chars`.
+///
+/// Two orders of magnitude above the largest MEASURED composer threshold in the
+/// tree (Codex's 1000). A value up here is not a preference anyone could have
+/// arrived at from how the CLIs behave; it is a byte figure or an extra zero,
+/// and clamping it with a warning is what the warn-once-and-degrade convention
+/// is for. Switching the behaviour off has its own value, and it is `0`.
+pub const MAX_UPLOAD_PASTED_TEXT_CHARS: usize = 100_000;
+
+/// Normalize a configured `ui.upload_pasted_text_chars`: `0` is the valid
+/// "switch it off" value and is preserved; anything else is clamped into
+/// [`MIN_UPLOAD_PASTED_TEXT_CHARS`, `MAX_UPLOAD_PASTED_TEXT_CHARS`].
+///
+/// Deliberately PURE: it does not log. The on-disk value is warned about and
+/// corrected exactly once, at load, in [`load_config`]; this is then called
+/// from read paths (the bootstrap projection) that run far more often than the
+/// config loads. Same split as [`normalized_upload_directory`].
+pub fn normalized_upload_pasted_text_chars(configured: usize) -> usize {
+    if configured == 0 {
+        return 0;
+    }
+    configured.clamp(MIN_UPLOAD_PASTED_TEXT_CHARS, MAX_UPLOAD_PASTED_TEXT_CHARS)
+}
+
+/// The warning [`load_config`] emits for an out-of-range
+/// `ui.upload_pasted_text_chars`, or `None` for a usable one.
+///
+/// It names the way to switch the behaviour off as well as the clamp, because
+/// somebody typing a very small number is usually reaching for "never do this"
+/// and would otherwise keep lowering it and keep being clamped.
+pub fn upload_pasted_text_chars_load_warning(configured: usize) -> Option<String> {
+    let normalized = normalized_upload_pasted_text_chars(configured);
+    if normalized == configured {
+        return None;
+    }
+    Some(format!(
+        "ui.upload_pasted_text_chars = {configured} is outside the usable range of \
+         {MIN_UPLOAD_PASTED_TEXT_CHARS} to {MAX_UPLOAD_PASTED_TEXT_CHARS} characters and is \
+         being clamped to {normalized}. Use 0 to stop saving long pastes as files entirely."
+    ))
 }
 
 /// The warning [`load_config`] emits for an unusable `ui.upload_directory`, or
@@ -1247,6 +1347,7 @@ impl Default for UiConfig {
             mobile_accessory_bar: true,
             upload_directory: DEFAULT_UPLOAD_DIRECTORY.to_string(),
             upload_write_gitignore: true,
+            upload_pasted_text_chars: DEFAULT_UPLOAD_PASTED_TEXT_CHARS,
             attention_grace_seconds: 3,
             auto_reopen_agents: false,
             show_changes_pane: true,
@@ -1800,6 +1901,7 @@ impl Default for Config {
                 mobile_accessory_bar: true,
                 upload_directory: DEFAULT_UPLOAD_DIRECTORY.to_string(),
                 upload_write_gitignore: true,
+                upload_pasted_text_chars: DEFAULT_UPLOAD_PASTED_TEXT_CHARS,
                 attention_grace_seconds: 3,
                 auto_reopen_agents: false,
                 show_changes_pane: true,
@@ -2011,6 +2113,12 @@ pub fn load_config(paths: &DuxPaths) -> Config {
     // And once more for an upload directory that names somewhere dux will not
     // write (absolute, traversing, or empty). Corrected in memory here so every
     // later upload resolves the default silently rather than warning per file.
+    if let Some(warning) = upload_pasted_text_chars_load_warning(config.ui.upload_pasted_text_chars)
+    {
+        crate::logger::warn(&warning);
+        config.ui.upload_pasted_text_chars =
+            normalized_upload_pasted_text_chars(config.ui.upload_pasted_text_chars);
+    }
     if let Some(warning) = upload_directory_load_warning(&config.ui.upload_directory) {
         crate::logger::warn(&warning);
         config.ui.upload_directory = DEFAULT_UPLOAD_DIRECTORY.to_string();
@@ -2726,6 +2834,93 @@ mod tests {
         let config = load_config(&paths);
         assert_eq!(config.ui.upload_directory, "tmp/drops");
         assert!(!config.ui.upload_write_gitignore);
+    }
+
+    // ── ui.upload_pasted_text_chars ──────────────────────────────────────────
+
+    #[test]
+    fn a_usable_pasted_text_threshold_is_kept_as_written() {
+        for value in [
+            MIN_UPLOAD_PASTED_TEXT_CHARS,
+            DEFAULT_UPLOAD_PASTED_TEXT_CHARS,
+            2_500,
+            MAX_UPLOAD_PASTED_TEXT_CHARS,
+        ] {
+            assert_eq!(normalized_upload_pasted_text_chars(value), value);
+            assert_eq!(
+                upload_pasted_text_chars_load_warning(value),
+                None,
+                "for {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pasted_text_threshold_of_zero_is_preserved_as_the_off_switch() {
+        // `0` is the documented way to switch the behaviour off, so it must
+        // never be clamped up to the floor.
+        assert_eq!(normalized_upload_pasted_text_chars(0), 0);
+        assert_eq!(upload_pasted_text_chars_load_warning(0), None);
+    }
+
+    #[test]
+    fn a_tiny_pasted_text_threshold_is_raised_to_the_floor_and_says_so() {
+        assert_eq!(
+            normalized_upload_pasted_text_chars(5),
+            MIN_UPLOAD_PASTED_TEXT_CHARS
+        );
+        let warning = upload_pasted_text_chars_load_warning(5).expect("warning expected");
+        assert!(warning.contains('5'), "{warning}");
+        assert!(
+            warning.contains(&MIN_UPLOAD_PASTED_TEXT_CHARS.to_string()),
+            "{warning}"
+        );
+        // The way out has to be in the message, or a user who wanted the
+        // feature off will keep lowering the number and keep being clamped.
+        assert!(warning.contains('0'), "{warning}");
+    }
+
+    #[test]
+    fn an_enormous_pasted_text_threshold_is_clamped_to_the_ceiling() {
+        assert_eq!(
+            normalized_upload_pasted_text_chars(usize::MAX),
+            MAX_UPLOAD_PASTED_TEXT_CHARS
+        );
+        let warning =
+            upload_pasted_text_chars_load_warning(MAX_UPLOAD_PASTED_TEXT_CHARS + 1).expect("warns");
+        assert!(
+            warning.contains(&MAX_UPLOAD_PASTED_TEXT_CHARS.to_string()),
+            "{warning}"
+        );
+    }
+
+    #[test]
+    fn load_config_corrects_an_unusable_pasted_text_threshold_in_memory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = make_test_paths(dir.path());
+        std::fs::write(&paths.config_path, "[ui]\nupload_pasted_text_chars = 3\n")
+            .expect("write config");
+
+        let config = load_config(&paths);
+        assert_eq!(
+            config.ui.upload_pasted_text_chars,
+            MIN_UPLOAD_PASTED_TEXT_CHARS
+        );
+        assert_eq!(
+            upload_pasted_text_chars_load_warning(config.ui.upload_pasted_text_chars),
+            None,
+            "the corrected value must not warn a second time"
+        );
+    }
+
+    #[test]
+    fn load_config_keeps_a_pasted_text_threshold_of_zero() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = make_test_paths(dir.path());
+        std::fs::write(&paths.config_path, "[ui]\nupload_pasted_text_chars = 0\n")
+            .expect("write config");
+
+        assert_eq!(load_config(&paths).ui.upload_pasted_text_chars, 0);
     }
 
     #[test]

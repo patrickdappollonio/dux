@@ -724,6 +724,13 @@ pub struct SettingsPatch {
     /// companion `ui.upload_directory` is deliberately absent: it is a PATH,
     /// and the web has no directory picker to edit one with.
     pub upload_write_gitignore: Option<bool>,
+    /// `ui.upload_pasted_text_chars`: how many characters a text paste onto an
+    /// AGENT pane may run to before the web saves it as a file and pastes the
+    /// path. A plain field write (the next paste reads it), so it rides the
+    /// generic settings path. Out-of-range values are CLAMPED here rather than
+    /// rejected, the same treatment `load_config` gives the on-disk value, so
+    /// the two ways in cannot disagree about what a bad number means.
+    pub upload_pasted_text_chars: Option<usize>,
     /// `ui.auto_reopen_agents`: the global startup auto-reopen switch. A plain
     /// field write with no side effects (the reopen pass reads it at the NEXT
     /// startup), so it rides the generic settings path.
@@ -1533,6 +1540,7 @@ impl Engine {
             mobile_top_bar,
             mobile_accessory_bar,
             upload_write_gitignore,
+            upload_pasted_text_chars,
             auto_reopen_agents,
             show_changes_pane,
             web_notifications,
@@ -1586,6 +1594,10 @@ impl Engine {
         }
         if let Some(v) = upload_write_gitignore {
             candidate.ui.upload_write_gitignore = v;
+        }
+        if let Some(v) = upload_pasted_text_chars {
+            candidate.ui.upload_pasted_text_chars =
+                crate::config::normalized_upload_pasted_text_chars(v);
         }
         if let Some(v) = auto_reopen_agents {
             candidate.ui.auto_reopen_agents = v;
@@ -9672,6 +9684,13 @@ mod tests {
                 expect: "false",
             },
             SettingsFieldRow {
+                key: "upload_pasted_text_chars",
+                seed: |c| c.ui.upload_pasted_text_chars = 1_000,
+                sent: serde_json::json!(2_500),
+                read: |c| c.ui.upload_pasted_text_chars.to_string(),
+                expect: "2500",
+            },
+            SettingsFieldRow {
                 key: "auto_reopen_agents",
                 seed: |c| c.ui.auto_reopen_agents = false,
                 sent: serde_json::json!(true),
@@ -9801,7 +9820,7 @@ mod tests {
         let rows = settings_field_rows();
         assert_eq!(
             rows.len(),
-            21,
+            22,
             "add a row when you add a field to SettingsPatch"
         );
         for row in rows {
@@ -9848,6 +9867,7 @@ mod tests {
             mobile_top_bar: Some(!before.ui.mobile_top_bar),
             mobile_accessory_bar: Some(!before.ui.mobile_accessory_bar),
             upload_write_gitignore: Some(!before.ui.upload_write_gitignore),
+            upload_pasted_text_chars: Some(before.ui.upload_pasted_text_chars + 1),
             auto_reopen_agents: Some(!before.ui.auto_reopen_agents),
             show_changes_pane: Some(!before.ui.show_changes_pane),
             web_notifications: Some(!before.capabilities.web_notifications),

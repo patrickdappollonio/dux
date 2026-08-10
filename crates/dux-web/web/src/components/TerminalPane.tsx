@@ -395,6 +395,19 @@ export function TerminalPane(props: TerminalPaneProps) {
   useEffect(() => {
     fileDropEnabledRef.current = fileDropEnabled
   }, [fileDropEnabled])
+  // `ui.upload_pasted_text_chars`: how long a TEXT paste has to be before dux
+  // saves it as a document and pastes its path instead of typing it. Mirrored
+  // into a ref for the same reason as the flag above (the paste listener is a
+  // mount-effect closure), and read as OFF when absent for the same reason too:
+  // an older server never published it, and a paste that quietly becomes a file
+  // before dux can say the feature exists is a surprise, not a convenience.
+  //
+  // It only ever reaches an AGENT pane. See `ClipboardPastePane`.
+  const pastedTextChars = bootstrap?.upload_pasted_text_chars ?? 0
+  const pastedTextCharsRef = useRef(pastedTextChars)
+  useEffect(() => {
+    pastedTextCharsRef.current = pastedTextChars
+  }, [pastedTextChars])
   // The user's configured toast window, mirrored for exactly the same reason.
   // The upload path is entered from a mount-effect listener as well as from a
   // JSX handler, and the listener closes over the MOUNT render, where the
@@ -2011,6 +2024,7 @@ export function TerminalPane(props: TerminalPaneProps) {
     files: File[],
     toastId: string,
     sink: UploadSink,
+    pastedTextChars?: number,
   ) {
     if (files.length === 0) return
     const outcomes: DropOutcome[] = []
@@ -2116,6 +2130,10 @@ export function TerminalPane(props: TerminalPaneProps) {
     const ctx: DropContext = {
       kind: props.kind === "agent" ? "agent" : "terminal",
       delivery: sink.delivery,
+      // Absent for every drop and for an image paste, so no existing report
+      // gains a word; present only for a long text paste dux turned into a
+      // document, where the user needs telling that it did.
+      pastedTextChars,
     }
     const report = dropToastFor(outcomes, ctx)
     // Through the SHARED final-toast raiser, so the user's configured dismiss
@@ -2140,10 +2158,14 @@ export function TerminalPane(props: TerminalPaneProps) {
   /// The id is minted HERE, once per drop, and handed to both halves, so a
   /// second drop starting while this one is still uploading cannot land its
   /// spinner on this drop's report.
-  async function runUpload(files: File[], sink: UploadSink) {
+  async function runUpload(
+    files: File[],
+    sink: UploadSink,
+    pastedTextChars?: number,
+  ) {
     const toastId = nextFileDropToastId()
     try {
-      await handleUploadedFiles(files, toastId, sink)
+      await handleUploadedFiles(files, toastId, sink, pastedTextChars)
     } catch (e) {
       showFinalToast(
         "error",
@@ -2206,10 +2228,22 @@ export function TerminalPane(props: TerminalPaneProps) {
     const items = Array.from(e.clipboardData?.items ?? [])
     const action = clipboardPasteAction(
       items,
+      // Read SYNCHRONOUSLY: the decision has to be made while the event is
+      // still cancellable, and a `DataTransferItem` of kind `string` only
+      // yields its contents through an async callback, by which time xterm has
+      // already pasted. `getData` on the event's own `clipboardData` needs no
+      // secure context, exactly like the image bytes beside it.
+      e.clipboardData?.getData("text/plain") ?? "",
       {
         uploadsEnabled: fileDropEnabledRef.current,
         isOwner: isOwnerRef.current,
         forceText,
+        // An AGENT gets the long-text threshold; a TERMINAL has none, and the
+        // union is what makes that structural rather than a condition.
+        pane:
+          kind === "agent"
+            ? { kind: "agent", longTextChars: pastedTextCharsRef.current }
+            : { kind: "terminal" },
       },
       new Date(),
     )
@@ -2218,7 +2252,11 @@ export function TerminalPane(props: TerminalPaneProps) {
       e.stopPropagation()
       // Resolved HERE, at the gesture, so a paste into the compose box goes to
       // the draft and a paste into the terminal goes to the PTY.
-      void runUpload(action.files, activeUploadSink())
+      //
+      // `pastedTextChars` is set only when these "files" are one long text
+      // paste dux filed away, and it travels to the toast so the report can say
+      // what happened rather than announcing a file the user never made.
+      void runUpload(action.files, activeUploadSink(), action.pastedTextChars)
       return
     }
     if (action.kind === "refused") {
@@ -2228,7 +2266,15 @@ export function TerminalPane(props: TerminalPaneProps) {
       e.preventDefault()
       e.stopPropagation()
       showFinalToast("error", action.reason, {
-        id: "clipboard-image-paste",
+        // One id PER SUBJECT, not one for the whole listener. A refusal
+        // replaces whatever is already on its id, so an image refusal and a
+        // text refusal sharing one would erase each other: a viewer who pastes
+        // a screenshot and then a wall of text would be told about exactly one
+        // of them, with no way to know the other happened.
+        id:
+          action.subject === "text"
+            ? "clipboard-text-paste"
+            : "clipboard-image-paste",
         statusClearSeconds: statusClearSecondsRef.current,
       })
       return

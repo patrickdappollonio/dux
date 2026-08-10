@@ -246,6 +246,7 @@ function makeState(): DuxState {
       mobile_top_bar: true,
       mobile_accessory_bar: true,
       file_drop_max_bytes: 1024,
+      upload_pasted_text_chars: 1000,
       provider_drop_paste: {
         claude: { form: "bare", command_name: "claude" },
         codex: { form: "single_quoted", command_name: "codex" },
@@ -299,9 +300,17 @@ function textItem(text = "hello") {
 /// Dispatch a real `paste` event at `el` and return it, so the test can assert
 /// on `defaultPrevented`: whether dux took the paste over is exactly the
 /// question "did the browser's own paste still happen".
-async function paste(el: Element, items: unknown[]) {
+async function paste(el: Element, items: unknown[], text = "") {
   const event = createEvent.paste(el, {
-    clipboardData: { items, types: items.map((i) => (i as { type: string }).type) },
+    clipboardData: {
+      items,
+      types: items.map((i) => (i as { type: string }).type),
+      // The synchronous flavour read, which is the only way the long-text
+      // decision can see the contents in time to cancel the event: a
+      // `DataTransferItem` of kind `string` yields its text through an async
+      // callback, and by then the paste has already happened.
+      getData: (type: string) => (type === "text/plain" ? text : ""),
+    },
   })
   await act(async () => {
     fireEvent(el, event)
@@ -699,7 +708,11 @@ describe("pasting an image while the mobile compose bar is the typing surface", 
     fireEvent.change(box, { target: { value: "look at " } })
 
     const event = createEvent.paste(box, {
-      clipboardData: { items: [imageItem(png("image.png"))], types: ["image/png"] },
+      clipboardData: {
+        items: [imageItem(png("image.png"))],
+        types: ["image/png"],
+        getData: () => "",
+      },
     })
     await act(async () => void fireEvent(box, event))
 
@@ -732,5 +745,261 @@ describe("pasting an image while the mobile compose bar is the typing surface", 
     // Not cancelled, so the browser inserts the text into the textarea itself,
     // exactly as it does for any other paste into any other input.
     expect(event.defaultPrevented).toBe(false)
+  })
+})
+
+describe("pasting a very long text onto an agent", () => {
+  // The same journey as an image, entered by a different trigger, and for the
+  // user's own reason: an agent's context window is finite, but it can read a
+  // document when it needs to. A path costs almost nothing; a wall of text
+  // costs the context whether the agent needed all of it or not.
+
+  /// `n` characters of ordinary prose-shaped text.
+  function long(n: number, ch = "x") {
+    return ch.repeat(n)
+  }
+
+  it("saves it as a .txt file and sends the path, never the text", async () => {
+    uploadDroppedFile.mockResolvedValue(saved("pasted-x.txt"))
+    mockState = stateRunning("claude")
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const text = long(5000)
+    const event = await paste(terminalHost(), [textItem(text)], text)
+
+    expect(uploadDroppedFile).toHaveBeenCalledTimes(1)
+    const uploaded = uploadDroppedFile.mock.calls[0][0] as File
+    expect(uploaded.name).toMatch(/^pasted-\d{4}-\d{2}-\d{2}-\d{6}\.txt$/)
+    expect(await uploaded.text()).toBe(text)
+    // The PATH went out, and the 5000 characters did not.
+    expect(sentToSocket()).toEqual(["/tmp/p1/.dux/uploads/pasted-x.txt "])
+    expect(TermStub.pastes).toEqual(["/tmp/p1/.dux/uploads/pasted-x.txt "])
+    // Cancelled AND stopped, so xterm never sees the text at all.
+    expect(event.defaultPrevented).toBe(true)
+    expect(TermStub.xtermPastes).toEqual([])
+    // And the report says what happened, in the user's terms.
+    const message = vi.mocked(toast.success).mock.calls.at(-1)![0] as string
+    expect(message).toContain("5000 characters")
+    expect(message).toContain("saved it as a file")
+    expect(message).toContain("pasted-x.txt")
+  })
+
+  it("leaves a paste under the threshold entirely to xterm", async () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const text = long(999)
+    const event = await paste(terminalHost(), [textItem(text)], text)
+
+    expect(uploadDroppedFile).not.toHaveBeenCalled()
+    expect(event.defaultPrevented).toBe(false)
+    expect(TermStub.xtermPastes).toEqual([event])
+  })
+
+  it("pastes long text verbatim into a TERMINAL, at any length", async () => {
+    // A long paste into a shell is a command or a heredoc. Turning it into a
+    // file would destroy what the user meant, so a terminal never does.
+    render(
+      <TerminalPane
+        kind="terminal"
+        id="t1"
+        owner={{ kind: "session", session_id: "s1" }}
+      />,
+    )
+    const text = long(50_000)
+    const event = await paste(terminalHost(), [textItem(text)], text)
+
+    expect(uploadDroppedFile).not.toHaveBeenCalled()
+    expect(event.defaultPrevented).toBe(false)
+    expect(TermStub.xtermPastes).toEqual([event])
+  })
+
+  it("is switched off by a threshold of 0", async () => {
+    mockState = makeState()
+    mockState.bootstrap!.upload_pasted_text_chars = 0
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const text = long(50_000)
+    const event = await paste(terminalHost(), [textItem(text)], text)
+
+    expect(uploadDroppedFile).not.toHaveBeenCalled()
+    expect(event.defaultPrevented).toBe(false)
+  })
+
+  it("is switched off for a server that never published the setting", async () => {
+    // Not yet known is not enabled, the same rule `file_drop_max_bytes`
+    // follows: nothing surprising happens to a paste until dux has said the
+    // feature is there.
+    mockState = makeState()
+    delete mockState.bootstrap!.upload_pasted_text_chars
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const text = long(50_000)
+    await paste(terminalHost(), [textItem(text)], text)
+
+    expect(uploadDroppedFile).not.toHaveBeenCalled()
+  })
+
+  it("hands long text straight to xterm on Ctrl+Shift+v", async () => {
+    // One hatch for both triggers. The chord already means "give it to me
+    // literally" for image-wins, and it means the same thing here.
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(pressKey({ code: "KeyV", ctrlKey: true, shiftKey: true })).toBe(false)
+    const text = long(50_000)
+    const event = await paste(terminalHost(), [textItem(text)], text)
+
+    expect(uploadDroppedFile).not.toHaveBeenCalled()
+    expect(event.defaultPrevented).toBe(false)
+    expect(TermStub.xtermPastes).toEqual([event])
+  })
+
+  it("refuses it for a client that does not hold input, and saves nothing", async () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    act(() => FakePtySocket.instances.at(-1)!.onConnected("42"))
+    act(() => notifyPtyOwner("s1", "someone-else", undefined, undefined))
+    const text = long(50_000)
+    const event = await paste(terminalHost(), [textItem(text)], text)
+
+    expect(uploadDroppedFile).not.toHaveBeenCalled()
+    expect(sentToSocket()).toEqual([])
+    expect(event.defaultPrevented).toBe(true)
+    const message = vi.mocked(toast.error).mock.calls[0][0] as string
+    expect(message).toContain("Take over")
+    // Its OWN toast id. On the image refusal's id the two would replace each
+    // other, so a viewer who pastes a screenshot and then a wall of text sees
+    // one message and is told nothing about the other.
+    const options = vi.mocked(toast.error).mock.calls[0][1] as { id: string }
+    expect(options.id).toBe("clipboard-text-paste")
+  })
+
+  it("keeps the image refusal on its own toast id", async () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    act(() => FakePtySocket.instances.at(-1)!.onConnected("42"))
+    act(() => notifyPtyOwner("s1", "someone-else", undefined, undefined))
+    await paste(terminalHost(), [imageItem(png("shot.png"))])
+
+    const options = vi.mocked(toast.error).mock.calls[0][1] as { id: string }
+    expect(options.id).toBe("clipboard-image-paste")
+  })
+
+  it("fires at exactly one character over a threshold the server chose", async () => {
+    // Not the shipped default, so this pins that the number really is read off
+    // the bootstrap document rather than baked in, and pins the boundary at the
+    // same time: `limit` is typed, `limit + 1` becomes a file.
+    uploadDroppedFile.mockResolvedValue(saved("pasted-x.txt"))
+    mockState = makeState()
+    mockState.bootstrap!.upload_pasted_text_chars = 2500
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+
+    const atLimit = long(2500)
+    const first = await paste(terminalHost(), [textItem(atLimit)], atLimit)
+    expect(uploadDroppedFile).not.toHaveBeenCalled()
+    expect(first.defaultPrevented).toBe(false)
+
+    const overLimit = long(2501)
+    const second = await paste(terminalHost(), [textItem(overLimit)], overLimit)
+    expect(uploadDroppedFile).toHaveBeenCalledTimes(1)
+    expect(second.defaultPrevented).toBe(true)
+    const message = vi.mocked(toast.success).mock.calls.at(-1)![0] as string
+    expect(message).toContain("2501 characters")
+  })
+
+  it("leaves a paste carrying only text/html alone", async () => {
+    // Copying out of a rich editor puts `text/html` on the clipboard, and a
+    // browser that offers no `text/plain` flavour beside it gives `getData` an
+    // empty string. There is no text for dux to file away, so the paste is
+    // xterm's, however large the markup is.
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const htmlItem = {
+      kind: "string",
+      type: "text/html",
+      getAsFile: () => null,
+      getAsString: (cb: (s: string) => void) => cb(long(50_000)),
+    }
+    const event = await paste(terminalHost(), [htmlItem], "")
+
+    expect(uploadDroppedFile).not.toHaveBeenCalled()
+    expect(event.defaultPrevented).toBe(false)
+    expect(TermStub.xtermPastes).toEqual([event])
+  })
+
+  it("files a long paste away from the mobile compose box too, into the DRAFT", async () => {
+    // The compose bar is IN scope, deliberately. A paste that large is a
+    // document whichever surface receives it, and the path joining the draft is
+    // better than either dumping the text into the message or refusing it: the
+    // user can still write around the path before pressing Send.
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 420 })
+    try {
+      uploadDroppedFile.mockResolvedValue(saved("pasted-x.txt"))
+      render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+      const box = screen.getByLabelText("Message") as HTMLTextAreaElement
+      fireEvent.change(box, { target: { value: "look at " } })
+
+      const text = long(5000)
+      const event = await paste(box, [textItem(text)], text)
+
+      expect(uploadDroppedFile).toHaveBeenCalledTimes(1)
+      expect((uploadDroppedFile.mock.calls[0][0] as File).name).toMatch(
+        /^pasted-\d{4}-\d{2}-\d{2}-\d{6}\.txt$/,
+      )
+      // The PATH joined the draft. Nothing was sent: a paste must not fire a
+      // half-written message.
+      expect(box.value).toBe("look at /tmp/p1/.dux/uploads/pasted-x.txt ")
+      expect(sentToSocket()).toEqual([])
+      expect(TermStub.pastes).toEqual([])
+      expect(event.defaultPrevented).toBe(true)
+      // And the report says where the path went, in the compose bar's own
+      // words, instead of claiming the text was typed at the agent.
+      const message = vi.mocked(toast.success).mock.calls.at(-1)![0] as string
+      expect(message).toContain("5000 characters")
+      expect(message).toContain("added its path to your message")
+      expect(message).not.toContain("typing it into the agent")
+    } finally {
+      Object.defineProperty(window, "innerWidth", {
+        configurable: true,
+        value: 1024,
+      })
+    }
+  })
+
+  it("strands a long paste, with its path, when the message box closes mid-upload", async () => {
+    // The compose sink's liveness check still applies to a filed-away paste:
+    // the bar can go away while the upload is in flight, and reporting "added
+    // its path to your message" with no message box on screen would be a lie
+    // about where the text went.
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 420 })
+    try {
+      let release: (v: unknown) => void = () => {}
+      uploadDroppedFile.mockReturnValue(
+        new Promise((resolve) => {
+          release = resolve
+        }),
+      )
+      const view = render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+      const box = screen.getByLabelText("Message") as HTMLTextAreaElement
+      const text = long(5000)
+      await paste(box, [textItem(text)], text)
+
+      mockState = {
+        ...mockState,
+        bootstrap: { ...mockState.bootstrap!, compose_bar: false },
+      }
+      await act(async () => {
+        view.rerender(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+      })
+      await act(async () => {
+        release(saved("pasted-x.txt"))
+        for (let i = 0; i < 4; i++) await Promise.resolve()
+      })
+
+      expect(sentToSocket()).toEqual([])
+      const message = vi.mocked(toast.warning).mock.calls.at(-1)![0] as string
+      expect(message).toContain("5000 characters")
+      expect(message).toContain("/tmp/p1/.dux/uploads/pasted-x.txt")
+      expect(message).toContain("message box closed")
+      // And the recovery, because the text reached neither the draft nor the
+      // agent.
+      expect(message).toContain("still on the clipboard")
+    } finally {
+      Object.defineProperty(window, "innerWidth", {
+        configurable: true,
+        value: 1024,
+      })
+    }
   })
 })

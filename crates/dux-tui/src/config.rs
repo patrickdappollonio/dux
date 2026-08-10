@@ -489,6 +489,41 @@ fn config_schema() -> Vec<ConfigEntry> {
             value_fn: |c| FieldValue::Bool(c.ui.upload_write_gitignore),
         },
         ConfigEntry::Field {
+            key: "upload_pasted_text_chars",
+            comment: Some(CommentSource::Static(
+                "# Web UI only: how long a piece of text you PASTE into an agent may be\n\
+                 # before dux saves it to the upload directory above as a .txt file and\n\
+                 # pastes that file's path instead of typing the text out.\n\
+                 # Why: an agent has a limited context window, but it can read or scan a\n\
+                 # document efficiently when it needs to. A wall of pasted text spends\n\
+                 # that context whether the agent needed all of it or not; a path costs\n\
+                 # almost nothing and the agent fetches what it wants. Paste a log, a\n\
+                 # stack trace or a diff and you hand over a file; paste a paragraph of\n\
+                 # instructions and it arrives as text, as it always did.\n\
+                 # Counted in CHARACTERS, so a paste in Japanese or one full of emoji is\n\
+                 # measured the same way an English one is.\n\
+                 # The default of 1000 is deliberately conservative. It sits at the low\n\
+                 # end of the region where the CLIs we could measure start reclassifying\n\
+                 # a paste themselves (Codex files anything over 1000 characters away as\n\
+                 # generic large content; Claude Code treats a single key event over 800\n\
+                 # as a paste), because any command can be a provider here and one we\n\
+                 # have not measured may cut off sooner. Raise it if you would rather\n\
+                 # more of your text arrived as text.\n\
+                 # Set to 0 to switch this off and always paste text as text. Press\n\
+                 # Ctrl+Shift+v (Cmd+Shift+v on a Mac) to bypass it for one paste; that\n\
+                 # is the same chord that forces text when the clipboard also holds an\n\
+                 # image. Values between 1 and 199, or above 100000, are clamped with one\n\
+                 # warning in dux.log.\n\
+                 # This never applies to a TERMINAL: a long paste into a shell is a\n\
+                 # command or a heredoc, and turning it into a file would destroy what\n\
+                 # you meant. It DOES apply in the phone message box, where the path is\n\
+                 # put into your draft instead: a paste that large is a document wherever\n\
+                 # you paste it, and a path you can write around beats a message box full\n\
+                 # of log.",
+            )),
+            value_fn: |c| FieldValue::Usize(c.ui.upload_pasted_text_chars),
+        },
+        ConfigEntry::Field {
             key: "attention_grace_seconds",
             comment: Some(CommentSource::Static(
                 "# Seconds the attention indicators stay visible after dux regains your\n# attention, before the focused agent's needs-attention flag clears. Applies\n# when you return to the dux browser tab (web UI) and when your terminal\n# window regains focus (TUI). Gives you time to see which agent(s) wanted you\n# before the indicator vanishes. Set to 0 to clear the indicator immediately.\n# TUI note: requires a terminal that reports focus; under tmux, set\n# `focus-events on`. Terminals that never report focus keep the old behavior.",

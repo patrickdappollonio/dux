@@ -26,9 +26,11 @@ shape, the same one toast at the end.
 
 A few specifics worth knowing:
 
-- **Images only.** A clipboard carrying an image is taken over; anything else,
-  text included, is left completely alone and pastes exactly as it always has.
-  When the clipboard carries *both* (copying a screenshot out of an application
+- **Images, and text that is very long.** A clipboard carrying an image is taken
+  over. So is a piece of text past a length you set
+  ([below](#a-very-long-paste-becomes-a-file-too)). Anything shorter is left
+  completely alone and pastes exactly as it always has. When the clipboard
+  carries an image *and* text (copying a screenshot out of an application
   routinely does), the image wins and the text is not pasted, because pasting
   both would drop the markup into your prompt beside the path.
 - **`Ctrl+Shift+v` forces the text.** Image-wins is the right default for a
@@ -36,8 +38,9 @@ A few specifics worth knowing:
   cells and the clipboard carries a picture of the cells alongside the numbers,
   and you almost certainly wanted the numbers. `Ctrl+Shift+v` (`Cmd+Shift+v` on
   a Mac) skips image handling entirely and pastes the text, exactly as that
-  chord does elsewhere. It applies to that one keystroke; the next `Ctrl+v` is
-  image-wins again.
+  chord does elsewhere. It is also how you paste a very long piece of text as
+  text, because it is one hatch rather than two competing ones. It applies to
+  that one keystroke; the next `Ctrl+v` behaves normally again.
 - **On a phone, the path joins your draft.** With the compose bar up, a pasted
   image puts its path into the message you are composing rather than sending
   anything. You finish the sentence and press Send, as usual. The toast says so
@@ -58,6 +61,60 @@ keystroke *is* the permission: the browser hands the bytes to the page precisely
 because you asked it to. That is the same reasoning behind `Ctrl+v` being the
 reliable paste chord in the web terminal (see
 [The workspace in the browser](/docs/web-workspace)).
+
+## A very long paste becomes a file too
+
+Paste a 40 KB error log into an agent and every one of those characters goes
+into its context window, whether or not it needed all of them. The agent can
+only read what you gave it, and you gave it everything.
+
+So past a length you set, dux takes the same route it takes for an image: it
+saves the text as a `.txt` file in the agent's upload folder and pastes **that
+file's path**. The agent can then open it, scan it, grep it, or ignore most of
+it. A path costs a handful of tokens; the log costs the window.
+
+The threshold is [`ui.upload_pasted_text_chars`](/docs/configuration), and the
+default is **1000 characters**, deliberately on the low side. The CLIs whose
+source could be read start reclassifying a paste themselves somewhere in that
+region (Codex files anything past 1000 characters away as generic large content;
+Claude Code treats a single key event over 800 as a paste), and since any
+command can be a provider in dux, one nobody has measured may cut off sooner.
+Raise it if you would rather more of your text arrived as text. Paste a stack
+trace, a diff or a config file and you hand over a document. Paste a paragraph
+of instructions and it arrives as text, as it always did.
+
+The details:
+
+- **Counted in characters.** A paste in Japanese, or one full of emoji, is
+  measured exactly the way an English one is. Counting bytes would file a
+  Japanese paragraph away at a third of the length an English one is allowed.
+- **The file is the pasted text, exactly.** UTF-8, no BOM added, nothing
+  appended, no newlines rewritten: carriage returns, trailing spaces, escape
+  codes, combining marks and NUL bytes all survive. The one exception is an
+  unpaired surrogate, half of a character whose other half never arrived, which
+  UTF-8 cannot represent and which is written as the replacement character
+  (`U+FFFD`) instead. It is named from the clock, like
+  `pasted-2026-08-09-141530.txt`, and
+  it lands in the same folder, under the same ignore file and the same
+  collision-safe naming, as everything else on this page.
+- **The toast says so, and says the way out.** Turning a paste into a file
+  silently would be a surprise, so the report leads with what happened and with
+  the size that triggered it, then names the file, then tells you your text is
+  still on the clipboard and which chord pastes it literally: *"That paste was
+  41320 characters, so dux saved it as a file rather than typing it into the
+  agent."* If the save itself fails it says it **tried** to save, and the
+  clipboard note is how you get your text back.
+- **`Ctrl+Shift+v` pastes it as text anyway.** The same hatch as image-wins,
+  for the same reason, and for that one keystroke only.
+- **Set it to `0` to switch it off** and long pastes go to the prompt verbatim,
+  as before.
+- **Never in a terminal.** A long paste into a shell is a command, or a heredoc,
+  or a script you meant to run. Turning that into a file would destroy what you
+  meant, so a terminal pastes text verbatim at any length and always will.
+- **In the phone message box too.** A paste that large is a document wherever
+  you paste it, so the same thing happens: the file is saved and its **path
+  joins your draft**, which you can then write around before pressing Send. The
+  alternative would be a message box holding 40 KB of log.
 
 ## Why a path and not the file itself
 
@@ -207,12 +264,13 @@ Two things dux deliberately will not do:
   main repository and change what git ignores in every other worktree at once.
   Polluting your repo is the thing this feature exists to stop doing.
 
-Both halves are settings, on `[ui]` in `config.toml`:
+These are settings, on `[ui]` in `config.toml`:
 
 | Key | Default | What it does |
 |---|---|---|
 | `upload_directory` | `".dux/uploads"` | Where an agent's dropped and pasted files go, relative to that agent's worktree. Must be a relative path with no `..` in it that a filesystem could actually hold; anything else falls back to the default and says so once in `dux.log`. |
 | `upload_write_gitignore` | `true` | Whether to keep the self-ignoring `.gitignore` in that folder, attempted on every upload. Set it to `false` if you intend to commit what you drop or paste, and your uploads show up as ordinary untracked files again. This one is also a row in the web UI's **Preferences** dialog, as *Hide dropped and pasted files from git*. |
+| `upload_pasted_text_chars` | `1000` | How long a piece of text you paste into an **agent** may be before dux saves it as a `.txt` file in the folder above and pastes that file's path instead. Counted in characters. `0` switches it off. Values between 1 and 199, or above 100000, are clamped with one warning in `dux.log`. Also a row in the web UI's **Preferences** dialog, as *Save long pastes as a file*. Never applies to a terminal. |
 
 `upload_directory` deliberately has **no** Preferences row. It is a path, and a
 free-text box is a poor way to pick one; doing it properly needs a directory

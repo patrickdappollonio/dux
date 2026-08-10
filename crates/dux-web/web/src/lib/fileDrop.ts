@@ -145,6 +145,23 @@ export type DropContext = {
   /// Reporting that as "sent its path" claimed the agent had the file when it
   /// did not, which is the one thing this whole toast exists to be exact about.
   delivery?: "sent" | "draft"
+  /// Set ONLY when this batch is not dropped files at all but one long TEXT
+  /// paste dux turned into a document, and then it is that paste's character
+  /// count.
+  ///
+  /// It exists because that gesture is the one where the user did not ask for a
+  /// file. They pressed paste; a document appeared and a path went to the agent
+  /// instead of their text. Reporting only "Saved pasted-....txt and sent its
+  /// path" would be true and still leave them wondering where their paragraph
+  /// went, so the report leads with what happened and with the size that
+  /// triggered it. The number, rather than a bare "it was long", is what lets
+  /// them decide whether to raise or lower the threshold.
+  ///
+  /// It is a LEAD-IN rather than a fourth rung: everything else the ladder says
+  /// (refused, stranded with its full path, renamed) is exactly as true for a
+  /// pasted document as for a dropped file, so this adds a sentence rather than
+  /// forking the reporting.
+  pastedTextChars?: number
 }
 
 /// "sent its path" / "added its path to your message", for one file.
@@ -387,7 +404,7 @@ export function dragDropPasteFor(
 /// this exists to catch.
 ///
 /// Takes the LIMIT rather than the form, for the reason spelled out on
-/// `PROVIDER_ATTACHMENT_CHAR_LIMITS`. A `null` limit refuses nothing.
+/// `COMMAND_ATTACHMENT_CHAR_LIMITS`. A `null` limit refuses nothing.
 ///
 /// Counts CHARACTERS, because that is what the CLI counts. JavaScript's `.length`
 /// counts UTF-16 code units, so a path full of emoji would look twice as long as
@@ -680,6 +697,80 @@ function renameNote(saved: SavedFile[], ctx: DropContext): string {
 /// lands on: what a renamed file is now called, and which folder each file went
 /// to when they did not all go to the same one.
 export function dropToastFor(
+  outcomes: DropOutcome[],
+  ctx: DropContext,
+): DropToast {
+  const report = savedFilesToast(outcomes, ctx)
+  if (ctx.pastedTextChars === undefined) return report
+  const anySaved = outcomes.some(
+    (o) => o.kind === "sent" || o.kind === "saved-not-sent",
+  )
+  return {
+    ...report,
+    message:
+      pastedTextLead(ctx.pastedTextChars, anySaved, ctx) +
+      report.message +
+      PASTED_TEXT_RECOVERY,
+  }
+}
+
+/// The sentence that goes in front of every rung when the "files" were really
+/// one long text paste. Empty for a drop and for an image paste, so no existing
+/// report gains a word.
+///
+/// It says the SIZE (the thing the user can act on: raise the threshold, or
+/// lower it) and it says dux made a file of the text rather than delivering it,
+/// which is the surprising half. What the file is called and where it went are
+/// the ladder's job, and it already does that better than a lead-in could.
+///
+/// TWO things it must get right, and it used to get both wrong.
+///
+/// TENSE. It is prepended to whichever rung the ladder chose, INCLUDING rung 1,
+/// where nothing was saved at all. "dux saved it as a file" in front of "Could
+/// not save pasted-....txt" is a flat contradiction, and the user reading it
+/// has no way to tell which half is true. `saved` is what the outcomes actually
+/// say, so a failed save reads "tried to save".
+///
+/// DESTINATION. The path does not always go to the agent: with the mobile
+/// compose bar up it joins the DRAFT, which is what `ctx.delivery` already
+/// tells the ladder ("added its path to your message"). A lead-in hardcoded to
+/// "typing it into the agent" contradicted the sentence directly after it.
+function pastedTextLead(
+  chars: number,
+  saved: boolean,
+  ctx: DropContext,
+): string {
+  const verb = saved ? "saved" : "tried to save"
+  const instead =
+    ctx.delivery === "draft"
+      ? "putting the text in your message"
+      : "typing it into the agent"
+  return `That paste was ${chars} characters, so dux ${verb} it as a file rather than ${instead}. `
+}
+
+/// The way back, appended to EVERY rung of a filed-away text paste.
+///
+/// It is on the good rung as well as the bad ones on purpose. The successful
+/// case is the one where the user is definitely reading, and it is also the
+/// case they may not have wanted: the toast is the only place that can tell
+/// them how to get the literal text this time and how to stop it happening
+/// next time.
+///
+/// On the FAILING rungs it is the whole recovery. dux cancels the paste event
+/// to make room for the file, so when the save fails the text is neither typed
+/// nor saved, and the report would otherwise leave the user with nothing. It
+/// never writes to the clipboard, so the bytes are still exactly where they
+/// were copied from and the force-text chord inserts them literally; that is
+/// enough, and stashing a copy anywhere else would be a new place for content
+/// the user already holds.
+///
+/// The chord is written out for both platforms rather than sniffed, matching
+/// the docs and every other place dux names it: a toast that named the wrong
+/// modifier would be worse than one that names both.
+const PASTED_TEXT_RECOVERY =
+  ' Your text is still on the clipboard: press Ctrl+Shift+v (Cmd+Shift+v on a Mac) to paste it as text, or change when this happens under "Save long pastes as a file" in Preferences.'
+
+function savedFilesToast(
   outcomes: DropOutcome[],
   ctx: DropContext,
 ): DropToast {

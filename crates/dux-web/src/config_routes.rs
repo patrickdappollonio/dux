@@ -305,6 +305,11 @@ struct UiSettingsPatch {
     /// Its companion `upload_directory` is deliberately not settable here: it
     /// is a path, and the web has no directory picker to edit one with.
     upload_write_gitignore: Option<bool>,
+    /// How many characters a text paste onto an agent pane may run to before
+    /// the web saves it as a file and pastes the path. Out-of-range values are
+    /// clamped engine-side (see `normalized_upload_pasted_text_chars`), not
+    /// rejected here.
+    upload_pasted_text_chars: Option<usize>,
     auto_reopen_agents: Option<bool>,
     show_changes_pane: Option<bool>,
     always_show_tab_strip: Option<bool>,
@@ -425,6 +430,7 @@ async fn set_settings(
             mobile_top_bar: body.ui.mobile_top_bar,
             mobile_accessory_bar: body.ui.mobile_accessory_bar,
             upload_write_gitignore: body.ui.upload_write_gitignore,
+            upload_pasted_text_chars: body.ui.upload_pasted_text_chars,
             auto_reopen_agents: body.ui.auto_reopen_agents,
             show_changes_pane: body.ui.show_changes_pane,
             web_notifications: body.capabilities.web_notifications,

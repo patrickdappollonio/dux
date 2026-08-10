@@ -216,14 +216,16 @@ to every open tab immediately, so it sticks across restarts.
 
 ## Where dropped and pasted files go (`[ui]`)
 
-Two web-only settings under `[ui]` decide what happens to a file you drop or
+Three web-only settings under `[ui]` decide what happens to a file you drop or
 paste onto an **agent** pane. Dropping or pasting onto a terminal is unaffected:
-that always lands in the folder the terminal is actually in.
+that always lands in the folder the terminal is actually in, and a terminal
+never turns a paste into a file at all.
 
 ```toml
 [ui]
-upload_directory       = ".dux/uploads"  # relative to the agent's worktree
-upload_write_gitignore = true            # hide the uploads from git
+upload_directory         = ".dux/uploads"  # relative to the agent's worktree
+upload_write_gitignore   = true            # hide the uploads from git
+upload_pasted_text_chars = 1000            # longer pastes become a .txt file
 ```
 
 `upload_directory` is where the file is saved, relative to that agent's
@@ -244,8 +246,24 @@ already have there, and never writes to `.git/info/exclude` (in a linked worktre
 resolves to the main checkout's copy, so it would change what git ignores in
 every other worktree at once).
 
-`upload_write_gitignore` is also a row in the web UI's **Preferences** dialog,
-as *Hide dropped and pasted files from git*. `upload_directory` deliberately is
+`upload_pasted_text_chars` is the point at which a piece of text you PASTE into
+an agent stops being typed at the prompt and becomes a document instead: dux
+saves it as a `.txt` file in the folder above and pastes that file's path. The
+reason is the agent's context window. It is finite, but an agent can read or
+scan a file when it needs to, so a path costs almost nothing while a wall of
+text costs the window whether the agent needed all of it or not. The default of
+1000 is deliberately conservative: it sits at the low end of the region where
+the CLIs we could measure start reclassifying a paste themselves, and any
+command can be a provider in dux, so one nobody has measured may cut off sooner.
+It counts CHARACTERS, so a paste in Japanese is measured the way an English one
+is. Set it to `0` to switch the behaviour off
+and always paste text as text, or press `Ctrl+Shift+v` (`Cmd+Shift+v` on a Mac)
+to bypass it for one paste. Values between 1 and 199, or above 100000, are
+clamped with one warning in `dux.log`.
+
+`upload_write_gitignore` and `upload_pasted_text_chars` are also rows in the web
+UI's **Preferences** dialog, as *Hide dropped and pasted files from git* and
+*Save long pastes as a file*. `upload_directory` deliberately is
 not: it is a path, and a free-text box is a poor way to pick one, so it stays a
 config-file setting until there is a directory picker worth pointing at it. The
 full story is in

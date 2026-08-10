@@ -132,6 +132,21 @@ pub struct BootstrapView {
     /// field is a poor affordance, and doing it properly needs a directory
     /// picker. Web-only behavior, as the setting itself is.
     pub upload_write_gitignore: bool,
+    /// Mirrors `config.ui.upload_pasted_text_chars`, already NORMALIZED: how
+    /// many characters a text paste onto an AGENT pane may run to before the
+    /// web saves it as a `.txt` file and pastes that file's path instead of
+    /// typing the text. `0` switches the behaviour off.
+    ///
+    /// Normalized here as well as at load, for the same reason
+    /// `terminal_font_size` is: `set_settings` and the raw config editor can
+    /// both put a fresh value in memory without going back through
+    /// `load_config`, and an out-of-range number reaching the browser would
+    /// turn every prompt into a file.
+    ///
+    /// Not published for a TERMINAL to read, because a terminal has no use for
+    /// it: a long paste into a shell is a command or a heredoc, and dux never
+    /// files one away. Web-only behavior, as the setting itself is.
+    pub upload_pasted_text_chars: usize,
     /// Mirrors `config.ui.auto_reopen_agents`: the GLOBAL startup auto-reopen
     /// switch (default false). When on, agents that were running when dux last
     /// exited (and have their per-agent opt-in) are relaunched at startup, by
@@ -1191,6 +1206,9 @@ impl Engine {
             mobile_top_bar: self.config.ui.mobile_top_bar,
             mobile_accessory_bar: self.config.ui.mobile_accessory_bar,
             upload_write_gitignore: self.config.ui.upload_write_gitignore,
+            upload_pasted_text_chars: crate::config::normalized_upload_pasted_text_chars(
+                self.config.ui.upload_pasted_text_chars,
+            ),
             auto_reopen_agents: self.config.ui.auto_reopen_agents,
             attention_grace_seconds: self.config.ui.attention_grace_seconds,
             web_notifications: self.config.capabilities.web_notifications,
@@ -2237,6 +2255,31 @@ mod tests {
         assert_eq!(engine.bootstrap().file_drop_max_bytes, 4242);
     }
 
+    #[test]
+    fn the_long_paste_threshold_is_projected_already_normalized() {
+        // The browser acts on this number without re-checking it, so an
+        // out-of-range value must be corrected before it leaves. `set_settings`
+        // and the raw config editor can both put one in memory without going
+        // back through `load_config`, which is the only other place that
+        // corrects it.
+        let (mut engine, _tmp) = test_engine();
+        assert_eq!(
+            engine.bootstrap().upload_pasted_text_chars,
+            crate::config::DEFAULT_UPLOAD_PASTED_TEXT_CHARS
+        );
+        // Zero is the off switch and survives untouched.
+        engine.config.ui.upload_pasted_text_chars = 0;
+        assert_eq!(engine.bootstrap().upload_pasted_text_chars, 0);
+        // A value that would turn every prompt into a file is clamped up.
+        engine.config.ui.upload_pasted_text_chars = 4;
+        assert_eq!(
+            engine.bootstrap().upload_pasted_text_chars,
+            crate::config::MIN_UPLOAD_PASTED_TEXT_CHARS
+        );
+        engine.config.ui.upload_pasted_text_chars = 2_500;
+        assert_eq!(engine.bootstrap().upload_pasted_text_chars, 2_500);
+    }
+
     /// One launched entry, spelled out rather than defaulted, so a test that
     /// cares about the command says so and a test that cares about the form says
     /// so.
@@ -2542,6 +2585,7 @@ mod tests {
             "mobile_top_bar",
             "mobile_accessory_bar",
             "upload_write_gitignore",
+            "upload_pasted_text_chars",
             "auto_reopen_agents",
             "attention_grace_seconds",
             "web_notifications",

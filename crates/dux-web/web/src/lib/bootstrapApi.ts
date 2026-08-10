@@ -91,6 +91,15 @@ export interface Bootstrap {
    * companion `ui.upload_directory` is deliberately not published as a
    * preference: it is a path, and there is no directory picker to edit it. */
   upload_write_gitignore?: boolean
+  /** Mirrors `config.ui.upload_pasted_text_chars`: how many characters a TEXT
+   * paste onto an AGENT pane may run to before dux saves it as a `.txt` file
+   * and pastes that file's path instead of typing the text. `0` switches the
+   * behaviour off. Older servers omit it, and this document arrives after the
+   * first render, so consumers treat an absent value as OFF (0): nothing
+   * surprising happens to a paste until dux has said the feature exists, the
+   * same rule `file_drop_max_bytes` follows. Never applies to a TERMINAL pane,
+   * where a long paste is a command or a heredoc. */
+  upload_pasted_text_chars?: number
   /** Mirrors `config.ui.auto_reopen_agents`: the GLOBAL startup auto-reopen
    * switch. When on, agents that were still running when dux last exited (and
    * have their per-agent opt-in) relaunch at the next startup, on the TUI and

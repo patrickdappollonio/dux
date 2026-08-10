@@ -875,6 +875,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_upload_route_stores_a_posted_text_file_byte_for_byte() {
+        // A ROUTE-CONTRACT test, and nothing more. Be honest about its reach:
+        // it posts a `.txt` through the ordinary upload route and would pass
+        // with the entire long-paste client feature reverted, because the
+        // DECISION to turn a paste into a file is client-side
+        // (`lib/clipboardPaste.ts`) and never touches this crate.
+        //
+        // It earns its place anyway: the client feature rests on the promise
+        // that whatever it posts comes back off disk unchanged, since the whole
+        // point is that the agent opens the file and reads what was on the
+        // clipboard. This is where that promise is pinned.
+        //
+        // The content is deliberately awkward: non-Latin text, an emoji outside
+        // the BMP, a CRLF and a lone LF. Any re-encoding, newline normalization
+        // or BOM on the way through would show up here as different bytes.
+        let (_tmp, wt, app) = router().await;
+        let text = "エラーログ\r\nline two\n🙂 done";
+        let resp = app
+            .oneshot(drop_req(
+                "pty=s1&filename=pasted-2026-08-09-141530.txt",
+                text.as_bytes().to_vec(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_str(&body_text(resp).await).unwrap();
+
+        assert_eq!(body["saved_name"], "pasted-2026-08-09-141530.txt");
+        let path = std::path::PathBuf::from(body["path"].as_str().unwrap());
+        assert_eq!(
+            std::fs::canonicalize(path.parent().unwrap()).unwrap(),
+            std::fs::canonicalize(wt.join(".dux").join("uploads")).unwrap(),
+            "a pasted document goes to the same upload directory a dropped file does"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            text.as_bytes(),
+            "the saved file must be the pasted text byte for byte"
+        );
+    }
+
+    #[tokio::test]
     async fn a_configured_upload_directory_is_where_an_agent_drop_actually_lands() {
         // Every other test in this file exercises the DEFAULT `.dux/uploads`,
         // so nothing proved the configured value reaches the drop at all: the

@@ -1307,3 +1307,119 @@ describe("the toast says where the path actually went", () => {
     )
   })
 })
+
+describe("dropToastFor, for a long text paste turned into a file", () => {
+  // Silently turning a paste into a file is a surprise, so the report has to
+  // say so outright: what happened, why (the size), and what the file is
+  // called. It rides the SAME rung ladder as a drop rather than a second
+  // reporting path, so a refusal or a stranded file still reads correctly.
+  const pastedAgent = { kind: "agent" as const, pastedTextChars: 4213 }
+
+  it("says the text was saved instead of typed, names the size, and names the file", () => {
+    const t = dropToastFor(
+      [sent("pasted-2026-08-09-141530.txt", "pasted-2026-08-09-141530.txt", "~/wt/.dux/uploads")],
+      pastedAgent,
+    )
+    expect(t.tone).toBe("success")
+    expect(t.message).toContain("4213 characters")
+    expect(t.message).toContain("saved it as a file")
+    expect(t.message).toContain("pasted-2026-08-09-141530.txt")
+    expect(t.message).toContain("~/wt/.dux/uploads")
+    expect(t.message).toContain("sent its path")
+  })
+
+  it("keeps the explanation on a rung that went wrong", () => {
+    const t = dropToastFor(
+      [
+        {
+          kind: "saved-not-sent",
+          requestedName: "pasted-2026-08-09-141530.txt",
+          savedName: "pasted-2026-08-09-141530.txt",
+          path: "/wt/.dux/uploads/pasted-2026-08-09-141530.txt",
+          folderLabel: "~/wt/.dux/uploads",
+          reason: "the connection dropped",
+        },
+      ],
+      pastedAgent,
+    )
+    expect(t.tone).toBe("warning")
+    expect(t.message).toContain("4213 characters")
+    expect(t.message).toContain("/wt/.dux/uploads/pasted-2026-08-09-141530.txt")
+  })
+
+  it("says nothing extra for an ordinary drop", () => {
+    // The field is absent for every drop and for an image paste, so no existing
+    // report gains a sentence.
+    expect(dropToastFor([sent("shot.png")], agent).message).not.toContain(
+      "characters",
+    )
+  })
+
+  it("says it TRIED to save when the save failed, and never claims it did", () => {
+    // The rung-1 case, and the one the lead-in used to lie about. The upload
+    // was refused, so nothing was saved; and because the paste was cancelled to
+    // make room for the file, the text was not typed either. A lead-in that
+    // says "dux saved it as a file" in front of "could not save it" tells the
+    // user both halves of a contradiction and neither of them is help.
+    const t = dropToastFor(
+      [
+        {
+          kind: "refused",
+          requestedName: "pasted-2026-08-09-141530.txt",
+          reason: "The server is busy. Try the drop again shortly.",
+        },
+      ],
+      pastedAgent,
+    )
+    expect(t.tone).toBe("error")
+    expect(t.message).toContain("4213 characters")
+    expect(t.message).toContain("tried to save")
+    expect(t.message).not.toContain("so dux saved it as a file")
+    expect(t.message).toContain("Could not save pasted-2026-08-09-141530.txt")
+  })
+
+  it("names the recovery on every rung: the clipboard still holds the text", () => {
+    // The text is neither typed nor saved on the failing rungs, and it is not
+    // in the message on the good one either, so the way to get it back has to
+    // be in the toast. dux never writes to the clipboard, so the bytes are
+    // still exactly where the user copied them from, and the force-text chord
+    // inserts them literally.
+    const rungs = [
+      dropToastFor([sent("pasted.txt")], pastedAgent),
+      dropToastFor([notSent("pasted.txt")], pastedAgent),
+      dropToastFor(
+        [{ kind: "refused", requestedName: "pasted.txt", reason: "nope" }],
+        pastedAgent,
+      ),
+    ]
+    for (const t of rungs) {
+      expect(t.message).toContain("still on the clipboard")
+      expect(t.message).toContain("Ctrl+Shift+v")
+      expect(t.message).toContain("Cmd+Shift+v")
+      // The opt-out, named where the user is definitely looking. A toast that
+      // explains a surprise without saying how to stop it happening again is
+      // half a message.
+      expect(t.message).toContain("Save long pastes as a file")
+    }
+  })
+
+  it("says the path joined the message, not that the text was typed at the agent", () => {
+    // On the compose surface the delivery is a draft insert, and the ladder
+    // already says "added its path to your message". A lead-in still saying
+    // "rather than typing it into the agent" contradicts the sentence directly
+    // after it.
+    const t = dropToastFor([sent("pasted.txt")], {
+      ...pastedAgent,
+      delivery: "draft",
+    })
+    expect(t.message).toContain("added its path to your message")
+    expect(t.message).toContain("rather than putting the text in your message")
+    expect(t.message).not.toContain("typing it into the agent")
+  })
+
+  it("says the text was typed at the agent when the delivery is the terminal", () => {
+    const t = dropToastFor([sent("pasted.txt")], pastedAgent)
+    expect(t.message).toContain("rather than typing it into the agent")
+    expect(t.message).not.toContain("putting the text in your message")
+  })
+})

@@ -69,6 +69,7 @@ describe("settingsDescriptors", () => {
         "ui.mobile_top_bar",
         "ui.mobile_accessory_bar",
         "ui.upload_write_gitignore",
+        "ui.upload_pasted_text_chars",
         "ui.auto_reopen_agents",
         "capabilities.web_notifications",
         "ui.status_clear_seconds",
@@ -197,6 +198,41 @@ describe("settingsDescriptors", () => {
     expect(byKey["ui.terminal_font_size"]).toBe(14)
   })
 
+  it("read() shows the long-paste threshold as OFF on a server that never published it", () => {
+    // The one number in this file whose absent value is NOT its default. An
+    // older server publishes nothing, `TerminalPane` reads that as `0` and
+    // files nothing away, and `bootstrapApi.ts` documents absent-means-off. A
+    // dialog reading the same absence as 1000 would show a threshold that is
+    // not in force, and a user "confirming" it would silently switch the
+    // feature ON.
+    const bare = { ...sampleBootstrap } as Partial<Bootstrap>
+    delete bare.upload_pasted_text_chars
+    const byKey = Object.fromEntries(
+      allSettingDescriptors().map((d) => [d.key, d.read(bare as Bootstrap)]),
+    )
+    expect(byKey["ui.upload_pasted_text_chars"]).toBe(0)
+  })
+
+  it("read() reports the long-paste threshold the server actually published", () => {
+    expect(
+      allSettingDescriptors()
+        .find((d) => d.key === "ui.upload_pasted_text_chars")
+        ?.read({ ...sampleBootstrap, upload_pasted_text_chars: 2500 }),
+    ).toBe(2500)
+  })
+
+  it("names the server's floor on the long-paste row, since the control cannot enforce it", () => {
+    // The control's `min` is 0, because 0 is the off switch and bounding the
+    // input at the floor would make it unreachable. That leaves a real gap: a
+    // user typing 50 is clamped up to 200 by the server with a warning that
+    // only lands in `dux.log`, and the browser would otherwise say nothing at
+    // all about it.
+    const d = allSettingDescriptors().find(
+      (d) => d.key === "ui.upload_pasted_text_chars",
+    )
+    expect(d?.description).toContain("200")
+  })
+
   it("read() falls back to showing both first-load screens on an older bootstrap", () => {
     const bare = { ...sampleBootstrap } as Partial<Bootstrap>
     delete bare.disable_automated_welcome_screen
@@ -244,6 +280,7 @@ describe("settingsDescriptors", () => {
       "ui.status_clear_seconds",
       "ui.terminal_font_family",
       "ui.terminal_font_size",
+      "ui.upload_pasted_text_chars",
       "ui.upload_write_gitignore",
     ])
   })

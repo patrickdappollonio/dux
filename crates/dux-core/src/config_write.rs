@@ -365,6 +365,12 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
         "upload_write_gitignore",
         config.ui.upload_write_gitignore,
     );
+    patch_table_usize(
+        doc,
+        "ui",
+        "upload_pasted_text_chars",
+        config.ui.upload_pasted_text_chars,
+    );
     patch_table_bool(
         doc,
         "ui",

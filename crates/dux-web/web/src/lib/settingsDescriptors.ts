@@ -123,6 +123,14 @@ export interface SettingGroup {
 // the post-save bootstrap refetch reflects whatever it actually saved.
 const MAX_STATUS_CLEAR_SECONDS = 3_600
 const MAX_ATTENTION_GRACE_SECONDS = 300
+// Mirrors `MAX_UPLOAD_PASTED_TEXT_CHARS` / `DEFAULT_UPLOAD_PASTED_TEXT_CHARS`
+// in `crates/dux-core/src/config.rs`. The floor is deliberately NOT mirrored as
+// the input's `min`: `0` is a real value (switch the behaviour off) and the
+// server clamps anything between 1 and the floor up with a warning, so bounding
+// the input at the floor would make the off switch unreachable from here.
+const MAX_UPLOAD_PASTED_TEXT_CHARS = 100_000
+const MIN_UPLOAD_PASTED_TEXT_CHARS = 200
+const DEFAULT_UPLOAD_PASTED_TEXT_CHARS = 1_000
 // MIN_TERMINAL_FONT_SIZE/MAX_TERMINAL_FONT_SIZE are imported above from
 // terminalFont.ts rather than redeclared here (that file mirrors the
 // server-side bounds in `crates/dux-core/src/config.rs`). UX bounds only; the
@@ -246,6 +254,30 @@ export const SETTING_GROUPS: SettingGroup[] = [
         default: true,
         writeTarget: "settings",
         read: (b) => b.upload_write_gitignore ?? true,
+      },
+      {
+        key: "ui.upload_pasted_text_chars",
+        label: "Save long pastes as a file",
+        description:
+          `Paste more than this many characters into an agent and dux saves the text as a .txt file in the upload folder and pastes that file's path instead, into the message box on a phone or straight at the prompt otherwise. An agent's context window is finite, but it can read a document when it needs to, so a path costs it almost nothing while a wall of text costs the window either way. Press Ctrl+Shift+v (Cmd+Shift+v on a Mac) to paste text as text just this once. Never applies to a terminal, where a long paste is usually a command. Anything between 1 and ${MIN_UPLOAD_PASTED_TEXT_CHARS} is raised to ${MIN_UPLOAD_PASTED_TEXT_CHARS}; use 0 to switch it off.`,
+        surface: "web",
+        control: {
+          kind: "number",
+          min: 0,
+          max: MAX_UPLOAD_PASTED_TEXT_CHARS,
+          zeroMeaning: "Never; always paste text as text",
+          unit: "characters",
+        },
+        default: DEFAULT_UPLOAD_PASTED_TEXT_CHARS,
+        writeTarget: "settings",
+        // ABSENT MEANS OFF, not "means the default". An older server publishes
+        // nothing here, `TerminalPane` reads that as 0 and files nothing away,
+        // and `bootstrapApi.ts` documents the rule. Reading it as 1000 in this
+        // one place showed a threshold that was not in force, and a user who
+        // saved the dialog would have switched the feature on without asking
+        // for it. `default` below is the shipped value, which is a different
+        // question and is answered separately.
+        read: (b) => b.upload_pasted_text_chars ?? 0,
       },
       {
         key: "capabilities.web_notifications",

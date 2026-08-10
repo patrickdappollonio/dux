@@ -102,6 +102,12 @@ const fullBootstrap: Bootstrap = {
   always_show_tab_strip: false,
   attention_indicator: true,
   attention_on_bell: true,
+  // Stated rather than left absent, unlike the rows above it whose `read()`
+  // falls back to their own default. This one's absence MEANS OFF (an older
+  // server never published it), so leaving it out would make the fixture a
+  // server with the feature switched off, and "reset the section to defaults"
+  // would then legitimately emit it as a change.
+  upload_pasted_text_chars: 1000,
 }
 
 function seed(overrides: Partial<Bootstrap> = {}) {
