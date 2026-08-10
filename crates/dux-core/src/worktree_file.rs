@@ -428,16 +428,32 @@ enum RenameNoReplaceError {
     Failed(std::io::Error),
 }
 
-/// Rename `src` onto `dst`, refusing an occupied destination ATOMICALLY.
+/// Which of the two code paths inside [`rename_no_replace_reporting`] actually
+/// answered. It exists to make the choice OBSERVABLE, because the result alone
+/// cannot tell the two apart: for every input a test can construct, a stat
+/// followed by [`std::fs::rename`] returns exactly the same
+/// [`RenameNoReplaceError::DestinationExists`] that the kernel flag returns.
+/// The difference is only WHICH code ran, so that is what gets reported and
+/// asserted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RenameMechanism {
+    /// `renameat_with(RenameFlags::NOREPLACE)` answered, by renaming or by
+    /// refusing. Both supported platforms take this path.
+    NoReplaceSyscall,
+    /// The flag is unimplemented here, so the older stat-then-rename pair ran.
+    StatThenRename,
+}
+
+/// Rename `src` onto `dst`, refusing an occupied destination in one syscall.
 ///
 /// A stat followed by [`std::fs::rename`] is not the same promise: `rename(2)`
 /// silently OVERWRITES (measured: file-onto-file and directory-onto-empty-
 /// directory both succeed), so another client can create the destination in
 /// the window between the two calls and lose it, and dux is explicitly
 /// multi-client with no trash to recover from.
-/// `renameat_with(RenameFlags::NOREPLACE)` makes the refusal the kernel's, in
-/// the same syscall. rustix maps that flag to `RENAME_NOREPLACE` on Linux and
-/// to `renameatx_np`'s `RENAME_EXCL` on macOS, which are dux's two supported
+/// `renameat_with(RenameFlags::NOREPLACE)` puts the refusal in the rename call
+/// itself. rustix maps that flag to `RENAME_NOREPLACE` on Linux and to
+/// `renameatx_np`'s `RENAME_EXCL` on macOS, which are dux's two supported
 /// targets.
 ///
 /// The fallback is narrow and stated rather than hidden: a filesystem with no
@@ -445,15 +461,36 @@ enum RenameNoReplaceError {
 /// and answers `ENOSYS`) reports `ENOSYS`/`EINVAL`/`ENOTSUP`, and only there
 /// does this stat first and rename after, which is the older racy pair. There
 /// and only there does the TOCTOU window still exist.
+///
+/// What the tests prove is that on this platform both a successful and a
+/// refused no-replace rename go through the SYSCALL path and not the fallback
+/// (`RenameMechanism`, asserted below), and that an occupied destination is
+/// refused with the source and destination untouched. The ATOMICITY itself is
+/// deliberately not asserted, because it is not black-box testable from here:
+/// the only observable difference between the two paths is a window measured
+/// in microseconds inside another process's scheduling, and a test that tried
+/// to hit it would be a load-driven flake that proves nothing when it passes.
+/// Asserting the branch is the deterministic stand-in: it fails the moment the
+/// syscall stops being the thing that answers.
 fn rename_no_replace(src: &Path, dst: &Path) -> Result<(), RenameNoReplaceError> {
+    rename_no_replace_reporting(src, dst).1
+}
+
+/// [`rename_no_replace`] plus the branch it took. The wrapper above is what
+/// production calls, and it discards the mechanism; only the tests read it.
+fn rename_no_replace_reporting(
+    src: &Path,
+    dst: &Path,
+) -> (RenameMechanism, Result<(), RenameNoReplaceError>) {
     use rustix::fs::{CWD, RenameFlags, renameat_with};
     use rustix::io::Errno;
 
     match renameat_with(CWD, src, CWD, dst, RenameFlags::NOREPLACE) {
-        Ok(()) => Ok(()),
-        Err(err) if err == Errno::EXIST || err == Errno::NOTEMPTY => {
-            Err(RenameNoReplaceError::DestinationExists)
-        }
+        Ok(()) => (RenameMechanism::NoReplaceSyscall, Ok(())),
+        Err(err) if err == Errno::EXIST || err == Errno::NOTEMPTY => (
+            RenameMechanism::NoReplaceSyscall,
+            Err(RenameNoReplaceError::DestinationExists),
+        ),
         Err(err)
             if err == Errno::NOSYS
                 || err == Errno::INVAL
@@ -461,11 +498,20 @@ fn rename_no_replace(src: &Path, dst: &Path) -> Result<(), RenameNoReplaceError>
                 || err == Errno::OPNOTSUPP =>
         {
             if dst.symlink_metadata().is_ok() {
-                return Err(RenameNoReplaceError::DestinationExists);
+                return (
+                    RenameMechanism::StatThenRename,
+                    Err(RenameNoReplaceError::DestinationExists),
+                );
             }
-            std::fs::rename(src, dst).map_err(RenameNoReplaceError::Failed)
+            (
+                RenameMechanism::StatThenRename,
+                std::fs::rename(src, dst).map_err(RenameNoReplaceError::Failed),
+            )
         }
-        Err(err) => Err(RenameNoReplaceError::Failed(err.into())),
+        Err(err) => (
+            RenameMechanism::NoReplaceSyscall,
+            Err(RenameNoReplaceError::Failed(err.into())),
+        ),
     }
 }
 
@@ -1769,11 +1815,12 @@ mod tests {
     mod rename_entry_tests {
         use super::*;
 
-        /// The refusal is the KERNEL's, in the same syscall as the rename,
-        /// with no stat in front of it: `rename(2)` on its own silently
-        /// overwrites, so a stat-then-rename pair is a race two clients can
-        /// lose a file to. This calls the primitive directly, precisely so
-        /// nothing stats first.
+        /// An occupied destination is refused and nothing is lost: `rename(2)`
+        /// on its own silently overwrites. This calls the primitive directly,
+        /// so no caller-side stat can be what produced the refusal. It does
+        /// NOT establish that the KERNEL refused rather than a stat inside the
+        /// primitive; that is what
+        /// `a_refused_rename_goes_through_the_no_replace_syscall` is for.
         #[test]
         fn the_rename_primitive_itself_refuses_an_occupied_destination() {
             let dir = tempfile::tempdir().unwrap();
@@ -1822,6 +1869,50 @@ mod tests {
             rename_no_replace(&src, &dst).unwrap();
             assert!(!src.exists());
             assert_eq!(std::fs::read_to_string(&dst).unwrap(), "moved\n");
+        }
+
+        /// Both assertions below exist because the RESULT of a no-replace
+        /// rename is not evidence of how it was reached: reverting the
+        /// `renameat_with` call to a stat followed by `std::fs::rename` leaves
+        /// every other rename test in this file green, since a stat in front
+        /// of `rename(2)` returns `DestinationExists` for exactly the inputs a
+        /// test can set up. So these assert the BRANCH instead. Both supported
+        /// targets implement the flag (Linux `RENAME_NOREPLACE`, macOS
+        /// `renameatx_np`/`RENAME_EXCL`), so the fallback must not run here,
+        /// and it running is the regression that matters: it is the shape the
+        /// TOCTOU window comes back in.
+        #[test]
+        fn a_successful_rename_goes_through_the_no_replace_syscall() {
+            let dir = tempfile::tempdir().unwrap();
+            let src = dir.path().join("a.txt");
+            let dst = dir.path().join("b.txt");
+            std::fs::write(&src, "moved\n").unwrap();
+            let (mechanism, result) = rename_no_replace_reporting(&src, &dst);
+            result.unwrap();
+            assert_eq!(
+                mechanism,
+                RenameMechanism::NoReplaceSyscall,
+                "the rename must be the kernel's, not a stat followed by rename(2)"
+            );
+        }
+
+        #[test]
+        fn a_refused_rename_goes_through_the_no_replace_syscall() {
+            let dir = tempfile::tempdir().unwrap();
+            let src = dir.path().join("a.txt");
+            let dst = dir.path().join("b.txt");
+            std::fs::write(&src, "source\n").unwrap();
+            std::fs::write(&dst, "do not lose me\n").unwrap();
+            let (mechanism, result) = rename_no_replace_reporting(&src, &dst);
+            assert!(
+                matches!(result, Err(RenameNoReplaceError::DestinationExists)),
+                "unexpected result: {result:?}"
+            );
+            assert_eq!(
+                mechanism,
+                RenameMechanism::NoReplaceSyscall,
+                "the refusal must be the kernel's, not a stat in front of rename(2)"
+            );
         }
 
         /// A symlink whose target escapes the worktree can be DELETED, so it
