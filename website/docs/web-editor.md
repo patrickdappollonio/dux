@@ -1,6 +1,6 @@
 ---
 title: The code editor
-description: A real Monaco editor in the browser for any file in a worktree, with syntax highlighting, JSON and TOML help, Markdown and SVG previews, image viewing, path search, diffs against HEAD, file management including moving and inspecting files, and open-in-local-editor.
+description: A real Monaco editor in the browser for any file in a worktree, with syntax highlighting, JSON and TOML help, Markdown and SVG previews, image viewing, path search, diffs against HEAD, file management including moving and inspecting files, dragging files in from your desktop, and open-in-local-editor.
 group: Web UI
 order: 62
 ---
@@ -190,6 +190,67 @@ the editor:
 Renaming, moving, or deleting a file that has other open editor tabs pointed at it
 (or, for a folder, tabs pointed anywhere underneath it) keeps everything in sync: a
 rename or a move retargets those tabs to the new path, and a delete closes them.
+
+## Dragging files in from your desktop
+
+Drag files from your own machine onto the file tree and let go, and they are
+saved into the worktree on the server. This is how you get a logo, a fixture, a
+CSV or a screenshot **into the project** from a laptop that is not the machine
+dux is running on.
+
+Where they land is where you point:
+
+- **A folder row** takes the files into that folder.
+- **A file row** takes them into the folder that file is in, because a file is
+  not a place to put a file. It is the same rule New File… follows.
+- **The empty space** below the tree takes them to the worktree root.
+
+The row that would receive the drop is highlighted while you are still holding
+the files, so you can see the destination before you commit to it, and a toast
+afterwards names the folder they went to.
+
+These are **ordinary files**. They show up in `git status`, they show up in the
+agent's Changes pane straight away, and you can commit them. Nothing is hidden
+and no ignore file is written. That is deliberate, and it is the difference
+between this and dropping a file onto an agent's pane: a file handed to an agent
+is scratch that dies with the agent, and a file dropped here is one you are
+adding to the repository. dux calls those two different intents and gives them
+different destinations. See
+[Dropping and pasting files](/docs/dropping-files) for the whole picture.
+
+A drop here pastes nothing into any terminal, and it does not need you to hold
+input on anything: it saves files and stops.
+
+Nothing already on disk is overwritten. If a name is taken the file is saved
+under a new one, with a timestamp and a counter, and the toast tells you what it
+is called now. (Note the deliberate difference from **Move…** above, which
+refuses an occupied destination outright. A move names one exact destination, so
+putting the file somewhere else would be a different operation from the one you
+asked for; a drop names only a folder, so the next free name is the honest
+answer. Neither overwrites.) Your filenames are kept exactly as you had them,
+accents and all, and a name dux cannot use is refused with the reason rather
+than rewritten.
+
+Dropping outside the worktree or into `.git` is refused, exactly as creating,
+renaming or moving into either is. A drop is **stricter than those three in one
+way**, and it is worth knowing about rather than being surprised by: **New
+File…**, **Rename…** and **Move…** will follow a symlinked directory that stays
+inside the worktree, so `New File…` inside a `libs -> packages/libs` link works,
+while a drop refuses any folder reached through a link and says so. That is the
+safe direction to be wrong in (a link is the one way a perfectly ordinary
+relative path still lands outside the tree), so it stays; if you want to drop
+into a linked folder, navigate to the real one and drop there. Both the tree and
+the file search index refresh as soon as the files land.
+
+dux takes **files**, not folders. Dropping a folder is refused by name, with the
+files dropped alongside it still saved, and one toast says which was which. And
+a drop that misses the tree entirely, landing on the editor or the tab strip, is
+swallowed rather than handled by the browser, which would otherwise navigate the
+tab to the file you dropped and throw away everything you had not saved.
+
+The whole feature is switched off when `[server] file_drop_max_bytes` is `0`,
+and the same size limit applies here as anywhere else; the tree simply does not
+respond to a drag when it is off.
 
 ## Syntax highlighting and language niceties
 

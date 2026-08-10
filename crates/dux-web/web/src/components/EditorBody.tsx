@@ -72,6 +72,12 @@ import {
   sanitizeEditorLayout,
 } from "@/lib/editorLayout"
 import { isImagePreviewPath, previewKind } from "@/lib/editorPreview"
+import { performTreeDrop } from "@/lib/editorDrop"
+import type { DroppedItems } from "@/lib/editorDrop"
+import { nextFileDropToastId } from "@/lib/fileDrop"
+import { uploadDroppedFile } from "@/lib/fileDropApi"
+import { showBusyToast } from "@/lib/busyToast"
+import { showFinalToast } from "@/lib/finalToast"
 import { cn } from "@/lib/utils"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { useObjectUrl } from "@/hooks/use-object-url"
@@ -145,7 +151,7 @@ interface EditorBodyProps {
 }
 
 export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
-  const { changes, editorTarget, editorTabs } = useDux()
+  const { bootstrap, changes, editorTarget, editorTabs } = useDux()
   const tabsState = editorTabs[sessionId]
   const tabs = useMemo(() => tabsState?.tabs ?? [], [tabsState])
   const activeTab = tabs.find((t) => t.id === tabsState?.activeId) ?? null
@@ -1060,6 +1066,33 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
       })
   }
 
+  // Files dragged from the DESKTOP onto the tree. This is dux's durable drop
+  // intent, "add this file to my project": the file lands where the user
+  // pointed, as an ordinary visible file, and NOTHING is pasted into any
+  // terminal (that is the pane drop, and it is a different intent entirely).
+  //
+  // The refresh afterwards is the move path's, for the same reason: the tree's
+  // cached listing of that directory and the flat search index both went stale.
+  function handleFilesDropped(dir: string, dropped: DroppedItems): void {
+    const toastId = nextFileDropToastId()
+    void performTreeDrop(dir, dropped, {
+      upload: (file, into) =>
+        // `conn` is null on purpose. It names the TERMINAL SOCKET, and the
+        // check it feeds exists only so a viewer who cannot paste is told
+        // before a file is written. A tree drop pastes nothing, so there is
+        // nothing to check and no socket to name.
+        uploadDroppedFile(file, { pty: sessionId, conn: null, dir: into }),
+      revalidateDirs,
+      refreshSearchIndex,
+      reportBusy: (message) => showBusyToast(message, { id: toastId }),
+      reportFinal: (t) =>
+        showFinalToast(t.tone, t.message, {
+          id: toastId,
+          statusClearSeconds: bootstrap?.status_clear_seconds,
+        }),
+    })
+  }
+
   const openPath = activeTab?.path ?? null
 
   return (
@@ -1516,6 +1549,13 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
                     setDeleteEntryTarget({ path, isDir })
                   }
                   revalidate={treeRevalidate}
+                  // NOT YET KNOWN is NOT ENABLED, exactly as on the pane: the
+                  // bootstrap document and the workspace load in parallel, and
+                  // an older server never sends the field, so a drag arriving
+                  // in that window must not offer a feature dux cannot yet say
+                  // it has. The window closes in one fetch.
+                  fileDropEnabled={(bootstrap?.file_drop_max_bytes ?? 0) > 0}
+                  onFilesDropped={handleFilesDropped}
                 />
               )}
             </div>

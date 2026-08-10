@@ -7,6 +7,7 @@ import {
 import { useIsMobile } from "@/hooks/use-mobile"
 import { closeEditor, useDux } from "@/lib/store"
 import { EditorBody } from "@/components/EditorBody"
+import { swallowMissedFileDrop } from "@/lib/editorDrop"
 
 
 // The overlay shell: owns the Dialog and is desktop-only — Monaco is poor on
@@ -38,6 +39,13 @@ export function EditorOverlay() {
     >
       <DialogContent
         showCloseButton={false}
+        // The floor under the file tree's drop targets. A dropped file the
+        // browser is left to handle NAVIGATES the tab to it, so a drag aimed at
+        // the tree that lands on Monaco or the tab strip would throw the editor
+        // away. The tree's own rows stop propagation, so this only ever sees
+        // the misses. See `swallowMissedFileDrop`.
+        onDragOver={swallowMissedFileDrop}
+        onDrop={swallowMissedFileDrop}
         className="flex h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] max-w-[calc(100%-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-[min(80rem,calc(100%-2rem))]"
       >
         <DialogTitle className="sr-only">Code editor</DialogTitle>

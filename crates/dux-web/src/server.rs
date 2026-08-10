@@ -167,6 +167,19 @@ impl AppState {
             Some(owner) if *owner != conn_id
         )
     }
+
+    /// Hand input ownership of `pty_id` to `conn_id`, for tests that need the
+    /// courtesy check above to have something to say.
+    ///
+    /// Test-only and narrow on purpose: the alternative was widening the
+    /// `pty_size_owners` field to the whole crate so a route test could reach
+    /// past `AppState`'s surface into a lock, which is a lot of new reach to buy
+    /// one fixture. Ownership is otherwise only ever taken by a live terminal
+    /// socket, which a `oneshot` router test has no way to open.
+    #[cfg(test)]
+    pub(crate) fn give_input_to(&self, pty_id: &str, conn_id: u64) {
+        let _ = self.pty_size_owners.claim(pty_id, conn_id);
+    }
 }
 
 /// Maximum size of a single inbound WebSocket MESSAGE (text or binary), down

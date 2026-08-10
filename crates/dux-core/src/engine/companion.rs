@@ -222,6 +222,37 @@ impl Engine {
         })
     }
 
+    /// Where a file dropped onto the EDITOR'S FILE TREE should be saved: the
+    /// tree directory the user dropped on, inside that agent's worktree.
+    ///
+    /// The other intent. [`Self::file_drop_destination`] answers "look at this
+    /// for me" with the invisible upload directory; this answers "add this file
+    /// to my project" with the place the user pointed at, as an ordinary file
+    /// git can see.
+    ///
+    /// A TERMINAL id answers `None` rather than falling back to that terminal's
+    /// own directory, and the fallback is what makes that worth stating: a
+    /// terminal has no file tree, so a tree drop naming one is a request that
+    /// cannot mean what it says, and quietly serving it from the other intent
+    /// would put the file somewhere the user never pointed at. `relative` is
+    /// carried through UNVALIDATED on purpose: the guards belong next to the
+    /// walk that opens the directory (`DropDir::open_tree_dir`), on the
+    /// blocking pool, not on the engine thread.
+    pub fn file_drop_tree_destination(
+        &self,
+        pty_id: &str,
+        relative: &str,
+    ) -> Option<crate::file_drop::FileDropDestination> {
+        if self.companion_terminals.contains_key(pty_id) {
+            return None;
+        }
+        let session = self.session_behind_pty(pty_id)?;
+        Some(crate::file_drop::FileDropDestination::WorktreeDirectory {
+            worktree: session.worktree_path.clone().into(),
+            relative: relative.to_string(),
+        })
+    }
+
     /// The agent pane whose changed files a drop on `pty_id` could affect: its
     /// session id and its worktree, or `None` when there is no agent behind the
     /// pane at all.

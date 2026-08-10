@@ -4,6 +4,7 @@ import { AgentNotFound } from "@/components/AgentNotFound"
 import { EditorBody } from "@/components/EditorBody"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { useVisualViewportHeight } from "@/hooks/use-visual-viewport"
+import { swallowMissedFileDrop } from "@/lib/editorDrop"
 import { useDux } from "@/lib/store"
 import { keyboardLikelyOpen } from "@/lib/viewport"
 
@@ -52,6 +53,11 @@ export function StandaloneEditorShell() {
   return (
     <div
       className="flex min-h-0 flex-col overflow-hidden bg-background"
+      // The same floor the overlay has: a file dropped anywhere but the tree's
+      // own rows would otherwise navigate this tab to the file and discard
+      // every unsaved buffer. See `swallowMissedFileDrop`.
+      onDragOver={swallowMissedFileDrop}
+      onDrop={swallowMissedFileDrop}
       style={{
         height:
           constrainToKeyboard && viewportHeight !== null

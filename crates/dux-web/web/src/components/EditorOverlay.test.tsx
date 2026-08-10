@@ -934,3 +934,55 @@ describe("file explorer collapse toggle", () => {
     expect(screen.getByPlaceholderText("Search files…")).toBeTruthy()
   })
 })
+
+// A file drop that MISSES the file tree must not navigate the tab away.
+//
+// The browser's default action for a dropped file is to open it, which
+// discards the whole SPA and every unsaved in-memory buffer with it. The
+// editor now invites exactly this drag (the tree takes file drops), so a drop
+// landing on Monaco, the tab strip or the panel chrome is an ordinary
+// near-miss rather than an exotic one. `lib/editorDrafts.ts` puts a
+// `beforeunload` prompt in the way, so the work is not lost silently, but a
+// prompt the user has to answer is not the feature.
+describe("a file drop that misses the tree", () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    installBootStubs()
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.unstubAllGlobals()
+  })
+
+  // What the browser reads to decide whether to handle the drop itself:
+  // whether anything called preventDefault.
+  function fileDrag() {
+    return { dataTransfer: { types: ["Files"], files: [], items: [] } }
+  }
+
+  it("is cancelled by the overlay, so the browser never opens the file", async () => {
+    await mountWithTab(PATH)
+    // The overlay's own surface. Anything inside it that does not claim the
+    // drop itself bubbles here.
+    const surface = await screen.findByRole("dialog")
+
+    const over = fireEvent.dragOver(surface, fileDrag())
+    const dropped = fireEvent.drop(surface, fileDrag())
+    // `fireEvent` returns false when a handler called preventDefault, which is
+    // the whole signal: with no handler the browser takes the drop and
+    // navigates.
+    expect(over).toBe(false)
+    expect(dropped).toBe(false)
+  })
+
+  it("leaves an in-app drag alone, so nothing else is disturbed", async () => {
+    await mountWithTab(PATH)
+    const surface = await screen.findByRole("dialog")
+    const textDrag = {
+      dataTransfer: { types: ["text/plain"], files: [], items: [] },
+    }
+    expect(fireEvent.dragOver(surface, textDrag)).toBe(true)
+    expect(fireEvent.drop(surface, textDrag)).toBe(true)
+  })
+})

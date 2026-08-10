@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 
 import type { DirEntry } from "@/lib/fileTree"
+import type { DroppedItems } from "@/lib/editorDrop"
 
 // FileTree talks to the server exclusively through `fileApi.tree`, so mocking
 // that one function is enough to drive every scenario below without a real
@@ -628,6 +629,217 @@ describe("FileTree", () => {
       fireEvent.contextMenu(row)
       fireEvent.click(await screen.findByText("Delete…"))
       expect(onDelete).toHaveBeenCalledWith("a.ts", false)
+    })
+  })
+
+  // Dropping files onto the tree is the DURABLE half of dux's two drop
+  // intents: "add this file to my project", saved where the user pointed. The
+  // rule these tests pin is where "where the user pointed" resolves to, since
+  // getting it wrong writes a file into the wrong folder silently.
+  describe("dropping files onto the tree", () => {
+    // jsdom builds no DataTransfer, so a drag is described by the minimum the
+    // handlers actually read: what kinds it carries, the files, and the items
+    // (which is the only thing that can tell a folder from a file).
+    function fileDrag(files: File[], folders: string[] = []) {
+      return {
+        dataTransfer: {
+          types: ["Files"],
+          files,
+          items: [
+            ...files.map((f) => ({
+              kind: "file",
+              type: f.type,
+              webkitGetAsEntry: () => ({ isDirectory: false, name: f.name }),
+            })),
+            ...folders.map((name) => ({
+              kind: "file",
+              type: "",
+              webkitGetAsEntry: () => ({ isDirectory: true, name }),
+            })),
+          ],
+          dropEffect: "none",
+        },
+      }
+    }
+
+    // What the highlight actually IS: the classes the row paints while it is
+    // the drop target. Asserted rather than a marker attribute, because a
+    // marker no CSS reads keeps its test green while the tree lights up
+    // nothing at all, which is exactly what the previous version of these
+    // tests did.
+    const DROP_HIGHLIGHT = ["bg-primary/10", "ring-1", "ring-primary"]
+    const isHighlighted = (el: Element | null) =>
+      el !== null && DROP_HIGHLIGHT.every((c) => el.classList.contains(c))
+    // Every row's drop target is the row's own button; empty space is the
+    // filler surface.
+    const rowTarget = (label: string) => screen.getByText(label).closest("button")
+
+    async function tree(
+      onFilesDropped: (dir: string, dropped: DroppedItems) => void,
+    ) {
+      treeMock.mockImplementation((_sid, d) =>
+        Promise.resolve({
+          dir: d,
+          entries:
+            d === "" ? [dir("src"), file("README.md")] : [file("src/a.ts")],
+        }),
+      )
+      render(
+        <FileTree
+          sessionId="s1"
+          openPath={null}
+          changed={new Map()}
+          initialPath={null}
+          onOpen={() => {}}
+          fileDropEnabled
+          onFilesDropped={onFilesDropped}
+        />,
+      )
+      expect(await screen.findByText("README.md")).toBeTruthy()
+    }
+
+    const dropped = [new File(["x"], "logo.png")]
+    const asFiles = (files: File[]) => ({ files, folders: [] })
+
+    it("targets the folder itself when dropped on a folder row", async () => {
+      const onFilesDropped = vi.fn()
+      await tree(onFilesDropped)
+      fireEvent.drop(screen.getByText("src"), fileDrag(dropped))
+      expect(onFilesDropped).toHaveBeenCalledWith("src", asFiles(dropped))
+    })
+
+    it("targets the PARENT folder when dropped on a file row", async () => {
+      // A file is not a place to put a file. Every other tree action that
+      // needs a destination folder resolves a file row the same way.
+      const onFilesDropped = vi.fn()
+      await tree(onFilesDropped)
+      fireEvent.drop(screen.getByText("README.md"), fileDrag(dropped))
+      expect(onFilesDropped).toHaveBeenCalledWith("", asFiles(dropped))
+    })
+
+    it("targets the worktree root when dropped on empty tree space", async () => {
+      const onFilesDropped = vi.fn()
+      await tree(onFilesDropped)
+      fireEvent.drop(
+        screen.getByTestId("file-tree-drop-surface"),
+        fileDrag(dropped),
+      )
+      expect(onFilesDropped).toHaveBeenCalledWith("", asFiles(dropped))
+    })
+
+    it("passes every file of a multi-file drop through in one call", async () => {
+      const onFilesDropped = vi.fn()
+      await tree(onFilesDropped)
+      const many = [new File(["a"], "a.png"), new File(["b"], "b.png")]
+      fireEvent.drop(screen.getByText("src"), fileDrag(many))
+      expect(onFilesDropped).toHaveBeenCalledTimes(1)
+      expect(onFilesDropped).toHaveBeenCalledWith("src", asFiles(many))
+    })
+
+    it("reports a dropped FOLDER as a folder rather than as a file", async () => {
+      // Dropping a folder on a file tree is an entirely natural gesture. What
+      // arrives for one is browser-dependent: in one shape it rides in `files`
+      // as an entry whose read fails, which uploaded as a file produces a
+      // transport-shaped error blaming the network. The tree sorts it out here,
+      // because this is the only place the DataTransfer is reachable.
+      const onFilesDropped = vi.fn()
+      await tree(onFilesDropped)
+      const folderAsFile = new File([], "icons")
+      fireEvent.drop(
+        screen.getByText("src"),
+        fileDrag([...dropped, folderAsFile], ["icons"]),
+      )
+      expect(onFilesDropped).toHaveBeenCalledWith("src", {
+        files: dropped,
+        folders: ["icons"],
+      })
+    })
+
+    it("still reports a drop that delivered nothing identifiable", async () => {
+      // The other shape: the drag said it carried files and neither a file nor
+      // an item arrived. Reporting nothing here is how letting go of a folder
+      // came to look exactly like letting go of nothing.
+      const onFilesDropped = vi.fn()
+      await tree(onFilesDropped)
+      fireEvent.drop(screen.getByText("src"), {
+        dataTransfer: { types: ["Files"], files: [], items: [] },
+      })
+      expect(onFilesDropped).toHaveBeenCalledWith("src", {
+        files: [],
+        folders: [],
+      })
+    })
+
+    it("highlights the row that would receive the drop, and only that one", async () => {
+      // The target has to be obvious BEFORE the drop lands, or the user finds
+      // out where the file went by reading a toast afterwards. The assertion is
+      // on the CLASSES the row paints, so deleting the highlight fails here.
+      const onFilesDropped = vi.fn()
+      await tree(onFilesDropped)
+      expect(isHighlighted(rowTarget("src"))).toBe(false)
+
+      fireEvent.dragEnter(screen.getByText("src"), fileDrag(dropped))
+      fireEvent.dragOver(screen.getByText("src"), fileDrag(dropped))
+      expect(isHighlighted(rowTarget("src"))).toBe(true)
+      expect(isHighlighted(rowTarget("README.md"))).toBe(false)
+
+      fireEvent.drop(screen.getByText("src"), fileDrag(dropped))
+      expect(isHighlighted(rowTarget("src"))).toBe(false)
+    })
+
+    it("highlights the empty-space surface when the drag is over the root", async () => {
+      const onFilesDropped = vi.fn()
+      await tree(onFilesDropped)
+      const surface = screen.getByTestId("file-tree-drop-surface")
+      expect(isHighlighted(surface)).toBe(false)
+      fireEvent.dragEnter(surface, fileDrag(dropped))
+      expect(isHighlighted(surface)).toBe(true)
+      expect(isHighlighted(rowTarget("src"))).toBe(false)
+    })
+
+    it("clears the highlight when the drag leaves without dropping", async () => {
+      const onFilesDropped = vi.fn()
+      await tree(onFilesDropped)
+      fireEvent.dragEnter(screen.getByText("src"), fileDrag(dropped))
+      expect(isHighlighted(rowTarget("src"))).toBe(true)
+      fireEvent.dragLeave(screen.getByText("src"), fileDrag(dropped))
+      expect(isHighlighted(rowTarget("src"))).toBe(false)
+      expect(onFilesDropped).not.toHaveBeenCalled()
+    })
+
+    it("ignores a drag that carries no files, so an in-app drag never uploads", async () => {
+      const onFilesDropped = vi.fn()
+      await tree(onFilesDropped)
+      const textDrag = {
+        dataTransfer: { types: ["text/plain"], files: [], items: [] },
+      }
+      fireEvent.dragEnter(screen.getByText("src"), textDrag)
+      expect(isHighlighted(rowTarget("src"))).toBe(false)
+      fireEvent.drop(screen.getByText("src"), textDrag)
+      expect(onFilesDropped).not.toHaveBeenCalled()
+    })
+
+    it("does nothing at all when file drop is switched off on the server", async () => {
+      const onFilesDropped = vi.fn()
+      treeMock.mockImplementation((_sid, d) =>
+        Promise.resolve({ dir: d, entries: d === "" ? [dir("src")] : [] }),
+      )
+      render(
+        <FileTree
+          sessionId="s1"
+          openPath={null}
+          changed={new Map()}
+          initialPath={null}
+          onOpen={() => {}}
+          fileDropEnabled={false}
+          onFilesDropped={onFilesDropped}
+        />,
+      )
+      const row = await screen.findByText("src")
+      fireEvent.dragEnter(row, fileDrag(dropped))
+      expect(isHighlighted(row.closest("button"))).toBe(false)
+      fireEvent.drop(row, fileDrag(dropped))
+      expect(onFilesDropped).not.toHaveBeenCalled()
     })
   })
 })

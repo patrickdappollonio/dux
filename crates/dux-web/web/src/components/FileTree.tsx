@@ -8,6 +8,9 @@ import { FileTreeContextMenu } from "@/components/FileTreeContextMenu"
 import { FileTreeIcon } from "@/components/FileTreeIcon"
 import { dirIconKind, fileIconKind } from "@/lib/fileIcons"
 import { fileApi } from "@/lib/fileApi"
+import { dragCarriesFiles } from "@/lib/fileDrop"
+import { classifyDroppedItems } from "@/lib/editorDrop"
+import type { DroppedItems } from "@/lib/editorDrop"
 import { targetDirForCreate } from "@/lib/fileTreeOps"
 import {
   ancestorDirs,
@@ -49,7 +52,29 @@ interface FileTreeProps {
   // Bump the nonce (with the affected dir(s)) to force a refetch of those
   // directories after a create/rename/delete mutation lands.
   revalidate?: { dirs: string[]; nonce: number } | null
+  // Whether the server accepts uploads at all (`file_drop_max_bytes > 0`).
+  // With it off the tree does not highlight, does not accept a drop, and does
+  // not pretend a drop would work.
+  fileDropEnabled?: boolean
+  // Things dropped from the DESKTOP onto the tree, with the worktree-relative
+  // directory they were dropped on ("" = the worktree root). This is the
+  // durable drop intent, "add this file to my project": the caller uploads
+  // them and refreshes, exactly as it does after a move.
+  //
+  // It carries a `DroppedItems` rather than a `File[]` because a drop can also
+  // be a FOLDER, which is a natural gesture on a file tree and is not something
+  // dux takes. The tree sorts the two apart (it is the only place that can see
+  // the `DataTransfer`) and the caller reports both.
+  onFilesDropped?: (dir: string, dropped: DroppedItems) => void
 }
+
+// The key identifying which drop target is currently under the pointer.
+//
+// It is a ROW identity, not the destination directory, and the two are
+// genuinely different: a file row's destination is its PARENT, so several rows
+// and the root surface can all resolve to `""` while only the one the pointer
+// is actually over may light up.
+const ROOT_DROP_KEY = "\u0000root"
 
 export function FileTree({
   sessionId,
@@ -64,6 +89,8 @@ export function FileTree({
   onDelete = noop,
   onInfo = noop,
   revalidate = null,
+  fileDropEnabled = false,
+  onFilesDropped,
 }: FileTreeProps) {
   // The lazy loaded-directory cache: dirPath ("" = root) → DirState.
   const [dirs, setDirs] = useState<Map<string, DirState>>(() => new Map())
@@ -72,6 +99,9 @@ export function FileTree({
   // element arrives via a callback ref (state, not a plain ref) so the
   // measuring effect below re-runs when it mounts — a mount-only effect would
   // race the loading-spinner state and never attach.
+  // Which drop target the pointer is over, by row identity. `null` is "no drag
+  // in progress over the tree".
+  const [dropKey, setDropKey] = useState<string | null>(null)
   const [viewportEl, setViewportEl] = useState<HTMLDivElement | null>(null)
   const [scrollTop, setScrollTop] = useState(0)
   const [viewportHeight, setViewportHeight] = useState(400)
@@ -291,6 +321,78 @@ export function FileTree({
   )
   const visibleRows = rows.slice(firstVisible, lastVisible + 1)
 
+  // The four native drag handlers one drop target needs, for the row
+  // identified by `key` delivering into `dir`.
+  //
+  // `stopPropagation` is what keeps a row and the root filler underneath it
+  // from both claiming the same drag: the filler wraps every row, so without
+  // it the bubbling event would reach the filler LAST and the root would win
+  // every time, quietly retargeting a folder drop to the worktree root.
+  //
+  // `preventDefault` on dragover is not optional either: without it the
+  // browser refuses the drop and then NAVIGATES to the dropped file, throwing
+  // the editor away.
+  //
+  // Clearing on dragleave without a depth counter is deliberate. A leave fired
+  // while crossing into a child element self-heals on the very next dragover
+  // (which fires continuously), so the worst case is one frame of missing
+  // highlight rather than the stuck highlight a mismatched counter leaves
+  // behind.
+  const dropHandlers = useCallback(
+    (key: string, dir: string) => {
+      if (!fileDropEnabled || !onFilesDropped) return {}
+      const claim = (e: React.DragEvent) => {
+        if (!dragCarriesFiles(e.dataTransfer?.types)) return false
+        e.preventDefault()
+        e.stopPropagation()
+        return true
+      }
+      return {
+        onDragEnter: (e: React.DragEvent) => {
+          if (claim(e)) setDropKey(key)
+        },
+        onDragOver: (e: React.DragEvent) => {
+          if (!claim(e)) return
+          e.dataTransfer.dropEffect = "copy"
+          setDropKey(key)
+        },
+        onDragLeave: (e: React.DragEvent) => {
+          if (!dragCarriesFiles(e.dataTransfer?.types)) return
+          e.stopPropagation()
+          setDropKey((current) => (current === key ? null : current))
+        },
+        onDrop: (e: React.DragEvent) => {
+          if (!claim(e)) return
+          setDropKey(null)
+          // Sorted HERE because this is the only place the `DataTransfer` is
+          // reachable, and reported unconditionally: a drop that produced
+          // neither a file nor a folder still has to say so, or letting go of
+          // a folder looks like letting go of nothing.
+          onFilesDropped(
+            dir,
+            classifyDroppedItems(
+              Array.from(e.dataTransfer.files ?? []),
+              Array.from(e.dataTransfer.items ?? []),
+            ),
+          )
+        },
+      }
+    },
+    [fileDropEnabled, onFilesDropped],
+  )
+
+  // The highlight on the row the drop would land in. Returned as CLASSES so a
+  // caller can merge them into whatever the element already carries, and
+  // through tokens rather than literal colours.
+  //
+  // There used to be a `data-drop-target` attribute beside this that no CSS
+  // ever read: the highlight tests asserted the attribute, so deleting every
+  // `dropClass` call and leaving the tree visually inert kept them green. The
+  // attribute is gone and the tests assert the classes, which is the thing the
+  // user can actually see.
+  const dropClass = (key: string) =>
+    dropKey === key && "bg-primary/10 ring-1 ring-primary"
+
   // The tree renders inside its OWN ScrollArea and windows rows against that
   // viewport. Virtualizing against any other element breaks silently: the
   // window only moves on scroll events from the element it measures, so if an
@@ -312,12 +414,17 @@ export function FileTree({
       <ContextMenuTrigger
         render={
           <div
-            className="min-h-full p-1"
+            data-testid="file-tree-drop-surface"
             // A right-click that lands directly on this filler (not bubbled
             // up from a row's own trigger, which stops propagation before it
             // gets here) opens the root menu: New File…/New Folder… at the
             // worktree root. `min-h-full` covers the empty space below the
             // last row so a click there still hits this trigger.
+            //
+            // It is the drop target for the same space and for the same
+            // reason: a drop on empty tree space means the worktree root.
+            {...dropHandlers(ROOT_DROP_KEY, "")}
+            className={cn("min-h-full rounded p-1", dropClass(ROOT_DROP_KEY))}
           />
         }
       >
@@ -369,7 +476,20 @@ export function FileTree({
                         // to open from the same right-click.
                         onContextMenu={(e) => e.stopPropagation()}
                         aria-expanded={expanded.has(row.path)}
-                        className="flex w-full items-center gap-1 rounded py-1 pr-1 text-left hover:bg-muted"
+                        // Dropping ON a folder puts the files IN it. Routed
+                        // through the same mapping the file row uses rather
+                        // than passing `row.path` straight in: it is the one
+                        // place that answers "which directory does this row
+                        // mean", and two rows answering it two ways is how the
+                        // two drift.
+                        {...dropHandlers(
+                          row.path,
+                          targetDirForCreate({ kind: "dir", path: row.path }),
+                        )}
+                        className={cn(
+                          "flex w-full items-center gap-1 rounded py-1 pr-1 text-left hover:bg-muted",
+                          dropClass(row.path),
+                        )}
                         style={{
                           paddingLeft: `${row.depth * 0.75 + 0.25}rem`,
                           height: ROW_HEIGHT,
@@ -456,6 +576,13 @@ export function FileTree({
                         // See the dir row's identical comment: stops this
                         // row's right-click from also opening the root menu.
                         onContextMenu={(e) => e.stopPropagation()}
+                        // A file is not a place to put a file, so a drop here
+                        // targets the folder the file is IN. The same mapping
+                        // every other destination-taking tree action uses.
+                        {...dropHandlers(
+                          row.path,
+                          targetDirForCreate({ kind: "file", path: row.path }),
+                        )}
                         style={{
                           paddingLeft: `${row.depth * 0.75 + 0.25}rem`,
                           height: ROW_HEIGHT,
@@ -463,6 +590,7 @@ export function FileTree({
                         className={cn(
                           "flex w-full items-center gap-1.5 rounded py-1 pr-1 text-left hover:bg-muted",
                           row.path === openPath && "bg-muted",
+                          dropClass(row.path),
                         )}
                       />
                     }

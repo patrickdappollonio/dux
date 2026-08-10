@@ -130,6 +130,16 @@ pub enum EngineRequest {
         String,
         oneshot::Sender<Option<dux_core::file_drop::FileDropDestination>>,
     ),
+    /// Where a file dropped onto the EDITOR'S FILE TREE should be saved: the
+    /// worktree-relative directory the user dropped on, inside that agent's
+    /// worktree. A terminal id answers `None` (a terminal has no file tree).
+    /// The directory travels UNVALIDATED; its guards live beside the walk that
+    /// opens it, on the blocking pool.
+    FileDropTreeDestination(
+        String,
+        String,
+        oneshot::Sender<Option<dux_core::file_drop::FileDropDestination>>,
+    ),
     /// The agent pane a drop on this pty id could affect: its session id and its
     /// worktree. `None` when there is no agent behind the pane (a terminal owned
     /// by a project or by nothing). Ownership only: whether the file actually
@@ -886,6 +896,26 @@ impl EngineHandle {
         rx.await.unwrap_or(None)
     }
 
+    /// Resolve `pty_id` plus a worktree-relative directory to an editor
+    /// file-tree drop destination. `None` when the pty id names a terminal or
+    /// is unknown, or the engine thread is gone.
+    pub async fn file_drop_tree_destination(
+        &self,
+        pty_id: String,
+        dir: String,
+    ) -> Option<dux_core::file_drop::FileDropDestination> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .req_tx
+            .send(EngineRequest::FileDropTreeDestination(pty_id, dir, tx))
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.unwrap_or(None)
+    }
+
     /// The agent pane whose changed files a drop on `pty_id` could affect, as
     /// `(session id, worktree)`. `None` when no agent is behind the pane or the
     /// engine thread is gone.
@@ -1458,6 +1488,7 @@ fn request_mutates_spine(req: &EngineRequest) -> bool {
         | EngineRequest::TabSession(..)
         | EngineRequest::SessionWorktree(..)
         | EngineRequest::FileDropDestination(..)
+        | EngineRequest::FileDropTreeDestination(..)
         | EngineRequest::FileDropRefreshTarget(..)
         | EngineRequest::ProjectPath(..)
         | EngineRequest::ProjectWorktreeInputs(..)
@@ -2541,6 +2572,9 @@ fn handle_request(
         }
         EngineRequest::FileDropDestination(pty_id, reply) => {
             let _ = reply.send(engine.file_drop_destination(&pty_id));
+        }
+        EngineRequest::FileDropTreeDestination(pty_id, dir, reply) => {
+            let _ = reply.send(engine.file_drop_tree_destination(&pty_id, &dir));
         }
         EngineRequest::FileDropRefreshTarget(pty_id, reply) => {
             let _ = reply.send(engine.file_drop_refresh_target(&pty_id));
@@ -4442,6 +4476,11 @@ mod tests {
                 false,
             ),
             (
+                "FileDropTreeDestination",
+                EngineRequest::FileDropTreeDestination("s1".into(), "src".into(), dead_reply()),
+                false,
+            ),
+            (
                 "FileDropRefreshTarget",
                 EngineRequest::FileDropRefreshTarget("s1".into(), dead_reply()),
                 false,
@@ -4627,7 +4666,7 @@ mod tests {
         // through with a copied-from-its-neighbour `false` that nothing reads.
         assert_eq!(
             request_kind_answers().len(),
-            38,
+            39,
             "every EngineRequest kind needs a row in request_kind_answers; \
              update the count deliberately when adding one"
         );

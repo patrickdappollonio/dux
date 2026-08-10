@@ -149,6 +149,70 @@ impl std::fmt::Display for UnreportablePath {
     }
 }
 
+/// Why a directory named by the editor's file tree cannot receive a drop.
+///
+/// The two refusals are the SAME boundary the editor's own create, rename and
+/// delete already enforce (`worktree_file::resolve_worktree_path` and
+/// `entry_literal_path`), restated here because this destination is reached
+/// through the upload route and never touches those functions. Keeping the two
+/// wordings apart from the guards themselves is deliberate: this is a
+/// destination directory, not a file path, so it is checked before a handle is
+/// opened rather than after a path is resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TreeDirError {
+    /// Absolute, or carrying a `..` or `.` segment. Either one names somewhere
+    /// other than the row the user dropped on, and `..` is how a drop leaves
+    /// the worktree entirely.
+    Traversal,
+    /// Holds a `.git` component. Matched case-insensitively, exactly as
+    /// `entry_literal_path` does, because a case-insensitive filesystem
+    /// resolves `.GIT` to the same directory.
+    GitDirectory,
+}
+
+impl std::fmt::Display for TreeDirError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Traversal => write!(
+                f,
+                "that folder is not inside the worktree, so nothing was saved"
+            ),
+            Self::GitDirectory => write!(
+                f,
+                "dux will not save a file inside the git directory, so nothing \
+                 was saved"
+            ),
+        }
+    }
+}
+
+/// Whether `relative` names a directory the editor's tree may drop into.
+///
+/// Pure and checked on the RAW string rather than on `Path::components`,
+/// because that normalizer silently drops a non-leading `.` segment, so
+/// `src/./x` would pass a component walk while naming something the caller did
+/// not write. The same trap is documented on `worktree_file::entry_literal_path`.
+///
+/// The empty string is the worktree ROOT and is allowed: it is what the browser
+/// sends for a drop on empty tree space.
+pub fn validate_tree_drop_dir(relative: &str) -> Result<(), TreeDirError> {
+    if relative.is_empty() {
+        return Ok(());
+    }
+    if relative.starts_with('/') {
+        return Err(TreeDirError::Traversal);
+    }
+    for segment in relative.split('/') {
+        if segment == ".." || segment == "." {
+            return Err(TreeDirError::Traversal);
+        }
+        if segment.eq_ignore_ascii_case(".git") {
+            return Err(TreeDirError::GitDirectory);
+        }
+    }
+    Ok(())
+}
+
 /// Why a destination folder cannot be used.
 ///
 /// Every variant is a REFUSAL. None of them may be quietly downgraded into
@@ -168,6 +232,30 @@ pub enum DropDirError {
     /// land outside the worktree, and a file in the way means the path names
     /// something dux did not create and must not disturb.
     UploadPathBlocked { component: String },
+    /// The directory the editor's file tree named is not a place a file may be
+    /// put. See [`TreeDirError`].
+    TreeDirRefused(TreeDirError),
+    /// A component of the editor tree directory is a symlink, or is a file
+    /// rather than a directory. Refused rather than followed, for the same
+    /// reason as [`Self::UploadPathBlocked`]: a symlink is the one way a
+    /// relative, traversal-free directory still lands outside the worktree.
+    TreePathBlocked { component: String },
+    /// A component of the editor tree directory is not there. The browser's
+    /// tree is a lazy client-side cache, so the ordinary way to reach this is
+    /// a folder deleted elsewhere since the tree last listed it.
+    ///
+    /// It is its OWN variant rather than an [`Self::Io`] carrying `ENOENT`
+    /// because the message is shown to a person: an errno is not a sentence,
+    /// and every other refusal on this path is written in the user's words.
+    TreeDirMissing { component: String },
+    /// The editor tree directory was opened, and the path it answers to no
+    /// longer names it (it was removed while the handle was held).
+    ///
+    /// This is the ONE half of [`UnreportablePath`] a tree drop keeps, because
+    /// it is about correctness rather than about a terminal. The other three
+    /// (not absolute, not UTF-8, holding a control character) exist because a
+    /// pane drop SENDS the path into a PTY, and a tree drop sends it nowhere.
+    TreeDirVanished,
     /// The process runs in a different MOUNT NAMESPACE, so the file would be
     /// saved in the right place under a name that means something else (or
     /// nothing) in the terminal's own view. Refused until a name that is
@@ -196,6 +284,22 @@ impl std::fmt::Display for DropDirError {
                 "the upload folder could not be created because \"{component}\" is a \
                  symlink, or a file rather than a folder. Remove it, or point \
                  [ui] upload_directory somewhere else."
+            ),
+            Self::TreeDirRefused(why) => write!(f, "{why}"),
+            Self::TreePathBlocked { component } => write!(
+                f,
+                "the file was not saved because \"{component}\" is a symlink, or a \
+                 file rather than a folder"
+            ),
+            Self::TreeDirMissing { component } => write!(
+                f,
+                "the folder \"{component}\" is not there any more, so nothing was \
+                 saved. Refresh the file explorer and drop it again."
+            ),
+            Self::TreeDirVanished => write!(
+                f,
+                "that folder was removed while the file was being saved, so nothing \
+                 was saved"
             ),
             Self::ForeignMountNamespace => write!(
                 f,
@@ -505,6 +609,94 @@ impl DropDir {
         Ok(Self { fd, path })
     }
 
+    /// Pin an EXISTING, ordinary directory inside `worktree`, named by the
+    /// editor's file tree.
+    ///
+    /// This is the durable half of the two drop intents. A file dropped on an
+    /// agent means "look at this for me" and goes to the invisible upload
+    /// directory ([`Self::open_uploads`]); a file dropped on the editor's tree
+    /// means "add this to my project", so it lands where the user pointed, as
+    /// an ordinary visible file git can see. Nothing here creates a directory
+    /// and nothing here writes a `.gitignore`, and both omissions are the
+    /// point rather than an oversight: the tree only offers directories that
+    /// exist, and hiding the file from git would defeat the intent.
+    ///
+    /// It is a separate function from `open_uploads` rather than a flag on it
+    /// because the two differ in what they are ALLOWED to do to the user's
+    /// project, and a boolean parameter deciding whether a walk may create
+    /// directories is exactly the kind of switch that gets passed the wrong
+    /// way round.
+    ///
+    /// The guards are the ones the rest of the editor already applies, in two
+    /// layers. [`validate_tree_drop_dir`] refuses the SHAPE (absolute, `..`,
+    /// `.`, a `.git` component). The walk then enforces it: one component at a
+    /// time from the pinned worktree handle with `O_NOFOLLOW`, so a symlink at
+    /// any component fails the request instead of being followed out of the
+    /// tree, and nothing is resolved back to text and reopened.
+    pub fn open_tree_dir(worktree: &Path, relative: &str) -> Result<Self, DropDirError> {
+        validate_tree_drop_dir(relative).map_err(DropDirError::TreeDirRefused)?;
+
+        let mut fd = rustix::fs::open(
+            worktree,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|e| DropDirError::Io(e.into()))?;
+
+        let mut opened_as = worktree.to_path_buf();
+        for segment in relative.split('/').filter(|s| !s.is_empty()) {
+            fd = match rustix::fs::openat(
+                &fd,
+                segment,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            ) {
+                Ok(fd) => fd,
+                // The same three errnos `open_uploads` folds together, and for
+                // the same measured reason: with `O_DIRECTORY | O_NOFOLLOW` a
+                // symlink reports ENOTDIR on Linux, exactly like a plain file
+                // in the way, while macOS documents ELOOP and some BSDs answer
+                // EMLINK.
+                Err(rustix::io::Errno::LOOP)
+                | Err(rustix::io::Errno::MLINK)
+                | Err(rustix::io::Errno::NOTDIR) => {
+                    return Err(DropDirError::TreePathBlocked {
+                        component: segment.to_string(),
+                    });
+                }
+                // The ordinary way to get here is a STALE tree: the browser's
+                // listing is a lazy client-side cache, so a folder deleted in a
+                // terminal or another tab is still a row until that directory
+                // is re-read. It gets its own refusal because it is a sentence
+                // the user can act on, where the errno underneath it is not.
+                Err(rustix::io::Errno::NOENT) => {
+                    return Err(DropDirError::TreeDirMissing {
+                        component: segment.to_string(),
+                    });
+                }
+                Err(e) => return Err(DropDirError::Io(e.into())),
+            };
+            opened_as.push(segment);
+        }
+
+        // `verified_path_of`, not `reportable_path_of`, and the difference is
+        // the whole point. The reportable checks (absolute, UTF-8, no control
+        // character) exist because a PANE drop hands the path to a PTY, where a
+        // line feed submits and an escape byte is obeyed. Nothing is sent
+        // anywhere here, and a folder named with a control character is legal
+        // on both supported platforms and is shown by the file tree, so holding
+        // a durable save to that bar refused a legitimate drop and explained it
+        // with a sentence about a terminal that was never involved. What IS
+        // kept is the identity check, which is about correctness.
+        let path = verified_path_of(&fd, &opened_as).map_err(|e| match e {
+            DropDirError::Unreportable(UnreportablePath::Unverifiable) => {
+                DropDirError::TreeDirVanished
+            }
+            other => other,
+        })?;
+        Ok(Self { fd, path })
+    }
+
     /// The absolute path of the pinned directory.
     ///
     /// On Linux this is read back from the HANDLE (`/proc/self/fd/<n>`), so it
@@ -639,7 +831,33 @@ fn seed_uploads_gitignore(dir: &OwnedFd) {
 /// checked to still name the pinned directory, so a folder that was removed
 /// under us (Linux answers `"/gone (deleted)"`) or that is only reachable under
 /// this name from another view is refused rather than reported.
+///
+/// The two halves are separable, and [`verified_path_of`] is the second one on
+/// its own, for the destination that never sends the path anywhere.
 fn reportable_path_of(fd: &OwnedFd, opened_as: &Path) -> Result<PathBuf, DropDirError> {
+    let path = verified_path_of(fd, opened_as)?;
+    check_reportable_dir_path(&path).map_err(DropDirError::Unreportable)?;
+    Ok(path)
+}
+
+/// The path a pinned directory answers to, checked only to still NAME that
+/// directory.
+///
+/// This is [`reportable_path_of`] without the terminal-facing half. Those
+/// checks (absolute, valid UTF-8, no control character) are all about what
+/// survives being typed into a PTY, and the editor's tree drop types nothing
+/// anywhere: it saves a file and reports a name. A directory called `"we\nird"`
+/// is legal on Linux and macOS and the file tree shows it, so refusing to save
+/// into it, with a sentence about a terminal, was wrong twice over.
+///
+/// The identity check stays for BOTH callers, because it answers a different
+/// question: whether the handle still refers to something reachable under this
+/// path at all.
+///
+/// The only errors it can produce are [`DropDirError::Io`] and
+/// [`DropDirError::Unreportable`] carrying [`UnreportablePath::Unverifiable`];
+/// `open_tree_dir` relies on that when it rewords the second one.
+fn verified_path_of(fd: &OwnedFd, opened_as: &Path) -> Result<PathBuf, DropDirError> {
     #[cfg(target_os = "linux")]
     let path = {
         let _ = opened_as;
@@ -649,7 +867,6 @@ fn reportable_path_of(fd: &OwnedFd, opened_as: &Path) -> Result<PathBuf, DropDir
     #[cfg(not(target_os = "linux"))]
     let path = opened_as.to_path_buf();
 
-    check_reportable_dir_path(&path).map_err(DropDirError::Unreportable)?;
     if !path_names_the_pinned_directory(fd, &path) {
         return Err(DropDirError::Unreportable(UnreportablePath::Unverifiable));
     }
@@ -823,6 +1040,23 @@ pub enum FileDropDestination {
         /// (`ui.upload_write_gitignore`).
         write_gitignore: bool,
     },
+    /// The EDITOR's FILE TREE: an ordinary, visible directory inside the
+    /// agent's worktree, chosen by the user by dropping on a row.
+    ///
+    /// This is the second of the two intents. `AgentUploads` above is "look at
+    /// this for me": invisible to git, gone with the agent. This one is "add
+    /// this file to my project", and the editor is where it belongs because
+    /// the editor is the only surface where the user picks the destination.
+    /// So nothing here goes near the upload directory and nothing here writes
+    /// a `.gitignore`.
+    WorktreeDirectory {
+        /// The agent's worktree.
+        worktree: PathBuf,
+        /// The directory relative to it, as the tree names it. The empty
+        /// string is the worktree root, which is what a drop on empty tree
+        /// space sends.
+        relative: String,
+    },
     /// A TERMINAL pane: wherever that terminal actually is right now.
     ///
     /// Deliberately UNCHANGED by the upload directory. A shell that has been
@@ -845,6 +1079,9 @@ impl FileDropDestination {
                 relative,
                 write_gitignore,
             } => DropDir::open_uploads(worktree, relative, *write_gitignore),
+            Self::WorktreeDirectory { worktree, relative } => {
+                DropDir::open_tree_dir(worktree, relative)
+            }
             Self::Terminal(plan) => plan.open(),
         }
     }
@@ -3070,5 +3307,188 @@ mod uploads_dir {
             "the file must land in the upload directory"
         );
         assert!(saved_file_is_within(wt.path(), &saved.path));
+    }
+}
+
+/// The OTHER intent: a file dropped onto the editor's file tree is "add this to
+/// my project", so it lands in the tree directory the user dropped on, as an
+/// ordinary visible file. Everything about naming, collisions and symlinks is
+/// the upload path's, unchanged; the only new thing is WHERE, and the guards on
+/// getting there.
+#[cfg(test)]
+mod tree_drop_dir {
+    use super::*;
+
+    fn worktree() -> tempfile::TempDir {
+        tempfile::tempdir().expect("worktree")
+    }
+
+    #[test]
+    fn an_empty_relative_path_pins_the_worktree_root() {
+        // Dropping on empty tree space targets the root, and the root is
+        // spelled as the empty string on the wire.
+        let wt = worktree();
+        let dir = DropDir::open_tree_dir(wt.path(), "").expect("open root");
+        assert_eq!(
+            std::fs::canonicalize(dir.path()).unwrap(),
+            std::fs::canonicalize(wt.path()).unwrap()
+        );
+    }
+
+    #[test]
+    fn an_existing_subdirectory_is_pinned() {
+        let wt = worktree();
+        std::fs::create_dir_all(wt.path().join("src/ui")).unwrap();
+        let dir = DropDir::open_tree_dir(wt.path(), "src/ui").expect("open src/ui");
+        assert_eq!(
+            std::fs::canonicalize(dir.path()).unwrap(),
+            std::fs::canonicalize(wt.path().join("src/ui")).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_missing_directory_is_refused_and_never_created() {
+        // The editor's tree only shows directories that exist, so a missing one
+        // means the tree is stale or the request was made up. Creating it would
+        // put a folder in the user's project they never asked for, which is the
+        // opposite of what `open_uploads` is allowed to do and why this is a
+        // different function rather than a flag on that one.
+        //
+        // The variant is asserted rather than just "some error", because a bare
+        // `Io` here is what produced the raw `No such file or directory (os
+        // error 2)` the user was shown: an errno is not a sentence, and every
+        // other refusal on this path is written in the user's words.
+        let wt = worktree();
+        let err = DropDir::open_tree_dir(wt.path(), "nope/deeper").expect_err("must refuse");
+        assert!(
+            matches!(&err, DropDirError::TreeDirMissing { component } if component == "nope"),
+            "got {err:?}"
+        );
+        let message = err.to_string();
+        assert!(
+            message.contains("nope") && message.contains("nothing was saved"),
+            "the refusal must name the folder in the user's words: {message}"
+        );
+        assert!(
+            !message.contains("os error"),
+            "an errno is not a sentence: {message}"
+        );
+        assert!(!wt.path().join("nope").exists());
+    }
+
+    /// A control character in a DIRECTORY NAME is legal on both supported
+    /// platforms and the file tree will happily show such a folder, so dropping
+    /// into it must work.
+    ///
+    /// It did not: this destination inherited `reportable_path_of`, whose
+    /// checks exist because the pane drop SENDS the path to a terminal, where a
+    /// line feed submits and an escape byte is obeyed. A tree drop sends the
+    /// path nowhere at all, so the requirement does not apply to it and the
+    /// refusal it produced ("so the path could not be sent to the terminal")
+    /// described something that was never going to happen.
+    ///
+    /// What is deliberately KEPT from that function is the identity check, that
+    /// the path still names the pinned directory. That one is about correctness
+    /// rather than about the terminal.
+    #[test]
+    fn a_directory_whose_name_holds_a_control_character_still_accepts_a_drop() {
+        let wt = worktree();
+        std::fs::create_dir(wt.path().join("we\nird")).unwrap();
+        let dir = DropDir::open_tree_dir(wt.path(), "we\nird").expect("open the odd folder");
+        let saved = save_drop(&dir, "logo.png", b"png", "20260809-120000").expect("save");
+        assert_eq!(saved.path, wt.path().join("we\nird/logo.png"));
+        assert_eq!(std::fs::read(&saved.path).unwrap(), b"png");
+    }
+
+    #[test]
+    fn a_traversing_directory_is_refused() {
+        let wt = worktree();
+        for bad in ["..", "../outside", "src/../..", "/etc", "src/./x"] {
+            let Err(err) = DropDir::open_tree_dir(wt.path(), bad) else {
+                panic!("{bad} must be refused");
+            };
+            assert!(
+                matches!(err, DropDirError::TreeDirRefused(TreeDirError::Traversal)),
+                "{bad}: got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_git_directory_is_refused() {
+        let wt = worktree();
+        std::fs::create_dir_all(wt.path().join(".git/hooks")).unwrap();
+        for bad in [".git", ".git/hooks", ".GIT"] {
+            let err = DropDir::open_tree_dir(wt.path(), bad).expect_err("must refuse");
+            assert!(
+                matches!(
+                    err,
+                    DropDirError::TreeDirRefused(TreeDirError::GitDirectory)
+                ),
+                "{bad}: got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_symlinked_component_is_refused_rather_than_followed() {
+        // Same property the upload walk has, and the reason is the same: a
+        // symlink is how a relative, traversal-free directory still lands
+        // outside the worktree.
+        let wt = worktree();
+        let outside = tempfile::tempdir().expect("outside");
+        std::fs::create_dir(outside.path().join("inner")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), wt.path().join("escape")).unwrap();
+
+        let err = DropDir::open_tree_dir(wt.path(), "escape/inner").expect_err("must refuse");
+        assert!(
+            matches!(&err, DropDirError::TreePathBlocked { component } if component == "escape"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_saved_file_is_visible_to_git_and_carries_no_gitignore() {
+        // The whole point of this destination: an ORDINARY file. Nothing may be
+        // written to hide it, which is exactly what the agent-uploads walk does
+        // and must not happen here.
+        let wt = worktree();
+        std::fs::create_dir(wt.path().join("assets")).unwrap();
+        let dir = DropDir::open_tree_dir(wt.path(), "assets").expect("open assets");
+        let saved = save_drop(&dir, "logo.png", b"png", "20260809-120000").expect("save");
+
+        assert_eq!(saved.saved_name, "logo.png");
+        assert!(!saved.renamed);
+        assert_eq!(saved.path, wt.path().join("assets/logo.png"));
+        assert!(
+            !wt.path().join("assets/.gitignore").exists(),
+            "a durable drop must not hide itself from git"
+        );
+        assert!(saved_file_is_within(wt.path(), &saved.path));
+    }
+
+    #[test]
+    fn a_non_latin_name_survives_exactly_as_dropped() {
+        let wt = worktree();
+        let dir = DropDir::open_tree_dir(wt.path(), "").expect("open root");
+        let saved = save_drop(&dir, "設計メモ.md", b"x", "20260809-120000").expect("save");
+        assert_eq!(saved.saved_name, "設計メモ.md");
+        assert!(wt.path().join("設計メモ.md").exists());
+    }
+
+    #[test]
+    fn an_occupied_name_gets_a_suffix_and_the_existing_file_is_untouched() {
+        let wt = worktree();
+        std::fs::write(wt.path().join("notes.md"), "mine\n").unwrap();
+        let dir = DropDir::open_tree_dir(wt.path(), "").expect("open root");
+        let saved = save_drop(&dir, "notes.md", b"theirs", "20260809-120000").expect("save");
+
+        assert!(saved.renamed);
+        assert_ne!(saved.saved_name, "notes.md");
+        assert_eq!(
+            std::fs::read_to_string(wt.path().join("notes.md")).unwrap(),
+            "mine\n",
+            "not one byte of the existing file may change"
+        );
     }
 }

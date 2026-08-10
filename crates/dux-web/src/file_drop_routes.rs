@@ -24,9 +24,9 @@
 //! upload carries THAT one, in its own `conn` parameter. Reusing the header
 //! would be checking a different thing entirely.
 //!
-//! # Where the file lands, and why the two answers differ
+//! # Where the file lands, and why the three answers differ
 //!
-//! The two panes carry two different intents, so they get two destinations.
+//! There are two INTENTS and three SURFACES, so there are three destinations.
 //!
 //! On an AGENT, the agent's upload directory (`ui.upload_directory`, default
 //! `.dux/uploads` inside the worktree), created on first use with a
@@ -43,9 +43,37 @@
 //! agent's pane) and a standalone terminal (which has no worktree at all, so an
 //! upload directory could not be resolved for it even in principle).
 //!
-//! Both resolve through `Engine::file_drop_destination`; the directory
+//! On the EDITOR'S FILE TREE, the tree directory the user dropped on, as an
+//! ordinary VISIBLE file. This is the other intent, "add this file to my
+//! project", and the editor is where it belongs because the editor is the only
+//! surface where the user picks the destination. Nothing here goes near the
+//! upload directory and nothing writes a `.gitignore`: hiding the file from git
+//! would defeat the whole point. A tree drop is marked by the `dir` query
+//! parameter, which is PRESENT (possibly empty, meaning the worktree root) for
+//! exactly this case.
+//!
+//! The two pane cases resolve through `Engine::file_drop_destination` and the
+//! tree case through `Engine::file_drop_tree_destination`; the directory
 //! creation, the probing and the writing all run on a blocking pool, like every
 //! other filesystem call in this crate.
+//!
+//! **A tree drop reuses this route rather than getting one of its own**, and
+//! that is a decision worth defending: everything except the destination is
+//! shared, and it is the part that is easy to get wrong. The size cap, the
+//! concurrency permit taken before the body is buffered, the name validated and
+//! never rewritten so a non-Latin name survives, the create relative to a
+//! PINNED directory handle, the refusal of a symlink at any candidate, and the
+//! collision suffix carrying both a counter and a timestamp. A second route
+//! would be a second copy of all of it.
+//!
+//! **On an occupied name the tree drop suffixes, where the editor's MOVE
+//! refuses.** Both promise the same thing (nothing already on disk is
+//! overwritten) and they differ because the user said different things. A move
+//! names one exact destination, so silently moving to a different name would be
+//! a different operation from the one asked for. A drop names no destination
+//! name at all, only a folder, so the next free name is the honest answer and
+//! the response reports it (`renamed`, with `requested_name` beside
+//! `saved_name`) for the browser to say out loud.
 //!
 //! There is ONE size limit on this route, `[server] file_drop_max_bytes`,
 //! applied by the `DefaultBodyLimit` layer below and reported by the handler in
@@ -101,6 +129,18 @@ struct DropQuery {
     /// `X-Connection-Id`). Optional: a browser that has not yet received its
     /// first frame simply skips the courtesy check.
     conn: Option<u64>,
+    /// PRESENT means the drop came from the editor's FILE TREE, and its value
+    /// is the worktree-relative directory the user dropped on (`""` for the
+    /// worktree root). ABSENT means a drop on the agent or terminal PANE.
+    ///
+    /// This one optional parameter is what carries the two intents, rather
+    /// than a second route, because everything the two share is the part worth
+    /// sharing: the size and concurrency limits, the name validation that
+    /// never rewrites, the pinned-handle exclusive create that refuses a
+    /// symlink at any candidate, and the collision suffix. Only the
+    /// DESTINATION differs, and a destination is what
+    /// `FileDropDestination` already models.
+    dir: Option<String>,
 }
 
 /// Where a dropped file ended up.
@@ -243,7 +283,14 @@ async fn upload_dropped_file(
     // The courtesy check. See the module docs: the websocket's own write check
     // is what actually enforces input authority. This only exists so a viewer
     // who cannot paste is told before a file is written rather than after.
-    if let Some(conn) = query.conn
+    //
+    // An EDITOR TREE drop pastes nothing into anything, so there is nothing to
+    // be told about and no input to hold: it is skipped rather than merely
+    // unreached, so a browser that happens to carry a `conn` from the pane it
+    // came from cannot have a durable save refused by a check that does not
+    // apply to it.
+    if query.dir.is_none()
+        && let Some(conn) = query.conn
         && state.input_held_by_someone_else(&query.pty, conn)
     {
         return (
@@ -273,7 +320,16 @@ async fn upload_dropped_file(
         }
     };
 
-    let Some(destination) = state.engine.file_drop_destination(query.pty.clone()).await else {
+    let destination = match query.dir.clone() {
+        Some(dir) => {
+            state
+                .engine
+                .file_drop_tree_destination(query.pty.clone(), dir)
+                .await
+        }
+        None => state.engine.file_drop_destination(query.pty.clone()).await,
+    };
+    let Some(destination) = destination else {
         return (StatusCode::NOT_FOUND, "unknown terminal or agent").into_response();
     };
 
@@ -1063,6 +1119,312 @@ mod tests {
             "the file landed where the terminal was opened, not where it is now"
         );
         assert_eq!(std::fs::read(&path).unwrap(), b"png");
+    }
+
+    /// The DURABLE intent: a file dropped onto the editor's file tree is "add
+    /// this to my project", so it lands in the tree directory the user dropped
+    /// on, as an ordinary visible file, and never in the invisible upload
+    /// directory an agent-pane drop uses.
+    mod editor_tree_drop {
+        use super::*;
+
+        /// A drop naming a tree directory. `dir` is what separates the two
+        /// intents on the wire; everything else is the same upload route.
+        fn tree_drop(pty: &str, filename: &str, dir: &str) -> Request<axum::body::Body> {
+            drop_req(
+                &format!("pty={pty}&filename={filename}&dir={dir}"),
+                b"bytes".to_vec(),
+            )
+        }
+
+        #[tokio::test]
+        async fn dropping_on_a_folder_row_saves_a_visible_file_in_that_folder() {
+            let (_tmp, wt, app) = router().await;
+            std::fs::create_dir_all(wt.join("assets")).unwrap();
+
+            let resp = app
+                .oneshot(tree_drop("s1", "logo.png", "assets"))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "{}", "folder drop");
+            let body: serde_json::Value = serde_json::from_str(&body_text(resp).await).unwrap();
+
+            assert_eq!(body["saved_name"], "logo.png");
+            assert_eq!(body["renamed"], false);
+            assert_eq!(
+                std::fs::read(wt.join("assets/logo.png")).unwrap(),
+                b"bytes",
+                "the file must be where the user dropped it"
+            );
+            assert!(
+                !wt.join("assets/.gitignore").exists(),
+                "a durable drop must not hide itself from git"
+            );
+            assert!(
+                !wt.join(".dux").exists(),
+                "the uploads directory must not be created, let alone used"
+            );
+        }
+
+        #[tokio::test]
+        async fn dropping_on_empty_tree_space_saves_at_the_worktree_root() {
+            // Empty space is the ROOT, and the root travels as the empty
+            // string, so this also pins that encoding.
+            let (_tmp, wt, app) = router().await;
+            let resp = app.oneshot(tree_drop("s1", "notes.md", "")).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body: serde_json::Value = serde_json::from_str(&body_text(resp).await).unwrap();
+            assert_eq!(
+                std::path::PathBuf::from(body["path"].as_str().unwrap()),
+                wt.join("notes.md")
+            );
+            assert!(!wt.join(".dux").exists());
+        }
+
+        #[tokio::test]
+        async fn a_drop_of_several_files_saves_every_one_of_them() {
+            // One request per file, which is what the browser sends, and the
+            // point is that the second does not disturb the first.
+            let (_tmp, wt, app) = router().await;
+            std::fs::create_dir_all(wt.join("docs")).unwrap();
+            for name in ["one.md", "two.md", "three.md"] {
+                let resp = app
+                    .clone()
+                    .oneshot(tree_drop("s1", name, "docs"))
+                    .await
+                    .unwrap();
+                assert_eq!(resp.status(), StatusCode::OK, "saving {name}");
+            }
+            for name in ["one.md", "two.md", "three.md"] {
+                assert!(wt.join("docs").join(name).exists(), "{name} is missing");
+            }
+        }
+
+        #[tokio::test]
+        async fn a_collision_keeps_the_existing_file_and_reports_the_new_name() {
+            // The editor's MOVE refuses an occupied destination outright,
+            // because the user named that exact destination. A DROP names no
+            // destination name at all, so the upload route's suffix applies
+            // instead. Both promises are the same where it counts: the file
+            // already there is never overwritten, and the browser is told
+            // which name was actually used.
+            let (_tmp, wt, app) = router().await;
+            std::fs::write(wt.join("notes.md"), "mine\n").unwrap();
+
+            let resp = app.oneshot(tree_drop("s1", "notes.md", "")).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body: serde_json::Value = serde_json::from_str(&body_text(resp).await).unwrap();
+
+            assert_eq!(body["renamed"], true);
+            assert_eq!(body["requested_name"], "notes.md");
+            assert_ne!(body["saved_name"], "notes.md");
+            assert_eq!(
+                std::fs::read_to_string(wt.join("notes.md")).unwrap(),
+                "mine\n",
+                "not one byte of the existing file may change"
+            );
+            assert_eq!(
+                std::fs::read(body["path"].as_str().unwrap()).unwrap(),
+                b"bytes"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_non_latin_name_survives_a_tree_drop_exactly_as_dropped() {
+            let (_tmp, wt, app) = router().await;
+            let resp = app
+                .oneshot(tree_drop(
+                    "s1",
+                    "%E8%A8%AD%E8%A8%88%E3%83%A1%E3%83%A2.md",
+                    "",
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body: serde_json::Value = serde_json::from_str(&body_text(resp).await).unwrap();
+            assert_eq!(body["saved_name"], "設計メモ.md");
+            assert!(wt.join("設計メモ.md").exists());
+        }
+
+        #[tokio::test]
+        async fn a_directory_escaping_the_worktree_is_refused_and_writes_nothing() {
+            let (tmp, wt, app) = router().await;
+            let resp = app
+                .oneshot(tree_drop("s1", "escaped.png", "..%2F.."))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+            let msg = body_text(resp).await;
+            assert!(msg.contains("not inside the worktree"), "got: {msg}");
+            assert!(!tmp.path().join("escaped.png").exists());
+            assert!(!wt.join("escaped.png").exists());
+        }
+
+        #[tokio::test]
+        async fn the_git_directory_is_refused() {
+            let (_tmp, wt, app) = router().await;
+            std::fs::create_dir_all(wt.join(".git/hooks")).unwrap();
+            let resp = app
+                .oneshot(tree_drop("s1", "pre-commit", ".git%2Fhooks"))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+            let msg = body_text(resp).await;
+            assert!(msg.contains("git directory"), "got: {msg}");
+            assert!(!wt.join(".git/hooks/pre-commit").exists());
+        }
+
+        #[tokio::test]
+        async fn a_directory_that_is_really_a_file_is_refused() {
+            // The browser resolves a drop on a FILE row to that file's parent,
+            // so a file arriving here means a stale tree or a made-up request.
+            // Writing into it is impossible, so say so rather than failing
+            // opaquely.
+            let (_tmp, wt, app) = router().await;
+            std::fs::write(wt.join("README.md"), "x").unwrap();
+            let resp = app
+                .oneshot(tree_drop("s1", "logo.png", "README.md"))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+            let msg = body_text(resp).await;
+            assert!(msg.contains("README.md"), "the refusal must name it: {msg}");
+        }
+
+        #[tokio::test]
+        async fn a_missing_directory_is_refused_rather_than_created() {
+            // The wording is asserted, not only the status. The browser's tree
+            // is a lazy cache, so this is the ordinary stale-tree journey, and
+            // it used to answer with a raw `No such file or directory (os error
+            // 2)` while every other refusal on this path is a sentence. A test
+            // that checks the status alone passes with any wording at all,
+            // which is exactly how that one survived.
+            let (_tmp, wt, app) = router().await;
+            let resp = app
+                .oneshot(tree_drop("s1", "logo.png", "nope"))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+            let msg = body_text(resp).await;
+            assert!(msg.contains("nope"), "the refusal must name it: {msg}");
+            assert!(
+                msg.contains("not there any more") && msg.contains("nothing was saved"),
+                "the refusal must be in the user's words: {msg}"
+            );
+            assert!(
+                !msg.contains("os error"),
+                "an errno is not a sentence: {msg}"
+            );
+            assert!(!wt.join("nope").exists());
+        }
+
+        /// The courtesy input-ownership check is SKIPPED for a tree drop, and
+        /// this is the test that pins the skip.
+        ///
+        /// It matters because the skip is otherwise invisible: deleting
+        /// `query.dir.is_none() &&` from the condition left every other test in
+        /// this file green, since none of them sets `conn` at all. A browser
+        /// really does carry a terminal-socket id (it holds one per pane it has
+        /// attached to), so without the skip a durable save into the user's own
+        /// project could be refused by a check about pasting into a terminal
+        /// that this drop never goes near.
+        #[tokio::test]
+        async fn a_tree_drop_is_saved_even_while_another_device_holds_the_terminal() {
+            let world = drop_world().await;
+            // Somebody ELSE owns input on this agent's PTY.
+            world.state.give_input_to("s1", 7);
+            assert!(
+                world.state.input_held_by_someone_else("s1", 99),
+                "the fixture must actually put input in another connection's hands"
+            );
+
+            let resp = world
+                .app
+                .clone()
+                .oneshot(drop_req(
+                    "pty=s1&filename=notes.md&dir=&conn=99",
+                    b"bytes".to_vec(),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "a tree drop pastes nothing into any terminal, so who holds \
+                 input has nothing to do with it: {}",
+                body_text(resp).await
+            );
+            assert_eq!(std::fs::read(world.wt.join("notes.md")).unwrap(), b"bytes");
+        }
+
+        /// The other direction, so the pair proves the check exists rather than
+        /// merely that it does not fire. A PANE drop ends in a paste over the
+        /// terminal socket, and a viewer who cannot write is better told before
+        /// a file is written than after.
+        #[tokio::test]
+        async fn a_pane_drop_is_refused_while_another_device_holds_the_terminal() {
+            let world = drop_world().await;
+            world.state.give_input_to("s1", 7);
+
+            let resp = world
+                .app
+                .clone()
+                .oneshot(drop_req(
+                    "pty=s1&filename=shot.png&conn=99",
+                    b"png".to_vec(),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::CONFLICT);
+            let msg = body_text(resp).await;
+            assert!(msg.contains("Take over input"), "got: {msg}");
+            assert!(
+                !world.wt.join(".dux").exists(),
+                "a refused pane drop must write nothing"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_tree_drop_refreshes_the_agent_s_changed_files() {
+            // The file is visible to git by design, so the Changes pane must
+            // hear about it now rather than up to ten seconds later.
+            let world = drop_world().await;
+            let (generation, refreshes) = world.refreshes();
+            assert!(refreshes.is_empty());
+
+            let resp = world
+                .app
+                .clone()
+                .oneshot(tree_drop("s1", "notes.md", ""))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let (generation_after, refreshes) = world.refreshes();
+            assert!(generation_after > generation);
+            assert_eq!(refreshes.len(), 1, "got {refreshes:?}");
+            assert_eq!(
+                std::fs::canonicalize(&refreshes[0]).unwrap(),
+                std::fs::canonicalize(&world.wt).unwrap()
+            );
+        }
+
+        #[tokio::test]
+        async fn a_terminal_has_no_file_tree_so_a_tree_drop_on_one_is_not_found() {
+            // The tree belongs to an agent's worktree. A terminal id in `pty`
+            // must not quietly fall back to the terminal's own directory: that
+            // is the OTHER intent, and it would put the file somewhere the
+            // user did not point at.
+            let world = drop_world().await;
+            let terminal = world.create_terminal("/api/v1/terminals").await;
+            let resp = world
+                .app
+                .clone()
+                .oneshot(tree_drop(&terminal, "notes.md", ""))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        }
     }
 
     #[tokio::test]

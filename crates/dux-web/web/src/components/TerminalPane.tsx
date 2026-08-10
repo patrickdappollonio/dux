@@ -21,9 +21,11 @@ import {
   type ConfiguredDropPaste,
   type DropContext,
   type DropOutcome,
+  dragCarriesFiles,
   dropToastFor,
   dragDropPasteFor,
   dropRefusalReason,
+  nextFileDropToastId,
   pasteExceedsAttachmentLimit,
   pastePayload,
   tooLongToAttachReason,
@@ -173,25 +175,6 @@ const WHEEL_SCROLL_SENSITIVITY = 3
 // resizeHeldByGesture): the flush is a settle window like any other, giving the
 // keyboard/URL-bar animation that held it time to finish collapsing.
 const RESIZE_SEND_DEBOUNCE_MS = 200
-
-// The sonner id ONE file drop lives on: its per-file spinners and its single
-// report at the end. One id per drop is what makes the final REPLACE that
-// drop's spinner in place instead of stacking a second toast beneath it, and it
-// is what lets the final retire that spinner's leak guard without either side
-// knowing about the other.
-//
-// It is minted per drop rather than being a module constant. Uploads within one
-// drop are sequential, but a drop is not atomic, so two quick drops overlap:
-// with a shared id, drop A's final landed on the id and was then painted over by
-// drop B's next per-file spinner, and the user lost A's report entirely. That
-// report is often the error naming which files were refused, which is the one
-// the user most needs. A counter rather than a random id, so the ordering stays
-// legible.
-let fileDropSeq = 0
-function nextFileDropToastId(): string {
-  fileDropSeq += 1
-  return `file-drop-${fileDropSeq}`
-}
 
 // Copy the terminal's current selection to the clipboard and toast the result.
 // `copyToClipboard` writes via the async Clipboard API in a secure context and
@@ -392,7 +375,7 @@ export function TerminalPane(props: TerminalPaneProps) {
     !mobileTopBarVisible(duxState) || !accessoryBarVisible
   // Whether dropping a file onto this pane does anything at all. `[server]
   // file_drop_max_bytes = 0` switches the feature off, so the whole drag
-  // surface goes with it (see `dragCarriesFiles`). Read reactively rather than
+  // surface goes with it (see `paneAcceptsFileDrag`). Read reactively rather than
   // through a ref: the drag handlers are rendered props, not mount-effect
   // closures, so they see the current value.
   //
@@ -2264,12 +2247,18 @@ export function TerminalPane(props: TerminalPaneProps) {
   // target, accepting the drop and only then reporting a refusal per file. It
   // is closed while the setting is merely UNKNOWN too, so nothing is offered
   // before dux can say the feature is there (see `fileDropEnabled`).
-  function dragCarriesFiles(e: React.DragEvent): boolean {
+  //
+  // Deliberately NOT called `dragCarriesFiles`: that name belongs to the one
+  // shared predicate in `lib/fileDrop.ts`, which answers only "is this drag
+  // carrying files", and the editor's file tree calls it under that name too.
+  // This one answers the wider question ("and may this pane act on it"), so it
+  // says so.
+  function paneAcceptsFileDrag(e: React.DragEvent): boolean {
     return (
       fileDropEnabled &&
       isOwner &&
       !isMobile &&
-      Array.from(e.dataTransfer.types).includes("Files")
+      dragCarriesFiles(e.dataTransfer.types)
     )
   }
 
@@ -2562,29 +2551,29 @@ export function TerminalPane(props: TerminalPaneProps) {
           : "group relative h-full w-full overflow-hidden bg-background"
       }
       onDragEnter={(e) => {
-        if (!dragCarriesFiles(e)) return
+        if (!paneAcceptsFileDrag(e)) return
         e.preventDefault()
         dragDepthRef.current += 1
         setDragActive(true)
       }}
       onDragOver={(e) => {
-        if (!dragCarriesFiles(e)) return
+        if (!paneAcceptsFileDrag(e)) return
         // Without preventDefault on dragover the browser refuses the drop and
         // navigates to the file instead, which loses the whole page.
         e.preventDefault()
         e.dataTransfer.dropEffect = "copy"
       }}
       onDragLeave={(e) => {
-        if (!dragCarriesFiles(e)) return
+        if (!paneAcceptsFileDrag(e)) return
         dragDepthRef.current = Math.max(0, dragDepthRef.current - 1)
         if (dragDepthRef.current === 0) setDragActive(false)
       }}
       onDrop={(e) => {
-        if (!dragCarriesFiles(e)) return
+        if (!paneAcceptsFileDrag(e)) return
         e.preventDefault()
         dragDepthRef.current = 0
         setDragActive(false)
-        // Desktop only (`dragCarriesFiles` refuses a drag on a phone), so this
+        // Desktop only (`paneAcceptsFileDrag` refuses a drag on a phone), so this
         // always resolves to the terminal today. It still asks rather than
         // assuming, so a drop and a paste can never disagree about where a
         // path belongs.

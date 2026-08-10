@@ -1,6 +1,6 @@
 ---
 title: Dropping and pasting files onto an agent
-description: Drag a screenshot from your desktop onto an agent or terminal in the browser, or just press paste, and dux saves it on the server and pastes its path into the prompt. Where files land, why an agent's uploads stay out of git, why nothing is ever overwritten, and why this is web-only.
+description: Drag a screenshot from your desktop onto an agent, a terminal or the editor's file tree in the browser, or just press paste, and dux puts it where you meant it. Where files land, why an agent's uploads stay out of git, why an editor drop is an ordinary committable file, why nothing is ever overwritten, and why this is web-only.
 group: Web UI
 order: 67
 ---
@@ -83,10 +83,12 @@ Dropping a file means one of two things, and dux stopped pretending it was one.
 
 Handing an image to an agent is **"look at this for me"**. It is scratch: you
 want the agent to read it, and then you want it gone. Dropping a file into a
-terminal is **"put this here"**. It is a file you are placing in a folder you
-chose, and you meant it.
+terminal, or onto the editor's file tree, is **"put this here"**. It is a file
+you are placing in a folder you chose, and you meant it.
 
-Those want opposite things from git, so they get different destinations.
+Those want opposite things from git, so they get different destinations. Two
+intents, three places you can drop: the agent's pane, a terminal, and the
+editor's file tree.
 
 ## Where the file lands
 
@@ -129,6 +131,43 @@ behaves identically on both platforms.
 If dux cannot read the process at all, it refuses the drop and tells you, rather
 than writing somewhere else and naming that instead. Being unable to see where a
 terminal is has never been a good reason to guess.
+
+**On the editor's file tree**, in the folder you dropped on. This is the
+durable answer, and it is the one place where you pick the destination by
+pointing at it rather than by having navigated there. Drop on a **folder** row
+and the files go into that folder. Drop on a **file** row and they go into the
+folder that file is in, because a file is not a place to put a file. Drop on the
+**empty space** below the tree and they go to the worktree root. Whichever row
+would receive the drop lights up while you are still holding the files, so you
+can see where they are going before you let go, and the toast afterwards names
+the folder.
+
+Nothing here goes near the upload folder and nothing writes an ignore file.
+These are **ordinary, visible files**: `git status` shows them, you can commit
+them, and they are still there after the agent is gone. That is the whole point
+of dropping them here instead of on the pane. The agent's Changes pane refreshes
+immediately, so the new files appear there without waiting for the next poll,
+and the file tree and the file search index both pick them up at once.
+
+A tree drop pastes nothing into any terminal. It saves the file and stops, which
+is what "add this to my project" means.
+
+You cannot drop outside the worktree or into `.git`, exactly as you cannot
+create, rename or move anything into either. dux refuses and says so, and
+nothing is written.
+
+A drop is **stricter than create, rename and move in one way**: those three
+follow a symlinked directory as long as it stays inside the worktree, so
+creating a file inside a `libs -> packages/libs` link works, while a drop
+refuses any folder reached through a link. That is the safe direction to be
+wrong in, since a link is the one way an ordinary-looking relative path still
+lands outside the tree. Drop into the real folder instead.
+
+dux takes **files**, not folders. Drop a folder and it is refused by name, with
+any files you dropped alongside it still saved; one toast tells you which was
+which. And if the folder you dropped on has been deleted since the tree last
+listed it, the drop is refused with that folder named, rather than being
+recreated behind your back.
 
 The toast that appears afterwards names the folder for each file, so you never
 have to guess. Drop several onto a terminal, type `cd` in the middle, and they
@@ -221,6 +260,14 @@ The file is created exclusively, so two uploads racing each other cannot land on
 the same name, and dux refuses to write through a symlink. If something
 unexpected is sitting at that name, the drop fails and says so rather than
 quietly writing next to it.
+
+The same holds for a drop on the editor's file tree, and it is worth being
+precise about how that differs from **moving** a file in the editor. A move is
+*refused* when something is already at the destination, because you named that
+exact destination and quietly putting the file somewhere else would be a
+different operation from the one you asked for. A drop names only a folder, so
+the next free name is the honest answer and the toast tells you which one it
+used. Neither one ever overwrites what is already there.
 
 ## Your filenames are kept as you had them
 
@@ -386,6 +433,10 @@ nothing happened. It is replaced, in place, by **one** toast reporting the whole
 drop rather than one per file.
 
 ## Who can drop, and who can paste
+
+This section is about the two **pane** drops. A drop on the editor's file tree
+pastes nothing, so nothing below applies to it: it needs no input ownership and
+a watcher can do it.
 
 Only the device that currently holds input. Terminals in dux are one-writer,
 many-watchers (see [The workspace in the browser](/docs/web-workspace)), and the

@@ -16,6 +16,26 @@
 /// reads and the folder listing is the better answer.
 export const MAX_NAMED_FILES = 5
 
+/// Whether a drag is carrying files from OUTSIDE the browser.
+///
+/// `types` is the only thing readable during a dragover (the files themselves
+/// are withheld until the drop fires), so it is what every drop target has to
+/// gate on. An in-app drag (the sidebar reorder, a text selection) carries no
+/// `"Files"` entry and must never light a drop target up.
+///
+/// This answers ONE question and nothing else, which is why it takes the type
+/// list rather than an event. Both drop surfaces used to carry a local function
+/// under this name asking DIFFERENT questions: the tree's was this, and the
+/// terminal pane's folded its own three enabling gates in, so the same call
+/// spelled the same way meant two things. The pane's gates now live in
+/// `paneAcceptsFileDrag`, whose name says that it is answering the wider
+/// question.
+export function dragCarriesFiles(
+  types: readonly string[] | undefined,
+): boolean {
+  return Array.from(types ?? []).includes("Files")
+}
+
 /// What one SAVED file has in common whichever way it ended.
 ///
 /// The folder belongs HERE rather than to the drop as a whole. A terminal's
@@ -751,4 +771,26 @@ export function dropToastFor(
       renameNote(savedFiles, ctx) +
       folderBreakdown(savedFiles, ctx),
   }
+}
+
+/// The sonner id ONE file drop lives on: its per-file spinners and its single
+/// report at the end. One id per drop is what makes the final REPLACE that
+/// drop's spinner in place instead of stacking a second toast beneath it, and it
+/// is what lets the final retire that spinner's leak guard without either side
+/// knowing about the other.
+///
+/// It is minted per drop rather than being a module constant. Uploads within one
+/// drop are sequential, but a drop is not atomic, so two quick drops overlap:
+/// with a shared id, drop A's final landed on the id and was then painted over by
+/// drop B's next per-file spinner, and the user lost A's report entirely. That
+/// report is often the error naming which files were refused, which is the one
+/// the user most needs. A counter rather than a random id, so the ordering stays
+/// legible.
+///
+/// Shared by both drop surfaces (the pane and the editor tree), so their ids
+/// come from one sequence and neither can mint an id the other is using.
+let fileDropSeq = 0
+export function nextFileDropToastId(): string {
+  fileDropSeq += 1
+  return `file-drop-${fileDropSeq}`
 }

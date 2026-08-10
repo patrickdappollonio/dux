@@ -28,12 +28,20 @@ export class FileDropApiError extends Error {
   }
 }
 
+/// `dir` is what switches the route between dux's two drop intents, and it is
+/// distinguished by PRESENCE and not by emptiness: `undefined` is a drop on a
+/// pane (the file goes to the agent's invisible upload folder, or to where the
+/// terminal actually is), while any string, INCLUDING the empty one, is a drop
+/// on the editor's file tree and names the worktree-relative folder the user
+/// dropped on. The empty string is the worktree root, which is a perfectly
+/// ordinary place to drop, so it must not be treated as "no directory".
 export async function uploadDroppedFile(
   file: File,
-  opts: { pty: string; conn: string | null },
+  opts: { pty: string; conn: string | null; dir?: string },
 ): Promise<SavedDropResponse> {
   const params = new URLSearchParams({ pty: opts.pty, filename: file.name })
   if (opts.conn) params.set("conn", opts.conn)
+  if (opts.dir !== undefined) params.set("dir", opts.dir)
   let resp: Response
   try {
     resp = await fetch(`/api/v1/file-drop?${params.toString()}`, {
