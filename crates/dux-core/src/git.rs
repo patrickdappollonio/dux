@@ -1688,6 +1688,14 @@ pub fn file_status(worktree: &Path, rel_path: &str) -> Result<Option<FileStatusC
 /// A SPAWN failure propagates rather than answering `false`: "git is not
 /// installed" and "this is not a repository" are different facts, and the
 /// info panel renders the second as a sentence the user will believe.
+///
+/// That propagation is deliberate and UNTESTED BY CONSTRUCTION, which is also
+/// deliberate. `Command::new("git")` is hardcoded with no seam, so the only
+/// way to make the spawn fail is a process-global `PATH` change, and the test
+/// binary runs every git test in one process: hiding git for this test hides
+/// it for all of them. A seam added only so a test could exist would put an
+/// injection point on a security-relevant git call site to buy one assertion,
+/// so the trade is refused and the gap is written down instead.
 fn is_inside_work_tree(path: &Path) -> Result<bool> {
     let output = Command::new("git")
         .args([
@@ -1709,6 +1717,13 @@ fn is_inside_work_tree(path: &Path) -> Result<bool> {
 /// to the outer repository: `git status` in the worktree lists nothing for
 /// anything under it, which is indistinguishable from "clean" unless somebody
 /// asks this question.
+///
+/// The spawn-failure propagation here is untested by construction for the same
+/// reason as [`is_inside_work_tree`], and deliberately so: no seam, and the
+/// only lever is a process-global `PATH` that every other git test shares.
+/// Note what IS covered, so the gap is not mistaken for a wider one: a
+/// non-zero exit (the ordinary "no repository here" answer) is `Ok(None)` and
+/// is tested; only the failure to spawn git at all is not.
 pub fn repository_root(dir: &Path) -> Result<Option<PathBuf>> {
     let output = Command::new("git")
         .args([
