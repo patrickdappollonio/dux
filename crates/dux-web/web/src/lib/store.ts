@@ -576,6 +576,18 @@ export interface DuxState {
   // toggle persists to config via the server; this clears once the broadcast
   // confirms (or on command error / disconnect, which roll it back).
   changesPaneOverride: boolean | null
+  // The Changes panel's CURRENT width, as a percentage of the desktop panel
+  // group (0..100). Lifted out of the ResizablePanelGroup by its onLayoutChange
+  // so the InsetHeader, which is the group's sibling directly above it and spans
+  // exactly the same width, can mirror the percentage as a right-hand spacer and
+  // park the Macros button on the terminal pane's right edge. Mirroring the
+  // PERCENTAGE rather than measuring pixels is what keeps that alignment correct
+  // at any zoom or window size, with nothing having to know the pane's width.
+  //
+  // Runtime-only and deliberately not persisted: a dragged split is not
+  // remembered across hide/show today (see the note in App.tsx), and this field
+  // reports the split rather than deciding it.
+  changesPanePercent: number
   // Optimistic overrides for the mobile terminal screens' two hideable bars
   // (the top bar and the accessory key bar). `null` follows the persisted
   // config (`bootstrap.mobile_top_bar` / `bootstrap.mobile_accessory_bar`);
@@ -678,6 +690,12 @@ const hasBrowser = typeof window !== "undefined"
 // 18rem gives agent names breathing room next to the PR/status badges; a
 // previously persisted width still wins.
 const SIDEBAR_WIDTH_KEY = "dux:sidebar-width"
+
+// The Changes panel's mount-time size, in percent. Shared by the panel's own
+// `defaultSize` and the store's initial `changesPanePercent`, so the header's
+// spacer is already the right width on the very first frame, before any layout
+// callback has fired.
+export const CHANGES_PANE_DEFAULT_PERCENT = 26
 const DEFAULT_SIDEBAR_WIDTH = "18rem"
 
 function loadSidebarWidth(): string {
@@ -820,6 +838,7 @@ let state: DuxState = {
   createAgentPrRequestId: null,
   sidebarWidth: loadSidebarWidth(),
   changesPaneOverride: null,
+  changesPanePercent: CHANGES_PANE_DEFAULT_PERCENT,
   mobileTopBarOverride: null,
   mobileAccessoryBarOverride: null,
   ptyOwnership: {},
@@ -5028,6 +5047,25 @@ export function setSidebarWidth(width: string, persist = false): void {
 // pre-load window before the first bootstrap fetch lands).
 export function changesPaneVisible(s: DuxState): boolean {
   return s.changesPaneOverride ?? s.bootstrap?.show_changes_pane ?? true
+}
+
+// Record the live split. Called from the panel group's onLayoutChange on every
+// pointer move of a drag (the header's spacer must track the divider, not jump
+// to it on release), so it is written far more often than it changes value:
+// `setState` re-renders every subscriber, and a pointer move that lands the
+// divider on the same percentage twice must not cost one.
+export function setChangesPanePercent(percent: number): void {
+  const next = Math.min(100, Math.max(0, percent))
+  if (state.changesPanePercent === next) return
+  setState({ changesPanePercent: next })
+}
+
+// What the header must reserve on its right so the control before the spacer
+// lands on the terminal pane's right edge. Zero when the Changes pane is hidden,
+// because the terminal pane then runs to the window edge and the button slides
+// out with it.
+export function changesSpacerPercent(s: DuxState): number {
+  return changesPaneVisible(s) ? s.changesPanePercent : 0
 }
 
 // Set the Changes pane's visibility and persist it (config.ui.show_changes_pane).

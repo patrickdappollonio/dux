@@ -1,93 +1,76 @@
-// The header metadata strip is "one subject plus a caption", and the decision of
-// WHAT goes in each half lives here rather than in the components, so both the
-// desktop `InsetHeader` and the phone header in `MobileShell` answer it the same
-// way and so it can be unit-tested without mounting React.
+// The header metadata strip is ONE ROW OF CHIPS, each a glyph followed by its
+// value, and the decision of WHICH chips exist and what each one says lives here
+// rather than in the components, so it can be unit-tested without mounting React
+// and so the agent / session-terminal / project-terminal / standalone-terminal
+// variants cannot drift apart.
 //
-// The shape it replaced was four labelled pairs (`agent: X | provider: Y |
-// project: Z | branch: W`). Two measured problems drove the redesign: the labels
-// were 34 of about 74 characters, so nearly half the bar spelled out what the
-// values already made obvious, and an agent named after its branch (the common
-// case, `server-mode` on `server-mode`) printed that one word twice.
+// The shape this replaced was four labelled pairs (`agent: X | provider: Y |
+// project: Z | branch: W`), then briefly a bold subject plus a muted caption.
+// Two measured problems drove the first redesign and both still apply: the
+// labels were 34 of about 74 characters, so nearly half the bar spelled out what
+// the values already made obvious, and an agent named after its branch (the
+// common case, `server-mode` on `server-mode`) printed that one word twice.
 //
-// So: the SUBJECT is the thing you are looking at, unlabelled, at normal size,
-// and everything else is a small muted caption beside it. The branch collapses
-// to `same branch` when it merely repeats the subject.
+// So: the LABEL becomes a glyph, the glyph is also the separator (no hairline
+// rules between fields, a wider gap does that work), and the word the glyph
+// stands for is recovered on hover. That hover is not decoration: it is the only
+// thing that makes a glyph learnable, and it is the reason this shape is
+// acceptable at all. Every chip therefore carries a `label`, and a chip with no
+// label is a bug rather than a style.
 
-// The caption's parts are joined by a middot. A middot rather than a hairline
-// divider because the caption is one small run of text, not a row of equals.
+// Joins the clauses of a tooltip, and the phone header's one caption line. A
+// middot rather than a hairline divider because it is one small run of text.
 export const CAPTION_SEPARATOR = " · "
 
-// What the caption says instead of repeating the agent name when the branch and
-// the agent name are the same string.
-export const SAME_BRANCH_CAPTION = "same branch"
+// The chips, in the order they render. `terminal` is one kind rather than two
+// because a terminal glyph means the same thing in both places it appears: on an
+// agent it counts that agent's terminals, and on a focused terminal it names the
+// terminal you are looking at.
+export type HeaderChipKind =
+  | "project"
+  | "agent"
+  | "branch"
+  | "terminal"
+  | "assistant"
+  | "directory"
 
-export interface HeaderSubject {
-  // The unlabelled, foreground-coloured thing being named. Truncates LAST.
-  subject: string
-  // Small muted clauses beside it, in order. Truncates FIRST.
-  caption: string[]
+export interface HeaderChip {
+  kind: HeaderChipKind
+  // The word the glyph stands for, shown on hover. Never empty.
+  label: string
+  // The chip's text.
+  value: string
+  // An extra tooltip clause after the label (and after the value when the value
+  // is cut off): the assistant's "change it in the agent menu", the branch's
+  // drift note, a terminal's sibling count.
+  hint?: string
+  // Exactly one chip per header is primary: the thing you navigate by. It is the
+  // LAST to give way when the row runs out of room; every other chip yields
+  // first, all the way to nothing.
+  primary?: boolean
 }
 
+// The assistant chip's hover clause. The provider is not editable from the
+// header, so the tooltip says where it IS editable rather than leaving a user
+// hunting for it.
+export const ASSISTANT_HINT = "change it in the agent menu"
+
 // Drop empties and join. Callers pass optional parts straight through (a project
-// that could not be resolved, a terminal count of zero) rather than filtering at
-// each site.
+// that could not be resolved, a drift clause that does not apply) rather than
+// filtering at each site.
 export function captionText(
   parts: readonly (string | null | undefined)[],
 ): string {
   return parts.filter((p): p is string => !!p).join(CAPTION_SEPARATOR)
 }
 
-// The branch clause. `same branch` when the branch merely repeats the name the
-// header already shows, the branch itself otherwise. Compared against the NAME
-// the header displays (an agent's title falls back to its branch, so an untitled
-// agent collapses too, which is exactly the duplicated-word case).
-export function branchCaption(subjectName: string, branchName: string): string {
-  return branchName === subjectName ? SAME_BRANCH_CAPTION : branchName
-}
-
-export interface AgentCaptionInput {
-  // The agent's display name (its title, falling back to its branch).
-  name: string
-  provider: string
-  projectName?: string | null
-  branchName: string
-  // The immutable branch the agent was created on. Absent on an older server.
-  initialBranch?: string | null
-}
-
-// The caption clauses for an AGENT, in order: project, provider, branch clause,
-// and the drift clause when the current branch has moved off the one the agent
-// was created on. Project leads because it is the coarsest fact and the one that
-// answers "which codebase am I in"; provider follows because it answers "who am
-// I talking to"; the branch clause is last because it is the one that usually
-// says nothing new.
-export function agentCaption(input: AgentCaptionInput): string[] {
-  const parts: string[] = []
-  if (input.projectName) parts.push(input.projectName)
-  parts.push(input.provider)
-  parts.push(branchCaption(input.name, input.branchName))
-  if (input.initialBranch && input.initialBranch !== input.branchName) {
-    parts.push(`originally ${input.initialBranch}`)
-  }
-  return parts
-}
-
-// The subject/caption pair for a focused AGENT. The agent's own name is the
-// subject; everything else is caption.
-export function agentHeaderSubject(input: AgentCaptionInput): HeaderSubject {
-  return { subject: input.name, caption: agentCaption(input) }
-}
-
-// The phone header's second line: the two facts the old mobile header dropped
-// entirely (it showed the branch and nothing else, so it never said which
-// project or which assistant you were talking to). Deliberately NOT the full
-// agent caption: a phone header has one short line to spend and the branch is
-// the clause most likely to repeat the name above it.
-export function mobileCaption(input: {
-  provider: string
-  projectName?: string | null
-}): string {
-  return captionText([input.projectName, input.provider])
+// What a chip says on hover. The label ALWAYS, because that is the whole deal
+// with a glyph. The VALUE only when it is actually cut off on screen: a tooltip
+// that repeats text the user can already read is noise, and whether the text is
+// cut off is measurable at render (scroll width against client width), so the
+// caller passes the answer in rather than guessing.
+export function headerChipTooltip(chip: HeaderChip, truncated: boolean): string {
+  return captionText([chip.label, truncated ? chip.value : null, chip.hint])
 }
 
 // The sibling-count clause, pluralized. Omitted (null) at zero so callers can
@@ -97,19 +80,120 @@ export function terminalCountCaption(count: number): string | null {
   return count === 1 ? "1 terminal" : `${count} terminals`
 }
 
-// The subject/caption pair for a focused TERMINAL. The terminal is what is on
-// screen, so it is the subject; its OWNER (an agent's caption, a project name, a
-// standalone terminal's directory) becomes the caption in front of the sibling
-// count. Same shape as the agent case, just a different subject.
-export function terminalHeaderSubject(
-  title: string,
-  ownerCaption: readonly string[],
-  siblingCount: number,
-): HeaderSubject {
+export interface AgentChipsInput {
+  // The agent's display name (its title, falling back to its branch).
+  name: string
+  provider: string
+  projectName?: string | null
+  branchName: string
+  // The immutable branch the agent was created on. Absent on an older server.
+  initialBranch?: string | null
+  // How many terminals this agent owns. Zero renders no terminal chip.
+  terminalCount?: number
+  // Set when a TERMINAL is the thing on screen and this agent merely owns it.
+  // The agent then stops being the primary chip and the terminal takes over.
+  primary?: "agent" | "none"
+}
+
+// True when the branch has moved off the one the agent was created on. Guarded
+// on `initialBranch` being present, so an older server that omits the field
+// never renders "originally undefined".
+function branchDrifted(input: AgentChipsInput): boolean {
+  return !!input.initialBranch && input.initialBranch !== input.branchName
+}
+
+// The branch chip, or null.
+//
+// It is omitted in the ordinary case, where the branch merely repeats the agent
+// name the header is already showing (an untitled agent takes its name FROM its
+// branch, so that case is the common one and printing it twice was the original
+// complaint). It appears when the branch differs from that name.
+//
+// It ALSO appears when the branch has DRIFTED off the branch the agent was
+// created on, even if it currently matches the agent name. That second condition
+// is not in the mock, which never draws a drifted agent; without it the drift
+// note has no chip to live on and the fact would be silently dropped, which is
+// worse than one extra chip in a rare case.
+export function branchChip(input: AgentChipsInput): HeaderChip | null {
+  const drifted = branchDrifted(input)
+  if (input.branchName === input.name && !drifted) return null
   return {
-    subject: title,
-    caption: [...ownerCaption, terminalCountCaption(siblingCount)].filter(
-      (p): p is string => !!p,
-    ),
+    kind: "branch",
+    label: "Branch",
+    value: input.branchName,
+    hint: drifted ? `originally ${input.initialBranch}` : undefined,
   }
+}
+
+// The chips describing an AGENT, in order: project, agent, branch, terminals,
+// assistant. Project leads because it is the coarsest fact and answers "which
+// codebase am I in"; the agent name follows and is what you navigate by;
+// branch and terminals appear only when they have something to say, which is
+// what keeps the row short in the ordinary case; the assistant is last because
+// it is the one value with a small fixed set and the one you scan for least.
+export function agentHeaderChips(input: AgentChipsInput): HeaderChip[] {
+  const chips: HeaderChip[] = []
+  if (input.projectName) {
+    chips.push({ kind: "project", label: "Project", value: input.projectName })
+  }
+  chips.push({
+    kind: "agent",
+    label: "Agent",
+    value: input.name,
+    primary: input.primary !== "none",
+  })
+  const branch = branchChip(input)
+  if (branch) chips.push(branch)
+  const count = input.terminalCount ?? 0
+  if (count > 0) {
+    chips.push({ kind: "terminal", label: "Terminals", value: String(count) })
+  }
+  chips.push({
+    kind: "assistant",
+    label: "Assistant",
+    value: input.provider,
+    hint: ASSISTANT_HINT,
+  })
+  return chips
+}
+
+// The chip for a FOCUSED terminal: the terminal is what is on screen, so it is
+// the primary chip and the last to give way. Its value is the terminal's title
+// (the foreground command when one is running, else the stable "Terminal N"),
+// and the owner's sibling count moves into the hover clause rather than being
+// dropped, since the title has taken the chip's text.
+export function focusedTerminalChip(
+  title: string,
+  siblingCount: number,
+): HeaderChip {
+  const count = siblingCount > 1 ? terminalCountCaption(siblingCount) : null
+  return {
+    kind: "terminal",
+    label: "Terminal",
+    value: title,
+    hint: count ?? undefined,
+    primary: true,
+  }
+}
+
+// The chip naming a STANDALONE terminal's directory. A standalone terminal has
+// no owner to name, so where it is IS its context. It reuses the folder glyph:
+// a directory is a folder, and the two never appear together (a standalone
+// terminal belongs to no project), so the shared glyph never has to mean two
+// things at once in one row.
+export function directoryChip(cwdLabel: string): HeaderChip {
+  return { kind: "directory", label: "Directory", value: cwdLabel }
+}
+
+// The phone header's second line: the two facts the old mobile header dropped
+// entirely (it showed the branch and nothing else, so it never said which
+// project or which assistant you were talking to). Deliberately NOT the full
+// desktop chip row: a phone header has one short line to spend, there is no
+// hover on a phone to explain a glyph, and the branch is the field most likely
+// to repeat the name above it.
+export function mobileCaption(input: {
+  provider: string
+  projectName?: string | null
+}): string {
+  return captionText([input.projectName, input.provider])
 }

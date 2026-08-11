@@ -80,7 +80,7 @@ describe("app menu keyboard bindings", () => {
 
   it("opens on ArrowDown but not on a bare letter key", async () => {
     const { getByRole, queryByRole } = render(<AppMenu />)
-    const trigger = getByRole("button", { name: /^menu$/i })
+    const trigger = getByRole("button", { name: /^settings$/i })
     trigger.focus()
 
     fireEvent.keyDown(trigger, { key: "k" })

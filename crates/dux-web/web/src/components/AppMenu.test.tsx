@@ -49,7 +49,7 @@ describe("AppMenu", () => {
 
   it("renders a cog trigger labelled Menu", () => {
     render(<AppMenu />)
-    expect(screen.getByRole("button", { name: /^menu$/i })).toBeTruthy()
+    expect(screen.getByRole("button", { name: /^settings$/i })).toBeTruthy()
   })
 
   // The trigger is a real <button>, so a browser fires its click on Enter/Space
@@ -59,7 +59,7 @@ describe("AppMenu", () => {
   // the menu and moves focus into it.
   it("is reachable by keyboard", () => {
     render(<AppMenu />)
-    const trigger = screen.getByRole("button", { name: /^menu$/i })
+    const trigger = screen.getByRole("button", { name: /^settings$/i })
     trigger.focus()
     expect(document.activeElement).toBe(trigger)
     expect(trigger.tagName).toBe("BUTTON")
@@ -68,7 +68,7 @@ describe("AppMenu", () => {
 
   it("opens on ArrowDown and moves focus into the menu", async () => {
     render(<AppMenu />)
-    const trigger = screen.getByRole("button", { name: /^menu$/i })
+    const trigger = screen.getByRole("button", { name: /^settings$/i })
     trigger.focus()
     fireEvent.keyDown(trigger, { key: "ArrowDown" })
     expect(await screen.findByRole("menu")).toBeTruthy()
@@ -86,7 +86,7 @@ describe("AppMenu", () => {
   // test was written. Assert what the primitive actually emits.
   it("marks the open trigger with data-popup-open, not aria-expanded", async () => {
     render(<AppMenu />)
-    const trigger = screen.getByRole("button", { name: /^menu$/i })
+    const trigger = screen.getByRole("button", { name: /^settings$/i })
     fireEvent.click(trigger)
     await screen.findByRole("menu")
     expect(trigger.hasAttribute("data-popup-open")).toBe(true)
@@ -95,7 +95,7 @@ describe("AppMenu", () => {
 
   it("renders one menuitem per model entry", async () => {
     render(<AppMenu />)
-    fireEvent.click(screen.getByRole("button", { name: /^menu$/i }))
+    fireEvent.click(screen.getByRole("button", { name: /^settings$/i }))
     await screen.findByRole("menu")
 
     // Drive the expectation from the model, never a hand-written list.
@@ -112,7 +112,7 @@ describe("AppMenu", () => {
   // This is the desktop half; `AppMenuSheet.test.tsx` has the mobile twin.
   it("offers both first-load screens at the top level", async () => {
     render(<AppMenu />)
-    fireEvent.click(screen.getByRole("button", { name: /^menu$/i }))
+    fireEvent.click(screen.getByRole("button", { name: /^settings$/i }))
     await screen.findByRole("menu")
 
     const rendered = screen.getAllByRole("menuitem").map((e) => e.textContent)
@@ -122,7 +122,7 @@ describe("AppMenu", () => {
 
   it("marks submenu triggers with aria-haspopup", async () => {
     render(<AppMenu />)
-    fireEvent.click(screen.getByRole("button", { name: /^menu$/i }))
+    fireEvent.click(screen.getByRole("button", { name: /^settings$/i }))
     await screen.findByRole("menu")
     const subTriggers = document.querySelectorAll(
       '[data-slot="dropdown-menu-sub-trigger"]',
@@ -141,7 +141,7 @@ describe("AppMenu", () => {
   // rather than relying on it. This asserts the intent reaches the positioner.
   it("opens submenus to the left", async () => {
     render(<AppMenu />)
-    fireEvent.click(screen.getByRole("button", { name: /^menu$/i }))
+    fireEvent.click(screen.getByRole("button", { name: /^settings$/i }))
     await screen.findByRole("menu")
     fireEvent.click(
       document.querySelector('[data-slot="dropdown-menu-sub-trigger"]')!,
@@ -155,7 +155,7 @@ describe("AppMenu", () => {
 
   it("expands a submenu and shows its children", async () => {
     render(<AppMenu />)
-    fireEvent.click(screen.getByRole("button", { name: /^menu$/i }))
+    fireEvent.click(screen.getByRole("button", { name: /^settings$/i }))
     await screen.findByRole("menu")
     const sortTrigger = screen.getByText("Sort agents by")
     fireEvent.click(sortTrigger)
@@ -170,7 +170,7 @@ describe("AppMenu", () => {
   // test has the mobile twin.
   it("expands the New agent submenu and routes a variant to its store action", async () => {
     render(<AppMenu />)
-    fireEvent.click(screen.getByRole("button", { name: /^menu$/i }))
+    fireEvent.click(screen.getByRole("button", { name: /^settings$/i }))
     await screen.findByRole("menu")
     fireEvent.click(screen.getByText("New agent"))
     await settle()
@@ -184,7 +184,7 @@ describe("AppMenu", () => {
   it("hides the from-PR variant when gh is unavailable", async () => {
     ghAvailable = false
     render(<AppMenu />)
-    fireEvent.click(screen.getByRole("button", { name: /^menu$/i }))
+    fireEvent.click(screen.getByRole("button", { name: /^settings$/i }))
     await screen.findByRole("menu")
     fireEvent.click(screen.getByText("New agent"))
     await settle()
@@ -194,7 +194,7 @@ describe("AppMenu", () => {
 
   it("expands the Add project submenu and routes a variant to its store action", async () => {
     render(<AppMenu />)
-    fireEvent.click(screen.getByRole("button", { name: /^menu$/i }))
+    fireEvent.click(screen.getByRole("button", { name: /^settings$/i }))
     await screen.findByRole("menu")
     fireEvent.click(screen.getByText("Add project"))
     await settle()
@@ -205,7 +205,7 @@ describe("AppMenu", () => {
 
   it("closes on Escape and returns focus to the trigger", async () => {
     render(<AppMenu />)
-    const trigger = screen.getByRole("button", { name: /^menu$/i })
+    const trigger = screen.getByRole("button", { name: /^settings$/i })
     fireEvent.click(trigger)
     await screen.findByRole("menu")
     fireEvent.keyDown(document.activeElement ?? document.body, {
@@ -218,7 +218,7 @@ describe("AppMenu", () => {
 
   it("calls openCustomizeWebapp when Preferences is chosen", async () => {
     render(<AppMenu />)
-    fireEvent.click(screen.getByRole("button", { name: /^menu$/i }))
+    fireEvent.click(screen.getByRole("button", { name: /^settings$/i }))
     await screen.findByRole("menu")
     fireEvent.click(screen.getByText("Preferences…"))
     expect(openCustomizeWebapp).toHaveBeenCalledOnce()
@@ -226,7 +226,7 @@ describe("AppMenu", () => {
 
   it("renders every non-separator entry with an icon", async () => {
     render(<AppMenu />)
-    fireEvent.click(screen.getByRole("button", { name: /^menu$/i }))
+    fireEvent.click(screen.getByRole("button", { name: /^settings$/i }))
     await screen.findByRole("menu")
     for (const item of screen.getAllByRole("menuitem")) {
       expect(item.querySelector("svg"), item.textContent ?? "").toBeTruthy()

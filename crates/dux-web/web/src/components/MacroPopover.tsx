@@ -18,6 +18,7 @@ import { Button } from "@/components/ui/button"
 import { getComposeInsertSink } from "@/lib/composeInsert"
 import { macrosForTarget } from "@/lib/macros"
 import { openMacrosDialog, runMacro, useDux } from "@/lib/store"
+import { getTerminalFocusElement } from "@/lib/terminalFocus"
 import type { SelectedTarget } from "@/lib/store"
 
 // A small quick-picker for sending a text macro to the focused target. Mirrors
@@ -50,7 +51,7 @@ export function MacroPopover({
   // This intentionally overrides the usual "return focus to the trigger" popover
   // convention because the trigger floats over a live terminal the user drives.
   finalFocus?: () => HTMLElement | null
-  // "labeled" is the desktop floating trigger ("Macros…" over the pane);
+  // "labeled" is the desktop trigger ("Macros…" in the center pane's top bar);
   // "icon" is the mobile terminal-screen header's icon button, matching the
   // header's outline action-cluster idiom (see the trigger below). On phones
   // the picker submits through
@@ -86,15 +87,26 @@ export function MacroPopover({
   // for it, but Base UI owns focus during a popover close and would otherwise
   // hand it back to the trigger, yanking the keyboard away from the text the
   // user is about to edit). Every other close keeps the existing behavior: the
-  // caller's finalFocus when given (the desktop trigger points it at xterm's
-  // textarea), else Base UI's default return-to-trigger (`true`).
+  // caller's finalFocus when given, else, for the DESKTOP labelled trigger,
+  // the mounted terminal pane's own typing surface, else Base UI's default
+  // return-to-trigger (`true`).
+  //
+  // The desktop trigger sits in the header now, outside `TerminalPane`, so it
+  // has no ref to hand in; the pane registers its surface on the module-scope
+  // `terminalFocus` hand-off instead. That fallback is deliberately NOT applied
+  // to the `icon` variant: on a phone, focusing a terminal textarea on a plain
+  // dismissal pops the soft keyboard, so the mobile picker keeps Base UI's
+  // return-to-trigger (a PICK that landed in the compose draft is the one
+  // exception, handled above).
   function resolveFinalFocus(): HTMLElement | boolean | null {
     if (pickedIntoComposeRef.current) {
       pickedIntoComposeRef.current = false
       const composeTarget = getComposeInsertSink()?.target() ?? null
       if (composeTarget) return composeTarget
     }
-    return finalFocus ? finalFocus() : true
+    if (finalFocus) return finalFocus()
+    if (variant === "labeled") return getTerminalFocusElement() ?? true
+    return true
   }
 
   return (
@@ -104,6 +116,15 @@ export function MacroPopover({
           it sits in the mobile terminal header among other icon-only controls,
           and on a phone icon-only is the default because space is scarce. Do
           not give it a label back.
+
+          BOTH variants are `outline`. The labelled one used to be `secondary`
+          because it FLOATED over live terminal output and needed a filled
+          surface to stay legible against it; it now sits in the desktop
+          header's control row beside the Settings cog and the Show-Changes
+          button, and outline is that row's one-family treatment. Its height
+          comes from the button's default `h-8` token, which is exactly the
+          `size="icon"` (`size-8`) height of the icon-only buttons next to it,
+          so the label changes the WIDTH and nothing else.
 
           The shape lives HERE rather than being overridden at the call site,
           so the trigger cannot drift from the `±N` and `⋯` buttons it sits
@@ -122,7 +143,7 @@ export function MacroPopover({
               aria-label="Run a macro"
             />
           ) : (
-            <Button variant="secondary" aria-label="Run a macro" />
+            <Button variant="outline" aria-label="Run a macro" />
           )
         }
       >

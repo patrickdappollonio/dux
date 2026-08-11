@@ -32,10 +32,26 @@ function installBootStubs() {
 installBootStubs()
 const { InsetHeader } = await import("./InsetHeader")
 
+// The chip a kind renders as, or null when that field is absent. Queried by the
+// `data-chip` marker the header stamps on each chip, because a glyph has no
+// accessible name to query by and the value alone cannot say WHICH field it is.
+function chip(kind: string): HTMLElement | null {
+  return document.querySelector(`[data-chip="${kind}"]`)
+}
+function chipValue(kind: string): string | undefined {
+  return chip(kind)?.textContent ?? undefined
+}
+function chipKindsInOrder(): string[] {
+  return [...document.querySelectorAll("[data-chip]")].map(
+    (el) => el.getAttribute("data-chip") ?? "",
+  )
+}
+
 function stateFor(branchName: string, initialBranch: string): DuxState {
   return {
     selectedSessionId: "s1",
     selectedTarget: { kind: "agent", sessionId: "s1", tabId: "s1" },
+    changesPanePercent: 26,
     spine: {
       projects: [{ id: "p1", name: "Repo" }],
       sessions: [
@@ -72,23 +88,304 @@ beforeEach(() => {
 afterEach(() => {
   cleanup()
   vi.unstubAllGlobals()
+  vi.restoreAllMocks()
 })
 
 describe("InsetHeader app menu", () => {
-  it("renders the app-menu cog instead of a Commands button", () => {
+  it("renders the app-menu cog, labelled Settings, instead of a Commands button", () => {
     mockState = stateFor("main", "main")
     render(<InsetHeader />)
     expect(screen.queryByText(/Commands/)).toBeNull()
-    expect(screen.getByRole("button", { name: /^menu$/i })).toBeTruthy()
+    expect(screen.getByRole("button", { name: /^settings$/i })).toBeTruthy()
+  })
+
+  it("gives the labelled cog exactly the height of the icon-only buttons beside it", () => {
+    // The rule the label must not break: a label changes the WIDTH only. Both
+    // the button's default size token and its `icon` token resolve to 32px
+    // (`h-8` / `size-8`), and asserting the classes is the only way to check it
+    // in jsdom, which computes no layout.
+    mockState = {
+      ...stateFor("main", "main"),
+      bootstrap: { show_changes_pane: false },
+    } as unknown as DuxState
+    render(<InsetHeader />)
+    const settings = screen.getByRole("button", { name: /^settings$/i })
+    const reopen = screen.getByRole("button", { name: /show changes pane/i })
+    const macros = screen.getByRole("button", { name: /run a macro/i })
+    expect(settings.className).toContain("h-8")
+    expect(macros.className).toContain("h-8")
+    expect(reopen.className).toContain("size-8")
+    // …and no control in the row forces its own height on top of the token.
+    for (const el of [settings, reopen, macros]) {
+      expect(el.className).not.toMatch(/\bh-(9|10|11)\b/)
+    }
   })
 })
 
-describe("InsetHeader project terminal crumbs", () => {
-  it("renders project and terminal crumbs for a focused project terminal", () => {
-    // The trap this guards (T8): every crumb was gated on a resolved SESSION,
-    // so a focused project terminal rendered a completely blank breadcrumb bar.
+describe("InsetHeader agent chips", () => {
+  it("renders a glyph and a value for each field", () => {
+    const titled = stateFor("feature-x", "")
+    titled.spine!.sessions[0].title = "Tab redesign"
+    mockState = titled
+    render(<InsetHeader />)
+    expect(chipValue("project")).toBe("Repo")
+    expect(chipValue("agent")).toBe("Tab redesign")
+    expect(chipValue("branch")).toBe("feature-x")
+    expect(chipValue("assistant")).toBe("claude")
+    // A glyph, not a word: no field prints its own label into the bar.
+    for (const kind of ["project", "agent", "branch", "assistant"]) {
+      expect(chip(kind)!.querySelector("svg"), kind).toBeTruthy()
+    }
+    expect(screen.queryByText(/agent:/)).toBeNull()
+    expect(screen.queryByText(/provider:/)).toBeNull()
+    expect(screen.queryByText(/branch:/)).toBeNull()
+    expect(screen.queryByText(/project:/)).toBeNull()
+  })
+
+  it("orders the chips project, agent, branch, terminals, assistant", () => {
+    const titled = stateFor("feature-x", "")
+    titled.spine!.sessions[0].title = "Tab redesign"
+    titled.spine!.terminals = [
+      {
+        id: "t1",
+        owner: { kind: "session", session_id: "s1" },
+        label: "Terminal 1",
+      },
+      {
+        id: "t2",
+        owner: { kind: "session", session_id: "s1" },
+        label: "Terminal 2",
+      },
+    ] as never
+    mockState = titled
+    render(<InsetHeader />)
+    expect(chipKindsInOrder()).toEqual([
+      "project",
+      "agent",
+      "branch",
+      "terminal",
+      "assistant",
+    ])
+  })
+
+  it("drops the branch chip when the branch merely repeats the agent name", () => {
+    mockState = stateFor("main", "main")
+    render(<InsetHeader />)
+    expect(chipValue("agent")).toBe("main")
+    expect(chip("branch")).toBeNull()
+    // The words it used to print instead are gone with the caption.
+    expect(screen.queryByText(/same branch/)).toBeNull()
+  })
+
+  it("shows the terminals chip only when the agent owns terminals", () => {
+    mockState = stateFor("main", "main")
+    render(<InsetHeader />)
+    expect(chip("terminal")).toBeNull()
+    cleanup()
+
+    const withTerminals = stateFor("main", "main")
+    withTerminals.spine!.terminals = [
+      {
+        id: "t1",
+        owner: { kind: "session", session_id: "s1" },
+        label: "Terminal 1",
+      },
+      {
+        id: "t2",
+        owner: { kind: "session", session_id: "s1" },
+        label: "Terminal 2",
+      },
+    ] as never
+    mockState = withTerminals
+    render(<InsetHeader />)
+    expect(chipValue("terminal")).toBe("2")
+  })
+
+  it("wires every chip to a hover label", () => {
+    // The glyphs are only learnable because each one names itself, so every chip
+    // must actually be a tooltip trigger. Asserted as base-ui's own marker: a
+    // chip that quietly stopped being wrapped would still render its value and
+    // look completely fine.
+    const titled = stateFor("feature-x", "")
+    titled.spine!.sessions[0].title = "Tab redesign"
+    mockState = titled
+    render(<InsetHeader />)
+    const chips = [...document.querySelectorAll("[data-chip]")]
+    expect(chips.length).toBe(4)
+    for (const el of chips) {
+      expect(
+        el.getAttribute("data-slot"),
+        `${el.getAttribute("data-chip")} is not a tooltip trigger`,
+      ).toBe("tooltip-trigger")
+    }
+  })
+
+  it("lets every other chip give way before the agent name does", () => {
+    // Asserted as the classes that carry it: a layout rule no CSS reads is a
+    // rule that silently stops working.
+    const titled = stateFor("feature-x", "")
+    titled.spine!.sessions[0].title = "Tab redesign"
+    mockState = titled
+    render(<InsetHeader />)
+    const agent = chip("agent")!
+    expect(agent.className).toContain("min-w-0")
+    expect(agent.className).toContain("shrink")
+    expect(agent.className).not.toContain("shrink-[9999]")
+    for (const kind of ["project", "branch", "assistant"]) {
+      expect(chip(kind)!.className, kind).toContain("shrink-[9999]")
+    }
+    // One font and one size: the chips are peers, so nothing here is
+    // distinguished by font or by type scale.
+    for (const el of document.querySelectorAll("[data-chip]")) {
+      expect(el.className).toContain("text-sm")
+      expect(el.className).not.toContain("font-mono")
+    }
+  })
+
+  it("draws no hairline divider between the fields", () => {
+    // The glyph IS the separator; a rule would only spend pixels. A wider gap
+    // than the header's own does the spacing.
+    mockState = stateFor("main", "main")
+    render(<InsetHeader />)
+    const row = chip("agent")!.parentElement!
+    expect(row.className).toContain("gap-3.5")
+    expect(row.querySelectorAll("[data-chip]").length).toBe(
+      row.children.length,
+    )
+  })
+})
+
+describe("InsetHeader branch drift cue", () => {
+  it("keeps the original branch off the bar and on the branch chip's hover clause", () => {
+    const titled = stateFor("agent-tabs", "server-mode")
+    titled.spine!.sessions[0].title = "Tab redesign"
+    mockState = titled
+    render(<InsetHeader />)
+    expect(chipValue("branch")).toBe("agent-tabs")
+    // The drift is a hover clause now, not bar text: it must not be printed.
+    expect(screen.queryByText(/originally/)).toBeNull()
+  })
+
+  it("keeps a branch chip at all when the branch drifted but matches the agent name", () => {
+    // Without this the drift note has nowhere to live and the fact is dropped.
+    mockState = stateFor("main", "server-mode")
+    render(<InsetHeader />)
+    expect(chipValue("branch")).toBe("main")
+  })
+
+  it("shows no branch chip when nothing about the branch is worth saying", () => {
+    mockState = stateFor("main", "main")
+    render(<InsetHeader />)
+    expect(chip("branch")).toBeNull()
+  })
+})
+
+describe("InsetHeader chip tooltips", () => {
+  it("offers nothing to reveal while the value is fully readable", async () => {
+    // jsdom computes no layout, so scrollWidth === clientWidth === 0: nothing is
+    // truncated and no chip may offer to repeat what the user can already read.
+    const { headerChipTooltip } = await import("@/lib/headerSubject")
+    mockState = stateFor("main", "main")
+    render(<InsetHeader />)
+    expect(
+      headerChipTooltip(
+        { kind: "project", label: "Project", value: "Repo" },
+        false,
+      ),
+    ).toBe("Project")
+    expect(document.body.textContent).not.toContain("Project · Repo")
+  })
+
+  it("measures the overflow itself rather than assuming it", async () => {
+    // Truncation is a MEASUREMENT (scroll width against client width), which is
+    // what makes "only when actually cut off" possible at all. Drive it: make
+    // every element report an overflowing scroll width and the hook must read
+    // both sides.
+    const scrollWidth = vi
+      .spyOn(HTMLElement.prototype, "scrollWidth", "get")
+      .mockReturnValue(400)
+    const clientWidth = vi
+      .spyOn(HTMLElement.prototype, "clientWidth", "get")
+      .mockReturnValue(40)
+    mockState = stateFor("main", "main")
+    render(<InsetHeader />)
+    expect(scrollWidth).toHaveBeenCalled()
+    expect(clientWidth).toHaveBeenCalled()
+    const { headerChipTooltip } = await import("@/lib/headerSubject")
+    expect(
+      headerChipTooltip(
+        { kind: "project", label: "Project", value: "Repo" },
+        true,
+      ),
+    ).toBe("Project · Repo")
+  })
+})
+
+describe("InsetHeader macros and the pane-edge spacer", () => {
+  it("puts the macro trigger before a spacer sized to the Changes panel", () => {
+    mockState = { ...stateFor("main", "main"), changesPanePercent: 31 }
+    render(<InsetHeader />)
+    const macros = screen.getByRole("button", { name: /run a macro/i })
+    const spacer = macros.nextElementSibling as HTMLElement
+    expect(spacer.style.width).toBe("31%")
+  })
+
+  it("tracks a dragged divider, because the width is the live percentage", () => {
+    mockState = { ...stateFor("main", "main"), changesPanePercent: 44.5 }
+    render(<InsetHeader />)
+    const macros = screen.getByRole("button", { name: /run a macro/i })
+    expect((macros.nextElementSibling as HTMLElement).style.width).toBe("44.5%")
+  })
+
+  it("collapses the spacer to zero when the Changes pane is hidden", () => {
+    // The button slides right with the terminal pane that just grew under it.
+    mockState = {
+      ...stateFor("main", "main"),
+      changesPanePercent: 26,
+      bootstrap: { show_changes_pane: false },
+    } as unknown as DuxState
+    render(<InsetHeader />)
+    const macros = screen.getByRole("button", { name: /run a macro/i })
+    expect((macros.nextElementSibling as HTMLElement).style.width).toBe("0%")
+  })
+
+  it("puts the controls INSIDE the spacer, right-aligned, with a floor", () => {
+    // The spacer is the control cluster, not an empty box in front of it: an
+    // empty one would push Macros left by the cluster's own width and only
+    // pixel math could correct it. Right-aligning inside a
+    // Changes-panel-sized box is what puts the cog on the window's edge and
+    // Macros on the pane's. `min-w-fit` is the floor that survives both the
+    // hidden pane (0%) and a pane dragged narrower than the buttons.
+    mockState = { ...stateFor("main", "main"), changesPanePercent: 26 }
+    render(<InsetHeader />)
+    const macros = screen.getByRole("button", { name: /run a macro/i })
+    const cluster = macros.nextElementSibling as HTMLElement
+    expect(cluster.contains(screen.getByRole("button", { name: /^settings$/i })))
+      .toBe(true)
+    expect(cluster.className).toContain("justify-end")
+    expect(cluster.className).toContain("min-w-fit")
+    expect(cluster.className).toContain("shrink-0")
+  })
+
+  it("renders no macro trigger when nothing is focused", () => {
     mockState = {
       selectedSessionId: null,
+      selectedTarget: null,
+      changesPanePercent: 26,
+      spine: { projects: [], sessions: [] },
+    } as unknown as DuxState
+    render(<InsetHeader />)
+    expect(screen.queryByRole("button", { name: /run a macro/i })).toBeNull()
+  })
+})
+
+describe("InsetHeader project terminal chips", () => {
+  it("renders project and terminal chips for a focused project terminal", () => {
+    // The trap this guards (T8): every field was gated on a resolved SESSION,
+    // so a focused project terminal rendered a completely blank bar.
+    mockState = {
+      selectedSessionId: null,
+      changesPanePercent: 26,
       selectedTarget: {
         kind: "terminal",
         terminalId: "pt-1",
@@ -109,22 +406,61 @@ describe("InsetHeader project terminal crumbs", () => {
       },
     } as unknown as DuxState
     render(<InsetHeader />)
-    // The TERMINAL is the subject; its owning project is the caption. No labels
-    // on either half.
-    expect(screen.getByText("Terminal 2")).toBeTruthy()
-    expect(screen.getByText("Repo · 1 terminal")).toBeTruthy()
+    expect(chipKindsInOrder()).toEqual(["project", "terminal"])
+    expect(chipValue("project")).toBe("Repo")
+    expect(chipValue("terminal")).toBe("Terminal 2")
     expect(screen.queryByText(/project:/)).toBeNull()
     expect(screen.queryByText(/terminal:/)).toBeNull()
   })
 })
 
-describe("InsetHeader standalone terminal crumbs", () => {
+describe("InsetHeader session terminal chips", () => {
+  it("keeps the owning agent's fields and hands the primary slot to the terminal", () => {
+    const base = stateFor("main", "main")
+    mockState = {
+      ...base,
+      selectedSessionId: "s1",
+      selectedTarget: {
+        kind: "terminal",
+        terminalId: "t1",
+        owner: { kind: "session", sessionId: "s1" },
+      },
+      spine: {
+        ...base.spine,
+        terminals: [
+          {
+            id: "t1",
+            owner: { kind: "session", session_id: "s1" },
+            label: "Terminal 1",
+            has_output: true,
+            foreground_cmd: null,
+          },
+        ],
+      },
+    } as unknown as DuxState
+    render(<InsetHeader />)
+    // One terminal glyph, not two: the focused terminal's chip replaces the
+    // agent's count rather than sitting beside it.
+    expect(chipKindsInOrder()).toEqual([
+      "project",
+      "agent",
+      "terminal",
+      "assistant",
+    ])
+    expect(chipValue("terminal")).toBe("Terminal 1")
+    expect(chip("terminal")!.className).not.toContain("shrink-[9999]")
+    expect(chip("agent")!.className).toContain("shrink-[9999]")
+  })
+})
+
+describe("InsetHeader standalone terminal chips", () => {
   it("names the directory for a focused standalone terminal", () => {
-    // It has no owner to name, so a breadcrumb that only knows how to name
-    // owners would render blank. The directory is what it says instead, and it
-    // is the same string its sidebar row shows.
+    // It has no owner to name, so a header that only knows how to name owners
+    // would render blank. The directory is what it says instead, and it is the
+    // same string its sidebar row shows.
     mockState = {
       selectedSessionId: null,
+      changesPanePercent: 26,
       selectedTarget: {
         kind: "terminal",
         terminalId: "solo-1",
@@ -145,8 +481,9 @@ describe("InsetHeader standalone terminal crumbs", () => {
       },
     } as unknown as DuxState
     render(<InsetHeader />)
-    expect(screen.getByText("Terminal 1")).toBeTruthy()
-    expect(screen.getByText("~/code · 1 terminal")).toBeTruthy()
+    expect(chipKindsInOrder()).toEqual(["directory", "terminal"])
+    expect(chipValue("directory")).toBe("~/code")
+    expect(chipValue("terminal")).toBe("Terminal 1")
     expect(screen.queryByText(/directory:/)).toBeNull()
   })
 })
@@ -208,66 +545,20 @@ describe("InsetHeader show-Changes button", () => {
   })
 })
 
-describe("InsetHeader branch drift cue", () => {
-  it("shows the original branch only when the current branch differs", () => {
-    mockState = stateFor("agent-tabs", "server-mode")
-    render(<InsetHeader />)
-    expect(screen.getByText(/originally server-mode/)).toBeTruthy()
-  })
-
-  it("omits the original branch when it matches the current branch", () => {
+describe("InsetHeader geometry", () => {
+  it("stays exactly 48px tall and never lets the chips push the controls off", () => {
     mockState = stateFor("main", "main")
-    render(<InsetHeader />)
-    expect(screen.queryByText(/originally/)).toBeNull()
-  })
-})
-
-describe("InsetHeader one-subject layout", () => {
-  it("names the agent once, unlabelled, and says `same branch` instead of repeating it", () => {
-    // The measured problem: an untitled agent takes its name from its branch, so
-    // the old four-pair bar printed that word twice ("agent: main … branch:
-    // main").
-    mockState = stateFor("main", "main")
-    render(<InsetHeader />)
-    expect(screen.getByText("main")).toBeTruthy()
-    expect(screen.getByText("Repo · claude · same branch")).toBeTruthy()
-    // No labels survive anywhere in the strip.
-    expect(screen.queryByText(/agent:/)).toBeNull()
-    expect(screen.queryByText(/provider:/)).toBeNull()
-    expect(screen.queryByText(/branch:/)).toBeNull()
-  })
-
-  it("prints the branch in the caption when it differs from the agent name", () => {
-    // An untitled agent takes its name FROM the branch, so a differing branch
-    // needs a titled agent.
-    const titled = stateFor("feature-x", "")
-    titled.spine!.sessions[0].title = "Tab redesign"
-    mockState = titled
-    render(<InsetHeader />)
-    expect(screen.getByText("Tab redesign")).toBeTruthy()
-    expect(screen.getByText("Repo · claude · feature-x")).toBeTruthy()
-    expect(screen.queryByText(/same branch/)).toBeNull()
-  })
-
-  it("lets the caption give way before the agent name does", () => {
-    // Both halves can truncate, but the caption's shrink factor is thousands of
-    // times the subject's, so overflow is absorbed by the caption first. Asserted
-    // as the classes that carry it: a layout rule no CSS reads is a rule that
-    // silently stops working.
-    mockState = stateFor("main", "main")
-    render(<InsetHeader />)
-    const subject = screen.getByText("main")
-    const caption = screen.getByText("Repo · claude · same branch")
-    expect(subject.className).toContain("truncate")
-    expect(subject.className).toContain("min-w-0")
-    expect(subject.className).toContain("shrink")
-    expect(subject.className).not.toContain("shrink-0")
-    expect(caption.className).toContain("truncate")
-    expect(caption.className).toContain("shrink-[9999]")
-    // Size and weight carry the hierarchy; one font (sans) throughout.
-    expect(subject.className).toContain("text-sm")
-    expect(caption.className).toContain("text-xs")
-    expect(subject.className).not.toContain("font-mono")
-    expect(caption.className).not.toContain("font-mono")
+    const { container } = render(<InsetHeader />)
+    const header = container.querySelector("header")!
+    expect(header.className).toContain("h-12")
+    expect(header.className).toContain("shrink-0")
+    // Buttons win: the chip row owns the whole shrink budget.
+    const row = chip("agent")!.parentElement!
+    expect(row.className).toContain("min-w-0")
+    expect(row.className).toContain("flex-1")
+    expect(row.className).toContain("overflow-hidden")
+    const controls = screen.getByRole("button", { name: /^settings$/i })
+      .parentElement!
+    expect(controls.className).toContain("shrink-0")
   })
 })

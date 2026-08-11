@@ -69,10 +69,20 @@ export function AppMenu() {
   const ghAvailable = bootstrap?.gh_available ?? false
   return (
     <DropdownMenu>
+      {/* LABELLED on desktop, where there is room: "Settings" says what the cog
+          opens without a hover, and this is the menu every global action lives
+          behind. The label changes the WIDTH and nothing else, the button's
+          default size token is `h-8`, exactly the `size="icon"` (`size-8`)
+          height of the icon-only buttons beside it, so the control row stays one
+          height. The `aria-label="Menu"` it used to carry is GONE rather than
+          kept: an aria-label overrides the accessible name, so a button reading
+          "Settings" would have announced as "Menu" and no voice command matching
+          the visible word would reach it. The visible text is the name now. */}
       <DropdownMenuTrigger
         render={
-          <Button variant="outline" size="icon" aria-label="Menu">
+          <Button variant="outline">
             <Settings />
+            Settings
           </Button>
         }
       />

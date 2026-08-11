@@ -20,6 +20,10 @@ import {
   setComposeInsertSink,
 } from "@/lib/composeInsert"
 import {
+  peekTerminalFocusTarget,
+  setTerminalFocusTarget,
+} from "@/lib/terminalFocus"
+import {
   type ConfiguredDropPaste,
   type DropContext,
   type DropOutcome,
@@ -36,7 +40,6 @@ import { FileDropApiError, uploadDroppedFile } from "@/lib/fileDropApi"
 import { clipboardPasteAction } from "@/lib/clipboardPaste"
 import { showBusyToast } from "@/lib/busyToast"
 import { showFinalToast } from "@/lib/finalToast"
-import { MacroPopover } from "@/components/MacroPopover"
 import { Button } from "@/components/ui/button"
 import {
   Card,
@@ -86,7 +89,7 @@ import {
   restoreMobileBars,
   useDux,
 } from "@/lib/store"
-import type { SelectedTarget, TerminalOwnerRef } from "@/lib/store"
+import type { TerminalOwnerRef } from "@/lib/store"
 import { isTabGone } from "@/lib/agentTabs"
 import {
   nextAppliedGeneration,
@@ -653,14 +656,6 @@ export function TerminalPane(props: TerminalPaneProps) {
   useEffect(() => {
     sessionTabsRef.current = session?.tabs
   }, [session?.tabs])
-  // The macro popover's target. For an agent the streamed id is the FOCUSED TAB
-  // id; for a terminal it is the terminal id. Mirrors the store's
-  // `SelectedTarget` shape so the popover filters macros by the focused surface
-  // and runs against the right PTY.
-  const macroTarget: SelectedTarget =
-    props.kind === "agent"
-      ? { kind: "agent", sessionId: props.sessionId, tabId: id }
-      : { kind: "terminal", terminalId: id, owner: props.owner }
   // Latch readiness: once the PTY has emitted output we keep the spinner hidden,
   // even if a later view model reports `has_output: false` (e.g. an exited
   // agent). Adjusting state during render is the React-sanctioned latch pattern
@@ -751,6 +746,23 @@ export function TerminalPane(props: TerminalPaneProps) {
     // and listing it would re-register the sink on every keystroke.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [composeBarEnabled, isOwner])
+  // The desktop macro picker now lives in the header (`InsetHeader`), outside
+  // this pane, so it cannot reach xterm to hand Base UI a close-focus target.
+  // Register the pane's typing surface for it, on the same module-scope
+  // hand-off idiom as the compose sink above (and with the same
+  // only-retire-your-own-registration guard). The pane resolves the surface at
+  // CALL time through `focusTypingSurface`'s own rule, so a picker close lands
+  // where typing already was rather than where it was when this effect ran.
+  useEffect(() => {
+    const target = () =>
+      composeActiveRef.current && composeInputRef.current
+        ? composeInputRef.current
+        : (termRef.current?.textarea ?? null)
+    setTerminalFocusTarget(target)
+    return () => {
+      if (peekTerminalFocusTarget() === target) setTerminalFocusTarget(null)
+    }
+  }, [])
   // The compose textarea's own image-paste listener. The compose bar renders
   // OUTSIDE the terminal container (it is a sibling row of the mobile shell),
   // so the container's capture listener cannot see a paste that lands in it,
@@ -2795,30 +2807,14 @@ export function TerminalPane(props: TerminalPaneProps) {
           className="h-full w-full"
         />
       </div>
-      {/* Pane chrome. An absolutely-positioned overlay (a sibling of the xterm
-          host, NOT inside the unpadded containerRef xterm opens into) so it never
-          changes the terminal's box measurement — see the hostRef comment. The
-          right offset reserves the xterm scrollbar gutter so the button never
-          overlaps the scrollbar: 0.5rem MUST match the host's `p-2` padding below,
-          then the shared --xterm-scrollbar-width (fallback keeps the offset valid
-          if the var is ever missing), then a small gap. */}
-      {/* DESKTOP ONLY: on a phone this floating trigger sat on top of the PTY
-          text and made the text under it unreadable, so the mobile entry
-          point is the terminal screen's header icon button (MobileShell),
-          never this overlay. */}
-      {!isMobile ? (
-        <div className="absolute top-3 right-[calc(0.5rem+var(--xterm-scrollbar-width,8px)+0.25rem)] z-10 flex gap-2">
-          {/* The popover trigger renders a secondary labeled Button (see
-              MacroPopover). On close we hand Base UI the terminal's textarea as
-              the focus target instead of calling termRef.focus() imperatively
-              like the accessory-bar handlers do, because Base UI owns focus
-              during a popover close — see the MacroPopover finalFocus comment. */}
-          <MacroPopover
-            target={macroTarget}
-            finalFocus={() => termRef.current?.textarea ?? null}
-          />
-        </div>
-      ) : null}
+      {/* The desktop macro trigger used to float HERE, as an
+          absolutely-positioned overlay over the PTY text. It now lives in the
+          center pane's top bar (`InsetHeader`), parked on this pane's right
+          edge, so it no longer covers the terminal's own output and reads as one
+          family with the header's other controls. The mobile entry point is
+          unchanged: the terminal screen's header icon button (MobileShell).
+          Focus still returns to this pane's typing surface on close, through the
+          `terminalFocus` registration above rather than a prop. */}
       {/* Readiness / reconnect overlay. Non-blocking (pointer-events-none) so it
           never steals input. Shows while the PTY is still starting up (before its
           first output latches `everReady`) OR whenever the socket has dropped and

@@ -51,7 +51,9 @@ import { Toaster } from "@/components/ui/sonner"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { useVisualViewportHeight } from "@/hooks/use-visual-viewport"
 import {
+  CHANGES_PANE_DEFAULT_PERCENT,
   changesPaneVisible,
+  setChangesPanePercent,
   useDux,
 } from "@/lib/store"
 import { keyboardLikelyOpen } from "@/lib/viewport"
@@ -122,7 +124,27 @@ function DesktopShell() {
       <SidebarInset className="flex h-svh min-h-0 flex-col overflow-hidden">
         <InsetHeader />
         <div className="min-h-0 flex-1">
-          <ResizablePanelGroup orientation="horizontal" className="size-full">
+          <ResizablePanelGroup
+            orientation="horizontal"
+            className="size-full"
+            // The split is LIFTED into the store because InsetHeader, this
+            // group's sibling directly above, spans exactly the same width and
+            // has to park the Macros button on the terminal pane's right edge.
+            // It mirrors this percentage as a spacer, so nothing has to measure
+            // pixels and the alignment survives any zoom or window size.
+            //
+            // `onLayoutChange` rather than `onLayoutChanged`: the former fires
+            // on every pointer move of a drag, which is what makes the button
+            // track the divider live instead of snapping to it on release. The
+            // setter drops a write that would not change the value, so the
+            // per-move cadence costs a render only when the split actually
+            // moved.
+            onLayoutChange={(layout) =>
+              setChangesPanePercent(
+                layout["changes-pane"] ?? CHANGES_PANE_DEFAULT_PERCENT,
+              )
+            }
+          >
             {/* The terminal panel's defaultSize drops to 100 when the Changes
                 panel is absent so it fills the width (no leftover sliver). The
                 ids keep the two panels stable across the conditional mount.
@@ -130,7 +152,7 @@ function DesktopShell() {
                 (defaultSize only applies on mount). */}
             <ResizablePanel
               id="terminal-pane"
-              defaultSize={showChanges ? 74 : 100}
+              defaultSize={showChanges ? 100 - CHANGES_PANE_DEFAULT_PERCENT : 100}
               minSize={30}
             >
               <TerminalArea />
@@ -140,7 +162,7 @@ function DesktopShell() {
                 <ResizableHandle />
                 <ResizablePanel
                   id="changes-pane"
-                  defaultSize={26}
+                  defaultSize={CHANGES_PANE_DEFAULT_PERCENT}
                   minSize={14}
                   collapsible
                 >

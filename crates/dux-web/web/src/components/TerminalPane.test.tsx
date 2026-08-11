@@ -643,11 +643,14 @@ describe("TerminalPane project-terminal owner resolution", () => {
   })
 })
 
-// The floating "Macros…" trigger is desktop chrome only: on a phone it sat
-// over the PTY text and made the text under it unreadable, so the mobile
-// entry point is the terminal screen's header (MobileShell), never this
-// overlay.
-describe("TerminalPane floating macro trigger", () => {
+// The macro trigger no longer floats over the PTY at ANY width. On desktop it
+// moved into the center pane's top bar (`InsetHeader`), parked on this pane's
+// right edge; on a phone it has always lived in the terminal screen's header
+// (MobileShell), because the overlay sat on top of the output and made the text
+// under it unreadable. What the pane keeps is the FOCUS hand-off: the header's
+// picker is outside this component and cannot reach xterm, so the pane
+// registers its typing surface for it.
+describe("TerminalPane macro trigger", () => {
   const desktopWidth = window.innerWidth
   afterEach(() => {
     Object.defineProperty(window, "innerWidth", {
@@ -656,18 +659,36 @@ describe("TerminalPane floating macro trigger", () => {
     })
   })
 
-  it("renders the floating trigger on desktop", () => {
+  it("renders no macro trigger over the terminal on desktop", () => {
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-    expect(screen.getByTestId("macro-popover")).toBeTruthy()
+    expect(screen.queryByTestId("macro-popover")).toBeNull()
   })
 
-  it("does not render the floating trigger on mobile", () => {
+  it("renders no macro trigger over the terminal on mobile", () => {
     Object.defineProperty(window, "innerWidth", {
       value: 500,
       configurable: true,
     })
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     expect(screen.queryByTestId("macro-popover")).toBeNull()
+  })
+
+  it("registers its typing surface so the header's picker can return focus to it", async () => {
+    // Without this, closing the header picker hands focus back to the trigger
+    // and the Enter that was meant to submit the macro re-opens the menu, and the
+    // exact bug the pane's old `finalFocus` prop existed to prevent.
+    const { getTerminalFocusElement, peekTerminalFocusTarget } = await import(
+      "@/lib/terminalFocus"
+    )
+    // Deliberately no assertion that the slot starts empty: it is module-global
+    // state shared by every test in this file, so a pane a neighbouring test
+    // left mounted would make that assertion order-dependent. What matters is
+    // that THIS pane claims the slot and gives it back.
+    const view = render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(peekTerminalFocusTarget()).not.toBeNull()
+    expect(getTerminalFocusElement()).toBe(TermStub.instances.at(-1)!.textarea)
+    view.unmount()
+    expect(peekTerminalFocusTarget()).toBeNull()
   })
 })
 
