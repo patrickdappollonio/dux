@@ -10,6 +10,7 @@ import {
 import type { DuxState } from "@/lib/store"
 import type { ConnState } from "@/lib/types"
 import { notifyPtyOwner, resetPtyOwnerEpochs } from "@/lib/ptyOwnership"
+import { installXtermMouseModel } from "@/lib/xtermMouseModel"
 
 // TerminalPane embeds xterm.js, whose canvas rendering jsdom cannot back (see the
 // note in TerminalArea.test.tsx). So we mount the REAL TerminalPane — exercising
@@ -51,9 +52,80 @@ class TermStub {
   loadAddon(addon: { activate?: (term: TermStub) => void }) {
     addon.activate?.(this)
   }
-  open() {}
-  onData() {
-    return { dispose() {} }
+  // xterm's own DOM: `Terminal.element` is the `.xterm` div it creates inside
+  // the host, and `.xterm-screen` is the child its coordinate math measures.
+  // Both are real nodes here so the mouse-replay path can dispatch at them, and
+  // `installXtermMouseModel` stands in for the pipeline jsdom cannot run (see
+  // `lib/xtermMouseModel.ts`). Rects are stubbed because jsdom reports zeros.
+  element: HTMLElement | null = null
+  mouse: ReturnType<typeof installXtermMouseModel> | null = null
+  focusCalls = 0
+  static mouseGeometry = {
+    left: 100,
+    top: 50,
+    cellWidth: 10,
+    cellHeight: 20,
+    paddingLeft: 0,
+    paddingTop: 0,
+  }
+  open(container: HTMLElement) {
+    const g = TermStub.mouseGeometry
+    const element = container.ownerDocument.createElement("div")
+    element.className = "xterm"
+    const screen = container.ownerDocument.createElement("div")
+    screen.className = "xterm-screen"
+    element.appendChild(screen)
+    container.appendChild(element)
+    const rect = (el: HTMLElement, w: number, h: number) => {
+      el.getBoundingClientRect = () =>
+        ({
+          left: g.left,
+          top: g.top,
+          right: g.left + w,
+          bottom: g.top + h,
+          width: w,
+          height: h,
+          x: g.left,
+          y: g.top,
+          toJSON() {},
+        }) as DOMRect
+    }
+    rect(element, this.cols * g.cellWidth, this.rows * g.cellHeight)
+    rect(screen, this.cols * g.cellWidth, this.rows * g.cellHeight)
+    this.element = element
+    this.mouse = installXtermMouseModel({
+      element,
+      screen,
+      cols: this.cols,
+      rows: this.rows,
+      cellWidth: g.cellWidth,
+      cellHeight: g.cellHeight,
+      paddingLeft: g.paddingLeft,
+      paddingTop: g.paddingTop,
+      onData: (d) => this.dataHandler?.(d),
+      onBinary: (d) => this.binaryHandler?.(d),
+      onFocus: () => {
+        this.focusCalls++
+      },
+    })
+  }
+  dataHandler: ((s: string) => void) | null = null
+  binaryHandler: ((s: string) => void) | null = null
+  onData(cb: (s: string) => void) {
+    this.dataHandler = cb
+    return {
+      dispose: () => {
+        this.dataHandler = null
+      },
+    }
+  }
+  onBinary(cb: (s: string) => void) {
+    this.binaryHandler = cb
+    return {
+      dispose: () => {
+        this.binaryHandler = null
+      },
+    }
   }
   // xterm's own resize event. It fires only when the grid actually CHANGES, and
   // it is the pane's single choke point for reporting geometry to the PTY, so
@@ -1071,32 +1143,191 @@ describe("TerminalPane tap-to-focus redirect", () => {
     expect(tap(container())).toBe(false)
   })
 
-  it("forwards a synthetic SGR click to a mouse-tracking app AND focuses compose", () => {
+  // The forwarded tap is a REPLAY, not an encoding: dux dispatches the mouse
+  // events the swallowed synthetic ones would have been at `Terminal.element`
+  // and xterm resolves the cell and picks the wire format. So these assert what
+  // the APP received, through the transcribed pipeline in `lib/xtermMouseModel.ts`
+  // (geometry: origin 100,50; 10x20 cells; 80x24 grid, so the canvas is 800x480).
+  const sent = () => {
+    const pty = FakePtySocket.instances.at(-1)
+    if (!pty) throw new Error("no pty constructed")
+    const dec = new TextDecoder("latin1")
+    return pty.sendInput.mock.calls.map((c) =>
+      dec.decode(c[0] as Uint8Array),
+    )
+  }
+  const armed = (
+    protocol: Parameters<
+      NonNullable<InstanceType<typeof TermStub>["mouse"]>["setProtocol"]
+    >[0],
+    encoding: Parameters<
+      NonNullable<InstanceType<typeof TermStub>["mouse"]>["setEncoding"]
+    >[0],
+  ) => {
+    const term = TermStub.instances.at(-1)
+    if (!term?.mouse) throw new Error("no term constructed")
+    // `mouseTrackingMode` is what dux gates the forward on; the model carries
+    // the protocol and the encoding, which xterm publishes neither of.
+    term.modes.mouseTrackingMode = protocol === "X10" ? "x10" : "vt200"
+    term.mouse.setProtocol(protocol)
+    term.mouse.setEncoding(encoding)
+    return term
+  }
+  // A cell, as a client point: the CENTRE of the 1-based cell (col, row).
+  const at = (col: number, row: number) => ({
+    clientX: 100 + (col - 1) * 10 + 5,
+    clientY: 50 + (row - 1) * 20 + 10,
+  })
+  const tapAt = (point: { clientX: number; clientY: number }) => {
+    const el = container()
+    fireEvent.touchStart(el, { touches: [point] })
+    return !fireEvent.touchEnd(el, { touches: [], changedTouches: [point] })
+  }
+
+  it("forwards a tap to a mouse-tracking app AND focuses compose", () => {
     goMobile()
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-    const pty = FakePtySocket.instances.at(-1)
-    const term = TermStub.instances.at(-1)
-    if (!pty || !term) throw new Error("no pty/term constructed")
     // The app in the PTY has grabbed the mouse: the swallowed tap must still
     // reach it as a left click (press + release) at the tapped cell, or
     // tap-driven TUIs go dead with the compose bar up.
-    term.modes.mouseTrackingMode = "sgr"
-    const prevented = tap(container())
-    expect(prevented).toBe(true)
+    const term = armed("VT200", "SGR")
+    expect(tapAt(at(4, 3))).toBe(true)
     expect(document.activeElement).toBe(composeTextarea())
-    expect(pty.sendInput).toHaveBeenCalledTimes(1)
-    const bytes = new TextDecoder().decode(
-      pty.sendInput.mock.calls[0][0] as Uint8Array,
-    )
-    // jsdom rects/sizes are all 0, so the drag-path math degrades to the
-    // 1px-per-cell guard: cell = floor(10 / 1) + 1 = 11 on both axes.
-    expect(bytes).toBe("\x1b[<0;11;11M\x1b[<0;11;11m")
+    expect(sent()).toEqual(["\x1b[<0;4;3M", "\x1b[<0;4;3m"])
+    // xterm's own mousedown handler grabbed focus; the redirect took it back.
+    expect(term.focusCalls).toBe(1)
   })
+
+  // One case per encoding xterm can actually be in. `?1005` (UTF-8) and `?1015`
+  // (urxvt) are absent on purpose: the installed xterm parses both DECSETs and
+  // ignores them ("DECSET 1005 not supported (see #2507)"), so it has no such
+  // state to be in and dux can never owe an app those bytes.
+  it("sends the DEFAULT (X10 byte) encoding on onBinary when the app never asked for SGR", () => {
+    goMobile()
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    armed("VT200", "DEFAULT")
+    expect(tapAt(at(4, 3))).toBe(true)
+    // `ESC [ M Cb Cx Cy`, each coordinate offset by 32. Press: button 0 -> 32
+    // (space), col 4 -> 36 ($), row 3 -> 35 (#). Release: X10 has no button on
+    // a release, so Cb is 3 + 32 = 35 (#).
+    expect(sent()).toEqual(["\x1b[M \x24\x23", "\x1b[M\x23\x24\x23"])
+  })
+
+  it("sends SGR_PIXELS in pixels, not cells, when the app asked for ?1016", () => {
+    goMobile()
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    armed("VT200", "SGR_PIXELS")
+    expect(tapAt(at(4, 3))).toBe(true)
+    // The point is 35px, 50px into the canvas, and stays in pixels.
+    expect(sent()).toEqual(["\x1b[<0;35;50M", "\x1b[<0;35;50m"])
+  })
+
+  it("sends NO release under the X10 protocol, which reports presses only", () => {
+    goMobile()
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    armed("X10", "DEFAULT")
+    expect(tapAt(at(4, 3))).toBe(true)
+    expect(sent()).toEqual(["\x1b[M \x24\x23"])
+  })
+
+  // Boundary cells. xterm clamps the point into the canvas and then rejects an
+  // out-of-grid cell, so a tap in the padding resolves to the edge cell exactly
+  // as a desktop click there does, and nothing lands outside 1..cols / 1..rows.
+  it("resolves the first cell, the last cell, and each far edge", () => {
+    goMobile()
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    armed("VT200", "SGR")
+    const press = () => sent()[0]
+    const pty = () => FakePtySocket.instances.at(-1)!
+    tapAt(at(1, 1))
+    expect(press()).toBe("\x1b[<0;1;1M")
+    pty().sendInput.mockClear()
+    tapAt(at(80, 1))
+    expect(press()).toBe("\x1b[<0;80;1M")
+    pty().sendInput.mockClear()
+    tapAt(at(1, 24))
+    expect(press()).toBe("\x1b[<0;1;24M")
+    pty().sendInput.mockClear()
+    tapAt(at(80, 24))
+    expect(press()).toBe("\x1b[<0;80;24M")
+    pty().sendInput.mockClear()
+    // Beyond every edge, in both directions: clamped onto the edge cell, never
+    // dropped and never off-grid.
+    tapAt({ clientX: -500, clientY: -500 })
+    expect(press()).toBe("\x1b[<0;1;1M")
+    pty().sendInput.mockClear()
+    tapAt({ clientX: 5000, clientY: 5000 })
+    expect(press()).toBe("\x1b[<0;80;24M")
+  })
+
+  it("forwards nothing when the app has no mouse tracking on", () => {
+    goMobile()
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(tapAt(at(4, 3))).toBe(true)
+    expect(sent()).toEqual([])
+    expect(document.activeElement).toBe(composeTextarea())
+  })
+
 })
 
 // The accessory-bar render gate (the `ui.mobile_accessory_bar` preference,
 // default on) sits beside the owner gate: hiding the key rows returns them to
 // the terminal, while the compose bar (its own preference) stays.
+// A touch drag on the ALT SCREEN of a mouse-tracking app is forwarded as wheel
+// notches. Same replay, same reason: the app, not dux, picks the wire format.
+describe("TerminalPane forwards a touch drag as wheel reports", () => {
+  const container = () => screen.getByTestId("terminal-container")
+  const sent = () => {
+    const pty = FakePtySocket.instances.at(-1)
+    if (!pty) throw new Error("no pty constructed")
+    const dec = new TextDecoder("latin1")
+    return pty.sendInput.mock.calls.map((c) => dec.decode(c[0] as Uint8Array))
+  }
+  // Alt screen (no xterm scrollback) plus a mouse-tracking app is the only
+  // combination that forwards; anything else scrolls xterm locally.
+  const armAltScreen = (encoding: "SGR" | "DEFAULT") => {
+    const term = TermStub.instances.at(-1)
+    if (!term?.mouse) throw new Error("no term constructed")
+    term.buffer = { active: { type: "alternate" } }
+    term.modes.mouseTrackingMode = "drag"
+    term.mouse.setProtocol("DRAG")
+    term.mouse.setEncoding(encoding)
+    return term
+  }
+  // 20px past the threshold, upward: one notch of wheel-DOWN (newer output),
+  // matching `dragScrollLines`' sign convention. jsdom reports a zero container
+  // height, so the drag math falls back to its 16px row guard.
+  const dragUp = () => {
+    fireEvent.touchStart(container(), { touches: [{ clientX: 10, clientY: 300 }] })
+    fireEvent.touchMove(container(), { touches: [{ clientX: 10, clientY: 280 }] })
+  }
+
+  it("sends exactly one SGR wheel report per move, at the finger's cell", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    armAltScreen("SGR")
+    dragUp()
+    // Button 64|action: action 1 (deltaY > 0) is wheel down. The point is left
+    // of the canvas, so the column clamps to 1; y = 280 - 50 = 230px = row 12.
+    expect(sent()).toEqual(["\x1b[<65;1;12M"])
+  })
+
+  it("sends the X10 byte form on onBinary when the app never asked for SGR", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    armAltScreen("DEFAULT")
+    dragUp()
+    // Cb 65 + 32 = 97 (a), col 1 + 32 = 33 (!), row 12 + 32 = 44 (,).
+    expect(sent()).toEqual(["\x1b[Ma!,"])
+  })
+
+  it("forwards nothing on the alt screen when the app has no mouse tracking", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const term = TermStub.instances.at(-1)!
+    term.buffer = { active: { type: "alternate" } }
+    dragUp()
+    expect(sent()).toEqual([])
+  })
+})
+
 describe("TerminalPane mobile accessory-bar preference", () => {
   const desktopWidth = window.innerWidth
   const goMobile = () => {

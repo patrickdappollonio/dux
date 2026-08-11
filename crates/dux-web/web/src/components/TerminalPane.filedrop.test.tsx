@@ -58,6 +58,11 @@ class TermStub {
     this.dataHandler = cb
     return { dispose() {} }
   }
+  // xterm's other output channel: an X10-encoded mouse report goes out here,
+  // not through onData. Subscribable so the pane's mount effect completes.
+  onBinary() {
+    return { dispose() {} }
+  }
   attachCustomKeyEventHandler() {}
   focus() {}
   getSelection() {

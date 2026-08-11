@@ -71,6 +71,11 @@ class TermStub {
     this.dataHandler = cb
     return { dispose() {} }
   }
+  // xterm's other output channel: an X10-encoded mouse report goes out here,
+  // not through onData. Subscribable so the pane's mount effect completes.
+  onBinary() {
+    return { dispose() {} }
+  }
   /// Kept rather than dropped, so a test can drive the real chord handler: the
   /// text-paste hatch is a KEY event arming a latch a PASTE event consumes, and
   /// only exercising both halves proves the two meet.

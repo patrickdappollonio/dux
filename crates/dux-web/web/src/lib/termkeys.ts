@@ -115,58 +115,15 @@ export function arrowSeq(
   return `${ESC}${applicationCursorKeys ? "O" : "["}${final}`
 }
 
-/**
- * Encodes a mouse-wheel scroll as SGR (1006) press events for forwarding to a
- * full-screen (alt-screen) app that has mouse tracking enabled.
- *
- * A full-screen TUI owns the alternate screen and keeps its OWN scrollback that
- * never reaches xterm's viewport, so xterm's local `scrollLines()` cannot move
- * it. To scroll such an app from a touch drag or the Page buttons we forward the
- * exact wheel events xterm would synthesize for a real mouse wheel: the SGR
- * press form `ESC [ < Cb ; Col ; Row M`, with button code 64 = wheel up (older
- * output) and 65 = wheel down (newer output). `Col`/`Row` are the 1-based cell
- * under the pointer; most full-screen apps ignore the position for wheel events,
- * but we send a real in-bounds cell to be safe.
- *
- * `lines` is signed the same way as xterm's `scrollLines()`: NEGATIVE reveals
- * OLDER output (wheel up), POSITIVE reveals NEWER output (wheel down). Returns
- * `abs(lines)` stacked wheel events (one per line), or `""` for a zero scroll.
- *
- * This emits SGR encoding unconditionally, which every modern full-screen CLI
- * (Claude, Codex, OpenCode, Copilot, vim, less) negotiates via DECSET 1006. The
- * caller is responsible for only invoking this when `mouseTrackingMode` is not
- * `"none"`; a legacy app that requested non-SGR mouse encoding would misread it.
+/*
+ * A mouse report is DELIBERATELY not encoded here. `sgrWheelSeq` and
+ * `sgrClickSeq` used to live at this spot and hand-built SGR (DECSET 1006)
+ * bytes unconditionally, which is wrong for any app that enables a tracking
+ * mode without also enabling 1006, and computed the cell with arithmetic of
+ * their own that did not match xterm's. Both are gone: `lib/termmouse.ts`
+ * replays the DOM events instead and lets xterm encode. Do not reinstate an
+ * encoder here.
  */
-export function sgrWheelSeq(lines: number, col: number, row: number): string {
-  const count = Math.abs(Math.trunc(lines))
-  if (count === 0) return ""
-  const button = lines < 0 ? 64 : 65
-  const c = Math.max(1, Math.trunc(col))
-  const r = Math.max(1, Math.trunc(row))
-  return `${ESC}[<${button};${c};${r}M`.repeat(count)
-}
-
-/**
- * Encodes a single SGR (1006) LEFT-BUTTON CLICK, press immediately followed by
- * release, at the 1-based cell (`col`, `row`).
- *
- * Used by the compose bar's tap-to-focus redirect: the redirect swallows the
- * touchend (so xterm never focuses its hidden textarea), which also swallows
- * the synthetic mouse events xterm would have translated into a click for a
- * mouse-tracking app. When such an app owns the PTY, the caller forwards this
- * synthetic click at the tapped cell so tap-driven UIs (menu items, buttons in
- * full-screen TUIs) keep working with the compose bar up.
- *
- * SGR forms: press is `ESC [ < 0 ; Col ; Row M` (button code 0 = left),
- * release is the same sequence with a lowercase `m`. As with `sgrWheelSeq`,
- * this emits SGR unconditionally; the caller is responsible for only invoking
- * it when `mouseTrackingMode` is not `"none"`.
- */
-export function sgrClickSeq(col: number, row: number): string {
-  const c = Math.max(1, Math.trunc(col))
-  const r = Math.max(1, Math.trunc(row))
-  return `${ESC}[<0;${c};${r}M${ESC}[<0;${c};${r}m`
-}
 
 /**
  * Returns the byte sequence for a Page Up / Page Down key, used to page a

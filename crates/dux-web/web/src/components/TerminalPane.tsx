@@ -58,11 +58,16 @@ import {
   LF,
   linkActivateAction,
   pageKeySeq,
-  sgrClickSeq,
-  sgrWheelSeq,
   softNewlineAction,
   TAB,
 } from "@/lib/termkeys"
+import {
+  dispatchMouseReplay,
+  latin1Bytes,
+  rectCenter,
+  tapReplaySteps,
+  wheelReplaySteps,
+} from "@/lib/termmouse"
 import {
   activateLinkAtPoint,
   linkifierElement,
@@ -980,6 +985,22 @@ export function TerminalPane(props: TerminalPaneProps) {
       pty.sendInput(encoder.encode(out))
     })
 
+    // The OTHER half of xterm's output stream. `onData` carries text; `onBinary`
+    // carries a byte-per-code-unit "binary string", and the only thing xterm
+    // routes through it is a mouse report in the DEFAULT (X10) encoding, which
+    // `CoreMouseService.triggerMouseEvent` sends via `triggerBinaryEvent`
+    // whenever the app enabled a tracking mode WITHOUT DECSET 1006 (see
+    // `lib/termmouse.ts`). Without this subscription every such report was
+    // dropped on the floor, desktop clicks included, so a `?1000`-only TUI was
+    // simply unclickable in the web UI. `latin1Bytes`, never `TextEncoder`: the
+    // X10 form puts `col + 32` in one byte and UTF-8 would split it in two.
+    // Deliberately does NOT run the sticky-modifier transform or clear a latch:
+    // a mouse report is not a keystroke.
+    const binarySub = term.onBinary((s) => {
+      if (!isOwnerRef.current) return
+      pty.sendInput(latin1Bytes(s))
+    })
+
     // xterm allows only ONE custom key-event handler, so this single closure owns
     // both the soft-newline chord and the clipboard chords. They match disjoint
     // keys (bare Shift-Enter vs Ctrl-based clipboard chords), so soft-newline is
@@ -1159,7 +1180,7 @@ export function TerminalPane(props: TerminalPaneProps) {
     // ALT-SCREEN (a full-screen TUI like Claude's renderer) has NO xterm
     // scrollback — the app keeps its own history that never reaches xterm. When
     // such an app has mouse tracking on and we own the PTY, we forward the drag
-    // to it as SGR wheel events (sgrWheelSeq), so it scrolls its own history just
+    // to it as replayed wheel events (see `lib/termmouse.ts`), so it scrolls its own history just
     // as a desktop mouse wheel would. If the alt-screen app has no mouse tracking
     // (or we are a read-only viewer), there is nothing to forward to, so we leave
     // the touch to native handling and let the arrow row drive it.
@@ -1250,23 +1271,26 @@ export function TerminalPane(props: TerminalPaneProps) {
           // (most apps ignore the position, but we send a real in-bounds one).
           // Cap to at most ONE wheel notch per touch-move (`dragWheelReport`):
           // `dragScrollLines` can return a many-row magnitude on a fast flick, and
-          // `sgrWheelSeq` would then emit that many SGR reports as a dense burst in
+          // forwarding it whole would then emit that many reports as a dense burst in
           // a single frame. A mouse-tracking alt-screen app (Claude Code, ...)
           // survives the desktop wheel's one-report-per-discrete-event cadence but
           // not that burst — it corrupts the app's scrollback-pager repaint, and
           // because an alt-screen has no client scrollback and nothing reconnects,
           // the duplicated lines persist. One notch per move reproduces the
           // desktop 1:1 cadence while still tracking the finger across moves.
+          //
+          // The report itself is produced by xterm, not by us: we replay the
+          // wheel event a real mouse would have delivered at the finger's point
+          // and let xterm resolve the cell and apply the encoding the app
+          // actually negotiated (see `lib/termmouse.ts`). The bytes come back
+          // out through `onData`/`onBinary` above.
           const { notch } = dragWheelReport(touchAccum, rowHeight)
-          const colWidth = container.clientWidth / term.cols
-          const rect = container.getBoundingClientRect()
-          const col =
-            Math.floor(
-              (e.touches[0].clientX - rect.left) / (colWidth > 0 ? colWidth : 1),
-            ) + 1
-          const cellRow =
-            Math.floor((y - rect.top) / (rowHeight > 0 ? rowHeight : 1)) + 1
-          pty.sendInput(encoder.encode(sgrWheelSeq(notch, col, cellRow)))
+          dispatchMouseReplay(
+            term.element,
+            wheelReplaySteps(notch),
+            e.touches[0].clientX,
+            y,
+          )
         } else {
           term.scrollLines(scrollLines)
         }
@@ -1349,17 +1373,30 @@ export function TerminalPane(props: TerminalPaneProps) {
         mouseTracking: term.modes.mouseTrackingMode !== "none",
       })
       if (touch && forwardClick) {
-        // Mirror onTouchMove's wheel-coordinate math: 1-based cell from the
-        // touch point, with the divide-by-zero guards for a not-yet-measured
-        // container.
-        const rect = container.getBoundingClientRect()
-        const colWidth = container.clientWidth / term.cols
-        const rowHeight = container.clientHeight / term.rows
-        const col =
-          Math.floor((touch.clientX - rect.left) / (colWidth > 0 ? colWidth : 1)) + 1
-        const cellRow =
-          Math.floor((touch.clientY - rect.top) / (rowHeight > 0 ? rowHeight : 1)) + 1
-        pty.sendInput(encoder.encode(sgrClickSeq(col, cellRow)))
+        // Replay the press/release the swallowed synthetic mouse events would
+        // have been, at xterm's own mouse-report element, so xterm resolves the
+        // cell (its `getMouseReportCoords`, which measures the screen element
+        // and its padding against the MEASURED cell size) and applies the
+        // protocol and encoding the app negotiated. dux used to compute the
+        // cell with a parallel arithmetic and hand-encode SGR unconditionally,
+        // which was wrong for every app that enabled a tracking mode without
+        // DECSET 1006. See `lib/termmouse.ts`.
+        //
+        // xterm's own mousedown handler grabs focus for its hidden textarea
+        // (`focus({preventScroll: true})`), which is exactly what this redirect
+        // exists to prevent, so focus is put back immediately below: onto the
+        // compose box for an ordinary tap, or onto whatever held it for a link
+        // tap, which deliberately raises no keyboard.
+        const focusedBefore = document.activeElement
+        dispatchMouseReplay(
+          term.element,
+          tapReplaySteps(),
+          touch.clientX,
+          touch.clientY,
+        )
+        if (!focusCompose && focusedBefore instanceof HTMLElement) {
+          focusedBefore.focus()
+        }
       }
       if (focusCompose) compose.focus()
     }
@@ -1809,6 +1846,7 @@ export function TerminalPane(props: TerminalPaneProps) {
       document.removeEventListener("visibilitychange", resyncToForeground)
       window.removeEventListener("focus", resyncToForeground)
       dataSub.dispose()
+      binarySub.dispose()
       // Close this target's PTY socket (user-initiated: no reconnect) and clear
       // the active-socket registration ONLY if it still points at this one. A
       // focus switch swaps panes; whichever order React runs old-cleanup vs
@@ -2570,12 +2608,23 @@ export function TerminalPane(props: TerminalPaneProps) {
       if (term.modes.mouseTrackingMode !== "none") {
         // A screenful of wheel notches toward older (up) or newer (down) output.
         // The exact distance depends on the app's per-notch step; one row-height
-        // shy of a full screen is a reasonable page.
+        // shy of a full screen is a reasonable page. Replayed as real wheel
+        // events at the middle of the terminal so xterm encodes them the way the
+        // app asked (see `lib/termmouse.ts`); there is no finger to take a point
+        // from here, so the centre stands in for one.
         const lines = Math.max(1, term.rows - 1)
-        const col = Math.max(1, Math.floor(term.cols / 2))
-        const cellRow = Math.max(1, Math.floor(term.rows / 2))
-        const seq = sgrWheelSeq(up ? -lines : lines, col, cellRow)
-        ptyRef.current?.sendInput(encoder.encode(seq))
+        const element = term.element
+        if (element) {
+          const { clientX, clientY } = rectCenter(
+            element.getBoundingClientRect(),
+          )
+          dispatchMouseReplay(
+            element,
+            wheelReplaySteps(up ? -lines : lines),
+            clientX,
+            clientY,
+          )
+        }
       } else {
         // Keyboard-only full-screen app: send the actual PgUp/PgDn key.
         ptyRef.current?.sendInput(encoder.encode(pageKeySeq(up ? "up" : "down")))

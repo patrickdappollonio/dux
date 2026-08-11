@@ -50,7 +50,7 @@ export function dragScrollLines(
 // discrete wheel event, spaced across event-loop ticks, and xterm forwards it
 // 1:1 (see `WHEEL_SCROLL_SENSITIVITY`'s note in TerminalPane). A finger drag,
 // by contrast, can cover many rows in a single touch-move; forwarding that as
-// `sgrWheelSeq(scrollLines, ..)` emits a DENSE burst of N reports inside one
+// Forwarding the raw `scrollLines` magnitude emits a DENSE burst of N reports inside one
 // WebSocket frame with zero inter-notch spacing. That burst is what corrupted
 // the agent's scrollback-pager repaint on a fast flick (duplicated lines that
 // persist, since an alt-screen app has no client-side scrollback and nothing
