@@ -52,7 +52,8 @@ export function MacroPopover({
   finalFocus?: () => HTMLElement | null
   // "labeled" is the desktop floating trigger ("Macros…" over the pane);
   // "icon" is the mobile terminal-screen header's icon button, matching the
-  // header's ghost size-10 chrome idiom. On phones the picker submits through
+  // header's outline action-cluster idiom (see the trigger below). On phones
+  // the picker submits through
   // the compose bar / a tap, so the icon variant passes no finalFocus and
   // keeps the default return-focus-to-trigger behavior on a dismissal rather
   // than popping the soft keyboard by focusing a terminal textarea. A PICK
@@ -100,15 +101,24 @@ export function MacroPopover({
     <Popover open={open} onOpenChange={setOpen}>
       {/* Ellipsis on the label signals the button opens a menu of choices
           (rather than acting immediately). The icon variant drops the label:
-          it sits in the mobile header among other icon-only controls, and
-          its 40px target follows the header's touch-target idiom. */}
+          it sits in the mobile terminal header among other icon-only controls,
+          and on a phone icon-only is the default because space is scarce. Do
+          not give it a label back.
+
+          The shape lives HERE rather than being overridden at the call site,
+          so the trigger cannot drift from the `±N` and `⋯` buttons it sits
+          between. All three are `outline` (the desktop AppMenu cog and the
+          Show-Changes button beside it already establish outline as the
+          one-family treatment for an action cluster), all three take their
+          height from `size="lg"`, and all three carry the same 44px width
+          floor. See MobileShell.tsx's header for the full justification. */}
       <PopoverTrigger
         render={
           variant === "icon" ? (
             <Button
-              variant="ghost"
-              size="icon"
-              className="size-10 shrink-0"
+              variant="outline"
+              size="lg"
+              className="min-w-11 shrink-0"
               aria-label="Run a macro"
             />
           ) : (

@@ -11,6 +11,8 @@ import {
   COMPOSE_SUBMIT_DELAY_MS,
   composeSendTooLarge,
   composeSendWrites,
+  composeBarMode,
+  composeBarVisible,
   insertIntoComposeDraft,
 } from "@/lib/composebar"
 import {
@@ -44,6 +46,7 @@ import {
   CardTitle,
 } from "@/components/ui/card"
 import { useIsMobile } from "@/hooks/use-mobile"
+import { useIsCoarsePointer } from "@/hooks/use-coarse-pointer"
 import { dragScrollLines, dragWheelReport } from "@/lib/viewport"
 import { firstFrameResizePlan } from "@/lib/firstFrameResize"
 import { copyToClipboard } from "@/lib/clipboard"
@@ -279,6 +282,9 @@ export function TerminalPane(props: TerminalPaneProps) {
   // they send stdin to the same socket xterm's `onData` does.
   const ptyRef = useRef<PtySocket | null>(null)
   const isMobile = useIsMobile()
+  // Is touch the primary pointer? Gates the compose bar ONLY (see below);
+  // `isMobile` stays the width signal for layout and sizing.
+  const isCoarsePointer = useIsCoarsePointer()
 
   // Drag-and-drop of a file onto the pane. `dragDepth` counts enter/leave pairs
   // because dragging across a child element fires a `dragleave` for the parent;
@@ -366,14 +372,38 @@ export function TerminalPane(props: TerminalPaneProps) {
     fitAddonRef.current?.fit()
     loadTerminalFontsThenRefit(term, termRef, fitAddonRef, size, family)
   }, [terminalFontFamilySetting, terminalFontSizeSetting])
-  // The mobile compose bar (the `ui.compose_bar` preference, default on): the
-  // phone's typing surface, a buffered textarea below the accessory bar whose
+  // The compose bar (the `ui.compose_bar` preference, default "auto"): the
+  // touch typing surface, a buffered textarea below the accessory bar whose
   // Send delivers the message in one write. Rendering reads the reactive value;
-  // the ref mirrors "the compose bar is up" (mobile AND preference on) for the
-  // stable mount-effect closures (the tap-to-focus redirect below), which would
-  // otherwise capture a stale value. When the preference is off, nothing
-  // renders and no focus behavior changes, exactly today's tap-focuses-xterm.
-  const composeBarEnabled = isMobile && (bootstrap?.compose_bar ?? true)
+  // the ref mirrors "the compose bar is up" for the stable mount-effect
+  // closures (the tap-to-focus redirect below), which would otherwise capture a
+  // stale value. When it is down, nothing renders and no focus behavior
+  // changes, exactly today's tap-focuses-xterm.
+  //
+  // GATED ON THE POINTER, NOT THE VIEWPORT WIDTH, and that is the fix rather
+  // than a detail: this used to read `useIsMobile()`, so rotating a tablet
+  // changed the user's typing surface mid-session. Whether the compose bar
+  // helps depends on whether a SOFT keyboard is doing the typing (its
+  // autocorrect/swipe/IME have nothing to correct when keystrokes go straight
+  // into a terminal), which is an INPUT question, and `pointer: coarse` does
+  // not change with orientation. The `always`/`never` modes exist because that
+  // check provably cannot finish the job; see `hooks/use-coarse-pointer.ts`
+  // for the measurements.
+  //
+  // SCOPE, and be exact about it rather than claiming more than is true. This
+  // decides the BAR. It does not decide the mobile SHELL: the `if (!isMobile)
+  // return pane` further down is layout, still width-driven, and the accessory
+  // bar and this bar both live inside that column. So a device that crosses
+  // the 768px breakpoint still swaps between the mobile and desktop layouts,
+  // and loses the bar with the rest of that column. What this fixes is the bar
+  // no longer having a SECOND, independent width opinion on top of the shell's
+  // (a touchscreen laptop, or a narrow desktop window on a fine pointer, now
+  // gets the right answer). Moving the shell itself off the width breakpoint
+  // is a larger layout decision and is deliberately not made here.
+  const composeBarEnabled = composeBarVisible(
+    composeBarMode(bootstrap?.compose_bar),
+    isCoarsePointer
+  )
   // The two hideable-bar preferences (`ui.mobile_top_bar`,
   // `ui.mobile_accessory_bar`), resolved through their optimistic overrides.
   // The accessory value gates the AccessoryBar render below (beside the

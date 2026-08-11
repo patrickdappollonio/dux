@@ -331,7 +331,7 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
         "terminal_font_size",
         config.ui.terminal_font_size,
     );
-    patch_table_bool(doc, "ui", "compose_bar", config.ui.compose_bar);
+    patch_table_str(doc, "ui", "compose_bar", &config.ui.compose_bar);
     patch_table_bool(doc, "ui", "mobile_top_bar", config.ui.mobile_top_bar);
     patch_table_bool(
         doc,
@@ -1600,24 +1600,45 @@ build = { text = \"cargo build\", surface = \"terminal\" }
 
     #[test]
     fn compose_bar_renders_and_round_trips() {
-        // The default (true) renders and re-parses.
+        // The default ("auto") renders and re-parses.
         let rendered = render_config_plain(&Config::default());
         let parsed: Config = toml::from_str(&rendered).expect("re-parse");
-        assert!(parsed.ui.compose_bar);
+        assert_eq!(parsed.ui.compose_bar, "auto");
 
-        // A user-set false survives a regenerate. This is the half that catches
-        // a missing `patch_table_bool` line: with the key absent from the
-        // render, the re-parse would silently fall back to the default (true).
-        let config = Config {
-            ui: crate::config::UiConfig {
-                compose_bar: false,
+        // A user-set mode survives a regenerate. This is the half that catches
+        // a missing `patch_table_str` line: with the key absent from the
+        // render, the re-parse would silently fall back to the default.
+        for mode in ["always", "never"] {
+            let config = Config {
+                ui: crate::config::UiConfig {
+                    compose_bar: mode.to_string(),
+                    ..Default::default()
+                },
                 ..Default::default()
-            },
-            ..Default::default()
-        };
-        let rendered = render_config_plain(&config);
-        let parsed: Config = toml::from_str(&rendered).expect("re-parse");
-        assert!(!parsed.ui.compose_bar);
+            };
+            let rendered = render_config_plain(&config);
+            let parsed: Config = toml::from_str(&rendered).expect("re-parse");
+            assert_eq!(parsed.ui.compose_bar, mode);
+        }
+    }
+
+    /// The bool-to-enum migration survives the SAVE path, not just the load
+    /// path: a config file still holding the old boolean is read through
+    /// `deserialize_compose_bar` and written back out as the string form, so
+    /// the legacy value is retired the first time anything saves.
+    #[test]
+    fn a_legacy_boolean_compose_bar_is_rewritten_as_a_mode_on_save() {
+        for (legacy, expected) in [("true", "auto"), ("false", "never")] {
+            let parsed: Config = toml::from_str(&format!("[ui]\ncompose_bar = {legacy}\n"))
+                .expect("a legacy boolean must still parse");
+            assert_eq!(parsed.ui.compose_bar, expected);
+
+            let rendered = render_config_plain(&parsed);
+            assert!(
+                rendered.contains(&format!("compose_bar = \"{expected}\"")),
+                "saved config must carry the string form, got:\n{rendered}"
+            );
+        }
     }
 
     #[test]

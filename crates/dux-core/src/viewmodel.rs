@@ -108,11 +108,15 @@ pub struct BootstrapView {
     /// [`crate::config::normalized_terminal_font_size`] so the browser never
     /// receives an out-of-range value. Web UI only.
     pub terminal_font_size: u16,
-    /// Mirrors `config.ui.compose_bar`: whether the web's mobile terminal shows
-    /// the compose bar (the buffered phone typing surface with native
-    /// autocorrect) and redirects a terminal tap into it (default true). Read
-    /// by the terminal pane and by the web's Preferences dialog. Web-only.
-    pub compose_bar: bool,
+    /// Mirrors `config.ui.compose_bar`: WHEN the web's touch terminal shows the
+    /// compose bar (the buffered phone typing surface with native autocorrect)
+    /// and redirects a terminal tap into it. One of `"auto"` (the default,
+    /// decided in the browser from `pointer: coarse`), `"always"` or `"never"`.
+    ///
+    /// Normalized through [`crate::config::ComposeBarMode`] on the way out, so
+    /// the browser never receives a value it has no case for. Read by the
+    /// terminal pane and by the web's Preferences dialog. Web-only.
+    pub compose_bar: String,
     /// Mirrors `config.ui.mobile_top_bar`: whether the web's mobile terminal
     /// screens show the top bar (the back/branch header plus the agent tab
     /// strip), default true. A pure render gate read by the mobile shell and
@@ -1202,7 +1206,16 @@ impl Engine {
             terminal_font_size: crate::config::normalized_terminal_font_size(
                 self.config.ui.terminal_font_size,
             ),
-            compose_bar: self.config.ui.compose_bar,
+            // Normalized rather than passed through: `set_settings` and the raw
+            // config editor both put a value in memory without going back
+            // through `load_config`, so this is the last place a typo can be
+            // caught before the browser has to act on it (the
+            // `upload_pasted_text_chars` precedent).
+            compose_bar: crate::config::ComposeBarMode::from_config_str(
+                &self.config.ui.compose_bar,
+            )
+            .as_str()
+            .to_string(),
             mobile_top_bar: self.config.ui.mobile_top_bar,
             mobile_accessory_bar: self.config.ui.mobile_accessory_bar,
             upload_write_gitignore: self.config.ui.upload_write_gitignore,
@@ -2181,10 +2194,24 @@ mod tests {
     fn compose_bar_is_projected_from_config() {
         let (mut engine, _tmp) = test_engine();
 
-        assert!(engine.bootstrap().compose_bar);
+        assert_eq!(engine.bootstrap().compose_bar, "auto");
 
-        engine.config.ui.compose_bar = false;
-        assert!(!engine.bootstrap().compose_bar);
+        engine.config.ui.compose_bar = "never".to_string();
+        assert_eq!(engine.bootstrap().compose_bar, "never");
+
+        engine.config.ui.compose_bar = "always".to_string();
+        assert_eq!(engine.bootstrap().compose_bar, "always");
+    }
+
+    /// A value that never went through `load_config` (the raw config editor,
+    /// `set_settings`) is normalized by the projection rather than shipped to a
+    /// browser that has no case for it.
+    #[test]
+    fn compose_bar_projection_normalizes_an_unknown_mode() {
+        let (mut engine, _tmp) = test_engine();
+
+        engine.config.ui.compose_bar = "sometimes".to_string();
+        assert_eq!(engine.bootstrap().compose_bar, "auto");
     }
 
     #[test]

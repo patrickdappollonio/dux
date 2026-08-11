@@ -213,14 +213,21 @@ export const SETTING_GROUPS: SettingGroup[] = [
       },
       {
         key: "ui.compose_bar",
-        label: "Mobile compose bar",
+        label: "Touch compose bar",
         description:
-          "On phones, adds a compose box below the terminal keys: type with your keyboard's autocorrect and swipe input, then Send delivers the message and presses Enter. When off, tapping the terminal types directly into it, as before.",
+          "On a touch device, adds a compose box below the terminal keys: type with your keyboard's autocorrect and swipe input, then Send delivers the message and presses Enter. Without it, tapping the terminal types directly into it. Automatic follows your browser's report of whether you point with a finger, which (unlike a screen-size rule) does not change when you rotate a tablet. It cannot tell a tablet with a keyboard case from one without, so choose Always or Never if your device is one dux guesses wrong.",
         surface: "web",
-        control: { kind: "bool" },
-        default: true,
+        control: {
+          kind: "enum",
+          options: [
+            { value: "auto", label: "Automatic" },
+            { value: "always", label: "Always" },
+            { value: "never", label: "Never" },
+          ],
+        },
+        default: "auto",
         writeTarget: "settings",
-        read: (b) => b.compose_bar ?? true,
+        read: (b) => b.compose_bar ?? "auto",
       },
       {
         key: "ui.mobile_top_bar",

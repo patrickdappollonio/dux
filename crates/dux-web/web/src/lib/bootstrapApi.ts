@@ -66,13 +66,17 @@ export interface Bootstrap {
    * degrades to the default at load time). Older servers omit it, so
    * consumers fall back to 14. */
   terminal_font_size?: number
-  /** Mirrors `config.ui.compose_bar`: whether the mobile terminal shows the
+  /** Mirrors `config.ui.compose_bar`: WHEN the touch terminal shows the
    * compose bar (a buffered textarea with native autocorrect whose Send
    * delivers the message plus a submitting Enter) and redirects a tap on the
-   * terminal into it. When false, a tap focuses xterm directly, the
-   * pre-compose-bar behavior. Older servers omit it, so consumers fall back
-   * to true. */
-  compose_bar?: boolean
+   * terminal into it. When it is down, a tap focuses xterm directly, the
+   * pre-compose-bar behavior.
+   *
+   * One of `"auto"` (the default: the BROWSER decides, from whether touch is
+   * the primary pointer), `"always"` or `"never"`. This was a boolean before
+   * the mode existed; an older server omits the field entirely, and both that
+   * and an unrecognized value read as `"auto"` through `composeBarMode`. */
+  compose_bar?: string
   /** Mirrors `config.ui.mobile_top_bar`: whether the mobile terminal screens
    * show the top bar (the back/branch header plus the agent tab strip). A
    * pure render gate; hidden bars are restored from the

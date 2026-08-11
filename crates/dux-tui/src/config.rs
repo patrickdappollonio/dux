@@ -426,9 +426,9 @@ fn config_schema() -> Vec<ConfigEntry> {
         ConfigEntry::Field {
             key: "compose_bar",
             comment: Some(CommentSource::Static(
-                "# Web UI only: on a phone, show a compose box below the terminal keys.\n# You type into it with your keyboard's autocorrect and swipe input, then\n# the Send button delivers the whole message and presses Enter for you\n# (Enter inside the box just adds a newline). While enabled, tapping the\n# terminal focuses the compose box so the soft keyboard always types into\n# it. Set to false to hide the box and type directly into the terminal.\n# Change it at runtime from the web UI's Preferences dialog.",
+                "# Web UI only: on a touch device, show a compose box below the terminal\n# keys. You type into it with your keyboard's autocorrect and swipe input,\n# then the Send button delivers the whole message and presses Enter for you\n# (Enter inside the box just adds a newline). While it is up, tapping the\n# terminal focuses the compose box so the soft keyboard always types into\n# it; otherwise a tap types straight into the terminal.\n#\n#   \"auto\"   show it when your browser reports touch as the primary way you\n#            point at the screen. The default.\n#   \"always\" show it whatever you are on.\n#   \"never\"  hide it and always type directly into the terminal.\n#\n# \"auto\" is a capability check, not a screen-width one, so rotating a tablet\n# no longer changes your typing surface mid-session. It cannot tell a tablet\n# with a keyboard case from one without (the browser reports them\n# identically), which is what \"always\" and \"never\" are for. An older config\n# holding true/false still loads: true means \"auto\", false means \"never\".\n# Change it at runtime from the web UI's Preferences dialog.",
             )),
-            value_fn: |c| FieldValue::Bool(c.ui.compose_bar),
+            value_fn: |c| FieldValue::Str(c.ui.compose_bar.clone()),
         },
         ConfigEntry::Field {
             key: "mobile_top_bar",
@@ -2071,7 +2071,7 @@ mod tests {
         assert!(rendered.contains("copy_on_select = true"));
         assert!(rendered.contains("terminal_font_family = \"\""));
         assert!(rendered.contains("terminal_font_size = 14"));
-        assert!(rendered.contains("compose_bar = true"));
+        assert!(rendered.contains("compose_bar = \"auto\""));
         assert!(rendered.contains("mobile_top_bar = true"));
         assert!(rendered.contains("mobile_accessory_bar = true"));
         assert!(rendered.contains("attention_grace_seconds = 3"));

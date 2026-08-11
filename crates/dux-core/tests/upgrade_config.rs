@@ -379,3 +379,64 @@ PROJECT_ONE = "2"
     assert_eq!(reloaded.env, config.env);
     assert_eq!(reloaded.projects[0].env, config.projects[0].env);
 }
+
+/// `ui.compose_bar` was a BOOLEAN before it became the three-way
+/// [`dux_core::config::ComposeBarMode`], and a boolean is what is sitting in
+/// every already-installed user's `config.toml`. Changing a field's TYPE is the
+/// one config change serde defaults do not absorb: without the custom
+/// deserializer, `true` would be an "invalid type: boolean, expected a string"
+/// error that fails the WHOLE load, taking every other setting with it.
+///
+/// The migration preserves meaning rather than merely parsing: `true` meant
+/// "show the bar on the mobile surface", which is what `"auto"` now decides,
+/// and `false` meant "never".
+#[test]
+fn a_legacy_boolean_compose_bar_still_loads_and_migrates() {
+    for (legacy, expected) in [("true", "auto"), ("false", "never")] {
+        let (_tmp, _paths, config) = load_old(&format!(
+            "[ui]\ncompose_bar = {legacy}\nstatus_clear_seconds = 42\n\n[server]\nport = 9999\n"
+        ));
+
+        assert_eq!(
+            config.ui.compose_bar, expected,
+            "a legacy `compose_bar = {legacy}` must migrate to {expected:?}"
+        );
+        // The rest of the file survived, which is the half that would be lost
+        // if the type change failed the load instead of migrating.
+        assert_eq!(config.ui.status_clear_seconds, 42);
+        assert_eq!(config.server.port, 9999);
+    }
+}
+
+/// And the migrated value is what gets PERSISTED: a save rewrites the legacy
+/// boolean as the string form, so the old shape is retired the first time
+/// anything writes rather than lingering forever.
+#[test]
+fn saving_after_the_upgrade_rewrites_the_legacy_boolean() {
+    let (_tmp, paths, config) = load_old("[ui]\ncompose_bar = false\n");
+    assert_eq!(config.ui.compose_bar, "never");
+
+    save_config_with(&paths.config_path, &config, Durability::Fsync).expect("save");
+
+    let raw = std::fs::read_to_string(&paths.config_path).expect("read back");
+    assert!(
+        raw.contains("compose_bar = \"never\""),
+        "the save must carry the string form, got:\n{raw}"
+    );
+    assert!(
+        !raw.contains("compose_bar = false"),
+        "the legacy boolean must be gone, got:\n{raw}"
+    );
+}
+
+/// A value naming a mode dux does not know degrades to the default with a
+/// warning rather than failing the load, the `upload_directory` /
+/// `web_dragdrop_paste` warn-once-and-degrade precedent.
+#[test]
+fn an_unknown_compose_bar_mode_degrades_to_auto_at_load() {
+    let (_tmp, _paths, config) =
+        load_old("[ui]\ncompose_bar = \"sometimes\"\nstatus_clear_seconds = 7\n");
+
+    assert_eq!(config.ui.compose_bar, "auto");
+    assert_eq!(config.ui.status_clear_seconds, 7, "the load did not fail");
+}

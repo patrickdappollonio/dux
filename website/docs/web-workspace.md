@@ -262,8 +262,19 @@ into a terminal gives a phone keyboard nothing to fix. Enter adds a newline
 instead of submitting, so multi-line prompts read the way you wrote them; Send
 delivers the whole message and presses Enter for you, and an empty Send is a
 plain Enter for confirming menus and prompts. Tapping the terminal drops you into
-the compose box (a refused send keeps your draft and tells you why), and the
-whole thing can be turned off in Preferences if you would rather type raw.
+the compose box (a refused send keeps your draft and tells you why).
+
+Whether the compose bar appears is the `ui.compose_bar` setting, a Preferences
+row with three values. **Automatic** (the default) asks your browser whether you
+point at the screen with a finger. That is a question about your *input*, not
+about your screen size, which matters because rotating a tablet used to cross a
+width threshold and swap your typing surface out from under you mid-session.
+What it genuinely cannot see is a keyboard case: an Android tablet with one
+attached and the same tablet without report the browser exactly the same
+capabilities. So **Always** and **Never** are there for the device dux guesses
+wrong on, and Never restores typing straight into the terminal. An older config
+that still says `compose_bar = true` or `false` keeps working; `true` is read as
+Automatic and `false` as Never.
 
 Terminal rows are precious on a phone, so the chrome around the terminal is
 hideable. Every terminal screen's `⋯` menu (agent, project, and standalone

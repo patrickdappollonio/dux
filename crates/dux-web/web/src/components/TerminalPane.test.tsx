@@ -11,6 +11,7 @@ import type { DuxState } from "@/lib/store"
 import type { ConnState } from "@/lib/types"
 import { notifyPtyOwner, resetPtyOwnerEpochs } from "@/lib/ptyOwnership"
 import { installXtermMouseModel } from "@/lib/xtermMouseModel"
+import { stubCoarsePointer, type MatchMediaStub } from "@/test/matchMedia"
 
 // TerminalPane embeds xterm.js, whose canvas rendering jsdom cannot back (see the
 // note in TerminalArea.test.tsx). So we mount the REAL TerminalPane — exercising
@@ -677,17 +678,28 @@ describe("TerminalPane floating macro trigger", () => {
 // breakpoint is how these tests mount the mobile shell.
 describe("TerminalPane mobile compose bar", () => {
   const desktopWidth = window.innerWidth
+  // `goMobile` now means "the phone SHELL is up AND touch is the primary
+  // pointer". Those are two different signals since the compose bar moved off
+  // the width breakpoint: width still drives the mobile layout, but the
+  // compose bar itself is gated on `pointer: coarse` (see
+  // `hooks/use-coarse-pointer.ts`). Real phones report both, so these suites
+  // set both; the tests that pull them APART live in the compose-bar gate
+  // suite at the end of this file.
+  let pointerStub: MatchMediaStub | null = null
   const goMobile = () => {
     Object.defineProperty(window, "innerWidth", {
       value: 500,
       configurable: true,
     })
+    pointerStub = stubCoarsePointer()
   }
   afterEach(() => {
     Object.defineProperty(window, "innerWidth", {
       value: desktopWidth,
       configurable: true,
     })
+    pointerStub?.restore()
+    pointerStub = null
   })
 
   const composeTextarea = () =>
@@ -706,8 +718,8 @@ describe("TerminalPane mobile compose bar", () => {
   it("does not render when the ui.compose_bar preference is off", () => {
     goMobile()
     const state = makeState()
-    ;(state.bootstrap as unknown as { compose_bar?: boolean }).compose_bar =
-      false
+    ;(state.bootstrap as unknown as { compose_bar?: string }).compose_bar =
+      "never"
     mockState = state
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
@@ -867,7 +879,7 @@ describe("TerminalPane mobile compose bar", () => {
     // The preference flips off: the bar unmounts. The buffer lives in
     // TerminalPane state, not the bar, so it must survive the round trip.
     const off = makeState()
-    ;(off.bootstrap as unknown as { compose_bar?: boolean }).compose_bar = false
+    ;(off.bootstrap as unknown as { compose_bar?: string }).compose_bar = "never"
     mockState = off
     rerender(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
@@ -886,17 +898,28 @@ describe("TerminalPane mobile compose bar", () => {
 // the typing surface having had focus when the tap landed.
 describe("TerminalPane accessory keys preserve the keyboard state", () => {
   const desktopWidth = window.innerWidth
+  // `goMobile` now means "the phone SHELL is up AND touch is the primary
+  // pointer". Those are two different signals since the compose bar moved off
+  // the width breakpoint: width still drives the mobile layout, but the
+  // compose bar itself is gated on `pointer: coarse` (see
+  // `hooks/use-coarse-pointer.ts`). Real phones report both, so these suites
+  // set both; the tests that pull them APART live in the compose-bar gate
+  // suite at the end of this file.
+  let pointerStub: MatchMediaStub | null = null
   const goMobile = () => {
     Object.defineProperty(window, "innerWidth", {
       value: 500,
       configurable: true,
     })
+    pointerStub = stubCoarsePointer()
   }
   afterEach(() => {
     Object.defineProperty(window, "innerWidth", {
       value: desktopWidth,
       configurable: true,
     })
+    pointerStub?.restore()
+    pointerStub = null
   })
 
   const composeTextarea = () =>
@@ -974,17 +997,28 @@ describe("TerminalPane accessory keys preserve the keyboard state", () => {
 // is what keeps today's direct-to-PTY path for those cases.
 describe("TerminalPane compose macro insert sink", () => {
   const desktopWidth = window.innerWidth
+  // `goMobile` now means "the phone SHELL is up AND touch is the primary
+  // pointer". Those are two different signals since the compose bar moved off
+  // the width breakpoint: width still drives the mobile layout, but the
+  // compose bar itself is gated on `pointer: coarse` (see
+  // `hooks/use-coarse-pointer.ts`). Real phones report both, so these suites
+  // set both; the tests that pull them APART live in the compose-bar gate
+  // suite at the end of this file.
+  let pointerStub: MatchMediaStub | null = null
   const goMobile = () => {
     Object.defineProperty(window, "innerWidth", {
       value: 500,
       configurable: true,
     })
+    pointerStub = stubCoarsePointer()
   }
   afterEach(() => {
     Object.defineProperty(window, "innerWidth", {
       value: desktopWidth,
       configurable: true,
     })
+    pointerStub?.restore()
+    pointerStub = null
   })
 
   const composeTextarea = () =>
@@ -1008,8 +1042,8 @@ describe("TerminalPane compose macro insert sink", () => {
   it("does not register the sink when the ui.compose_bar preference is off", () => {
     goMobile()
     const state = makeState()
-    ;(state.bootstrap as unknown as { compose_bar?: boolean }).compose_bar =
-      false
+    ;(state.bootstrap as unknown as { compose_bar?: string }).compose_bar =
+      "never"
     mockState = state
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     expect(getComposeInsertSink()).toBeNull()
@@ -1095,17 +1129,28 @@ describe("TerminalPane wheel scroll speed", () => {
 // empty once the finger lifts).
 describe("TerminalPane tap-to-focus redirect", () => {
   const desktopWidth = window.innerWidth
+  // `goMobile` now means "the phone SHELL is up AND touch is the primary
+  // pointer". Those are two different signals since the compose bar moved off
+  // the width breakpoint: width still drives the mobile layout, but the
+  // compose bar itself is gated on `pointer: coarse` (see
+  // `hooks/use-coarse-pointer.ts`). Real phones report both, so these suites
+  // set both; the tests that pull them APART live in the compose-bar gate
+  // suite at the end of this file.
+  let pointerStub: MatchMediaStub | null = null
   const goMobile = () => {
     Object.defineProperty(window, "innerWidth", {
       value: 500,
       configurable: true,
     })
+    pointerStub = stubCoarsePointer()
   }
   afterEach(() => {
     Object.defineProperty(window, "innerWidth", {
       value: desktopWidth,
       configurable: true,
     })
+    pointerStub?.restore()
+    pointerStub = null
   })
 
   const container = () => screen.getByTestId("terminal-container")
@@ -1134,8 +1179,8 @@ describe("TerminalPane tap-to-focus redirect", () => {
   it("does not intercept the tap when the preference is off", () => {
     goMobile()
     const state = makeState()
-    ;(state.bootstrap as unknown as { compose_bar?: boolean }).compose_bar =
-      false
+    ;(state.bootstrap as unknown as { compose_bar?: string }).compose_bar =
+      "never"
     mockState = state
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     // No preventDefault: the synthetic mouse events flow and xterm focuses its
@@ -1330,17 +1375,28 @@ describe("TerminalPane forwards a touch drag as wheel reports", () => {
 
 describe("TerminalPane mobile accessory-bar preference", () => {
   const desktopWidth = window.innerWidth
+  // `goMobile` now means "the phone SHELL is up AND touch is the primary
+  // pointer". Those are two different signals since the compose bar moved off
+  // the width breakpoint: width still drives the mobile layout, but the
+  // compose bar itself is gated on `pointer: coarse` (see
+  // `hooks/use-coarse-pointer.ts`). Real phones report both, so these suites
+  // set both; the tests that pull them APART live in the compose-bar gate
+  // suite at the end of this file.
+  let pointerStub: MatchMediaStub | null = null
   const goMobile = () => {
     Object.defineProperty(window, "innerWidth", {
       value: 500,
       configurable: true,
     })
+    pointerStub = stubCoarsePointer()
   }
   afterEach(() => {
     Object.defineProperty(window, "innerWidth", {
       value: desktopWidth,
       configurable: true,
     })
+    pointerStub?.restore()
+    pointerStub = null
   })
 
   it("renders the accessory bar on mobile by default (preference absent falls back to on)", () => {
@@ -1378,17 +1434,28 @@ describe("TerminalPane mobile accessory-bar preference", () => {
 // preferences through the same settings PATCH the quick toggles use.
 describe("TerminalPane compose-bar restore button", () => {
   const desktopWidth = window.innerWidth
+  // `goMobile` now means "the phone SHELL is up AND touch is the primary
+  // pointer". Those are two different signals since the compose bar moved off
+  // the width breakpoint: width still drives the mobile layout, but the
+  // compose bar itself is gated on `pointer: coarse` (see
+  // `hooks/use-coarse-pointer.ts`). Real phones report both, so these suites
+  // set both; the tests that pull them APART live in the compose-bar gate
+  // suite at the end of this file.
+  let pointerStub: MatchMediaStub | null = null
   const goMobile = () => {
     Object.defineProperty(window, "innerWidth", {
       value: 500,
       configurable: true,
     })
+    pointerStub = stubCoarsePointer()
   }
   afterEach(() => {
     Object.defineProperty(window, "innerWidth", {
       value: desktopWidth,
       configurable: true,
     })
+    pointerStub?.restore()
+    pointerStub = null
   })
 
   it("does not render while both bars are visible", () => {
@@ -1456,17 +1523,28 @@ describe("TerminalPane compose-bar restore button", () => {
 // carrying ONLY the same restore button.
 describe("TerminalPane restore row when the compose bar is off", () => {
   const desktopWidth = window.innerWidth
+  // `goMobile` now means "the phone SHELL is up AND touch is the primary
+  // pointer". Those are two different signals since the compose bar moved off
+  // the width breakpoint: width still drives the mobile layout, but the
+  // compose bar itself is gated on `pointer: coarse` (see
+  // `hooks/use-coarse-pointer.ts`). Real phones report both, so these suites
+  // set both; the tests that pull them APART live in the compose-bar gate
+  // suite at the end of this file.
+  let pointerStub: MatchMediaStub | null = null
   const goMobile = () => {
     Object.defineProperty(window, "innerWidth", {
       value: 500,
       configurable: true,
     })
+    pointerStub = stubCoarsePointer()
   }
   afterEach(() => {
     Object.defineProperty(window, "innerWidth", {
       value: desktopWidth,
       configurable: true,
     })
+    pointerStub?.restore()
+    pointerStub = null
   })
 
   it("renders the restore button in its own bottom row when a bar is hidden", () => {
@@ -1474,10 +1552,10 @@ describe("TerminalPane restore row when the compose bar is off", () => {
     const state = makeState()
     ;(
       state.bootstrap as unknown as {
-        compose_bar?: boolean
+        compose_bar?: string
         mobile_top_bar?: boolean
       }
-    ).compose_bar = false
+    ).compose_bar = "never"
     ;(
       state.bootstrap as unknown as { mobile_top_bar?: boolean }
     ).mobile_top_bar = false
@@ -1493,8 +1571,8 @@ describe("TerminalPane restore row when the compose bar is off", () => {
   it("renders nothing extra while both bars are visible", () => {
     goMobile()
     const state = makeState()
-    ;(state.bootstrap as unknown as { compose_bar?: boolean }).compose_bar =
-      false
+    ;(state.bootstrap as unknown as { compose_bar?: string }).compose_bar =
+      "never"
     mockState = state
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
@@ -1991,5 +2069,120 @@ describe("TerminalPane reports every local re-grid to the PTY", () => {
     })
     expect(pty.sendResize).toHaveBeenCalledTimes(1)
     expect(pty.sendResize).toHaveBeenCalledWith(24, 80)
+  })
+})
+
+// THE COMPOSE-BAR GATE. The bar used to carry its own `useIsMobile()` width
+// check, so its visibility had a SECOND width opinion on top of the shell's. It
+// is now gated on the three-way `ui.compose_bar` mode resolved against
+// `pointer: coarse`.
+//
+// SCOPE: this decides the BAR, not the mobile SHELL. The pane still returns the
+// desktop layout above the 768px breakpoint (that early return is layout, and
+// is deliberately untouched), so these tests hold the width inside the mobile
+// range and vary the pointer and the mode, which is exactly the axis the gate
+// now owns. The one test that varies width does so within that range.
+describe("TerminalPane compose bar gate", () => {
+  const desktopWidth = window.innerWidth
+  let pointerStub: MatchMediaStub | null = null
+
+  const setWidth = (value: number) =>
+    Object.defineProperty(window, "innerWidth", { value, configurable: true })
+
+  beforeEach(() => setWidth(500))
+  afterEach(() => {
+    setWidth(desktopWidth)
+    pointerStub?.restore()
+    pointerStub = null
+  })
+
+  const withMode = (mode?: string) => {
+    const state = makeState()
+    ;(state.bootstrap as unknown as { compose_bar?: string }).compose_bar = mode
+    mockState = state
+  }
+
+  const barIsUp = () =>
+    screen.queryByRole("textbox", { name: "Message" }) !== null
+
+  it("shows the bar on a coarse pointer and hides it on a fine one", () => {
+    pointerStub = stubCoarsePointer(true)
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(barIsUp()).toBe(true)
+
+    cleanup()
+    pointerStub.restore()
+    pointerStub = stubCoarsePointer(false)
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(barIsUp()).toBe(false)
+  })
+
+  // THE REGRESSION. Same device, same pointer, four widths inside the mobile
+  // range. The answer must not move. Under the old gate the bar was tied to a
+  // width comparison of its own; now the only thing that decides it is the
+  // pointer.
+  it("does NOT change when only the viewport width changes", () => {
+    for (const coarse of [true, false]) {
+      for (const width of [760, 640, 500, 320]) {
+        pointerStub?.restore()
+        pointerStub = stubCoarsePointer(coarse)
+        setWidth(width)
+        render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+        expect(
+          barIsUp(),
+          `coarse=${coarse} width=${width}: the bar must follow the pointer, not the width`
+        ).toBe(coarse)
+        cleanup()
+      }
+    }
+  })
+
+  // A touchscreen laptop at a narrow window used to get the bar purely because
+  // the window was narrow. It is a FINE pointer, so it should not.
+  it("does not show the bar to a fine pointer at a phone-sized window", () => {
+    pointerStub = stubCoarsePointer(false)
+    setWidth(400)
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(barIsUp()).toBe(false)
+  })
+
+  // A tablet with a keyboard case and one without are INDISTINGUISHABLE to the
+  // browser (measured), so the user must be able to override the capability
+  // answer in both directions. That is the entire reason this is not a bool.
+  it("'always' shows the bar even on a fine pointer", () => {
+    pointerStub = stubCoarsePointer(false)
+    withMode("always")
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(barIsUp()).toBe(true)
+  })
+
+  it("'never' hides the bar even on a coarse pointer", () => {
+    pointerStub = stubCoarsePointer(true)
+    withMode("never")
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(barIsUp()).toBe(false)
+  })
+
+  it("'auto' defers to the pointer in both directions", () => {
+    pointerStub = stubCoarsePointer(true)
+    withMode("auto")
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(barIsUp()).toBe(true)
+
+    cleanup()
+    pointerStub.restore()
+    pointerStub = stubCoarsePointer(false)
+    withMode("auto")
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(barIsUp()).toBe(false)
+  })
+
+  // An older server omits the field entirely; it must behave as "auto" rather
+  // than as "off".
+  it("treats an absent mode as auto", () => {
+    pointerStub = stubCoarsePointer(true)
+    withMode(undefined)
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(barIsUp()).toBe(true)
   })
 })

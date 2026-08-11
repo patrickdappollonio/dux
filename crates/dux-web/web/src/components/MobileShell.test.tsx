@@ -1034,3 +1034,106 @@ describe("MobileShell agent header identity", () => {
     expect(screen.getByText("main").className).not.toContain("font-mono")
   })
 })
+
+// THE PHONE HEADER'S CONTROLS ARE ONE FAMILY. They used to be three unrelated
+// treatments sitting side by side: a ghost size-10 macro trigger, an outline
+// size="sm" ±N (whose `sm` token also swapped the corner RADIUS), and a ghost
+// size-10 ⋯.
+//
+// jsdom has no layout engine, so `getBoundingClientRect` is all zeros here and
+// these assert the height TOKEN rather than the rendered pixel. The rendered
+// pixels were measured separately in the preview container (all four controls
+// at exactly 36px tall, 44px+ wide); this test is what keeps them from
+// drifting apart again without anyone re-running that.
+describe("MobileShell terminal header control family", () => {
+  function headerState(): DuxState {
+    return makeState({
+      spine: makeSessionSpine(1),
+      bootstrap: {
+        title: "dux",
+        dux_version: "v1",
+        available_providers: ["claude"],
+      },
+      selectedTarget: { kind: "agent", sessionId: "s1", tabId: "s1" },
+      selectedSessionId: "s1",
+      mobileScreen: "terminal",
+      changes: { sessionId: "s1", phase: "loaded", staged: [], unstaged: [] },
+      startedDormantTabs: [],
+      terminalEpoch: 0,
+      mobileTopBarOverride: null,
+      mobileAccessoryBarOverride: null,
+    })
+  }
+
+  const controls = () => ({
+    macro: screen.getByLabelText("Run a macro"),
+    changes: screen.getByLabelText(/changed files$/),
+    actions: screen.getByLabelText("Session actions"),
+    back: screen.getByLabelText("Back"),
+  })
+
+  it("renders every header control at the SAME explicit height", () => {
+    mockState = headerState()
+    render(<MobileShell />)
+    const found = controls()
+
+    // One height token across all four, so an icon-only control and the one
+    // carrying text cannot disagree. This is the rule: a control's height is
+    // set explicitly, never inherited from its padding or its content.
+    for (const [name, el] of Object.entries(found)) {
+      expect(el.className, `${name} must carry the h-9 (36px) height`).toContain(
+        "h-9"
+      )
+    }
+
+    // And nothing re-introduces a content- or square-derived height: no
+    // `min-h-*` prop-up (what `size="sm"` needed) and no `size-N` square
+    // (what `size="icon"` is), either of which ties height to width.
+    // Both patterns anchor on a class BOUNDARY. A loose `\bsize-\d` also
+    // matches the base button's `[&_svg:not([class*='size-'])]:size-4`, which
+    // sizes the ICON inside the control and has nothing to do with the
+    // control's own box.
+    for (const [name, el] of Object.entries(found)) {
+      expect(el.className, `${name} must not force a min height`).not.toMatch(
+        /(?:^|\s)min-h-\d/
+      )
+      expect(el.className, `${name} must not be a fixed square`).not.toMatch(
+        /(?:^|\s)size-\d/
+      )
+    }
+  })
+
+  it("gives every header control the 44px per-axis width floor", () => {
+    mockState = headerState()
+    render(<MobileShell />)
+    for (const [name, el] of Object.entries(controls())) {
+      expect(el.className, `${name} must carry min-w-11`).toContain("min-w-11")
+    }
+  })
+
+  // The action cluster is outline (the treatment the desktop AppMenu cog and
+  // the Show-Changes button beside it already use for an action cluster). The
+  // back chevron deliberately stays ghost because it is NAVIGATION, not an
+  // action on this screen; it matches on geometry and differs on weight.
+  it("makes the three actions outline and leaves Back ghost", () => {
+    mockState = headerState()
+    render(<MobileShell />)
+    const { macro, changes, actions, back } = controls()
+
+    for (const [name, el] of Object.entries({ macro, changes, actions })) {
+      expect(el.className, `${name} must be the outline variant`).toContain(
+        "border-border"
+      )
+    }
+    expect(back.className).not.toContain("border-border")
+  })
+
+  // ±N is the deliberate exception to phones-prefer-icon-only: the number is
+  // DATA, not a label, and no icon can say "3 changes". It keeps its text and
+  // therefore its auto width, while the height stays pinned above.
+  it("keeps the changed-count text on the ±N control", () => {
+    mockState = headerState()
+    render(<MobileShell />)
+    expect(controls().changes.textContent).toMatch(/^±\d+$/)
+  })
+})

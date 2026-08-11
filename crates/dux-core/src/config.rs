@@ -673,6 +673,146 @@ impl WebDragDropPaste {
     }
 }
 
+/// When the web UI's touch terminal puts up the mobile compose bar
+/// ([`UiConfig::compose_bar`]).
+///
+/// WHY THIS IS THREE-WAY AND NOT A BOOLEAN. [`Self::Auto`] asks the browser
+/// whether touch is the primary pointing device (`pointer: coarse`), which is
+/// the right question: the compose bar exists because a soft keyboard's
+/// autocorrect, swipe and IME have nothing to correct when keystrokes go
+/// straight into a terminal. It replaced a viewport-WIDTH check, which had the
+/// bug that rotating a tablet changed the typing surface underneath the user.
+///
+/// But a capability gate cannot finish the job, and this is MEASURED rather
+/// than assumed: on an Android tablet, WITH and WITHOUT a physical keyboard
+/// attached, every interaction media query is identical (`pointer: coarse`
+/// true, `any-pointer: fine` true, `any-hover: hover` false). A keyboard case
+/// is invisible to the browser, so the two situations that want opposite
+/// answers are indistinguishable, and the only thing that can resolve them is
+/// the user saying so. Hence [`Self::Always`] and [`Self::Never`].
+///
+/// DO NOT BUILD KEYBOARD SNIFFING to close that gap. Also measured: focusing an
+/// input on an Android tablet while the on-screen keyboard opened and closed
+/// produced NO observable change at all. Window height, visual viewport height
+/// and `navigator.virtualKeyboard.boundingRect` were identical across two full
+/// open-and-close cycles, so there is nothing to detect after the fact either.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ComposeBarMode {
+    /// Show it when the browser reports touch as the primary pointer. The
+    /// default, and what the old `compose_bar = true` migrates to.
+    #[default]
+    Auto,
+    /// Always show it, whatever the pointer says. For the tablet-with-keyboard
+    /// case the browser cannot see, when the user wants the box anyway.
+    Always,
+    /// Never show it; tapping the terminal types straight into it. What the old
+    /// `compose_bar = false` migrates to.
+    Never,
+}
+
+impl ComposeBarMode {
+    /// Parse a config string into a mode, returning `None` for an unrecognized
+    /// value so the caller decides whether to warn. Never warns itself.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "always" => Some(Self::Always),
+            "never" => Some(Self::Never),
+            _ => None,
+        }
+    }
+
+    /// The warning text for one unrecognized value, or `None` when the value is
+    /// a mode dux knows.
+    ///
+    /// Returned rather than logged so the message itself is testable, the same
+    /// reason [`WebDragDropPaste::unknown_value_warning`] gives.
+    pub fn unknown_value_warning(s: &str) -> Option<String> {
+        if Self::parse(s).is_some() {
+            return None;
+        }
+        Some(format!(
+            "unknown ui.compose_bar value {s:?}; falling back to \"auto\" \
+             (valid: auto, always, never)"
+        ))
+    }
+
+    /// Parse a config string, falling back to [`ComposeBarMode::Auto`] with a
+    /// logged warning on an unrecognized value. Call this at config load
+    /// (once), not per render.
+    pub fn from_config_str(s: &str) -> Self {
+        if let Some(warning) = Self::unknown_value_warning(s) {
+            crate::logger::warn(&warning);
+        }
+        Self::parse(s).unwrap_or(Self::Auto)
+    }
+
+    /// The canonical lowercase name. This is what goes in `config.toml` and
+    /// what is projected into the web bootstrap document, so both surfaces
+    /// agree.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Always => "always",
+            Self::Never => "never",
+        }
+    }
+}
+
+/// Accept BOTH the current `ui.compose_bar` string and the BOOLEAN this setting
+/// used to be, so upgrading dux never fails to parse a config a user already
+/// has on disk.
+///
+/// The migration is the meaning-preserving one: `true` was "show the bar on the
+/// mobile surface", which is exactly what [`ComposeBarMode::Auto`] now decides,
+/// and `false` was "never show it". Nothing is rewritten on disk by reading it;
+/// the value is normalized here and the next config save writes the string
+/// form, so a user who never saves keeps a working boolean indefinitely.
+///
+/// An unrecognized STRING is passed through untouched rather than rejected or
+/// coerced here. That is deliberate and matches the rest of the string-valued
+/// settings: the warn-once-and-degrade happens at load
+/// ([`compose_bar_load_warning`]) and at use ([`ComposeBarMode::from_config_str`]),
+/// so one typo does not take the whole config file down with it.
+fn deserialize_compose_bar<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct ComposeBarVisitor;
+
+    impl serde::de::Visitor<'_> for ComposeBarVisitor {
+        type Value = String;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("\"auto\", \"always\", \"never\", or a legacy boolean")
+        }
+
+        fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<String, E> {
+            Ok(if v {
+                ComposeBarMode::Auto.as_str().to_string()
+            } else {
+                ComposeBarMode::Never.as_str().to_string()
+            })
+        }
+
+        fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<String, E> {
+            Ok(v.to_string())
+        }
+    }
+
+    deserializer.deserialize_any(ComposeBarVisitor)
+}
+
+/// The one-line warning to log when `ui.compose_bar` names a mode dux does not
+/// know, or `None` when it is fine.
+///
+/// Split out from the parse so `load_config` can warn exactly once per load
+/// rather than once per render, the `upload_directory_load_warning` /
+/// `upload_pasted_text_chars_load_warning` precedent.
+pub fn compose_bar_load_warning(config: &Config) -> Option<String> {
+    ComposeBarMode::unknown_value_warning(&config.ui.compose_bar)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectConfig {
     #[serde(default = "new_project_id")]
@@ -745,15 +885,27 @@ pub struct UiConfig {
     /// browser's terminal. Web UI only. Changing it from the web's
     /// Preferences dialog persists the new value here.
     pub terminal_font_size: u16,
-    /// Whether the web UI's mobile terminal shows the compose bar: a buffered
-    /// text box below the accessory-bar keys where the phone keyboard's
+    /// WHEN the web UI's touch terminal shows the compose bar: a buffered text
+    /// box below the accessory-bar keys where the phone keyboard's
     /// autocorrect/swipe input work, with a Send button that delivers the
-    /// message plus a submitting Enter in one write. While enabled, tapping
-    /// the terminal focuses the compose box instead of the raw terminal input.
-    /// When false, the bar is hidden and a tap types directly into the
-    /// terminal (the pre-compose-bar behavior). Changing it from the web's
-    /// Preferences dialog persists the new value here. Web-only behavior.
-    pub compose_bar: bool,
+    /// message plus a submitting Enter in one write. While it is up, tapping
+    /// the terminal focuses the compose box instead of the raw terminal input;
+    /// when it is not, a tap types directly into the terminal (the
+    /// pre-compose-bar behavior).
+    ///
+    /// The raw config string, parsed at use through [`ComposeBarMode`] so a
+    /// typo degrades gracefully (warn once at load and fall back) instead of
+    /// failing the whole config load, mirroring the
+    /// `pr_banner_position`/`agent_sort`/[`WebDragDropPaste`] convention.
+    /// `"auto"` (the default) lets the browser decide from the pointer, and
+    /// `"always"`/`"never"` are the manual overrides. See [`ComposeBarMode`]
+    /// for why the manual pair has to exist at all.
+    ///
+    /// A pre-`ComposeBarMode` config holding the old BOOLEAN still loads: see
+    /// [`deserialize_compose_bar`]. Changing it from the web's Preferences
+    /// dialog persists the new value here. Web-only behavior.
+    #[serde(deserialize_with = "deserialize_compose_bar")]
+    pub compose_bar: String,
     /// Whether the web UI's mobile terminal screens show the top bar (the
     /// back-chevron header with the branch crumb and actions, plus the agent
     /// tab strip below it). Set to false to hide it and give those rows back
@@ -1342,7 +1494,7 @@ impl Default for UiConfig {
             copy_on_select: true,
             terminal_font_family: String::new(),
             terminal_font_size: DEFAULT_TERMINAL_FONT_SIZE,
-            compose_bar: true,
+            compose_bar: ComposeBarMode::Auto.as_str().to_string(),
             mobile_top_bar: true,
             mobile_accessory_bar: true,
             upload_directory: DEFAULT_UPLOAD_DIRECTORY.to_string(),
@@ -1896,7 +2048,7 @@ impl Default for Config {
                 copy_on_select: true,
                 terminal_font_family: String::new(),
                 terminal_font_size: DEFAULT_TERMINAL_FONT_SIZE,
-                compose_bar: true,
+                compose_bar: ComposeBarMode::Auto.as_str().to_string(),
                 mobile_top_bar: true,
                 mobile_accessory_bar: true,
                 upload_directory: DEFAULT_UPLOAD_DIRECTORY.to_string(),
@@ -2122,6 +2274,13 @@ pub fn load_config(paths: &DuxPaths) -> Config {
     if let Some(warning) = upload_directory_load_warning(&config.ui.upload_directory) {
         crate::logger::warn(&warning);
         config.ui.upload_directory = DEFAULT_UPLOAD_DIRECTORY.to_string();
+    }
+    // And once more for a `ui.compose_bar` naming a mode dux does not know.
+    // Corrected in memory so the bootstrap projection publishes a mode the
+    // browser can act on rather than passing the typo through to it.
+    if let Some(warning) = compose_bar_load_warning(&config) {
+        crate::logger::warn(&warning);
+        config.ui.compose_bar = ComposeBarMode::Auto.as_str().to_string();
     }
     config
 }
@@ -3902,6 +4061,78 @@ mod agent_tabs_cap_tests {
         assert_eq!(
             WebDragDropPaste::from_config_str("codex", "single-quoted"),
             WebDragDropPaste::Bare
+        );
+    }
+
+    #[test]
+    fn compose_bar_mode_parses_the_three_modes_case_and_space_insensitively() {
+        assert_eq!(ComposeBarMode::parse("auto"), Some(ComposeBarMode::Auto));
+        assert_eq!(
+            ComposeBarMode::parse("  ALWAYS "),
+            Some(ComposeBarMode::Always)
+        );
+        assert_eq!(
+            ComposeBarMode::parse("Never\n"),
+            Some(ComposeBarMode::Never)
+        );
+        // Not modes: the old boolean's spellings reach `parse` only if a
+        // deserializer failed to migrate them, and a typo must not resolve.
+        assert_eq!(ComposeBarMode::parse("true"), None);
+        assert_eq!(ComposeBarMode::parse("false"), None);
+        assert_eq!(ComposeBarMode::parse("sometimes"), None);
+        assert_eq!(ComposeBarMode::parse(""), None);
+    }
+
+    #[test]
+    fn compose_bar_mode_round_trips_through_as_str() {
+        for mode in [
+            ComposeBarMode::Auto,
+            ComposeBarMode::Always,
+            ComposeBarMode::Never,
+        ] {
+            assert_eq!(ComposeBarMode::parse(mode.as_str()), Some(mode));
+        }
+        // The default is what an absent or unparseable value lands on.
+        assert_eq!(ComposeBarMode::default(), ComposeBarMode::Auto);
+    }
+
+    #[test]
+    fn compose_bar_mode_warns_only_for_an_unknown_value() {
+        assert_eq!(ComposeBarMode::unknown_value_warning("always"), None);
+        let warning = ComposeBarMode::unknown_value_warning("sometimes").expect("warning expected");
+        // The message must name the offending value AND the valid set, or the
+        // user has to go and read the source to fix their config.
+        assert!(warning.contains("sometimes"), "{warning}");
+        assert!(warning.contains("auto"), "{warning}");
+        assert!(warning.contains("always"), "{warning}");
+        assert!(warning.contains("never"), "{warning}");
+    }
+
+    /// The BOOLEAN this setting used to be still deserializes, meaning
+    /// preserved, so an upgrade never fails to parse a config already on disk.
+    /// (`tests/upgrade_config.rs` covers the same thing through `load_config`;
+    /// this pins the deserializer itself.)
+    #[test]
+    fn a_legacy_boolean_compose_bar_deserializes_to_a_mode() {
+        let on: Config = toml::from_str("[ui]\ncompose_bar = true\n").expect("true parses");
+        assert_eq!(on.ui.compose_bar, "auto");
+
+        let off: Config = toml::from_str("[ui]\ncompose_bar = false\n").expect("false parses");
+        assert_eq!(off.ui.compose_bar, "never");
+    }
+
+    /// An unrecognized STRING is passed through by the deserializer rather than
+    /// rejected: one typo must not take the whole config file down with it. The
+    /// degrade happens at load and at use instead.
+    #[test]
+    fn an_unknown_compose_bar_string_parses_and_degrades_later() {
+        let parsed: Config =
+            toml::from_str("[ui]\ncompose_bar = \"sometimes\"\n").expect("still parses");
+        assert_eq!(parsed.ui.compose_bar, "sometimes");
+        assert!(compose_bar_load_warning(&parsed).is_some());
+        assert_eq!(
+            ComposeBarMode::from_config_str(&parsed.ui.compose_bar),
+            ComposeBarMode::Auto
         );
     }
 

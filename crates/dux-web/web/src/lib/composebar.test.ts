@@ -5,6 +5,8 @@ import {
   MAX_COMPOSE_SEND_BYTES,
   composeSendTooLarge,
   composeSendWrites,
+  composeBarMode,
+  composeBarVisible,
   insertIntoComposeDraft,
 } from "./composebar"
 
@@ -167,5 +169,50 @@ describe("composeSendTooLarge", () => {
 
   it("rejects a payload one byte over the cap", () => {
     expect(composeSendTooLarge(MAX_COMPOSE_SEND_BYTES + 1)).toBe(true)
+  })
+})
+
+// The three-way `ui.compose_bar` gate. Pure, so the whole matrix is pinned
+// without mounting a terminal or a media query.
+describe("composeBarMode", () => {
+  it("passes the three known modes through", () => {
+    expect(composeBarMode("auto")).toBe("auto")
+    expect(composeBarMode("always")).toBe("always")
+    expect(composeBarMode("never")).toBe("never")
+  })
+
+  // An older server sends no field at all, and a config typo reaches the
+  // browser only if it slipped past both the load warning and the projection.
+  // Both land on the documented default rather than throwing or disabling.
+  it("reads an absent or unrecognized value as auto", () => {
+    expect(composeBarMode(undefined)).toBe("auto")
+    expect(composeBarMode("")).toBe("auto")
+    expect(composeBarMode("sometimes")).toBe("auto")
+    expect(composeBarMode("Auto")).toBe("auto")
+  })
+
+  // It was a BOOLEAN before the mode existed. The server migrates a config
+  // file, but a stale client/server pair could still put one on the wire, and
+  // "auto" is the safe landing for either.
+  it("reads a legacy boolean off the wire as auto", () => {
+    expect(composeBarMode(true as unknown as string)).toBe("auto")
+    expect(composeBarMode(false as unknown as string)).toBe("auto")
+  })
+})
+
+describe("composeBarVisible", () => {
+  it("auto follows the pointer capability", () => {
+    expect(composeBarVisible("auto", true)).toBe(true)
+    expect(composeBarVisible("auto", false)).toBe(false)
+  })
+
+  // The whole reason the setting is three-way: a tablet with a keyboard case
+  // and one without report identical media queries, so the user must be able
+  // to override the capability answer in BOTH directions.
+  it("always and never override the capability in both directions", () => {
+    expect(composeBarVisible("always", false)).toBe(true)
+    expect(composeBarVisible("always", true)).toBe(true)
+    expect(composeBarVisible("never", true)).toBe(false)
+    expect(composeBarVisible("never", false)).toBe(false)
   })
 })

@@ -298,7 +298,7 @@ async fn set_instance_identity(
 #[serde(default, deny_unknown_fields)]
 struct UiSettingsPatch {
     copy_on_select: Option<bool>,
-    compose_bar: Option<bool>,
+    compose_bar: Option<String>,
     mobile_top_bar: Option<bool>,
     mobile_accessory_bar: Option<bool>,
     /// Whether the agent upload directory keeps a self-ignoring `.gitignore`.
@@ -944,7 +944,7 @@ mod tests {
                 r#"{
                     "ui": {
                         "copy_on_select": false,
-                        "compose_bar": false,
+                        "compose_bar": "never",
                         "mobile_top_bar": false,
                         "mobile_accessory_bar": false,
                         "upload_write_gitignore": false,
@@ -981,7 +981,7 @@ mod tests {
         let raw = read_raw_config_text(&app).await;
         for expected in [
             "copy_on_select = false",
-            "compose_bar = false",
+            "compose_bar = \"never\"",
             "mobile_top_bar = false",
             "mobile_accessory_bar = false",
             "upload_write_gitignore = false",

@@ -988,6 +988,24 @@ function SortControl() {
   const agentSort = agentSortValue(useDux())
   return (
     <DropdownMenu>
+      {/* 36px on a phone (`max-md:min-h-9`) rather than the 40px touch floor,
+          and it EARNS the relaxation through clear spacing (the third way to
+          earn it in the touch-target tenet). These are MEASURED in the real
+          container at a 390px viewport, not estimated:
+
+            - Along the HORIZONTAL axis it has no interactive neighbour at
+              all. `ml-auto` pins it to the right edge of its row, and the only
+              other things on that row are the "Agents" heading and the count,
+              both plain text.
+            - Along the VERTICAL axis the nearest interactive neighbour is the
+              search field 12px below it, and the app-menu trigger is 21px
+              above.
+
+          12px of clear space on the only axis that has a neighbour is enough
+          that an imprecise tap lands on neither control, which is what the
+          40px floor is protecting against in the first place. Do not "fix"
+          this by growing it: the height is deliberate, and if these gaps ever
+          close, restore the height rather than deleting this comment. */}
       <DropdownMenuTrigger
         render={
           <button

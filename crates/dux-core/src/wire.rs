@@ -704,10 +704,12 @@ pub fn normalize_pr_banner_position(raw: &str) -> Option<String> {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub struct SettingsPatch {
     pub copy_on_select: Option<bool>,
-    /// `ui.compose_bar`: the web mobile terminal's compose bar (the buffered
-    /// phone typing surface). A plain field write with no side effects, so it
-    /// rides the generic settings path like `copy_on_select`.
-    pub compose_bar: Option<bool>,
+    /// `ui.compose_bar`: WHEN the web's touch terminal puts up the compose bar
+    /// (the buffered phone typing surface). One of `"auto"`, `"always"` or
+    /// `"never"`; validated against that set like `pr_banner_position`, so an
+    /// unrecognized value REJECTS the whole command rather than being coerced.
+    /// A plain field write with no side effects otherwise.
+    pub compose_bar: Option<String>,
     /// `ui.mobile_top_bar`: the web mobile terminal screens' top bar (the
     /// back/branch header plus the agent tab strip). A plain field write with
     /// no side effects (a pure render gate), so it rides the generic settings
@@ -1565,6 +1567,17 @@ impl Engine {
             .map(|raw| {
                 normalize_pr_banner_position(&raw)
                     .ok_or_else(|| anyhow::anyhow!("unknown PR banner position \"{raw}\""))
+            })
+            .transpose()?;
+        // Rejected rather than degraded to "auto", the `pr_banner_position`
+        // rule: this validates a CLIENT-supplied string, where a 400 is more
+        // useful than silently saving something the user did not choose. The
+        // warn-and-degrade path is for a value already on disk.
+        let compose_bar = compose_bar
+            .map(|raw| {
+                crate::config::ComposeBarMode::parse(&raw)
+                    .map(|mode| mode.as_str().to_string())
+                    .ok_or_else(|| anyhow::anyhow!("unknown compose bar mode \"{raw}\""))
             })
             .transpose()?;
         // Validate against the configured provider list, the same source
@@ -9657,10 +9670,10 @@ mod tests {
             },
             SettingsFieldRow {
                 key: "compose_bar",
-                seed: |c| c.ui.compose_bar = true,
-                sent: serde_json::json!(false),
-                read: |c| c.ui.compose_bar.to_string(),
-                expect: "false",
+                seed: |c| c.ui.compose_bar = "auto".to_string(),
+                sent: serde_json::json!("never"),
+                read: |c| c.ui.compose_bar.clone(),
+                expect: "never",
             },
             SettingsFieldRow {
                 key: "mobile_top_bar",
@@ -9863,7 +9876,11 @@ mod tests {
         // by accidentally already holding the value we send.
         let patch = WireCommand::SetSettings(SettingsPatch {
             copy_on_select: Some(!before.ui.copy_on_select),
-            compose_bar: Some(!before.ui.compose_bar),
+            compose_bar: Some(if before.ui.compose_bar == "never" {
+                "always".to_string()
+            } else {
+                "never".to_string()
+            }),
             mobile_top_bar: Some(!before.ui.mobile_top_bar),
             mobile_accessory_bar: Some(!before.ui.mobile_accessory_bar),
             upload_write_gitignore: Some(!before.ui.upload_write_gitignore),
@@ -9900,7 +9917,7 @@ mod tests {
 
         let after = &engine.config;
         assert_eq!(after.ui.copy_on_select, !before.ui.copy_on_select);
-        assert_eq!(after.ui.compose_bar, !before.ui.compose_bar);
+        assert_eq!(after.ui.compose_bar, "never");
         assert_eq!(after.ui.mobile_top_bar, !before.ui.mobile_top_bar);
         assert_eq!(
             after.ui.mobile_accessory_bar,

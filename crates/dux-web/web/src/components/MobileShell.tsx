@@ -334,11 +334,25 @@ function TerminalScreen() {
       {topBarVisible ? (
         <>
           <header className="flex h-11 shrink-0 items-center gap-2 border-b px-3">
-            {/* Up to the hub, by name (see the project-terminal header above). */}
+            {/* Up to the hub, by name (see the project-terminal header above).
+
+                DELIBERATELY STILL GHOST, and this was examined rather than
+                left alone. It is NAVIGATION, not an action on this screen: it
+                leaves the screen, while the outline cluster at the other end
+                of this header acts on the agent you are looking at. Keeping
+                the two apart is what lets the cluster read as a cluster, and
+                giving every control in the row a border would flatten that
+                distinction back out.
+
+                The distinction is carried by the VARIANT alone. The GEOMETRY
+                matches the cluster exactly (`size="lg"`, the explicit h-9/36px
+                token, plus the same 44px width floor), because a row of
+                controls at two different heights is the inconsistency this
+                whole change is fixing. Same height, different weight. */}
             <Button
               variant="ghost"
-              size="icon"
-              className="size-10 shrink-0"
+              size="lg"
+              className="min-w-11 shrink-0"
               aria-label="Back"
               onClick={() => navigateUp()}
             >
@@ -386,6 +400,38 @@ function TerminalScreen() {
                 </a>
               </SimpleTooltip>
             ) : null}
+            {/* THE ACTION CLUSTER. These three (macro, ±N changes, session
+                ⋯) are the actions available on this screen, and they must read
+                as ONE FAMILY rather than three unrelated controls. They used
+                to be exactly that: a ghost size-10 macro trigger, an outline
+                size="sm" ±N whose `sm` token also swapped the corner RADIUS,
+                and a ghost size-10 ⋯. So all three are now `outline`, which is
+                the treatment the desktop already uses for an action cluster
+                (AppMenu.tsx's cog and the Show-Changes button beside it in
+                InsetHeader.tsx, whose comment says outline is what makes them
+                read as one family).
+
+                HEIGHT IS SET EXPLICITLY AND IDENTICALLY, and is never taken
+                from a control's content: all three pass `size="lg"`, which is
+                the button's explicit `h-9` (36px) token with auto width. That
+                is the whole point of using one token for all three. The two
+                alternatives both fail the rule: `size="icon"` is a fixed
+                SQUARE (`size-8`), which ties the height to the width and
+                cannot be shared with a control carrying text, and `size="sm"`
+                is a padding-driven `h-7` that the old code then had to force
+                up with `min-h-10`.
+
+                WIDTH is the only thing that varies: `min-w-11` (44px) is the
+                per-axis touch floor on all three, the icon-only two sit at
+                exactly that floor, and ±N grows past it when the count is
+                wide. ±N is the deliberate exception to phones-prefer-icon-only
+                because the number is DATA, not a label, and no icon can say
+                "3 changes". It was MEASURED at 37.6px wide before this change,
+                under the 44px floor, so the width floor is a real fix and not
+                a formality. Do not add a text label to the other two.
+
+                The macro trigger's shape lives in MacroPopover's `icon`
+                variant, not here, so it cannot drift from its neighbours. */}
             {/* The macro quick-picker's mobile entry point. It lives HERE, in
                 the header beside the chips, because the floating TerminalPane
                 trigger sat over the PTY text on a phone and made the text
@@ -396,8 +442,8 @@ function TerminalScreen() {
             <MacroPopover variant="icon" target={selectedTarget} />
             <Button
               variant="outline"
-              size="sm"
-              className="min-h-10 shrink-0"
+              size="lg"
+              className="min-w-11 shrink-0"
               aria-label={`${changeCount} changed files`}
               onClick={() => openChangesScreen()}
             >
@@ -407,9 +453,9 @@ function TerminalScreen() {
               <DropdownMenuTrigger
                 render={
                   <Button
-                    variant="ghost"
-                    size="icon"
-                    className="size-10 shrink-0"
+                    variant="outline"
+                    size="lg"
+                    className="min-w-11 shrink-0"
                     aria-label="Session actions"
                   />
                 }

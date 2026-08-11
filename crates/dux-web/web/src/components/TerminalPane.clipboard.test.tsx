@@ -17,6 +17,7 @@ import {
 
 import type { DuxState } from "@/lib/store"
 import { notifyPtyOwner, resetPtyOwnerEpochs } from "@/lib/ptyOwnership"
+import { stubCoarsePointer, type MatchMediaStub } from "@/test/matchMedia"
 
 /// The same xterm stand-in the drop suite uses: `paste()` does what xterm's
 /// really does, so an assertion can be made on the bytes that reach the socket
@@ -247,7 +248,7 @@ function makeState(): DuxState {
       available_providers: ["claude"],
       agent_tabs_max: 20,
       status_clear_seconds: 6,
-      compose_bar: true,
+      compose_bar: "auto",
       mobile_top_bar: true,
       mobile_accessory_bar: true,
       file_drop_max_bytes: 1024,
@@ -657,20 +658,26 @@ describe("when an image paste cannot be taken", () => {
 })
 
 describe("pasting an image while the mobile compose bar is the typing surface", () => {
-  // `useIsMobile` reads `window.innerWidth`, so these shrink it below the
-  // breakpoint for the duration.
+  // Two signals, because the compose bar needs both: `useIsMobile` reads
+  // `window.innerWidth` for the mobile SHELL, and the bar inside it is gated on
+  // `pointer: coarse` (see `hooks/use-coarse-pointer.ts`). A real phone reports
+  // both, so these set both for the duration.
   const desktopWidth = window.innerWidth
+  let pointerStub: MatchMediaStub | null = null
   beforeEach(() => {
     Object.defineProperty(window, "innerWidth", {
       configurable: true,
       value: 420,
     })
+    pointerStub = stubCoarsePointer()
   })
   afterEach(() => {
     Object.defineProperty(window, "innerWidth", {
       configurable: true,
       value: desktopWidth,
     })
+    pointerStub?.restore()
+    pointerStub = null
   })
 
   it("puts the path in the DRAFT and sends nothing", async () => {
@@ -722,7 +729,7 @@ describe("pasting an image while the mobile compose bar is the typing surface", 
     await act(async () => void fireEvent(box, event))
 
     // The bar goes away while the upload is still in flight.
-    mockState = { ...mockState, bootstrap: { ...mockState.bootstrap!, compose_bar: false } }
+    mockState = { ...mockState, bootstrap: { ...mockState.bootstrap!, compose_bar: "never" } }
     await act(async () => {
       view.rerender(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     })
@@ -929,6 +936,7 @@ describe("pasting a very long text onto an agent", () => {
     // better than either dumping the text into the message or refusing it: the
     // user can still write around the path before pressing Send.
     Object.defineProperty(window, "innerWidth", { configurable: true, value: 420 })
+    const pointerStub = stubCoarsePointer()
     try {
       uploadDroppedFile.mockResolvedValue(saved("pasted-x.txt"))
       render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
@@ -959,6 +967,7 @@ describe("pasting a very long text onto an agent", () => {
         configurable: true,
         value: 1024,
       })
+      pointerStub.restore()
     }
   })
 
@@ -968,6 +977,7 @@ describe("pasting a very long text onto an agent", () => {
     // its path to your message" with no message box on screen would be a lie
     // about where the text went.
     Object.defineProperty(window, "innerWidth", { configurable: true, value: 420 })
+    const pointerStub = stubCoarsePointer()
     try {
       let release: (v: unknown) => void = () => {}
       uploadDroppedFile.mockReturnValue(
@@ -982,7 +992,7 @@ describe("pasting a very long text onto an agent", () => {
 
       mockState = {
         ...mockState,
-        bootstrap: { ...mockState.bootstrap!, compose_bar: false },
+        bootstrap: { ...mockState.bootstrap!, compose_bar: "never" },
       }
       await act(async () => {
         view.rerender(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
@@ -1005,6 +1015,7 @@ describe("pasting a very long text onto an agent", () => {
         configurable: true,
         value: 1024,
       })
+      pointerStub.restore()
     }
   })
 })

@@ -16,7 +16,7 @@ const sampleBootstrap: Bootstrap = {
   copy_on_select: false,
   terminal_font_family: "Fira Code",
   terminal_font_size: 18,
-  compose_bar: false,
+  compose_bar: "never",
   mobile_top_bar: false,
   mobile_accessory_bar: false,
   upload_write_gitignore: false,
@@ -130,7 +130,7 @@ describe("settingsDescriptors", () => {
     expect(byKey["ui.copy_on_select"]).toBe(false)
     expect(byKey["ui.terminal_font_family"]).toBe("Fira Code")
     expect(byKey["ui.terminal_font_size"]).toBe(18)
-    expect(byKey["ui.compose_bar"]).toBe(false)
+    expect(byKey["ui.compose_bar"]).toBe("never")
     expect(byKey["ui.mobile_top_bar"]).toBe(false)
     expect(byKey["ui.mobile_accessory_bar"]).toBe(false)
     expect(byKey["ui.auto_reopen_agents"]).toBe(true)
@@ -329,10 +329,12 @@ describe("settingsDescriptors", () => {
     expect(byKey["ui.attention_indicator"]).toBe(true)
     expect(byKey["ui.attention_on_bell"]).toBe(true)
     expect(byKey["defaults.provider"]).toBe("claude")
-    expect(byKey["ui.compose_bar"]).toBe(true)
+    // The three-way mode's documented default, not a boolean.
+    expect(byKey["ui.compose_bar"]).toBe("auto")
     expect(byKey["ui.mobile_top_bar"]).toBe(true)
     expect(byKey["ui.mobile_accessory_bar"]).toBe(true)
-    // Unlike compose_bar, the auto-reopen fallback is FALSE (the config default).
+    // Unlike the mobile-bar preferences, the auto-reopen fallback is FALSE
+    // (the config default).
     expect(byKey["ui.auto_reopen_agents"]).toBe(false)
   })
 

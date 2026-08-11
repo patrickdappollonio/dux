@@ -103,3 +103,45 @@ export function insertIntoComposeDraft(
   const next = draft.slice(0, start) + text + draft.slice(end)
   return { next, caret: start + text.length }
 }
+
+/**
+ * The three values `ui.compose_bar` can take, mirroring
+ * `dux_core::config::ComposeBarMode`.
+ */
+export type ComposeBarMode = "auto" | "always" | "never"
+
+/** Narrow whatever the bootstrap document carried into a mode we have a case
+ * for. An absent field (an older server) and an unrecognized one both read as
+ * `"auto"`, matching the server-side warn-and-degrade fallback. */
+export function composeBarMode(raw: string | undefined): ComposeBarMode {
+  return raw === "always" || raw === "never" || raw === "auto" ? raw : "auto"
+}
+
+/**
+ * Should the compose bar be up?
+ *
+ * Pure so the whole matrix is testable without mounting a terminal. The
+ * capability argument is "is touch the primary pointer" (`pointer: coarse`,
+ * see `hooks/use-coarse-pointer.ts`), NOT a viewport width: the bar is a
+ * decision about the INPUT METHOD, and keying it to width meant rotating a
+ * tablet changed the typing surface underneath the user mid-session.
+ *
+ * `always`/`never` exist because that capability check cannot finish the job.
+ * MEASURED: an Android tablet with a physical keyboard attached and the same
+ * tablet without one report identical interaction media queries, so the two
+ * cases that want opposite answers are indistinguishable to the browser and
+ * only the user can resolve them.
+ */
+export function composeBarVisible(
+  mode: ComposeBarMode,
+  coarsePointer: boolean
+): boolean {
+  switch (mode) {
+    case "always":
+      return true
+    case "never":
+      return false
+    case "auto":
+      return coarsePointer
+  }
+}
