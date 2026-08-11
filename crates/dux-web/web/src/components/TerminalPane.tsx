@@ -64,6 +64,11 @@ import {
   TAB,
 } from "@/lib/termkeys"
 import {
+  activateLinkAtPoint,
+  linkifierElement,
+  terminalTapAction,
+} from "@/lib/termlink"
+import {
   ejectSelectionForReconnect,
   handleTabGone,
   mobileAccessoryBarVisible,
@@ -823,6 +828,11 @@ export function TerminalPane(props: TerminalPaneProps) {
         10
       ) || 8
 
+    // Bumped every time the linkHandler below actually opens a tab. The touch
+    // path compares it across its probe to learn whether a tap landed on a
+    // link, which is what keeps the open logic in ONE place (see
+    // `activateLinkAtPoint`).
+    let linkActivations = 0
     const fontFamily = terminalFontFamily(terminalFontFamilyRef.current)
     const fontSize = clampTerminalFontSize(terminalFontSizeRef.current)
     const term = new Terminal({
@@ -860,6 +870,7 @@ export function TerminalPane(props: TerminalPaneProps) {
           )
           if (action !== "open") return
           window.open(uri, "_blank", "noopener,noreferrer")
+          linkActivations++
         },
       },
     })
@@ -1296,6 +1307,17 @@ export function TerminalPane(props: TerminalPaneProps) {
     // the app saw before the redirect existed, not a byte-exact replay of the
     // browser's event pipeline; apps consume the click, not the DOM events.
     //
+    // Swallowing them ALSO swallows the only thing that can follow an OSC 8
+    // hyperlink: xterm's Linkifier resolves the link from `mousemove` and
+    // activates it from `mouseup`. So a tap on a link used to do nothing but
+    // raise the keyboard. Before deciding the tap is ordinary we replay that
+    // sequence straight at the Linkifier's element with `bubbles: false`
+    // (`activateLinkAtPoint`), which reaches the link layer and nothing else,
+    // and let xterm hit-test it; a hit opens through the same
+    // `linkHandler.activate` above. `terminalTapAction` then says what the
+    // rest of the tap does. See `lib/termlink.ts` for why the probe is a
+    // replay rather than a hit-test of our own.
+    //
     // Scroll and long-press selection take the other branches and are
     // untouched, a non-owner is covered by the take-over overlay anyway, and
     // with the preference off (or on desktop) the redirect never fires, so a
@@ -1312,7 +1334,21 @@ export function TerminalPane(props: TerminalPaneProps) {
       if (!compose) return
       e.preventDefault()
       const touch = e.changedTouches[0]
-      if (touch && term.modes.mouseTrackingMode !== "none") {
+      // Runs inside the touchend handler, so the window.open a hit produces is
+      // still inside the user gesture and is not treated as a popup.
+      const linkActivated = touch
+        ? activateLinkAtPoint(
+            linkifierElement(term.element),
+            touch.clientX,
+            touch.clientY,
+            () => linkActivations,
+          )
+        : false
+      const { forwardClick, focusCompose } = terminalTapAction({
+        linkActivated,
+        mouseTracking: term.modes.mouseTrackingMode !== "none",
+      })
+      if (touch && forwardClick) {
         // Mirror onTouchMove's wheel-coordinate math: 1-based cell from the
         // touch point, with the divide-by-zero guards for a not-yet-measured
         // container.
@@ -1325,7 +1361,7 @@ export function TerminalPane(props: TerminalPaneProps) {
           Math.floor((touch.clientY - rect.top) / (rowHeight > 0 ? rowHeight : 1)) + 1
         pty.sendInput(encoder.encode(sgrClickSeq(col, cellRow)))
       }
-      compose.focus()
+      if (focusCompose) compose.focus()
     }
     container.addEventListener("touchstart", onTouchStart, { passive: true })
     container.addEventListener("touchmove", onTouchMove, { passive: false })
