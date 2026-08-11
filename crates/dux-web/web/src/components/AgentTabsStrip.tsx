@@ -49,7 +49,10 @@ export function AgentTabsStrip({
   const disabled = atCap || creating
 
   return (
-    <div className="flex items-center gap-1 overflow-x-auto border-b bg-muted/30 px-2 py-1">
+    // `max-md:py-0.5` halves the strip's own vertical padding to go with the
+    // shorter phone pill below: shrinking the pill alone would leave the strip
+    // the same height. Desktop padding is unchanged.
+    <div className="flex items-center gap-1 overflow-x-auto border-b bg-muted/30 px-2 py-1 max-md:py-0.5">
       {session.tabs.map((tab, i) => (
         <TabPill
           key={tab.id}
@@ -79,7 +82,11 @@ export function AgentTabsStrip({
             aria-label="New tab"
             disabled={disabled}
             onClick={() => addTab(session.id)}
-            className="flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-background hover:text-foreground disabled:pointer-events-none disabled:opacity-40 max-md:size-11"
+            // `max-md:h-9 max-md:w-11` rather than `max-md:size-11`: the strip's
+            // height relaxation is VERTICAL only (see the pill below), so this
+            // keeps its full 44px WIDTH, where its neighbour is the provider
+            // caret and a stray sideways tap would add the wrong provider.
+            className="flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-background hover:text-foreground disabled:pointer-events-none disabled:opacity-40 max-md:h-9 max-md:w-11"
           >
             <Plus className="size-4" />
           </button>
@@ -91,7 +98,9 @@ export function AgentTabsStrip({
                 type="button"
                 aria-label="Choose provider for new tab"
                 disabled={disabled}
-                className="flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-background hover:text-foreground disabled:pointer-events-none disabled:opacity-40 max-md:size-11"
+                // Height relaxed, width kept: same reasoning as the "+" beside
+                // it.
+                className="flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-background hover:text-foreground disabled:pointer-events-none disabled:opacity-40 max-md:h-9 max-md:w-11"
               />
             }
           >
@@ -148,8 +157,23 @@ function TabPill({
           select()
         }
       }}
+      // `max-md:min-h-9` (36px) is a deliberate, per-axis relaxation of the 40px
+      // touch-target floor, taken under the tenet's exemption and justified by
+      // naming the neighbours. The relaxed axis is VERTICAL: above the strip is
+      // the mobile header, whose own controls end at its bottom edge and which
+      // offers no tap target adjacent to a pill; below is the PTY. The PTY is
+      // not inert (a tap there focuses the compose box, and with mouse tracking
+      // on it forwards a click to the app), but both are CHEAP mis-taps: a
+      // keyboard you dismiss, or a click the app ignores. Nothing here is
+      // destructive and nothing switches what you are looking at. HORIZONTALLY
+      // the pill keeps its size, because its neighbours are OTHER TABS and
+      // landing on the wrong tab is a real mis-tap. The strip sits between the
+      // header and the terminal, where vertical space is the scarce resource on
+      // a phone.
       className={cn(
-        "group/tab flex shrink-0 cursor-pointer items-center gap-1.5 rounded-md border px-2 py-1 text-sm transition-colors max-md:min-h-11",
+        // `max-md:py-0` goes with it: the pill's own 4px padding would sit on
+        // top of the 32px ⋯ hit area inside and overshoot the 36px again.
+        "group/tab flex shrink-0 cursor-pointer items-center gap-1.5 rounded-md border px-2 py-1 text-sm transition-colors max-md:min-h-9 max-md:py-0",
         active
           ? "border-border bg-background text-foreground"
           : "border-transparent bg-muted text-muted-foreground hover:text-foreground",
@@ -179,7 +203,11 @@ function TabPill({
                 type="button"
                 aria-label="Tab actions"
                 onClick={(e) => e.stopPropagation()}
-                className="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:text-foreground max-md:size-11"
+                // `max-md:h-8 max-md:w-11` keeps the full 44px width (its
+                // horizontal neighbour is the next tab) while fitting inside the
+                // pill's 36px height; `max-md:size-11` here would have forced
+                // the pill back to 44px and undone the shorter strip.
+                className="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:text-foreground max-md:h-8 max-md:w-11"
               />
             }
           >

@@ -1,10 +1,16 @@
-import { Fragment } from "react"
 import { PanelRightOpen } from "lucide-react"
 
 import { AppMenu } from "@/components/AppMenu"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Button } from "@/components/ui/button"
-import { branchDrift } from "@/lib/agentTabs"
+import {
+  agentCaption,
+  agentHeaderSubject,
+  captionText,
+  terminalCountCaption,
+  terminalHeaderSubject,
+  type HeaderSubject,
+} from "@/lib/headerSubject"
 import {
   changesPaneVisible,
   setChangesPaneVisibility,
@@ -14,17 +20,10 @@ import { matchOwner } from "@/lib/terminalOwner"
 import { terminalsForOwner, terminalTitle } from "@/lib/terminals"
 import type { SessionView, TerminalView } from "@/lib/types"
 
-// One `key: value` crumb in the header details row. `muted`, when present, is
-// appended as a dimmed trailing clause on the same crumb (used to surface the
-// original branch when the current branch has drifted from it).
-interface HeaderDetail {
-  key: string
-  value: string
-  muted?: string
-}
-
-// The desktop center-pane top bar: a flat `key: value` list (agent, provider,
-// project, branch, …) mirroring the TUI header, plus the app-menu cog.
+// The desktop center-pane top bar: ONE SUBJECT (the agent name, or the terminal
+// when a terminal is focused) with a small muted caption beside it, plus the
+// app-menu cog. The decision of what belongs in each half lives in
+// `lib/headerSubject.ts`, including the branch collapse.
 // Extracted from App.tsx into its own module so it can be unit-tested in
 // isolation without pulling in `GlobalOverlays` -> `ConfigEditorDialog`, whose
 // eager Monaco import cannot initialize under vitest (see `TerminalArea`).
@@ -35,50 +34,42 @@ export function InsetHeader() {
   const focusedTerminal =
     selectedTarget?.kind === "terminal" ? selectedTarget : undefined
 
-  // The crumbs describing one AGENT: name, provider, project, branch. Shared by
-  // an agent selection and by a session-owned terminal, which shows its agent's
-  // crumbs and then its own.
-  const agentCrumbs = (
-    agent: SessionView,
-    provider?: string,
-  ): HeaderDetail[] => {
-    const crumbs: HeaderDetail[] = [
-      { key: "agent", value: agent.title || agent.branch_name },
-      { key: "provider", value: provider ?? agent.provider },
-    ]
+  // The facts describing one AGENT: its name (the subject) and its caption
+  // clauses. Shared by an agent selection, where the name IS the subject, and by
+  // a session-owned terminal, where the terminal is the subject and the agent's
+  // name joins the caption in front of the rest.
+  //
+  // The drift clause ("originally <initial>") is guarded inside `agentCaption`
+  // on `initial_branch` being present, so an older server that omits the field
+  // never renders "originally undefined".
+  const agentFacts = (agent: SessionView, provider?: string) => {
     const owningProject = spine?.projects.find((p) => p.id === agent.project_id)
-    if (owningProject?.name) {
-      crumbs.push({ key: "project", value: owningProject.name })
+    return {
+      name: agent.title || agent.branch_name,
+      provider: provider ?? agent.provider,
+      projectName: owningProject?.name,
+      branchName: agent.branch_name,
+      initialBranch: agent.initial_branch,
     }
-    // Branch crumb. When the current branch has drifted from the immutable
-    // `initial_branch` the agent was created on, append a muted "originally
-    // <initial>" clause so the original branch stays visible (the web has room;
-    // the TUI shows a compact form only). Guarded on `initial_branch` being
-    // present so an older server that omits the field never renders "originally
-    // undefined".
-    const drift = branchDrift(agent)
-    crumbs.push({
-      key: "branch",
-      value: agent.branch_name,
-      muted: drift.drifted ? `originally ${drift.initial}` : undefined,
-    })
-    return crumbs
   }
 
-  // A focused terminal's breadcrumb is chosen by an EXHAUSTIVE match on its
-  // OWNER, because the bar's whole job here is to name the thing the terminal
+  // A focused terminal's caption is chosen by an EXHAUSTIVE match on its OWNER,
+  // because the caption's whole job here is to name the thing the terminal
   // belongs to. A two-bucket lookup keeps compiling when a new kind of owner
   // arrives and hands it an empty header, which is a blank bar rather than an
-  // error. Each arm answers with the owner's own crumbs plus that owner's
-  // terminals: the set `terminalTitle` disambiguates against, and the set the
-  // `terminals` count counts.
-  const ownerContext: { crumbs: HeaderDetail[]; siblings: TerminalView[] } | null =
+  // error. Each arm answers with the owner's own caption clauses plus that
+  // owner's terminals: the set `terminalTitle` disambiguates against, and the
+  // set the sibling count counts.
+  const ownerContext: { caption: string[]; siblings: TerminalView[] } | null =
     focusedTerminal
       ? matchOwner(focusedTerminal.owner, {
           session: (owner) => {
             const agent = spine?.sessions.find((s) => s.id === owner.sessionId)
+            // The agent is no longer the subject here, so its NAME leads its own
+            // caption clauses rather than being dropped with the labels.
+            const facts = agent ? agentFacts(agent) : null
             return {
-              crumbs: agent ? agentCrumbs(agent) : [],
+              caption: facts ? [facts.name, ...agentCaption(facts)] : [],
               siblings: terminalsForOwner(allTerminals, owner),
             }
           },
@@ -87,13 +78,11 @@ export function InsetHeader() {
               (p) => p.id === owner.projectId,
             )
             return {
-              crumbs: owningProject
-                ? [{ key: "project", value: owningProject.name }]
-                : [],
+              caption: owningProject ? [owningProject.name] : [],
               siblings: terminalsForOwner(allTerminals, owner),
             }
           },
-          // No owner to name, so the crumb names WHERE the terminal is. The
+          // No owner to name, so the caption names WHERE the terminal is. The
           // label is read off this terminal's own wire owner rather than the
           // client-side reference, which carries no id and no label precisely
           // because there is no owner: every standalone terminal shares one
@@ -106,17 +95,14 @@ export function InsetHeader() {
             const cwd =
               self?.owner.kind === "standalone" ? self.owner.cwd_label : null
             return {
-              crumbs: cwd ? [{ key: "directory", value: cwd }] : [],
+              caption: cwd ? [cwd] : [],
               siblings,
             }
           },
         })
       : null
 
-  // The header details, mirroring the TUI: a flat `key: value` list joined by a
-  // single separator. `terminal` only appears when a companion terminal is the
-  // focused target; `terminals` (the count) only when there is at least one.
-  // When an agent tab is focused, the provider crumb reflects the FOCUSED TAB
+  // When an agent tab is focused, the provider clause reflects the FOCUSED TAB
   // (an extra tab can run a different provider than the session-slot tab), not
   // the session-slot tab's own provider.
   const session = spine?.sessions.find((s) => s.id === selectedSessionId)
@@ -125,65 +111,60 @@ export function InsetHeader() {
       ? session?.tabs.find((t) => t.id === selectedTarget.tabId)?.provider
       : undefined
 
-  const details: HeaderDetail[] = []
+  let header: HeaderSubject | null = null
   if (ownerContext && focusedTerminal) {
-    details.push(...ownerContext.crumbs)
-    // The crumb text is the foreground command when one is running
-    // (disambiguated with the terminal's number if a sibling runs the same app),
-    // otherwise the stable "Terminal N" label.
+    // The subject is the terminal itself: the foreground command when one is
+    // running (disambiguated with the terminal's number if a sibling runs the
+    // same app), otherwise the stable "Terminal N" label.
     const terminal = ownerContext.siblings.find(
       (t) => t.id === focusedTerminal.terminalId,
     )
     if (terminal) {
-      details.push({
-        key: "terminal",
-        value: terminalTitle(terminal, ownerContext.siblings),
-      })
-    }
-    if (ownerContext.siblings.length > 0) {
-      details.push({
-        key: "terminals",
-        value: String(ownerContext.siblings.length),
-      })
+      header = terminalHeaderSubject(
+        terminalTitle(terminal, ownerContext.siblings),
+        ownerContext.caption,
+        ownerContext.siblings.length,
+      )
     }
   } else if (session) {
-    details.push(...agentCrumbs(session, focusedTabProvider))
+    const facts = agentFacts(session, focusedTabProvider)
+    header = agentHeaderSubject(facts)
     const sessionTerminals = terminalsForOwner(allTerminals, {
       kind: "session",
       sessionId: session.id,
     })
-    if (sessionTerminals.length > 0) {
-      details.push({ key: "terminals", value: String(sessionTerminals.length) })
-    }
+    const count = terminalCountCaption(sessionTerminals.length)
+    if (count) header = { ...header, caption: [...header.caption, count] }
   }
 
   return (
     <header className="flex h-12 shrink-0 items-center gap-2 border-b px-3">
-      {/* Left region shares one shrink budget so the details row clips instead of
-          pushing the right-hand controls off the edge. One font (sans) throughout
-          — mixing mono values with sans labels made `items-center` misalign them
-          (mono/sans glyphs center differently). Distinguish key vs value by
-          color/weight, not font. See the mono/sans alignment memory. */}
-      <div className="flex min-w-0 flex-1 items-center gap-x-2 overflow-hidden text-sm">
-        {details.map((d, i) => (
-          <Fragment key={d.key}>
-            {i > 0 && (
-              // A thin, vertically centered divider (items-center keeps it on the
-              // text's midline — a literal "|" glyph rode high).
-              <span
-                aria-hidden
-                className="h-3 w-px shrink-0 bg-border"
-              />
-            )}
-            <span className="shrink-0 whitespace-nowrap">
-              <span className="text-muted-foreground">{d.key}: </span>
-              <span className="font-medium text-foreground">{d.value}</span>
-              {d.muted ? (
-                <span className="text-muted-foreground"> · {d.muted}</span>
-              ) : null}
+      {/* Left region shares one shrink budget so the header clips instead of
+          pushing the right-hand controls off the edge. One font (sans)
+          throughout: mixing mono values with sans labels made `items-center`
+          misalign them (mono/sans glyphs center differently), so the subject and
+          its caption are distinguished by size, weight and color, never by font.
+
+          The two shrink weights are the "name truncates LAST" rule. Both boxes
+          are `min-w-0 truncate`, so both CAN shrink, but the caption's shrink
+          factor is thousands of times the subject's: overflow is distributed in
+          proportion, so the caption gives way down to nothing before the subject
+          loses its first character. `items-baseline` sits the 12px caption on
+          the subject's baseline rather than centering two different type sizes
+          against each other. */}
+      <div className="flex min-w-0 flex-1 items-baseline gap-2 overflow-hidden">
+        {header ? (
+          <>
+            <span className="min-w-0 shrink truncate text-sm font-medium text-foreground">
+              {header.subject}
             </span>
-          </Fragment>
-        ))}
+            {header.caption.length > 0 && (
+              <span className="min-w-0 shrink-[9999] truncate text-xs text-muted-foreground">
+                {captionText(header.caption)}
+              </span>
+            )}
+          </>
+        ) : null}
       </div>
 
       <div className="flex shrink-0 items-center gap-2">

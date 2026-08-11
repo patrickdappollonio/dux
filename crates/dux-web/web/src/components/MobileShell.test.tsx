@@ -977,3 +977,60 @@ describe("MobileShell agentless terminal screen ⋯ menu", () => {
     expect(screen.queryByText("Rename agent…")).toBeNull()
   })
 })
+
+describe("MobileShell agent header identity", () => {
+  // The phone header used to show the BRANCH alone, in mono, so it never said
+  // which project or which assistant you were talking to. It now carries the
+  // same two facts the desktop header does, as a two-line stack inside the SAME
+  // h-11 the one line used.
+  function agentHeaderState(): DuxState {
+    return makeState({
+      spine: makeSessionSpine(1),
+      bootstrap: {
+        title: "dux",
+        dux_version: "v1",
+        available_providers: ["claude"],
+      },
+      selectedTarget: { kind: "agent", sessionId: "s1", tabId: "s1" },
+      selectedSessionId: "s1",
+      mobileScreen: "terminal",
+      changes: { sessionId: "s1", phase: "loaded", staged: [], unstaged: [] },
+      startedDormantTabs: [],
+      terminalEpoch: 0,
+      mobileTopBarOverride: null,
+      mobileAccessoryBarOverride: null,
+    })
+  }
+
+  it("stacks the agent name over `project · provider`", () => {
+    mockState = agentHeaderState()
+    render(<MobileShell />)
+    const name = screen.getByText("main")
+    const caption = screen.getByText("Repo · claude")
+    expect(name.className).toContain("text-sm")
+    expect(caption.className).toContain("text-[11px]")
+    expect(caption.className).toContain("text-muted-foreground")
+    // Two separate lines, not one run of text.
+    expect(name).not.toBe(caption)
+    expect(name.parentElement).toBe(caption.parentElement)
+  })
+
+  it("does not grow the header: same h-11, tight leading, and the name truncates", () => {
+    mockState = agentHeaderState()
+    render(<MobileShell />)
+    const header = screen.getByLabelText("Back").closest("header")
+    expect(header?.className).toContain("h-11")
+    const name = screen.getByText("main")
+    const caption = screen.getByText("Repo · claude")
+    // 14px + 11px at leading-tight is about 31px, inside the 44px header.
+    expect(name.className).toContain("leading-tight")
+    expect(caption.className).toContain("leading-tight")
+    expect(name.className).toContain("truncate")
+  })
+
+  it("drops the mono branch line the old header showed", () => {
+    mockState = agentHeaderState()
+    render(<MobileShell />)
+    expect(screen.getByText("main").className).not.toContain("font-mono")
+  })
+})

@@ -109,11 +109,12 @@ describe("InsetHeader project terminal crumbs", () => {
       },
     } as unknown as DuxState
     render(<InsetHeader />)
-    expect(screen.getByText("Repo")).toBeTruthy()
+    // The TERMINAL is the subject; its owning project is the caption. No labels
+    // on either half.
     expect(screen.getByText("Terminal 2")).toBeTruthy()
-    // The crumb keys name the owner kind.
-    expect(screen.getByText(/project:/)).toBeTruthy()
-    expect(screen.getByText(/terminal:/)).toBeTruthy()
+    expect(screen.getByText("Repo · 1 terminal")).toBeTruthy()
+    expect(screen.queryByText(/project:/)).toBeNull()
+    expect(screen.queryByText(/terminal:/)).toBeNull()
   })
 })
 
@@ -144,10 +145,9 @@ describe("InsetHeader standalone terminal crumbs", () => {
       },
     } as unknown as DuxState
     render(<InsetHeader />)
-    expect(screen.getByText("~/code")).toBeTruthy()
-    expect(screen.getByText(/directory:/)).toBeTruthy()
     expect(screen.getByText("Terminal 1")).toBeTruthy()
-    expect(screen.getByText(/terminal:/)).toBeTruthy()
+    expect(screen.getByText("~/code · 1 terminal")).toBeTruthy()
+    expect(screen.queryByText(/directory:/)).toBeNull()
   })
 })
 
@@ -219,5 +219,55 @@ describe("InsetHeader branch drift cue", () => {
     mockState = stateFor("main", "main")
     render(<InsetHeader />)
     expect(screen.queryByText(/originally/)).toBeNull()
+  })
+})
+
+describe("InsetHeader one-subject layout", () => {
+  it("names the agent once, unlabelled, and says `same branch` instead of repeating it", () => {
+    // The measured problem: an untitled agent takes its name from its branch, so
+    // the old four-pair bar printed that word twice ("agent: main … branch:
+    // main").
+    mockState = stateFor("main", "main")
+    render(<InsetHeader />)
+    expect(screen.getByText("main")).toBeTruthy()
+    expect(screen.getByText("Repo · claude · same branch")).toBeTruthy()
+    // No labels survive anywhere in the strip.
+    expect(screen.queryByText(/agent:/)).toBeNull()
+    expect(screen.queryByText(/provider:/)).toBeNull()
+    expect(screen.queryByText(/branch:/)).toBeNull()
+  })
+
+  it("prints the branch in the caption when it differs from the agent name", () => {
+    // An untitled agent takes its name FROM the branch, so a differing branch
+    // needs a titled agent.
+    const titled = stateFor("feature-x", "")
+    titled.spine!.sessions[0].title = "Tab redesign"
+    mockState = titled
+    render(<InsetHeader />)
+    expect(screen.getByText("Tab redesign")).toBeTruthy()
+    expect(screen.getByText("Repo · claude · feature-x")).toBeTruthy()
+    expect(screen.queryByText(/same branch/)).toBeNull()
+  })
+
+  it("lets the caption give way before the agent name does", () => {
+    // Both halves can truncate, but the caption's shrink factor is thousands of
+    // times the subject's, so overflow is absorbed by the caption first. Asserted
+    // as the classes that carry it: a layout rule no CSS reads is a rule that
+    // silently stops working.
+    mockState = stateFor("main", "main")
+    render(<InsetHeader />)
+    const subject = screen.getByText("main")
+    const caption = screen.getByText("Repo · claude · same branch")
+    expect(subject.className).toContain("truncate")
+    expect(subject.className).toContain("min-w-0")
+    expect(subject.className).toContain("shrink")
+    expect(subject.className).not.toContain("shrink-0")
+    expect(caption.className).toContain("truncate")
+    expect(caption.className).toContain("shrink-[9999]")
+    // Size and weight carry the hierarchy; one font (sans) throughout.
+    expect(subject.className).toContain("text-sm")
+    expect(caption.className).toContain("text-xs")
+    expect(subject.className).not.toContain("font-mono")
+    expect(caption.className).not.toContain("font-mono")
   })
 })

@@ -23,6 +23,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { MobileBarToggleItems } from "@/components/MobileBarToggleItems"
 import { isExtraTabDormant, shouldShowTabStrip } from "@/lib/agentTabs"
+import { mobileCaption } from "@/lib/headerSubject"
 import { resolveInstanceTitle } from "@/lib/instanceTitle"
 import {
   mobileTopBarVisible,
@@ -343,8 +344,28 @@ function TerminalScreen() {
             >
               <ChevronLeft />
             </Button>
-            <div className="min-w-0 flex-1 text-sm">
-              <span className="truncate font-mono">{session.branch_name}</span>
+            {/* Two lines in the height one line used: the agent NAME at 14px,
+                and `project · provider` at 11px muted under it. The old header
+                showed the branch alone, in mono, so it never said which project
+                or which assistant you were talking to, and on an agent named
+                after its branch it said the same word the sidebar row had just
+                said. `leading-tight` on both keeps the stack (about 31px) inside
+                the header's existing h-11, so it does not grow. The NAME
+                truncates; the caption is the smaller fact and each line
+                truncates on its own. One font throughout (the mono branch
+                misaligned against the sans chrome beside it). */}
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-sm leading-tight font-medium">
+                {session.title || session.branch_name}
+              </div>
+              <div className="truncate text-[11px] leading-tight text-muted-foreground">
+                {mobileCaption({
+                  provider: focusedTab?.provider ?? session.provider,
+                  projectName: spine?.projects.find(
+                    (p) => p.id === session.project_id,
+                  )?.name,
+                })}
+              </div>
             </div>
             {session.pr ? (
               <SimpleTooltip

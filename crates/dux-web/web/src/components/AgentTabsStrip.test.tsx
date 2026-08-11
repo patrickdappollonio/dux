@@ -120,3 +120,41 @@ describe("AgentTabsStrip", () => {
     expect(screen.queryByLabelText("Needs attention")).toBeNull()
   })
 })
+
+describe("AgentTabsStrip phone height", () => {
+  // A deliberate per-axis relaxation of the 40px touch-target floor (see the
+  // tenet and the justification at the pill): the pill drops to 36px VERTICALLY
+  // because its vertical neighbours are the header above (no tap target beside a
+  // pill) and the PTY below (a cheap mis-tap), while every horizontal size is
+  // kept because the horizontal neighbours are other tabs.
+  it("pins the pill to 36px tall with no padding of its own", () => {
+    render(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />)
+    for (const pill of screen.getAllByRole("tab")) {
+      expect(pill.className).toContain("max-md:min-h-9")
+      expect(pill.className).toContain("max-md:py-0")
+      expect(pill.className).not.toContain("max-md:min-h-11")
+    }
+  })
+
+  it("halves the strip's own padding so the strip gets shorter, not just the pill", () => {
+    render(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />)
+    const strip = screen.getAllByRole("tab")[0].parentElement
+    expect(strip?.className).toContain("max-md:py-0.5")
+  })
+
+  it("keeps every control's 44px WIDTH while relaxing its height", () => {
+    // `size-11` on any of these would force the pill or the strip back to 44px
+    // tall; dropping the width would put a mis-tap on a neighbouring tab or on
+    // the wrong provider.
+    render(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />)
+    const controls = [
+      screen.getByLabelText("New tab"),
+      screen.getByLabelText("Choose provider for new tab"),
+      ...screen.getAllByLabelText("Tab actions"),
+    ]
+    for (const control of controls) {
+      expect(control.className).toContain("max-md:w-11")
+      expect(control.className).not.toContain("max-md:size-11")
+    }
+  })
+})
