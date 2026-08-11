@@ -63,9 +63,15 @@ export function ProjectMenuItems({ id }: { id: string }) {
               New agent from PR…
             </DropdownMenuItem>
           )}
+          {/* The per-project worktree manager: list, adopt one as an agent, or
+             remove one. Labelled for what it opens rather than for adoption
+             alone, which is now one action inside it. The global creation menu
+             keeps its "New agent from existing worktree…" wording, because
+             there the surface really is an agent-creation entry point that
+             happens to route through a project picker. */}
           <DropdownMenuItem onClick={() => openAttachWorktree(id)}>
             <FolderGit2 />
-            New agent from existing worktree…
+            Worktrees…
           </DropdownMenuItem>
           {/* A project terminal: a plain shell at the project's repo root with
               no agent attached. Immediate action (no trailing "…"), mirroring

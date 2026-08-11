@@ -1174,11 +1174,20 @@ pub struct RemoveResult {
     pub branch_already_deleted: bool,
 }
 
-pub fn remove_worktree(
-    repo_path: &Path,
-    worktree_path: &Path,
-    branch_name: &str,
-) -> Result<RemoveResult> {
+/// Remove a worktree from disk and from git's registry, and DO NOT touch its
+/// branch.
+///
+/// This is the half of [`remove_worktree`] that the web worktree manager wants.
+/// Deleting a branch is a second, separate act of destruction: `git branch -D`
+/// force-deletes it even when it holds commits that exist nowhere else, and a
+/// user who asked to remove a worktree has not asked for that. The branch is
+/// left behind, which is recoverable in a way the branch's commits would not be.
+/// [`remove_worktree`] (the agent-delete path, where dux created the branch and
+/// owns its whole lifecycle) keeps deleting it.
+///
+/// `--force` matches the existing behavior: a worktree with uncommitted work is
+/// removed anyway, so every caller must confirm with the user first.
+pub fn remove_worktree_keep_branch(repo_path: &Path, worktree_path: &Path) -> Result<()> {
     let output = Command::new("git")
         .args([
             "-C",
@@ -1186,6 +1195,9 @@ pub fn remove_worktree(
             "worktree",
             "remove",
             "--force",
+            // `--` so a worktree path that begins with a dash is read as a
+            // POSITIONAL and never as an option (the CLAUDE.md rule).
+            "--",
             worktree_path.to_string_lossy().as_ref(),
         ])
         .output()?;
@@ -1193,7 +1205,7 @@ pub fn remove_worktree(
         if worktree_path.exists() {
             return Err(anyhow!(
                 "git worktree remove failed: {}",
-                String::from_utf8_lossy(&output.stderr)
+                String::from_utf8_lossy(&output.stderr).trim()
             ));
         }
         // Worktree already gone from disk — prune stale git refs.
@@ -1206,6 +1218,46 @@ pub fn remove_worktree(
             ])
             .output();
     }
+    Ok(())
+}
+
+/// Whether the worktree has anything uncommitted: staged changes, unstaged
+/// changes, or untracked files. Untracked files count deliberately, because
+/// `git worktree remove --force` deletes them along with the directory and they
+/// exist in no commit anywhere, which makes them the least recoverable thing a
+/// worktree can hold.
+///
+/// Uses `--porcelain=v1 -z`, the machine-stable form (CLAUDE.md's git rule); the
+/// paths are never parsed, only their presence is.
+pub fn worktree_is_dirty(worktree_path: &Path) -> Result<bool> {
+    let output = Command::new("git")
+        .args([
+            "-C",
+            worktree_path.to_string_lossy().as_ref(),
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+        ])
+        .output()?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "git status failed for {}: {}",
+            worktree_path.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(!output.stdout.is_empty())
+}
+
+pub fn remove_worktree(
+    repo_path: &Path,
+    worktree_path: &Path,
+    branch_name: &str,
+) -> Result<RemoveResult> {
+    // The worktree half is shared with `remove_worktree_keep_branch`; only the
+    // branch deletion below is this function's own.
+    remove_worktree_keep_branch(repo_path, worktree_path)?;
     // Best-effort branch deletion.
     let branch_output = Command::new("git")
         .args([
@@ -4824,6 +4876,51 @@ mod tests {
             current_branch(repo.path()).unwrap(),
             "main",
             "HEAD must not have been detached"
+        );
+    }
+
+    /// The web worktree manager offers "Delete worktree", and the user asked to
+    /// remove a WORKTREE and nothing else. `remove_worktree` additionally runs
+    /// `git branch -D`, which force-deletes the branch even when it holds
+    /// unmerged commits, so the manager needs a variant that stops at the
+    /// worktree. Pin both halves of that: the directory is gone and the branch
+    /// is still listed.
+    #[test]
+    fn remove_worktree_keep_branch_removes_the_directory_and_leaves_the_branch() {
+        let repo = init_test_repo();
+        let wt = add_worktree(repo.path(), "keepme");
+        assert!(wt.exists());
+
+        remove_worktree_keep_branch(repo.path(), &wt).unwrap();
+
+        assert!(!wt.exists(), "the worktree directory must be gone");
+        let listed = std::process::Command::new("git")
+            .args(["-C", repo.path().to_string_lossy().as_ref(), "branch"])
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&listed.stdout).contains("keepme"),
+            "the branch must survive a worktree-only removal"
+        );
+    }
+
+    /// A worktree with uncommitted work is force-removed by git, so the manager
+    /// warns first. That warning is only as good as this predicate.
+    #[test]
+    fn worktree_is_dirty_distinguishes_a_clean_worktree_from_a_dirty_one() {
+        let repo = init_test_repo();
+        let wt = add_worktree(repo.path(), "dirtycheck");
+        assert!(
+            !worktree_is_dirty(&wt).unwrap(),
+            "a freshly created worktree is clean"
+        );
+        // An UNTRACKED file counts: `git worktree remove --force` deletes it
+        // with the directory and it exists in no commit anywhere, so it is the
+        // most unrecoverable thing in there.
+        std::fs::write(wt.join("scratch.txt"), "work in progress").unwrap();
+        assert!(
+            worktree_is_dirty(&wt).unwrap(),
+            "an untracked file must read as dirty"
         );
     }
 

@@ -239,6 +239,14 @@ export interface ProjectWorktreeEntryView {
   branch_name: string
   adoptable: boolean
   reason: string | null
+  // Whether the worktree holds uncommitted work (staged, unstaged or
+  // untracked). Removal is `git worktree remove --force` and there is no trash,
+  // so the delete confirmation says so specifically.
+  dirty: boolean
+  // The agent holding a non-adoptable worktree. The display name is resolved
+  // client-side from the spine (`title || branch_name`) so the naming lives in
+  // one place.
+  agent_id: string | null
 }
 
 // The branch-warning classification for a candidate project path, mirroring

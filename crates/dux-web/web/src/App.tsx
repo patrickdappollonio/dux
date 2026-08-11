@@ -5,7 +5,7 @@ import { AgentEnvDialog } from "@/components/AgentEnvDialog"
 import { AgentInfoDialog } from "@/components/AgentInfoDialog"
 import { AgentStartupCommandDialog } from "@/components/AgentStartupCommandDialog"
 import { AttachPullRequestDialog } from "@/components/AttachPullRequestDialog"
-import { AttachWorktreeDialog } from "@/components/AttachWorktreeDialog"
+import { WorktreesDialog } from "@/components/WorktreesDialog"
 import { AppSidebar } from "@/components/Sidebar"
 import { StartupLogsDialog } from "@/components/StartupLogsDialog"
 import { ChangedFiles } from "@/components/ChangedFiles"
@@ -94,7 +94,7 @@ function GlobalOverlays() {
       <AgentEnvDialog />
       <StartupLogsDialog />
       <AddProjectDialog />
-      <AttachWorktreeDialog />
+      <WorktreesDialog />
       <RemoveProjectDialog />
       <DeleteProjectDialog />
       <CheckoutDefaultBranchDialog />

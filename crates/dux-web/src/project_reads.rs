@@ -3,9 +3,15 @@
 //! (`list_project_worktrees` → `project_worktrees`, `inspect_project_path` →
 //! `project_path_inspection`); they are now plain unauthenticated GETs.
 //!
-//! - `GET /api/v1/projects/:id/worktrees` — the project's adoptable managed
-//!   worktree candidates for the "Attach worktree" picker. 404 for an unknown
-//!   project id.
+//! - `GET /api/v1/projects/:id/worktrees`: the project's managed worktrees for
+//!   the Worktrees manager: adoptable candidates and the ones an agent already
+//!   holds, each with its dirtiness. 404 for an unknown project id.
+//! - `DELETE /api/v1/projects/:id/worktrees?path=`: remove ONE managed worktree
+//!   from disk. Refuses anything that is not a managed worktree of that project
+//!   (404) and anything an agent is attached to (409).
+//! - `GET /api/v1/projects/worktree-counts`: how many managed worktrees each
+//!   project has, so the project picker can label its rows before the user
+//!   drills in and finds an empty list.
 //! - `GET /api/v1/projects/inspect?path=` — branch pre-flight for the add-project
 //!   flow: the candidate repo's current branch + a non-default-branch warning.
 //!   400 for an empty/relative path (the path must be absolute — it is not a
@@ -25,7 +31,8 @@
 //! [`crate::project_actions`]) — axum's matcher prefers the static segment, the
 //! same way `/api/v1/projects/reorder` already does.
 
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use axum::{
     Json, Router,
@@ -47,7 +54,14 @@ const MAX_PATH_LEN: usize = 4096;
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/v1/projects/inspect", get(inspect_path))
-        .route("/api/v1/projects/{id}/worktrees", get(list_worktrees))
+        .route(
+            "/api/v1/projects/worktree-counts",
+            get(list_worktree_counts),
+        )
+        .route(
+            "/api/v1/projects/{id}/worktrees",
+            get(list_worktrees).delete(delete_worktree),
+        )
 }
 
 // ── Worktrees ──────────────────────────────────────────────────────────────────
@@ -60,11 +74,26 @@ struct ProjectWorktreeEntryView {
     branch_name: String,
     adoptable: bool,
     reason: Option<String>,
+    /// Whether the worktree holds uncommitted work (staged, unstaged, or
+    /// untracked). The manager's delete confirmation says so specifically,
+    /// because removal is `--force` and there is no trash.
+    dirty: bool,
+    /// The agent holding this worktree, for a non-adoptable row. The client
+    /// resolves the display name from its own spine (`title || branch_name`) so
+    /// the naming vocabulary stays in one place, and points the user at that
+    /// agent instead of offering a second route to deleting the worktree.
+    agent_id: Option<String>,
 }
 
 #[derive(Serialize)]
 struct WorktreesReply {
     entries: Vec<ProjectWorktreeEntryView>,
+}
+
+#[derive(Serialize)]
+struct WorktreeCountsReply {
+    /// project id → how many managed worktrees it has.
+    counts: BTreeMap<String, usize>,
 }
 
 async fn list_worktrees(State(state): State<AppState>, AxumPath(id): AxumPath<String>) -> Response {
@@ -114,6 +143,12 @@ fn classify_managed_worktrees(
             .into_iter()
             .filter(|entry| entry.is_managed_by_dux && !entry.is_project_checkout)
             .map(|entry| ProjectWorktreeEntryView {
+                // Dirtiness is per worktree, so this is one `git status` per
+                // managed worktree. A failure (the directory vanished under us,
+                // a git lock) degrades to "clean" rather than failing the whole
+                // listing: the manager is still useful without the warning, and
+                // the delete confirmation always says the removal is forced.
+                dirty: dux_core::git::worktree_is_dirty(&entry.path).unwrap_or(false),
                 worktree_path: entry.path.to_string_lossy().to_string(),
                 branch_name: entry.branch_name,
                 adoptable: entry.is_selectable,
@@ -122,9 +157,153 @@ fn classify_managed_worktrees(
                 } else {
                     Some("Already has an agent.".to_string())
                 },
+                agent_id: entry.existing_session_id,
             })
             .collect();
     Ok(entries)
+}
+
+// ── Worktree counts ────────────────────────────────────────────────────────────
+
+/// How many managed worktrees each project has.
+///
+/// The project picker labels its rows with this so drilling into a project with
+/// nothing in it is a CHOICE rather than a surprise. Empty projects are still
+/// listed and still clickable: disabling a row gives no reason and reads as
+/// broken.
+///
+/// One request rather than one per row, and all the git work in a single
+/// `spawn_blocking`, because the listing shells to git per project.
+async fn list_worktree_counts(State(state): State<AppState>) -> Response {
+    let Some(spine) = state.engine.spine().await else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "engine unavailable").into_response();
+    };
+    let mut inputs = Vec::new();
+    for project in spine.projects {
+        if let Some(triple) = state
+            .engine
+            .project_worktree_inputs(project.id.clone())
+            .await
+        {
+            inputs.push((project.id, triple));
+        }
+    }
+    match tokio::task::spawn_blocking(move || {
+        let mut counts = BTreeMap::new();
+        for (id, (project, paths, sessions)) in inputs {
+            let n = classify_managed_worktrees(&project, &paths, &sessions)
+                .map(|entries| entries.len())
+                .unwrap_or(0);
+            counts.insert(id, n);
+        }
+        counts
+    })
+    .await
+    {
+        Ok(counts) => Json(WorktreeCountsReply { counts }).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("worktree counting failed: {e}"),
+        )
+            .into_response(),
+    }
+}
+
+// ── Delete one worktree ────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct DeleteWorktreeQuery {
+    #[serde(default)]
+    path: String,
+}
+
+/// What the delete request resolved to. Kept as a type so the three answers are
+/// decided in one place (off-thread, against a FRESH classification) and mapped
+/// to statuses at the boundary.
+enum DeleteResolution {
+    /// Not a managed worktree of this project. 404: dux will not remove a
+    /// directory it was not asked about, and an external worktree or the source
+    /// checkout is not the manager's to touch.
+    NotManaged,
+    /// An agent holds it. 409, and this is defence in depth rather than a
+    /// restatement of the UI rule: removing a worktree from under a live agent
+    /// leaves a broken session, and deleting the agent is the supported route.
+    Attached,
+    /// Removable; carries the canonical path git knows it by.
+    Removable(PathBuf),
+}
+
+async fn delete_worktree(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Query(query): Query<DeleteWorktreeQuery>,
+) -> Response {
+    if !id_within_bound(&id) {
+        return (StatusCode::NOT_FOUND, "unknown project").into_response();
+    }
+    if query.path.is_empty() {
+        return (StatusCode::BAD_REQUEST, "path is required").into_response();
+    }
+    if query.path.chars().count() > MAX_PATH_LEN {
+        return (StatusCode::BAD_REQUEST, "path is too long").into_response();
+    }
+    let Some((project, paths, sessions)) = state.engine.project_worktree_inputs(id).await else {
+        return (StatusCode::NOT_FOUND, "unknown project").into_response();
+    };
+
+    let requested = query.path.clone();
+    let repo_path = PathBuf::from(&project.path);
+    // Classify and remove in ONE off-thread hop, both because the classification
+    // shells to git and because the removal must be decided against a fresh
+    // listing rather than against whatever the client last saw.
+    let result = tokio::task::spawn_blocking(move || {
+        let entries = dux_core::git::list_worktrees(Path::new(&project.path))
+            .map_err(|e| format!("{e:#}"))?;
+        let classified = dux_core::project_browser::classify_project_worktrees(
+            &project, &paths, &sessions, entries,
+        );
+        // Compare canonically: the client echoes back the path this route's own
+        // listing published, which is already canonical, but a symlinked temp
+        // root or a hand-written request need not be.
+        let wanted =
+            std::fs::canonicalize(&requested).unwrap_or_else(|_| PathBuf::from(&requested));
+        let found = classified.into_iter().find(|entry| {
+            entry.is_managed_by_dux && !entry.is_project_checkout && entry.path == wanted
+        });
+        let resolution = match found {
+            None => DeleteResolution::NotManaged,
+            Some(entry) if entry.existing_session_id.is_some() => DeleteResolution::Attached,
+            Some(entry) => DeleteResolution::Removable(entry.path),
+        };
+        if let DeleteResolution::Removable(path) = &resolution {
+            // Worktree only: the branch is left alone. See
+            // `git::remove_worktree_keep_branch` for why.
+            dux_core::git::remove_worktree_keep_branch(&repo_path, path)
+                .map_err(|e| format!("{e:#}"))?;
+        }
+        Ok::<_, String>(resolution)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(DeleteResolution::NotManaged)) => (
+            StatusCode::NOT_FOUND,
+            "that is not a managed worktree of this project",
+        )
+            .into_response(),
+        Ok(Ok(DeleteResolution::Attached)) => (
+            StatusCode::CONFLICT,
+            "an agent is attached to that worktree; delete the agent instead",
+        )
+            .into_response(),
+        Ok(Ok(DeleteResolution::Removable(_))) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("worktree removal failed: {e}"),
+        )
+            .into_response(),
+    }
 }
 
 // ── Inspect ──────────────────────────────────────────────────────────────────

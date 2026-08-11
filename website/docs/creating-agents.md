@@ -257,8 +257,9 @@ terminal UI, a toast in the browser.
 
 ## Creating an agent from an existing worktree
 
-In the browser, that is **New agent from existing worktree…** in a project's `⋯`
-menu; in the terminal UI, the `new-agent-from-worktree` palette command, then a
+In the browser, that is **Worktrees…** in a project's `⋯` menu (or **New agent
+from existing worktree…** in the app menu, which asks for the project first);
+in the terminal UI, the `new-agent-from-worktree` palette command, then a
 project from the chooser. dux opens a picker that lists every git worktree it finds
 for that project's repository. Worktrees are grouped into two categories:
 
@@ -272,9 +273,15 @@ for that project's repository. Worktrees are grouped into two categories:
   and copies any dirty and untracked files across (gitignored files do not
   travel) so you don't lose in-progress work.
 
-The browser's **New agent from existing worktree…** dialog lists managed
-worktrees only. To adopt an external one, use the `new-agent-from-worktree`
-palette command in the terminal UI.
+The browser's **Worktrees** dialog lists managed worktrees only. To adopt an
+external one, use the `new-agent-from-worktree` palette command in the terminal
+UI. The browser dialog is also a small manager: an unused worktree's `⋯` menu
+offers **Delete worktree…**, which removes the directory from disk (the branch
+survives) after a confirmation that names the branch, names the full path, and
+says specifically when there are uncommitted changes to lose. The project picker
+in front of it labels each project with how many worktrees it has, so an empty
+project is a choice rather than a surprise, and the dialog offers **Back** to
+return to that list.
 
 The main checkout itself is not selectable; dux keeps that for you to work in
 outside of agent sessions.

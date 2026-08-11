@@ -124,6 +124,22 @@ export const projectsApi = {
       "GET",
       `/api/v1/projects/${encodeURIComponent(id)}/worktrees`,
     ),
+  // Remove ONE managed worktree from disk. The server re-validates against a
+  // fresh classification: a path that is not a managed worktree of this project
+  // is a 404 and one an agent holds is a 409, so the UI's rules are not the only
+  // thing standing between a stale list and a destroyed worktree.
+  deleteWorktree: (id: string, worktreePath: string) =>
+    request<void>(
+      "DELETE",
+      `/api/v1/projects/${encodeURIComponent(id)}/worktrees?path=${encodeURIComponent(worktreePath)}`,
+    ),
+  // Managed-worktree counts for every project, so the project picker can label
+  // its rows and an empty project is a choice rather than a surprise.
+  worktreeCounts: () =>
+    request<{ counts: Record<string, number> }>(
+      "GET",
+      "/api/v1/projects/worktree-counts",
+    ),
   // List the PROJECT-scoped startup-command log files: every run across every
   // agent of the project, newest first, with the newest file's contents
   // pre-loaded. The agent-scoped counterpart is `sessionsApi.startupLogs`; both

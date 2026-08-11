@@ -391,6 +391,19 @@ export interface DuxState {
   attachWorktreeTarget: string | null
   attachWorktreeEntries: ProjectWorktreeEntryView[]
   attachWorktreeLoading: boolean
+  // True when the Worktrees dialog was reached by drilling through the project
+  // picker, which is when a Back control makes sense: it returns to the project
+  // list. Opened straight from a project's own menu there is nothing above it,
+  // so no Back is offered and Cancel is the only way out.
+  attachWorktreeFromPicker: boolean
+  // The worktree pending a delete confirmation, or null. Carries the whole entry
+  // (not just its path) so the confirmation can name the branch and say whether
+  // there is uncommitted work to lose without re-deriving either.
+  deleteWorktreeTarget: { projectId: string; entry: ProjectWorktreeEntryView } | null
+  // Managed-worktree counts per project id for the project picker's row labels,
+  // or null before the first answer lands. Fetched when the picker opens in the
+  // worktree intent, not kept live: it is a label, not a live view.
+  projectWorktreeCounts: Record<string, number> | null
   // The name-input dialog target: a fresh agent in a project, a fork of an
   // existing session, or null (closed). One dialog component switches on `kind`.
   createAgentTarget: CreateAgentTarget | null
@@ -796,6 +809,9 @@ let state: DuxState = {
   attachWorktreeTarget: null,
   attachWorktreeEntries: [],
   attachWorktreeLoading: false,
+  attachWorktreeFromPicker: false,
+  deleteWorktreeTarget: null,
+  projectWorktreeCounts: null,
   createAgentTarget: null,
   renameTarget: null,
   renameDraft: "",
@@ -4248,15 +4264,25 @@ export function checkoutDefaultBranch(projectId: string): void {
 // listing reply fills `attachWorktreeEntries` via `onProjectWorktrees`. Runs in
 // the click handler that opens the dialog — never an effect — mirroring how
 // `openAddProject` kicks off its browse.
-export function openAttachWorktree(projectId: string): void {
+export function openAttachWorktree(
+  projectId: string,
+  fromPicker = false,
+): void {
   setState({
     attachWorktreeTarget: projectId,
     attachWorktreeEntries: [],
     attachWorktreeLoading: true,
+    attachWorktreeFromPicker: fromPicker,
   })
-  // Fetch the managed-worktree listing over REST (replaces the retired `/ws`
-  // `list_project_worktrees` → `project_worktrees` reply). Ignore a stale reply
-  // if the dialog closed (or switched projects) before it arrived.
+  loadProjectWorktrees(projectId)
+}
+
+// Fetch the managed-worktree listing over REST (replaces the retired `/ws`
+// `list_project_worktrees` → `project_worktrees` reply). Ignore a stale reply if
+// the dialog closed (or switched projects) before it arrived. Shared by the
+// opener and by the post-delete refresh so the list can never drift from what
+// the server would answer.
+function loadProjectWorktrees(projectId: string): void {
   projectsApi
     .worktrees(projectId)
     .then((res) => {
@@ -4275,11 +4301,61 @@ export function openAttachWorktree(projectId: string): void {
     })
 }
 
+// Fetch the per-project managed-worktree counts for the project picker's row
+// labels. Never toasts: an unavailable count degrades to no label at all, which
+// is strictly better than a scary error for a decoration.
+export function loadProjectWorktreeCounts(): void {
+  projectsApi
+    .worktreeCounts()
+    .then((res) => setState({ projectWorktreeCounts: res.counts }))
+    .catch(() => setState({ projectWorktreeCounts: null }))
+}
+
+// Arm the delete confirmation for one worktree. Only ever called from an
+// ADOPTABLE row: an attached worktree has no delete action, because removing it
+// from under a live agent leaves a broken session and deleting the agent is the
+// supported route. The server refuses it too.
+export function openDeleteWorktree(
+  projectId: string,
+  entry: ProjectWorktreeEntryView,
+): void {
+  setState({ deleteWorktreeTarget: { projectId, entry } })
+}
+
+export function closeDeleteWorktree(): void {
+  setState({ deleteWorktreeTarget: null })
+}
+
+// Remove one managed worktree from disk, then reload the listing so the row
+// disappears (and so a refusal the client did not predict shows up as the
+// server's answer rather than a stale row).
+export function deleteProjectWorktree(
+  projectId: string,
+  worktreePath: string,
+): void {
+  projectsApi
+    .deleteWorktree(projectId, worktreePath)
+    .then(() => {
+      toast.success(`Removed the worktree at ${worktreePath}.`)
+      if (state.attachWorktreeTarget === projectId) {
+        loadProjectWorktrees(projectId)
+      }
+      loadProjectWorktreeCounts()
+    })
+    .catch((e) =>
+      toast.error(
+        e instanceof Error ? e.message : "Could not remove the worktree.",
+      ),
+    )
+}
+
 export function closeAttachWorktree(): void {
   setState({
     attachWorktreeTarget: null,
     attachWorktreeEntries: [],
     attachWorktreeLoading: false,
+    attachWorktreeFromPicker: false,
+    deleteWorktreeTarget: null,
   })
 }
 
@@ -4581,7 +4657,15 @@ export function openNewAgentPicker(
     newAgentPickerOpen: true,
     newAgentPickerIntent: intent,
     newAgentPickerOnlyIds: onlyIds,
+    // Drop a previous answer so a stale count never labels a row while the
+    // fresh one is in flight.
+    projectWorktreeCounts:
+      intent === "from_worktree" ? null : state.projectWorktreeCounts,
   })
+  // Only the worktree intent labels its rows with a count, so only it pays for
+  // the listing (one git call per project). Kicked off from the click handler
+  // that opens the picker, never an effect.
+  if (intent === "from_worktree") loadProjectWorktreeCounts()
 }
 
 export function closeNewAgentPicker(): void {

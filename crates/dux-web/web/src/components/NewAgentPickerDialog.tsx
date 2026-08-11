@@ -79,12 +79,18 @@ const INTENT_COPY = {
   },
   from_worktree: {
     title: "New agent from existing worktree",
-    description: "Pick a project to adopt an existing worktree as an agent.",
+    description:
+      "Pick a project to see its worktrees. Adopt an unused one as an agent, or remove one you are done with.",
   },
 } as const
 
 function PickerBody() {
-  const { spine, newAgentPickerIntent, newAgentPickerOnlyIds } = useDux()
+  const {
+    spine,
+    newAgentPickerIntent,
+    newAgentPickerOnlyIds,
+    projectWorktreeCounts,
+  } = useDux()
   // Default to "new" so a missing value (older state, a test that only sets
   // newAgentPickerOpen) still renders the standard create flow.
   const intent = newAgentPickerIntent ?? "new"
@@ -129,7 +135,10 @@ function PickerBody() {
     }
     if (intent === "from_worktree") {
       closeNewAgentPicker()
-      openAttachWorktree(project.id)
+      // `true` marks the drill-down: the Worktrees dialog then offers a Back
+      // control that returns to this list, instead of Cancel being the only
+      // way out of a project that turned out to have nothing in it.
+      openAttachWorktree(project.id, true)
       return
     }
     closeNewAgentPicker()
@@ -172,6 +181,23 @@ function PickerBody() {
             ) : (
               filtered.map((project) => {
                 const count = agentCounts.get(project.id) ?? 0
+                // In the worktree intent the row is a doorway into that
+                // project's worktree list, so it is labelled with what is
+                // BEHIND the door. An empty project reads "none" and stays
+                // clickable: it is a choice, not a surprise, and disabling it
+                // would give no reason and read as broken. A count that has
+                // not arrived (or could not be fetched) shows no label at all
+                // rather than a misleading zero.
+                const worktreeCount = projectWorktreeCounts?.[project.id]
+                const rowLabel =
+                  intent === "from_worktree"
+                    ? projectWorktreeCounts === undefined ||
+                      projectWorktreeCounts === null
+                      ? null
+                      : (worktreeCount ?? 0) === 0
+                        ? "none"
+                        : `${worktreeCount} ${worktreeCount === 1 ? "worktree" : "worktrees"}`
+                    : `${count} ${count === 1 ? "agent" : "agents"}`
                 return (
                   <div
                     key={project.id}
@@ -189,9 +215,11 @@ function PickerBody() {
                       <span className="min-w-0 flex-1 truncate text-sm">
                         {project.name}
                       </span>
-                      <span className="shrink-0 font-mono text-xs text-muted-foreground">
-                        {count} {count === 1 ? "agent" : "agents"}
-                      </span>
+                      {rowLabel ? (
+                        <span className="shrink-0 font-mono text-xs text-muted-foreground">
+                          {rowLabel}
+                        </span>
+                      ) : null}
                     </button>
                     <DropdownMenu>
                       <DropdownMenuTrigger

@@ -72,10 +72,17 @@ scoped to that project and a bare `123` is perfectly meaningful.
 - **New agent from PR…** fetches a pull request's head branch into a new
   worktree. Give it a PR URL, `#123`, or just `123`. This one appears only when
   GitHub integration and the `gh` CLI are available.
-- **New agent from existing worktree…** (adopt) lists dux-managed worktrees that
-  have no agent attached and turns one back into a live agent on its existing
-  branch. Handy after a restart, or for reclaiming work a deleted agent left on
-  disk.
+- **Worktrees…** opens that project's worktree manager. It lists every worktree
+  dux manages for the project, with its branch, its path on disk, and a warning
+  when it is holding uncommitted changes. Pick one that has no agent and it
+  becomes a live agent again on its existing branch, which is handy after a
+  restart or for reclaiming work a deleted agent left behind. Each unused
+  worktree also carries a `⋯` menu with **Delete worktree…**, which removes the
+  directory from disk after a confirmation naming the branch and the full path.
+  The branch itself is kept: dux removes the working directory and nothing else.
+  A worktree that already has an agent names that agent and offers no delete,
+  because removing it from under a live agent leaves a broken session. Delete
+  the agent instead.
 
 **Forking** is different: it starts from an *existing agent*, not the project.
 Open that agent's `⋯` menu and pick **Fork agent…**, which opens the same New

@@ -54,10 +54,11 @@ const { NewAgentPickerDialog } = await import("./NewAgentPickerDialog")
 
 type Intent = DuxState["newAgentPickerIntent"]
 
-function seed(intent: Intent = "new") {
+function seed(intent: Intent = "new", extra: Partial<DuxState> = {}) {
   mockState = {
     newAgentPickerOpen: true,
     newAgentPickerIntent: intent,
+    ...extra,
     spine: {
       projects: [
         { id: "p1", name: "acme", default_provider: "claude" },
@@ -113,9 +114,37 @@ describe("NewAgentPickerDialog", () => {
     seed("from_worktree")
     render(<NewAgentPickerDialog />)
     fireEvent.click(screen.getByRole("button", { name: /acme/ }))
-    expect(openAttachWorktree).toHaveBeenCalledWith("p1")
+    // `true` marks the drill-down, which is what earns the Worktrees dialog a
+    // Back control returning to this list.
+    expect(openAttachWorktree).toHaveBeenCalledWith("p1", true)
     expect(openCreateAgent).not.toHaveBeenCalled()
     expect(closeNewAgentPicker).toHaveBeenCalledTimes(1)
+  })
+
+  it("labels each project row with its worktree count in the from_worktree intent", () => {
+    // The dead end this fixes: drilling into a project only to find nothing.
+    // An empty project stays listed and stays clickable, because disabling it
+    // gives no reason and reads as broken.
+    seed("from_worktree", {
+      projectWorktreeCounts: { p1: 3, p2: 0 },
+    } as Partial<DuxState>)
+    render(<NewAgentPickerDialog />)
+    expect(screen.getByRole("button", { name: /acme/ }).textContent).toContain(
+      "3 worktrees",
+    )
+    const beta = screen.getByRole("button", { name: /beta/ })
+    expect(beta.textContent).toContain("none")
+    expect(beta.hasAttribute("disabled")).toBe(false)
+  })
+
+  it("labels rows with agent counts in the other intents", () => {
+    // The worktree count replaces the agent count only in the worktree intent;
+    // the create flows still care about agents.
+    seed("new", { projectWorktreeCounts: { p1: 3 } } as Partial<DuxState>)
+    render(<NewAgentPickerDialog />)
+    expect(screen.getByRole("button", { name: /acme/ }).textContent).toContain(
+      "0 agents",
+    )
   })
 
   it("gives the results list a fixed height so the modal does not resize as you type", () => {
