@@ -39,6 +39,16 @@ interface AccessoryBarProps {
   alt: boolean
   onToggleCtrl: () => void
   onToggleAlt: () => void
+  // THE TYPING-SURFACE TOGGLE, and it lives HERE on purpose. A person with a
+  // keyboard case attached wants to type straight into the terminal; the same
+  // tablet without it wants the buffered message box, and the browser cannot
+  // tell the two apart (measured), so the user swaps it. The control belongs in
+  // THIS bar because this bar is on screen in BOTH states: put it inside the
+  // compose bar and it would vanish the instant it turned the compose bar off,
+  // leaving no way back. Absent (undefined) where the toggle would change
+  // nothing, which is every case except the `auto` setting on a touch device.
+  composeSurface?: boolean
+  onToggleSurface?: () => void
 }
 
 // CRITICAL: every bar button calls preventDefault() on pointerdown so the press
@@ -142,6 +152,8 @@ export function AccessoryBar({
   alt,
   onToggleCtrl,
   onToggleAlt,
+  composeSurface,
+  onToggleSurface,
 }: AccessoryBarProps) {
   // Two flex rows stacked: modifier/special keys on top, navigation (arrows +
   // page scroll) below; gap-1.5 between the rows so a fat-finger tap on the top
@@ -167,6 +179,34 @@ export function AccessoryBar({
         <KeyButton ariaLabel="Insert newline" onActivate={onNewline}>
           <ShiftEnterIcon />
         </KeyButton>
+        {/* The typing-surface toggle (see the prop). It NAMES the state it is
+            in, "Box" while the buffered message box is the typing surface and
+            "Direct" while keystrokes go straight to the terminal, with the
+            full sentence on the aria-label for anyone who cannot see the word.
+            TEXT ONLY, and on the SHORTER row, both for room rather than taste:
+            MEASURED at 390px, an eighth cell on the navigation row pushed the
+            key off the screen edge, and an icon beside the word costs another
+            22px the cell does not have. It sits behind its own divider,
+            because changing the typing surface out from under you is a far
+            bigger consequence than a mistap on a cursor key, and that is the
+            misclick-safe spacing the navigation row already uses. */}
+        {onToggleSurface ? (
+          <>
+            <div
+              aria-hidden="true"
+              className="mx-1.5 w-px shrink-0 self-stretch bg-border"
+            />
+            <KeyButton
+              label={composeSurface ? "Box" : "Direct"}
+              ariaLabel={
+                composeSurface
+                  ? "Typing surface: message box. Switch to typing directly."
+                  : "Typing surface: direct. Switch to the message box."
+              }
+              onActivate={onToggleSurface}
+            />
+          </>
+        ) : null}
       </div>
       {/* Row two — navigation. The four cursor arrows (sent to the program, keep
           focus) and PgUp/PgDn (scroll the xterm viewport, blur to dismiss the

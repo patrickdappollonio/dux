@@ -276,6 +276,24 @@ wrong on, and Never restores typing straight into the terminal. An older config
 that still says `compose_bar = true` or `false` keeps working; `true` is read as
 Automatic and `false` as Never.
 
+Because that is a question about your input rather than your screen, **both bars
+follow your pointer and not the layout**. A tablet in landscape is wide enough
+for the full desktop workspace, and it is still being typed on with a finger, so
+it gets the desktop panes *and* the accessory keys and compose box below the
+terminal. A mouse on a narrow window gets neither. The two questions are
+separate: how much room there is decides which layout you see, and what is doing
+the typing decides which typing surface you get.
+
+Since a keyboard case is exactly what dux cannot see, the accessory bar carries a
+**typing-surface toggle** at the end of its key row. It says which state it is
+in, **Box** while you are typing into the message box and **Direct** while your
+keystrokes go straight to the terminal, and one tap swaps them. It lives in the
+accessory bar because that bar is there in both states, so turning the box off
+never strands you without a way back. The toggle is not a setting: it is
+remembered on that device (so a reload does not snap you back) and it changes
+nothing in your config. It appears only under **Automatic**, since Always and
+Never have already answered the question.
+
 Terminal rows are precious on a phone, so the chrome around the terminal is
 hideable. Every terminal screen's `⋯` menu (agent, project, and standalone
 terminals alike) has **Hide top bar** (which on the agent screen also takes

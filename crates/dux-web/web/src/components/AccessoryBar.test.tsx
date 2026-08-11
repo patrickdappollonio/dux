@@ -70,3 +70,36 @@ describe("AccessoryBar key activation", () => {
     expect(props.onNewline).toHaveBeenCalledTimes(1)
   })
 })
+
+// The typing-surface toggle. It lives in THIS bar because this bar is on
+// screen in both states; inside the compose bar it would vanish with the
+// surface it turns off.
+describe("AccessoryBar typing-surface toggle", () => {
+  afterEach(cleanup)
+
+  it("is absent when no handler is supplied", () => {
+    renderBar()
+    expect(screen.queryByRole("button", { name: /^Typing surface:/ })).toBeNull()
+  })
+
+  it("names the state it is in, in both states", () => {
+    renderBar({ composeSurface: true, onToggleSurface: vi.fn() })
+    expect(
+      screen.getByRole("button", { name: /message box/ }).textContent,
+    ).toContain("Box")
+    cleanup()
+    renderBar({ composeSurface: false, onToggleSurface: vi.fn() })
+    expect(
+      screen.getByRole("button", { name: /direct/ }).textContent,
+    ).toContain("Direct")
+  })
+
+  it("fires on a tap, with the same focus-preserving contract as every key", () => {
+    const onToggleSurface = vi.fn()
+    renderBar({ composeSurface: true, onToggleSurface })
+    const button = screen.getByRole("button", { name: /^Typing surface:/ })
+    fireEvent.pointerDown(button)
+    fireEvent.click(button, { detail: 1 })
+    expect(onToggleSurface).toHaveBeenCalledTimes(1)
+  })
+})

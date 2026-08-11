@@ -1002,17 +1002,18 @@ describe("MobileShell agent header identity", () => {
     })
   }
 
-  it("stacks the agent name over `project · provider`", () => {
+  it("stacks the agent name over the project and assistant lane", () => {
     mockState = agentHeaderState()
     render(<MobileShell />)
     const name = screen.getByText("main")
-    const caption = screen.getByText("Repo · claude")
+    const laneTwo = screen.getByText("Repo").closest("div")
     expect(name.className).toContain("text-sm")
-    expect(caption.className).toContain("text-[11px]")
-    expect(caption.className).toContain("text-muted-foreground")
-    // Two separate lines, not one run of text.
-    expect(name).not.toBe(caption)
-    expect(name.parentElement).toBe(caption.parentElement)
+    expect(laneTwo?.className).toContain("text-[11px]")
+    expect(laneTwo?.className).toContain("text-muted-foreground")
+    // Two separate lanes, not one run of text: the name's lane is lane two's
+    // sibling.
+    expect(name.closest("div")).not.toBe(laneTwo)
+    expect(name.closest("div")?.parentElement).toBe(laneTwo?.parentElement)
   })
 
   it("does not grow the header: same h-11, tight leading, and the name truncates", () => {
@@ -1021,10 +1022,11 @@ describe("MobileShell agent header identity", () => {
     const header = screen.getByLabelText("Back").closest("header")
     expect(header?.className).toContain("h-11")
     const name = screen.getByText("main")
-    const caption = screen.getByText("Repo · claude")
-    // 14px + 11px at leading-tight is about 31px, inside the 44px header.
+    const laneTwo = screen.getByText("Repo").closest("div")
+    // 14px + 11px at leading-tight is about 31px, inside the 44px header, and
+    // both glyphs are smaller than their line boxes so they add nothing.
     expect(name.className).toContain("leading-tight")
-    expect(caption.className).toContain("leading-tight")
+    expect(laneTwo?.className).toContain("leading-tight")
     expect(name.className).toContain("truncate")
   })
 
@@ -1135,5 +1137,82 @@ describe("MobileShell terminal header control family", () => {
     mockState = headerState()
     render(<MobileShell />)
     expect(controls().changes.textContent).toMatch(/^±\d+$/)
+  })
+})
+
+// The phone header's two lanes. The approved mock draws lane one as the robot
+// glyph plus the agent name and lane two as folder+project and chip+assistant
+// at 11px muted; the phone deliberately carries only those two secondary
+// fields (no branch, no terminal count) because there is no hover on a phone,
+// so a glyph there can never explain itself. The lanes must fit the header's
+// existing height: two lines in the room one line used.
+describe("MobileShell agent header lanes", () => {
+  function laneState(): DuxState {
+    return makeState({
+      spine: makeSessionSpine(1),
+      bootstrap: {
+        title: "dux",
+        dux_version: "v1",
+        available_providers: ["claude"],
+      },
+      selectedTarget: { kind: "agent", sessionId: "s1", tabId: "s1" },
+      selectedSessionId: "s1",
+      mobileScreen: "terminal",
+      changes: { sessionId: "s1", phase: "loaded", staged: [], unstaged: [] },
+      startedDormantTabs: [],
+      terminalEpoch: 0,
+      mobileTopBarOverride: null,
+      mobileAccessoryBarOverride: null,
+    })
+  }
+
+  const header = () => {
+    const el = screen.getByLabelText("Back").closest("header")
+    if (!el) throw new Error("no header")
+    return el
+  }
+
+  it("draws the agent glyph beside the name in lane one", () => {
+    mockState = laneState()
+    render(<MobileShell />)
+    const lead = screen.getByText("main").parentElement
+    expect(lead?.querySelector("svg.lucide-bot")).toBeTruthy()
+  })
+
+  it("draws folder+project and chip+assistant in lane two", () => {
+    mockState = laneState()
+    render(<MobileShell />)
+    const project = screen.getByText("Repo").parentElement
+    const assistant = screen.getByText("claude").parentElement
+    expect(project?.querySelector("svg.lucide-folder")).toBeTruthy()
+    expect(assistant?.querySelector("svg.lucide-cpu")).toBeTruthy()
+  })
+
+  // The second lane is the smaller fact, at the 11px muted size the mock draws.
+  it("renders lane two at 11px in the muted tone", () => {
+    mockState = laneState()
+    render(<MobileShell />)
+    const lane = screen.getByText("Repo").closest("div")
+    expect(lane?.className).toContain("text-[11px]")
+    expect(lane?.className).toContain("text-muted-foreground")
+  })
+
+  // It must not grow the header: the stack lives inside the existing h-11.
+  it("keeps the header at its existing height", () => {
+    mockState = laneState()
+    render(<MobileShell />)
+    expect(header().className).toContain("h-11")
+    for (const lane of header().querySelectorAll(".leading-tight")) {
+      expect(lane.className).toContain("leading-tight")
+    }
+  })
+
+  // The branch is the field most likely to repeat the name above it, and the
+  // terminal count has no room; neither belongs on the phone.
+  it("shows neither the branch chip nor a terminal count", () => {
+    mockState = laneState()
+    render(<MobileShell />)
+    expect(header().querySelector("svg.lucide-git-branch")).toBeNull()
+    expect(header().querySelector("svg.lucide-square-terminal")).toBeNull()
   })
 })

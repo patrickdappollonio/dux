@@ -12,8 +12,10 @@ import {
   composeSendTooLarge,
   composeSendWrites,
   composeBarMode,
-  composeBarVisible,
+  composeBarShown,
   insertIntoComposeDraft,
+  touchSurfacesApply,
+  typingSurfaceToggleOffered,
 } from "@/lib/composebar"
 import {
   getComposeInsertSink,
@@ -50,6 +52,8 @@ import {
 } from "@/components/ui/card"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { useIsCoarsePointer } from "@/hooks/use-coarse-pointer"
+import { useTypingSurface } from "@/hooks/use-typing-surface"
+import { setTypingSurface } from "@/lib/typingSurface"
 import { dragScrollLines, dragWheelReport } from "@/lib/viewport"
 import { firstFrameResizePlan } from "@/lib/firstFrameResize"
 import { copyToClipboard } from "@/lib/clipboard"
@@ -285,9 +289,12 @@ export function TerminalPane(props: TerminalPaneProps) {
   // they send stdin to the same socket xterm's `onData` does.
   const ptyRef = useRef<PtySocket | null>(null)
   const isMobile = useIsMobile()
-  // Is touch the primary pointer? Gates the compose bar ONLY (see below);
+  // Is touch the primary pointer? Gates the TYPING SURFACES (see below);
   // `isMobile` stays the width signal for layout and sizing.
   const isCoarsePointer = useIsCoarsePointer()
+  // Which typing surface this device was last left on, or null while the
+  // pointer capability answers. Transient, per-device, never configuration.
+  const typingSurface = useTypingSurface()
 
   // Drag-and-drop of a file onto the pane. `dragDepth` counts enter/leave pairs
   // because dragging across a child element fires a `dragleave` for the parent;
@@ -375,36 +382,40 @@ export function TerminalPane(props: TerminalPaneProps) {
     fitAddonRef.current?.fit()
     loadTerminalFontsThenRefit(term, termRef, fitAddonRef, size, family)
   }, [terminalFontFamilySetting, terminalFontSizeSetting])
-  // The compose bar (the `ui.compose_bar` preference, default "auto"): the
-  // touch typing surface, a buffered textarea below the accessory bar whose
-  // Send delivers the message in one write. Rendering reads the reactive value;
-  // the ref mirrors "the compose bar is up" for the stable mount-effect
-  // closures (the tap-to-focus redirect below), which would otherwise capture a
-  // stale value. When it is down, nothing renders and no focus behavior
-  // changes, exactly today's tap-focuses-xterm.
+  // THE TYPING SURFACES: the accessory keys and the compose bar. Rendering
+  // reads the reactive values; the ref below mirrors "the compose bar is up"
+  // for the stable mount-effect closures (the tap-to-focus redirect), which
+  // would otherwise capture a stale value. When it is down, nothing renders and
+  // no focus behavior changes, exactly today's tap-focuses-xterm.
   //
-  // GATED ON THE POINTER, NOT THE VIEWPORT WIDTH, and that is the fix rather
-  // than a detail: this used to read `useIsMobile()`, so rotating a tablet
-  // changed the user's typing surface mid-session. Whether the compose bar
-  // helps depends on whether a SOFT keyboard is doing the typing (its
-  // autocorrect/swipe/IME have nothing to correct when keystrokes go straight
-  // into a terminal), which is an INPUT question, and `pointer: coarse` does
-  // not change with orientation. The `always`/`never` modes exist because that
-  // check provably cannot finish the job; see `hooks/use-coarse-pointer.ts`
-  // for the measurements.
+  // TWO ORTHOGONAL QUESTIONS, and this is the whole rule. WIDTH decides the
+  // LAYOUT: how much room is there, so which shell you get, which is what
+  // `isMobile` and the mobile column further down answer. THE POINTER decides
+  // the TYPING SURFACE: is a finger doing the typing, so does the text need a
+  // buffer where autocorrect, swipe and an IME have something to work with. A
+  // tablet in landscape gets the DESKTOP layout because it has the room AND
+  // needs the buffered input because a finger is still typing, so both bars
+  // render inside the desktop shell too. They travel with the pointer, not with
+  // the mobile column. `pointer: coarse` also does not change with orientation,
+  // which is what stopped a rotation from swapping the typing surface
+  // mid-session.
   //
-  // SCOPE, and be exact about it rather than claiming more than is true. This
-  // decides the BAR. It does not decide the mobile SHELL: the `if (!isMobile)
-  // return pane` further down is layout, still width-driven, and the accessory
-  // bar and this bar both live inside that column. So a device that crosses
-  // the 768px breakpoint still swaps between the mobile and desktop layouts,
-  // and loses the bar with the rest of that column. What this fixes is the bar
-  // no longer having a SECOND, independent width opinion on top of the shell's
-  // (a touchscreen laptop, or a narrow desktop window on a fine pointer, now
-  // gets the right answer). Moving the shell itself off the width breakpoint
-  // is a larger layout decision and is deliberately not made here.
-  const composeBarEnabled = composeBarVisible(
-    composeBarMode(bootstrap?.compose_bar),
+  // The `always`/`never` modes exist because the capability check provably
+  // cannot finish the job (see `hooks/use-coarse-pointer.ts` for the
+  // measurements), and `typingSurface` is the transient per-device toggle that
+  // resolves the same ambiguity in the moment; `composeBarShown` is where the
+  // setting-wins rule lives.
+  const composeMode = composeBarMode(bootstrap?.compose_bar)
+  const composeBarEnabled = composeBarShown(
+    composeMode,
+    isCoarsePointer,
+    typingSurface
+  )
+  // Do the touch surfaces belong on this device at all? Gates the ACCESSORY
+  // bar, and with it the toggle that turns the compose bar on and off.
+  const touchSurfaces = touchSurfacesApply(composeMode, isCoarsePointer)
+  const surfaceToggleOffered = typingSurfaceToggleOffered(
+    composeMode,
     isCoarsePointer
   )
   // The two hideable-bar preferences (`ui.mobile_top_bar`,
@@ -705,6 +716,16 @@ export function TerminalPane(props: TerminalPaneProps) {
   // demoted us to the read-only placeholder. Parsed into a human label ("Chrome on
   // macOS") for the take-over modal, and cleared the moment we regain ownership.
   const [takeoverDevice, setTakeoverDevice] = useState<string | null>(null)
+  // IS THIS PANE A COLUMN? True whenever something renders BELOW the terminal:
+  // the mobile shell always is one, and any layout showing the touch bars
+  // becomes one, desktop included. It decides the pane's own flex role, so the
+  // terminal is the flexible row when it has company and simply fills its
+  // parent when it does not. The bars are owner-only, so a viewer's pane is
+  // never a column.
+  const inColumn =
+    isMobile ||
+    (isOwner && ((touchSurfaces && accessoryBarVisible) || composeBarEnabled))
+
   // Mirror of `isOwner` for the stable mount-effect closures (onData, the resize
   // senders) to read synchronously. Kept in sync only at the mutation points
   // (a take-over and the handover handler), never written during render.
@@ -2719,7 +2740,10 @@ export function TerminalPane(props: TerminalPaneProps) {
   const pane = (
     <div
       className={
-        isMobile
+        // Inside a column (the mobile shell, or ANY layout carrying the touch
+        // bars below the terminal) the pane is the flexible row; standing alone
+        // it simply fills its parent.
+        inColumn
           ? "group relative min-h-0 w-full flex-1 overflow-hidden bg-background"
           : "group relative h-full w-full overflow-hidden bg-background"
       }
@@ -2898,17 +2922,27 @@ export function TerminalPane(props: TerminalPaneProps) {
     </div>
   )
 
-  // Desktop: render the pane exactly as before — no extra wrapper, no bar.
-  if (!isMobile) return pane
+  // NOTHING BELOW THE TERMINAL: the pane stands alone exactly as it always did
+  // on a desktop with a mouse.
+  if (!inColumn) return pane
 
-  // Mobile: a column root so the terminal host (flex-1 min-h-0) and the
-  // accessory bar (shrink-0) stack. The MobileApp root pins the whole shell to
-  // the visual viewport (and interactive-widget=resizes-content shrinks the
-  // layout viewport for the soft keyboard), so this column just fills its parent
-  // and the accessory bar sits on the keyboard — no per-pane keyboard sizing.
-  // The ResizeObserver on the host refits + debounce-resizes the PTY when this
-  // column reflows, so no extra resize wiring is needed. (The web UI has no
-  // fullscreen mode — see the CLAUDE.md web tenet.)
+  // A column root so the terminal host (flex-1 min-h-0) and the bars (shrink-0)
+  // stack. In the MOBILE shell the MobileApp root pins the whole thing to the
+  // visual viewport (and interactive-widget=resizes-content shrinks the layout
+  // viewport for the soft keyboard), so this column just fills its parent and
+  // the accessory bar sits on the keyboard, with no per-pane keyboard sizing.
+  //
+  // In the DESKTOP shell the pane fills a ResizablePanel of a fixed height, so
+  // the bars take their height OUT of the terminal rather than growing the
+  // page: the terminal shrinks by the bars' height and the panel geometry is
+  // untouched. That is the right trade and it is the same one the phone makes.
+  // The bars are only up when a finger is doing the typing, the soft keyboard
+  // is about to take far more room than they do, and a user who wants the rows
+  // back has the toggle in the accessory bar. Nothing here reaches out to the
+  // panel: the pane's own ResizeObserver refits and debounce-resizes the PTY
+  // when this column reflows, so the PTY learns its new size through the path
+  // it already used. (The web UI has no fullscreen mode; see the CLAUDE.md web
+  // tenet.)
   return (
     <div className="flex h-full w-full flex-col bg-background">
       {pane}
@@ -2925,7 +2959,7 @@ export function TerminalPane(props: TerminalPaneProps) {
               `ui.mobile_accessory_bar` preference (default on): hiding it
               returns its two key rows to the terminal. The compose bar's
               restore button (below) and Preferences bring it back. */}
-          {accessoryBarVisible ? (
+          {touchSurfaces && accessoryBarVisible ? (
             <AccessoryBar
               onEsc={() => sendSeq(ESC)}
               onTab={() => sendSeq(TAB)}
@@ -2936,31 +2970,39 @@ export function TerminalPane(props: TerminalPaneProps) {
               alt={alt}
               onToggleCtrl={toggleCtrl}
               onToggleAlt={toggleAlt}
+              composeSurface={surfaceToggleOffered ? composeBarEnabled : undefined}
+              onToggleSurface={
+                surfaceToggleOffered
+                  ? () =>
+                      setTypingSurface(composeBarEnabled ? "direct" : "compose")
+                  : undefined
+              }
             />
           ) : null}
-          {/* The compose bar (the `ui.compose_bar` preference, default on):
-              the third row, below the accessory bar's two key rows, so the
-              typing surface sits directly on the soft keyboard. When the
-              preference is off nothing renders and the tap-to-focus redirect
-              stays dormant, so the terminal behaves exactly as it did before
-              the bar existed. The draft value lives in this pane's state, so
-              losing and regaining ownership keeps an in-progress draft. */}
+          {/* The compose bar: the row below the accessory bar's two key rows,
+              so the typing surface sits directly on the soft keyboard. When it
+              is off nothing renders and the tap-to-focus redirect stays
+              dormant, so the terminal behaves exactly as it did before the bar
+              existed. The draft value lives in this pane's state, so losing and
+              regaining ownership keeps an in-progress draft. */}
           {composeBarEnabled ? (
             <ComposeBar
               value={composeText}
               onChange={setComposeText}
               onSend={sendCompose}
               inputRef={composeInputRef}
-              showRestoreBars={anyMobileBarHidden}
+              showRestoreBars={isMobile && anyMobileBarHidden}
               onRestoreBars={() => void restoreMobileBars()}
             />
-          ) : anyMobileBarHidden ? (
+          ) : isMobile && anyMobileBarHidden ? (
             // The compose bar is off AND a bar is hidden: without this the
             // terminal screen would be completely chrome-free, and the app
             // ships as a standalone PWA where no browser Back button exists.
             // A minimal bottom row carries ONLY the same restore button the
             // compose bar would (the shared RestoreBarsButton), so the way
-            // back is always one visible tap.
+            // back is always one visible tap. MOBILE ONLY, because the two
+            // hideable bars it restores are the mobile shell's own chrome; the
+            // desktop shell has never hidden anything to restore.
             <div className="flex shrink-0 items-end gap-1.5 border-t bg-background px-1 py-1">
               <RestoreBarsButton
                 onRestoreBars={() => void restoreMobileBars()}

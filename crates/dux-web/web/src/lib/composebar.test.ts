@@ -7,7 +7,10 @@ import {
   composeSendWrites,
   composeBarMode,
   composeBarVisible,
+  composeBarShown,
   insertIntoComposeDraft,
+  touchSurfacesApply,
+  typingSurfaceToggleOffered,
 } from "./composebar"
 
 // The full write-plan matrix for the mobile compose bar's Send action. The
@@ -214,5 +217,63 @@ describe("composeBarVisible", () => {
     expect(composeBarVisible("always", true)).toBe(true)
     expect(composeBarVisible("never", true)).toBe(false)
     expect(composeBarVisible("never", false)).toBe(false)
+  })
+})
+
+// THE TWO ORTHOGONAL QUESTIONS. Width decides the LAYOUT (how much room is
+// there, so which shell you get). The POINTER decides the TYPING SURFACE (is a
+// finger doing the typing, so does the text need a buffer autocorrect and swipe
+// can work in). These helpers answer only the second one, and nothing here has
+// a width in it.
+describe("touchSurfacesApply", () => {
+  it("puts the touch surfaces wherever the pointer is coarse, layout regardless", () => {
+    expect(touchSurfacesApply("auto", true)).toBe(true)
+    expect(touchSurfacesApply("never", true)).toBe(true)
+  })
+
+  it("keeps them away from a fine pointer unless the user asked for them", () => {
+    expect(touchSurfacesApply("auto", false)).toBe(false)
+    expect(touchSurfacesApply("never", false)).toBe(false)
+    expect(touchSurfacesApply("always", false)).toBe(true)
+  })
+
+  // `never` is about the compose BOX. A phone still cannot produce Esc, Tab or
+  // a Ctrl chord, so the accessory keys stay.
+  it("keeps the accessory keys on a phone whose compose box is switched off", () => {
+    expect(touchSurfacesApply("never", true)).toBe(true)
+    expect(composeBarShown("never", true, null)).toBe(false)
+  })
+})
+
+describe("composeBarShown", () => {
+  it("follows the pointer while nothing has been chosen on this device", () => {
+    expect(composeBarShown("auto", true, null)).toBe(true)
+    expect(composeBarShown("auto", false, null)).toBe(false)
+  })
+
+  it("lets the device-local choice flip the surface in both directions", () => {
+    expect(composeBarShown("auto", true, "direct")).toBe(false)
+    expect(composeBarShown("auto", false, "compose")).toBe(true)
+  })
+
+  // The SETTING is the configuration surface and it wins. A transient toggle
+  // must never quietly defeat something the operator wrote in config.
+  it("lets always and never win over the device-local choice", () => {
+    expect(composeBarShown("always", true, "direct")).toBe(true)
+    expect(composeBarShown("always", false, "direct")).toBe(true)
+    expect(composeBarShown("never", true, "compose")).toBe(false)
+    expect(composeBarShown("never", false, "compose")).toBe(false)
+  })
+})
+
+describe("typingSurfaceToggleOffered", () => {
+  // The toggle exists only where it can do something: in `auto`, on a device
+  // that has the touch surfaces at all. Under always/never the setting decides
+  // and a control that changed nothing would be a lie.
+  it("is offered in auto on a coarse pointer and nowhere else", () => {
+    expect(typingSurfaceToggleOffered("auto", true)).toBe(true)
+    expect(typingSurfaceToggleOffered("auto", false)).toBe(false)
+    expect(typingSurfaceToggleOffered("always", true)).toBe(false)
+    expect(typingSurfaceToggleOffered("never", true)).toBe(false)
   })
 })

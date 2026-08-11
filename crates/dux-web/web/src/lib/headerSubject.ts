@@ -185,15 +185,37 @@ export function directoryChip(cwdLabel: string): HeaderChip {
   return { kind: "directory", label: "Directory", value: cwdLabel }
 }
 
-// The phone header's second line: the two facts the old mobile header dropped
-// entirely (it showed the branch and nothing else, so it never said which
-// project or which assistant you were talking to). Deliberately NOT the full
-// desktop chip row: a phone header has one short line to spend, there is no
-// hover on a phone to explain a glyph, and the branch is the field most likely
-// to repeat the name above it.
-export function mobileCaption(input: {
-  provider: string
-  projectName?: string | null
-}): string {
-  return captionText([input.projectName, input.provider])
+// The chips the PHONE header may draw, in the order the desktop row would put
+// them. Everything else the desktop carries (the branch, the terminal count) is
+// dropped here, and that is the honest cost of glyph labels rather than an
+// omission: a glyph is learnable only through its hover, there is no hover on a
+// phone, so the phone keeps the two fields that matter most beside the name and
+// shows no glyph nobody can interrogate.
+const PHONE_CHIP_KINDS: readonly HeaderChipKind[] = [
+  "project",
+  "agent",
+  "assistant",
+]
+
+// The phone header's two lanes, derived from the SAME chip model the desktop
+// row renders so a label or a value can never drift between the surfaces.
+//
+// Lane one is the primary chip (the agent name, the one value that runs long
+// and the thing you navigate by) at full size. Lane two is what is left, at
+// 11px muted: project, then assistant. The old mobile header showed the branch
+// alone, in mono, so it never said which project or which assistant you were
+// talking to, and on an agent named after its branch it repeated the word the
+// sidebar row had just said.
+export function mobileHeaderLanes(input: AgentChipsInput): {
+  lead: HeaderChip
+  rest: HeaderChip[]
+} {
+  const chips = agentHeaderChips(input).filter((c) =>
+    PHONE_CHIP_KINDS.includes(c.kind),
+  )
+  // The agent chip is always produced by `agentHeaderChips`, and on the phone
+  // it is always the primary one (a terminal has its own phone screen), so this
+  // find cannot miss; the fallback keeps the return type honest anyway.
+  const lead = chips.find((c) => c.kind === "agent") ?? chips[0]
+  return { lead, rest: chips.filter((c) => c !== lead) }
 }

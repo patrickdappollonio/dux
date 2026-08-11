@@ -12,6 +12,7 @@ import { ConnDot } from "@/components/ConnDot"
 import { AgentTabsStrip } from "@/components/AgentTabsStrip"
 import { DormantTabCard } from "@/components/DormantTabCard"
 import { AgentActionsMenu, FlatAgentList } from "@/components/FlatAgentList"
+import { CHIP_GLYPHS } from "@/components/headerChipGlyphs"
 import { MacroPopover } from "@/components/MacroPopover"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Button } from "@/components/ui/button"
@@ -23,7 +24,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { MobileBarToggleItems } from "@/components/MobileBarToggleItems"
 import { isExtraTabDormant, shouldShowTabStrip } from "@/lib/agentTabs"
-import { mobileCaption } from "@/lib/headerSubject"
+import { mobileHeaderLanes } from "@/lib/headerSubject"
 import { resolveInstanceTitle } from "@/lib/instanceTitle"
 import {
   mobileTopBarVisible,
@@ -36,6 +37,7 @@ import {
 } from "@/lib/store"
 import { prIconClass, prIconHoverClass, prStateLabel } from "@/lib/pr"
 import type { TerminalOwnerRef } from "@/lib/store"
+import type { SessionView } from "@/lib/types"
 import { matchOwner } from "@/lib/terminalOwner"
 import { terminalsForOwner, terminalTitle } from "@/lib/terminals"
 import { cn } from "@/lib/utils"
@@ -252,6 +254,49 @@ function StandaloneTerminalScreen({
   )
 }
 
+// The phone header's identity block: the two lanes described at the call site.
+// It renders `mobileHeaderLanes`, which derives both lanes from the desktop
+// chip model, and the shared `CHIP_GLYPHS`, so a chip kind is drawn as the same
+// glyph on both surfaces.
+function MobileHeaderLanes({
+  session,
+  provider,
+  projectName,
+}: {
+  session: SessionView
+  provider: string
+  projectName?: string | null
+}) {
+  const { lead, rest } = mobileHeaderLanes({
+    name: session.title || session.branch_name,
+    provider,
+    projectName,
+    branchName: session.branch_name,
+  })
+  const LeadGlyph = CHIP_GLYPHS[lead.kind]
+  return (
+    <>
+      <div className="flex min-w-0 items-center gap-1.5">
+        <LeadGlyph className="size-3.5 shrink-0 text-muted-foreground" />
+        <span className="truncate text-sm leading-tight font-medium">
+          {lead.value}
+        </span>
+      </div>
+      <div className="flex min-w-0 items-center gap-2.5 text-[11px] leading-tight text-muted-foreground">
+        {rest.map((chip) => {
+          const Glyph = CHIP_GLYPHS[chip.kind]
+          return (
+            <span key={chip.kind} className="flex min-w-0 items-center gap-1">
+              <Glyph className="size-3 shrink-0" />
+              <span className="truncate">{chip.value}</span>
+            </span>
+          )
+        })}
+      </div>
+    </>
+  )
+}
+
 // The focused-terminal spoke: a slim top bar over the full-screen shared terminal.
 function TerminalScreen() {
   const duxState = useDux()
@@ -358,28 +403,35 @@ function TerminalScreen() {
             >
               <ChevronLeft />
             </Button>
-            {/* Two lines in the height one line used: the agent NAME at 14px,
-                and `project · provider` at 11px muted under it. The old header
-                showed the branch alone, in mono, so it never said which project
-                or which assistant you were talking to, and on an agent named
-                after its branch it said the same word the sidebar row had just
-                said. `leading-tight` on both keeps the stack (about 31px) inside
-                the header's existing h-11, so it does not grow. The NAME
-                truncates; the caption is the smaller fact and each line
-                truncates on its own. One font throughout (the mono branch
-                misaligned against the sans chrome beside it). */}
+            {/* TWO LANES IN THE HEIGHT ONE LINE USED, each lane a glyph and a
+                value, drawn from the SAME chip model the desktop header row
+                uses (`mobileHeaderLanes`) so the two surfaces cannot drift.
+                Lane one is the agent NAME at 14px behind the robot glyph; lane
+                two is folder+project and chip+assistant at 11px muted. The old
+                header showed the branch alone, in mono, so it never said which
+                project or which assistant you were talking to, and on an agent
+                named after its branch it said the same word the sidebar row had
+                just said.
+
+                `leading-tight` on both lanes keeps the stack (about 31px)
+                inside the header's existing h-11, so it does not grow; the
+                glyphs are deliberately smaller than their line boxes (14px and
+                12px against 17.5px and 13.75px) so adding them costs no height
+                either. Every value truncates on its own.
+
+                WHAT THE PHONE DOES NOT SHOW is branch and terminals, and that
+                is the honest cost of labelling fields with glyphs: a glyph is
+                learnable only through its hover, and there is no hover on a
+                phone. So the phone carries the two fields that matter beside
+                the name rather than glyphs nobody can interrogate. */}
             <div className="min-w-0 flex-1">
-              <div className="truncate text-sm leading-tight font-medium">
-                {session.title || session.branch_name}
-              </div>
-              <div className="truncate text-[11px] leading-tight text-muted-foreground">
-                {mobileCaption({
-                  provider: focusedTab?.provider ?? session.provider,
-                  projectName: spine?.projects.find(
-                    (p) => p.id === session.project_id,
-                  )?.name,
-                })}
-              </div>
+              <MobileHeaderLanes
+                session={session}
+                provider={focusedTab?.provider ?? session.provider}
+                projectName={
+                  spine?.projects.find((p) => p.id === session.project_id)?.name
+                }
+              />
             </div>
             {session.pr ? (
               <SimpleTooltip

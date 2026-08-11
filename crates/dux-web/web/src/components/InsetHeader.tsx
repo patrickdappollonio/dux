@@ -1,15 +1,8 @@
-import {
-  Bot,
-  Cpu,
-  Folder,
-  GitBranch,
-  PanelRightOpen,
-  SquareTerminal,
-} from "lucide-react"
-import type { LucideIcon } from "lucide-react"
+import { PanelRightOpen } from "lucide-react"
 
 import { AppMenu } from "@/components/AppMenu"
 import { MacroPopover } from "@/components/MacroPopover"
+import { CHIP_GLYPHS } from "@/components/headerChipGlyphs"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Button } from "@/components/ui/button"
 import { useIsTruncated } from "@/hooks/use-truncated"
@@ -20,7 +13,6 @@ import {
   headerChipTooltip,
   type AgentChipsInput,
   type HeaderChip,
-  type HeaderChipKind,
 } from "@/lib/headerSubject"
 import {
   changesPaneVisible,
@@ -40,28 +32,6 @@ import type { SessionView, TerminalView } from "@/lib/types"
 // Extracted from App.tsx into its own module so it can be unit-tested in
 // isolation without pulling in `GlobalOverlays` -> `ConfigEditorDialog`, whose
 // eager Monaco import cannot initialize under vitest (see `TerminalArea`).
-
-// The glyph per chip kind. NONE of these was chosen for looks: every one is the
-// glyph dux already draws for that thing somewhere else, so the header and the
-// rest of the app teach each other rather than inventing a second vocabulary.
-// `Folder` is the project glyph on a sidebar agent row, `Bot` is the agent glyph
-// in the sidebar and on every tab, `Cpu` is what the agent ⋯ menu already puts
-// beside "Change agent provider", and `SquareTerminal` is the terminal glyph in
-// the sidebar and the agent menu. `GitBranch` means what it means everywhere.
-//
-// The robot deliberately does NOT do double duty for the assistant: it already
-// means "an agent", and reusing it would say the agent's name and the model
-// behind it are the same kind of thing. `directory` shares the folder because a
-// directory IS a folder, and the two never appear in one row (a standalone
-// terminal belongs to no project).
-const CHIP_GLYPHS: Record<HeaderChipKind, LucideIcon> = {
-  project: Folder,
-  agent: Bot,
-  branch: GitBranch,
-  terminal: SquareTerminal,
-  assistant: Cpu,
-  directory: Folder,
-}
 
 // One glyph-and-value pair.
 //

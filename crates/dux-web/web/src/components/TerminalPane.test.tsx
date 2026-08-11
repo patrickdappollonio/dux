@@ -2207,3 +2207,160 @@ describe("TerminalPane compose bar gate", () => {
     expect(barIsUp()).toBe(true)
   })
 })
+
+// WIDTH DECIDES THE LAYOUT; THE POINTER DECIDES THE TYPING SURFACE. The two
+// are orthogonal, and treating them as one question was the bug: a tablet in
+// landscape gets the DESKTOP shell because it has the room, and still needs the
+// buffered input because a finger is still doing the typing. So both touch
+// surfaces (the compose bar and the accessory keys) travel with the pointer,
+// including inside the desktop shell, which was impossible before.
+describe("TerminalPane typing surfaces follow the pointer, not the layout", () => {
+  const desktopWidth = 1200
+  let pointerStub: MatchMediaStub | null = null
+
+  const setWidth = (value: number) =>
+    Object.defineProperty(window, "innerWidth", { value, configurable: true })
+
+  beforeEach(() => setWidth(desktopWidth))
+  afterEach(() => {
+    setWidth(desktopWidth)
+    pointerStub?.restore()
+    pointerStub = null
+  })
+
+  const composeUp = () =>
+    screen.queryByRole("textbox", { name: "Message" }) !== null
+  const accessoryUp = () =>
+    screen.queryByRole("button", { name: "Esc" }) !== null
+
+  it("renders BOTH bars in the desktop shell on a coarse pointer", () => {
+    pointerStub = stubCoarsePointer(true)
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(composeUp()).toBe(true)
+    expect(accessoryUp()).toBe(true)
+  })
+
+  it("renders neither in the desktop shell on a fine pointer", () => {
+    pointerStub = stubCoarsePointer(false)
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(composeUp()).toBe(false)
+    expect(accessoryUp()).toBe(false)
+  })
+
+  // The input-owner gate is unchanged: a viewer gets the take-over card and no
+  // surface that could even stage input.
+  it("renders neither for a viewer, coarse pointer or not", () => {
+    pointerStub = stubCoarsePointer(true)
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    act(() => notifyPtyOwner("s1", "conn-other"))
+    expect(composeUp()).toBe(false)
+    expect(accessoryUp()).toBe(false)
+  })
+
+  it("still honours 'always' and 'never' in the desktop shell", () => {
+    const withMode = (mode: string) => {
+      const state = makeState()
+      ;(state.bootstrap as unknown as { compose_bar?: string }).compose_bar =
+        mode
+      mockState = state
+    }
+
+    pointerStub = stubCoarsePointer(false)
+    withMode("always")
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(composeUp()).toBe(true)
+
+    cleanup()
+    pointerStub.restore()
+    pointerStub = stubCoarsePointer(true)
+    withMode("never")
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(composeUp()).toBe(false)
+    // The accessory keys stay: a phone still cannot produce Esc or a Ctrl
+    // chord, whatever the compose box is doing.
+    expect(accessoryUp()).toBe(true)
+  })
+})
+
+// THE TOGGLE. A tablet with a keyboard case attached wants direct typing; the
+// same tablet without it wants the buffered box, and the browser cannot tell
+// the two apart (measured). So the user swaps it, transiently, per device.
+describe("TerminalPane typing-surface toggle", () => {
+  let pointerStub: MatchMediaStub | null = null
+
+  beforeEach(async () => {
+    pointerStub = stubCoarsePointer(true)
+    const mod = await import("@/lib/typingSurface")
+    mod.setTypingSurface(null)
+  })
+  afterEach(() => {
+    pointerStub?.restore()
+    pointerStub = null
+  })
+
+  const toggle = () => screen.getByRole("button", { name: /^Typing surface:/ })
+  const composeUp = () =>
+    screen.queryByRole("textbox", { name: "Message" }) !== null
+
+  it("flips the surface and says which state it is in", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(composeUp()).toBe(true)
+    // It names its state rather than being an unlabelled icon.
+    expect(toggle().textContent).toBeTruthy()
+    const before = toggle().textContent
+
+    fireEvent.pointerDown(toggle())
+    expect(composeUp()).toBe(false)
+    expect(toggle().textContent).not.toBe(before)
+
+    fireEvent.pointerDown(toggle())
+    expect(composeUp()).toBe(true)
+  })
+
+  // It lives in the ACCESSORY bar because that bar is present in BOTH states.
+  // Inside the compose bar it would vanish with the surface it turns off.
+  it("is reachable in both states", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(toggle()).toBeTruthy()
+    fireEvent.pointerDown(toggle())
+    expect(composeUp()).toBe(false)
+    expect(toggle()).toBeTruthy()
+  })
+
+  it("writes the choice to localStorage, so a reload does not snap back", async () => {
+    const mod = await import("@/lib/typingSurface")
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    fireEvent.pointerDown(toggle())
+    expect(composeUp()).toBe(false)
+    // THE STORAGE, not the module's own memory: a live module variable would
+    // satisfy a remount in this file and still lose the choice on a real
+    // reload. (What a genuinely fresh page does with that key is pinned in
+    // `lib/typingSurface.test.ts`, which re-evaluates the module.)
+    expect(localStorage.getItem(mod.TYPING_SURFACE_KEY)).toBe("direct")
+    cleanup()
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(composeUp()).toBe(false)
+  })
+
+  it("does not write the ui.compose_bar setting", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const calls = () =>
+      (fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls
+    const before = calls().length
+    fireEvent.pointerDown(toggle())
+    for (const call of calls().slice(before)) {
+      expect(String(call[0])).not.toContain("/settings")
+    }
+  })
+
+  // Under always/never the SETTING decides, so a control that changed nothing
+  // must not be there at all.
+  it("is absent when the setting has already decided", () => {
+    const state = makeState()
+    ;(state.bootstrap as unknown as { compose_bar?: string }).compose_bar =
+      "always"
+    mockState = state
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(screen.queryByRole("button", { name: /^Typing surface:/ })).toBeNull()
+  })
+})

@@ -145,3 +145,70 @@ export function composeBarVisible(
       return coarsePointer
   }
 }
+
+/**
+ * Do the TOUCH TYPING SURFACES belong on this device at all?
+ *
+ * TWO ORTHOGONAL QUESTIONS, and treating them as one was the bug. WIDTH decides
+ * the LAYOUT: how much room is there, so which shell you get. The POINTER
+ * decides the TYPING SURFACE: is a finger doing the typing, so does the text
+ * need a buffer where autocorrect and swipe have something to work with. A
+ * tablet in landscape wants the desktop layout AND the buffered input, so the
+ * bars travel with the pointer and render inside the desktop shell too.
+ *
+ * This gates the pair: the accessory keys (Esc/Tab/Ctrl/Alt and the rest) and
+ * the compose bar. `never` still keeps the accessory keys on a coarse pointer,
+ * because it is a preference about the compose BOX and a soft keyboard still
+ * cannot produce a Ctrl chord; `always` brings the pair to a fine pointer,
+ * because that is the user saying the capability answer is wrong here.
+ */
+export function touchSurfacesApply(
+  mode: ComposeBarMode,
+  coarsePointer: boolean
+): boolean {
+  return coarsePointer || mode === "always"
+}
+
+/**
+ * Which typing surface a device-local toggle has been left on, or `null` while
+ * nobody has touched it and the pointer capability answers. Persisted in
+ * `localStorage` by `lib/typingSurface.ts`; deliberately NOT configuration.
+ */
+export type TypingSurfaceChoice = "compose" | "direct"
+
+/**
+ * Is the compose bar up, once the device-local toggle is folded in?
+ *
+ * The SETTING wins: `always` and `never` are what the operator wrote in config
+ * and a transient toggle must never quietly defeat them. Only `auto` (which
+ * MEANS "work it out") consults the choice, and there the choice replaces the
+ * capability answer for exactly the case the browser cannot see: the same
+ * tablet with and without a keyboard case attached.
+ */
+export function composeBarShown(
+  mode: ComposeBarMode,
+  coarsePointer: boolean,
+  choice: TypingSurfaceChoice | null
+): boolean {
+  if (mode !== "auto") return composeBarVisible(mode, coarsePointer)
+  if (choice !== null) return choice === "compose"
+  return coarsePointer
+}
+
+/**
+ * Should the toggle render?
+ *
+ * Only where it can do something: in `auto` (under always/never the setting has
+ * already decided, and a control that changed nothing would be a lie) and on a
+ * device that has the touch surfaces at all, since the toggle lives in the
+ * accessory bar. It lives THERE rather than in the compose bar because the
+ * accessory bar is present in BOTH states: a toggle inside the compose bar
+ * would disappear the moment it turned the compose bar off, stranding the user
+ * in direct typing with no way back.
+ */
+export function typingSurfaceToggleOffered(
+  mode: ComposeBarMode,
+  coarsePointer: boolean
+): boolean {
+  return mode === "auto" && touchSurfacesApply(mode, coarsePointer)
+}

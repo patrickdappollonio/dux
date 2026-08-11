@@ -8,7 +8,7 @@ import {
   directoryChip,
   focusedTerminalChip,
   headerChipTooltip,
-  mobileCaption,
+  mobileHeaderLanes,
   terminalCountCaption,
   type AgentChipsInput,
 } from "./headerSubject"
@@ -249,15 +249,38 @@ describe("captionText", () => {
   })
 })
 
-describe("mobileCaption", () => {
-  it("names the project and the provider, the two facts the phone header lacked", () => {
-    expect(mobileCaption({ provider: "codex", projectName: "dux" })).toBe(
-      "dux · codex",
-    )
+describe("mobileHeaderLanes", () => {
+  it("puts the agent in lane one and project + assistant in lane two", () => {
+    const lanes = mobileHeaderLanes({ ...AGENT, provider: "codex" })
+    expect(lanes.lead.kind).toBe("agent")
+    expect(lanes.lead.value).toBe("server-mode")
+    expect(lanes.rest.map((c) => c.kind)).toEqual(["project", "assistant"])
+    expect(lanes.rest.map((c) => c.value)).toEqual(["dux", "codex"])
   })
 
-  it("degrades to the provider alone when the project is unknown", () => {
-    expect(mobileCaption({ provider: "codex" })).toBe("codex")
+  // The phone deliberately drops branch and terminals: there is no hover on a
+  // phone, so a glyph there could never explain itself.
+  it("drops the branch and terminal chips the desktop row would carry", () => {
+    const lanes = mobileHeaderLanes({
+      ...AGENT,
+      name: "menu-demo",
+      branchName: "fix/paste-crash",
+      terminalCount: 2,
+    })
+    expect(lanes.rest.map((c) => c.kind)).toEqual(["project", "assistant"])
+  })
+
+  it("degrades to the assistant alone when the project is unknown", () => {
+    const lanes = mobileHeaderLanes({ ...AGENT, projectName: null })
+    expect(lanes.rest.map((c) => c.kind)).toEqual(["assistant"])
+  })
+
+  // Reuses the desktop chip model rather than a second one, so the words a
+  // chip carries cannot drift between the two surfaces.
+  it("carries the same labels the desktop chips do", () => {
+    const lanes = mobileHeaderLanes(AGENT)
+    expect(lanes.lead.label).toBe("Agent")
+    expect(lanes.rest.map((c) => c.label)).toEqual(["Project", "Assistant"])
   })
 })
 
