@@ -3535,7 +3535,9 @@ impl App {
                 format!("keeps its chords: {next_pane_key} still moves panes, and the tab,"),
                 "palette, and scroll keys stay dux's. Fullscreen".to_string(),
                 format!("({fullscreen_key}), every key goes to the agent verbatim and"),
-                format!("{fullscreen_key} is the way back."),
+                format!("{fullscreen_key} is the way back. A chord dux keeps never"),
+                "reaches the agent windowed; rebind it in [keys] to".to_string(),
+                "hand its key to the agent.".to_string(),
             ];
             for text in mode_lines {
                 lines.push(Line::from(Span::styled(

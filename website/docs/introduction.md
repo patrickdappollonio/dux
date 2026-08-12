@@ -65,6 +65,18 @@ Both front ends lay the workspace out the same way, in three panes:
   a diff opens in the file-editor overlay instead.
 - The **right pane** shows the files an agent has changed, with diffs.
 
+> [!IMPORTANT]
+> In the terminal UI's windowed layout, not every key reaches the agent. dux
+> keeps its own chords for itself: pane navigation, the command palette, tab
+> switching, and the rest of its bindings all fire in dux instead of typing
+> into the agent. Fullscreen forwards everything verbatim, so it's the escape
+> hatch when the agent needs a key dux normally keeps. And because every dux
+> binding is configurable under `[keys]`, you can also rebind dux's side so a
+> specific chord reaches the agent windowed; see
+> [Configuration](/docs/configuration#keybindings). When crafting custom
+> bindings, the `input-debugging` command in the command palette opens dux's
+> input debugger, which shows exactly what dux receives for each keypress.
+
 In the terminal UI, dedicated focus-next and focus-previous keys move between
 panes, and that's the primary way you get around. Every pane has its own local key
 combinations, and the authoritative list of every binding lives in the in-app help

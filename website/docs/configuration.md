@@ -166,6 +166,12 @@ Modifier and control-key parsing is case-insensitive: `Ctrl-g`, `ctrl-g`, and
 `CTRL-g` all mean the same thing. Letter keys are lowercased too, so to bind an
 uppercase letter you write the shifted form, e.g. `shift-p`.
 
+One consequence worth knowing: while you type into an agent in the windowed
+pane, any chord bound here belongs to dux and never reaches the agent, so
+rebinding dux's side is how you free a chord the agent needs (the
+`input-debugging` palette command shows what dux receives for each keypress).
+The full story is in [Introduction](/docs/introduction#the-three-panes).
+
 Rather than memorizing hotkeys, you can reach most actions through the terminal
 UI's command palette; the in-app help overlay names the key it is currently bound
 to. It's the fastest way to discover what dux can do.
