@@ -1147,6 +1147,23 @@ impl App {
                     }
                 }
                 Action::ExitInteractive if !in_diff => self.activate_center_agent(false, false)?,
+                Action::OpenMacroBar if !in_diff => {
+                    // Decision 4: the macro chord works over the minimized
+                    // pane too. Mirror the fullscreen intercept's gates: no
+                    // bar while scrolled back (the scroll vocabulary owns the
+                    // pane), and no bar without a live surface, because the
+                    // send would silently go nowhere.
+                    if self.scroll_mode_active() {
+                        // Suppressed, like the fullscreen intercept while scrolled back.
+                    } else if self.selected_terminal_surface_client().is_none() {
+                        let focus_key = self.bindings.label_for(Action::FocusAgent);
+                        self.set_error(format!(
+                            "No running agent or terminal in this pane to send macros to. Press {focus_key} to launch the focused tab first."
+                        ));
+                    } else {
+                        self.open_macro_bar();
+                    }
+                }
                 Action::ShowTerminal if !in_diff => self.show_or_open_first_terminal()?,
                 Action::NextTab if !in_diff => self.focus_tab_relative(true),
                 Action::PrevTab if !in_diff => self.focus_tab_relative(false),
@@ -1895,6 +1912,25 @@ impl App {
         Ok(false)
     }
 
+    /// Open the macro bar over the focused center surface. Shared by the
+    /// fullscreen byte-pattern intercept and the minimized Center binding so
+    /// the two entry points cannot drift. Sets an info line and opens nothing
+    /// when no macros are defined for the surface.
+    fn open_macro_bar(&mut self) {
+        if self.filtered_macros("").is_empty() {
+            self.set_info("No macros defined for this surface.");
+            return;
+        }
+        let prev = self.input_target;
+        self.macro_bar = Some(MacroBarState {
+            input: TextInput::new(),
+            selected: 0,
+            previous_input_target: prev,
+        });
+        self.input_target = InputTarget::None;
+        self.terminal_selection = None;
+    }
+
     fn close_macro_bar(&mut self) {
         if let Some(bar) = self.macro_bar.take() {
             self.input_target = bar.previous_input_target;
@@ -2385,20 +2421,7 @@ impl App {
                     if is_scrolled_back {
                         continue;
                     }
-                    if self.filtered_macros("").is_empty() {
-                        self.set_info("No macros defined for this surface.");
-                        self.raw_input_buf.clear();
-                        self.raw_input_parser.clear();
-                        return Ok(false);
-                    }
-                    let prev = self.input_target;
-                    self.macro_bar = Some(MacroBarState {
-                        input: TextInput::new(),
-                        selected: 0,
-                        previous_input_target: prev,
-                    });
-                    self.input_target = InputTarget::None;
-                    self.terminal_selection = None;
+                    self.open_macro_bar();
                     self.raw_input_buf.clear();
                     self.raw_input_parser.clear();
                     return Ok(false);
@@ -23795,6 +23818,146 @@ cyan = "#00ffff"
         assert!(
             rendered.contains("^[") && rendered.contains("^M"),
             "newline should have been translated to ESC+CR (`^[^M`); got: {rendered:?}"
+        );
+    }
+
+    /// Shared fixture for the minimized macro-bar tests: a live `cat -v` PTY
+    /// under the session-slot tab, center focused, WINDOWED (no fullscreen
+    /// overlay, no interactive input target), one agent-surface macro.
+    fn minimized_typeable_app_with_macro() -> crate::app::App {
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        let client = PtyClient::spawn(
+            "sh",
+            &["-c".to_string(), "stty raw -echo; exec cat -v".to_string()],
+            std::path::Path::new("."),
+            5,
+            80,
+            100,
+        )
+        .expect("spawn pty");
+        app.engine.providers.insert(session_id, client);
+        app.focus = FocusPane::Center;
+        app.center_mode = CenterMode::Agent;
+        app.session_surface = crate::model::SessionSurface::Agent;
+        app.input_target = InputTarget::None;
+        app.fullscreen_overlay = FullscreenOverlay::None;
+        app.engine.config.macros.entries.insert(
+            "greet".to_string(),
+            crate::config::MacroEntry {
+                text: "hello-macro".to_string(),
+                surface: crate::config::MacroSurface::Agent,
+            },
+        );
+        // Give the shell a moment to enter raw mode and exec cat.
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        assert!(app.center_typeable(), "fixture must start typeable");
+        app
+    }
+
+    /// Decision 4: the macro bar's chord gains Center scope, so it opens
+    /// while typing into the MINIMIZED pane (the chord is dux's; the typing
+    /// bypass never swallows it).
+    #[test]
+    fn ctrl_backslash_opens_the_macro_bar_while_typing_minimized() {
+        let mut app = minimized_typeable_app_with_macro();
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('\\'), KeyModifiers::CONTROL))
+            .expect("handle ctrl-backslash");
+
+        assert!(
+            app.macro_bar.is_some(),
+            "Ctrl-\\ must open the macro bar over the minimized typeable pane"
+        );
+    }
+
+    /// Sending a macro from the minimized bar writes to the FOCUSED center
+    /// surface's PTY, exactly as the fullscreen bar does.
+    #[test]
+    fn minimized_macro_bar_sends_to_the_focused_surface_pty() {
+        let mut app = minimized_typeable_app_with_macro();
+        app.handle_key(KeyEvent::new(KeyCode::Char('\\'), KeyModifiers::CONTROL))
+            .expect("open bar");
+        assert!(app.macro_bar.is_some());
+
+        // Enter goes through the ordinary handle_key ladder: the open bar
+        // consumes it and sends the selected macro.
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .expect("send macro");
+
+        assert!(app.macro_bar.is_none(), "macro bar closes after send");
+        assert_eq!(app.status.message(), "Sent macro \"greet\".");
+
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let provider = app.engine.providers.values().next().expect("provider");
+        let rendered: String = provider
+            .snapshot()
+            .cells
+            .iter()
+            .map(|cell| cell.symbol.as_str())
+            .collect();
+        assert!(
+            rendered.contains("hello-macro"),
+            "the macro text must reach the focused surface's PTY; got: {rendered:?}"
+        );
+    }
+
+    /// Escape closes the minimized macro bar and typing resumes: the pane is
+    /// typeable again and the next plain key types into the agent.
+    #[test]
+    fn escape_closes_the_minimized_macro_bar_and_typing_resumes() {
+        let mut app = minimized_typeable_app_with_macro();
+        app.handle_key(KeyEvent::new(KeyCode::Char('\\'), KeyModifiers::CONTROL))
+            .expect("open bar");
+        assert!(app.macro_bar.is_some());
+
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .expect("close bar");
+
+        assert!(app.macro_bar.is_none(), "Esc must close the macro bar");
+        assert!(
+            app.center_typeable(),
+            "typing must resume once the bar closes"
+        );
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
+            .expect("type after close");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let provider = app.engine.providers.values().next().expect("provider");
+        let rendered: String = provider
+            .snapshot()
+            .cells
+            .iter()
+            .map(|cell| cell.symbol.as_str())
+            .collect();
+        assert!(
+            rendered.contains('x'),
+            "a plain key after closing the bar types into the agent; got: {rendered:?}"
+        );
+    }
+
+    /// A dormant center pane has no PTY to send to, so the Center-scope chord
+    /// reports that instead of opening a bar whose send would go nowhere.
+    #[test]
+    fn minimized_macro_bar_needs_a_live_surface() {
+        let mut app = test_app(default_bindings());
+        app.focus = FocusPane::Center;
+        app.center_mode = CenterMode::Agent;
+        // No provider inserted: the focused tab is dormant.
+        app.engine.config.macros.entries.insert(
+            "greet".to_string(),
+            crate::config::MacroEntry {
+                text: "hello-macro".to_string(),
+                surface: crate::config::MacroSurface::Agent,
+            },
+        );
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('\\'), KeyModifiers::CONTROL))
+            .expect("handle ctrl-backslash");
+
+        assert!(
+            app.macro_bar.is_none(),
+            "no macro bar over a dormant pane: there is nothing to send to"
         );
     }
 

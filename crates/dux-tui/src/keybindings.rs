@@ -483,8 +483,15 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         hint_contexts: &[],
     },
     BindingDef {
+        // No default key. Under the legacy terminal protocol Ctrl-4 IS
+        // Ctrl-\ (both arrive as byte 0x1c, and `normalize_ctrl_punct` folds
+        // them together), and that key belongs to the macro bar
+        // (`OpenMacroBar`), which gained Center scope for the minimized
+        // typeable pane (decision 4). Tab 4 stays reachable via
+        // NextTab/PrevTab or a custom rebind; a user who rebinds the macro
+        // bar off Ctrl-\ can give `select_tab_4` the key back.
         action: Action::SelectTab4,
-        default_keys: &[key!(ctrl - 4)],
+        default_keys: &[],
         scopes: &[BindingScope::Center],
         help: None,
         hint_contexts: &[],
@@ -589,9 +596,12 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         hint_contexts: &[],
     },
     BindingDef {
+        // Center scope (decision 4): the chord also opens the bar over the
+        // minimized typeable pane; being a chord, the typing bypass never
+        // swallows it.
         action: Action::OpenMacroBar,
         default_keys: &[key!(ctrl - '\\')],
-        scopes: &[BindingScope::Interactive],
+        scopes: &[BindingScope::Interactive, BindingScope::Center],
         help: Some(HelpEntry {
             section: "Agent pane",
             description: "Open the macro command bar to send text macros",
