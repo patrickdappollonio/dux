@@ -635,6 +635,88 @@ async fn a_new_connection_is_told_about_work_in_flight_and_about_the_outcome_it_
     );
 }
 
+/// A final stays continuously replayable from the moment it is broadcast: two
+/// fresh connections, one straight after the final and one a second and a half
+/// later, must BOTH be handed it.
+///
+/// This exists because a container run reported a snapshot that was empty ~1s
+/// after a final and populated ~2.5s after it, which is non-monotonic and so
+/// cannot be the replay window. Nothing in this tree reproduces it, and this
+/// test is the guard that says so in the shape the report described: a gap of
+/// any length in that first stretch fails it. It drives the real actor through
+/// the real create path rather than the controller, because the reported
+/// journey was an ASYNC final delivered by a worker followup, not a synchronous
+/// command result.
+#[tokio::test]
+async fn a_final_is_replayable_continuously_from_the_moment_it_is_broadcast() {
+    let (addr, _tmp) = boot_for_create_agent().await;
+    let (mut ws_a, _id_a) = connect_events(addr).await;
+
+    // No `X-Connection-Id`, so the create's statuses are `All`-scoped and every
+    // connection is entitled to them.
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{addr}/api/v1/sessions"))
+        .json(&serde_json::json!({"kind":"new","project_id":"p1","name":"replay"}))
+        .send()
+        .await
+        .expect("POST create");
+    assert!(
+        resp.status().is_success(),
+        "create must be accepted, got {}",
+        resp.status()
+    );
+
+    // Wait for the create's INFO final on the live socket, so the rest of the
+    // test is timed from the broadcast rather than from the POST.
+    assert!(
+        saw_status_tone(&mut ws_a, "info", Duration::from_secs(20))
+            .await
+            .is_some(),
+        "the attached connection must see the create final"
+    );
+
+    // Straight after the final.
+    let (mut ws_b, _id_b) = connect_events(addr).await;
+    assert!(
+        saw_status_tone(&mut ws_b, "info", Duration::from_secs(5))
+            .await
+            .is_some(),
+        "a connection made immediately after the final must be replayed it"
+    );
+
+    // And again after the interval the report said was empty. Presence at both
+    // ends brackets the reported gap: the snapshot cannot have dropped the final
+    // and picked it back up in between, because a drop is permanent until a new
+    // `set` on the key, and no second create runs here.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let (mut ws_c, _id_c) = connect_events(addr).await;
+    assert!(
+        saw_status_tone(&mut ws_c, "info", Duration::from_secs(5))
+            .await
+            .is_some(),
+        "a connection made 1.5s after the final must still be replayed it"
+    );
+
+    // Nothing may have dismissed it either: a server-driven `status_cleared` for
+    // a finished operation is what the retention split removed.
+    let cleared = tokio::time::timeout(Duration::from_millis(500), async {
+        loop {
+            if let Some(Ok(m)) = ws_a.next().await
+                && let Ok(t) = m.into_text()
+                && t.contains("status_cleared")
+            {
+                return t.to_string();
+            }
+        }
+    })
+    .await;
+    assert!(
+        cleared.is_err(),
+        "no status_cleared may be sent for a finished create, got {cleared:?}"
+    );
+}
+
 /// A failed delete is reported to the connection that was watching, and the
 /// error arrives STICKY end to end, from the engine resolver to the wire.
 ///
