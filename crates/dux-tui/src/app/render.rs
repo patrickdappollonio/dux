@@ -2554,13 +2554,12 @@ impl App {
                 // per cell, so the clear only redid work the frame start had
                 // already done. What it did NOT redo is the frame-wide `app_bg`
                 // fill, which runs before this: a reset cell's background is
-                // `Color::Reset` (the host terminal's default). In the
-                // non-interactive pane `pty_cell_colors` returns no background
-                // for a default-background cell, on purpose, so the app surface
-                // shows through, and the loop below applies each cell as a
-                // style PATCH that leaves an unset background alone. The clear
-                // therefore stripped the theme colour off every cell the child
-                // had not painted a background on.
+                // `Color::Reset` (the host terminal's default). The loop below
+                // paints every snapshot cell's colors verbatim, but it skips
+                // `WIDE_CHAR_SPACER` cells and anything outside the child's
+                // grid, and those skipped cells rely on the frame-wide fill.
+                // The clear stripped the theme colour off exactly those cells,
+                // and only on the frames where it fired, so the pane flickered.
                 //
                 // It used to fire on a single frame per user scroll, which
                 // nobody could see. Now output always flows and the terminal
@@ -2594,18 +2593,15 @@ impl App {
                     }
                     let x = term_area.x + cell.col;
                     let y = term_area.y + cell.row;
-                    let (fg, bg) = pty_cell_colors(
-                        to_ratatui_color(cell.fg),
-                        to_ratatui_color(cell.bg),
-                        is_input,
-                        &self.theme,
-                    );
-                    let mut style = Style::default()
-                        .fg(fg)
+                    // The child's colors render verbatim in every mode. The
+                    // pane used to desaturate when not interactive (dim
+                    // foreground, grayscaled background) as a read-only cue;
+                    // that cue is now the caret and the hint bar, so the CLI's
+                    // own palette always shows end-to-end.
+                    let style = Style::default()
+                        .fg(to_ratatui_color(cell.fg))
+                        .bg(to_ratatui_color(cell.bg))
                         .add_modifier(to_ratatui_modifier(cell.modifier));
-                    if let Some(bg) = bg {
-                        style = style.bg(bg);
-                    }
                     let ratatui_cell = &mut buf[(x, y)];
                     // When this cell carries an OSC 8 hyperlink and links are
                     // enabled, wrap its symbol in a self-contained OSC 8 open/close
@@ -9249,91 +9245,6 @@ impl App {
     }
 }
 
-/// Convert a [`Color`] to its grayscale equivalent using ITU-R BT.601
-/// luminance weights (0.299 R + 0.587 G + 0.114 B).
-///
-/// - `Color::Rgb` values are converted directly.
-/// - `Color::Indexed` values are resolved through the standard xterm-256
-///   palette before conversion.
-/// - All other variants (`Reset`, named ANSI colors, etc.) are returned as-is.
-fn to_grayscale(color: Color) -> Color {
-    match color {
-        Color::Rgb(r, g, b) => {
-            let l = (0.299 * r as f64 + 0.587 * g as f64 + 0.114 * b as f64).round() as u8;
-            Color::Rgb(l, l, l)
-        }
-        Color::Indexed(idx) => {
-            let (r, g, b) = xterm256_to_rgb(idx);
-            let l = (0.299 * r as f64 + 0.587 * g as f64 + 0.114 * b as f64).round() as u8;
-            Color::Rgb(l, l, l)
-        }
-        other => other,
-    }
-}
-
-/// Resolve a xterm-256 palette index to (R, G, B).
-fn xterm256_to_rgb(idx: u8) -> (u8, u8, u8) {
-    #[rustfmt::skip]
-    const BASIC: [(u8, u8, u8); 16] = [
-        (0,0,0),       (128,0,0),     (0,128,0),     (128,128,0),
-        (0,0,128),     (128,0,128),   (0,128,128),   (192,192,192),
-        (128,128,128), (255,0,0),     (0,255,0),     (255,255,0),
-        (0,0,255),     (255,0,255),   (0,255,255),   (255,255,255),
-    ];
-
-    match idx {
-        0..=15 => BASIC[idx as usize],
-        16..=231 => {
-            let val = idx - 16;
-            let r_idx = val / 36;
-            let g_idx = (val % 36) / 6;
-            let b_idx = val % 6;
-            let to_level = |i: u8| if i == 0 { 0 } else { 55 + 40 * i };
-            (to_level(r_idx), to_level(g_idx), to_level(b_idx))
-        }
-        232..=255 => {
-            let level = 8 + 10 * (idx - 232);
-            (level, level, level)
-        }
-    }
-}
-
-/// Choose foreground/background colors for a PTY cell.
-///
-/// In interactive mode (`is_input == true`) the cell's original colors are
-/// returned. In non-interactive mode the foreground is replaced with the
-/// theme's dim color and the background is converted to grayscale, giving
-/// the pane a muted appearance that signals it is read-only.
-///
-/// Resolve the foreground/background a single PTY cell should render with.
-///
-/// The bg is `Option<Color>` to give the caller a way to say "leave the
-/// underlying buffer background alone": the rendering loop only applies bg
-/// when this is `Some`, so `None` lets whatever was already in the buffer
-/// (the frame-wide `app_bg` pre-fill, the dim overlay, the parent block
-/// fill, …) show through.
-///
-/// Interactive mode (fullscreen agent or focused agent/terminal) always
-/// passes the CLI's colors through unchanged so the user's configured
-/// palette renders end-to-end without dux fighting it.
-///
-/// Non-interactive (minimized / read-only) mode dims the foreground to a
-/// single muted shade. Cells the CLI explicitly colored have their
-/// background grayscaled, which is what produces the recognizable "this
-/// pane is read-only" look. Cells the CLI emitted with `Color::Reset` are
-/// returned with `bg = None` so the dim overlay / app surface continues to
-/// show through them — only the solid CLI-painted backgrounds are
-/// grayscaled, not the ambient surface around them.
-fn pty_cell_colors(fg: Color, bg: Color, is_input: bool, theme: &Theme) -> (Color, Option<Color>) {
-    if is_input {
-        (fg, Some(bg))
-    } else if bg == Color::Reset {
-        (theme.overlay_dim_fg, None)
-    } else {
-        (theme.overlay_dim_fg, Some(to_grayscale(bg)))
-    }
-}
-
 fn format_bytes(bytes: u64) -> String {
     const KIB: u64 = 1024;
     const MIB: u64 = KIB * 1024;
@@ -11563,11 +11474,14 @@ mod tests {
     /// essentially every frame and the pane background visibly flipped between
     /// themed and terminal-default while the agent talked.
     ///
-    /// Non-interactive on purpose: in interactive mode a default-background PTY
-    /// cell deliberately resolves to `Some(Color::Reset)` (see
-    /// `pty_cell_colors_preserves_default_bg_in_interactive_mode`) so the CLI's
-    /// own surface shows through, and the pane's own background is not what the
-    /// user is looking at. Non-interactive is where `app_bg` is the surface.
+    /// PTY cell colors now render verbatim in every mode, so a child cell with
+    /// a default background legitimately carries `Color::Reset` here. What this
+    /// test pins is STABILITY: the pane's background distribution must be
+    /// byte-identical between a frame where the offset moved and one where it
+    /// did not, which is exactly what the old clear broke (it fired only on
+    /// offset-change frames and stripped the frame-wide fill off every cell
+    /// the snapshot loop leaves alone, so the pane flickered while the agent
+    /// talked).
     #[test]
     fn agent_pane_background_survives_a_scrollback_offset_change() {
         use ratatui::Terminal;
@@ -11637,20 +11551,6 @@ mod tests {
         let moved_badge = scrollback_badge_rect(&app, term_area);
         let moved = pane_bg_tally(terminal.backend().buffer(), term_area, moved_badge);
 
-        let app_bg = format!("{:?}", app.theme.app_bg);
-        for (label, tally) in [("offset unchanged", &quiet), ("offset moved", &moved)] {
-            assert_eq!(
-                tally.get("Reset").copied().unwrap_or(0),
-                0,
-                "the {label} frame dropped agent-pane cells to the terminal default \
-                 background; backgrounds were {tally:?}"
-            );
-            assert!(
-                tally.get(&app_bg).copied().unwrap_or(0) > 0,
-                "the {label} frame painted no themed {app_bg} background in the agent \
-                 pane; backgrounds were {tally:?}"
-            );
-        }
         assert_eq!(
             quiet, moved,
             "the agent pane background must not depend on whether the scrollback \
@@ -12331,115 +12231,61 @@ mod tests {
         assert_eq!(capitalize("CODEX"), "CODEX");
     }
 
-    // ── Unit tests for pty_cell_colors ────────────────────────────
+    // ── PTY cell colors render verbatim in every mode ──────────────
 
+    /// The non-interactive (minimized, read-only) agent pane must paint the
+    /// child's colors verbatim. The old desaturation (dim foreground,
+    /// grayscaled background) is gone: the caret and the hint bar carry the
+    /// mode signal now, not a washed-out palette.
     #[test]
-    fn pty_cell_colors_passes_through_in_interactive_mode() {
-        let theme = Theme::default_dark();
-        let fg = Color::Rgb(200, 100, 50);
-        let bg = Color::Rgb(10, 20, 30);
-        assert_eq!(pty_cell_colors(fg, bg, true, &theme), (fg, Some(bg)));
-    }
+    fn non_interactive_pane_paints_child_colors_verbatim() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
 
-    #[test]
-    fn pty_cell_colors_preserves_default_bg_in_interactive_mode() {
-        // Color::Reset must pass through so the agent/terminal pane shows
-        // whatever the user's CLI configured rather than fighting it with
-        // a dux-themed surface.
-        let theme = Theme::default_dark();
-        let fg = Color::Rgb(200, 100, 50);
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        // Red foreground on blue background, at a known cell.
+        let args = vec![
+            "-c".to_string(),
+            "printf '\\033[5;9H\\033[31;44mX'; sleep 30".to_string(),
+        ];
+        let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 24, 80, 100)
+            .expect("spawn pty");
+        app.engine.providers.insert(session_id, client);
+
+        // Non-interactive: the pane is visible but input is NOT routed to it.
+        app.session_surface = SessionSurface::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::None;
+        app.center_mode = CenterMode::Agent;
+        app.input_target = InputTarget::None;
+
+        // The cursor lands one cell right of the X once it is drawn.
+        wait_for_agent_cursor(&mut app, 4, 9);
+
+        let backend = TestBackend::new(100, 40);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+
+        let term_area = app
+            .mouse_layout
+            .agent_term
+            .expect("agent terminal area should be recorded after render");
+        let cell = &terminal.backend().buffer()[(term_area.x + 8, term_area.y + 4)];
+        assert_eq!(cell.symbol(), "X");
+        // The emulator reports the standard palette as indexed colors: SGR 31
+        // is palette index 1 (red) and SGR 44 is palette index 4 (blue).
         assert_eq!(
-            pty_cell_colors(fg, Color::Reset, true, &theme),
-            (fg, Some(Color::Reset))
+            cell.fg,
+            Color::Indexed(1),
+            "the child's SGR 31 foreground must render verbatim, not dimmed"
         );
-    }
-
-    #[test]
-    fn pty_cell_colors_grayscales_solid_bg_in_non_interactive_mode() {
-        let theme = Theme::default_dark();
-        let fg = Color::Rgb(200, 100, 50);
-        let bg = Color::Rgb(10, 20, 30);
-        let (result_fg, result_bg) = pty_cell_colors(fg, bg, false, &theme);
-        assert_eq!(result_fg, theme.overlay_dim_fg);
-        // Solid CLI-painted backgrounds get grayscaled, marking them as
-        // read-only.
-        assert_eq!(result_bg, Some(to_grayscale(bg)));
-        // Sanity: the grayscale value is a uniform grey, not near-black.
-        let expected_l = (0.299 * 10.0_f64 + 0.587 * 20.0 + 0.114 * 30.0).round() as u8;
         assert_eq!(
-            result_bg,
-            Some(Color::Rgb(expected_l, expected_l, expected_l))
+            cell.bg,
+            Color::Indexed(4),
+            "the child's SGR 44 background must render verbatim, not grayscaled"
         );
-    }
-
-    #[test]
-    fn pty_cell_colors_lets_default_bg_show_through_in_non_interactive_mode() {
-        let theme = Theme::default_dark();
-        let fg = Color::Rgb(200, 100, 50);
-        // Cells the CLI emitted with no explicit background return `None`
-        // for the bg so the rendering loop leaves the underlying buffer
-        // bg untouched — that lets the dim overlay / app surface show
-        // through the minimized PTY view, only grayscaling the cells the
-        // CLI actually painted.
-        assert_eq!(
-            pty_cell_colors(fg, Color::Reset, false, &theme),
-            (theme.overlay_dim_fg, None)
-        );
-    }
-
-    // ── Unit tests for to_grayscale / xterm256_to_rgb ──────────────
-
-    #[test]
-    fn to_grayscale_rgb() {
-        // Pure red (255,0,0) → luminance ≈ 76
-        assert_eq!(to_grayscale(Color::Rgb(255, 0, 0)), Color::Rgb(76, 76, 76));
-        // Pure green (0,255,0) → luminance ≈ 150
-        assert_eq!(
-            to_grayscale(Color::Rgb(0, 255, 0)),
-            Color::Rgb(150, 150, 150)
-        );
-        // Pure white → stays white
-        assert_eq!(
-            to_grayscale(Color::Rgb(255, 255, 255)),
-            Color::Rgb(255, 255, 255)
-        );
-        // Pure black → stays black
-        assert_eq!(to_grayscale(Color::Rgb(0, 0, 0)), Color::Rgb(0, 0, 0));
-    }
-
-    #[test]
-    fn to_grayscale_indexed() {
-        // Index 1 = red (128,0,0) → luminance ≈ 38
-        let result = to_grayscale(Color::Indexed(1));
-        assert_eq!(result, Color::Rgb(38, 38, 38));
-        // Index 244 = grayscale ramp entry → 8 + 10*(244-232) = 128
-        assert_eq!(to_grayscale(Color::Indexed(244)), Color::Rgb(128, 128, 128));
-    }
-
-    #[test]
-    fn to_grayscale_reset_passthrough() {
-        assert_eq!(to_grayscale(Color::Reset), Color::Reset);
-    }
-
-    #[test]
-    fn xterm256_basic_colors() {
-        assert_eq!(xterm256_to_rgb(0), (0, 0, 0));
-        assert_eq!(xterm256_to_rgb(7), (192, 192, 192));
-        assert_eq!(xterm256_to_rgb(15), (255, 255, 255));
-    }
-
-    #[test]
-    fn xterm256_cube_colors() {
-        // Index 16 = (0,0,0)
-        assert_eq!(xterm256_to_rgb(16), (0, 0, 0));
-        // Index 196 = (255,0,0): (196-16)=180, r=180/36=5, g=0, b=0 → (255,0,0)
-        assert_eq!(xterm256_to_rgb(196), (255, 0, 0));
-    }
-
-    #[test]
-    fn xterm256_grayscale_ramp() {
-        assert_eq!(xterm256_to_rgb(232), (8, 8, 8));
-        assert_eq!(xterm256_to_rgb(255), (238, 238, 238));
     }
 
     #[test]
