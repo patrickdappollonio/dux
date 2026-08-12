@@ -147,6 +147,53 @@ impl TextInput {
         self.cursor = index + ch.len_utf8();
     }
 
+    /// Insert pasted text at the caret, leaving the caret after the inserted
+    /// text.
+    ///
+    /// A MULTILINE field takes the text verbatim, with line endings
+    /// normalized to `\n` (`\r\n` and a lone `\r` each become one newline,
+    /// the form the field's own Enter inserts). A SINGLE-LINE field collapses
+    /// each INTERIOR newline run into one space, and drops leading/trailing
+    /// runs outright: that deliberately keeps every pasted word visible and
+    /// editable instead of silently truncating at the first line break (the
+    /// conservative choice; no content is discarded), while the trailing
+    /// newline most copied lines carry adds no stray space.
+    ///
+    /// Goes through [`TextInput::insert_char`] per character so the optional
+    /// `char_map` filters a paste exactly as it filters typing.
+    pub fn insert_str(&mut self, text: &str) {
+        let multiline = self.multiline.is_some();
+        let mut pending_separator = false;
+        let mut inserted_any = false;
+        let mut chars = text.chars().peekable();
+        while let Some(ch) = chars.next() {
+            let ch = if ch == '\r' {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                '\n'
+            } else {
+                ch
+            };
+            if ch == '\n' {
+                if multiline {
+                    self.insert_char('\n');
+                } else {
+                    pending_separator = true;
+                }
+                continue;
+            }
+            if pending_separator {
+                if inserted_any {
+                    self.insert_char(' ');
+                }
+                pending_separator = false;
+            }
+            self.insert_char(ch);
+            inserted_any = true;
+        }
+    }
+
     pub fn backspace(&mut self) {
         let index = clamp_cursor(&self.text, self.cursor);
         if index == 0 {
@@ -1000,6 +1047,66 @@ mod tests {
     fn handle_key_returns_false_for_tab() {
         let mut ti = TextInput::new();
         assert!(!ti.handle_key(key(KeyCode::Tab)));
+    }
+
+    // -- insert_str (paste) --
+
+    #[test]
+    fn insert_str_multiline_takes_text_verbatim_with_normalized_newlines() {
+        let mut ti = TextInput::new().with_multiline(4);
+        ti.insert_str("one\r\ntwo\rthree\nfour");
+        assert_eq!(ti.text, "one\ntwo\nthree\nfour");
+        assert_eq!(ti.cursor, ti.text.len(), "the caret lands after the paste");
+    }
+
+    #[test]
+    fn insert_str_single_line_collapses_newline_runs_to_one_space() {
+        let mut ti = TextInput::new();
+        ti.insert_str("one\ntwo\r\n\r\n\nthree");
+        assert_eq!(
+            ti.text, "one two three",
+            "every word survives; a newline run is one space"
+        );
+        assert_eq!(ti.cursor, ti.text.len());
+    }
+
+    #[test]
+    fn insert_str_single_line_drops_leading_and_trailing_newlines() {
+        let mut ti = TextInput::new();
+        ti.insert_str("\nfoo\n");
+        assert_eq!(
+            ti.text, "foo",
+            "a copied line's trailing newline must not add a stray space"
+        );
+    }
+
+    #[test]
+    fn insert_str_inserts_at_the_caret_not_the_end() {
+        let mut ti = TextInput::with_text("ad".into());
+        ti.cursor = 1;
+        ti.insert_str("bc");
+        assert_eq!(ti.text, "abcd");
+        assert_eq!(ti.cursor, 3, "the caret lands after the inserted text");
+    }
+
+    #[test]
+    fn insert_str_is_utf8_safe_around_wide_glyphs() {
+        // The caret sits between two multi-byte glyphs; the paste itself
+        // carries wide glyphs too.
+        let mut ti = TextInput::with_text("日語".into());
+        ti.cursor = "日".len();
+        ti.insert_str("本emoji🚀");
+        assert_eq!(ti.text, "日本emoji🚀語");
+        assert_eq!(ti.cursor, "日本emoji🚀".len());
+    }
+
+    #[test]
+    fn insert_str_respects_the_char_map_like_typing() {
+        // A mapper that rejects spaces outright: the paste must be filtered
+        // exactly as typed input would be.
+        let mut ti = TextInput::new().with_char_map(|_, _, ch| (ch != ' ').then_some(ch));
+        ti.insert_str("a b");
+        assert_eq!(ti.text, "ab");
     }
 
     #[test]

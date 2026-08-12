@@ -10,8 +10,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::event::{
-    self, DisableFocusChange, DisableMouseCapture, EnableFocusChange, EnableMouseCapture, Event,
-    KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+    EnableFocusChange, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton,
+    MouseEvent, MouseEventKind,
 };
 use crossterm::execute;
 use ratatui::Frame;
@@ -3037,9 +3038,17 @@ impl App {
         self.engine.spawn_gh_status_check();
         let mut terminal = ratatui::init();
         // EnableFocusChange (DEC mode 1004) so the host reports window focus,
-        // gating the per-tick "viewed" stamp. Enabled/disabled symmetrically
-        // with mouse capture at every terminal-mode lifecycle site below.
-        execute!(stdout(), EnableMouseCapture, EnableFocusChange)?;
+        // gating the per-tick "viewed" stamp. EnableBracketedPaste (DEC mode
+        // 2004) so a host paste arrives as one `Event::Paste` instead of a
+        // burst of key events (`App::handle_paste` routes it to whichever
+        // surface owns typing). All three are enabled/disabled symmetrically
+        // at every terminal-mode lifecycle site below.
+        execute!(
+            stdout(),
+            EnableMouseCapture,
+            EnableFocusChange,
+            EnableBracketedPaste
+        )?;
 
         let result: RunExit = {
             'main: loop {
@@ -3085,9 +3094,15 @@ impl App {
                     if let Err(err) = terminal.clear() {
                         self.report_runtime_error("force redraw failed", &err);
                     }
-                    // Re-enable mouse capture and focus reporting:
-                    // terminal.clear() resets terminal state which drops both.
-                    let _ = execute!(stdout(), EnableMouseCapture, EnableFocusChange);
+                    // Re-enable mouse capture, focus reporting, and bracketed
+                    // paste: terminal.clear() resets terminal state which
+                    // drops all three.
+                    let _ = execute!(
+                        stdout(),
+                        EnableMouseCapture,
+                        EnableFocusChange,
+                        EnableBracketedPaste
+                    );
                 }
 
                 if let Err(err) = terminal.draw(|frame| self.render(frame)) {
@@ -3230,7 +3245,7 @@ impl App {
                                     self.terminal_focus.on_focus_gained(Instant::now())
                                 }
                                 Event::FocusLost => self.terminal_focus.on_focus_lost(),
-                                _ => {}
+                                Event::Paste(text) => self.handle_paste(&text),
                             }
 
                             // Stop draining if exit was requested.
@@ -3264,7 +3279,12 @@ impl App {
             }
         };
 
-        let _ = execute!(stdout(), DisableMouseCapture, DisableFocusChange);
+        let _ = execute!(
+            stdout(),
+            DisableMouseCapture,
+            DisableFocusChange,
+            DisableBracketedPaste
+        );
         ratatui::restore();
 
         // On a real quit, wind the agents and companion terminals down

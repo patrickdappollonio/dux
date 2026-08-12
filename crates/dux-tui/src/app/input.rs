@@ -1353,6 +1353,259 @@ impl App {
         }
     }
 
+    /// Route a host-terminal paste (`Event::Paste`, bracketed paste captured
+    /// by crossterm) to whichever surface owns typing right now, mirroring
+    /// `handle_key`'s routing ladder rung for rung. With paste capture on,
+    /// text fields no longer receive pastes as a burst of key events, so
+    /// EVERY typing surface must be reachable from here; a paste with no
+    /// typing surface focused is deliberately dropped (pasting at a list is
+    /// not typing, and feeding the characters to the binding lookup would
+    /// fire hotkeys).
+    pub(crate) fn handle_paste(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        // An open modal owns the paste (the ladder's first rung).
+        if !matches!(self.prompt, PromptState::None) {
+            self.handle_prompt_paste(text);
+            return;
+        }
+        // Fullscreen INTERACTIVE mode reads raw stdin, so crossterm should
+        // never deliver a Paste there; handle it defensively the same way the
+        // raw path would (verbatim to the focused surface's PTY).
+        if matches!(
+            self.input_target,
+            InputTarget::Agent | InputTarget::Terminal
+        ) {
+            self.paste_to_center_pty(text);
+            return;
+        }
+        // The fullscreen startup-log viewer: its search row is the one typing
+        // surface; everything else on that screen is scroll-only.
+        if matches!(self.fullscreen_overlay, FullscreenOverlay::StartupLog) {
+            let mut changed = false;
+            if let Some(viewer) = self.startup_log_viewer.as_mut()
+                && viewer.searching
+            {
+                let before = viewer.search.text.clone();
+                viewer.search.insert_str(text);
+                changed = viewer.search.text != before;
+            }
+            if changed {
+                self.update_startup_log_search_scroll();
+            }
+            return;
+        }
+        // The macro bar's query (type-immediately).
+        if let Some(bar) = self.macro_bar.as_mut() {
+            bar.input.insert_str(text);
+            bar.selected = 0;
+            return;
+        }
+        // The agent-list filter (type-immediately while Left has focus).
+        if self.agent_filter.is_some() && self.focus == FocusPane::Left {
+            if let Some(input) = self.agent_filter.as_mut() {
+                input.insert_str(text);
+                self.rebuild_left_items();
+            }
+            return;
+        }
+        // The help overlay consumes every key and takes no text.
+        if self.help_scroll.is_some() {
+            return;
+        }
+        // The engaged commit box: a multiline field, the text arrives
+        // verbatim (line breaks included).
+        if self.input_target == InputTarget::CommitMessage {
+            self.commit_input.insert_str(text);
+            return;
+        }
+        // The typeable center pane: the paste belongs to the child PTY,
+        // except while scrolled back, where typing is suppressed.
+        if self.center_typeable() && !self.scroll_mode_active() {
+            self.paste_to_center_pty(text);
+            return;
+        }
+        // The files-pane search row (type-immediately while open).
+        if self.focus == FocusPane::Files && self.files_search_active {
+            self.files_search.insert_str(text);
+            let query = self.files_search.text.clone();
+            let found_match = self.update_files_search(query);
+            if !found_match && self.has_files_search() {
+                self.set_info("No file matches the current search.");
+            }
+        }
+        // Anything else: nothing owns typing, so the paste is dropped.
+    }
+
+    /// The modal half of [`App::handle_paste`]: resolve the open prompt's
+    /// FOCUSED text field and insert there, running the same follow-up
+    /// bookkeeping the char-typing path runs (filter re-aim, selection
+    /// reset). Exhaustive over `PromptState` with no `_` arm, like
+    /// `modal::prompt_text_inputs`, so a new modal that grows a text field
+    /// cannot silently become unpasteable.
+    fn handle_prompt_paste(&mut self, text: &str) {
+        // Follow-ups that need `&mut self` after the prompt borrow ends.
+        let mut refresh_path_completions = false;
+        let mut select_startup_log: Option<usize> = None;
+        match &mut self.prompt {
+            PromptState::None => {}
+
+            // Type-immediately: the palette query.
+            PromptState::Command { input, selected } => {
+                input.insert_str(text);
+                *selected = 0;
+            }
+
+            // Filters take a paste only while their search row is open (a
+            // closed search row means the list owns the keys, and a paste is
+            // typing).
+            PromptState::PickProject { list, .. } => {
+                if list.searching {
+                    list.filter.insert_str(text);
+                    list.selected = 0;
+                }
+            }
+            PromptState::KillRunning(prompt) => {
+                if prompt.list.searching {
+                    prompt.list.filter.insert_str(text);
+                    prompt.list.selected = 0;
+                    Self::clamp_kill_running_prompt(prompt);
+                }
+            }
+            PromptState::BrowseProjects {
+                editing_path,
+                path_input,
+                searching,
+                filter,
+                selected,
+                ..
+            } => {
+                if *editing_path {
+                    path_input.insert_str(text);
+                    refresh_path_completions = true;
+                } else if *searching {
+                    filter.insert_str(text);
+                    *selected = 0;
+                }
+            }
+            PromptState::StartupCommandLogs(prompt) => {
+                if prompt.searching {
+                    let before = prompt.filter.text.clone();
+                    prompt.filter.insert_str(text);
+                    if prompt.filter.text != before {
+                        select_startup_log = Self::startup_command_log_filtered_indices(prompt)
+                            .first()
+                            .copied();
+                    }
+                }
+            }
+
+            // Single-line form fields: the field takes the paste while IT has
+            // focus; with focus on a checkbox or button the paste is dropped,
+            // exactly as typed characters are (editing a field that draws no
+            // caret would be invisible).
+            PromptState::RenameSession { input, focus, .. } => {
+                if matches!(focus, RenameSessionFocus::Input) {
+                    input.insert_str(text);
+                }
+            }
+            PromptState::PullRequestInput { input, focus, .. } => {
+                if matches!(focus, PullRequestInputFocus::Input) {
+                    input.insert_str(text);
+                }
+            }
+            PromptState::AttachPullRequestInput { input, .. } => {
+                input.insert_str(text);
+            }
+            PromptState::NameNewAgent { input, focus, .. } => {
+                if matches!(focus, NameNewAgentFocus::Input) {
+                    input.insert_str(text);
+                }
+            }
+
+            // Full-text modal fields take a paste only while ENGAGED: an
+            // unengaged field owns no keys at all, and that includes a paste.
+            PromptState::ConfigureStartupCommand { input, .. }
+            | PromptState::ConfigureProjectEnv { input, .. }
+            | PromptState::ConfigureGlobalEnv { input, .. } => {
+                if self.input_target == InputTarget::StartupCommand {
+                    input.insert_str(text);
+                }
+            }
+            PromptState::EditMacros {
+                editing: Some(state),
+                pending_delete: None,
+                ..
+            } => {
+                if self.input_target == InputTarget::MacroText {
+                    state.text_input.insert_str(text);
+                } else if matches!(state.focus, MacroEditFocus::Name) {
+                    state.name_input.insert_str(text);
+                }
+            }
+            // The macro list, and the nested delete-confirm, own no text.
+            PromptState::EditMacros { .. } => {}
+
+            // Report, confirm, and picker modals hold no text field; the
+            // paste is dropped, as their key handlers drop plain characters.
+            PromptState::AgentInfo(_)
+            | PromptState::AddProjectFailed { .. }
+            | PromptState::FirstLoad(_)
+            | PromptState::DebugInput { .. }
+            | PromptState::ResourceMonitor { .. }
+            | PromptState::ConfigReloadFailed { .. }
+            | PromptState::ConfirmDeleteAgent { .. }
+            | PromptState::ConfirmDeleteTerminal { .. }
+            | PromptState::ConfirmCloseTab { .. }
+            | PromptState::ConfirmQuit { .. }
+            | PromptState::ConfirmDiscardFile { .. }
+            | PromptState::ConfirmInitRepo { .. }
+            | PromptState::ConfirmCreateInitialCommit { .. }
+            | PromptState::ConfirmNonDefaultBranch { .. }
+            | PromptState::ConfirmUseExistingBranch { .. }
+            | PromptState::ConfirmKillRunning(_)
+            | PromptState::PickEditor { .. }
+            | PromptState::PickProjectWorktree(_)
+            | PromptState::ChangeTheme(_)
+            | PromptState::ChangeAgentProvider(_)
+            | PromptState::ChangeDefaultProvider(_)
+            | PromptState::ChangeProjectDefaultProvider(_) => {}
+        }
+        if refresh_path_completions {
+            self.refresh_path_editor_completions();
+        }
+        if let Some(index) = select_startup_log {
+            self.select_startup_command_log(index);
+        }
+    }
+
+    /// Deliver a paste to the focused center surface's PTY. Wrapped in the
+    /// bracketed-paste markers iff the CHILD enabled DECSET 2004 (so it can
+    /// tell a paste from typing); otherwise sent raw with newlines normalized
+    /// to carriage returns, which is what a classic terminal paste produces.
+    /// Stamped as typing (`note_pty_input`) so the echo the paste provokes is
+    /// not read as the agent working.
+    fn paste_to_center_pty(&mut self, text: &str) {
+        let Some(provider) = self.selected_terminal_surface_client() else {
+            return;
+        };
+        let bytes = if provider.has_bracketed_paste() {
+            let mut bytes = Vec::with_capacity(text.len() + 12);
+            bytes.extend_from_slice(b"\x1b[200~");
+            bytes.extend_from_slice(text.as_bytes());
+            bytes.extend_from_slice(b"\x1b[201~");
+            bytes
+        } else {
+            text.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
+        };
+        let _ = provider.write_bytes(&bytes);
+        self.terminal_selection = None;
+        if let Some(id) = self.selected_terminal_surface_id() {
+            self.engine.note_pty_input(&id);
+        }
+    }
+
     fn scroll_pty(&mut self, direction: ScrollDirection, amount: usize) {
         let provider = match self.selected_terminal_surface_client() {
             Some(provider) => provider,
@@ -24362,6 +24615,219 @@ cyan = "#00ffff"
             rendered.contains('x'),
             "a plain key after closing the bar types into the agent; got: {rendered:?}"
         );
+    }
+
+    // -- Host paste routing (`App::handle_paste`) --
+
+    /// A live `cat -v` child under the session-slot tab that first runs the
+    /// given printf payload (e.g. a DECSET), with the center pane focused,
+    /// windowed, and typeable.
+    fn typeable_app_with_paste_child(decsets: &str) -> crate::app::App {
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        let cmd = format!("stty raw -echo; printf '{decsets}'; exec cat -v");
+        let client = PtyClient::spawn(
+            "/bin/sh",
+            &["-c".to_string(), cmd],
+            std::path::Path::new("."),
+            5,
+            80,
+            100,
+        )
+        .expect("spawn pty");
+        app.engine.providers.insert(session_id, client);
+        app.selected_left = 1;
+        app.focus = FocusPane::Center;
+        app.center_mode = CenterMode::Agent;
+        app.session_surface = crate::model::SessionSurface::Agent;
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        assert!(app.center_typeable(), "fixture must start typeable");
+        app
+    }
+
+    fn paste_child_grid(app: &crate::app::App) -> String {
+        app.selected_terminal_surface_client()
+            .expect("provider")
+            .snapshot()
+            .cells
+            .iter()
+            .map(|cell| cell.symbol.as_str())
+            .collect()
+    }
+
+    fn wait_for_paste_echo(app: &crate::app::App, needle: &str) -> String {
+        let mut rendered = String::new();
+        for _ in 0..400 {
+            rendered = paste_child_grid(app);
+            if rendered.contains(needle) {
+                return rendered;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("the child never echoed {needle:?}; grid was: {rendered:?}");
+    }
+
+    /// A paste into the typeable pane of a child that enabled DECSET 2004 is
+    /// wrapped in the bracketed-paste markers, content verbatim.
+    #[test]
+    fn paste_to_pty_is_wrapped_when_the_child_enabled_bracketed_paste() {
+        let mut app = typeable_app_with_paste_child("\\033[?2004h");
+        let mut ready = false;
+        for _ in 0..400 {
+            if app
+                .selected_terminal_surface_client()
+                .is_some_and(|p| p.has_bracketed_paste())
+            {
+                ready = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(ready, "the child never enabled bracketed paste");
+
+        app.handle_paste("hi\nyou");
+
+        // `cat -v` renders ESC as `^[`, so the wrapped paste reads
+        // `^[[200~hi` … `you^[[201~`.
+        let rendered = wait_for_paste_echo(&app, "[201~");
+        assert!(
+            rendered.contains("[200~hi"),
+            "the open marker must precede the verbatim text; got {rendered:?}"
+        );
+        let session_id = app.engine.sessions[0].id.clone();
+        assert!(
+            app.engine.pty_input.contains_key(&session_id),
+            "a paste is typing: it must stamp the input window"
+        );
+    }
+
+    /// Without DECSET 2004 the paste is sent raw, with newlines normalized to
+    /// carriage returns (a classic terminal paste).
+    #[test]
+    fn paste_to_pty_without_2004_is_raw_with_cr_normalized_newlines() {
+        let mut app = typeable_app_with_paste_child("");
+
+        app.handle_paste("a\nb");
+
+        // Raw-mode `cat -v` renders the CR as `^M`; no bracket markers.
+        let rendered = wait_for_paste_echo(&app, "a^Mb");
+        assert!(
+            !rendered.contains("[200~"),
+            "no bracket markers without DECSET 2004; got {rendered:?}"
+        );
+    }
+
+    /// The engaged commit box takes a paste verbatim, line breaks included.
+    #[test]
+    fn paste_into_the_commit_box_keeps_line_breaks() {
+        let mut app = test_app(default_bindings());
+        app.focus = FocusPane::Files;
+        app.right_section = RightSection::CommitInput;
+        app.input_target = InputTarget::CommitMessage;
+
+        app.handle_paste("subject\n\nbody line");
+
+        assert_eq!(app.commit_input.text, "subject\n\nbody line");
+    }
+
+    /// The palette query is type-immediately, so a paste lands in it and
+    /// re-aims the selection, with the copied line's trailing newline dropped
+    /// rather than turned into a stray space.
+    #[test]
+    fn paste_into_the_palette_filter_types_and_reaims_the_selection() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::Command {
+            input: TextInput::new(),
+            selected: 3,
+        };
+
+        app.handle_paste("reload-config\n");
+
+        let PromptState::Command { input, selected } = &app.prompt else {
+            panic!("palette must stay open");
+        };
+        assert_eq!(input.text, "reload-config");
+        assert_eq!(*selected, 0, "a changed query re-aims the selection");
+    }
+
+    /// A modal's single-line field takes the paste while IT has focus, and
+    /// drops it while focus sits on the checkbox (typing a field that draws
+    /// no caret would be invisible).
+    #[test]
+    fn paste_into_a_modal_field_follows_focus() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::RenameSession {
+            session_id: "session-1".to_string(),
+            input: TextInput::new(),
+            rename_branch: false,
+            focus: RenameSessionFocus::Input,
+        };
+        app.handle_paste("new name");
+        if let PromptState::RenameSession { input, .. } = &app.prompt {
+            assert_eq!(input.text, "new name");
+        } else {
+            panic!("prompt must stay open");
+        }
+
+        if let PromptState::RenameSession { focus, .. } = &mut app.prompt {
+            *focus = RenameSessionFocus::RenameBranchCheckbox;
+        }
+        app.handle_paste(" more");
+        if let PromptState::RenameSession { input, .. } = &app.prompt {
+            assert_eq!(
+                input.text, "new name",
+                "a paste with focus on the checkbox is dropped"
+            );
+        }
+    }
+
+    /// A modal full-text field takes a paste only while ENGAGED; unengaged it
+    /// owns no keys at all, pastes included.
+    #[test]
+    fn paste_into_a_configure_modal_requires_engagement() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::ConfigureStartupCommand {
+            project_id: "project-1".to_string(),
+            project_name: "demo".to_string(),
+            input: TextInput::new().with_multiline(4),
+            focus: crate::app::ConfigureFieldFocus::Input,
+        };
+
+        app.handle_paste("npm install\nnpm run dev");
+        if let PromptState::ConfigureStartupCommand { input, .. } = &app.prompt {
+            assert!(
+                input.text.is_empty(),
+                "an unengaged full-text field takes no paste"
+            );
+        }
+
+        app.input_target = InputTarget::StartupCommand;
+        app.handle_paste("npm install\nnpm run dev");
+        if let PromptState::ConfigureStartupCommand { input, .. } = &app.prompt {
+            assert_eq!(
+                input.text, "npm install\nnpm run dev",
+                "the engaged field takes the paste verbatim"
+            );
+        }
+    }
+
+    /// With no typing surface focused the paste is dropped: nothing reaches
+    /// a PTY and no binding fires.
+    #[test]
+    fn paste_with_nothing_focused_is_dropped() {
+        let mut app = typeable_app_with_paste_child("");
+        app.focus = FocusPane::Left;
+        assert!(!app.center_typeable());
+
+        app.handle_paste("hello");
+
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let rendered = paste_child_grid(&app);
+        assert!(
+            !rendered.contains("hello"),
+            "a paste with nothing focused must not reach the PTY; got {rendered:?}"
+        );
+        assert!(app.commit_input.text.is_empty());
     }
 
     /// A dormant center pane has no PTY to send to, so the Center-scope chord
