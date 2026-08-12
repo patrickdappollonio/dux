@@ -1375,6 +1375,14 @@ impl PtyClient {
         self.terminal.lock().is_ok_and(|t| t.has_mouse_mode())
     }
 
+    /// Whether the child process has enabled bracketed paste (DECSET 2004).
+    /// When true, pasted text should be delivered wrapped in `ESC[200~` /
+    /// `ESC[201~` so the child can tell it apart from typed keystrokes;
+    /// when false, it should be written raw.
+    pub fn has_bracketed_paste(&self) -> bool {
+        self.terminal.lock().is_ok_and(|t| t.has_bracketed_paste())
+    }
+
     /// Non-blocking check of the child's exit status, memoized.
     ///
     /// The underlying `Child::try_wait` reaps the zombie and so yields the
@@ -2029,6 +2037,13 @@ impl TerminalState {
     /// alt screen; Claude and shells use the main screen.
     fn is_alt_screen(&self) -> bool {
         self.term.mode().contains(TermMode::ALT_SCREEN)
+    }
+
+    /// Whether the child process has enabled bracketed paste (DECSET 2004).
+    /// When true, pasted text should be wrapped in `ESC[200~` / `ESC[201~`
+    /// so the child can tell a paste apart from typed keystrokes.
+    fn has_bracketed_paste(&self) -> bool {
+        self.term.mode().contains(TermMode::BRACKETED_PASTE)
     }
 
     fn snapshot(&self) -> TerminalSnapshot {
@@ -5725,6 +5740,32 @@ mod tests {
         assert!(
             !terminal.has_mouse_mode(),
             "mouse mode should be disabled after DECRST 1000"
+        );
+    }
+
+    #[test]
+    fn bracketed_paste_off_by_default() {
+        let terminal = TerminalState::with_scrollback(24, 80, 100);
+        assert!(
+            !terminal.has_bracketed_paste(),
+            "a fresh terminal should not have bracketed paste enabled"
+        );
+    }
+
+    #[test]
+    fn bracketed_paste_tracks_decset_2004() {
+        let mut terminal = TerminalState::with_scrollback(24, 80, 100);
+        // DECSET 2004: the child asks for pastes wrapped in ESC[200~/201~.
+        terminal.process(b"\x1b[?2004h");
+        assert!(
+            terminal.has_bracketed_paste(),
+            "bracketed paste should be enabled after DECSET 2004"
+        );
+        // DECRST 2004 turns it back off.
+        terminal.process(b"\x1b[?2004l");
+        assert!(
+            !terminal.has_bracketed_paste(),
+            "bracketed paste should be disabled after DECRST 2004"
         );
     }
 
