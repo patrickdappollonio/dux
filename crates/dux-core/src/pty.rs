@@ -1391,6 +1391,15 @@ impl PtyClient {
         self.terminal.lock().is_ok_and(|t| t.has_bracketed_paste())
     }
 
+    /// Whether the child process has enabled application cursor keys
+    /// (DECSET 1, DECCKM). When true, unmodified cursor keys should be
+    /// encoded in the SS3 form (`ESC O A..D`, `ESC O H`/`ESC O F`) so a
+    /// child expecting application-mode arrows recognizes them; when
+    /// false, the CSI form is what a legacy terminal would send.
+    pub fn has_app_cursor(&self) -> bool {
+        self.terminal.lock().is_ok_and(|t| t.has_app_cursor())
+    }
+
     /// Non-blocking check of the child's exit status, memoized.
     ///
     /// The underlying `Child::try_wait` reaps the zombie and so yields the
@@ -2061,6 +2070,14 @@ impl TerminalState {
     /// so the child can tell a paste apart from typed keystrokes.
     fn has_bracketed_paste(&self) -> bool {
         self.term.mode().contains(TermMode::BRACKETED_PASTE)
+    }
+
+    /// Whether the child process has enabled application cursor keys
+    /// (DECSET 1, DECCKM). When true, unmodified cursor keys should be
+    /// delivered in the SS3 form (`ESC O A..D`, `ESC O H`/`ESC O F`)
+    /// rather than the CSI form.
+    fn has_app_cursor(&self) -> bool {
+        self.term.mode().contains(TermMode::APP_CURSOR)
     }
 
     fn snapshot(&self) -> TerminalSnapshot {
@@ -5812,6 +5829,32 @@ mod tests {
         assert!(
             !terminal.has_bracketed_paste(),
             "bracketed paste should be disabled after DECRST 2004"
+        );
+    }
+
+    #[test]
+    fn app_cursor_off_by_default() {
+        let terminal = TerminalState::with_scrollback(24, 80, 100);
+        assert!(
+            !terminal.has_app_cursor(),
+            "a fresh terminal should not have application cursor keys enabled"
+        );
+    }
+
+    #[test]
+    fn app_cursor_tracks_decset_1() {
+        let mut terminal = TerminalState::with_scrollback(24, 80, 100);
+        // DECSET 1 (DECCKM): the child asks for SS3 cursor keys (ESC O A..D).
+        terminal.process(b"\x1b[?1h");
+        assert!(
+            terminal.has_app_cursor(),
+            "application cursor keys should be enabled after DECSET 1"
+        );
+        // DECRST 1 turns it back off.
+        terminal.process(b"\x1b[?1l");
+        assert!(
+            !terminal.has_app_cursor(),
+            "application cursor keys should be disabled after DECRST 1"
         );
     }
 

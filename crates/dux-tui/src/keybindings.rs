@@ -2027,7 +2027,12 @@ pub(crate) fn key_combination_to_bytes(kc: &KeyCombination) -> Option<Vec<u8>> {
 
     let norm = kc.normalized();
     match norm.codes {
-        One(code) => crate::key_encode::encode_key(code, norm.modifiers),
+        // app_cursor is false here on purpose: these patterns match bytes the
+        // HOST terminal sends to dux, and dux never sets DECCKM on the host,
+        // so the host always sends cursor keys in the CSI form. The child's
+        // DECCKM state is a property of the child PTY and is irrelevant to
+        // what arrives on dux's own stdin.
+        One(code) => crate::key_encode::encode_key(code, norm.modifiers, false),
         _ => None,
     }
 }

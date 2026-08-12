@@ -1340,10 +1340,14 @@ impl App {
     /// silently dropped, and a forwarded keystroke retires any terminal
     /// selection exactly as the raw path's forward flush does.
     fn forward_typing_key_to_center(&mut self, key: &KeyEvent) {
-        let Some(bytes) = crate::key_encode::key_event_to_pty_bytes(key) else {
+        let Some(provider) = self.selected_terminal_surface_client() else {
             return;
         };
-        let Some(provider) = self.selected_terminal_surface_client() else {
+        // The child's DECCKM state is read at encode time so an app that
+        // flips application cursor keys on or off mid-session gets the form
+        // it currently expects.
+        let app_cursor = provider.has_app_cursor();
+        let Some(bytes) = crate::key_encode::key_event_to_pty_bytes(key, app_cursor) else {
             return;
         };
         let _ = provider.write_bytes(&bytes);
@@ -22266,6 +22270,81 @@ cyan = "#00ffff"
     fn tap_center(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         app.handle_key(KeyEvent::new(code, mods))
             .expect("handle key");
+    }
+
+    /// The minimized typeable pane backed by a `cat -v` child that first
+    /// emits `prelude` (raw mode, echo off), so every forwarded byte is
+    /// copied back into the grid in caret notation. A READY sentinel after
+    /// the prelude marks both the prelude parsed and cat running.
+    fn app_with_minimized_typeable_caret_child(prelude: &str) -> App {
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        let cmd = format!("stty raw -echo; printf '{prelude}'; printf 'READY'; exec cat -v");
+        let client = PtyClient::spawn(
+            "/bin/sh",
+            &["-c".to_string(), cmd],
+            std::path::Path::new("."),
+            24,
+            80,
+            1_000,
+        )
+        .expect("spawn pty");
+        app.engine.providers.insert(session_id, client);
+        app.session_surface = SessionSurface::Agent;
+        app.center_mode = CenterMode::Agent;
+        app.focus = FocusPane::Center;
+        app.input_target = InputTarget::None;
+        app.fullscreen_overlay = FullscreenOverlay::None;
+        app.last_pty_size = (24, 80);
+        wait_for_grid_row(&mut app, "READY");
+        assert!(
+            app.center_typeable(),
+            "test setup: the fixture must be typeable or these tests prove nothing"
+        );
+        app
+    }
+
+    /// A child that enabled application cursor keys (DECSET 1) receives an
+    /// unmodified arrow as SS3 (`ESC O A`), while a MODIFIED arrow keeps the
+    /// CSI 1;m form even in application mode, exactly as xterm sends them.
+    #[test]
+    fn windowed_arrow_honors_the_childs_app_cursor_mode() {
+        let mut app = app_with_minimized_typeable_caret_child("\\033[?1h");
+        let mut app_cursor = false;
+        for _ in 0..200 {
+            if app
+                .selected_terminal_surface_client()
+                .is_some_and(|p| p.has_app_cursor())
+            {
+                app_cursor = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(app_cursor, "test setup: the child must have DECCKM on");
+
+        tap_center(&mut app, KeyCode::Up, KeyModifiers::NONE);
+        wait_for_grid_row(&mut app, "READY^[OA");
+
+        // A MODIFIED arrow (one that is not a dux chord: Ctrl-arrows switch
+        // tabs and never reach the agent) keeps the CSI 1;m form.
+        tap_center(&mut app, KeyCode::Up, KeyModifiers::SHIFT);
+        wait_for_grid_row(&mut app, "READY^[OA^[[1;2A");
+    }
+
+    /// After the child turns application cursor keys back off (DECRST 1),
+    /// an unmodified arrow returns to the CSI form.
+    #[test]
+    fn windowed_arrow_returns_to_csi_after_the_child_resets_deccm() {
+        let mut app = app_with_minimized_typeable_caret_child("\\033[?1h\\033[?1l");
+        assert!(
+            app.selected_terminal_surface_client()
+                .is_some_and(|p| !p.has_app_cursor()),
+            "test setup: DECRST 1 must have turned application cursor keys off"
+        );
+
+        tap_center(&mut app, KeyCode::Up, KeyModifiers::NONE);
+        wait_for_grid_row(&mut app, "READY^[[A");
     }
 
     /// Typed characters (capitals included) and Enter reach the PTY writer:
