@@ -2574,20 +2574,57 @@ impl App {
         // (between ESC[200~ and ESC[201~), skip intercept matching so
         // pasted text never triggers keybindings.
         let mut actions: Vec<SeqAction> = Vec::with_capacity(sequences.len());
+        // Whether this batch carried unwrapped paste BODY for a non-2004
+        // child. A paste is typing whatever its bytes look like, but with
+        // the markers stripped the classifier can no longer see that (a
+        // pasted literal `ESC[I` classifies as a focus report), so the
+        // typing stamp is asserted directly at the tail.
+        let mut normalized_paste_forwarded = false;
         for parsed in &sequences {
             let seq = parsed.bytes.as_slice();
             if seq == crate::raw_input::BRACKET_PASTE_START {
                 self.in_bracket_paste = self.raw_input_parser.in_bracket_paste();
-                actions.push(SeqAction::Forward(seq.to_vec()));
+                // dux enables host bracketed paste globally, so EVERY host
+                // paste arrives wrapped. Forward the wrapper verbatim only
+                // to a child that asked for it (DECSET 2004); a child that
+                // never did (cat, an old REPL, readline with 2004 off)
+                // would get the literal markers typed at it and LF line
+                // endings, so for that child the markers are stripped and
+                // the body's newlines are normalized to CR below, mirroring
+                // `paste_to_center_pty`'s non-2004 arm.
+                self.raw_paste_normalize = !self
+                    .selected_terminal_surface_client()
+                    .is_some_and(|p| p.has_bracketed_paste());
+                self.raw_paste_prev_cr = false;
+                if !self.raw_paste_normalize {
+                    actions.push(SeqAction::Forward(seq.to_vec()));
+                }
                 continue;
             }
             if seq == crate::raw_input::BRACKET_PASTE_END {
                 self.in_bracket_paste = self.raw_input_parser.in_bracket_paste();
-                actions.push(SeqAction::Forward(seq.to_vec()));
+                if !self.raw_paste_normalize {
+                    actions.push(SeqAction::Forward(seq.to_vec()));
+                }
+                self.raw_paste_normalize = false;
+                self.raw_paste_prev_cr = false;
                 continue;
             }
             if parsed.in_bracket_paste {
-                actions.push(SeqAction::Forward(seq.to_vec()));
+                if self.raw_paste_normalize {
+                    // Paste body for a non-2004 child: LF becomes CR, with
+                    // the last-byte-was-CR fact threaded across chunks so a
+                    // CR-LF pair split over two reads still collapses.
+                    let (bytes, prev_cr) =
+                        crate::raw_input::normalize_paste_newlines(seq, self.raw_paste_prev_cr);
+                    self.raw_paste_prev_cr = prev_cr;
+                    if !bytes.is_empty() {
+                        normalized_paste_forwarded = true;
+                        actions.push(SeqAction::Forward(bytes));
+                    }
+                } else {
+                    actions.push(SeqAction::Forward(seq.to_vec()));
+                }
                 continue;
             }
             // Terminal focus reports (DEC mode 1004: ESC[I / ESC[O) are host
@@ -2928,6 +2965,16 @@ impl App {
 
         if needs_selection_clear {
             self.terminal_selection = None;
+        }
+
+        // Unwrapped paste body reached the PTY: that is typing, whatever the
+        // bytes looked like to the classifier (see the note at the top of
+        // the sequence loop). Mirrors `paste_to_center_pty`'s explicit stamp.
+        if normalized_paste_forwarded
+            && !is_scrolled_back
+            && self.selected_terminal_surface_client().is_some()
+        {
+            forwarded_to_pty.typing = true;
         }
 
         self.stamp_forwarded_input(&mut forwarded_to_pty);
@@ -9076,6 +9123,8 @@ impl App {
         self.session_surface = SessionSurface::Agent;
         self.terminal_selection = None;
         self.in_bracket_paste = false;
+        self.raw_paste_normalize = false;
+        self.raw_paste_prev_cr = false;
         self.raw_input_buf.clear();
         self.raw_input_parser.clear();
         self.loading_input_buf.clear();
@@ -23311,10 +23360,103 @@ cyan = "#00ffff"
     // Bracket paste and input batching tests
     // ---------------------------------------------------------------
 
+    /// Fullscreen raw-path fixture: the same live `cat -v` child as
+    /// `typeable_app_with_paste_child`, flipped into fullscreen interactive
+    /// mode so bytes travel through `process_raw_input_bytes`.
+    fn fullscreen_app_with_paste_child(decsets: &str) -> crate::app::App {
+        let mut app = typeable_app_with_paste_child(decsets);
+        app.input_target = InputTarget::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+        app
+    }
+
+    /// A raw-path (fullscreen) paste to a child that enabled DECSET 2004 is
+    /// forwarded wrapped and verbatim: markers intact, LF endings untouched.
+    #[test]
+    fn raw_path_paste_to_a_2004_child_forwards_the_wrapped_paste_verbatim() {
+        let mut app = fullscreen_app_with_paste_child("\\033[?2004h");
+        let mut ready = false;
+        for _ in 0..400 {
+            if app
+                .selected_terminal_surface_client()
+                .is_some_and(|p| p.has_bracketed_paste())
+            {
+                ready = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(ready, "the child never enabled bracketed paste");
+
+        let mut input = Vec::new();
+        input.extend_from_slice(crate::raw_input::BRACKET_PASTE_START);
+        input.extend_from_slice(b"hi\nyou");
+        input.extend_from_slice(crate::raw_input::BRACKET_PASTE_END);
+        app.process_raw_input_bytes(&input).unwrap();
+
+        // `cat -v` renders ESC as `^[` and CR as `^M`; the LF stays a real
+        // line feed, so the body must arrive with no `^M` in it.
+        let rendered = wait_for_paste_echo(&app, "you^[[201~");
+        assert!(
+            rendered.contains("[200~hi"),
+            "the open marker must precede the verbatim body; got {rendered:?}"
+        );
+        assert!(
+            !rendered.contains("hi^M"),
+            "a 2004 child's paste keeps its LF endings; got {rendered:?}"
+        );
+    }
+
+    /// A raw-path paste to a child WITHOUT DECSET 2004 arrives unwrapped
+    /// (no literal markers typed at it) with LF endings normalized to CR,
+    /// mirroring the windowed `paste_to_center_pty` semantics.
+    #[test]
+    fn raw_path_paste_to_a_non_2004_child_is_unwrapped_with_cr_endings() {
+        let mut app = fullscreen_app_with_paste_child("");
+
+        let mut input = Vec::new();
+        input.extend_from_slice(crate::raw_input::BRACKET_PASTE_START);
+        input.extend_from_slice(b"a\nb");
+        input.extend_from_slice(crate::raw_input::BRACKET_PASTE_END);
+        app.process_raw_input_bytes(&input).unwrap();
+
+        let rendered = wait_for_paste_echo(&app, "a^Mb");
+        assert!(
+            !rendered.contains("[200~") && !rendered.contains("[201~"),
+            "a non-2004 child must never see the literal markers; got {rendered:?}"
+        );
+    }
+
+    /// A CR-LF pair inside the paste collapses to ONE carriage return, even
+    /// when the pair is split across two stdin reads.
+    #[test]
+    fn raw_path_paste_crlf_split_across_reads_collapses_to_one_cr() {
+        let mut app = fullscreen_app_with_paste_child("");
+
+        let mut first = Vec::new();
+        first.extend_from_slice(crate::raw_input::BRACKET_PASTE_START);
+        first.extend_from_slice(b"x\r");
+        app.process_raw_input_bytes(&first).unwrap();
+
+        let mut second = Vec::new();
+        second.extend_from_slice(b"\ny");
+        second.extend_from_slice(crate::raw_input::BRACKET_PASTE_END);
+        app.process_raw_input_bytes(&second).unwrap();
+
+        let rendered = wait_for_paste_echo(&app, "x^My");
+        assert!(
+            !rendered.contains("x^M^My"),
+            "CR-LF must not double into CR-CR; got {rendered:?}"
+        );
+    }
+
     #[test]
     fn bracket_paste_skips_intercept_matching() {
         // Ctrl-g (0x07) normally triggers ExitInteractive. Inside a
         // bracket paste it should be forwarded, not intercepted.
+        // (The `cat` child never enables DECSET 2004, so on this path the
+        // markers are stripped and only the body is forwarded; the byte
+        // under test is the body.)
         let mut app = test_app(default_bindings());
         app.input_target = InputTarget::Agent;
         app.fullscreen_overlay = FullscreenOverlay::Agent;

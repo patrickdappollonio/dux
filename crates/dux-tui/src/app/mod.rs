@@ -281,6 +281,20 @@ pub struct App {
     /// (`ESC[200~` … `ESC[201~`). Inside a paste, intercept matching is
     /// skipped so pasted text doesn't trigger keybindings.
     pub(crate) in_bracket_paste: bool,
+    /// True while the current raw-path bracketed paste is being UNWRAPPED
+    /// for a child that never enabled DECSET 2004: dux enables host
+    /// bracketed paste globally, so every host paste arrives wrapped, and a
+    /// non-2004 child would otherwise get the literal `ESC[200~`/`ESC[201~`
+    /// markers typed at it plus LF line endings. While set, the markers are
+    /// stripped and the paste body's newlines are normalized to carriage
+    /// returns, mirroring `paste_to_center_pty`'s non-2004 arm. Decided
+    /// once, at the opening marker, from the focused surface's
+    /// `has_bracketed_paste()`.
+    pub(crate) raw_paste_normalize: bool,
+    /// Whether the last normalized paste byte forwarded was a CR, threaded
+    /// across read chunks so a CR-LF pair split over two reads still
+    /// collapses to one CR instead of doubling.
+    pub(crate) raw_paste_prev_cr: bool,
     /// Host terminal-window focus, tracked via DEC mode 1004 focus reports.
     /// Gates the per-tick "viewed" stamp so an unfocused window stops
     /// suppressing the focused agent's attention flag. Fails open until the
@@ -2911,6 +2925,8 @@ impl App {
             raw_input_buf: Vec::new(),
             loading_input_buf: Vec::new(),
             in_bracket_paste: false,
+            raw_paste_normalize: false,
+            raw_paste_prev_cr: false,
             terminal_focus: crate::focus::TerminalFocus::new(),
             macro_bar: None,
             sigwinch_flag: signals.sigwinch_flag,
