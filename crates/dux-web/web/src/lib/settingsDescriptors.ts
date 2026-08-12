@@ -313,7 +313,12 @@ export const SETTING_GROUPS: SettingGroup[] = [
           kind: "number",
           min: 0,
           max: MAX_STATUS_CLEAR_SECONDS,
-          zeroMeaning: "Never auto-clear (sticky, like a warning)",
+          // Not "like a warning" any more: a warning now retires at twice this
+          // window rather than persisting, so the old analogy taught the
+          // opposite of the truth. "Sticky" is also a specific thing now (the
+          // handful of messages that wait for the user whatever this is set to),
+          // so it cannot double as a loose description of this setting.
+          zeroMeaning: "Never auto-clear (stays until you dismiss it)",
           unit: "seconds",
         },
         default: 6,
