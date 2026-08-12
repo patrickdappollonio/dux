@@ -167,6 +167,30 @@ that app instead of selecting text. Hold **Shift** (on Linux and Windows) or
 **Option** (on macOS) while dragging to force a local selection you can copy. dux
 pops a one-time hint the first time this bites you.
 
+### Selecting text with a finger
+
+On a phone or tablet, **press and hold** on the terminal. The word under your
+finger highlights, and dragging from there extends the selection. Drag past the
+top or bottom edge and the terminal keeps scrolling on its own for as long as you
+hold there, so a selection can run well beyond what fits on screen. **Lift your
+finger and it is copied**, under the same `ui.copy_on_select` preference as the
+desktop. The highlight stays up so you can see what you got; the next tap clears
+it.
+
+A press is not a tap, so the keyboard stays down. That is deliberate: a keyboard
+sliding up over the text you just highlighted would cover the thing you were
+reading.
+
+This is also the touch version of the Shift and Option escape hatch above. A long
+press **always** selects locally, even when a full-screen agent has taken the
+mouse, so text inside a running Claude Code or opencode session is still
+selectable with a finger.
+
+Two limits worth knowing. There are no drag handles, so a selection cannot be
+adjusted once you lift; press again to redo it. And if the agent is writing fast
+enough to push lines out of the scrollback while you are mid-drag, the selection
+can slide onto the wrong text, which pressing again also fixes.
+
 Your agent can also write your clipboard directly through an `OSC 52` escape
 sequence, and that write lands on **your** browser's clipboard, not the server's,
 governed by the `clipboard_passthrough` capability. That story lives in
