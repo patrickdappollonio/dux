@@ -344,7 +344,9 @@ impl Action {
             Action::ChangeProjectDefaultProvider => {
                 "Change the selected project's default provider used for new agent sessions in that project only."
             }
-            Action::FocusAgent => "Focus the selected agent's output pane.",
+            Action::FocusAgent => {
+                "Focus the selected agent's pane. With the pane focused, this key types into a live agent and launches a dormant one."
+            }
             Action::OpenProjectBrowser => "Open the project browser.",
             Action::CopyPath => "Copy the selected agent's worktree path.",
             Action::OpenWorktreeInEditor => {
@@ -360,7 +362,9 @@ impl Action {
             Action::ReconnectAgent => "Restart the CLI for the selected agent.",
             Action::DeleteSession => "Delete the selected session and worktree.",
             Action::DeleteTerminal => "Delete the selected companion terminal.",
-            Action::InteractAgent => "Start a prompt turn for the agent.",
+            Action::InteractAgent => {
+                "Open the selected agent fullscreen, where keys go to the agent verbatim."
+            }
             Action::ShowTerminal => {
                 "Open the first companion terminal for the selected agent, or launch a new one if none exists."
             }
@@ -371,7 +375,9 @@ impl Action {
             Action::SelectTab1 => "Focus tab 1 of the selected agent.",
             Action::SelectTab2 => "Focus tab 2 of the selected agent.",
             Action::SelectTab3 => "Focus tab 3 of the selected agent.",
-            Action::SelectTab4 => "Focus tab 4 of the selected agent.",
+            Action::SelectTab4 => {
+                "Focus tab 4 of the selected agent. Ships with no default key: most terminals send the same byte for Ctrl-4 and Ctrl-\\ (the macro bar), so bind your own key here for direct access."
+            }
             Action::SelectTab5 => "Focus tab 5 of the selected agent.",
             Action::SelectTab6 => "Focus tab 6 of the selected agent.",
             Action::SelectTab7 => "Focus tab 7 of the selected agent.",
@@ -382,8 +388,12 @@ impl Action {
             Action::NewStandaloneTerminal => {
                 "Open a standalone terminal in your home directory, belonging to no project or agent."
             }
-            Action::ExitInteractive => "Exit interactive mode (stop forwarding keys to agent).",
-            Action::OpenMacroBar => "Open the macro command bar to send text macros.",
+            Action::ExitInteractive => {
+                "Minimize the fullscreen agent pane. Unbound by default: the fullscreen toggle covers both directions, and this name is kept so existing custom binds keep working."
+            }
+            Action::OpenMacroBar => {
+                "Open the macro command bar to send text macros. Works over the windowed agent pane and in fullscreen."
+            }
             Action::OpenCurrentPullRequest => {
                 "Open the selected agent's current pull request in the default browser."
             }
@@ -393,11 +403,21 @@ impl Action {
             Action::DetachPullRequest => {
                 "Detach the manually attached pull request so branch autodetection resumes."
             }
-            Action::ToggleFullscreen => "Toggle fullscreen overlay for the agent terminal.",
-            Action::ScrollPageUp => "Scroll up one page in the agent output.",
-            Action::ScrollPageDown => "Scroll down one page in the agent output.",
-            Action::ScrollLineUp => "Scroll up one line in any scrollable view.",
-            Action::ScrollLineDown => "Scroll down one line in any scrollable view.",
+            Action::ToggleFullscreen => {
+                "Toggle the agent pane between windowed and fullscreen. Windowed, typing reaches the agent while dux chords stay active; fullscreen, keys go to the agent verbatim."
+            }
+            Action::ScrollPageUp => {
+                "Scroll up one page in the agent output. Forwarded to the app itself when it owns the screen (see each provider's forward_scroll)."
+            }
+            Action::ScrollPageDown => {
+                "Scroll down one page in the agent output. Forwarded to the app itself when it owns the screen (see each provider's forward_scroll)."
+            }
+            Action::ScrollLineUp => {
+                "Scroll up one line in any scrollable view. In a typing agent pane this key reaches the agent until the view is scrolled back."
+            }
+            Action::ScrollLineDown => {
+                "Scroll down one line in any scrollable view. In a typing agent pane this key reaches the agent until the view is scrolled back."
+            }
             Action::ScrollToBottom => "Exit scroll mode and jump to the latest output.",
             Action::ScrollToTop => "Jump to the top of the scrollback buffer.",
             Action::OpenDiff => "Open the selected file's diff.",

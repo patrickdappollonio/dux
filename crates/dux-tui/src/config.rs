@@ -1207,10 +1207,32 @@ fn render_keys_config(
 
     let mut last_section: Option<&str> = None;
     for def in keybindings::BINDING_DEFS {
-        if def.default_keys.is_empty() {
+        let config_name = def.action.config_name();
+        // Palette-only actions (no key scopes) are configured through the
+        // palette, not [keys], and stay out of the template. A key-scoped
+        // action that SHIPS unbound (exit_interactive, select_tab_4) is
+        // documented as a commented-out row instead of being omitted: the
+        // config file is the documentation, and an invisible action is one
+        // nobody learns they can bind. A user who bound it gets a real row.
+        let user_bound = keys
+            .bindings
+            .get(config_name)
+            .is_some_and(|combos| !combos.is_empty());
+        if def.default_keys.is_empty() && !user_bound {
+            if !def.scopes.is_empty() {
+                let section = def.action.help_section().unwrap_or("Other");
+                if last_section != Some(section) {
+                    if last_section.is_some() {
+                        out.push('\n');
+                    }
+                    let _ = writeln!(out, "# -- {section} --");
+                    last_section = Some(section);
+                }
+                let _ = writeln!(out, "# {}", def.action.config_description());
+                let _ = writeln!(out, "# {config_name} = []");
+            }
             continue;
         }
-        let config_name = def.action.config_name();
 
         // Section header based on help section.
         let section = def.action.help_section().unwrap_or("Other");
@@ -1495,10 +1517,11 @@ fn render_provider_config(out: &mut String, name: &str, config: &ProviderCommand
     }
     out.push_str(
         "# Controls whether the mouse wheel and PgUp/PgDn scroll dux's own host\n\
-         # scrollback or get forwarded to the provider. Tri-state:\n\
+         # scrollback or get forwarded to the provider. Applies in the windowed\n\
+         # agent pane and in fullscreen alike. Tri-state:\n\
          #   (unset) = auto: forward to the child only when it owns the screen and\n\
-         #             wants the wheel (a fullscreen alt-screen, mouse-aware app like\n\
-         #             an agent's renderer); otherwise scroll dux host scrollback.\n\
+         #             wants the wheel (an alt-screen, mouse-aware app like an\n\
+         #             agent's renderer); otherwise scroll dux host scrollback.\n\
          #   true    = always forward scroll + page keys to the child.\n\
          #   false   = never forward; always use dux host scrollback.\n\
          # Leave this key absent for auto. Uncomment to pin a value.\n",
@@ -2135,6 +2158,61 @@ mod tests {
         assert!(
             !rendered.contains("commit_prompt"),
             "the removed AI-commit prompt key must no longer be rendered"
+        );
+    }
+
+    /// A key-scoped action that SHIPS unbound (the minimize alias, tab 4 under
+    /// the legacy Ctrl-4/Ctrl-\ identity) must still be discoverable from the
+    /// config file: it renders as a commented-out row with its description.
+    /// Palette-only actions (no key scopes) stay out of [keys] entirely.
+    #[test]
+    fn render_keys_documents_shipped_unbound_actions_as_commented_rows() {
+        let config = Config::default();
+        let bindings = crate::keybindings::RuntimeBindings::from_keys_config(&config.keys);
+        let rendered = render_config(&config, &bindings);
+
+        for name in ["exit_interactive", "select_tab_4"] {
+            assert!(
+                rendered
+                    .lines()
+                    .any(|l| l.trim() == format!("# {name} = []")),
+                "unbound key-scoped action {name} must appear as a commented row"
+            );
+            assert!(
+                !rendered
+                    .lines()
+                    .any(|l| l.trim().starts_with(&format!("{name} ="))),
+                "an unbound action must not be written as an ACTIVE row"
+            );
+        }
+        // Palette-only (scope-less) actions never reach [keys].
+        assert!(
+            !rendered.contains("manage_projects"),
+            "palette-only actions must stay out of the [keys] section"
+        );
+    }
+
+    /// A user who bound one of the shipped-unbound actions gets a real,
+    /// uncommented row carrying their keys.
+    #[test]
+    fn render_keys_writes_a_real_row_for_a_user_bound_unbound_default() {
+        let mut config = Config::default();
+        config
+            .keys
+            .bindings
+            .insert("select_tab_4".to_string(), vec!["ctrl-t".to_string()]);
+        let bindings = crate::keybindings::RuntimeBindings::from_keys_config(&config.keys);
+        let rendered = render_config(&config, &bindings);
+        assert!(
+            rendered
+                .lines()
+                .any(|l| l.trim() == "select_tab_4 = [\"ctrl-t\"]"),
+            "a user-bound action must render as an active row; got:\n{}",
+            rendered
+                .lines()
+                .filter(|l| l.contains("select_tab_4"))
+                .collect::<Vec<_>>()
+                .join("\n")
         );
     }
 

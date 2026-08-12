@@ -1350,6 +1350,10 @@ impl App {
                 // pending reconnect op as before), but an extra-tab launch has no
                 // op under its tab id, so it falls through to an anonymous status
                 // instead of resolving the session-slot tab's op with the wrong message.
+                // The engine's message is shared with the web; the TUI appends
+                // where the launch landed and how to toggle fullscreen.
+                let status_message =
+                    self.launch_completion_message(status_message, outcome.wants_fullscreen);
                 self.resolve_reconnect_op_or(
                     &outcome.tab_id,
                     dux_core::engine::LaunchOutcome::Ready { status_message },
@@ -1365,15 +1369,21 @@ impl App {
                 session_id,
                 status_message,
             } => {
-                if self.selected_session().map(|selected| selected.id.as_str())
-                    == Some(session_id.as_str())
-                {
+                let landed_here = self.selected_session().map(|selected| selected.id.as_str())
+                    == Some(session_id.as_str());
+                let status_message = if landed_here {
                     self.show_agent_surface();
                     // Decision 10: the fallback relaunch is engine-initiated
                     // and never fullscreen-seeking, so it lands minimized (see
-                    // CreateCommitted above).
+                    // CreateCommitted above). The landing note is appended only
+                    // when the landing actually happened: a fallback for an
+                    // unselected agent moves no focus, so promising a typeable
+                    // pane there would be a lie.
                     self.land_completed_launch(outcome.wants_fullscreen);
-                }
+                    self.launch_completion_message(status_message, outcome.wants_fullscreen)
+                } else {
+                    status_message
+                };
                 self.resolve_reconnect_op_or(
                     &session_id,
                     dux_core::engine::LaunchOutcome::Ready { status_message },
@@ -2073,7 +2083,24 @@ mod tests {
             .find(|s| s.key.as_deref() == Some(op_key.as_str()));
         let entry = entry.expect("the op's keyed entry must still exist, replaced in place");
         assert_eq!(entry.tone.as_str(), "info");
-        assert_eq!(entry.message, "Reconnected.");
+        // The engine's message survives verbatim at the front; the TUI appends
+        // its landing note (typeable pane, named fullscreen key) because the
+        // minimized landing is a TUI-only concept the shared message can't know.
+        assert!(
+            entry.message.starts_with("Reconnected."),
+            "the engine-composed message must lead: {:?}",
+            entry.message
+        );
+        let key = app.bindings.label_for(Action::ToggleFullscreen);
+        assert!(
+            entry.message.contains("type to the agent")
+                && entry
+                    .message
+                    .contains(&format!("press {key} for fullscreen")),
+            "a minimized landing must say the pane is typeable and name the \
+             fullscreen toggle via the bindings: {:?}",
+            entry.message
+        );
         assert!(
             app.pending_reconnect_ops.is_empty(),
             "the reconnect op must be consumed on resolution",

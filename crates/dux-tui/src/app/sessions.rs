@@ -1397,6 +1397,27 @@ impl App {
         }
     }
 
+    /// Extend an engine-composed launch-completion message with the TUI's
+    /// landing note. The engine's message is shared with the web (which has no
+    /// modes and no keybindings), so the note about where the launch landed
+    /// and how to go fullscreen is appended TUI-side, with the key resolved
+    /// through the bindings. A fullscreen-seeking launch gets the opposite
+    /// note: it landed fullscreen, and the same toggle is the way back.
+    pub(crate) fn launch_completion_message(
+        &self,
+        engine_message: String,
+        wants_fullscreen: bool,
+    ) -> String {
+        let key = self.bindings.label_for(Action::ToggleFullscreen);
+        if wants_fullscreen {
+            format!("{engine_message} The pane is fullscreen; press {key} to minimize.")
+        } else {
+            format!(
+                "{engine_message} The pane is focused, so you can type to the agent right away; press {key} for fullscreen."
+            )
+        }
+    }
+
     pub(crate) fn show_companion_terminal_surface(&mut self) {
         self.session_surface = SessionSurface::Terminal;
         self.fullscreen_overlay = FullscreenOverlay::Terminal;

@@ -2367,9 +2367,8 @@ impl App {
     /// wording never hardcodes a key: every binding is user-configurable, so the
     /// labels come from `RuntimeBindings` and stay right after a rebind. The
     /// colors come from `Theme`: `nudge_border` is the existing semantic
-    /// "something needs your attention in this pane" field, already used for the
-    /// nudge border and the read-only warning on this very hint bar, so no new
-    /// theme token is needed.
+    /// "something needs your attention in this pane" field, so no new theme
+    /// token is needed.
     pub(crate) fn scroll_mode_cue_line(&self) -> Line<'static> {
         let warn_style = Style::default().fg(self.theme.nudge_border);
         let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
@@ -2394,10 +2393,10 @@ impl App {
         spans.push(Span::styled(" down  ", desc_style));
         // This line REPLACES the whole hint bar, so the exit key has to come
         // along: while the mode is on, every other key is being swallowed and
-        // this is the only place left on screen that says how to get out of
-        // interactive mode.
+        // this is the only place left on screen that says how to leave
+        // fullscreen.
         spans.extend(self.theme.dim_key_badge_default(&exit_key));
-        spans.push(Span::styled(" return", desc_style));
+        spans.push(Span::styled(" minimize", desc_style));
         // The key badges borrow the label strings, which are locals here, so
         // hand back owned spans (same pattern as `hint_bar::modal_hint_line`).
         Line::from(
@@ -2793,6 +2792,8 @@ impl App {
             let reconnect = self.bindings.labels_for(Action::ReconnectAgent);
 
             let macro_key = self.bindings.label_for(Action::OpenMacroBar);
+            let next_pane = self.bindings.label_for(Action::FocusNext);
+            let live_edge = self.bindings.labels_for(Action::ScrollToBottom);
             let hint_line = if is_input && self.scroll_mode_active() {
                 // Scroll mode swallows every non-scroll key (see
                 // `process_raw_input_bytes`), so while it is on, this line says
@@ -2801,10 +2802,12 @@ impl App {
                 // being a signal the moment the pane is live again.
                 self.scroll_mode_cue_line()
             } else if is_input {
+                // Fullscreen interactive: keys go to the child verbatim, so
+                // the line names the way back plus the scroll keys.
                 let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
                 let mut spans: Vec<Span> = Vec::new();
                 spans.extend(self.theme.dim_key_badge_default(&exit_key));
-                spans.push(Span::styled(" return  ", desc_style));
+                spans.push(Span::styled(" minimize  ", desc_style));
                 spans.extend(self.theme.dim_key_badge_default(&scroll_up));
                 spans.push(Span::styled(" up  ", desc_style));
                 spans.extend(self.theme.dim_key_badge_default(&scroll_down));
@@ -2822,10 +2825,19 @@ impl App {
                 }
                 Line::from(spans)
             } else if scrollback_offset > 0 {
+                // Scrolled back: the scroll vocabulary owns the pane. In a
+                // typeable pane that also means typing is paused, and the line
+                // must say so: the keys silently stop reaching the agent
+                // otherwise, and the live-edge key is the way back.
                 let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
                 let mut spans: Vec<Span> = Vec::new();
+                let prefix = if self.center_typeable() {
+                    format!("Scrolled back {scrollback_offset} lines. Typing is paused. ")
+                } else {
+                    format!("Scrolled back {scrollback_offset} lines. ")
+                };
                 spans.push(Span::styled(
-                    format!("Scrolled back {scrollback_offset} lines. "),
+                    prefix,
                     Style::default().fg(self.theme.hint_key_fg),
                 ));
                 spans.extend(self.theme.dim_key_badge_default(&scroll_down));
@@ -2833,7 +2845,34 @@ impl App {
                 spans.extend(self.theme.dim_key_badge_default(&scroll_up));
                 spans.push(Span::styled(" up, ", desc_style));
                 spans.extend(self.theme.dim_key_badge_default(&scroll_line));
-                spans.push(Span::styled(" one line.", desc_style));
+                spans.push(Span::styled(" one line, ", desc_style));
+                spans.extend(self.theme.dim_key_badge_default(&live_edge));
+                spans.push(Span::styled(" live edge.", desc_style));
+                Line::from(spans)
+            } else if self.center_typeable() {
+                // Windowed typing: keystrokes reach the focused surface's PTY
+                // while dux keeps its chords, so the line says where typing
+                // goes and names the chords that stay dux's (all resolved
+                // through the bindings, never hardcoded).
+                let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
+                let target = match active_surface {
+                    SessionSurface::Agent => "agent",
+                    SessionSurface::Terminal => "terminal",
+                };
+                let mut spans: Vec<Span> = vec![Span::styled(
+                    format!("Typing goes to the {target}. "),
+                    Style::default().fg(self.theme.hint_key_fg),
+                )];
+                spans.extend(self.theme.dim_key_badge_default(&exit_key));
+                spans.push(Span::styled(" fullscreen  ", desc_style));
+                spans.extend(self.theme.dim_key_badge_default(&next_pane));
+                spans.push(Span::styled(" next pane", desc_style));
+                if !self.filtered_macros("").is_empty() && !macro_key.is_empty() {
+                    spans.push(Span::styled("  ", desc_style));
+                    spans.extend(self.theme.dim_key_badge_default(&macro_key));
+                    spans.push(Span::styled(" macros", desc_style));
+                }
+                spans.push(Span::styled(".", desc_style));
                 Line::from(spans)
             } else {
                 let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
@@ -2860,8 +2899,10 @@ impl App {
                         }
                     }
                 } else if session_active {
+                    // A live agent whose pane is NOT focused: the activate key
+                    // focuses the pane, and from there typing reaches the agent.
                     spans.extend(self.theme.dim_key_badge_default(&focus_agent));
-                    spans.push(Span::styled(" to interact. ", desc_style));
+                    spans.push(Span::styled(" focus and type. ", desc_style));
                     spans.extend(self.theme.dim_key_badge_default(&scroll_up));
                     spans.push(Span::styled(" ", desc_style));
                     spans.extend(self.theme.dim_key_badge_default(&scroll_down));
@@ -2871,9 +2912,9 @@ impl App {
                 } else if session_id.is_some() {
                     spans.push(Span::styled("Agent CLI exited. Press ", desc_style));
                     spans.extend(self.theme.dim_key_badge_default(&reconnect));
-                    spans.push(Span::styled(" to relaunch or ", desc_style));
+                    spans.push(Span::styled(" or ", desc_style));
                     spans.extend(self.theme.dim_key_badge_default(&focus_agent));
-                    spans.push(Span::styled(" to interact.", desc_style));
+                    spans.push(Span::styled(" to launch it again.", desc_style));
                 } else {
                     spans.push(Span::styled("No agent selected.", desc_style));
                 }
@@ -3457,6 +3498,35 @@ impl App {
             ));
             lines.push(Line::from(spans));
         }
+        // Agent pane modes: the authoritative one-paragraph description of the
+        // two key-routing regimes, with every key resolved through the
+        // bindings so a rebind keeps this text true.
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Agent pane modes",
+            Style::default()
+                .fg(self.theme.help_section_header_fg)
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        )));
+        {
+            let fullscreen_key = self.bindings.label_for(Action::ToggleFullscreen);
+            let next_pane_key = self.bindings.label_for(Action::FocusNext);
+            let mode_lines = [
+                "The agent pane has two modes. Windowed (the normal".to_string(),
+                "3-pane layout), typing reaches the agent while dux".to_string(),
+                format!("keeps its chords: {next_pane_key} still moves panes, and the tab,"),
+                "palette, and scroll keys stay dux's. Fullscreen".to_string(),
+                format!("({fullscreen_key}), every key goes to the agent verbatim and"),
+                format!("{fullscreen_key} is the way back."),
+            ];
+            for text in mode_lines {
+                lines.push(Line::from(Span::styled(
+                    text,
+                    Style::default().fg(self.theme.hint_desc_fg),
+                )));
+            }
+        }
+
         // Session state legend
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
@@ -11410,6 +11480,116 @@ mod tests {
 
         let expected = (term_area.x + 9, term_area.y + 4);
         terminal.backend_mut().assert_cursor_position(expected);
+    }
+
+    /// The windowed typeable pane's hint line says where typing goes and names
+    /// the chords that stay dux's (fullscreen toggle, next pane), every label
+    /// resolved through the bindings rather than hardcoded.
+    #[test]
+    fn typeable_pane_hint_says_typing_goes_to_the_agent() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = app_with_parked_agent_cursor();
+        app.center_mode = CenterMode::Agent;
+        app.focus = FocusPane::Center;
+        app.input_target = InputTarget::None;
+        app.fullscreen_overlay = FullscreenOverlay::None;
+        assert!(app.center_typeable(), "test setup: pane must be typeable");
+
+        let backend = TestBackend::new(180, 40);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+
+        let rows = buffer_rows(terminal.backend().buffer());
+        let hint = rows
+            .iter()
+            .find(|row| row.contains("Typing goes to the agent."))
+            .unwrap_or_else(|| {
+                panic!(
+                    "the typeable pane must say where typing goes; frame was:\n{}",
+                    rows.join("\n")
+                )
+            });
+        let fullscreen_key = app.bindings.label_for(Action::ToggleFullscreen);
+        let next_pane_key = app.bindings.label_for(Action::FocusNext);
+        assert!(
+            hint.contains(&fullscreen_key) && hint.contains("fullscreen"),
+            "the hint must name the fullscreen toggle {fullscreen_key:?}; row was {hint:?}"
+        );
+        assert!(
+            hint.contains(&next_pane_key) && hint.contains("next pane"),
+            "the hint must name the next-pane key {next_pane_key:?}; row was {hint:?}"
+        );
+    }
+
+    /// A live agent whose pane is NOT focused offers the activate key as
+    /// "focus and type": the old "to interact" wording described the removed
+    /// coupled fullscreen-on-Enter model.
+    #[test]
+    fn unfocused_live_pane_hint_offers_focus_and_type() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = app_with_parked_agent_cursor();
+        app.center_mode = CenterMode::Agent;
+        app.focus = FocusPane::Left;
+        app.input_target = InputTarget::None;
+        app.fullscreen_overlay = FullscreenOverlay::None;
+        assert!(!app.center_typeable());
+
+        let backend = TestBackend::new(180, 40);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+
+        let rows = buffer_rows(terminal.backend().buffer());
+        assert!(
+            rows.iter().any(|row| row.contains("focus and type")),
+            "an unfocused live pane must offer focus-and-type; frame was:\n{}",
+            rows.join("\n")
+        );
+        assert!(
+            !rows.iter().any(|row| row.contains("to interact")),
+            "the old 'to interact' wording must be gone"
+        );
+    }
+
+    /// With no live process behind the pane, the hint names BOTH launch keys
+    /// and says they launch (not "interact": there is nothing to type into).
+    #[test]
+    fn exited_agent_hint_names_the_launch_keys() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        app.center_mode = CenterMode::Agent;
+        app.focus = FocusPane::Center;
+        assert!(app.engine.providers.is_empty(), "test setup: no live PTY");
+
+        let backend = TestBackend::new(180, 40);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+
+        let rows = buffer_rows(terminal.backend().buffer());
+        let hint = rows
+            .iter()
+            .find(|row| row.contains("Agent CLI exited."))
+            .unwrap_or_else(|| {
+                panic!(
+                    "the exited pane must say the CLI exited; frame was:\n{}",
+                    rows.join("\n")
+                )
+            });
+        assert!(
+            hint.contains("to launch it again"),
+            "the exited hint must say the keys LAUNCH; row was {hint:?}"
+        );
     }
 
     /// A pane that does not RECEIVE keys must not show the caret: a blinking

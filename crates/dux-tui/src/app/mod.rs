@@ -3466,9 +3466,19 @@ impl App {
             self.fullscreen_overlay = FullscreenOverlay::None;
             self.input_target = InputTarget::None;
             let key = self.bindings.label_for(Action::ToggleFullscreen);
-            self.set_info(format!(
-                "Minimized the agent pane. Press {key} to go fullscreen again."
-            ));
+            // Say what the minimized pane DOES now: with a live surface it is
+            // typeable (checked after the reset above, which is what makes it
+            // so), while a dormant tab's relaunch screen has nothing to type
+            // into, so promising typing there would be a lie.
+            if self.center_typeable() {
+                self.set_info(format!(
+                    "Minimized the agent pane. Typing still reaches the agent; press {key} for fullscreen."
+                ));
+            } else {
+                self.set_info(format!(
+                    "Minimized the agent pane. Press {key} to go fullscreen again."
+                ));
+            }
             return true;
         }
         // The first-load screens dismiss like any other prompt, EXCEPT that

@@ -336,12 +336,15 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[BindingScope::Left, BindingScope::Center],
         help: Some(HelpEntry {
             section: "Projects pane",
-            description: "Focus the selected agent",
+            description: "Focus the selected agent and type into it (launches a dormant one)",
         }),
         hint_contexts: &[
             (HintContext::LeftSession, "Focus"),
             (HintContext::LeftTerminal, "Focus"),
-            (HintContext::Center, "Interact"),
+            // With the center pane focused this key is TYPED into a live
+            // agent (it is a typing-owned default) and launches a dormant
+            // one, so the footer word is "Type", not "Interact".
+            (HintContext::Center, "Type"),
         ],
     },
     BindingDef {
@@ -464,7 +467,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[BindingScope::Center],
         help: Some(HelpEntry {
             section: "Agent pane",
-            description: "Focus tab 1-9",
+            description: "Focus tab by number (tab 4 ships with no default key)",
         }),
         hint_contexts: &[],
     },
@@ -573,7 +576,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[BindingScope::Left],
         help: Some(HelpEntry {
             section: "Projects pane",
-            description: "Enter interactive mode for the selected agent",
+            description: "Open the selected agent fullscreen (keys go to it verbatim)",
         }),
         hint_contexts: &[],
     },
@@ -604,7 +607,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[BindingScope::Interactive, BindingScope::Center],
         help: Some(HelpEntry {
             section: "Agent pane",
-            description: "Open the macro command bar to send text macros",
+            description: "Open the macro bar to send text macros (windowed or fullscreen)",
         }),
         hint_contexts: &[],
     },
@@ -649,9 +652,9 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         ],
         help: Some(HelpEntry {
             section: "Agent pane",
-            description: "Toggle fullscreen (keys go to the agent verbatim)",
+            description: "Toggle fullscreen (fullscreen keys go to the agent verbatim)",
         }),
-        hint_contexts: &[],
+        hint_contexts: &[(HintContext::Center, "Fullscreen")],
     },
     BindingDef {
         action: Action::ScrollPageUp,
@@ -663,7 +666,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         ],
         help: Some(HelpEntry {
             section: "Agent pane",
-            description: "Scroll up one page",
+            description: "Scroll up one page (forwarded when the app owns the screen)",
         }),
         hint_contexts: &[],
     },
@@ -677,7 +680,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         ],
         help: Some(HelpEntry {
             section: "Agent pane",
-            description: "Scroll down one page",
+            description: "Scroll down one page (forwarded when the app owns the screen)",
         }),
         hint_contexts: &[],
     },
@@ -687,7 +690,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[BindingScope::Interactive, BindingScope::Center],
         help: Some(HelpEntry {
             section: "Scrolling",
-            description: "Scroll up one line",
+            description: "Scroll up one line (in a typing pane, only while scrolled back)",
         }),
         hint_contexts: &[],
     },
@@ -697,7 +700,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[BindingScope::Interactive, BindingScope::Center],
         help: Some(HelpEntry {
             section: "Scrolling",
-            description: "Scroll down one line",
+            description: "Scroll down one line (in a typing pane, only while scrolled back)",
         }),
         hint_contexts: &[],
     },
@@ -2283,6 +2286,32 @@ mod tests {
         let section_names: Vec<_> = sections.iter().map(|(n, _)| *n).collect();
         assert!(section_names.contains(&"Global"));
         assert!(section_names.contains(&"Projects pane"));
+    }
+
+    /// An action that ships with no default key but still carries a help entry
+    /// (ExitInteractive, the unbound minimize alias) must not render a broken
+    /// row with an empty key badge: `help_sections` skips label-less entries.
+    #[test]
+    fn help_sections_skips_unbound_actions_instead_of_rendering_empty_keys() {
+        let bindings = default_bindings();
+        assert_eq!(
+            bindings.labels_for(Action::ExitInteractive),
+            "",
+            "fixture: exit_interactive ships unbound"
+        );
+        assert_eq!(
+            bindings.labels_for(Action::SelectTab4),
+            "",
+            "fixture: select_tab_4 ships unbound (Ctrl-4 is Ctrl-\\ under the legacy protocol)"
+        );
+        for (section, entries) in bindings.help_sections() {
+            for (label, desc) in entries {
+                assert!(
+                    !label.is_empty(),
+                    "help section {section:?} rendered an empty key label for {desc:?}"
+                );
+            }
+        }
     }
 
     #[test]
