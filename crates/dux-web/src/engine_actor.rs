@@ -1564,16 +1564,13 @@ pub(crate) fn run_engine_loop(
     // snapshot watch in sync so connecting clients see all open toasts at once.
     // Keeping the binding name `thread_status_tx` and a `send` method means the
     // loop's existing call sites need no changes. `tick` (called once per
-    // iteration below) expires timed-out Info entries, upgrades stale Busy→Warning,
-    // and pushes cleared keys onto `clear_tx`. The timeout is captured at startup
-    // (like the TUI), so changing `status_clear_seconds` takes effect on the next
-    // server start.
-    let mut thread_status_tx = StatusEmitter::new(
-        thread_status_tx,
-        status_clear_tx,
-        status_snapshot_tx,
-        Duration::from_secs(engine.config.ui.status_clear_seconds as u64),
-    );
+    // iteration below) upgrades a stale Busy→Warning and drops finals that have
+    // aged past `FINAL_REPLAY_WINDOW`. It takes no `status_clear_seconds`: under
+    // `StatusRetention::Emit` how long a toast stays on SCREEN belongs to the
+    // browser, and the only server-side lifetime left is the fixed replay
+    // window.
+    let mut thread_status_tx =
+        StatusEmitter::new(thread_status_tx, status_clear_tx, status_snapshot_tx);
     // Subscribes waiting for their provider to come up via the worker-event drain.
     let mut pending: Vec<PendingSubscribe> = Vec::new();
     // The session most recently brought to the foreground via a PTY subscribe.
@@ -2033,7 +2030,6 @@ impl StatusEmitter {
         tx: broadcast::Sender<WireStatus>,
         clear_tx: broadcast::Sender<Option<String>>,
         snapshot_tx: watch::Sender<Vec<KeyedWireStatus>>,
-        clear_after: Duration,
     ) -> Self {
         Self {
             tx,
@@ -2045,7 +2041,7 @@ impl StatusEmitter {
             // every reconnect, forever. A `Busy` is live state a late joiner must
             // learn about; a final is an event it legitimately missed. See
             // [`dux_core::statusline::StatusRetention`].
-            controller: KeyedStatusController::emitting_finals(clear_after),
+            controller: KeyedStatusController::emitting_finals(),
             generations: std::collections::HashMap::new(),
         }
     }
@@ -2086,13 +2082,20 @@ impl StatusEmitter {
         }
     }
 
-    /// Expire timed-out entries (auto-clear Info, upgrade stale Busy→Warning).
-    /// Pushes cleared keys onto `clear_tx` (for the WS forwarder's
-    /// `StatusCleared` frames) and broadcasts upgraded entries as live `WireStatus`
-    /// updates. Short-circuits when nothing changed so idle ticks cost nothing.
+    /// Expire timed-out entries: upgrade a stale Busy→Warning and drop finals
+    /// that have aged past `FINAL_REPLAY_WINDOW`. Pushes cleared keys onto
+    /// `clear_tx` (for the WS forwarder's `StatusCleared` frames) and broadcasts
+    /// upgraded entries as live `WireStatus` updates. Short-circuits when
+    /// nothing changed so idle ticks cost nothing.
+    ///
+    /// `changes.purged` MUST be part of that short-circuit test even though it
+    /// produces no frame: it is the count of finals that left the replay
+    /// snapshot, so skipping on it alone would leave `snapshot_tx` publishing
+    /// entries the controller has already dropped, and the stale-replay bug
+    /// would survive in the copy the sockets actually read.
     fn tick(&mut self, now: Instant) {
         let changes = self.controller.tick(now, LAUNCH_TIMEOUT);
-        if changes.cleared_keys.is_empty() && changes.upgraded.is_empty() {
+        if changes.cleared_keys.is_empty() && changes.upgraded.is_empty() && changes.purged == 0 {
             return;
         }
         let _ = self.snapshot_tx.send(self.controller.snapshot());
@@ -2998,6 +3001,7 @@ mod tests {
     use super::*;
     use crate::bootstrap::bootstrap_engine;
     use dux_core::config::DuxPaths;
+    use dux_core::statusline::FINAL_REPLAY_WINDOW;
 
     fn temp_paths() -> (tempfile::TempDir, DuxPaths) {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -3202,11 +3206,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn apply_wire_status_is_broadcast_live_and_not_left_in_the_snapshot() {
+    async fn apply_wire_status_is_broadcast_live_and_briefly_replayable() {
         // A synchronous command result is ALSO published to the live broadcast,
         // not just returned to the requester, so it reaches every client that is
-        // currently attached. It must NOT linger in the snapshot: it is a final,
-        // and the snapshot is replayed to every connection that arrives later.
+        // currently attached, AND it enters the snapshot so a socket that
+        // dropped across the command still learns the outcome when it comes
+        // back. It stops being replayable on `FINAL_REPLAY_WINDOW`, which the
+        // controller and emitter tests pin with a controlled clock rather than
+        // by making this one wait thirty seconds.
         let (_tmp, paths) = temp_paths();
         {
             let store = dux_core::storage::SessionStore::open(&paths.sessions_db_path).unwrap();
@@ -3237,14 +3244,11 @@ mod tests {
         // The reply still carries the status (the requester's instant ack)…
         let want = outcome.status.expect("command produced a status").message;
 
-        // …and the snapshot a newly-connected client would read does NOT hold
-        // it. The command already finished, so a browser opening the page a
-        // minute later has legitimately missed this confirmation and must not be
-        // shown it as though it had just happened.
+        // …and the snapshot a reconnecting client would read holds it too.
         let snap = handle.status_snapshot();
         assert!(
-            !snap.iter().any(|s| s.message == want),
-            "a finished command's status must not be replayable: {snap:?}"
+            snap.iter().any(|s| s.message == want),
+            "a just-finished command's status must be replayable: {snap:?}"
         );
 
         // …AND it is delivered live on the broadcast to every connected client.
@@ -3330,7 +3334,7 @@ mod tests {
             tx,
             clear_tx,
             snapshot_tx: snap_tx,
-            controller: KeyedStatusController::emitting_finals(Duration::from_secs(6)),
+            controller: KeyedStatusController::emitting_finals(),
             generations: std::collections::HashMap::new(),
         };
         (emitter, snap_rx)
@@ -3357,37 +3361,72 @@ mod tests {
     }
 
     #[test]
-    fn emitter_snapshot_carries_busys_forward_and_leaves_finals_behind() {
-        // The replay contract in one test. The snapshot is what a NEW `/ws/events`
-        // connection is handed, so it must contain work still in flight and
-        // nothing that already finished, whatever the final's tone.
+    fn emitter_snapshot_carries_busys_and_recent_finals_then_drops_the_finals() {
+        // The replay contract in one test. The snapshot is what a NEW or a
+        // RECONNECTING `/ws/events` connection is handed, so it must contain
+        // work still in flight plus outcomes recent enough that the tab which
+        // missed them is the same session, and nothing older.
         let (mut e, snap_rx) = make_emitter();
         let _ = e.send(WireStatus::keyed("pull", "busy", "Pulling\u{2026}"));
         let _ = e.send(WireStatus::keyed("push", "error", "Push to remote failed."));
         let _ = e.send(WireStatus::keyed("commit", "info", "Committed."));
         let _ = e.send(WireStatus::new("warning", "Heads up."));
-        let _ = e.send(WireStatus::new("error", "Something broke."));
 
+        assert_eq!(
+            snap_rx.borrow().len(),
+            4,
+            "everything is replayable at first: {:?}",
+            snap_rx.borrow()
+        );
+
+        // A tick inside the window changes nothing: a reconnect landing here
+        // still learns how the two finished operations ended, and the in-flight
+        // pull is still a spinner.
+        e.tick(Instant::now() + Duration::from_secs(5));
+        let snap = snap_rx.borrow().clone();
+        assert_eq!(
+            snap.len(),
+            4,
+            "a reconnect inside the window is owed the finals"
+        );
+        assert!(
+            snap.iter()
+                .any(|s| s.key.as_deref() == Some("pull") && s.tone == "busy"),
+            "the in-flight operation is still in flight: {snap:?}"
+        );
+
+        // Past the window the finals are gone. The pull is a WARNING rather than
+        // a busy, and that is not incidental: `LAUNCH_TIMEOUT` (20s) is shorter
+        // than `FINAL_REPLAY_WINDOW` (30s), so a busy that reaches the window has
+        // already been upgraded by the stranded-busy rule. A busy outliving the
+        // window on its own is pinned in core, where the two timeouts can be
+        // driven apart.
+        assert!(
+            LAUNCH_TIMEOUT < FINAL_REPLAY_WINDOW,
+            "the note above assumes this"
+        );
+        e.tick(Instant::now() + FINAL_REPLAY_WINDOW + Duration::from_secs(1));
         let snap = snap_rx.borrow().clone();
         assert_eq!(
             snap.len(),
             1,
-            "only the in-flight busy may be replayed, got {snap:?}"
+            "only the live operation's slot is left: {snap:?}"
         );
         assert_eq!(snap[0].key.as_deref(), Some("pull"));
-        assert_eq!(snap[0].tone, "busy");
+        assert!(
+            !snap.iter().any(|s| s.key.as_deref() == Some("push")),
+            "the aged error must not be replayable: {snap:?}"
+        );
 
-        // And the busy's OWN final ends it: no orphan spinner is left to replay.
+        // And a final ends the operation on its slot: no orphan spinner remains.
         let _ = e.send(WireStatus::keyed(
             "pull",
             "error",
             "Pull from remote failed.",
         ));
-        assert!(
-            snap_rx.borrow().is_empty(),
-            "a final must retire the busy it replaces, got {:?}",
-            snap_rx.borrow()
-        );
+        let snap = snap_rx.borrow().clone();
+        assert_eq!(snap.len(), 1, "the final replaced what was there: {snap:?}");
+        assert_eq!(snap[0].tone, "error");
     }
 
     #[test]
@@ -3403,7 +3442,7 @@ mod tests {
             tx,
             clear_tx,
             snapshot_tx: snap_tx,
-            controller: KeyedStatusController::emitting_finals(Duration::from_secs(6)),
+            controller: KeyedStatusController::emitting_finals(),
             generations: std::collections::HashMap::new(),
         };
         let _ = e.send(WireStatus::keyed("notes", "busy", "Fetching\u{2026}"));
@@ -3423,15 +3462,13 @@ mod tests {
     }
 
     #[test]
-    fn emitter_never_retains_an_info_so_tick_has_nothing_to_expire() {
-        // An Info is a final, so under `StatusRetention::Emit` it is broadcast
-        // live and never stored: there is nothing left for `tick` to expire and
-        // no `StatusCleared` frame to send. That is a deliberate change from the
-        // retain-then-expire behaviour, and it is safe because the browser's
-        // toast layer already retires every tone on its own timer
-        // (`lib/statusToast.ts`); the server-side expiry was a second, slower
-        // copy of that same decision, and keeping it would mean keeping the
-        // finals that caused the replay bug.
+    fn emitter_expires_a_final_silently_so_no_one_s_toast_is_dismissed() {
+        // Under `StatusRetention::Emit` a final leaves the snapshot on the fixed
+        // replay window, and it leaves QUIETLY. No `StatusCleared` key is pushed,
+        // because the frame that would produce dismisses the toast on every
+        // screen showing it, including a `sticky` one whose entire purpose is to
+        // wait for the user. On-screen lifetime is the browser's job
+        // (`lib/statusToast.ts`); the server only decides what is replayable.
         let (tx, _rx) = broadcast::channel::<WireStatus>(16);
         let (clear_tx, mut crx) = broadcast::channel::<Option<String>>(16);
         let (snap_tx, snap_rx) = watch::channel::<Vec<KeyedWireStatus>>(vec![]);
@@ -3439,26 +3476,26 @@ mod tests {
             tx,
             clear_tx,
             snapshot_tx: snap_tx,
-            controller: KeyedStatusController::emitting_finals(Duration::from_secs(6)),
+            controller: KeyedStatusController::emitting_finals(),
             generations: std::collections::HashMap::new(),
         };
-        // One keyed Info and one anonymous Info: neither is retained.
+        // One keyed Info, one anonymous Info, and a sticky error that must not
+        // be dismissed by anything the server does here.
         let _ = e.send(WireStatus::keyed("commit", "info", "Committed."));
         let _ = e.send(WireStatus::new("info", "Saved."));
+        let _ = e.send(WireStatus::keyed("del", "error", "Worktree delete failed.").sticky());
+        assert_eq!(snap_rx.borrow().len(), 3, "all replayable at first");
+
+        e.tick(Instant::now() + FINAL_REPLAY_WINDOW + Duration::from_secs(1));
+
         assert!(
             snap_rx.borrow().is_empty(),
-            "an info is an event, not replayable state, got {:?}",
+            "every final must stop being replayable, got {:?}",
             snap_rx.borrow()
         );
-
-        // Advance wall-clock well past clear_after: nothing is there to expire.
-        let far_future = Instant::now() + Duration::from_secs(100);
-        e.tick(far_future);
-
-        assert!(snap_rx.borrow().is_empty(), "still nothing to replay");
         assert!(
             crx.try_recv().is_err(),
-            "no StatusCleared is owed for a status that was never retained"
+            "leaving the replay snapshot must dismiss nobody's toast"
         );
     }
 
@@ -3501,9 +3538,10 @@ mod tests {
 
     #[test]
     fn emitter_tick_upgrades_stale_busy_and_broadcasts_upgraded_wire_status() {
-        // A Busy that outlives LAUNCH_TIMEOUT must be upgraded to Warning
-        // in-place and broadcast as a live WireStatus update so the client sees
-        // the change without a full reconnect.
+        // A Busy that outlives LAUNCH_TIMEOUT is upgraded to Warning and
+        // broadcast live so the client sees the spinner stop. Both slots are
+        // covered: a KEYED busy and the ANONYMOUS one, whose upgrade path is a
+        // separate branch in `tick` and was previously pinned only in core.
         let (tx, mut rx) = broadcast::channel::<WireStatus>(16);
         let (clear_tx, _crx) = broadcast::channel::<Option<String>>(16);
         let (snap_tx, snap_rx) = watch::channel::<Vec<KeyedWireStatus>>(vec![]);
@@ -3511,32 +3549,59 @@ mod tests {
             tx,
             clear_tx,
             snapshot_tx: snap_tx,
-            controller: KeyedStatusController::emitting_finals(Duration::from_secs(6)),
+            controller: KeyedStatusController::emitting_finals(),
             generations: std::collections::HashMap::new(),
         };
-        // Drain the initial send so `rx` only sees the upgrade.
+        // Drain the initial sends so `rx` only sees the upgrades.
         let _ = e.send(WireStatus::keyed("launch", "busy", "Launching\u{2026}"));
-        let _ = rx.try_recv(); // consume the live send
+        let _ = e.send(WireStatus::new("busy", "Loading\u{2026}"));
+        let _ = rx.try_recv();
+        let _ = rx.try_recv();
 
         // Advance past LAUNCH_TIMEOUT.
-        let far_future = Instant::now() + LAUNCH_TIMEOUT + Duration::from_secs(1);
-        e.tick(far_future);
+        let timed_out = Instant::now() + LAUNCH_TIMEOUT + Duration::from_secs(1);
+        e.tick(timed_out);
 
-        // The spinner is gone from the snapshot: the upgrade turned it into a
-        // Warning, which is a final, and a final is not replayable state. The
-        // stranded busy is what MUST NOT survive here, because a replayed
-        // spinner never stops.
+        // Both entries are now warnings, and both stay replayable: a tab that
+        // dropped while the operation hung must reconnect to the timed-out
+        // warning, not to an empty snapshot and a spinner nothing will stop.
+        let snap = snap_rx.borrow().clone();
+        assert_eq!(snap.len(), 2, "both upgrades remain replayable: {snap:?}");
         assert!(
-            snap_rx.borrow().is_empty(),
-            "neither the stranded busy nor its timed-out warning may be replayed, got {:?}",
-            snap_rx.borrow()
+            snap.iter().all(|s| s.tone == "warning"),
+            "both must be warnings now: {snap:?}"
+        );
+        assert!(
+            snap.iter().any(|s| s.key.is_none()),
+            "the ANONYMOUS slot's upgrade must be there too: {snap:?}"
+        );
+        assert!(
+            snap.iter().any(|s| s.key.as_deref() == Some("launch")),
+            "and the keyed one: {snap:?}"
         );
 
-        // The upgraded status must still have been broadcast live, so the client
-        // watching the spinner replaces it by key.
-        let upgraded = rx.try_recv().expect("upgraded status must be broadcast");
-        assert_eq!(upgraded.key.as_deref(), Some("launch"));
-        assert_eq!(upgraded.tone, "warning");
+        // Both must have been broadcast live, keyed and anonymous alike.
+        let mut broadcast_keys = Vec::new();
+        while let Ok(up) = rx.try_recv() {
+            assert_eq!(up.tone, "warning");
+            broadcast_keys.push(up.key);
+        }
+        assert!(
+            broadcast_keys.contains(&Some("launch".to_string())),
+            "keyed upgrade must be broadcast, got {broadcast_keys:?}"
+        );
+        assert!(
+            broadcast_keys.contains(&None),
+            "anonymous upgrade must be broadcast, got {broadcast_keys:?}"
+        );
+
+        // The window runs from the upgrade, so a later tick retires both.
+        e.tick(timed_out + FINAL_REPLAY_WINDOW);
+        assert!(
+            snap_rx.borrow().is_empty(),
+            "the timed-out warnings age out like any other final, got {:?}",
+            snap_rx.borrow()
+        );
     }
 
     #[test]
@@ -4301,7 +4366,7 @@ mod tests {
         let (tx, _rx) = broadcast::channel(8);
         let (clear_tx, _clear_rx) = broadcast::channel(8);
         let (snapshot_tx, _snapshot_rx) = watch::channel(Vec::new());
-        let mut status = StatusEmitter::new(tx, clear_tx, snapshot_tx, Duration::from_secs(6));
+        let mut status = StatusEmitter::new(tx, clear_tx, snapshot_tx);
         let (config_reload_tx, _config_rx) = broadcast::channel(8);
         let mut disk_ahead = false;
         let owners = crate::pty_owners::PtySizeOwners::default();

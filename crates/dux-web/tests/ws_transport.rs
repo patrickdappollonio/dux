@@ -479,26 +479,176 @@ async fn saw_status_tone(ws: &mut ClientWs, tone: &str, timeout: Duration) -> Op
     None
 }
 
-/// The replay bug, as the user hit it: an operation fails, its error toast is
-/// broadcast to everyone watching, and then a NEW browser opens the page. That
-/// browser missed the event and must not be told about it, or an hour-old
-/// failure is re-raised as a fresh toast on every page load, every new tab and
-/// every reconnect.
+/// Boot with `p1` carrying a startup command that BLOCKS on a FIFO the caller
+/// controls, so a keyed `Busy` stays provably up for exactly as long as the test
+/// wants. This is the "hold the window open with a real dependency" technique
+/// CLAUDE.md mandates: no sleep, no polling for a race, just a process parked on
+/// a read that nothing but the test can satisfy.
 ///
-/// The status is deliberately raised WITHOUT an `X-Connection-Id`, so its scope
-/// is `All` and per-connection filtering cannot make this pass for the wrong
-/// reason. The already-attached connection seeing it is the control.
-#[tokio::test]
-async fn a_finished_operations_error_is_never_replayed_to_a_later_connection() {
-    let (addr, _tmp) = boot().await;
+/// Returns the FIFO path; writing anything to it lets the command exit and the
+/// keyed final arrive.
+async fn boot_with_gated_startup_command() -> (SocketAddr, std::path::PathBuf, tempfile::TempDir) {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_path_buf();
+    let gate = root.join("startup-gate");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&gate)
+        .status()
+        .expect("spawn mkfifo");
+    assert!(made.success(), "mkfifo {} failed", gate.display());
 
-    // The browser that is already open when the operation runs.
+    let paths = DuxPaths {
+        root: root.clone(),
+        config_path: root.join("config.toml"),
+        sessions_db_path: root.join("sessions.sqlite3"),
+        worktrees_root: root.join("worktrees"),
+        lock_path: root.join("dux.lock"),
+    };
+    std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+    {
+        let store = SessionStore::open(&paths.sessions_db_path).unwrap();
+        store
+            .upsert_project(&ProjectConfig {
+                id: "p1".to_string(),
+                path: root.to_string_lossy().into_owned(),
+                name: Some("p1-name".to_string()),
+                default_provider: None,
+                leading_branch: None,
+                auto_reopen_agents: None,
+                // Blocks until the test opens the FIFO for writing.
+                startup_command: Some(format!("cat {}", gate.display())),
+                env: Default::default(),
+            })
+            .unwrap();
+        store
+            .upsert_session(&sample_session(
+                "s1",
+                "p1",
+                "feat",
+                root.to_string_lossy().as_ref(),
+            ))
+            .unwrap();
+    }
+    let mut engine = bootstrap_engine(&paths).unwrap();
+    // Pin the shell so the gate command is interpreted identically everywhere,
+    // rather than depending on whatever login shell the host defaults to.
+    engine.config.startup_command_terminal.command = "sh".to_string();
+    engine.config.startup_command_terminal.args = vec!["-c".to_string()];
+    let (handle, _join) = spawn_engine_thread(engine);
+    let app = router(handle);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    (addr, gate, tmp)
+}
+
+/// Release the gated startup command by opening its FIFO for writing. Opening a
+/// FIFO for write blocks until a reader is present, so this is only called once
+/// the busy status has proved the command is running.
+async fn release_gate(gate: std::path::PathBuf) {
+    tokio::task::spawn_blocking(move || {
+        let _ = std::fs::write(&gate, b"go\n");
+    })
+    .await
+    .expect("gate writer");
+}
+
+/// The connect-time snapshot replay, in both directions, over a real socket.
+///
+/// This glue had NO coverage: replacing the replay loop in `ws_events` with a
+/// discarded call broke nothing in the whole suite, even though it is the only
+/// thing that tells a client about work it did not personally start. The
+/// retention split makes it MORE load-bearing, since an in-flight `Busy` is now
+/// the main thing the snapshot exists to carry.
+///
+/// Both statuses are raised WITHOUT an `X-Connection-Id`, so their scope is
+/// `All` and per-connection filtering cannot make this pass for the wrong
+/// reason.
+#[tokio::test]
+async fn a_new_connection_is_told_about_work_in_flight_and_about_the_outcome_it_missed() {
+    let (addr, gate, _tmp) = boot_with_gated_startup_command().await;
+
+    // The browser that is already open when the operation starts.
+    let (mut ws_a, _id_a) = connect_events(addr).await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!(
+            "http://{addr}/api/v1/sessions/s1/rerun-startup-command"
+        ))
+        .send()
+        .await
+        .expect("POST rerun-startup-command");
+    assert_eq!(resp.status().as_u16(), 200, "the command is accepted");
+
+    // The operation is now parked on the FIFO, so the busy is provably still in
+    // flight for the rest of this block.
+    assert!(
+        saw_status_tone(&mut ws_a, "busy", Duration::from_secs(10))
+            .await
+            .is_some(),
+        "the attached connection must see the busy live"
+    );
+
+    // DIRECTION ONE: a browser that opens mid-operation is handed the spinner
+    // out of the connect-time snapshot, having seen no live broadcast at all.
+    let (mut ws_b, _id_b) = connect_events(addr).await;
+    let replayed_busy = saw_status_tone(&mut ws_b, "busy", Duration::from_secs(5)).await;
+    assert!(
+        replayed_busy.is_some(),
+        "a connection opened mid-operation must be replayed the in-flight busy"
+    );
+
+    // Let the startup command finish; its keyed final replaces the busy.
+    release_gate(gate).await;
+    assert!(
+        saw_status_tone(&mut ws_a, "info", Duration::from_secs(15))
+            .await
+            .is_some(),
+        "the attached connection must see the final live"
+    );
+
+    // DIRECTION TWO: the dropped-socket journey. A connection made after the
+    // operation ended is still inside `FINAL_REPLAY_WINDOW`, so it is handed the
+    // outcome rather than an empty snapshot. Without this a tab whose socket
+    // blipped across the operation would sit on a spinner forever and never
+    // learn what happened.
+    let (mut ws_c, _id_c) = connect_events(addr).await;
+    let replayed_final = saw_status_tone(&mut ws_c, "info", Duration::from_secs(5)).await;
+    assert!(
+        replayed_final.is_some(),
+        "a connection made just after the operation must be replayed its outcome"
+    );
+    // …and the spinner must NOT come back with it: the final retired it.
+    assert!(
+        saw_status_tone(&mut ws_c, "busy", Duration::from_millis(800))
+            .await
+            .is_none(),
+        "a finished operation must not be replayed as still running"
+    );
+}
+
+/// A failed delete is reported to the connection that was watching, and the
+/// error arrives STICKY end to end, from the engine resolver to the wire.
+///
+/// (What happens to that error THIRTY SECONDS later, when it leaves the replay
+/// window, is pinned in `dux_core::statusline` and in the emitter tests, which
+/// can drive the clock. It is deliberately not tested here: a thirty-second
+/// sleep in the suite would cost more than the coverage is worth.)
+#[tokio::test]
+async fn a_half_done_delete_reports_a_sticky_error_to_the_watching_connection() {
+    let (addr, _tmp) = boot().await;
     let (mut ws_a, _id_a) = connect_events(addr).await;
 
     // Deleting s1 with its worktree runs an async removal whose git call fails
-    // (the seeded worktree path is a plain directory, not a linked worktree), so
-    // the keyed busy resolves into a real error final: exactly the shape of the
-    // toast users were seeing resurrected on every page load.
+    // (the seeded worktree path is a plain directory, not a linked worktree).
     let client = reqwest::Client::new();
     let resp = client
         .delete(format!(
@@ -513,38 +663,14 @@ async fn a_finished_operations_error_is_never_replayed_to_a_later_connection() {
         "the delete is accepted; the failure arrives as a status"
     );
 
-    // Control: the connection that was watching DID receive the error.
     let seen = saw_status_tone(&mut ws_a, "error", Duration::from_secs(10)).await;
     let seen = seen.expect("the attached connection must receive the broadcast error");
 
-    // And it arrives STICKY, end to end from the engine resolver to the wire: a
-    // failed worktree removal leaves an orphaned directory on disk that only the
-    // user can clear, so this toast must wait for them rather than time out.
+    // A failed worktree removal leaves an orphaned directory on disk that only
+    // the user can clear, so this toast must wait for them rather than time out.
     assert!(
         seen.contains("\"sticky\":true"),
         "a half-done delete must be marked sticky on the wire, got {seen}"
-    );
-
-    // Let the actor settle so any snapshot write has landed; the point of the
-    // test is that time passing does NOT make the error replayable.
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
-    // The journey: a new browser opens the page afterwards.
-    let (mut ws_b, _id_b) = connect_events(addr).await;
-    let replayed = saw_status_tone(&mut ws_b, "error", Duration::from_secs(2)).await;
-    assert!(
-        replayed.is_none(),
-        "a connection that opened after the failure must not be told about it, got {replayed:?}"
-    );
-
-    // And a reconnect is the same journey again: a third connection is likewise
-    // owed nothing, so the error cannot be resurrected by reconnecting either.
-    let (mut ws_c, _id_c) = connect_events(addr).await;
-    assert!(
-        saw_status_tone(&mut ws_c, "error", Duration::from_secs(1))
-            .await
-            .is_none(),
-        "the error must not come back on any later connection"
     );
 }
 

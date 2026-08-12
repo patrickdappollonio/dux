@@ -30,6 +30,33 @@ pub enum StatusScope {
 /// both surfaces and the value only lives in one place.
 pub const BUSY_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// How long a FINAL stays replayable under [`StatusRetention::Emit`].
+///
+/// A reconnect is the same user who watched the spinner start, so it must be
+/// told how the operation ended; a page load an hour later is a different
+/// session and must not be. This window is what separates the two.
+///
+/// Deliberately a fixed constant and NOT `ui.status_clear_seconds`. How long a
+/// final stays REPLAYABLE and how long a toast stays ON SCREEN are different
+/// questions, and that setting answers the second. Tying them would also mean a
+/// user who sets `0` (meaning "never auto-clear on screen") gets unbounded
+/// retention, which is the stale-replay bug restored through the back door.
+///
+/// 30 seconds, derived rather than guessed, from the browser's own reconnect
+/// budget in `crates/dux-web/web/src/lib/reconnectingSocket.ts`: backoff starts
+/// at `RECONNECT_MIN_MS` (500) and doubles, capped at `RECONNECT_MAX_MS` (5000),
+/// for at most `MAX_RECONNECT_ATTEMPTS` (3) tries. Three tries are delayed 500,
+/// 1000 and 2000 ms, so the cap never even binds and the last attempt starts
+/// about 3.5 s after the drop; a socket that has not come back by then has given
+/// up, emitted `failed`, and handed the user a Reconnect affordance instead. 30 s
+/// clears that with an order of magnitude to spare while staying three orders of
+/// magnitude short of the hour-old error this window exists to stop.
+///
+/// The accepted consequence: a brand-new tab opened inside the window also sees
+/// the final. That is fine. A thirty-second-old outcome is current, and it is
+/// the price of the reconnect being honest.
+pub const FINAL_REPLAY_WINDOW: Duration = Duration::from_secs(30);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StatusTone {
     Info,
@@ -146,6 +173,13 @@ pub struct KeyedWireStatus {
 pub struct StatusTickChanges {
     pub cleared_keys: Vec<Option<String>>, // None = the anonymous slot cleared
     pub upgraded: Vec<KeyedWireStatus>,    // busy→warning replacements
+    /// How many finals aged out of the replay window under
+    /// [`StatusRetention::Emit`]. These are deliberately NOT reported as keys:
+    /// the caller must refresh its published snapshot but must send NO frame for
+    /// them, because a `status_cleared` would dismiss the toast on every screen
+    /// showing it, `sticky` ones included. A count rather than a list, so there
+    /// is nothing here to accidentally turn into frames.
+    pub purged: usize,
 }
 
 /// What the controller does with a FINAL status (anything that is not
@@ -154,18 +188,32 @@ pub struct StatusTickChanges {
 /// The distinction exists because a `Busy` is live STATE while a final is an
 /// EVENT. A surface that can be joined late (the web, where every page load and
 /// every reconnect replays the snapshot) must be told about work still in
-/// flight, and must NOT be told about an outcome it legitimately missed.
+/// flight, and must not still be told, an hour on, about an outcome that is
+/// long over.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StatusRetention {
     /// Store a final and keep it until something replaces it. The TUI's single
     /// status line has no other way to show an outcome, and it is never
     /// "reconnected", so the last message simply stays on screen.
     Retain,
-    /// Do not store a final at all. It is still handed to the caller to
-    /// broadcast live (the web emitter sends the `WireStatus` it was given), so
-    /// every client attached AT THE TIME sees it, but it never enters
-    /// [`snapshot`](KeyedStatusController::snapshot) and so is never replayed to
-    /// a connection that arrives afterwards.
+    /// Treat a final as an event with a short tail: it is broadcast live by the
+    /// caller (the web emitter sends the `WireStatus` it was given), kept
+    /// replayable for [`FINAL_REPLAY_WINDOW`], and then dropped by
+    /// [`tick`](KeyedStatusController::tick).
+    ///
+    /// The window is not a detail, it is the point. Without it a socket that
+    /// drops while an operation is running comes back to a snapshot holding
+    /// NOTHING: the busy was retired by its own final and the final was
+    /// broadcast to nobody, so the client sits on a spinner until its leak guard
+    /// silently retires it and the user is never told the operation failed. With
+    /// it, the reconnecting tab is handed the final it missed and the hour-old
+    /// error still never comes back.
+    ///
+    /// The expiry is SILENT: no cleared key is reported, because the on-screen
+    /// lifetime belongs to the client (which retires each toast on its own
+    /// timer, and deliberately never retires a `sticky` one). A `status_cleared`
+    /// at the thirty-second mark would dismiss exactly the messages that were
+    /// marked as needing to wait for the user.
     Emit,
 }
 
@@ -203,13 +251,22 @@ impl KeyedStatusController {
         Self::with_retention(clear_after, StatusRetention::Retain)
     }
 
-    /// A controller that EMITS finals without retaining them, for a surface
-    /// whose clients can attach late and would otherwise be replayed an outcome
-    /// they never witnessed. This is what the web engine actor uses.
-    pub fn emitting_finals(clear_after: Duration) -> Self {
-        Self::with_retention(clear_after, StatusRetention::Emit)
+    /// A controller that treats a final as an event with a short tail: broadcast
+    /// live, replayable for [`FINAL_REPLAY_WINDOW`], then dropped. This is what
+    /// the web engine actor uses.
+    ///
+    /// It takes no `clear_after`, and that is deliberate rather than an
+    /// oversight: `ui.status_clear_seconds` sets how long a toast stays ON
+    /// SCREEN, which under this policy is the client's business, and the only
+    /// server-side lifetime left is the replay window, which is a fixed constant
+    /// for the reasons on [`FINAL_REPLAY_WINDOW`]. Passing a setting that could
+    /// not affect anything would have been a lie in the signature.
+    pub fn emitting_finals() -> Self {
+        Self::with_retention(Duration::ZERO, StatusRetention::Emit)
     }
 
+    /// `clear_after` is meaningful only for [`StatusRetention::Retain`]; the
+    /// `Emit` path never reads it (see [`Self::emitting_finals`]).
     fn with_retention(clear_after: Duration, retention: StatusRetention) -> Self {
         Self {
             anon: None,
@@ -281,29 +338,19 @@ impl KeyedStatusController {
             seq,
         };
 
-        // Under `Emit` a final is not state, it is an event: the caller
-        // broadcasts it live and the controller keeps nothing. The slot it
-        // lands on is still CLEARED, because the final ends the operation whose
-        // `Busy` was sitting there and a leftover spinner would be replayed to
-        // the next connection forever.
-        let retain = match self.retention {
-            StatusRetention::Retain => true,
-            StatusRetention::Emit => tone == StatusTone::Busy,
-        };
-
+        // Both policies STORE the entry, including a final: `Emit` differs only
+        // in how long it keeps one, which is [`tick`](Self::tick)'s job. Storing
+        // is also what retires the `Busy` the final replaces, so no spinner is
+        // ever left behind on the slot.
         match key {
             None => {
-                self.anon = if retain { Some(entry) } else { None };
+                self.anon = Some(entry);
                 // A new anonymous set always clears the pin so the new message
                 // follows normal auto-clear rules (the pin was for the old one).
                 self.anon_pinned = false;
             }
             Some(k) => {
-                if retain {
-                    self.entries.insert(k, entry);
-                } else {
-                    self.entries.shift_remove(&k);
-                }
+                self.entries.insert(k, entry);
             }
         }
 
@@ -333,25 +380,48 @@ impl KeyedStatusController {
 
     /// Expire timed-out entries.
     ///
-    /// - `Info`/success entries older than `clear_after` are removed.
+    /// Under [`StatusRetention::Retain`]:
+    /// - `Info`/success entries older than `clear_after` are removed AND
+    ///   reported in `cleared_keys`.
+    ///
+    /// Under [`StatusRetention::Emit`]:
+    /// - EVERY final (info, warning, error alike) older than
+    ///   [`FINAL_REPLAY_WINDOW`] is removed SILENTLY, with nothing reported. It
+    ///   is leaving the replay snapshot, not leaving the user's screen, and
+    ///   `clear_after` plays no part.
+    ///
+    /// Under both:
     /// - `Busy` entries older than `busy_timeout` are upgraded in-place to a
     ///   `Warning` with a "timed out" message, so a leaked busy is never
-    ///   immortal.
+    ///   immortal. The upgrade restamps `since`, so under `Emit` the resulting
+    ///   warning gets its own full replay window before it ages out.
     ///
     /// Returns the set of changes the caller must broadcast.
     pub fn tick(&mut self, now: Instant, busy_timeout: Duration) -> StatusTickChanges {
         let mut changes = StatusTickChanges::default();
+        let emit = self.retention == StatusRetention::Emit;
 
-        // Check the anonymous slot.
+        // Check the anonymous slot. Under `Emit` the question is not "has this
+        // been on screen long enough" but "is it still worth replaying", so
+        // every tone of final ages out on the same fixed window and no cleared
+        // key is reported (see `StatusRetention::Emit`).
         let anon_expired = self.anon.as_ref().is_some_and(|a| {
-            !self.anon_pinned
-                && a.tone.auto_clears()
-                && !self.clear_after.is_zero()
-                && now.duration_since(a.since) >= self.clear_after
+            if emit {
+                a.tone != StatusTone::Busy && now.duration_since(a.since) >= FINAL_REPLAY_WINDOW
+            } else {
+                !self.anon_pinned
+                    && a.tone.auto_clears()
+                    && !self.clear_after.is_zero()
+                    && now.duration_since(a.since) >= self.clear_after
+            }
         });
         if anon_expired {
             self.anon = None;
-            changes.cleared_keys.push(None);
+            if emit {
+                changes.purged += 1;
+            } else {
+                changes.cleared_keys.push(None);
+            }
         }
 
         // A stale anonymous Busy is a leak too: an unkeyed pending status whose
@@ -384,37 +454,54 @@ impl KeyedStatusController {
                 // operation. Nothing is known to be lost, so it is not sticky.
                 sticky: false,
             });
-            // The upgrade produced a final, so `Emit` drops it exactly as it
-            // drops any other final: it is reported in `upgraded` (which the web
-            // broadcasts live, replacing the spinner by key) and then forgotten,
-            // rather than becoming a stale warning replayed to every later
-            // connection. It is deliberately NOT reported as a cleared key: a
-            // clear would dismiss the very warning the user is meant to read.
-            if self.retention == StatusRetention::Emit {
-                self.anon = None;
-            }
+            // The upgrade produced a final, and `since` was just restamped, so
+            // under `Emit` it now ages out on the ordinary replay window above
+            // rather than being dropped on the spot. That matters: a tab that
+            // dropped while the operation hung reconnects to the timed-out
+            // warning instead of to an empty snapshot and a spinner nothing
+            // will ever stop.
         }
 
-        // Collect keys to operate on; two passes to avoid borrow issues.
+        // Collect keys to operate on; three passes to avoid borrow issues.
+        // `to_clear` is the Retain path (removed AND announced); `to_purge` is
+        // the Emit path (removed and NOT announced).
         let mut to_clear: Vec<String> = Vec::new();
+        let mut to_purge: Vec<String> = Vec::new();
         let mut to_upgrade: Vec<String> = Vec::new();
 
         for (key, entry) in &self.entries {
             let age = now.duration_since(entry.since);
-            match entry.tone {
-                StatusTone::Info if !self.clear_after.is_zero() && age >= self.clear_after => {
-                    to_clear.push(key.clone());
-                }
-                StatusTone::Busy if age >= busy_timeout => {
+            if entry.tone == StatusTone::Busy {
+                if age >= busy_timeout {
                     to_upgrade.push(key.clone());
                 }
-                _ => {}
+                continue;
+            }
+            // Everything below is a final.
+            if emit {
+                if age >= FINAL_REPLAY_WINDOW {
+                    to_purge.push(key.clone());
+                }
+            } else if entry.tone.auto_clears()
+                && !self.clear_after.is_zero()
+                && age >= self.clear_after
+            {
+                to_clear.push(key.clone());
             }
         }
 
         for key in to_clear {
             self.entries.swap_remove(&key);
             changes.cleared_keys.push(Some(key));
+        }
+
+        // Silent, by design: the entry is leaving the REPLAY snapshot, not the
+        // user's screen. Announcing it would send `status_cleared` and dismiss
+        // the toast wherever it is showing, including the `sticky` ones that
+        // exist precisely to wait for the user.
+        for key in to_purge {
+            self.entries.shift_remove(&key);
+            changes.purged += 1;
         }
 
         for key in to_upgrade {
@@ -448,11 +535,6 @@ impl KeyedStatusController {
                     scope: entry.scope.clone(),
                     sticky: entry.sticky,
                 });
-            }
-            // See the anonymous path above: under `Emit` the timed-out Warning
-            // is broadcast and then dropped rather than retained.
-            if self.retention == StatusRetention::Emit {
-                self.entries.shift_remove(&key);
             }
         }
 
@@ -605,7 +687,7 @@ impl KeyedStatusController {
 
 #[cfg(test)]
 mod tests {
-    use super::{KeyedStatusController, StatusTone};
+    use super::{BUSY_TIMEOUT, FINAL_REPLAY_WINDOW, KeyedStatusController, StatusTone};
     use std::time::{Duration, Instant};
 
     #[test]
@@ -777,7 +859,8 @@ mod tests {
     #[test]
     fn retain_policy_keeps_a_final_until_something_replaces_it() {
         // The TUI's contract, pinned so the Emit work cannot quietly change it:
-        // an error stays on the single status line indefinitely.
+        // an error stays on the single status line indefinitely, well past the
+        // window that governs the web.
         let t0 = Instant::now();
         let mut c = KeyedStatusController::with_clear_after(Duration::from_secs(6));
         c.set(t0, Some("push".into()), StatusTone::Error, "Push failed.");
@@ -792,52 +875,91 @@ mod tests {
     }
 
     #[test]
-    fn emit_policy_never_retains_a_keyed_final() {
-        // A final is an EVENT: the caller broadcasts it live, and it must not sit
-        // in the snapshot waiting to be replayed to the next connection.
+    fn emit_policy_replays_a_recent_final_so_a_reconnect_learns_the_outcome() {
+        // The dropped-socket journey: the operation finishes while nobody is
+        // listening, and the tab that comes back a few seconds later must be
+        // handed the outcome. Without this it reconnects to an empty snapshot
+        // and sits on a spinner that nothing will ever stop.
         let t0 = Instant::now();
-        let mut c = KeyedStatusController::emitting_finals(Duration::from_secs(6));
-        c.set(t0, Some("pull".into()), StatusTone::Error, "Pull failed.");
-        assert!(
-            c.snapshot().is_empty(),
-            "an emitted error must not be retained, got {:?}",
-            c.snapshot()
+        let mut c = KeyedStatusController::emitting_finals();
+        c.set(t0, Some("del".into()), StatusTone::Busy, "Removing\u{2026}");
+        c.set(
+            t0 + Duration::from_secs(2),
+            Some("del".into()),
+            StatusTone::Error,
+            "Worktree delete failed.",
         );
-        assert!(c.is_empty(), "the controller must hold nothing");
+        // Five seconds in: comfortably inside the browser's reconnect budget.
+        let _ = c.tick(t0 + Duration::from_secs(5), Duration::from_secs(20));
+        let snap = c.snapshot();
+        assert_eq!(
+            snap.len(),
+            1,
+            "the final must still be replayable: {snap:?}"
+        );
+        assert_eq!(snap[0].tone, "error");
+        assert_eq!(
+            snap[0].key.as_deref(),
+            Some("del"),
+            "and it must have replaced the busy on its own key, not sit beside it"
+        );
+    }
+
+    #[test]
+    fn emit_policy_purges_every_tone_of_final_once_the_window_lapses() {
+        // The reported bug: an hour-old error re-raised on every page load. The
+        // window closes on info, warning and error alike, because "is this still
+        // worth replaying" does not depend on tone.
+        let t0 = Instant::now();
         for tone in [StatusTone::Info, StatusTone::Warning, StatusTone::Error] {
+            let mut c = KeyedStatusController::emitting_finals();
             c.set(t0, Some("k".into()), tone, "final");
+            c.set(t0, None, tone, "unkeyed final");
+            // One tick just before the boundary leaves both in place...
+            let _ = c.tick(
+                t0 + FINAL_REPLAY_WINDOW - Duration::from_millis(1),
+                BUSY_TIMEOUT,
+            );
+            assert_eq!(
+                c.snapshot().len(),
+                2,
+                "{tone:?} must survive to the boundary"
+            );
+            // ...and one at the boundary retires both, keyed and anonymous.
+            let changes = c.tick(t0 + FINAL_REPLAY_WINDOW, BUSY_TIMEOUT);
             assert!(
                 c.snapshot().is_empty(),
-                "{tone:?} is a final and must not be retained"
+                "{tone:?} must stop being replayable, got {:?}",
+                c.snapshot()
+            );
+            // SILENTLY. A cleared key becomes a `status_cleared` frame, which
+            // would dismiss the toast on every screen showing it, including a
+            // sticky one whose whole job is to wait for the user.
+            assert!(
+                changes.cleared_keys.is_empty(),
+                "leaving the replay snapshot must not dismiss anyone's toast, got {:?}",
+                changes.cleared_keys
             );
         }
     }
 
     #[test]
-    fn emit_policy_never_retains_an_anonymous_final() {
-        // The anonymous slot is the easy one to forget: an unkeyed error would
-        // otherwise be replayed to every new connection exactly like a keyed one.
+    fn emit_policy_never_purges_an_in_flight_busy() {
+        // The window is for finals only. A `Busy` outlives it and is retired by
+        // its own final or by the busy timeout, never by age alone.
         let t0 = Instant::now();
-        let mut c = KeyedStatusController::emitting_finals(Duration::from_secs(6));
-        c.set(t0, None, StatusTone::Error, "Something broke.");
-        assert!(
-            c.snapshot().is_empty(),
-            "an unkeyed error must not be retained, got {:?}",
-            c.snapshot()
-        );
-        c.set(t0, None, StatusTone::Info, "Saved.");
-        assert!(c.snapshot().is_empty(), "an unkeyed info must not persist");
-    }
-
-    #[test]
-    fn emit_policy_keeps_an_in_flight_busy_in_the_snapshot() {
-        // The other direction: a browser joining mid-operation MUST learn about
-        // work still running, keyed or not.
-        let t0 = Instant::now();
-        let mut c = KeyedStatusController::emitting_finals(Duration::from_secs(6));
+        let mut c = KeyedStatusController::emitting_finals();
         c.set(t0, Some("pull".into()), StatusTone::Busy, "Pulling\u{2026}");
         c.set(t0, None, StatusTone::Busy, "Loading\u{2026}");
-        assert_eq!(c.snapshot().len(), 2, "both busys must be replayable");
+        // A busy_timeout far past the replay window isolates the two rules.
+        let long = FINAL_REPLAY_WINDOW * 10;
+        let changes = c.tick(t0 + FINAL_REPLAY_WINDOW + Duration::from_secs(1), long);
+        assert!(changes.upgraded.is_empty(), "not yet timed out");
+        assert_eq!(
+            c.snapshot().len(),
+            2,
+            "an operation still running must stay replayable however long it runs"
+        );
     }
 
     #[test]
@@ -845,27 +967,28 @@ mod tests {
         // The final still has to end the operation: a Busy left behind after its
         // final would be replayed as a spinner that never stops.
         let t0 = Instant::now();
-        let mut c = KeyedStatusController::emitting_finals(Duration::from_secs(6));
+        let mut c = KeyedStatusController::emitting_finals();
         c.set(t0, Some("pull".into()), StatusTone::Busy, "Pulling\u{2026}");
         c.set(t0, None, StatusTone::Busy, "Loading\u{2026}");
         c.set(t0, Some("pull".into()), StatusTone::Error, "Pull failed.");
         c.set(t0, None, StatusTone::Info, "Loaded.");
+        let snap = c.snapshot();
+        assert_eq!(snap.len(), 2, "one entry per slot, not two: {snap:?}");
         assert!(
-            c.snapshot().is_empty(),
-            "each final must remove the busy on its own slot, got {:?}",
-            c.snapshot()
+            snap.iter().all(|e| e.tone != "busy"),
+            "no spinner may survive its own final: {snap:?}"
         );
     }
 
     #[test]
-    fn emit_policy_reports_a_stranded_busy_upgrade_without_retaining_it() {
-        // The busy-timeout upgrade produces a Warning, which is a final. Under
-        // Emit it is broadcast (so whoever is watching the spinner sees it stop)
-        // and then dropped, so a later connection is not told about a timeout it
-        // did not witness.
+    fn emit_policy_gives_a_stranded_busy_upgrade_its_own_window() {
+        // The busy-timeout upgrade produces a Warning, which is a final, so it
+        // is broadcast AND stays replayable for a full window measured from the
+        // upgrade. A tab that dropped while the operation hung then reconnects
+        // to the warning rather than to an empty snapshot.
         let t0 = Instant::now();
         let busy_timeout = Duration::from_secs(20);
-        let mut c = KeyedStatusController::emitting_finals(Duration::from_secs(6));
+        let mut c = KeyedStatusController::emitting_finals();
         c.set(
             t0,
             Some("launch".into()),
@@ -880,17 +1003,24 @@ mod tests {
             "both stranded busys must be reported as upgraded"
         );
         assert!(changes.upgraded.iter().all(|u| u.tone == "warning"));
-        assert!(
-            c.snapshot().is_empty(),
-            "the timed-out warnings must not be retained, got {:?}",
-            c.snapshot()
-        );
         // Nothing may be reported as CLEARED: the client replaces the toast by
         // key from the upgraded broadcast, and a clear would dismiss the warning
         // the user is meant to read.
         assert!(
             changes.cleared_keys.is_empty(),
             "an upgrade is a replacement, not a dismissal"
+        );
+        assert_eq!(
+            c.snapshot().len(),
+            2,
+            "the warnings must be replayable right after the upgrade"
+        );
+        // The window runs from the UPGRADE, not from when the busy started.
+        let _ = c.tick(t0 + busy_timeout + FINAL_REPLAY_WINDOW, busy_timeout);
+        assert!(
+            c.snapshot().is_empty(),
+            "and then they age out like any other final, got {:?}",
+            c.snapshot()
         );
     }
 
