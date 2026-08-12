@@ -46,8 +46,8 @@ pub const WELCOME_TIPS: &[WelcomeTip] = &[
         ),
         tui: Some(|resolve| {
             format!(
-                "Need more room? `{}` toggles interactive mode, going fullscreen. Focus mode: activated.",
-                resolve(Action::ExitInteractive)
+                "Need more room? `{}` toggles the agent pane fullscreen. Focus mode: activated.",
+                resolve(Action::ToggleFullscreen)
             )
         }),
     },
@@ -254,8 +254,8 @@ pub const WELCOME_TIPS: &[WelcomeTip] = &[
         web: None,
         tui: Some(|resolve| {
             format!(
-                "Agent keybinds clashing with dux? `{}` toggles interactive mode. Most keys go straight to the agent.",
-                resolve(Action::ExitInteractive)
+                "Agent keybinds clashing with dux? `{}` goes fullscreen, where keys reach the agent verbatim.",
+                resolve(Action::ToggleFullscreen)
             )
         }),
     },

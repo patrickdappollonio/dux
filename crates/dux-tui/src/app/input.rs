@@ -937,7 +937,13 @@ impl App {
                 Action::MoveDown => self.move_left_cursor_down(),
                 Action::MoveUp => self.move_left_cursor_up(),
                 Action::FocusAgent => self.activate_selected_left_item(true)?,
-                Action::ExitInteractive => self.activate_selected_left_item(false)?,
+                // From the sidebar, the fullscreen toggle (and its minimize
+                // alias) reopens fullscreen for a live agent and never
+                // launches a dormant one; `InteractAgent` stays the explicit
+                // jump-to-fullscreen.
+                Action::ExitInteractive | Action::ToggleFullscreen => {
+                    self.activate_selected_left_item(false)?
+                }
                 Action::OpenProjectBrowser => {
                     self.open_project_browser()?;
                 }
@@ -969,9 +975,9 @@ impl App {
                         self.center_mode = CenterMode::Agent;
                         self.input_target = InputTarget::Agent;
                         self.fullscreen_overlay = FullscreenOverlay::Agent;
-                        let exit_key = self.bindings.label_for(Action::ExitInteractive);
+                        let exit_key = self.bindings.label_for(Action::ToggleFullscreen);
                         self.set_info(format!(
-                            "Interactive mode. Keys forwarded to agent. {exit_key} exits."
+                            "Fullscreen. Keys go to the agent verbatim. Press {exit_key} to minimize."
                         ));
                     } else {
                         let r = self.bindings.label_for(Action::ReconnectAgent);
@@ -1092,7 +1098,7 @@ impl App {
             match action {
                 Action::MoveDown => self.move_left_cursor_down(),
                 Action::MoveUp => self.move_left_cursor_up(),
-                Action::FocusAgent | Action::ExitInteractive => {
+                Action::FocusAgent | Action::ExitInteractive | Action::ToggleFullscreen => {
                     // Open terminal overlay for the selected terminal item.
                     self.open_terminal_from_terminal_list()?;
                 }
@@ -1110,7 +1116,36 @@ impl App {
         let in_diff = matches!(self.center_mode, CenterMode::Diff { .. });
         if let Some(action) = self.bindings.lookup(&key, BindingScope::Center) {
             match action {
-                Action::FocusAgent if !in_diff => self.activate_center_agent(true)?,
+                Action::FocusAgent if !in_diff => {
+                    if self.center_typeable() {
+                        // A live, typeable pane types Enter (any typing-owned
+                        // default is already encoded by the `handle_key`
+                        // bypass; this arm is reached only while scrolled
+                        // back, where typing is suppressed, or under a chord
+                        // rebind at the live edge).
+                        if !self.scroll_mode_active() {
+                            self.forward_typing_key_to_center(&key);
+                        }
+                    } else {
+                        // Dormant or exited: the explicit activate action
+                        // launches (landing per the current launch-completion
+                        // behavior; see the stage-3 TODO in workers.rs).
+                        self.activate_center_agent(true)?;
+                    }
+                }
+                Action::ToggleFullscreen if !in_diff => {
+                    if !matches!(self.fullscreen_overlay, FullscreenOverlay::None) {
+                        // The toggle's down half: a non-interactive agent
+                        // fullscreen (the dormant relaunch screen) minimizes
+                        // without launching anything.
+                        self.close_top_overlay();
+                    } else {
+                        // The up half: maximize a live tab, or launch a
+                        // dormant one seeking fullscreen (decision 10 keeps
+                        // fullscreen-seeking launches landing fullscreen).
+                        self.activate_center_agent(true)?;
+                    }
+                }
                 Action::ExitInteractive if !in_diff => self.activate_center_agent(false)?,
                 Action::ShowTerminal if !in_diff => self.show_or_open_first_terminal()?,
                 Action::NextTab if !in_diff => self.focus_tab_relative(true),
@@ -2365,7 +2400,9 @@ impl App {
                     self.raw_input_parser.clear();
                     return Ok(false);
                 }
-                SeqAction::Intercept(Action::ExitInteractive, _, _) => {
+                // In fullscreen both the toggle and its documented minimize
+                // alias mean the same thing: leave fullscreen.
+                SeqAction::Intercept(Action::ExitInteractive | Action::ToggleFullscreen, _, _) => {
                     flush_forward_batch(
                         &mut forward_batch,
                         is_scrolled_back,
@@ -7654,9 +7691,9 @@ impl App {
             self.reset_pty_scrollback();
             self.input_target = InputTarget::Agent;
             self.fullscreen_overlay = FullscreenOverlay::Agent;
-            let exit_key = self.bindings.label_for(Action::ExitInteractive);
+            let exit_key = self.bindings.label_for(Action::ToggleFullscreen);
             self.set_info(format!(
-                "Interactive mode. Keys forwarded to agent. {exit_key} exits."
+                "Fullscreen. Keys go to the agent verbatim. Press {exit_key} to minimize."
             ));
         } else if tab_id != session_id {
             // Dormant extra tab: launch it (only when the caller allows it).
@@ -7693,6 +7730,17 @@ impl App {
     }
 
     fn activate_center_agent_from_mouse(&mut self) {
+        // A double click maximizes only when the child has no mouse tracking
+        // or the tab is dormant (decision 9): a mouse-aware child owns its
+        // clicks, so dux must never steal a rapid pair of them to fullscreen
+        // itself. (Forwarding the click to the child is stage 3; until then a
+        // double click on a mouse-mode child is just two focus events.)
+        if self
+            .selected_terminal_surface_client()
+            .is_some_and(|p| p.has_mouse_mode())
+        {
+            return;
+        }
         if let Err(err) = self.activate_center_agent(true) {
             self.set_error(format!("Mouse activation failed: {err}"));
         }
@@ -8578,40 +8626,26 @@ impl App {
             self.focus = FocusPane::Left;
         } else if return_to_projects {
             // Snap the sidebar to Projects so the agent you are looking at is
-            // the visible selection, but do NOT take focus. Minimizing means
-            // "stop typing at the agent", not "leave this pane": everything a
-            // user reaches for next (tab switching, scrolling, the diff
-            // toggle) is Center-scope, so stealing focus made all of it dead
-            // until they Tab-ed back, with nothing on screen saying why.
-            //
-            // The focus steal was added so a single toggle key could re-enter
-            // the agent from the sidebar. That is no longer load-bearing: the
-            // center handler routes the exit action through the same
-            // activation as the focus action, which re-enters interactive
-            // whenever the provider is live, so the toggle works from here
-            // too. `custom_exit_interactive_key_reopens_a_minimized_agent`
-            // pins it.
-            //
-            // A single-tab agent keeps the ORIGINAL behaviour and returns to
-            // Projects, because with only one tab there is nothing to switch
-            // between and the old muscle memory still applies.
-            //
-            // The test is the TAB COUNT, deliberately, not whether the strip
-            // is on screen. Those two come apart: `ui.always_show_tab_strip`
-            // draws the strip for a single-tab agent, and keying off the strip
-            // would then hold focus on the center pane for an agent with
-            // nothing to switch to, making a display preference silently
-            // change where the keyboard lands.
+            // the visible selection, but do NOT take focus: minimizing lands
+            // on the focused, TYPEABLE center pane, so keystrokes keep
+            // reaching the agent and the fullscreen toggle re-enters from
+            // right here. The old single-tab exception (returning focus to the
+            // sidebar because the tab keys bought nothing there) is obsolete:
+            // with minimized typing the center pane is useful with one tab or
+            // ten, and yanking focus would silently end typeability.
             self.left_section = LeftSection::Projects;
-            let multi_tab = self
-                .selected_session()
-                .map(|s| s.id.clone())
-                .is_some_and(|id| self.session_tab_ids(&id).len() > 1);
-            if !multi_tab {
-                self.focus = FocusPane::Left;
-            }
         }
-        self.set_info("Exited interactive mode.");
+        let key = self.bindings.label_for(Action::ToggleFullscreen);
+        if return_to_projects {
+            self.set_info(format!(
+                "Minimized the agent pane. dux keys are active again and \
+                 typing still reaches the agent. Press {key} for fullscreen."
+            ));
+        } else {
+            self.set_info(format!(
+                "Exited the fullscreen terminal. Press {key} to reopen it."
+            ));
+        }
     }
 
     /// Scan `loading_input_buf` for an ExitInteractive key sequence or a
@@ -8621,8 +8655,9 @@ impl App {
     pub(crate) fn scan_loading_phase_exit(&mut self) -> bool {
         let (sequences, _) = crate::raw_input::split_sequences(&self.loading_input_buf);
         for seq in &sequences {
-            // Check for ExitInteractive keybinding.
-            if let Some((Action::ExitInteractive, _)) =
+            // Check for a fullscreen-exit keybinding (the toggle or its
+            // minimize alias).
+            if let Some((Action::ExitInteractive | Action::ToggleFullscreen, _)) =
                 self.interactive_patterns.match_sequence(seq)
             {
                 self.exit_interactive_mode();
@@ -13638,6 +13673,64 @@ not_a_real_action = ["x"]
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Agent);
     }
 
+    /// A double click never steals clicks from a mouse-aware child (decision
+    /// 9): with mouse tracking on, both clicks are just focus events and the
+    /// pane stays minimized.
+    #[test]
+    fn mouse_double_click_does_not_maximize_a_mouse_mode_child() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+        app.selected_left = 1;
+        app.center_mode = CenterMode::Agent;
+        app.focus = FocusPane::Center;
+        app.engine.providers.insert(
+            "session-1".to_string(),
+            PtyClient::spawn(
+                "sh",
+                &[
+                    "-c".to_string(),
+                    "printf '\\033[?1000h'; sleep 5".to_string(),
+                ],
+                std::path::Path::new("."),
+                10,
+                10,
+                100,
+            )
+            .expect("spawn pty"),
+        );
+        // Wait for the child's mouse-tracking DECSET to be parsed.
+        let mut mouse_mode = false;
+        for _ in 0..200 {
+            if app
+                .selected_terminal_surface_client()
+                .is_some_and(|p| p.has_mouse_mode())
+            {
+                mouse_mode = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            mouse_mode,
+            "test setup: the child must have mouse tracking on"
+        );
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
+
+        assert_eq!(
+            app.focus,
+            FocusPane::Center,
+            "the clicks still focus the pane"
+        );
+        assert_eq!(
+            app.fullscreen_overlay,
+            FullscreenOverlay::None,
+            "a mouse-aware child owns its clicks, so a double click must not maximize"
+        );
+        assert_eq!(app.input_target, InputTarget::None);
+    }
+
     #[test]
     fn mouse_double_click_center_from_left_pane_opens_fullscreen() {
         let mut app = test_app(default_bindings());
@@ -17553,13 +17646,13 @@ cyan = "#00ffff"
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Terminal);
         assert_eq!(app.input_target, InputTarget::Terminal);
 
-        // Simulate ExitInteractive via the raw input path: feed Ctrl-g
+        // Simulate the fullscreen toggle via the raw input path: feed Ctrl-g
         // (0x07) into the raw input buffer and process sequences.
         app.raw_input_buf = vec![0x07];
         let (sequences, _) = crate::raw_input::split_sequences(&app.raw_input_buf);
         assert_eq!(sequences.len(), 1);
         let matched = app.interactive_patterns.match_sequence(sequences[0]);
-        assert_eq!(matched, Some((Action::ExitInteractive, false)));
+        assert_eq!(matched, Some((Action::ToggleFullscreen, false)));
 
         // Apply the same state change that poll_and_forward_raw_input does.
         let return_to_list =
@@ -17581,13 +17674,12 @@ cyan = "#00ffff"
         assert_eq!(app.focus, FocusPane::Left);
     }
 
-    /// Minimizing a MULTI-TAB agent leaves focus on the pane you were in.
+    /// Minimizing an agent leaves focus on the pane you were in.
     ///
     /// Jumping to the sidebar made the Center-scope tab keys dead the instant
     /// you minimized, with nothing on screen explaining why. The sidebar still
     /// SNAPS to Projects so the agent you are looking at is the visible
-    /// selection, but it does not steal focus to do it. A single-tab agent
-    /// keeps the original behaviour; see the test below.
+    /// selection, but it does not steal focus to do it.
     #[test]
     fn exit_interactive_from_a_multi_tab_agent_keeps_focus_on_the_agent_pane() {
         let mut app = test_app(default_bindings());
@@ -17612,15 +17704,15 @@ cyan = "#00ffff"
         );
     }
 
-    /// A SINGLE-tab agent still returns to Projects on minimize.
-    ///
-    /// This is the pre-existing behaviour, kept deliberately: with no tab
-    /// strip on screen there is nothing to switch between, so the Center-scope
-    /// tab keys buy nothing and the older habit of landing back in the agent
-    /// list is the more useful one.
+    /// A SINGLE-tab agent stays on the Center pane too. The old single-tab
+    /// return-to-Projects rationale (nothing to switch between, so the pane
+    /// bought nothing) is obsolete: the minimized pane is now TYPEABLE, so
+    /// leaving focus on it is what keeps keystrokes reaching the agent,
+    /// whatever the tab count and however the strip is configured to render.
     #[test]
-    fn exit_interactive_from_a_single_tab_agent_returns_to_projects() {
+    fn exit_interactive_from_a_single_tab_agent_keeps_focus_on_the_center_pane() {
         let mut app = test_app(default_bindings());
+        app.engine.config.ui.always_show_tab_strip = true;
         let session_id = app.engine.sessions[0].id.clone();
         assert_eq!(
             app.session_tab_ids(&session_id).len(),
@@ -17638,38 +17730,8 @@ cyan = "#00ffff"
         assert_eq!(app.left_section, LeftSection::Projects);
         assert_eq!(
             app.focus,
-            FocusPane::Left,
-            "a single-tab agent keeps returning to the agent list"
-        );
-    }
-
-    /// The focus rule reads the TAB COUNT, not whether the strip is drawn.
-    ///
-    /// `ui.always_show_tab_strip` puts the strip on screen for a single-tab
-    /// agent. If the rule keyed off the strip, turning that preference on
-    /// would silently start holding focus on the center pane for an agent with
-    /// nothing to switch to. A display preference must not move the keyboard.
-    #[test]
-    fn always_showing_the_tab_strip_does_not_change_where_focus_lands() {
-        let mut app = test_app(default_bindings());
-        app.engine.config.ui.always_show_tab_strip = true;
-        let session_id = app.engine.sessions[0].id.clone();
-        assert_eq!(
-            app.session_tab_ids(&session_id).len(),
-            1,
-            "the fixture must be a single-tab agent or this proves nothing"
-        );
-        app.focus = FocusPane::Center;
-        app.input_target = InputTarget::Agent;
-        app.session_surface = SessionSurface::Agent;
-        app.fullscreen_overlay = FullscreenOverlay::Agent;
-
-        app.exit_interactive_mode();
-
-        assert_eq!(
-            app.focus,
-            FocusPane::Left,
-            "one tab is one tab, however the strip is configured to render"
+            FocusPane::Center,
+            "minimizing must land on the typeable center pane regardless of tab count"
         );
     }
 
@@ -17700,10 +17762,16 @@ cyan = "#00ffff"
         );
     }
 
+    /// A custom `exit_interactive` bind keeps working as the documented
+    /// minimize alias, and (bound to a chord) it also re-enters fullscreen
+    /// from the minimized center pane through the same activation. The custom
+    /// key must be a CHORD to reach the bindings from the typeable pane: a
+    /// typing-owned key like Home now belongs to the agent there.
     #[test]
     fn custom_exit_interactive_key_reopens_a_minimized_agent() {
-        let bindings = bindings_with_overrides(&[(Action::ExitInteractive, &["home"])]);
+        let bindings = bindings_with_overrides(&[(Action::ExitInteractive, &["ctrl-e"])]);
         let mut app = test_app(bindings);
+        app.interactive_patterns = app.bindings.interactive_byte_patterns();
         let session_id = app.engine.sessions[0].id.clone();
         app.engine.providers.insert(
             session_id,
@@ -17723,21 +17791,19 @@ cyan = "#00ffff"
         app.session_surface = SessionSurface::Agent;
         app.fullscreen_overlay = FullscreenOverlay::Agent;
 
-        app.process_raw_input_bytes(b"\x1b[H").unwrap();
+        // Ctrl-e is 0x05 on the wire; the raw path must honor the alias.
+        app.process_raw_input_bytes(&[0x05]).unwrap();
 
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
         assert_eq!(app.left_section, LeftSection::Projects);
         assert_eq!(
             app.focus,
-            FocusPane::Left,
-            "single-tab agent, so this one still lands in the agent list"
+            FocusPane::Center,
+            "minimizing lands on the typeable center pane"
         );
 
-        // The two-way toggle re-enters from wherever focus landed. Pinned from
-        // the sidebar here; the multi-tab path leaves focus on the center pane
-        // and re-enters through the same activation, which is why dropping the
-        // focus steal there was safe.
-        app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE))
+        // The two-way toggle re-enters from the pane focus landed on.
+        app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL))
             .unwrap();
 
         assert_eq!(app.input_target, InputTarget::Agent);
@@ -17746,7 +17812,7 @@ cyan = "#00ffff"
     }
 
     #[test]
-    fn ctrl_g_enters_interactive_mode_from_center_pane() {
+    fn ctrl_g_enters_fullscreen_from_the_center_pane() {
         let mut app = test_app(default_bindings());
         app.focus = FocusPane::Center;
         app.center_mode = CenterMode::Agent;
@@ -17771,8 +17837,12 @@ cyan = "#00ffff"
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Agent);
     }
 
+    /// The fullscreen toggle is an EXPLICIT action, so on a dormant tab it
+    /// launches, seeking fullscreen (decision 10 keeps fullscreen-seeking
+    /// launches landing fullscreen). This replaces the old ExitInteractive
+    /// no-op: Ctrl-g now belongs to `ToggleFullscreen`.
     #[test]
-    fn ctrl_g_on_dormant_tab_windowed_is_noop() {
+    fn ctrl_g_on_a_dormant_tab_windowed_launches_seeking_fullscreen() {
         let mut app = test_app(default_bindings());
         app.focus = FocusPane::Center;
         app.center_mode = CenterMode::Agent;
@@ -17783,18 +17853,37 @@ cyan = "#00ffff"
         app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))
             .unwrap();
 
-        assert_eq!(
-            app.input_target,
-            InputTarget::None,
-            "ExitInteractive on a dormant tab must never launch it"
+        assert!(
+            app.engine
+                .is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch(
+                    "session-1".into()
+                )),
+            "the fullscreen toggle is an explicit action and must launch a dormant tab"
         );
+    }
+
+    /// The minimize ALIAS (`exit_interactive`, rebound to a chord) keeps its
+    /// old promise: it never launches a dormant tab.
+    #[test]
+    fn the_exit_interactive_alias_on_a_dormant_tab_never_launches() {
+        let bindings = bindings_with_overrides(&[(Action::ExitInteractive, &["ctrl-e"])]);
+        let mut app = test_app(bindings);
+        app.focus = FocusPane::Center;
+        app.center_mode = CenterMode::Agent;
+        app.input_target = InputTarget::None;
+        app.fullscreen_overlay = FullscreenOverlay::None;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL))
+            .unwrap();
+
+        assert_eq!(app.input_target, InputTarget::None);
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
         assert!(
             !app.engine
                 .is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch(
                     "session-1".into()
                 )),
-            "ExitInteractive must not dispatch a launch for a dormant tab"
+            "the minimize alias must not dispatch a launch for a dormant tab"
         );
     }
 
@@ -17814,7 +17903,7 @@ cyan = "#00ffff"
         assert_eq!(
             app.fullscreen_overlay,
             FullscreenOverlay::None,
-            "ExitInteractive on a dormant tab should minimize the fullscreen pane"
+            "the toggle's down half minimizes the dormant fullscreen pane"
         );
         assert_eq!(app.input_target, InputTarget::None);
         assert!(
@@ -17822,7 +17911,7 @@ cyan = "#00ffff"
                 .is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch(
                     "session-1".into()
                 )),
-            "ExitInteractive must not dispatch a launch for a dormant tab"
+            "minimizing a dormant fullscreen must not dispatch a launch"
         );
     }
 
@@ -20382,7 +20471,11 @@ cyan = "#00ffff"
         let app = test_app(default_bindings());
 
         let cue = line_text(&app.scroll_mode_cue_line());
-        let exit = app.bindings.label_for(Action::ExitInteractive);
+        let exit = app.bindings.label_for(Action::ToggleFullscreen);
+        assert!(
+            !exit.is_empty(),
+            "test premise: the fullscreen toggle must have a default key"
+        );
         assert!(
             cue.contains(&exit),
             "the cue must keep naming the exit key {exit:?}; got {cue:?}"
@@ -21355,6 +21448,55 @@ cyan = "#00ffff"
             }
             other => panic!("palette should still be open, got {other:?}"),
         }
+    }
+
+    /// Enter on a live, typeable pane TYPES (it is sent to the agent as CR)
+    /// and no longer engages fullscreen; Ctrl-g is the fullscreen key.
+    #[test]
+    fn enter_types_into_a_live_agent_instead_of_fullscreening() {
+        let mut app = app_with_minimized_typeable_agent();
+        let session_id = app.engine.sessions[0].id.clone();
+
+        tap_center(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+        assert_eq!(
+            app.fullscreen_overlay,
+            FullscreenOverlay::None,
+            "Enter must not maximize a live agent anymore"
+        );
+        assert_eq!(app.input_target, InputTarget::None);
+        assert!(
+            app.engine.pty_input.contains_key(&session_id),
+            "Enter must be forwarded to the agent as a keystroke"
+        );
+    }
+
+    /// Ctrl-g maximizes the live, typeable pane: the toggle's up half.
+    #[test]
+    fn ctrl_g_maximizes_a_live_typeable_pane() {
+        let mut app = app_with_minimized_typeable_agent();
+
+        tap_center(&mut app, KeyCode::Char('g'), KeyModifiers::CONTROL);
+
+        assert_eq!(app.input_target, InputTarget::Agent);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Agent);
+    }
+
+    /// Ctrl-g from the Left pane reopens fullscreen for a live selected agent
+    /// (the old ExitInteractive-from-Left behavior) and never launches a
+    /// dormant one.
+    #[test]
+    fn ctrl_g_from_left_reopens_fullscreen_for_a_live_agent() {
+        let mut app = app_with_minimized_typeable_agent();
+        app.focus = FocusPane::Left;
+        app.left_section = LeftSection::Projects;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))
+            .expect("handle key");
+
+        assert_eq!(app.input_target, InputTarget::Agent);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Agent);
+        assert_eq!(app.focus, FocusPane::Center);
     }
 
     #[test]

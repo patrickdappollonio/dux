@@ -2354,7 +2354,7 @@ impl App {
         let live_edge = self.bindings.labels_for(Action::ScrollToBottom);
         let scroll_up = self.bindings.labels_for(Action::ScrollPageUp);
         let scroll_down = self.bindings.labels_for(Action::ScrollPageDown);
-        let exit_key = self.bindings.label_for(Action::ExitInteractive);
+        let exit_key = self.bindings.label_for(Action::ToggleFullscreen);
 
         let mut spans: Vec<Span> = vec![Span::styled(
             format!("Scroll mode: keys are not reaching the {target}. "),
@@ -2759,7 +2759,7 @@ impl App {
         // Hint bar with top border.
         if hint_area.height > 0 {
             // Pre-compute all key labels so they outlive the Span borrows.
-            let exit_key = self.bindings.label_for(Action::ExitInteractive);
+            let exit_key = self.bindings.label_for(Action::ToggleFullscreen);
             let scroll_down = self.bindings.labels_for(Action::ScrollPageDown);
             let scroll_up = self.bindings.labels_for(Action::ScrollPageUp);
             let scroll_line = self.bindings.label_for(Action::ScrollLineDown);

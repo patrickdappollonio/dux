@@ -3437,9 +3437,9 @@ impl App {
             self.reset_pty_scrollback();
             self.fullscreen_overlay = FullscreenOverlay::None;
             self.input_target = InputTarget::None;
-            let key = self.bindings.label_for(Action::FocusAgent);
+            let key = self.bindings.label_for(Action::ToggleFullscreen);
             self.set_info(format!(
-                "Minimized the agent pane. Press \"{key}\" to reopen it."
+                "Minimized the agent pane. Press {key} to go fullscreen again."
             ));
             return true;
         }

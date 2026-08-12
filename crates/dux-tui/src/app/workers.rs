@@ -1312,6 +1312,11 @@ impl App {
                 self.project_chooser_context = None;
                 self.reload_changed_files();
                 self.show_agent_surface();
+                // TODO(stage 3, decision 10): launch completion should land
+                // MINIMIZED unless the launch was fullscreen-seeking; that
+                // needs a wants-fullscreen bit threaded through
+                // `AgentLaunchKind`. Until then every completed launch still
+                // fullscreens, and tests pin this current behavior.
                 self.input_target = InputTarget::Agent;
                 self.fullscreen_overlay = FullscreenOverlay::Agent;
                 // The create success / startup-error keyed final is resolved
@@ -1336,6 +1341,8 @@ impl App {
             }
             AgentLaunchReadyView::Reconnect { status_message } => {
                 self.show_agent_surface();
+                // TODO(stage 3, decision 10): land minimized unless the
+                // launch was fullscreen-seeking (see CreateCommitted above).
                 self.input_target = InputTarget::Agent;
                 self.fullscreen_overlay = FullscreenOverlay::Agent;
                 // Resolve the keyed reconnect op so its success replaces exactly
@@ -1365,6 +1372,8 @@ impl App {
                     == Some(session_id.as_str())
                 {
                     self.show_agent_surface();
+                    // TODO(stage 3, decision 10): land minimized unless the
+                    // launch was fullscreen-seeking (see CreateCommitted above).
                     self.input_target = InputTarget::Agent;
                     self.fullscreen_overlay = FullscreenOverlay::Agent;
                 }

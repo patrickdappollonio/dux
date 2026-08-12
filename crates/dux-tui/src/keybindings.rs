@@ -571,8 +571,12 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         hint_contexts: &[],
     },
     BindingDef {
+        // The documented alias for "minimize": it keeps its config name and
+        // its action so custom binds keep working, but it has NO default keys
+        // anymore. Ctrl-g moved to `ToggleFullscreen`, which owns the
+        // fullscreen toggle in both directions.
         action: Action::ExitInteractive,
-        default_keys: &[key!(ctrl - g)],
+        default_keys: &[],
         scopes: &[
             BindingScope::Interactive,
             BindingScope::Center,
@@ -580,7 +584,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         ],
         help: Some(HelpEntry {
             section: "Agent pane",
-            description: "Exit interactive mode",
+            description: "Minimize the fullscreen agent pane",
         }),
         hint_contexts: &[],
     },
@@ -621,10 +625,22 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         hint_contexts: &[],
     },
     BindingDef {
+        // The fullscreen toggle. In the Center scope it maximizes the focused
+        // agent (launching a dormant tab fullscreen-seeking); in Interactive
+        // scope its byte pattern minimizes, same as `ExitInteractive`; in the
+        // Left scope it reopens fullscreen for a live selected agent without
+        // launching a dormant one.
         action: Action::ToggleFullscreen,
-        default_keys: &[],
-        scopes: &[],
-        help: None,
+        default_keys: &[key!(ctrl - g)],
+        scopes: &[
+            BindingScope::Interactive,
+            BindingScope::Center,
+            BindingScope::Left,
+        ],
+        help: Some(HelpEntry {
+            section: "Agent pane",
+            description: "Toggle fullscreen (keys go to the agent verbatim)",
+        }),
         hint_contexts: &[],
     },
     BindingDef {
@@ -3166,10 +3182,11 @@ mod tests {
     fn interactive_byte_patterns_matches_defaults() {
         let bindings = default_bindings();
         let patterns = bindings.interactive_byte_patterns();
-        // ExitInteractive default is Ctrl-g → 0x07
+        // ToggleFullscreen default is Ctrl-g → 0x07 (ExitInteractive keeps
+        // its name for custom binds but ships with no default keys).
         let result = patterns.match_sequence(&[0x07]);
         assert!(result.is_some());
-        assert_eq!(result.unwrap().0, Action::ExitInteractive);
+        assert_eq!(result.unwrap().0, Action::ToggleFullscreen);
         assert!(!result.unwrap().1); // not conditional
     }
 
