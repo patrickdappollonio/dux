@@ -8279,12 +8279,17 @@ impl App {
     ///   host-selection story, exactly as in a real terminal emulator),
     /// - the click lands outside the terminal content area,
     /// - the pane is scrolled back (the scroll vocabulary owns it),
+    /// - a modal surface owns the pane (macro bar, resize mode), matching
+    ///   the keyboard's `center_typeable()` gates: while those are up the
+    ///   pane is suspended for the mouse exactly as it is for keys,
     /// - the surface is dormant or the child has no mouse tracking on
     ///   (a click then just focuses, today's behavior).
     fn begin_center_mouse_forward(&mut self, mouse: &MouseEvent) -> bool {
         if !matches!(self.fullscreen_overlay, FullscreenOverlay::None)
             || !matches!(self.center_mode, CenterMode::Agent)
             || !mouse.modifiers.is_empty()
+            || self.macro_bar.is_some()
+            || self.resize_mode
         {
             return false;
         }
@@ -8305,6 +8310,14 @@ impl App {
         };
         if !provider.has_mouse_mode() {
             return false;
+        }
+        // A SECOND button pressed mid-drag: the single-slot state can carry
+        // one lifecycle, so the in-flight button is released here (clamped
+        // to the new press's position) before the new one is armed. A real
+        // emulator tracks both lifecycles; releasing first is the honest
+        // rendering of what one slot can say.
+        if self.center_mouse_forward.is_some() {
+            self.finish_center_mouse_forward(mouse);
         }
         let cb = sgr_button_code(button);
         self.focus = FocusPane::Center;
@@ -8333,11 +8346,20 @@ impl App {
 
     /// Release of a forwarded button. The release must ALWAYS be delivered,
     /// clamped to the pane edge when the pointer has left the pane: a dropped
-    /// release leaves the child holding a stuck button.
+    /// release leaves the child holding a stuck button. The one exception is
+    /// a child that dropped mouse tracking MID-DRAG: it no longer wants any
+    /// report, so the state is simply cleared (writing one anyway would type
+    /// the raw SGR bytes at whatever replaced the mouse-mode app).
     fn finish_center_mouse_forward(&mut self, mouse: &MouseEvent) {
         let Some(cb) = self.center_mouse_forward.take() else {
             return;
         };
+        if !self
+            .selected_terminal_surface_client()
+            .is_some_and(|p| p.has_mouse_mode())
+        {
+            return;
+        }
         self.write_center_mouse_report(cb, b'm', mouse.column, mouse.row);
     }
 
@@ -8520,6 +8542,16 @@ impl App {
     }
 
     pub(crate) fn handle_mouse(&mut self, mouse: MouseEvent) -> bool {
+        // A prompt that opened MID-DRAG would consume the release below and
+        // strand the forwarded button on the child (a stuck button, exactly
+        // what `finish_center_mouse_forward` exists to prevent). Deliver the
+        // clamped release first; the prompt still sees the event afterwards.
+        if !matches!(self.prompt, PromptState::None)
+            && self.center_mouse_forward.is_some()
+            && matches!(mouse.kind, MouseEventKind::Up(_))
+        {
+            self.finish_center_mouse_forward(&mouse);
+        }
         if !matches!(self.prompt, PromptState::None) {
             return self.handle_prompt_mouse(mouse);
         }
@@ -14527,6 +14559,177 @@ not_a_real_action = ["x"]
         app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Middle), 30, 5));
         wait_for_forwarded_echo(&app, "[<1;10;5M");
         wait_for_forwarded_echo(&app, "[<1;10;5m");
+    }
+
+    /// The macro bar suspends the pane for the mouse exactly as it does for
+    /// keys (`center_typeable()` excludes it): a click inside the agent area
+    /// with the bar open is NOT forwarded.
+    #[test]
+    fn windowed_click_is_not_forwarded_while_the_macro_bar_is_open() {
+        let mut app = test_app(default_bindings());
+        install_mouse_forward_child(&mut app, "\\033[?1000h");
+        app.macro_bar = Some(crate::app::MacroBarState {
+            input: TextInput::new(),
+            selected: 0,
+            previous_input_target: InputTarget::None,
+        });
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
+
+        assert_eq!(app.center_mouse_forward, None);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let rendered = forwarded_echo(&app);
+        assert!(
+            !rendered.contains("[<"),
+            "a click while the macro bar is open must not reach the child; got {rendered:?}"
+        );
+    }
+
+    /// Resize mode suspends the pane for the mouse exactly as it does for
+    /// keys: a click inside the agent area in resize mode is NOT forwarded.
+    #[test]
+    fn windowed_click_is_not_forwarded_in_resize_mode() {
+        let mut app = test_app(default_bindings());
+        install_mouse_forward_child(&mut app, "\\033[?1000h");
+        app.resize_mode = true;
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
+
+        assert_eq!(app.center_mouse_forward, None);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let rendered = forwarded_echo(&app);
+        assert!(
+            !rendered.contains("[<"),
+            "a click in resize mode must not reach the child; got {rendered:?}"
+        );
+    }
+
+    /// A SECOND button pressed mid-drag releases the in-flight button before
+    /// arming the new one: the single-slot forward state can carry one
+    /// lifecycle, and silently overwriting it stranded the first button as
+    /// held forever on the child.
+    #[test]
+    fn a_second_button_pressed_mid_drag_releases_the_first() {
+        let mut app = test_app(default_bindings());
+        install_mouse_forward_child(&mut app, "\\033[?1000h");
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
+        wait_for_forwarded_echo(&app, "[<0;10;5M");
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Right), 31, 5));
+
+        assert_eq!(
+            app.center_mouse_forward,
+            Some(2),
+            "the new press must own the forward slot"
+        );
+        // The left button's release lands at the new press's position,
+        // BEFORE the right button's press.
+        wait_for_forwarded_echo(&app, "[<0;11;5m^[[<2;11;5M");
+    }
+
+    /// A child that dropped mouse tracking MID-DRAG no longer wants any
+    /// report: the release writes nothing and the state just clears
+    /// (writing it anyway would type raw SGR bytes at the replacement app).
+    #[test]
+    fn release_is_not_written_when_the_child_dropped_mouse_mode_mid_drag() {
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        // Enable tracking, swallow the 10-byte press report, then DISABLE
+        // tracking, then echo everything else: the release (if wrongly
+        // written) would render as visible `^[[<0;10;5m` text.
+        let cmd = "stty raw -echo; printf '\\033[?1000h'; head -c 10 >/dev/null; \
+                   printf '\\033[?1000l'; exec cat -v"
+            .to_string();
+        let client = PtyClient::spawn(
+            "/bin/sh",
+            &["-c".to_string(), cmd],
+            std::path::Path::new("."),
+            24,
+            80,
+            100,
+        )
+        .expect("spawn pty");
+        app.engine.providers.insert(session_id, client);
+        app.selected_left = 1;
+        app.session_surface = SessionSurface::Agent;
+        app.center_mode = CenterMode::Agent;
+        install_mouse_layout(&mut app);
+        for _ in 0..400 {
+            if app
+                .selected_terminal_surface_client()
+                .is_some_and(|p| p.has_mouse_mode())
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            app.selected_terminal_surface_client()
+                .is_some_and(|p| p.has_mouse_mode()),
+            "the child never enabled mouse tracking"
+        );
+
+        // The press ("\\x1b[<0;10;5M", 10 bytes) is swallowed by `head`,
+        // after which the child turns tracking off.
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
+        for _ in 0..400 {
+            if app
+                .selected_terminal_surface_client()
+                .is_some_and(|p| !p.has_mouse_mode())
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            app.selected_terminal_surface_client()
+                .is_some_and(|p| !p.has_mouse_mode()),
+            "the child never dropped mouse tracking"
+        );
+
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 30, 5));
+
+        assert_eq!(
+            app.center_mouse_forward, None,
+            "the release must still disarm the forwarding state"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let rendered = forwarded_echo(&app);
+        assert!(
+            !rendered.contains("[<0;10;5m"),
+            "no release report may reach a child that dropped tracking; got {rendered:?}"
+        );
+    }
+
+    /// A prompt that opens MID-DRAG must not swallow the release: the
+    /// clamped release is delivered to the child first, then the prompt
+    /// handles the event as usual.
+    #[test]
+    fn a_prompt_opened_mid_drag_still_delivers_the_release() {
+        let mut app = test_app(default_bindings());
+        install_mouse_forward_child(&mut app, "\\033[?1000h");
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
+        wait_for_forwarded_echo(&app, "[<0;10;5M");
+
+        // Something opens a modal mid-drag (a worker event, a key path).
+        app.prompt = PromptState::Command {
+            input: TextInput::new(),
+            selected: 0,
+        };
+
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 30, 5));
+
+        assert_eq!(
+            app.center_mouse_forward, None,
+            "the release must disarm the forward even with a prompt up"
+        );
+        wait_for_forwarded_echo(&app, "[<0;10;5m");
+        assert!(
+            matches!(app.prompt, PromptState::Command { .. }),
+            "the prompt stays open; only the stuck-button hazard is resolved"
+        );
     }
 
     #[test]
