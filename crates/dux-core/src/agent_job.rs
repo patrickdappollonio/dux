@@ -845,6 +845,9 @@ pub fn run_create_agent_job(
             startup_result,
             status_op_id: create_key.clone(),
         },
+        // A freshly created agent lands focused-but-minimized (decision 10);
+        // only fullscreen-seeking gestures set this, and create is never one.
+        wants_fullscreen: false,
     };
     run_agent_launch_job(request, worker_tx);
 }

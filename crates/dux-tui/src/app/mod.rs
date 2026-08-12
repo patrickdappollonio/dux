@@ -3762,7 +3762,7 @@ impl App {
             "rename-agent" => self.open_rename_session(),
             "agent-info" => self.open_agent_info(),
             "kill-running" => self.open_kill_running(),
-            "reconnect-agent" => self.reconnect_selected_session(),
+            "reconnect-agent" => self.reconnect_selected_session(false),
             "force-reconnect-agent" => self.force_reconnect_agent(),
             "refresh-changes" => self.refresh_changed_files_now(),
             "move-agent-up" => {
@@ -3797,7 +3797,7 @@ impl App {
                 self.move_selected_terminal(reorder::MoveDir::Bottom);
                 Ok(())
             }
-            "show-agent" => self.activate_center_agent(true),
+            "show-agent" => self.activate_center_agent(true, false),
             "show-terminal" => self.show_or_open_first_terminal(),
             "new-terminal-for-agent" => self.new_companion_terminal(),
             "new-terminal-for-project" => {

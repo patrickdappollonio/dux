@@ -157,6 +157,10 @@ impl Engine {
             pty_size,
             scrollback_lines: self.config.ui.agent_scrollback_lines,
             kind,
+            // Landing is minimized by default (decision 10). The TUI flips
+            // this on the returned request for fullscreen-seeking gestures;
+            // web-originated launches never touch it.
+            wants_fullscreen: false,
         }
     }
 

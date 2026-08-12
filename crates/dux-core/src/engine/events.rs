@@ -354,6 +354,10 @@ pub struct AgentLaunchReadyOutcome {
     pub tab_id: String,
     pub pty_size: (u16, u16),
     pub detached_session_id: Option<String>,
+    /// Copied from `AgentLaunchRequest::wants_fullscreen`: the TUI lands this
+    /// completion fullscreen when `true` and focused-but-minimized otherwise
+    /// (decision 10). The web never reads it.
+    pub wants_fullscreen: bool,
     pub view: AgentLaunchReadyView,
 }
 
@@ -734,6 +738,7 @@ impl Engine {
         // session-slot tab). Use it for the in-flight clear, the providers insert, and
         // the resume-fallback candidate so an extra tab tracks under its own key.
         let tab_id = request.tab_id.clone();
+        let wants_fullscreen = request.wants_fullscreen;
         self.clear_in_flight(&InFlightKey::AgentLaunch(tab_id.clone()));
 
         if let AgentLaunchKind::Create { status_op_id, .. } = &request.kind {
@@ -756,6 +761,7 @@ impl Engine {
                         tab_id: tab_id.clone(),
                         pty_size,
                         detached_session_id: None,
+                        wants_fullscreen,
                         view: AgentLaunchReadyView::CreatePersistFailed {
                             error: err.to_string(),
                         },
@@ -809,6 +815,7 @@ impl Engine {
                     tab_id: tab_id.clone(),
                     pty_size,
                     detached_session_id: detached.map(|d| d.id),
+                    wants_fullscreen,
                     view: AgentLaunchReadyView::CreateCommitted {
                         status_message,
                         startup_result_error,
@@ -830,6 +837,7 @@ impl Engine {
                     tab_id: tab_id.clone(),
                     pty_size,
                     detached_session_id: None,
+                    wants_fullscreen,
                     view: AgentLaunchReadyView::SessionMissing,
                 },
                 None,
@@ -853,6 +861,7 @@ impl Engine {
                     tab_id: tab_id.clone(),
                     pty_size,
                     detached_session_id: None,
+                    wants_fullscreen,
                     view: AgentLaunchReadyView::SessionMissing,
                 },
                 None,
@@ -905,6 +914,7 @@ impl Engine {
                 tab_id,
                 pty_size,
                 detached_session_id: detached.map(|d| d.id),
+                wants_fullscreen,
                 view,
             },
             None,
@@ -4288,6 +4298,7 @@ mod tests {
                 pty_size: (24, 80),
                 scrollback_lines: 1000,
                 kind,
+                wants_fullscreen: false,
             },
             message: message.to_string(),
         }
@@ -4398,6 +4409,7 @@ mod tests {
                     is_fresh,
                     status_message: String::new(),
                 },
+                wants_fullscreen: false,
             },
             message: message.to_string(),
         }
@@ -5175,6 +5187,7 @@ mod tests {
             kind: AgentLaunchKind::Reconnect {
                 status_message: String::new(),
             },
+            wants_fullscreen: false,
         };
         let reaction = engine
             .apply(crate::engine::Command::DispatchAgentLaunch {

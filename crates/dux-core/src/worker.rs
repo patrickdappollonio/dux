@@ -283,6 +283,15 @@ pub struct AgentLaunchRequest {
     pub pty_size: (u16, u16),
     pub scrollback_lines: usize,
     pub kind: AgentLaunchKind,
+    /// TUI-only landing hint (decision 10): `true` when the launch was
+    /// initiated by a fullscreen-seeking gesture (the fullscreen toggle on a
+    /// dormant tab, or a relaunch started from the fullscreen relaunch
+    /// screen), so its completion should land fullscreen. Every other launch
+    /// lands focused-but-minimized. Core builders always construct this as
+    /// `false`; the TUI flips it on the built request before dispatch. The
+    /// web has no fullscreen concept and never reads it, so web-originated
+    /// launches keep the `false` default and behave exactly as before.
+    pub wants_fullscreen: bool,
 }
 
 pub struct AgentLaunchReadyData {

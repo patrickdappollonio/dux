@@ -1312,13 +1312,11 @@ impl App {
                 self.project_chooser_context = None;
                 self.reload_changed_files();
                 self.show_agent_surface();
-                // TODO(stage 3, decision 10): launch completion should land
-                // MINIMIZED unless the launch was fullscreen-seeking; that
-                // needs a wants-fullscreen bit threaded through
-                // `AgentLaunchKind`. Until then every completed launch still
-                // fullscreens, and tests pin this current behavior.
-                self.input_target = InputTarget::Agent;
-                self.fullscreen_overlay = FullscreenOverlay::Agent;
+                // Decision 10: a launched agent lands focused-but-minimized
+                // (Center focused, typeable); only a fullscreen-seeking launch
+                // lands fullscreen. A create is never fullscreen-seeking, but
+                // the shared landing helper keeps the rule in one place.
+                self.land_completed_launch(outcome.wants_fullscreen);
                 // The create success / startup-error keyed final is resolved
                 // ENGINE-SIDE and arrives as a sibling `Status` in the same
                 // `Multi`; this arm keeps only the non-status view work.
@@ -1341,10 +1339,9 @@ impl App {
             }
             AgentLaunchReadyView::Reconnect { status_message } => {
                 self.show_agent_surface();
-                // TODO(stage 3, decision 10): land minimized unless the
-                // launch was fullscreen-seeking (see CreateCommitted above).
-                self.input_target = InputTarget::Agent;
-                self.fullscreen_overlay = FullscreenOverlay::Agent;
+                // Decision 10: land minimized unless the launch sought
+                // fullscreen (see CreateCommitted above).
+                self.land_completed_launch(outcome.wants_fullscreen);
                 // Resolve the keyed reconnect op so its success replaces exactly
                 // the "Launching…"/"Starting fresh…" busy. Falls back to an
                 // anonymous info when no op is stashed (e.g. a launch not driven
@@ -1372,10 +1369,10 @@ impl App {
                     == Some(session_id.as_str())
                 {
                     self.show_agent_surface();
-                    // TODO(stage 3, decision 10): land minimized unless the
-                    // launch was fullscreen-seeking (see CreateCommitted above).
-                    self.input_target = InputTarget::Agent;
-                    self.fullscreen_overlay = FullscreenOverlay::Agent;
+                    // Decision 10: the fallback relaunch is engine-initiated
+                    // and never fullscreen-seeking, so it lands minimized (see
+                    // CreateCommitted above).
+                    self.land_completed_launch(outcome.wants_fullscreen);
                 }
                 self.resolve_reconnect_op_or(
                     &session_id,
@@ -1823,6 +1820,7 @@ mod tests {
             session,
             pty_size: (80, 24),
             detached_session_id: None,
+            wants_fullscreen: false,
             view: AgentLaunchReadyView::CreateCommitted {
                 status_message: "Created agent.".to_string(),
                 startup_result_error: None,
@@ -1852,6 +1850,7 @@ mod tests {
             session,
             pty_size: (80, 24),
             detached_session_id: None,
+            wants_fullscreen: false,
             view: AgentLaunchReadyView::CreateCommitted {
                 status_message: "Created agent.".to_string(),
                 startup_result_error: None,
@@ -1862,6 +1861,132 @@ mod tests {
             app.project_chooser_context.is_none(),
             "creating an agent must clear the manage-projects target",
         );
+    }
+
+    /// Decision 10: a completed launch lands focused-but-minimized. The
+    /// Reconnect ready with `wants_fullscreen: false` must put focus on the
+    /// Center pane with NO fullscreen overlay and NO interactive input
+    /// target, leaving the pane typeable (the derived predicate).
+    #[test]
+    fn reconnect_ready_lands_focused_but_minimized_and_typeable() {
+        let mut app =
+            crate::app::test_support::test_app(crate::app::test_support::default_bindings());
+        let session = app.engine.sessions[0].clone();
+        // A live provider under the session-slot tab id, as the completed
+        // launch would have inserted engine-side.
+        let client = crate::pty::PtyClient::spawn(
+            "sh",
+            &["-c".to_string(), "sleep 0.5".to_string()],
+            Path::new("."),
+            10,
+            40,
+            100,
+        )
+        .expect("spawn pty");
+        app.engine.providers.insert(session.id.clone(), client);
+        app.focus = FocusPane::Left;
+
+        app.apply_agent_launch_ready_view(AgentLaunchReadyOutcome {
+            tab_id: session.id.clone(),
+            session: session.clone(),
+            pty_size: (80, 24),
+            detached_session_id: None,
+            wants_fullscreen: false,
+            view: AgentLaunchReadyView::Reconnect {
+                status_message: "Reconnected.".to_string(),
+            },
+        });
+
+        assert_eq!(app.focus, FocusPane::Center, "the launch focuses Center");
+        assert_eq!(
+            app.input_target,
+            InputTarget::None,
+            "a minimized landing must not enter interactive mode"
+        );
+        assert_eq!(
+            app.fullscreen_overlay,
+            FullscreenOverlay::None,
+            "a minimized landing must not fullscreen"
+        );
+        assert!(
+            app.center_typeable(),
+            "the landed pane must be immediately typeable"
+        );
+    }
+
+    /// Decision 10's exception: a fullscreen-seeking launch (the request's
+    /// `wants_fullscreen` bit) still lands fullscreen-interactive.
+    #[test]
+    fn fullscreen_seeking_reconnect_ready_lands_fullscreen() {
+        let mut app =
+            crate::app::test_support::test_app(crate::app::test_support::default_bindings());
+        let session = app.engine.sessions[0].clone();
+
+        app.apply_agent_launch_ready_view(AgentLaunchReadyOutcome {
+            tab_id: session.id.clone(),
+            session: session.clone(),
+            pty_size: (80, 24),
+            detached_session_id: None,
+            wants_fullscreen: true,
+            view: AgentLaunchReadyView::Reconnect {
+                status_message: "Reconnected.".to_string(),
+            },
+        });
+
+        assert_eq!(app.input_target, InputTarget::Agent);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Agent);
+    }
+
+    /// A create is never fullscreen-seeking: the CreateCommitted ready lands
+    /// the fresh agent focused-but-minimized.
+    #[test]
+    fn create_committed_ready_lands_minimized() {
+        let mut app =
+            crate::app::test_support::test_app(crate::app::test_support::default_bindings());
+        let session = app.engine.sessions[0].clone();
+
+        app.apply_agent_launch_ready_view(AgentLaunchReadyOutcome {
+            tab_id: session.id.clone(),
+            session,
+            pty_size: (80, 24),
+            detached_session_id: None,
+            wants_fullscreen: false,
+            view: AgentLaunchReadyView::CreateCommitted {
+                status_message: "Created agent.".to_string(),
+                startup_result_error: None,
+            },
+        });
+
+        assert_eq!(app.focus, FocusPane::Center);
+        assert_eq!(app.input_target, InputTarget::None);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
+    }
+
+    /// The engine-initiated resume-fallback relaunch is never
+    /// fullscreen-seeking; when its ready arrives for the selected session it
+    /// lands minimized too.
+    #[test]
+    fn resume_fallback_ready_lands_minimized_for_the_selected_session() {
+        let mut app =
+            crate::app::test_support::test_app(crate::app::test_support::default_bindings());
+        let session = app.engine.sessions[0].clone();
+        app.input_target = InputTarget::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+
+        app.apply_agent_launch_ready_view(AgentLaunchReadyOutcome {
+            tab_id: session.id.clone(),
+            session: session.clone(),
+            pty_size: (80, 24),
+            detached_session_id: None,
+            wants_fullscreen: false,
+            view: AgentLaunchReadyView::ResumeFallback {
+                session_id: session.id.clone(),
+                status_message: "Fresh restart.".to_string(),
+            },
+        });
+
+        assert_eq!(app.input_target, InputTarget::None);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
     }
 
     /// Reconnecting a dormant agent flips it Active in the engine; the view must
@@ -1896,6 +2021,7 @@ mod tests {
             session: session.clone(),
             pty_size: (80, 24),
             detached_session_id: None,
+            wants_fullscreen: false,
             view: AgentLaunchReadyView::Reconnect {
                 status_message: "Reconnected.".to_string(),
             },
@@ -1934,6 +2060,7 @@ mod tests {
             session: session.clone(),
             pty_size: (80, 24),
             detached_session_id: None,
+            wants_fullscreen: false,
             view: AgentLaunchReadyView::Reconnect {
                 status_message: "Reconnected.".to_string(),
             },
@@ -2033,6 +2160,7 @@ mod tests {
             kind: AgentLaunchKind::Reconnect {
                 status_message: "reconnect".to_string(),
             },
+            wants_fullscreen: false,
         };
 
         dux_core::agent_job::run_agent_launch_job(request, worker_tx);

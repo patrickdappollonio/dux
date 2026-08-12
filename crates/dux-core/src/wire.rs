@@ -6998,6 +6998,7 @@ mod tests {
             tab_id: "s1".to_string(),
             pty_size: (24, 80),
             detached_session_id: None,
+            wants_fullscreen: false,
             view: AgentLaunchReadyView::CreateCommitted {
                 status_message: "Launched agent \"feat\".".to_string(),
                 startup_result_error: None,
@@ -7013,6 +7014,7 @@ mod tests {
             tab_id: "s1".to_string(),
             pty_size: (24, 80),
             detached_session_id: None,
+            wants_fullscreen: false,
             view: AgentLaunchReadyView::CreatePersistFailed {
                 error: "db error".to_string(),
             },
@@ -7793,6 +7795,7 @@ mod tests {
             session: session.clone(),
             pty_size: (80, 24),
             detached_session_id: None,
+            wants_fullscreen: false,
             view: AgentLaunchReadyView::Reconnect {
                 status_message: "Reconnected.".into(),
             },
@@ -7825,6 +7828,7 @@ mod tests {
             session,
             pty_size: (80, 24),
             detached_session_id: None,
+            wants_fullscreen: false,
             view: AgentLaunchReadyView::SessionMissing,
         }));
         let followup = engine.drive_web_launch_followup(&reaction);
@@ -10545,6 +10549,7 @@ mod tests {
                 session: session.clone(),
                 pty_size: (24, 80),
                 detached_session_id: None,
+                wants_fullscreen: false,
                 view,
             };
             assert!(

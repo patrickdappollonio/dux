@@ -1128,9 +1128,9 @@ impl App {
                         }
                     } else {
                         // Dormant or exited: the explicit activate action
-                        // launches (landing per the current launch-completion
-                        // behavior; see the stage-3 TODO in workers.rs).
-                        self.activate_center_agent(true)?;
+                        // launches, landing focused-but-minimized on
+                        // completion (decision 10).
+                        self.activate_center_agent(true, false)?;
                     }
                 }
                 Action::ToggleFullscreen if !in_diff => {
@@ -1143,10 +1143,10 @@ impl App {
                         // The up half: maximize a live tab, or launch a
                         // dormant one seeking fullscreen (decision 10 keeps
                         // fullscreen-seeking launches landing fullscreen).
-                        self.activate_center_agent(true)?;
+                        self.activate_center_agent(true, true)?;
                     }
                 }
-                Action::ExitInteractive if !in_diff => self.activate_center_agent(false)?,
+                Action::ExitInteractive if !in_diff => self.activate_center_agent(false, false)?,
                 Action::ShowTerminal if !in_diff => self.show_or_open_first_terminal()?,
                 Action::NextTab if !in_diff => self.focus_tab_relative(true),
                 Action::PrevTab if !in_diff => self.focus_tab_relative(false),
@@ -1172,7 +1172,10 @@ impl App {
                     // mode on a live tab, launch a dormant extra tab fresh, or
                     // relaunch a dormant session-slot tab — resolving the FOCUSED tab so
                     // this never acts on the session-slot tab while an extra tab is shown.
-                    self.activate_center_agent(true)?;
+                    // Not fullscreen-seeking by itself; a reconnect initiated
+                    // from the fullscreen relaunch screen still lands
+                    // fullscreen via `launch_seeks_fullscreen`.
+                    self.activate_center_agent(true, false)?;
                 }
                 Action::ScrollPageUp => {
                     if let CenterMode::Diff { ref mut scroll, .. } = self.center_mode {
@@ -7646,7 +7649,10 @@ impl App {
                     self.fullscreen_overlay = FullscreenOverlay::Agent;
                 } else if self.selected_session().is_some() {
                     if allow_launch {
-                        self.reconnect_selected_session()?;
+                        // Enter from the sidebar focuses the minimized
+                        // typeable center (decision 9), so its dormant-agent
+                        // launch is minimized-seeking.
+                        self.reconnect_selected_session(false)?;
                     } else {
                         self.exit_interactive_without_launch();
                     }
@@ -7672,7 +7678,15 @@ impl App {
     /// never launch a dormant tab per the Agent Tabs tenet. See
     /// `activate_selected_left_item` for the same distinction in the
     /// Projects pane.
-    pub(crate) fn activate_center_agent(&mut self, allow_launch: bool) -> Result<()> {
+    /// `seek_fullscreen` marks a fullscreen-seeking activation (decision 10):
+    /// when it launches a dormant tab, the completed launch lands fullscreen
+    /// instead of focused-but-minimized. Only the fullscreen toggle (and the
+    /// double-click maximize gesture) pass `true`.
+    pub(crate) fn activate_center_agent(
+        &mut self,
+        allow_launch: bool,
+        seek_fullscreen: bool,
+    ) -> Result<()> {
         if !matches!(self.center_mode, CenterMode::Agent) {
             return Ok(());
         }
@@ -7702,12 +7716,12 @@ impl App {
             // its provider's prior conversation if it is the sole
             // live/launching tab of that provider, not "never resume".
             if allow_launch {
-                self.launch_focused_support_tab(&session_id, &tab_id)?;
+                self.launch_focused_support_tab(&session_id, &tab_id, seek_fullscreen)?;
             } else {
                 self.exit_interactive_without_launch();
             }
         } else if allow_launch {
-            self.reconnect_selected_session()?;
+            self.reconnect_selected_session(seek_fullscreen)?;
         } else {
             self.exit_interactive_without_launch();
         }
@@ -7741,7 +7755,9 @@ impl App {
         {
             return;
         }
-        if let Err(err) = self.activate_center_agent(true) {
+        // Double-click is the maximize gesture, so a dormant tab launched by
+        // it is fullscreen-seeking (decision 9/10).
+        if let Err(err) = self.activate_center_agent(true, true) {
             self.set_error(format!("Mouse activation failed: {err}"));
         }
     }
@@ -17837,6 +17853,25 @@ cyan = "#00ffff"
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Agent);
     }
 
+    /// Drain the engine worker channel until the dispatched launch job
+    /// reports back (the fixture provider command does not exist, so the job
+    /// fails fast), returning the request it carried. Skips unrelated worker
+    /// events (e.g. the foreground PR check).
+    fn recv_dispatched_launch_request(
+        app: &crate::app::App,
+    ) -> dux_core::worker::AgentLaunchRequest {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            match app.engine.worker_rx.recv_timeout(remaining) {
+                Ok(WorkerEvent::AgentLaunchFailed(data)) => return data.request,
+                Ok(WorkerEvent::AgentLaunchReady(data)) => return data.request,
+                Ok(_) => continue,
+                Err(err) => panic!("no dispatched launch event arrived: {err}"),
+            }
+        }
+    }
+
     /// The fullscreen toggle is an EXPLICIT action, so on a dormant tab it
     /// launches, seeking fullscreen (decision 10 keeps fullscreen-seeking
     /// launches landing fullscreen). This replaces the old ExitInteractive
@@ -17859,6 +17894,10 @@ cyan = "#00ffff"
                     "session-1".into()
                 )),
             "the fullscreen toggle is an explicit action and must launch a dormant tab"
+        );
+        assert!(
+            recv_dispatched_launch_request(&app).wants_fullscreen,
+            "the fullscreen toggle's launch must be fullscreen-seeking (decision 10)"
         );
     }
 
@@ -17932,6 +17971,32 @@ cyan = "#00ffff"
                 )),
             "Enter (the explicit activate action) must still launch a dormant tab"
         );
+        assert!(
+            !recv_dispatched_launch_request(&app).wants_fullscreen,
+            "Enter's launch is minimized-seeking: it lands focused-but-minimized (decision 10)"
+        );
+    }
+
+    /// A relaunch initiated FROM the fullscreen relaunch screen keeps the
+    /// user fullscreen: the dispatched request is fullscreen-seeking even
+    /// though ReconnectAgent itself is a minimized-seeking action.
+    #[test]
+    fn reconnect_from_the_fullscreen_relaunch_screen_seeks_fullscreen() {
+        let mut app = test_app(default_bindings());
+        app.focus = FocusPane::Center;
+        app.center_mode = CenterMode::Agent;
+        // Dormant tab shown on the fullscreen relaunch screen.
+        app.input_target = InputTarget::None;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE))
+            .unwrap();
+
+        let request = recv_dispatched_launch_request(&app);
+        assert!(
+            request.wants_fullscreen,
+            "a relaunch initiated from fullscreen must land fullscreen"
+        );
     }
 
     #[test]
@@ -17950,6 +18015,10 @@ cyan = "#00ffff"
                     "session-1".into()
                 )),
             "ReconnectAgent (the explicit reconnect action) must still launch a dormant tab"
+        );
+        assert!(
+            !recv_dispatched_launch_request(&app).wants_fullscreen,
+            "a windowed ReconnectAgent launch is minimized-seeking (decision 10)"
         );
     }
 
@@ -19818,8 +19887,11 @@ cyan = "#00ffff"
             "provider should still be present after fallback retry"
         );
         assert_eq!(app.engine.sessions[0].status, SessionStatus::Active);
-        assert_eq!(app.input_target, InputTarget::Agent);
-        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Agent);
+        // Decision 10: the engine-initiated fallback relaunch is never
+        // fullscreen-seeking, so it lands focused-but-minimized.
+        assert_eq!(app.input_target, InputTarget::None);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
+        assert_eq!(app.focus, FocusPane::Center);
         assert!(
             !app.engine
                 .resume_fallback_candidates

@@ -1278,6 +1278,7 @@ impl App {
         &mut self,
         _session_id: &str,
         tab_id: &str,
+        seek_fullscreen: bool,
     ) -> Result<()> {
         // Resolution, per-provider resume decision, message wording, and the
         // request build are the single-source `Engine::dormant_tab_launch_request`
@@ -1285,10 +1286,21 @@ impl App {
         // `None` (unknown tab / gone session) is a silent no-op, matching the
         // previous early return.
         let pty_size = self.pty_size_for_launch();
-        if let Some(request) = self.engine.dormant_tab_launch_request(tab_id, pty_size) {
+        if let Some(mut request) = self.engine.dormant_tab_launch_request(tab_id, pty_size) {
+            request.wants_fullscreen = self.launch_seeks_fullscreen(seek_fullscreen);
             self.dispatch_agent_launch(request);
         }
         Ok(())
+    }
+
+    /// Whether a launch dispatched right now should land fullscreen on
+    /// completion (decision 10). `seek_fullscreen` is the caller's explicit
+    /// intent (the fullscreen toggle on a dormant tab); on top of that, any
+    /// launch initiated while the fullscreen relaunch screen is up (e.g.
+    /// ReconnectAgent pressed on the dormant fullscreen surface) keeps the
+    /// user fullscreen rather than yanking them down to the 3-pane layout.
+    pub(crate) fn launch_seeks_fullscreen(&self, seek_fullscreen: bool) -> bool {
+        seek_fullscreen || !matches!(self.fullscreen_overlay, FullscreenOverlay::None)
     }
 
     /// Close-tab entry point. Opens the confirmation dialog for the focused
@@ -1367,6 +1379,22 @@ impl App {
         self.center_mode = CenterMode::Agent;
         self.session_surface = SessionSurface::Agent;
         self.fullscreen_overlay = FullscreenOverlay::None;
+    }
+
+    /// Landing for a COMPLETED agent launch (decision 10): fullscreen only
+    /// when the launch was fullscreen-seeking (the request's
+    /// `wants_fullscreen` bit, stamped at dispatch); every other launch lands
+    /// focused-but-minimized so the center pane is immediately typeable.
+    /// Callers run `show_agent_surface` first, which already put focus on the
+    /// Center agent surface with no overlay.
+    pub(crate) fn land_completed_launch(&mut self, wants_fullscreen: bool) {
+        if wants_fullscreen {
+            self.input_target = InputTarget::Agent;
+            self.fullscreen_overlay = FullscreenOverlay::Agent;
+        } else {
+            self.input_target = InputTarget::None;
+            self.fullscreen_overlay = FullscreenOverlay::None;
+        }
     }
 
     pub(crate) fn show_companion_terminal_surface(&mut self) {
@@ -3163,16 +3191,21 @@ impl App {
         logger::info(&format!(
             "restarting agent {session_id} with fresh session (no resume args)"
         ));
-        self.dispatch_reconnect_plan(&session_id, true)
+        self.dispatch_reconnect_plan(&session_id, true, false)
     }
 
-    pub(crate) fn reconnect_selected_session(&mut self) -> Result<()> {
+    /// `seek_fullscreen` marks a fullscreen-seeking relaunch (decision 10):
+    /// only the fullscreen toggle passes `true`; every other caller lands the
+    /// completed launch focused-but-minimized (a relaunch initiated FROM the
+    /// fullscreen relaunch screen still lands fullscreen; see
+    /// `launch_seeks_fullscreen`).
+    pub(crate) fn reconnect_selected_session(&mut self, seek_fullscreen: bool) -> Result<()> {
         let Some(session_id) = self.selected_session().map(|s| s.id.clone()) else {
             self.set_error("Select a stopped agent first to reconnect.");
             return Ok(());
         };
         logger::info(&format!("reconnecting session {session_id}"));
-        self.dispatch_reconnect_plan(&session_id, false)
+        self.dispatch_reconnect_plan(&session_id, false, seek_fullscreen)
     }
 
     /// Shared TUI reconnect dispatch: build the single-source
@@ -3183,7 +3216,12 @@ impl App {
     /// recomputes the resume decision (which used to be announced via the
     /// collision-blind `should_resume_session` while the dispatch re-gated,
     /// promising a resume that launched fresh).
-    fn dispatch_reconnect_plan(&mut self, session_id: &str, force: bool) -> Result<()> {
+    fn dispatch_reconnect_plan(
+        &mut self,
+        session_id: &str,
+        force: bool,
+        seek_fullscreen: bool,
+    ) -> Result<()> {
         let pty_size = self.pty_size_for_launch();
         match self.engine.reconnect_plan(session_id, force, pty_size)? {
             dux_core::engine::ReconnectPlan::AlreadyConnected { message } => {
@@ -3193,10 +3231,11 @@ impl App {
                 self.set_error(message);
             }
             dux_core::engine::ReconnectPlan::Launch {
-                request,
+                mut request,
                 busy_message,
                 ..
             } => {
+                request.wants_fullscreen = self.launch_seeks_fullscreen(seek_fullscreen);
                 if self.dispatch_agent_launch(*request) {
                     // Route the busy through a keyed reconnect op so its final
                     // (resolved in the shared launch-ready/failed view handlers)
