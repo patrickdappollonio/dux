@@ -448,6 +448,7 @@ describe("copyOnSelectAction", () => {
     dragged: false,
     mouseTrackingMode: "none",
     hintShown: false,
+    gesture: "mouse-drag",
     ...o,
   })
 
@@ -460,8 +461,28 @@ describe("copyOnSelectAction", () => {
     expect(copyOnSelectAction(ctx({ selection: "   " }))).toBe("ignore")
   })
 
-  it("ignores a trivial one-char selection (drag-misclick guard)", () => {
+  it("ignores a trivial one-char selection from a MOUSE drag (misclick guard)", () => {
     expect(copyOnSelectAction(ctx({ selection: "x" }))).toBe("ignore")
+  })
+
+  it("copies a one-char selection from a long press, which is deliberate", () => {
+    // The floor exists to stop a stray click-drag clobbering the clipboard with
+    // one character. A 400ms committed press is not a stray anything, and
+    // single-token targets are ordinary in a terminal: a flag letter, a digit,
+    // a "y". Refusing them highlighted the character and copied nothing, with
+    // no toast to say why.
+    expect(copyOnSelectAction(ctx({ selection: "y", gesture: "long-press" }))).toBe(
+      "copy",
+    )
+  })
+
+  it("still ignores an empty or blank selection from a long press", () => {
+    expect(copyOnSelectAction(ctx({ selection: "", gesture: "long-press" }))).toBe(
+      "ignore",
+    )
+    expect(copyOnSelectAction(ctx({ selection: " ", gesture: "long-press" }))).toBe(
+      "ignore",
+    )
   })
 
   it("does nothing when the preference is off, even with a selection", () => {

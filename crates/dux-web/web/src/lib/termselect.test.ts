@@ -3,11 +3,14 @@ import { describe, expect, it } from "vitest"
 import {
   DEFAULT_WORD_SEPARATORS,
   edgeAutoScroll,
+  glyphAt,
   pointToCell,
   rowCells,
   selectionSpan,
   wordRangeAt,
+  wordSpanAt,
   type RowCell,
+  type WrappedRow,
 } from "./termselect"
 
 // A 361x480 screen element at (14, 100), 80 columns of 4.5125px and 24 rows of
@@ -175,7 +178,7 @@ describe("rowCells", () => {
 
 const COLS = 80
 // The anchor word "status" on absolute buffer row 10, columns 4 through 9.
-const ANCHOR = { row: 10, startCol: 4, endColExclusive: 10 }
+const ANCHOR = { startRow: 10, startCol: 4, endRow: 10, endColExclusive: 10 }
 
 describe("selectionSpan", () => {
   it("keeps the whole anchor word while the finger has not left it", () => {
@@ -227,10 +230,157 @@ describe("selectionSpan", () => {
   })
 
   it("does not let the focus width leak into a backwards drag", () => {
+    // The focus cell is the START of a backwards span, so its own columns are
+    // already inside it and the width must not push the start rightwards.
+    // This says nothing about WHICH column the focus is: a finger on the right
+    // half of a wide glyph is resolved to the glyph by `glyphAt` before it
+    // gets here, which is the separate half of the same bug.
     expect(selectionSpan(ANCHOR, { col: 1, row: 10 }, COLS, 2)).toEqual({
       col: 1,
       row: 10,
       length: 9,
+    })
+  })
+
+  it("takes a WIDE glyph whole at the start of a backwards drag", () => {
+    // The glyph occupies columns 1 and 2; the finger landed on column 2, its
+    // continuation half, and `glyphAt` resolved that to column 1. Starting at
+    // column 2 would drop the glyph and leave a blank at the front.
+    expect(selectionSpan(ANCHOR, { col: 1, row: 10 }, COLS, 2).col).toBe(1)
+  })
+
+  it("spans from a word that itself runs over a wrapped line", () => {
+    const wrappedAnchor = {
+      startRow: 10,
+      startCol: 70,
+      endRow: 11,
+      endColExclusive: 6,
+    }
+    expect(selectionSpan(wrappedAnchor, { col: 20, row: 11 }, COLS)).toEqual({
+      col: 70,
+      row: 10,
+      length: COLS + 21 - 70,
+    })
+    expect(selectionSpan(wrappedAnchor, { col: 2, row: 10 }, COLS)).toEqual({
+      col: 2,
+      row: 10,
+      length: COLS + 6 - 2,
+    })
+  })
+})
+
+describe("glyphAt", () => {
+  const cells = [...ascii("a"), ...wide("日"), ...ascii("b")]
+
+  it("answers a narrow cell as itself", () => {
+    expect(glyphAt(cells, 0)).toEqual({ col: 0, width: 1 })
+  })
+
+  it("answers a wide cell as itself, two columns wide", () => {
+    expect(glyphAt(cells, 1)).toEqual({ col: 1, width: 2 })
+  })
+
+  it("resolves a CONTINUATION cell to the glyph that owns it", () => {
+    // The finding this exists for: a backwards drag ending on the right half
+    // of a wide glyph used to start the span mid-glyph, dropping the glyph and
+    // leaving a stray blank at the front of the copied text.
+    expect(glyphAt(cells, 2)).toEqual({ col: 1, width: 2 })
+  })
+
+  it("answers a column past the end of the row as a single blank cell", () => {
+    expect(glyphAt(cells, 40)).toEqual({ col: 40, width: 1 })
+  })
+})
+
+describe("wordSpanAt across wrapped lines", () => {
+  const row = (text: string, isWrapped = false): WrappedRow => ({
+    cells: ascii(text.padEnd(10, "\u0000")).map((c) =>
+      c.chars === "\u0000" ? { chars: "", width: 1 } : c,
+    ),
+    isWrapped,
+  })
+  // A ten-column terminal holding one path broken over three physical lines.
+  const wrapped = [
+    row("cd /very/l"),
+    row("ong/path/t", true),
+    row("o/file x", true),
+  ]
+  const lineAt = (y: number) => wrapped[y]
+
+  it("follows a word forward into the line it wrapped onto", () => {
+    expect(wordSpanAt(lineAt, 0, 4)).toEqual({
+      startRow: 0,
+      startCol: 3,
+      endRow: 2,
+      endColExclusive: 6,
+    })
+  })
+
+  it("answers the same span from the middle of the continuation", () => {
+    expect(wordSpanAt(lineAt, 1, 5)).toEqual({
+      startRow: 0,
+      startCol: 3,
+      endRow: 2,
+      endColExclusive: 6,
+    })
+  })
+
+  it("stops at the separator on the last physical line", () => {
+    expect(wordSpanAt(lineAt, 2, 7)).toEqual({
+      startRow: 2,
+      startCol: 7,
+      endRow: 2,
+      endColExclusive: 8,
+    })
+  })
+
+  it("does not cross a line break that is not a wrap", () => {
+    const hard = [row("abcdefghij"), row("klmnopqrst", false)]
+    expect(wordSpanAt((y) => hard[y], 0, 2)).toEqual({
+      startRow: 0,
+      startCol: 0,
+      endRow: 0,
+      endColExclusive: 10,
+    })
+  })
+
+  it("does not join across a wrap when the seam is a separator", () => {
+    const seam = [row("abcdefghi "), row("klmnopqrst", true)]
+    expect(wordSpanAt((y) => seam[y], 1, 2)).toEqual({
+      startRow: 1,
+      startCol: 0,
+      endRow: 1,
+      endColExclusive: 10,
+    })
+  })
+
+  it("does not chase a wrap out of a blank run", () => {
+    const blanks = [row("ab        "), row("cdefghijkl", true)]
+    expect(wordSpanAt((y) => blanks[y], 0, 5)).toEqual({
+      startRow: 0,
+      startCol: 2,
+      endRow: 0,
+      endColExclusive: 10,
+    })
+  })
+
+  it("answers an empty span for a row the buffer does not have", () => {
+    expect(wordSpanAt(() => undefined, 3, 2)).toEqual({
+      startRow: 3,
+      startCol: 2,
+      endRow: 3,
+      endColExclusive: 2,
+    })
+  })
+
+  it("honours a caller-supplied separator set across the wrap", () => {
+    // With "/" separating, the word at column 4 is "very" and the wrap is
+    // never reached at all.
+    expect(wordSpanAt(lineAt, 0, 4, DEFAULT_WORD_SEPARATORS + "/")).toEqual({
+      startRow: 0,
+      startCol: 4,
+      endRow: 0,
+      endColExclusive: 8,
     })
   })
 })

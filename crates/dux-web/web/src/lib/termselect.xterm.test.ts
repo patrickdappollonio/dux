@@ -2,7 +2,13 @@
 import { Terminal } from "@xterm/xterm"
 import { afterEach, describe, expect, it } from "vitest"
 
-import { rowCells, selectionSpan, wordRangeAt } from "./termselect"
+import {
+  glyphAt,
+  rowCells,
+  selectionSpan,
+  wordRangeAt,
+  wordSpanAt,
+} from "./termselect"
 
 // Unlike every other terminal test in this repo, these mount the REAL
 // `@xterm/xterm`. jsdom cannot back its canvas, so the renderer never measures
@@ -66,8 +72,10 @@ afterEach(() => {
 interface OpenTerminal {
   term: Terminal
   screen: HTMLElement
-  /** The cells of one viewport row, exactly as `TerminalPane` reads them. */
+  /** The cells of one buffer row, exactly as `TerminalPane` reads them. */
   cells: (row: number) => ReturnType<typeof rowCells>
+  /** The row accessor `wordSpanAt` takes, built the way the pane builds it. */
+  lineAt: (row: number) => { cells: ReturnType<typeof rowCells>; isWrapped: boolean } | undefined
 }
 
 async function openTerminal(
@@ -86,8 +94,19 @@ async function openTerminal(
     term,
     screen,
     cells: (row) => rowCells(term.buffer.active.getLine(row)),
+    lineAt: (row) => {
+      const line = term.buffer.active.getLine(row)
+      if (!line) return undefined
+      return { cells: rowCells(line), isWrapped: line.isWrapped }
+    },
   }
 }
+
+/** A single-row word range pinned to one absolute row. */
+const anchorOn = (
+  word: { startCol: number; endColExclusive: number },
+  row: number,
+) => ({ startRow: row, endRow: row, ...word })
 
 describe("the pure helpers against a real xterm buffer", () => {
   it("picks the word a long press landed on", async () => {
@@ -100,7 +119,7 @@ describe("the pure helpers against a real xterm buffer", () => {
   it("grows the span forward from the pressed word as the finger drags", async () => {
     const { term, cells } = await openTerminal("git status --porcelain\r\n")
     const word = wordRangeAt(cells(0), 6)
-    const span = selectionSpan({ ...word, row: 0 }, { col: 13, row: 0 }, term.cols)
+    const span = selectionSpan(anchorOn(word, 0), { col: 13, row: 0 }, term.cols)
     term.select(span.col, span.row, span.length)
     expect(term.getSelection()).toBe("status --p")
   })
@@ -108,7 +127,7 @@ describe("the pure helpers against a real xterm buffer", () => {
   it("normalizes a backwards drag into a selection that still reads forward", async () => {
     const { term, cells } = await openTerminal("git status --porcelain\r\n")
     const word = wordRangeAt(cells(0), 6)
-    const span = selectionSpan({ ...word, row: 0 }, { col: 0, row: 0 }, term.cols)
+    const span = selectionSpan(anchorOn(word, 0), { col: 0, row: 0 }, term.cols)
     term.select(span.col, span.row, span.length)
     expect(term.getSelection()).toBe("git status")
   })
@@ -121,7 +140,7 @@ describe("the pure helpers against a real xterm buffer", () => {
       cols: 20,
     })
     const word = wordRangeAt(cells(0), 0)
-    const span = selectionSpan({ ...word, row: 0 }, { col: 5, row: 1 }, term.cols)
+    const span = selectionSpan(anchorOn(word, 0), { col: 5, row: 1 }, term.cols)
     term.select(span.col, span.row, span.length)
     expect(term.getSelection()).toBe("first line\nsecond")
   })
@@ -171,6 +190,52 @@ describe("the pure helpers against a real xterm buffer", () => {
     const word = wordRangeAt(cells(0), 5)
     term.select(word.startCol, 0, word.endColExclusive - word.startCol)
     expect(term.getSelection()).toBe("日本-cli")
+  })
+
+  it("starts a BACKWARDS drag at the wide glyph, not inside it", async () => {
+    // Measured regression: with the anchor on "x" and the finger ending on the
+    // CONTINUATION half of 日, the span used to start mid-glyph and the copied
+    // text came back as " 本語 x", one glyph short and with a leading blank.
+    const { term, cells } = await openTerminal("ok 日本語 x\r\n")
+    const row = cells(0)
+    const anchor = anchorOn(wordRangeAt(row, 10), 0)
+    // Column 4 is the right half of 日, which starts at column 3.
+    const focus = glyphAt(row, 4)
+    expect(focus).toEqual({ col: 3, width: 2 })
+    const span = selectionSpan(anchor, { col: focus.col, row: 0 }, term.cols, focus.width)
+    term.select(span.col, span.row, span.length)
+    expect(term.getSelection()).toBe("日本語 x")
+  })
+
+  it("follows a wrapped path across the physical line break", async () => {
+    // A path longer than the terminal is wide: one logical word, two rows,
+    // which is the archetypal thing a long press is reaching for.
+    const { term, lineAt } = await openTerminal(
+      "cd /very/long/path/to/a/file.txt here\r\n",
+      { cols: 20 },
+    )
+    const span = wordSpanAt(lineAt, 0, 8)
+    expect(span.startRow).toBe(0)
+    expect(span.endRow).toBe(1)
+    term.select(
+      span.startCol,
+      span.startRow,
+      (span.endRow - span.startRow) * term.cols +
+        span.endColExclusive -
+        span.startCol,
+    )
+    expect(term.getSelection()).toBe("/very/long/path/to/a/file.txt")
+  })
+
+  it("stops at the hard break when the next line is not a continuation", async () => {
+    const { term, lineAt } = await openTerminal("alpha\r\nbeta\r\n", { cols: 20 })
+    expect(wordSpanAt(lineAt, 0, 2)).toEqual({
+      startRow: 0,
+      startCol: 0,
+      endRow: 0,
+      endColExclusive: 5,
+    })
+    expect(term.buffer.active.getLine(1)?.isWrapped).toBe(false)
   })
 })
 

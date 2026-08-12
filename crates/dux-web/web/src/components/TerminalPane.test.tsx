@@ -34,7 +34,22 @@ class TermStub {
   }
   rows = 24
   cols = 80
-  textarea = { setAttribute() {}, blur() {} }
+  // `value` and `focused` are both real. xterm's own `contextmenu` handler
+  // stuffs the current selection into this hidden textarea AND focuses it
+  // (`moveTextAreaUnderMouseCursor`), so the pane's guard has to wipe the value
+  // or it leaks back into the PTY as a paste, and hand focus back on touch or
+  // the soft keyboard rises over the selection.
+  textarea = {
+    setAttribute() {},
+    focused: false,
+    blur() {
+      this.focused = false
+    },
+    focus() {
+      this.focused = true
+    },
+    value: "",
+  }
   // The scrollback the selection tests read words out of. `lines` is the whole
   // buffer and `viewportY` is the first line on screen, so a test can scroll
   // and see the pane resolve a DIFFERENT absolute row from the same finger
@@ -42,18 +57,43 @@ class TermStub {
   // single-width cells are modelled here, because the wide-glyph rules are
   // pinned against a REAL xterm buffer in `lib/termselect.xterm.test.ts`.
   lines: string[] = ["git status --porcelain", "second line here"]
+  // Whether each line CONTINUES the one above it, for the wrapped-word rules.
+  wrapped: boolean[] = []
+  // A line as COLUMNS, not characters. A wide glyph really does take two of
+  // them (the glyph, then a zero-width continuation cell), because column and
+  // character index part company there and that is the whole point of the
+  // wide-glyph handling under test. The range is the one xterm's own default
+  // Unicode provider calls wide; an emoji is deliberately NOT in it (measured
+  // in `lib/termselect.xterm.test.ts`).
+  static WIDE =
+    /[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE6F\uFF00-\uFF60\uFFE0-\uFFE6]/
+  lineCells(y: number): { chars: string; width: number }[] | undefined {
+    const text = this.lines[y]
+    if (text === undefined) return undefined
+    const cells: { chars: string; width: number }[] = []
+    for (const ch of text) {
+      if (TermStub.WIDE.test(ch)) {
+        cells.push({ chars: ch, width: 2 }, { chars: "", width: 0 })
+      } else {
+        cells.push({ chars: ch, width: 1 })
+      }
+    }
+    while (cells.length < this.cols) cells.push({ chars: "", width: 1 })
+    return cells.slice(0, this.cols)
+  }
   buffer = {
     active: {
       type: "normal",
       viewportY: 0,
       getLine: (y: number) => {
-        const text = this.lines[y]
-        if (text === undefined) return undefined
+        const cells = this.lineCells(y)
+        if (!cells) return undefined
         return {
           length: this.cols,
+          isWrapped: this.wrapped[y] ?? false,
           getCell: (x: number) => ({
-            getChars: () => text[x] ?? "",
-            getWidth: () => 1,
+            getChars: () => cells[x]?.chars ?? "",
+            getWidth: () => cells[x]?.width ?? 1,
           }),
         }
       },
@@ -191,8 +231,10 @@ class TermStub {
     let col = sel.col
     while (remaining > 0) {
       const take = Math.min(remaining, this.cols - col)
-      const text = this.lines[row] ?? ""
-      out += text.slice(col, col + take).padEnd(0)
+      const cells = this.lineCells(row) ?? []
+      // Join the CHARS of the covered columns; a continuation cell carries
+      // none, so a wide glyph contributes itself once across its two columns.
+      for (let x = col; x < col + take; x++) out += cells[x]?.chars ?? ""
       remaining -= take
       row++
       col = 0
@@ -2481,6 +2523,13 @@ describe("TerminalPane long-press text selection", () => {
     vi.useRealTimers()
   })
 
+  it("cancels the lift so no compatibility mouse events follow it", () => {
+    // A bare press-and-lift, with no drag to have cancelled anything for us.
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    press(at(6, 0))
+    expect(lift(at(6, 0))).toBe(false)
+  })
+
   it("selects the word under the finger on a long press", () => {
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     press(at(6, 0))
@@ -2515,15 +2564,24 @@ describe("TerminalPane long-press text selection", () => {
     expect(term().getSelection()).toBe("status --porcelain\nsecond")
   })
 
-  it("auto-scrolls one row per move once the finger passes the bottom edge", () => {
+  // Auto-scroll is TIMER driven, not event driven. A finger parked at the edge
+  // produces no further touchmove, so an event-driven version simply stopped
+  // and the user had to jiggle to keep extending. xterm's own mouse drag scroll
+  // is a 50ms interval for the same reason.
+  const SCROLL_TICK_MS = 50
+  const tick = (times: number) =>
+    act(() => {
+      vi.advanceTimersByTime(SCROLL_TICK_MS * times)
+    })
+
+  it("keeps auto-scrolling while the finger is parked past the bottom edge", () => {
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     press(at(6, 0))
-    const below = { clientX: at(6, 0).clientX, clientY: 50 + 480 + 30 }
-    move(below)
-    move(below)
-    // One row per move, never a magnitude, and the viewport really moved.
-    expect(term().scrollLineCalls).toEqual([1, 1])
-    expect(term().buffer.active.viewportY).toBe(2)
+    // ONE move to the edge, then no further events at all.
+    move({ clientX: at(6, 0).clientX, clientY: 50 + 480 + 30 })
+    tick(3)
+    expect(term().scrollLineCalls).toEqual([1, 1, 1])
+    expect(term().buffer.active.viewportY).toBe(3)
   })
 
   it("auto-scrolls the other way above the top edge", () => {
@@ -2534,7 +2592,52 @@ describe("TerminalPane long-press text selection", () => {
     term().buffer.active.viewportY = 5
     press(at(6, 0))
     move({ clientX: at(6, 0).clientX, clientY: 50 - 30 })
-    expect(term().scrollLineCalls).toEqual([-1])
+    tick(2)
+    expect(term().scrollLineCalls).toEqual([-1, -1])
+  })
+
+  it("stops auto-scrolling when the finger comes back inside", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    press(at(6, 0))
+    move({ clientX: at(6, 0).clientX, clientY: 50 + 480 + 30 })
+    tick(2)
+    move(at(6, 3))
+    tick(5)
+    expect(term().scrollLineCalls).toEqual([1, 1])
+  })
+
+  it("stops auto-scrolling the moment the finger lifts", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    press(at(6, 0))
+    move({ clientX: at(6, 0).clientX, clientY: 50 + 480 + 30 })
+    tick(1)
+    lift({ clientX: at(6, 0).clientX, clientY: 50 + 480 + 30 })
+    tick(10)
+    expect(term().scrollLineCalls).toEqual([1])
+  })
+
+  // Nothing else pins the viewport-to-absolute-row conversion: the pure helpers
+  // never see `viewportY`, so dropping it left every other test green. A
+  // SCROLLED-BACK viewport is what makes the two answers differ in the text.
+  it("reads the word from the SCROLLED-BACK row, not from the top of the buffer", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    term().lines = ["alpha", "bravo", "charlie", "delta"]
+    // The user has scrolled back, so viewport row 0 is buffer row 2.
+    term().buffer.active.viewportY = 2
+    press(at(0, 0))
+    expect(term().getSelection()).toBe("charlie")
+  })
+
+  it("follows the viewport as the auto-scroll moves it under the finger", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    term().lines = ["alpha", "bravo", "charlie", "delta"]
+    term().buffer.active.viewportY = 0
+    press(at(0, 0))
+    expect(term().getSelection()).toBe("alpha")
+    move({ clientX: at(2, 0).clientX, clientY: 50 + 480 + 30 })
+    tick(2)
+    expect(term().buffer.active.viewportY).toBe(2)
+    expect(term().getSelection()).toContain("bravo")
   })
 
   it("does not scroll the scrollback while a selection drag is in flight", () => {
@@ -2569,6 +2672,19 @@ describe("TerminalPane long-press text selection", () => {
     expect(term().getSelection()).toBe("")
   })
 
+  it("a second finger during an ACTIVE selection cancels the gesture", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    press(at(6, 0))
+    expect(term().getSelection()).toBe("status")
+    // A pinch begins. Lifting one finger out of it must not be read as the end
+    // of a selection gesture: no copy, and no further extension.
+    fireEvent.touchStart(container(), { touches: [at(6, 0), at(20, 0)] })
+    move(at(20, 0))
+    lift(at(20, 0))
+    expect(copied).toEqual([])
+    expect(term().getSelection()).toBe("status")
+  })
+
   it("clears the selection on the NEXT tap", () => {
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     press(at(6, 0))
@@ -2585,6 +2701,15 @@ describe("TerminalPane long-press text selection", () => {
     lift(at(6, 0))
     expect(copied).toEqual(["status"])
     expect(term().getSelection()).toBe("status")
+  })
+
+  it("copies a ONE-character word, because a long press is deliberate", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    term().lines = ["a b c"]
+    press(at(2, 0))
+    lift(at(2, 0))
+    expect(term().getSelection()).toBe("b")
+    expect(copied).toEqual(["b"])
   })
 
   it("copies nothing on lift when copy-on-select is off", () => {
@@ -2616,9 +2741,65 @@ describe("TerminalPane long-press text selection", () => {
     lift(at(13, 0))
     expect(t.getSelection()).toBe("status --p")
     expect(pty.sendInput.mock.calls).toEqual([])
-    // And no "hold Shift and drag" hint: that advice is for a mouse, and the
-    // long press just selected perfectly well without it.
-    expect(toastCalls.map(String).join(" ")).not.toMatch(/Shift|Option/)
+  })
+
+  // The mouse-capture hint says "hold Shift and drag to select". It is advice
+  // for a MOUSE, and it is nonsense here: the long press already selected
+  // locally with no modifier at all. `copyOnSelectAction` still answers "hint"
+  // on this input (a blank selection, the app holding the mouse, a drag), so
+  // the pane has to be the thing that ignores it. Pressing on BLANK space is
+  // what reaches that answer; with real text the copy branch wins first, which
+  // is why asserting it there proved nothing.
+  it("never shows the mouse-capture hint, whatever the long press lands on", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const t = term()
+    // Real SPACES, not the unwritten cells past the end of a line: the hint
+    // branch needs a selection that is non-empty and yet blank, and unwritten
+    // cells carry no characters at all so they never reach it. (The pane's
+    // `mouseCaptureHintShown` latch is module-global and never reset; nothing
+    // else in this file trips it, so it is still false here.)
+    t.lines = ["a    b"]
+    t.modes.mouseTrackingMode = "vt200"
+    press(at(2, 0))
+    move(at(3, 0))
+    lift(at(3, 0))
+    expect(t.getSelection()).toBe("    ")
+    expect(t.getSelection().trim()).toBe("")
+    expect(toastCalls).toEqual([])
+    expect(copied).toEqual([])
+  })
+
+  it("hands focus back when xterm's contextmenu handler grabs the textarea", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    // xterm's handler focuses its hidden textarea to prepare a native Copy,
+    // which on a phone raises the soft keyboard over the selection.
+    term().textarea.focus()
+    fireEvent.pointerDown(container(), { pointerType: "touch" })
+    fireEvent.contextMenu(container())
+    expect(term().textarea.focused).toBe(false)
+  })
+
+  it("leaves the textarea focused for a MOUSE right-click, which pastes", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    term().textarea.focus()
+    fireEvent.pointerDown(container(), { pointerType: "mouse" })
+    fireEvent.contextMenu(container())
+    expect(term().textarea.value).toBe("")
+    expect(term().textarea.focused).toBe(true)
+  })
+
+  // The focus cell must be resolved to the GLYPH that owns it before any
+  // arithmetic. On the right half of a wide glyph the raw column is the
+  // continuation cell, so a BACKWARDS drag ending there started the span inside
+  // the glyph: the glyph was dropped and a blank appeared at the front.
+  it("starts a backwards drag at the wide glyph, not inside it", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    term().lines = ["ok 日本語 x"]
+    // Columns: o k _ 日 日 本 本 語 語 _ x
+    press(at(10, 0))
+    expect(term().getSelection()).toBe("x")
+    move(at(4, 0))
+    expect(term().getSelection()).toBe("日本語 x")
   })
 
   // A long press is not a tap, so the compose-bar focus redirect must not run:
@@ -2639,12 +2820,39 @@ describe("TerminalPane long-press text selection", () => {
       const prevented = !lift(at(6, 0))
       expect(term().getSelection()).toBe("status")
       expect(document.activeElement).not.toBe(compose)
-      // Nor does it preventDefault the touchend, which is the redirect's own
-      // mechanism; a long press simply is not that branch.
-      expect(prevented).toBe(false)
+      // And it CANCELS the touchend. That is not incidental: the browser's
+      // compatibility mouse events are dispatched after an uncancelled
+      // touchend, xterm focuses its hidden textarea from that mousedown (so the
+      // keyboard rises over the text just selected) and xterm's own
+      // `_handleSingleClick` then wipes the highlight the copy was for. Over a
+      // mouse-tracking app the same mousedown is forwarded into the TUI as a
+      // stray click.
+      expect(prevented).toBe(true)
     } finally {
       pointer.restore()
     }
+  })
+
+  it("abandons the gesture when the app flips buffers mid-drag", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    press(at(6, 0))
+    // The app entered its alt screen. The anchor names a NORMAL-buffer row;
+    // applying it to the alt buffer would select unrelated content.
+    term().buffer.active.type = "alternate"
+    move(at(20, 0))
+    expect(term().getSelection()).toBe("status")
+  })
+
+  it("wipes the selection xterm stuffed into its hidden textarea on a touch long press", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    // Android fires `contextmenu` on a long press. xterm's OWN listener sits on
+    // `term.element`, inside this container, so it runs first and writes the
+    // selection into the hidden textarea, where it would later be delivered to
+    // the PTY as a paste.
+    term().textarea.value = "status"
+    fireEvent.pointerDown(container(), { pointerType: "touch" })
+    fireEvent.contextMenu(container())
+    expect(term().textarea.value).toBe("")
   })
 
   it("suppresses the platform callout and context menu on the terminal", () => {

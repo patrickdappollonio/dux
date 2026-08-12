@@ -152,22 +152,47 @@ export interface WordRange {
   endColExclusive: number
 }
 
+/** A resolved glyph: the column it STARTS at, and how many columns it occupies. */
+export interface Glyph {
+  col: number
+  width: number
+}
+
 /**
- * The word occupying `col`, in COLUMNS.
+ * The glyph occupying a column.
+ *
+ * A wide glyph (CJK, the fullwidth forms) lives in a width-2 cell followed by a
+ * width-0 CONTINUATION cell, and a finger landing on that second cell is
+ * landing on the glyph, not between two of them. Every column that reaches the
+ * selection arithmetic goes through here first, in BOTH directions: a forward
+ * drag needs the glyph's far edge and a backwards drag needs its near one, and
+ * a backwards drag that skipped this step started the span mid-glyph, dropping
+ * the glyph and leaving a stray blank at the front of the copied text.
+ *
+ * A column past the end of the row answers as itself, one cell wide: there is
+ * no glyph there, and the caller is choosing an edge rather than a character.
+ */
+export function glyphAt(cells: readonly RowCell[], col: number): Glyph {
+  if (col < 0 || col >= cells.length) return { col, width: 1 }
+  let start = col
+  while (start > 0 && cells[start].width === 0) start--
+  return { col: start, width: Math.max(cells[start].width, 1) }
+}
+
+/**
+ * The word occupying `col`, in COLUMNS, on ONE physical row.
  *
  * Working in columns rather than in string indexes is what makes wide glyphs
- * fall out for free, and wide glyphs are the trap: a CJK character or an emoji
- * occupies TWO columns, and a finger landing on the second of them is landing
- * on that glyph, not on the next one. The same rule the Rust side states for
- * `cursor_from_single_line_position`. So a zero-width continuation cell first
- * steps LEFT onto the glyph it belongs to, and the expansion then walks whole
- * cells, letting a width-2 cell contribute both of its columns to the range.
+ * fall out for free, through `glyphAt` above.
  *
  * Two shapes match xterm's `_getWordAt` on purpose:
  *  - a blank run expands to the whole run, so a press in the gap between two
  *    words selects the gap rather than nothing;
  *  - a NON-blank separator selects only itself, because xterm's expansion
  *    checks the neighbours and never the starting cell.
+ *
+ * This is the single-row primitive. A word that WRAPPED onto the next physical
+ * line needs `wordSpanAt`, which composes this one.
  */
 export function wordRangeAt(
   cells: readonly RowCell[],
@@ -180,38 +205,106 @@ export function wordRangeAt(
   if (col < 0 || col >= cells.length) {
     return { startCol: col, endColExclusive: col }
   }
-  let start = col
-  // The continuation half of a wide glyph belongs to the glyph on its left.
-  while (start > 0 && cells[start].width === 0) start--
+  let start = glyphAt(cells, col).col
 
-  const blank = (cell: RowCell) => cell.chars === "" || cell.chars === " "
-  const separator = (cell: RowCell) =>
-    // Never a separator on a continuation cell: it carries no characters, and
-    // treating it as one would cut every wide glyph in half.
-    cell.width !== 0 && (blank(cell) || separators.includes(cell.chars))
-
-  let end = start + Math.max(cells[start].width, 1)
-
-  if (blank(cells[start])) {
-    while (start > 0 && blank(cells[start - 1])) start--
-    while (end < cells.length && blank(cells[end])) end++
+  if (isBlank(cells[start])) {
+    let end = start + 1
+    while (start > 0 && isBlank(cells[start - 1])) start--
+    while (end < cells.length && isBlank(cells[end])) end++
     return { startCol: start, endColExclusive: end }
   }
-  if (separator(cells[start])) {
+  let end = start + Math.max(cells[start].width, 1)
+  if (isSeparator(cells[start], separators)) {
     return { startCol: start, endColExclusive: end }
   }
   while (start > 0) {
-    let prev = start - 1
-    // Step over a continuation cell onto the glyph that owns it.
-    while (prev > 0 && cells[prev].width === 0) prev--
-    if (separator(cells[prev])) break
+    const prev = glyphAt(cells, start - 1).col
+    if (isSeparator(cells[prev], separators)) break
     start = prev
   }
   while (end < cells.length) {
-    if (separator(cells[end])) break
+    if (isSeparator(cells[end], separators)) break
     end += Math.max(cells[end].width, 1)
   }
   return { startCol: start, endColExclusive: Math.min(end, cells.length) }
+}
+
+function isBlank(cell: RowCell): boolean {
+  return cell.chars === "" || cell.chars === " "
+}
+
+function isSeparator(cell: RowCell, separators: string): boolean {
+  // Never a separator on a continuation cell: it carries no characters, and
+  // treating it as one would cut every wide glyph in half.
+  if (cell.width === 0) return false
+  return isBlank(cell) || separators.includes(cell.chars)
+}
+
+/** One physical buffer row, plus whether it CONTINUES the row above it. */
+export interface WrappedRow {
+  cells: readonly RowCell[]
+  /** xterm's public `IBufferLine.isWrapped`. */
+  isWrapped: boolean
+}
+
+/**
+ * The word occupying a cell, FOLLOWED across wrapped lines.
+ *
+ * A terminal breaks a long line across physical rows and marks each
+ * continuation `isWrapped`; the text is one logical line, and xterm's own
+ * double-click follows it. A long press has to as well, for two reasons: the
+ * separator set here is xterm's precisely so that the two gestures pick the
+ * same word, and the archetypal thing a user reaches for a long press to grab
+ * is one long file path, which is exactly the thing that wraps.
+ *
+ * The join is decided at the SEAM, one cell either side of the break: the word
+ * continues only when the last cell of the upper row and the first cell of the
+ * lower one are both non-separators. A blank run never chases a wrap, because a
+ * gap that happens to reach the edge of the screen is still just a gap.
+ */
+export function wordSpanAt(
+  lineAt: (row: number) => WrappedRow | undefined,
+  row: number,
+  col: number,
+  separators: string = DEFAULT_WORD_SEPARATORS,
+): AnchorWord {
+  const line = lineAt(row)
+  if (!line) {
+    return { startRow: row, startCol: col, endRow: row, endColExclusive: col }
+  }
+  const range = wordRangeAt(line.cells, col, separators)
+  const span: AnchorWord = {
+    startRow: row,
+    startCol: range.startCol,
+    endRow: row,
+    endColExclusive: range.endColExclusive,
+  }
+  const empty = range.endColExclusive <= range.startCol
+  if (empty || isBlank(line.cells[range.startCol])) return span
+
+  // Upwards: only from column 0 of a row that is itself a continuation.
+  for (;;) {
+    if (span.startCol !== 0) break
+    const here = lineAt(span.startRow)
+    if (!here?.isWrapped) break
+    const above = lineAt(span.startRow - 1)
+    if (!above || above.cells.length === 0) break
+    const last = above.cells.length - 1
+    if (isSeparator(above.cells[last], separators)) break
+    span.startRow -= 1
+    span.startCol = wordRangeAt(above.cells, last, separators).startCol
+  }
+  // Downwards: only into a row that says it continues this one.
+  for (;;) {
+    const here = lineAt(span.endRow)
+    if (!here || span.endColExclusive < here.cells.length) break
+    const below = lineAt(span.endRow + 1)
+    if (!below?.isWrapped || below.cells.length === 0) break
+    if (isSeparator(below.cells[0], separators)) break
+    span.endRow += 1
+    span.endColExclusive = wordRangeAt(below.cells, 0, separators).endColExclusive
+  }
+  return span
 }
 
 /** The forward triple `Terminal.select(column, row, length)` wants. */
@@ -221,9 +314,18 @@ export interface SelectSpan {
   length: number
 }
 
-/** A word range pinned to an absolute buffer row. */
-export interface AnchorWord extends WordRange {
-  row: number
+/**
+ * A word pinned to absolute buffer rows.
+ *
+ * Two rows rather than one, because a word can run over a wrapped line: the
+ * start and the end are independent positions, and `wordSpanAt` is what finds
+ * them.
+ */
+export interface AnchorWord {
+  startRow: number
+  startCol: number
+  endRow: number
+  endColExclusive: number
 }
 
 /**
@@ -236,11 +338,15 @@ export interface AnchorWord extends WordRange {
  * and starts at the focus cell, and a finger still inside the word leaves the
  * whole word selected.
  *
- * Both rows are ABSOLUTE buffer lines (`buffer.active.viewportY + viewportRow`),
- * which is what `select()` takes. `focusCellWidth` is the width of the cell
- * under the finger, so a drag ending on a wide glyph takes both of its columns;
- * it is deliberately ignored on a backwards drag, where the focus cell is the
- * START of the span and its own columns are already inside it.
+ * Every row here is an ABSOLUTE buffer line
+ * (`buffer.active.viewportY + viewportRow`), which is what `select()` takes.
+ *
+ * `focus` and `focusCellWidth` must come from `glyphAt`, never straight from
+ * `pointToCell`: on the right half of a wide glyph the raw column is the
+ * CONTINUATION cell, and a backwards drag would then start the span inside the
+ * glyph. The width is applied only on a FORWARD drag, where the focus cell is
+ * the end of the span; on a backwards drag the focus cell is the START and its
+ * own columns are already inside it.
  */
 export function selectionSpan(
   anchor: AnchorWord,
@@ -249,15 +355,15 @@ export function selectionSpan(
   focusCellWidth: number = 1,
 ): SelectSpan {
   const index = (col: number, row: number) => row * cols + col
-  const anchorStart = index(anchor.startCol, anchor.row)
-  const anchorEnd = index(anchor.endColExclusive, anchor.row)
+  const anchorStart = index(anchor.startCol, anchor.startRow)
+  const anchorEnd = index(anchor.endColExclusive, anchor.endRow)
   const focusStart = index(focus.col, focus.row)
   const focusEnd = focusStart + Math.max(focusCellWidth, 1)
 
   if (focusEnd > anchorEnd) {
     return {
       col: anchor.startCol,
-      row: anchor.row,
+      row: anchor.startRow,
       length: focusEnd - anchorStart,
     }
   }
@@ -266,7 +372,7 @@ export function selectionSpan(
   }
   return {
     col: anchor.startCol,
-    row: anchor.row,
+    row: anchor.startRow,
     length: anchorEnd - anchorStart,
   }
 }
