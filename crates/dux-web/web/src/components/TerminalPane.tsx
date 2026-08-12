@@ -84,6 +84,16 @@ import {
   terminalTapAction,
 } from "@/lib/termlink"
 import {
+  edgeAutoScroll,
+  glyphAt,
+  pointToCell,
+  rowCells,
+  selectionSpan,
+  wordSpanAt,
+  type AnchorWord,
+  type ScreenRect,
+} from "@/lib/termselect"
+import {
   ejectSelectionForReconnect,
   handleTabGone,
   mobileAccessoryBarVisible,
@@ -691,9 +701,9 @@ export function TerminalPane(props: TerminalPaneProps) {
   const [connectionLost, setConnectionLost] = useState(false)
 
   // The pointer type of the most recent press on the host. Android Chrome fires
-  // `contextmenu` on a touch LONG-PRESS, which would hijack the terminal's native
-  // long-press-to-select; right-click paste only fires for a mouse/pen press, so
-  // a touch long-press still hands off to native selection. This per-interaction
+  // `contextmenu` on a touch LONG-PRESS, which is dux's own text-selection
+  // gesture; right-click paste only fires for a mouse/pen press, so a touch
+  // long-press selects text instead of pasting. This per-interaction
   // signal is exact where an `isMobile` width check is not (a touchscreen laptop
   // with a mouse must still get right-click paste).
   const pointerTypeRef = useRef("")
@@ -1188,6 +1198,7 @@ export function TerminalPane(props: TerminalPaneProps) {
         dragged,
         mouseTrackingMode: term.modes.mouseTrackingMode,
         hintShown: mouseCaptureHintShown,
+        gesture: "mouse-drag",
       })
       if (action === "copy") {
         copyTermSelection(term, focusTypingSurface)
@@ -1211,11 +1222,19 @@ export function TerminalPane(props: TerminalPaneProps) {
     // (which fires right after that handler, before any input event could send
     // it). It only touches xterm's hidden input — the selection MODEL that our
     // menu's Copy reads is untouched, so the highlight and Copy stay intact.
-    // Skip touch (a long-press uses the native selection gesture, not xterm's
-    // mouse right-click handler, so nothing was stuffed).
+    // Touch is NOT exempt, and used to be. Android fires `contextmenu` on a
+    // long press, xterm's listener is on `term.element` INSIDE this container
+    // so it runs first, and `preventDefault` further up cannot un-run it. That
+    // was harmless while a touch long press never produced a selection; now
+    // that it does, skipping the wipe would leave the user's selected text
+    // sitting in the textarea, which is precisely the leak this guard exists
+    // to close. It also takes focus (`moveTextAreaUnderMouseCursor` focuses the
+    // textarea), which would raise the soft keyboard over the selection, so
+    // hand focus back on the touch path.
     const onContextMenuPasteGuard = () => {
-      if (pointerTypeRef.current === "touch") return
-      if (term.textarea) term.textarea.value = ""
+      if (!term.textarea) return
+      term.textarea.value = ""
+      if (pointerTypeRef.current === "touch") term.textarea.blur()
     }
     container.addEventListener("contextmenu", onContextMenuPasteGuard)
 
@@ -1228,8 +1247,8 @@ export function TerminalPane(props: TerminalPaneProps) {
 
     // Touch gestures over the terminal, mapped to the natural mobile model:
     //   - a one-finger DRAG scrolls the scrollback,
-    //   - a stationary LONG-PRESS hands off to the browser's native text
-    //     selection (and its handle-drag to extend it),
+    //   - a stationary LONG-PRESS selects the word under the finger and the
+    //     drag after it extends the selection (see the block further down),
     //   - a quick TAP falls through to xterm so it focuses and the keyboard opens.
     // xterm's text layer sits over its scrollable viewport, so a finger drag on
     // the output never reaches the native scroll (only the slim scrollbar does);
@@ -1245,15 +1264,15 @@ export function TerminalPane(props: TerminalPaneProps) {
     // such an app has mouse tracking on and we own the PTY, we forward the drag
     // to it as replayed wheel events (see `lib/termmouse.ts`), so it scrolls its own history just
     // as a desktop mouse wheel would. If the alt-screen app has no mouse tracking
-    // (or we are a read-only viewer), there is nothing to forward to, so we leave
-    // the touch to native handling and let the arrow row drive it.
+    // (or we are a read-only viewer), there is nothing to forward to, so the
+    // drag does nothing and the arrow row is the way to move.
     //
-    // Disambiguation: a long-press timer marks the gesture as a selection the
-    // moment the finger has been held still past the delay; from then on we never
-    // scroll, so extending a selection by dragging a handle is not hijacked. If
-    // the finger instead MOVES past a small threshold before that fires, it's a
-    // scroll — we cancel the timer and take over. A short, still tap trips
-    // neither and reaches xterm as a normal focus tap.
+    // Disambiguation: a long-press timer marks the gesture as a SELECTION the
+    // moment the finger has been held still past the delay; from then on we
+    // never scroll, and every move re-selects instead. If the finger instead
+    // MOVES past a small threshold before that fires, it's a scroll, so we
+    // cancel the timer and take over. A short, still tap trips neither and reaches
+    // xterm as a normal focus tap.
     const LONG_PRESS_MS = 400
     const SCROLL_THRESHOLD_PX = 8
     let touchLastY = 0
@@ -1277,6 +1296,175 @@ export function TerminalPane(props: TerminalPaneProps) {
     // report, coalescing however many container resizes the collapse produced.
     let resizeHeldByGesture = false
     let longPressTimer: ReturnType<typeof setTimeout> | undefined
+
+    // ---- Long-press text selection -------------------------------------
+    //
+    // A browser synthesizes mouse events for a TAP and for nothing else, so
+    // xterm's own selection service (driven entirely by mousedown/mousemove/
+    // mouseup) has never seen a touch drag and has never produced a selection
+    // from one. Nor can the BROWSER select the output: xterm.css puts
+    // `user-select: none` on `.xterm` itself. So the pane drives xterm's own
+    // selection model through the public `Terminal.select`, and the arithmetic
+    // and the word rules live in the pure `lib/termselect.ts`.
+    //
+    // The gesture is the one every touch platform ships: a long press picks the
+    // WORD under the finger, a drag grows the span from whichever end of that
+    // word the finger has passed, a drag past an edge auto-scrolls, and the
+    // lift copies through the same `copyOnSelectAction` the mouse path uses.
+    //
+    // It ALWAYS selects locally, even when the app in the PTY has mouse
+    // tracking on, which makes it the touch equivalent of the desktop
+    // force-local-selection modifier (Shift on Linux/Windows, Option on macOS).
+    // Claude Code and opencode both take the mouse, so a long press that
+    // forwarded instead would leave every real agent pane unselectable by
+    // finger.
+    // How often the viewport walks while the finger is parked past an edge.
+    // A TIMER, not one row per touchmove: a finger held still at the edge
+    // produces no further events, so an event-driven version stopped dead and
+    // the user had to jiggle to keep extending. xterm's own mouse drag scroll
+    // is a 50ms interval for exactly this reason (`DRAG_SCROLL_INTERVAL`).
+    const SELECT_SCROLL_INTERVAL_MS = 50
+    // KNOWN LIMIT, assessed and deliberately not guarded. `selectAnchor` holds
+    // ABSOLUTE buffer rows captured at press time. When the scrollback ring is
+    // already full and the child writes more output, xterm TRIMS lines off the
+    // top, every absolute row shifts, and the anchor then names different
+    // content for the rest of the gesture. xterm compensates its own model from
+    // `lines.onTrim`, which is INTERNAL: the public surface (`IBuffer`,
+    // `Terminal.onLineFeed`, `buffer.onBufferChange`) publishes no trim signal,
+    // and no combination of `length`/`baseY` distinguishes "scrolled" from
+    // "trimmed" once the ring is at its cap. Inferring one from `onLineFeed`
+    // would miss every scroll that is not a linefeed (IND, `CSI S`), and
+    // snapshotting the anchor row's text would fire on any in-place repaint. So
+    // there is no cheap CORRECT guard here, and a fragile one is worse than the
+    // bug: it needs a busy agent writing during the second or two a drag lasts,
+    // it costs the user a wrong selection and nothing else, and lifting and
+    // pressing again fixes it.
+    let selectAnchor: AnchorWord | null = null
+    // The finger's last position, so the auto-scroll tick can re-resolve the
+    // focus cell without an event of its own.
+    let selectPoint: { clientX: number; clientY: number } | null = null
+    let selectScrollTimer: ReturnType<typeof setInterval> | undefined
+    // Which buffer the anchor's rows belong to. An app entering or leaving its
+    // alt screen mid-gesture invalidates every one of them: a normal-buffer row
+    // number applied to the alt buffer names unrelated content. Abandoning is
+    // the only honest answer.
+    let selectBuffer = ""
+    const stopSelectAutoScroll = () => {
+      clearInterval(selectScrollTimer)
+      selectScrollTimer = undefined
+    }
+    // xterm's `.xterm-screen`, which is what the cell math must measure: the
+    // pane CONTAINER is wider by the scrollbar gutter, and dividing that by the
+    // column count drifts two columns by the far side of the row (MEASURED; see
+    // `lib/termmouse.ts`). A zero-sized rect means the terminal is not laid out
+    // yet, and there is no cell to answer with.
+    const screenRect = (): ScreenRect | null => {
+      const screen = term.element?.querySelector(".xterm-screen")
+      if (!screen) return null
+      const r = screen.getBoundingClientRect()
+      if (!r.width || !r.height) return null
+      return { left: r.left, top: r.top, width: r.width, height: r.height }
+    }
+    const grid = () => ({ cols: term.cols, rows: term.rows })
+    // A viewport row is only meaningful for the frame it was measured in;
+    // `select()` takes an ABSOLUTE buffer line, so every row crosses through
+    // `viewportY` here and nowhere else.
+    const absoluteRow = (viewportRow: number) =>
+      term.buffer.active.viewportY + viewportRow
+    // The row accessor `wordSpanAt` walks, so a word that wrapped onto the next
+    // physical line is picked whole (`isWrapped` is public API).
+    const lineAt = (row: number) => {
+      const line = term.buffer.active.getLine(row)
+      if (!line) return undefined
+      return { cells: rowCells(line), isWrapped: line.isWrapped }
+    }
+    const endTouchSelection = () => {
+      stopSelectAutoScroll()
+      // The ANCHOR is per gesture; the SELECTION deliberately outlives it, so
+      // the highlight stays on screen after the copy until the next tap.
+      selectAnchor = null
+      selectPoint = null
+      selectBuffer = ""
+    }
+    const beginTouchSelection = (touch: Touch): void => {
+      const rect = screenRect()
+      if (!rect) return
+      const cell = pointToCell(touch, rect, grid())
+      const span = wordSpanAt(lineAt, absoluteRow(cell.row), cell.col)
+      const length =
+        (span.endRow - span.startRow) * term.cols +
+        span.endColExclusive -
+        span.startCol
+      if (length <= 0) return
+      selectAnchor = span
+      selectBuffer = term.buffer.active.type
+      selectPoint = { clientX: touch.clientX, clientY: touch.clientY }
+      term.select(span.startCol, span.startRow, length)
+      // A short buzz is the platform's own "you are now selecting" signal.
+      // Guarded twice over: Safari implements no Vibration API at all, and a
+      // browser that does may still throw when the page lacks user activation.
+      try {
+        navigator.vibrate?.(10)
+      } catch {
+        // A missing buzz is not worth failing a selection over.
+      }
+    }
+    // Re-selects from the anchor to wherever `selectPoint` currently is. Called
+    // both from a touchmove and from the auto-scroll tick, which is why it
+    // reads the stored point rather than taking one.
+    const applyTouchSelection = (): void => {
+      const anchor = selectAnchor
+      const point = selectPoint
+      if (!anchor || !point) return
+      if (term.buffer.active.type !== selectBuffer) {
+        // The app swapped buffers under the gesture. Abandon rather than
+        // applying the anchor's rows to a buffer they do not describe; the
+        // painted selection is left alone, since it is what the user last saw.
+        endTouchSelection()
+        return
+      }
+      const rect = screenRect()
+      if (!rect) return
+      const cell = pointToCell(point, rect, grid())
+      const row = absoluteRow(cell.row)
+      const cells = rowCells(term.buffer.active.getLine(row))
+      // Resolve the column to the GLYPH that owns it before any arithmetic: on
+      // the right half of a wide glyph the raw column is a continuation cell,
+      // and a backwards drag would then start the span inside the glyph.
+      const focus = glyphAt(cells, cell.col)
+      const span = selectionSpan(anchor, { col: focus.col, row }, term.cols, focus.width)
+      term.select(span.col, span.row, span.length)
+    }
+    const autoScrollTick = (): void => {
+      const point = selectPoint
+      const rect = screenRect()
+      if (!point || !rect || !selectAnchor) {
+        stopSelectAutoScroll()
+        return
+      }
+      const direction = edgeAutoScroll(point.clientY, rect)
+      if (direction === 0) {
+        stopSelectAutoScroll()
+        return
+      }
+      // One row per TICK. Deliberately not a magnitude: the point is a readable
+      // walk the user can stop by moving back inside, not a jump.
+      term.scrollLines(direction)
+      applyTouchSelection()
+    }
+    const extendTouchSelection = (touch: Touch): void => {
+      selectPoint = { clientX: touch.clientX, clientY: touch.clientY }
+      const rect = screenRect()
+      const past = rect ? edgeAutoScroll(touch.clientY, rect) !== 0 : false
+      if (past && selectAnchor) {
+        if (selectScrollTimer === undefined) {
+          selectScrollTimer = setInterval(autoScrollTick, SELECT_SCROLL_INTERVAL_MS)
+        }
+      } else {
+        stopSelectAutoScroll()
+      }
+      applyTouchSelection()
+    }
     const onTouchStart = (e: TouchEvent) => {
       // Any new touch (including a second finger landing mid-gesture) supersedes
       // a pending long-press, so always cancel it first.
@@ -1285,24 +1473,45 @@ export function TerminalPane(props: TerminalPaneProps) {
       // xterm's scrollback, the alt-screen may forward to the app (decided per
       // move in onTouchMove, since mouse-tracking state can change mid-gesture).
       if (e.touches.length !== 1) {
+        // A pinch, or a second finger landing on an ACTIVE selection. Cancel
+        // the whole gesture, not just the pending timer: leaving `touchSelecting`
+        // set meant lifting one finger out of a pinch took the selecting branch
+        // below and copied. The painted selection stays, since the user can
+        // still see it and may be pinching in order to read it.
         touchActive = false
+        touchScrolling = false
+        touchSelecting = false
+        endTouchSelection()
         return
       }
       touchActive = true
       touchScrolling = false
       touchSelecting = false
+      endTouchSelection()
       touchAccum = 0
       touchLastY = e.touches[0].clientY
+      const start = e.touches[0]
       longPressTimer = setTimeout(() => {
+        // The gesture is a selection from here on WHATEVER the press landed on:
+        // a press on blank space selects nothing, but it is still not a tap, so
+        // the lift must not focus the terminal or raise the keyboard.
         touchSelecting = true
+        beginTouchSelection(start)
       }, LONG_PRESS_MS)
     }
     const onTouchMove = (e: TouchEvent) => {
-      if (!touchActive || touchSelecting || e.touches.length !== 1) return
+      if (!touchActive || e.touches.length !== 1) return
+      if (touchSelecting) {
+        // Ours now: keep the page from scrolling under the gesture and grow
+        // the span instead. Never falls through to the scroll/forward paths.
+        e.preventDefault()
+        extendTouchSelection(e.touches[0])
+        return
+      }
       // Decide the target fresh each move: an agent can flip in or out of an
       // alt-screen TUI mid-drag. On the alt-screen we can only act if the app
       // takes mouse input AND we own the PTY; otherwise there is nothing to
-      // forward to, so leave the touch to native handling (selection/long-press).
+      // forward to, so leave the touch alone and let the arrow row drive it.
       const altScreen = term.buffer.active.type !== "normal"
       const forwardWheel =
         altScreen &&
@@ -1365,6 +1574,7 @@ export function TerminalPane(props: TerminalPaneProps) {
       touchActive = false
       touchScrolling = false
       touchSelecting = false
+      endTouchSelection()
       // Flush a resize the gesture held back (see resizeHeldByGesture above):
       // the wheel-report stream ends with the finger, so re-arming the normal
       // debounce here sends one resize, at the final size, after the stream.
@@ -1405,17 +1615,68 @@ export function TerminalPane(props: TerminalPaneProps) {
     // rest of the tap does. See `lib/termlink.ts` for why the probe is a
     // replay rather than a hit-test of our own.
     //
-    // Scroll and long-press selection take the other branches and are
-    // untouched, a non-owner is covered by the take-over overlay anyway, and
-    // with the preference off (or on desktop) the redirect never fires, so a
-    // tap reaches xterm exactly as today. The listener is registered
-    // non-passive UNCONDITIONALLY (even when the redirect never fires): a
-    // deliberate, harmless choice, since touchend passivity does not gate the
-    // browser's scroll optimizations the way touchmove's does.
+    // A SCROLL takes the branch above and is untouched. A long-press SELECTION
+    // takes the branch below, which copies and returns; it is deliberately not
+    // a tap, so it never reaches the redirect and never raises the keyboard
+    // over the text the user has just selected. A non-owner is covered by the
+    // take-over overlay anyway, and with the preference off (or on desktop) the
+    // redirect never fires, so a tap reaches xterm exactly as today. The
+    // listener is registered non-passive UNCONDITIONALLY (even when the
+    // redirect never fires): a deliberate, harmless choice, since touchend
+    // passivity does not gate the browser's scroll optimizations the way
+    // touchmove's does.
     const onTouchEnd = (e: TouchEvent) => {
       const wasTap = touchActive && !touchScrolling && !touchSelecting
+      const wasSelecting = touchSelecting
       endTouch()
+      if (wasSelecting) {
+        // CANCEL the lift. The browser dispatches its compatibility mouse
+        // events after an UNCANCELLED touchend, and all three of them are
+        // wrong here: xterm focuses its hidden textarea from that `mousedown`
+        // (raising the soft keyboard over the text just selected), xterm's own
+        // `_handleSingleClick` resets `selectionStartLength` and wipes the
+        // highlight the copy was for, and over a mouse-tracking app the click
+        // is forwarded into the TUI, which is the one thing "selects locally,
+        // forwards nothing" is supposed to guarantee. A DRAG is incidentally
+        // protected because `onTouchMove` cancels; a bare press-and-lift, the
+        // primary gesture, is not, and Chrome's own long-press threshold sits
+        // above ours, so a press held between the two reads as a selection here
+        // and an ordinary tap to the browser.
+        e.preventDefault()
+        // Copy on LIFT, the touch half of copy-on-select, through the same
+        // decision function and the same `ui.copy_on_select` preference as the
+        // mouse path. Inside the touchend handler on purpose: that is the user
+        // gesture, so `copyToClipboard`'s synchronous execCommand fallback is
+        // still permitted over the plain-HTTP origins dux is routinely served
+        // on (a Tailscale address).
+        //
+        // Only the "copy" answer is acted on. The other one, the hold-Shift
+        // hint for a mouse the app has captured, is meaningless here: the long
+        // press just selected locally without any modifier at all.
+        const action = copyOnSelectAction({
+          copyOnSelect: copyOnSelectRef.current,
+          selection: term.getSelection(),
+          dragged: true,
+          mouseTrackingMode: term.modes.mouseTrackingMode,
+          hintShown: mouseCaptureHintShown,
+          // A finger held still for 400ms is deliberate by construction, so it
+          // is exempt from the mouse's one-character misclick floor: a `y`, a
+          // flag letter or a digit is an ordinary thing to want out of a
+          // terminal, and refusing it highlighted the character and copied
+          // nothing.
+          gesture: "long-press",
+        })
+        // No refocus: the selection is the result the user wanted, and pulling
+        // focus back to a typing surface would throw the soft keyboard over it.
+        if (action === "copy") copyTermSelection(term, () => {})
+        return
+      }
       if (!wasTap) return
+      // The next tap clears the selection, the way tapping elsewhere dismisses
+      // one on any touch platform. Before the redirect's own early returns,
+      // because it must happen with the compose bar off or this client not
+      // owning the input, neither of which stops a finger selecting text.
+      if (term.hasSelection()) term.clearSelection()
       if (!composeActiveRef.current || !isOwnerRef.current) return
       const compose = composeInputRef.current
       if (!compose) return
@@ -2802,9 +3063,9 @@ export function TerminalPane(props: TerminalPaneProps) {
       {/* Padding lives on the host, NOT the measured element below — see the
           hostRef comment: border-box computed heights include padding, and
           FitAddon would mint a phantom row/column from it. A mouse/pen right-click
-          opens our controlled clipboard menu at the cursor; a TOUCH long-press
-          (which fires `contextmenu` on Android) is left to the native
-          selection gesture — see `pointerTypeRef`. */}
+          pastes the clipboard; a TOUCH long-press (which fires `contextmenu` on
+          Android) is dux's own text-selection gesture, so its menu is
+          suppressed instead. See `pointerTypeRef`. */}
       <div
         ref={hostRef}
         className="h-full w-full p-2"
@@ -2812,8 +3073,16 @@ export function TerminalPane(props: TerminalPaneProps) {
           pointerTypeRef.current = e.pointerType
         }}
         onContextMenu={(e) => {
-          // Touch long-press: leave the OS's native text-selection gesture alone.
-          if (pointerTypeRef.current === "touch") return
+          // Touch long-press. dux OWNS this gesture now (it selects the word
+          // under the finger), so suppress whatever menu the platform wanted to
+          // raise over it: Android fires `contextmenu` on a long press, and a
+          // menu appearing on top of a selection the user is dragging is the
+          // gesture failing. It must NOT fall through to the paste below: a
+          // long press is not a right-click.
+          if (pointerTypeRef.current === "touch") {
+            e.preventDefault()
+            return
+          }
           // Mouse/pen right-click pastes the clipboard (classic terminal model,
           // no menu). preventDefault suppresses the native browser menu; the
           // contextmenu textarea-wipe (mount effect) kills xterm's own right-click
@@ -2825,10 +3094,14 @@ export function TerminalPane(props: TerminalPaneProps) {
         {/* data-testid: the touch-gesture and tap-redirect tests dispatch real
             TouchEvents on this exact node (the element the gesture listeners
             are registered on); there is no accessible role to query it by. */}
+        {/* `-webkit-touch-callout: none` is load-bearing on iOS: without it a
+            long press raises Safari's own magnifier loupe and share menu over
+            the gesture dux is using to select text. It costs nothing on the
+            platforms that ignore it. */}
         <div
           ref={containerRef}
           data-testid="terminal-container"
-          className="h-full w-full"
+          className="h-full w-full [-webkit-touch-callout:none]"
         />
       </div>
       {/* The desktop macro trigger used to float HERE, as an

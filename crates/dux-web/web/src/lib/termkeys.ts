@@ -377,7 +377,22 @@ export interface CopyOnSelectContext {
   mouseTrackingMode: string
   /** Whether the mouse-capture hint has already been shown this session. */
   hintShown: boolean
+  /**
+   * Which gesture produced this selection. Required rather than defaulted, so
+   * a new call site has to say which kind it is instead of silently inheriting
+   * the mouse's misclick guard (see the length floor below).
+   */
+  gesture: CopySelectGesture
 }
+
+/**
+ * The two gestures that can copy on select.
+ *
+ * `mouse-drag` is a press, a move and a release, any part of which can be an
+ * accident. `long-press` is a finger held still for 400ms, which is a
+ * deliberate act by construction.
+ */
+export type CopySelectGesture = "mouse-drag" | "long-press"
 
 /**
  * Decides what a copy-on-select `mouseup` does.
@@ -388,12 +403,17 @@ export interface CopyOnSelectContext {
  *               force-selection-modifier hint, once per session.
  * - `ignore` -> preference off, a plain click, or nothing worth acting on.
  *
- * The `selection.length >= 2` floor matches the drag-misclick guard: a stray
- * one-char selection never clobbers the clipboard.
+ * The `selection.length >= 2` floor is the drag-misclick guard: a stray
+ * one-char mouse selection never clobbers the clipboard. It applies to a MOUSE
+ * DRAG only. A long press cannot be stray (the finger was held still for
+ * 400ms), and single-token targets are ordinary in a terminal, so refusing them
+ * left the character highlighted and the clipboard untouched with nothing said.
+ * Blank is still blank on both paths.
  */
 export function copyOnSelectAction(ctx: CopyOnSelectContext): CopyOnSelectAction {
   if (!ctx.copyOnSelect) return "ignore"
-  if (ctx.selection.trim().length > 0 && ctx.selection.length >= 2) return "copy"
+  const floor = ctx.gesture === "long-press" ? 1 : 2
+  if (ctx.selection.trim().length > 0 && ctx.selection.length >= floor) return "copy"
   if (ctx.dragged && ctx.mouseTrackingMode !== "none" && !ctx.hintShown) return "hint"
   return "ignore"
 }
