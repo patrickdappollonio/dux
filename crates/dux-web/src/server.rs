@@ -2124,9 +2124,14 @@ async fn handle_events_socket(
                         "WebSocket events client {peer_ip} lagged behind the status \
                          broadcast; dropped {n} update(s); resending scoped snapshot"
                     ));
-                    // Recover the missed updates by replaying the current scoped
-                    // status snapshot. The client reconciles by key (it replaces the
-                    // toast for each open status), so missed live updates are healed.
+                    // Re-send the current scoped snapshot: every operation still
+                    // in flight, plus any outcome recent enough to be inside
+                    // `FINAL_REPLAY_WINDOW`. The client replaces its toast per
+                    // key, so a dropped update for one of those is healed. It is
+                    // NOT a full recovery and must not be described as one: an
+                    // outcome older than the window is gone, and so is any
+                    // dismissal, since the snapshot carries no way to say that
+                    // something ended.
                     if resend_status_snapshot(&sink, &engine, &connection_id)
                         .await
                         .is_err()
@@ -2153,10 +2158,15 @@ async fn handle_events_socket(
                         "WebSocket events client {peer_ip} lagged behind the status-clear \
                          broadcast; dropped {n} clear(s); resending scoped snapshot"
                     ));
-                    // A dropped clear cannot be reconstructed directly, so re-send the
-                    // snapshot of statuses still open: the client reconciles by key
-                    // (the frontend re-syncs to this set), recovering from a missed
-                    // dismissal for any keyed toast no longer present.
+                    // A dropped clear cannot be recovered. The client shows a
+                    // toast per `status` frame and dismisses on `status_cleared`;
+                    // it does NOT reconcile itself to the snapshot as a set, so
+                    // re-sending cannot retract a toast whose dismissal was
+                    // missed. What the resend does buy is that anything still
+                    // open, or finished within `FINAL_REPLAY_WINDOW`, is
+                    // re-asserted with its current tone and message, so the
+                    // client is at least not left showing a stale spinner for an
+                    // operation that has since resolved.
                     if resend_status_snapshot(&sink, &engine, &connection_id)
                         .await
                         .is_err()
@@ -2374,11 +2384,18 @@ fn scope_delivers(scope: &StatusScope, conn_id: &str) -> bool {
     }
 }
 
-/// Re-send the current scoped status snapshot to one connection. Used to recover
-/// after a `Lagged` on either the status or status-clear broadcast: the client
-/// reconciles by key (replacing the toast for each still-open status), so missed
-/// live updates and dismissals are healed without the server diffing. Returns
-/// `Err(())` if the sink is dead so the caller can break the connection loop.
+/// Re-send the current scoped status snapshot to one connection, after a
+/// `Lagged` on either the status or the status-clear broadcast.
+///
+/// Be precise about what this does and does not fix, because the previous
+/// wording promised more than the code delivers. It re-asserts every operation
+/// still IN FLIGHT plus any final still inside `FINAL_REPLAY_WINDOW`, each
+/// replacing the client's toast for that key. It does NOT recover an outcome
+/// older than the window, and it does NOT recover a missed DISMISSAL: the client
+/// adds a toast per `status` frame and removes one on `status_cleared`, it never
+/// reconciles itself to the snapshot as a set, so nothing the server re-sends can
+/// retract a toast. Returns `Err(())` if the sink is dead so the caller can break
+/// the connection loop.
 async fn resend_status_snapshot(
     sink: &SharedSink,
     engine: &EngineHandle,
@@ -2392,8 +2409,11 @@ async fn resend_status_snapshot(
 
 /// Build the status events to replay on connect from a status snapshot.
 ///
-/// Each open `KeyedWireStatus` in `snapshot` (non-empty message) whose scope is
-/// deliverable to `conn_id` maps to one [`WireStatusEvent`]. The scope filter
+/// Each `KeyedWireStatus` in `snapshot` (non-empty message) whose scope is
+/// deliverable to `conn_id` maps to one [`WireStatusEvent`]. The snapshot holds
+/// operations still in flight plus finals still inside `FINAL_REPLAY_WINDOW`, so
+/// this is what tells a mid-operation joiner about running work AND what tells a
+/// reconnecting tab how the operation it was watching ended. The scope filter
 /// mirrors the live status arm so a client connecting mid-operation does NOT
 /// receive another connection's in-progress `Busy` (a ghost spinner that never
 /// clears). Pure and side-effect-free so it can be unit-tested without a
