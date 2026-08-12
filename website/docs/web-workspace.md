@@ -249,6 +249,33 @@ project's terminals and deleting an agent closes that agent's; neither has
 anything to do with this one. It ends when you close it, or when dux shuts
 down.
 
+## Messages
+
+Progress and results arrive as small messages at the bottom of the screen, and
+**they clear themselves.** How long one stays depends on how much it matters:
+a success or a note uses your `ui.status_clear_seconds` window (six seconds by
+default), a warning stays twice that, and an error four times, so the thing you
+most need to read is the thing that waits longest. Setting
+`ui.status_clear_seconds = 0` turns auto-clearing off entirely. You can also
+dismiss any message early by swiping it away, or with its close button.
+
+A small number stay until you dismiss them, and the rule is narrow on purpose:
+a message waits only when **you have to go and do something outside it**, or when
+something may have been lost or left half-finished. A file that was saved but
+never handed to the agent waits, because the message holds the only copy of where
+it went. A worktree that could not be removed waits, because it is still on disk.
+A failed pull does not wait, because nothing was lost and you can simply try
+again.
+
+If several arrive at once they stack, five deep on a desktop and three on a
+phone, and the rest queue behind them.
+
+One thing worth knowing if you keep a tab open on a flaky connection: when the
+browser reconnects, dux tells it about work that is **still running**, plus any
+result from the last thirty seconds, so an outcome that landed while you were
+offline still reaches you. Older results are not repeated. Before this, every
+page load replayed every warning and error since the server started.
+
 ## Macros
 
 A floating **Macros…** button drops prewritten prompt snippets into the focused
