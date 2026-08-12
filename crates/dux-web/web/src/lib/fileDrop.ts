@@ -186,6 +186,15 @@ function notDelivered(ctx: DropContext): string {
 export type DropToast = {
   tone: "success" | "warning" | "error"
   message: string
+  /// Whether this report waits for the user instead of for a clock.
+  ///
+  /// True on exactly two rungs, and the bar is deliberately high (see
+  /// `NotifyOptions.sticky` in `lib/notify.ts`): a report the user must act on
+  /// OUTSIDE the toast to recover from, or one where something may have been
+  /// lost. A screen that fills up with reports nobody dismissed is the friction
+  /// the auto-clear policy exists to remove, so anything that merely went
+  /// slightly wrong still retires on its own.
+  sticky: boolean
 }
 
 /// The form a dropped file's path takes when it is written into the prompt.
@@ -707,6 +716,13 @@ export function dropToastFor(
   )
   return {
     ...report,
+    // A long text paste that saved NOTHING is the second sticky rung. dux
+    // cancels the paste to make room for the file, so a failed save leaves the
+    // text neither typed nor saved: it survives only on the clipboard, and the
+    // recovery sentence naming the force-text chord is the only way back to it.
+    // A failed FILE drop is not sticky, because the file is still sitting where
+    // the user dragged it from.
+    sticky: report.sticky || !anySaved,
     message:
       pastedTextLead(ctx.pastedTextChars, anySaved, ctx) +
       report.message +
@@ -784,6 +800,7 @@ function savedFilesToast(
     if (refused.length === 1) {
       return {
         tone: "error",
+        sticky: false,
         message: endSentence(
           `Could not save ${refused[0].requestedName}: ${refused[0].reason}`,
         ),
@@ -791,6 +808,7 @@ function savedFilesToast(
     }
     return {
       tone: "error",
+      sticky: false,
       message: endSentence(
         `Could not save any of the ${refused.length} dropped files. ${reasonList(refused)}`,
       ),
@@ -824,6 +842,11 @@ function savedFilesToast(
             .join("; ")}.`
     return {
       tone: "warning",
+      // THE sticky rung. This message carries the full path of a file that is
+      // on disk and that the agent was never given, and nothing else on screen
+      // names that path. Recovering means typing it or dropping the file again,
+      // which is work the user cannot begin once the report has cleared itself.
+      sticky: true,
       message:
         head +
         alsoRefused +
@@ -837,6 +860,9 @@ function savedFilesToast(
     const total = outcomes.length
     return {
       tone: "warning",
+      // Not sticky: what was refused was never taken from the user, so the
+      // originals are still wherever they were dragged from.
+      sticky: false,
       message:
         `Saved ${savedFiles.length} of ${total} files${toPhrase(savedFiles, ctx)} and ${deliveredMany(ctx)}. ` +
         `Refused: ${endSentence(reasonList(refused))}` +
@@ -853,10 +879,11 @@ function savedFilesToast(
       one.requestedName === one.savedName
         ? `Saved ${one.savedName}${where} and ${deliveredOne(ctx)}.`
         : `Saved ${one.requestedName}${where} as ${one.savedName}, so nothing was overwritten, and ${deliveredOne(ctx)}.`
-    return { tone: "success", message: named }
+    return { tone: "success", sticky: false, message: named }
   }
   return {
     tone: "success",
+    sticky: false,
     message:
       `Saved ${savedFiles.length} files${toPhrase(savedFiles, ctx)} and ${deliveredMany(ctx)}.` +
       renameNote(savedFiles, ctx) +

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import { BUSY_TOAST_MAX_MS } from "./statusToast"
+import { BUSY_TOAST_MAX_MS } from "./notify"
 
 // Mock sonner before importing the store so the store's top-level
 // `import { toast } from "sonner"` picks up our spies.
@@ -117,11 +117,16 @@ function status(
   key: string | null | undefined,
   tone: string,
   message: string,
+  sticky?: boolean,
 ) {
+  // `sticky` is omitted from the frame unless asked for, mirroring the server's
+  // `skip_serializing_if`: an older server, and every ordinary status, sends no
+  // such field at all.
+  const extra = sticky === undefined ? {} : { sticky }
   mod.eventsSocket.onEvent(
     key == null
-      ? { event: "status", tone, message }
-      : { event: "status", key, tone, message },
+      ? { event: "status", tone, message, ...extra }
+      : { event: "status", key, tone, message, ...extra },
   )
 }
 function statusCleared(mod: StoreModule, key: string | null | undefined) {
@@ -429,6 +434,44 @@ describe("engine status → sonner toast routing", () => {
     expect(toast.success).toHaveBeenCalledWith("Agent and worktree removed.", {
       id: "delete:s1",
       duration: 6000,
+    })
+  })
+})
+
+describe("an engine status that says it waits for the user", () => {
+  it("is pinned when the frame carries sticky", async () => {
+    const mod = await loadStoreWithBootstrap()
+    const { toast } = await import("sonner")
+
+    status(mod, "half-done", "warning", "Half of it landed.", true)
+    expect(toast.warning).toHaveBeenCalledWith("Half of it landed.", {
+      id: "half-done",
+      duration: Infinity,
+    })
+  })
+
+  it("is NOT pinned when the frame says so explicitly", async () => {
+    const mod = await loadStoreWithBootstrap()
+    const { toast } = await import("sonner")
+
+    status(mod, "ordinary", "warning", "Careful.", false)
+    expect(toast.warning).toHaveBeenCalledWith("Careful.", {
+      id: "ordinary",
+      duration: 12000,
+    })
+  })
+
+  it("is NOT pinned when the field is absent, which is what an older server sends", async () => {
+    // The field is new. Every status from a server that predates it arrives
+    // without one, and an absent flag must read as false rather than as
+    // "unknown, better keep it on screen".
+    const mod = await loadStoreWithBootstrap()
+    const { toast } = await import("sonner")
+
+    status(mod, "ordinary", "error", "Broken.")
+    expect(toast.error).toHaveBeenCalledWith("Broken.", {
+      id: "ordinary",
+      duration: 24000,
     })
   })
 })

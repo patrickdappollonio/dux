@@ -1423,3 +1423,68 @@ describe("dropToastFor, for a long text paste turned into a file", () => {
     expect(t.message).not.toContain("putting the text in your message")
   })
 })
+
+describe("which drop reports wait for the user", () => {
+  // A sticky report is one the user must act on OUTSIDE the toast to recover
+  // from, or one where something may have been lost. Everything else retires on
+  // its own clock, because a screen that fills with reports nobody dismissed is
+  // the friction this whole policy exists to remove. The bar is high on purpose.
+
+  it("pins a report carrying the path of a file that was saved but never delivered", () => {
+    // This is the archetype. The file is on disk, the agent has not been given
+    // it, and the full path in this sentence is the only copy of where it went:
+    // nothing else on screen names it. Recovering means typing that path or
+    // dropping the file again, which is work the user cannot start after the
+    // toast has cleared itself away.
+    const t = dropToastFor([notSent("shot.png")], agent)
+    expect(t.tone).toBe("warning")
+    expect(t.sticky).toBe(true)
+    expect(t.message).toContain("shot.png")
+  })
+
+  it("pins it on the compose surface too, where the path joined a draft that may not survive", () => {
+    const t = dropToastFor([notSent("shot.png")], {
+      kind: "agent",
+      delivery: "draft",
+    })
+    expect(t.sticky).toBe(true)
+  })
+
+  it("pins a long text paste that ended up saved nowhere, because the paste was cancelled to make room for it", () => {
+    // dux cancels the paste before saving, so a failed save leaves the text
+    // neither typed nor saved. It is still on the clipboard and the report says
+    // so, which is exactly the instruction that must not vanish.
+    const t = dropToastFor(
+      [{ kind: "refused", requestedName: "pasted.txt", reason: "the disk is full" }],
+      { kind: "agent", pastedTextChars: 4213 },
+    )
+    expect(t.tone).toBe("error")
+    expect(t.sticky).toBe(true)
+  })
+
+  it("does NOT pin a failed FILE drop, because the file is still where the user dragged it from", () => {
+    const t = dropToastFor(
+      [{ kind: "refused", requestedName: "shot.png", reason: "the disk is full" }],
+      agent,
+    )
+    expect(t.tone).toBe("error")
+    expect(t.sticky).toBe(false)
+  })
+
+  it("does NOT pin a partial refusal, since what was refused was never taken from the user", () => {
+    const t = dropToastFor(
+      [
+        sent("a.png"),
+        { kind: "refused", requestedName: "b.png", reason: "too large" },
+      ],
+      agent,
+    )
+    expect(t.tone).toBe("warning")
+    expect(t.sticky).toBe(false)
+  })
+
+  it("does NOT pin a plain success", () => {
+    expect(dropToastFor([sent("shot.png")], agent).sticky).toBe(false)
+    expect(dropToastFor([sent("a.png"), sent("b.png")], agent).sticky).toBe(false)
+  })
+})

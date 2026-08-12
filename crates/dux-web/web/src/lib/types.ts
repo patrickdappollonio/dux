@@ -381,6 +381,11 @@ export interface EventsServerMessage {
   tone?: string
   /** Status message (`status`). */
   message?: string
+  /** Whether this status waits for the user instead of for a clock (`status`).
+   *  The server sends it only for the statuses it means to pin, and sends it
+   *  not at all otherwise, so an absent field reads as `false`. What earns it
+   *  is documented on `NotifyOptions.sticky` in `lib/notify.ts`. */
+  sticky?: boolean
   /** Server-side status scope (`status`); already scope-filtered by the server,
    *  so the client ignores it. */
   scope?: string
