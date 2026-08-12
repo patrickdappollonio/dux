@@ -44,12 +44,22 @@ to Gemini, dux won't launch it — switch it to a supported provider and relaunc
 Add a `[providers.<name>]` block to your config; no adapters, no protocol layer.
 See [Custom CLI Agents](/docs/custom-agents).
 
+### Do I have to go fullscreen to type to an agent?
+
+No. In the terminal UI, focusing the agent's pane is enough: what you type goes
+to the agent right there in the windowed layout, while dux's own shortcuts (all
+modifier chords) keep working. Fullscreen is still there as a toggle for when
+the agent should get every key verbatim; the keys dux otherwise keeps for
+itself reach the agent there, so it is the escape hatch for Tab completion and
+readline shortcuts. The in-app help overlay shows the toggle's current binding.
+
 ### The mouse wheel or PgUp won't scroll an agent. Why?
 
 Some agents take over the whole screen and scroll their own content. A good
 recent example is Claude Code's new full-screen renderer (OpenCode works the
 same way): dux detects this and forwards the wheel and `PgUp`/`PgDn` to the
-agent, while keeping its own scrollback for agents that don't. An explicit
+agent, while keeping its own scrollback for agents that don't. The same rule
+applies whether the agent pane is windowed or fullscreen. An explicit
 `forward_scroll = true`/`false` in a `[providers.<name>]` block overrides that
 detection; delete the line to return to auto-detect. See
 [Custom CLI Agents](/docs/custom-agents).

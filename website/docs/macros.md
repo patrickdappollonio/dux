@@ -69,9 +69,11 @@ exactly what gets sent.
 ## Sending a macro in the terminal UI
 
 The macro bar is opened by the `open_macro_bar` binding in `[keys]`; the in-app
-help overlay shows the key it is currently bound to. It is available while a pane
-is in interactive mode. If no macros are defined for the current surface, dux shows a status
-message and does nothing.
+help overlay shows the key it is currently bound to. It is available whenever the
+agent or terminal pane has your keys: with the center pane focused in the windowed
+layout, or in fullscreen, so you can fire a macro mid-typing without leaving the
+pane. If no macros are defined for the current surface, dux shows a status message
+and does nothing.
 
 Once the bar is open:
 

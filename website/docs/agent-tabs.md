@@ -106,10 +106,19 @@ dux remembers, so a coworker sending you a link to their tab never changes
 which tab you land on next time you (or anyone else) simply reopen the agent.
 
 In the terminal UI, switching is keyboard-driven and the keys are yours to rebind
-(the in-app help overlay always shows your current bindings). One deliberate quirk: tab
-switching is a non-interactive-mode action. While you're actively typing into an
-agent in fullscreen, those keys belong to the agent, not to dux, so drop out of
-the agent first to hop between tabs.
+(the in-app help overlay always shows your current bindings). The defaults are
+modifier chords, and chords stay dux's even while you're typing into the agent in
+the windowed pane, so you can hop tabs mid-sentence without ever leaving the
+keyboard. Each pill shows its position number in its label, so the switch-by-number
+keys always have a visible address. One deliberate quirk on fullscreen: there, keys
+belong to the agent verbatim and the strip isn't even drawn, so minimize first to
+hop between tabs.
+
+A footnote on tab 4: switch-to-tab-4 ships with no default key. Most terminals send
+the exact same byte for `Ctrl-4` and `Ctrl-\`, and dux gives that byte to the macro
+bar, so out of the box you reach tab 4 by stepping with the next/previous-tab keys,
+or by binding your own key to `select_tab_4` (the config file documents it as a
+commented-out row, ready to fill in).
 
 ## Closing tabs
 

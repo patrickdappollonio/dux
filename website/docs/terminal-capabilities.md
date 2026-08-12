@@ -167,6 +167,18 @@ your host terminal supports OSC 8) and in the web terminal. For safety the web o
 opens `http` and `https` links, and it opens them in a fresh tab with no way to
 reach back into the app.
 
+## Pasting into the terminal UI
+
+Bracketed paste gets the same "honest middleman" treatment. When you paste into
+the terminal UI, your host terminal hands dux the text as one paste event, and
+dux routes it to whatever currently has your keys: a text field (a modal, a
+filter, the commit box; single-line fields fold any line breaks into spaces), or
+the agent itself when its pane is the thing you're typing into. If the agent's
+CLI has turned bracketed paste on, which agent CLIs do, dux re-wraps the text in
+the same paste markers so the CLI sees a single paste rather than a burst of
+keystrokes. If it hasn't asked for bracketing, the text arrives as plain typed
+input, exactly as it would in any other terminal.
+
 ## Getting a file to the agent
 
 Capabilities are about what an agent can reach out and do. The other direction,

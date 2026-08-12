@@ -112,10 +112,10 @@ Already have a Git worktree you want dux to use? The `new-agent-from-worktree` c
 In the terminal UI, the interface has three panes:
 
 - **Left:** a flat list of your agents, most-active first, with search and a project chooser
-- **Center:** the agent's live terminal output (or a file diff)
+- **Center:** the agent's live terminal (or a file diff). Focus it and type: your keystrokes go straight to the agent, right there in the window, while dux's own shortcuts keep working around it
 - **Right:** changed files, staging, and diffs
 
-Tab between panes. Resize them with keyboard or mouse. Collapse the sidebar or git pane when you want more room. Go fullscreen with interactive mode. It's your layout.
+Tab between panes. Resize them with keyboard or mouse. Collapse the sidebar or git pane when you want more room. Toggle the agent fullscreen when you want every key and every cell to belong to it. It's your layout.
 
 ### Bring Any CLI
 
