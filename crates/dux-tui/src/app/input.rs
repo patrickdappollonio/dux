@@ -655,6 +655,22 @@ impl App {
             self.handle_startup_command_input_key(key)?;
             return Ok(false);
         }
+        // Minimized typing: chords belong to dux, typing belongs to the agent.
+        // While the center pane is typeable and at the live edge, typing-owned
+        // keys skip the Global and Center binding lookups entirely and are
+        // encoded straight to the focused surface's PTY. Scrolled back, the
+        // ladder runs as today so the scroll bindings win (and the encoder
+        // fall-through in `handle_center_key` suppresses what falls through,
+        // mirroring the raw path's scroll-mode suppression). Every modal
+        // surface (prompt, help, macro bar, filters, resize mode) is either
+        // handled above this point or excluded by `center_typeable` itself.
+        if self.center_typeable()
+            && !self.scroll_mode_active()
+            && crate::keybindings::center_typing_owns_key(&key)
+        {
+            self.forward_typing_key_to_center(&key);
+            return Ok(false);
+        }
         // Check if a Global binding should defer to a pane-scoped binding.
         // For example, `q` is Quit globally but ScrollToBottom in Center — if
         // the focused pane has a binding for this key, skip the global handler
@@ -802,6 +818,18 @@ impl App {
                             "Resize mode off. Pane widths saved. Press {key} to re-enter."
                         ));
                     }
+                }
+                // Nothing closed: the early `close_top_overlay` at the top of
+                // this function already consumed the close key when there was
+                // an overlay to dismiss, and when the close key is typing-owned
+                // (Esc, the default) the minimized-typing bypass above already
+                // forwarded it to a typeable agent before this lookup ran. So
+                // this arm only fires for a CloseOverlay rebound to a chord dux
+                // does not otherwise own: forward it to the typeable agent so
+                // the keystroke is not silently eaten; anywhere else it falls
+                // to the catch-all and is consumed as before.
+                Action::CloseOverlay if self.center_typeable() && !self.scroll_mode_active() => {
+                    self.forward_typing_key_to_center(&key);
                 }
                 _ => {}
             }
@@ -1115,6 +1143,11 @@ impl App {
                     if let CenterMode::Diff { ref mut scroll, .. } = self.center_mode {
                         let page = self.last_diff_height.max(1);
                         *scroll = scroll.saturating_sub(page);
+                    } else if self.center_typeable() && self.should_forward_center_page() {
+                        // Typeable pane, page-owning child: forward the page
+                        // key's bytes exactly as fullscreen does (decision 8);
+                        // an alt-screen child has no host scrollback to move.
+                        self.forward_typing_key_to_center(&key);
                     } else if self.last_pty_size.0 > 0 {
                         self.scroll_pty(ScrollDirection::Up, self.last_pty_size.0 as usize);
                     }
@@ -1126,15 +1159,31 @@ impl App {
                             .last_diff_visual_lines
                             .saturating_sub(self.last_diff_height.max(1));
                         *scroll = (*scroll + page).min(max_scroll);
+                    } else if self.center_typeable() && self.should_forward_center_page() {
+                        self.forward_typing_key_to_center(&key);
                     } else if self.last_pty_size.0 > 0 {
                         self.scroll_pty(ScrollDirection::Down, self.last_pty_size.0 as usize);
                     }
                 }
+                // The line-scroll and snap keys are gated by context in a
+                // typeable pane (the line-scroll gating tenet): they scroll
+                // only when the pane is already scrolled back; at the live
+                // edge they fall through to the encoder like any other typed
+                // key. In a non-typeable pane (dormant or exited agent) there
+                // is no competing use, so they scroll unconditionally as
+                // before. With the default bindings these keys are
+                // typing-owned and never reach this match while typeable at
+                // the live edge (the `handle_key` bypass grabs them first);
+                // the gate here covers rebinds onto chords.
                 Action::ScrollLineUp => {
                     if let CenterMode::Diff { ref mut scroll, .. } = self.center_mode {
                         *scroll = scroll.saturating_sub(1);
-                    } else if self.last_pty_size.0 > 0 {
-                        self.scroll_pty(ScrollDirection::Up, 1);
+                    } else if !self.center_scroll_keys_gated() {
+                        if self.last_pty_size.0 > 0 {
+                            self.scroll_pty(ScrollDirection::Up, 1);
+                        }
+                    } else {
+                        self.forward_typing_key_to_center(&key);
                     }
                 }
                 Action::ScrollLineDown => {
@@ -1143,8 +1192,12 @@ impl App {
                             .last_diff_visual_lines
                             .saturating_sub(self.last_diff_height.max(1));
                         *scroll = (*scroll + 1).min(max_scroll);
-                    } else if self.last_pty_size.0 > 0 {
-                        self.scroll_pty(ScrollDirection::Down, 1);
+                    } else if !self.center_scroll_keys_gated() {
+                        if self.last_pty_size.0 > 0 {
+                            self.scroll_pty(ScrollDirection::Down, 1);
+                        }
+                    } else {
+                        self.forward_typing_key_to_center(&key);
                     }
                 }
                 Action::ScrollToBottom => {
@@ -1153,29 +1206,86 @@ impl App {
                             .last_diff_visual_lines
                             .saturating_sub(self.last_diff_height.max(1));
                         *scroll = max_scroll;
-                    } else {
+                    } else if !self.center_scroll_keys_gated() {
                         self.reset_pty_scrollback();
+                    } else {
+                        self.forward_typing_key_to_center(&key);
                     }
                 }
                 Action::ScrollToTop => {
                     if let CenterMode::Diff { ref mut scroll, .. } = self.center_mode {
                         *scroll = 0;
-                    } else {
+                    } else if !self.center_scroll_keys_gated() {
                         self.set_pty_scrollback_max();
+                    } else {
+                        self.forward_typing_key_to_center(&key);
                     }
                 }
                 _ => {}
             }
-        } else if !in_diff && self.input_target == InputTarget::None {
-            let is_typeable = matches!(
-                key.code,
-                KeyCode::Char(_) | KeyCode::Enter | KeyCode::Backspace
-            );
-            if is_typeable && key.modifiers.difference(KeyModifiers::SHIFT).is_empty() {
-                self.readonly_nudge_tick = Some(self.tick_count);
+        } else if !in_diff {
+            // No binding claimed the key. When the pane is typeable and at the
+            // live edge, encode it for the focused surface's PTY (an unbound
+            // chord like Alt-b or an unclaimed Ctrl combo belongs to the agent
+            // once dux has passed on it; the encoder silently drops what the
+            // legacy protocol cannot represent). Scrolled back, the keystroke
+            // is suppressed instead, mirroring the raw path's scroll-mode
+            // suppression: a frozen view must not type invisibly into the
+            // live edge below it. A non-typeable pane (dormant or exited
+            // agent, no live PTY) ignores the key entirely; the hint bar says
+            // how to relaunch.
+            if self.center_typeable() && !self.scroll_mode_active() {
+                self.forward_typing_key_to_center(&key);
             }
         }
         Ok(())
+    }
+
+    /// Whether the Center-scope scroll bindings are GATED by minimized typing:
+    /// the pane is typeable and sitting at the live edge, so a scroll key has
+    /// nothing to scroll and falls through to the encoder instead. False in
+    /// every other state (non-typeable panes keep scrolling unconditionally;
+    /// a scrolled-back typeable pane is exactly what the scroll keys are for).
+    fn center_scroll_keys_gated(&self) -> bool {
+        self.center_typeable()
+            && !self.scroll_mode_active()
+            && self
+                .selected_terminal_surface_client()
+                .is_none_or(|p| p.scrollback_offset() == 0)
+    }
+
+    /// The fullscreen page-key forwarding policy, asked for the minimized
+    /// typeable pane: forward PgUp/PgDn to the child when its `forward_scroll`
+    /// policy (or the live alt-screen state) says the child owns page keys.
+    fn should_forward_center_page(&self) -> bool {
+        let fs = self.selected_surface_forward_scroll();
+        let alt = self
+            .selected_terminal_surface_client()
+            .is_some_and(|p| p.is_alt_screen());
+        should_forward_page(fs, alt)
+    }
+
+    /// Encode one typed key for the focused center surface's PTY, write it,
+    /// and stamp the typing window so the echo it provokes is not read as the
+    /// agent working (and the sidebar Typing glyph fires). The minimized twin
+    /// of the raw interactive forward path: the stamp goes under the SURFACE
+    /// id (focused tab or companion terminal), resolved explicitly here
+    /// because `stamp_forwarded_input` resolves from `input_target`, which is
+    /// `None` in this mode. A key the legacy protocol cannot encode is
+    /// silently dropped, and a forwarded keystroke retires any terminal
+    /// selection exactly as the raw path's forward flush does.
+    fn forward_typing_key_to_center(&mut self, key: &KeyEvent) {
+        let Some(bytes) = crate::key_encode::key_event_to_pty_bytes(key) else {
+            return;
+        };
+        let Some(provider) = self.selected_terminal_surface_client() else {
+            return;
+        };
+        let _ = provider.write_bytes(&bytes);
+        self.terminal_selection = None;
+        if let Some(id) = self.selected_terminal_surface_id() {
+            self.engine.note_pty_input(&id);
+        }
     }
 
     fn scroll_pty(&mut self, direction: ScrollDirection, amount: usize) {
@@ -14271,16 +14381,15 @@ not_a_real_action = ["x"]
         );
     }
 
-    /// A plain horizontal arrow switches tabs in the non-interactive center
-    /// pane. It is a default alongside the Ctrl arrow because a modified arrow
-    /// is not universally deliverable: some terminals, multiplexers and SSH
-    /// setups never send a distinct Ctrl-Left/Ctrl-Right, leaving those users
-    /// with no tab key at all. Both must work, and the plain one must reach
-    /// the binding only from the Center scope, which is non-interactive by
-    /// construction, so an interactive PTY still gets its own arrows.
+    /// A plain horizontal arrow no longer switches tabs. It used to be a
+    /// default alongside the Ctrl arrow, justified by Center scope being
+    /// unreachable while keys flowed to a PTY; minimized typing killed that
+    /// premise, so the plain arrows now belong to the agent (they type a
+    /// caret move into a live one) and must never move the tab focus, live or
+    /// dormant.
     #[test]
-    fn a_plain_horizontal_arrow_switches_tabs_in_the_windowed_center_pane() {
-        for (key, expected) in [(KeyCode::Right, "tab-2"), (KeyCode::Left, "tab-2")] {
+    fn a_plain_horizontal_arrow_no_longer_switches_tabs() {
+        for key in [KeyCode::Right, KeyCode::Left] {
             let mut app = test_app(default_bindings());
             let session_id = app.engine.sessions[0].id.clone();
             seed_input_tab(&mut app, &session_id, "tab-2", "claude", 1);
@@ -14298,13 +14407,13 @@ not_a_real_action = ["x"]
 
             assert_eq!(
                 app.focused_tab_id(&session_id),
-                expected,
-                "{key:?} must move to the other tab of a two-tab agent"
+                session_id,
+                "{key:?} must stay on the same tab: the plain arrows belong to the agent now"
             );
         }
     }
 
-    /// The Ctrl arrows keep working; the plain ones are additive, not a swap.
+    /// The Ctrl arrows are the tab keys.
     #[test]
     fn the_ctrl_arrows_still_switch_tabs() {
         let mut app = test_app(default_bindings());
@@ -17581,7 +17690,7 @@ cyan = "#00ffff"
         app.fullscreen_overlay = FullscreenOverlay::Agent;
 
         app.exit_interactive_mode();
-        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL))
             .expect("handle arrow");
 
         assert_eq!(
@@ -20828,6 +20937,424 @@ cyan = "#00ffff"
             !app.engine.recent_pointer_input(&session_id),
             "and it must not stamp the pointer window"
         );
+    }
+
+    // ── Minimized typing (typeable center pane) ─────────────────────
+
+    /// A live agent PTY shown in the MINIMIZED center pane with focus on it,
+    /// i.e. the `center_typeable` state. The child is the feedable `cat`
+    /// fixture (echo off), so whatever dux forwards is copied back into the
+    /// grid once a CR/LF flushes the canonical input line.
+    fn app_with_minimized_typeable_agent() -> App {
+        let mut app = test_app(default_bindings());
+        install_feedable_pty(&mut app);
+        app.center_mode = CenterMode::Agent;
+        app.focus = FocusPane::Center;
+        app.input_target = InputTarget::None;
+        app.fullscreen_overlay = FullscreenOverlay::None;
+        app.last_pty_size = (24, 80);
+        assert!(
+            app.center_typeable(),
+            "test setup: the fixture must be typeable or these tests prove nothing"
+        );
+        app
+    }
+
+    /// Block until some viewport row's text starts with `needle`, i.e. the
+    /// child echoed back what dux forwarded to its PTY.
+    fn wait_for_grid_row(app: &mut App, needle: &str) {
+        for _ in 0..200 {
+            app.refresh_snapshot_buf();
+            let mut rows: std::collections::BTreeMap<u16, String> =
+                std::collections::BTreeMap::new();
+            for cell in &app.snapshot_buf.cells {
+                rows.entry(cell.row).or_default().push_str(&cell.symbol);
+            }
+            if rows.values().any(|line| line.trim().starts_with(needle)) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("the child never echoed {needle:?} within 2s");
+    }
+
+    fn tap_center(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+        app.handle_key(KeyEvent::new(code, mods))
+            .expect("handle key");
+    }
+
+    /// Typed characters (capitals included) and Enter reach the PTY writer:
+    /// the canonical-mode child only sees the line once the forwarded CR
+    /// flushes it, so the echoed row proves every byte arrived.
+    #[test]
+    fn typing_reaches_the_minimized_agent_pty() {
+        let mut app = app_with_minimized_typeable_agent();
+
+        tap_center(&mut app, KeyCode::Char('H'), KeyModifiers::SHIFT);
+        tap_center(&mut app, KeyCode::Char('i'), KeyModifiers::NONE);
+        tap_center(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+        wait_for_grid_row(&mut app, "Hi");
+    }
+
+    /// Ctrl-j is the soft-newline key: it must encode as LF and flush the
+    /// canonical line exactly as Enter's CR does.
+    #[test]
+    fn ctrl_j_reaches_the_minimized_agent_pty_as_a_line_feed() {
+        let mut app = app_with_minimized_typeable_agent();
+
+        tap_center(&mut app, KeyCode::Char('o'), KeyModifiers::NONE);
+        tap_center(&mut app, KeyCode::Char('k'), KeyModifiers::NONE);
+        tap_center(&mut app, KeyCode::Char('j'), KeyModifiers::CONTROL);
+
+        wait_for_grid_row(&mut app, "ok");
+    }
+
+    /// Ctrl-c is the ONE chord the agent gets while typing minimized
+    /// (decision: interrupting the agent quickly is the common intent). The
+    /// forwarded 0x03 raises SIGINT in the child's foreground group, so the
+    /// fixture child dying is the proof the byte arrived.
+    #[test]
+    fn ctrl_c_minimized_forwards_sigint_to_the_agent() {
+        let mut app = app_with_minimized_typeable_agent();
+        let session_id = app.engine.sessions[0].id.clone();
+
+        tap_center(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL);
+
+        let mut exited = false;
+        for _ in 0..200 {
+            if app
+                .engine
+                .providers
+                .get_mut(&session_id)
+                .expect("provider")
+                .try_wait()
+                .is_some()
+            {
+                exited = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            exited,
+            "the forwarded Ctrl-c must reach the child as SIGINT and end it"
+        );
+        assert!(
+            !matches!(app.prompt, PromptState::ConfirmQuit { .. }),
+            "Ctrl-c while typeable belongs to the agent, never to Quit"
+        );
+    }
+
+    /// Tab remains dux's: it moves pane focus and must neither reach the PTY
+    /// nor stamp the typing window.
+    #[test]
+    fn tab_still_moves_focus_and_never_reaches_the_pty() {
+        let mut app = app_with_minimized_typeable_agent();
+        let session_id = app.engine.sessions[0].id.clone();
+
+        tap_center(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+
+        assert_ne!(
+            app.focus,
+            FocusPane::Center,
+            "Tab must keep moving focus between panes"
+        );
+        assert!(
+            !app.engine.pty_input.contains_key(&session_id),
+            "Tab must not be forwarded to the agent"
+        );
+    }
+
+    /// Shift-Tab is the other half of the pane navigation and stays dux's too.
+    #[test]
+    fn shift_tab_still_moves_focus_while_typeable() {
+        let mut app = app_with_minimized_typeable_agent();
+        let session_id = app.engine.sessions[0].id.clone();
+
+        tap_center(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT);
+
+        assert_ne!(app.focus, FocusPane::Center);
+        assert!(!app.engine.pty_input.contains_key(&session_id));
+    }
+
+    /// The Ctrl arrows keep switching tabs while the pane is typeable: chords
+    /// belong to dux.
+    #[test]
+    fn ctrl_arrows_still_switch_tabs_while_typeable() {
+        let mut app = app_with_minimized_typeable_agent();
+        let session_id = app.engine.sessions[0].id.clone();
+        seed_input_tab(&mut app, &session_id, "tab-2", "claude", 1);
+
+        tap_center(&mut app, KeyCode::Right, KeyModifiers::CONTROL);
+
+        assert_eq!(
+            app.focused_tab_id(&session_id),
+            "tab-2",
+            "Ctrl-Right must still switch tabs while the pane is typeable"
+        );
+    }
+
+    /// Ctrl-p keeps opening the palette while the pane is typeable.
+    #[test]
+    fn ctrl_p_still_opens_the_palette_while_typeable() {
+        let mut app = app_with_minimized_typeable_agent();
+
+        tap_center(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL);
+
+        assert!(
+            matches!(app.prompt, PromptState::Command { .. }),
+            "the palette chord belongs to dux even while the pane is typeable"
+        );
+    }
+
+    /// `q` types into a live agent from the Center pane and still quits from
+    /// the Left pane. "Dux wins" cannot apply literally to plain letters.
+    #[test]
+    fn q_types_into_a_live_agent_but_still_quits_from_left() {
+        let mut app = app_with_minimized_typeable_agent();
+        let session_id = app.engine.sessions[0].id.clone();
+
+        tap_center(&mut app, KeyCode::Char('q'), KeyModifiers::NONE);
+
+        assert!(
+            matches!(app.prompt, PromptState::None),
+            "q while typeable must not begin a quit"
+        );
+        assert!(
+            app.engine.pty_input.contains_key(&session_id),
+            "q while typeable must be forwarded to the agent"
+        );
+
+        app.focus = FocusPane::Left;
+        tap_center(&mut app, KeyCode::Char('q'), KeyModifiers::NONE);
+        assert!(
+            matches!(app.prompt, PromptState::ConfirmQuit { .. }),
+            "q from the Left pane must still quit (confirming, agents are live)"
+        );
+    }
+
+    /// The plain-char globals type instead of firing: `?` must not open help,
+    /// and the bracket keys must be forwarded rather than resolved.
+    #[test]
+    fn question_mark_and_brackets_type_into_a_live_agent() {
+        let mut app = app_with_minimized_typeable_agent();
+        let session_id = app.engine.sessions[0].id.clone();
+
+        for ch in ['?', '[', ']'] {
+            app.engine.pty_input.remove(&session_id);
+            tap_center(&mut app, KeyCode::Char(ch), KeyModifiers::NONE);
+            assert!(
+                app.engine.pty_input.contains_key(&session_id),
+                "{ch:?} must be forwarded to the agent while typeable"
+            );
+        }
+        assert!(
+            app.help_scroll.is_none(),
+            "? while typeable must type, not open the help overlay"
+        );
+    }
+
+    /// Esc with nothing to close forwards to the agent (decision 2). Before
+    /// this, the Global CloseOverlay lookup swallowed Esc even when no overlay
+    /// closed, so agent TUIs never saw their menu-dismiss key minimized.
+    #[test]
+    fn esc_with_nothing_to_close_forwards_to_the_agent() {
+        let mut app = app_with_minimized_typeable_agent();
+        let session_id = app.engine.sessions[0].id.clone();
+
+        tap_center(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+
+        assert!(
+            app.engine.pty_input.contains_key(&session_id),
+            "Esc with no overlay open must be forwarded to the agent"
+        );
+    }
+
+    /// Esc with an overlay open closes it and forwards nothing: closing wins.
+    #[test]
+    fn esc_with_an_overlay_open_closes_it_and_forwards_nothing() {
+        let mut app = app_with_minimized_typeable_agent();
+        let session_id = app.engine.sessions[0].id.clone();
+        app.help_scroll = Some(0);
+
+        tap_center(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+
+        assert!(app.help_scroll.is_none(), "Esc must close the help overlay");
+        assert!(
+            !app.engine.pty_input.contains_key(&session_id),
+            "an Esc that closed an overlay must not also reach the agent"
+        );
+    }
+
+    /// While scrolled back, the scroll bindings win and plain typing is
+    /// suppressed (the raw path's scroll-mode rule, extended to the minimized
+    /// pane). This is the mutation guard on the `!scroll_mode_active()` gate:
+    /// delete it and the `x` below lands in the PTY.
+    #[test]
+    fn scrolled_back_minimized_scroll_keys_win_and_typing_is_suppressed() {
+        let mut app = app_with_minimized_typeable_agent();
+        let session_id = app.engine.sessions[0].id.clone();
+        let mut fill = String::new();
+        for n in 0..40 {
+            fill.push_str(&format!("L{n:02}\n"));
+        }
+        feed_until_history(&mut app, &fill, 18);
+        enter_scroll_mode(&mut app, 3);
+        assert!(app.scroll_mode_active(), "test setup: scroll mode is on");
+        app.engine.pty_input.remove(&session_id);
+
+        // Plain typing is suppressed: nothing written, nothing stamped.
+        tap_center(&mut app, KeyCode::Char('x'), KeyModifiers::NONE);
+        assert!(
+            !app.engine.pty_input.contains_key(&session_id),
+            "typing while scrolled back must be suppressed, not forwarded"
+        );
+
+        // The line-scroll keys act on the scrollback.
+        let before = app
+            .selected_terminal_surface_client()
+            .expect("provider")
+            .scrollback_offset();
+        tap_center(&mut app, KeyCode::Up, KeyModifiers::NONE);
+        let after = app
+            .selected_terminal_surface_client()
+            .expect("provider")
+            .scrollback_offset();
+        assert!(after > before, "Up while scrolled back must keep scrolling");
+
+        // `q` snaps back to the live edge instead of quitting or typing.
+        tap_center(&mut app, KeyCode::Char('q'), KeyModifiers::NONE);
+        assert_eq!(
+            app.selected_terminal_surface_client()
+                .expect("provider")
+                .scrollback_offset(),
+            0,
+            "q while scrolled back must snap to the live edge"
+        );
+        assert!(matches!(app.prompt, PromptState::None));
+    }
+
+    /// PgUp minimized follows the fullscreen forwarding policy: a child that
+    /// owns page keys (per `forward_scroll` / the alt screen) gets the bytes.
+    #[test]
+    fn pgup_minimized_forwards_to_a_page_owning_child() {
+        let mut app = app_with_minimized_typeable_agent();
+        let session_id = app.engine.sessions[0].id.clone();
+        set_forward_scroll(&mut app, true);
+
+        tap_center(&mut app, KeyCode::PageUp, KeyModifiers::NONE);
+
+        assert!(
+            app.engine.pty_input.contains_key(&session_id),
+            "PgUp must be forwarded to a page-owning child"
+        );
+        assert_eq!(
+            app.selected_terminal_surface_client()
+                .expect("provider")
+                .scrollback_offset(),
+            0,
+            "a forwarded PgUp must not also scroll the host scrollback"
+        );
+    }
+
+    /// The same key scrolls locally when the child does not own page keys.
+    #[test]
+    fn pgup_minimized_scrolls_locally_for_a_normal_buffer_child() {
+        let mut app = app_with_minimized_typeable_agent();
+        let session_id = app.engine.sessions[0].id.clone();
+        set_forward_scroll(&mut app, false);
+        let mut fill = String::new();
+        for n in 0..40 {
+            fill.push_str(&format!("L{n:02}\n"));
+        }
+        feed_until_history(&mut app, &fill, 18);
+        app.last_pty_size = (24, 80);
+
+        tap_center(&mut app, KeyCode::PageUp, KeyModifiers::NONE);
+
+        assert!(
+            app.selected_terminal_surface_client()
+                .expect("provider")
+                .scrollback_offset()
+                > 0,
+            "PgUp must scroll dux's own scrollback for a normal-buffer child"
+        );
+        assert!(
+            !app.engine.pty_input.contains_key(&session_id),
+            "a local page scroll must not stamp the typing window"
+        );
+    }
+
+    /// Keys are inert on a pane showing a dormant/exited agent: no write, no
+    /// crash, no prompt. Only the explicit activate action launches.
+    #[test]
+    fn typing_is_inert_when_the_focused_agent_is_not_live() {
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        app.center_mode = CenterMode::Agent;
+        app.focus = FocusPane::Center;
+        assert!(!app.center_typeable());
+
+        for (code, mods) in [
+            (KeyCode::Char('x'), KeyModifiers::NONE),
+            (KeyCode::Esc, KeyModifiers::NONE),
+            (KeyCode::Backspace, KeyModifiers::NONE),
+        ] {
+            tap_center(&mut app, code, mods);
+        }
+
+        assert!(
+            !app.engine.pty_input.contains_key(&session_id),
+            "there is no PTY to type into, so nothing may be stamped"
+        );
+        assert!(matches!(app.prompt, PromptState::None));
+    }
+
+    /// The mutation guard on the stamp: a minimized keystroke must stamp the
+    /// TYPING window under the focused surface id, and never the pointer one,
+    /// so typed echo is not read as the agent working and the sidebar Typing
+    /// glyph fires.
+    #[test]
+    fn minimized_typing_stamps_the_typing_window_for_the_focused_surface() {
+        let mut app = app_with_minimized_typeable_agent();
+        let session_id = app.engine.sessions[0].id.clone();
+
+        tap_center(&mut app, KeyCode::Char('x'), KeyModifiers::NONE);
+
+        assert!(
+            app.engine.pty_input.contains_key(&session_id),
+            "a minimized keystroke must record input for echo suppression"
+        );
+        assert!(
+            !app.engine.recent_pointer_input(&session_id),
+            "typing must not stamp the pointer window"
+        );
+    }
+
+    /// A prompt takes every key first: with the palette open, typing lands in
+    /// its filter and nothing reaches the PTY underneath.
+    #[test]
+    fn an_open_prompt_swallows_typing_before_the_pty() {
+        let mut app = app_with_minimized_typeable_agent();
+        let session_id = app.engine.sessions[0].id.clone();
+        app.prompt = PromptState::Command {
+            input: TextInput::new(),
+            selected: 0,
+        };
+
+        tap_center(&mut app, KeyCode::Char('x'), KeyModifiers::NONE);
+
+        assert!(
+            !app.engine.pty_input.contains_key(&session_id),
+            "a keystroke consumed by a prompt must never reach the PTY"
+        );
+        match &app.prompt {
+            PromptState::Command { input, .. } => {
+                assert_eq!(input.text, "x", "the prompt must have received the key")
+            }
+            other => panic!("palette should still be open, got {other:?}"),
+        }
     }
 
     #[test]

@@ -234,7 +234,6 @@ pub struct App {
     /// running; see [`RefusalBlink`] for why it also remembers which modal
     /// armed it.
     pub(crate) refusal_blink: Option<RefusalBlink>,
-    pub(crate) readonly_nudge_tick: Option<u64>,
     /// Whether the flat list's "Inactive" tail (detached/exited agents) is
     /// collapsed. Starts collapsed, matching the web. Replaces the old
     /// per-project collapse now that there are no project headers.
@@ -2889,7 +2888,6 @@ impl App {
             tick_count: 0,
             start_time: Instant::now(),
             refusal_blink: None,
-            readonly_nudge_tick: None,
             inactive_collapsed: true,
             inactive_search_dismissed: None,
             inactive_collapse_overridden: false,
@@ -3588,11 +3586,35 @@ impl App {
         }
     }
 
-    const NUDGE_DURATION_TICKS: u64 = 15; // ~1.5s at 100ms/tick
-
-    pub(crate) fn is_nudge_active(&self) -> bool {
-        self.readonly_nudge_tick
-            .is_some_and(|t| self.tick_count.wrapping_sub(t) < Self::NUDGE_DURATION_TICKS)
+    /// Whether the minimized center pane currently TYPES into the focused
+    /// surface's PTY: focus is on the Center pane, nothing modal or fullscreen
+    /// is in the way, the pane is showing the agent surface (not a diff), and
+    /// that surface has a live PTY behind it.
+    ///
+    /// This is a DERIVED predicate, deliberately not new state: focus loss, a
+    /// prompt opening, a tab switch and an agent exit all end typeability for
+    /// free, with nothing to desync. Fullscreen interactive mode is a separate
+    /// regime (raw stdin passthrough keyed on `input_target`) and is excluded
+    /// here by the overlay and `input_target` checks.
+    ///
+    /// The companion-terminal surface gets the same treatment as the agent
+    /// surface: the liveness question is asked through
+    /// [`Self::selected_terminal_surface_client`], which resolves whichever
+    /// surface the center pane is showing.
+    ///
+    /// Scroll state is deliberately NOT part of this predicate: callers that
+    /// must suppress typing while scrolled back (the line-scroll gating tenet)
+    /// combine it with [`Self::scroll_mode_active`].
+    pub(crate) fn center_typeable(&self) -> bool {
+        self.focus == FocusPane::Center
+            && matches!(self.fullscreen_overlay, FullscreenOverlay::None)
+            && self.input_target == InputTarget::None
+            && matches!(self.prompt, PromptState::None)
+            && self.help_scroll.is_none()
+            && self.macro_bar.is_none()
+            && !self.resize_mode
+            && matches!(self.center_mode, CenterMode::Agent)
+            && self.selected_terminal_surface_client().is_some()
     }
 
     fn report_runtime_error(&mut self, context: &str, err: &dyn std::error::Error) {

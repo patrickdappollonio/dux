@@ -2383,13 +2383,7 @@ impl App {
     }
 
     fn render_agent_terminal(&mut self, frame: &mut Frame, area: Rect, title: &str, focused: bool) {
-        let nudge_active = self.is_nudge_active();
-        let outer_block = if nudge_active {
-            self.themed_block(title, focused)
-                .border_style(Style::default().fg(self.theme.nudge_border))
-        } else {
-            self.themed_block(title, focused)
-        };
+        let outer_block = self.themed_block(title, focused);
         let inner = outer_block.inner(area);
         outer_block.render(area, frame.buffer_mut());
 
@@ -2404,6 +2398,13 @@ impl App {
             (InputTarget::Agent, SessionSurface::Agent)
                 | (InputTarget::Terminal, SessionSurface::Terminal)
         );
+        // The hardware caret follows KEYS, not just fullscreen-interactive
+        // mode: the minimized typeable pane receives keystrokes too, and the
+        // caret is both the "your keys land here" cue and what anchors IME
+        // composition popups. While scrolled back the cursor cell maps out of
+        // the viewport (the bounds check below skips it), so the caret
+        // vanishes there on both regimes without extra gating.
+        let receives_keys = is_input || self.center_typeable();
         let mut scrollback_offset: usize = 0;
         let mut rendered_content = false;
 
@@ -2652,8 +2653,8 @@ impl App {
                     }
                 }
 
-                // Render cursor if in input mode.
-                if is_input
+                // Render the caret whenever this pane receives keys.
+                if receives_keys
                     && let Some(cursor) = self.snapshot_buf.cursor
                     && cursor.row < self.snapshot_buf.rows
                     && cursor.col < self.snapshot_buf.cols
@@ -2832,14 +2833,6 @@ impl App {
                             ));
                         }
                     }
-                } else if session_active && nudge_active {
-                    let warn_style = Style::default().fg(self.theme.nudge_border);
-                    spans.push(Span::styled(
-                        "Read-only \u{2014} agent needs full keyboard control. ",
-                        warn_style,
-                    ));
-                    spans.extend(self.theme.dim_key_badge_default(&focus_agent));
-                    spans.push(Span::styled(" to interact.", desc_style));
                 } else if session_active {
                     spans.extend(self.theme.dim_key_badge_default(&focus_agent));
                     spans.push(Span::styled(" to interact. ", desc_style));
@@ -11262,15 +11255,9 @@ mod tests {
         terminal.backend_mut().assert_cursor_position(expected);
     }
 
-    /// The hardware cursor must only track the PTY in interactive (input) mode.
-    /// In a non-interactive agent view there is no IME input, so the cursor
-    /// must not be repositioned — otherwise it leaves a stray blinking cursor
-    /// over read-only output.
-    #[test]
-    fn non_interactive_agent_leaves_hardware_cursor_at_origin() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
+    /// Build an app with a live agent PTY that has parked its cursor at
+    /// (row 4, col 9), for the caret-placement tests below.
+    fn app_with_parked_agent_cursor() -> App {
         let mut app = test_app(default_bindings());
         let session_id = app.engine.sessions[0].id.clone();
         let args = vec![
@@ -11280,39 +11267,149 @@ mod tests {
         let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 24, 80, 100)
             .expect("spawn pty");
         app.engine.providers.insert(session_id, client);
-
-        // session_surface is Agent so the snapshot is populated, but input is
-        // NOT routed to the agent.
         app.session_surface = SessionSurface::Agent;
-        app.fullscreen_overlay = FullscreenOverlay::Agent;
-        wait_for_agent_cursor(&mut app, 4, 9);
-        app.input_target = InputTarget::None;
+        app
+    }
 
-        let backend = TestBackend::new(100, 40);
-        let mut terminal = Terminal::new(backend).expect("terminal");
+    /// Draw a frame and return (terminal, term_area).
+    fn draw_caret_frame(
+        app: &mut App,
+    ) -> (
+        ratatui::Terminal<ratatui::backend::TestBackend>,
+        ratatui::layout::Rect,
+    ) {
+        let backend = ratatui::backend::TestBackend::new(100, 40);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
         terminal
             .draw(|frame| app.render(frame))
             .expect("render frame");
-
         let term_area = app
             .mouse_layout
             .agent_term
             .expect("agent terminal area should be recorded after render");
-        // The PTY genuinely has an off-origin cursor that the renderer COULD
-        // have placed: term_area is offset and the PTY cursor is at (4, 9), so
-        // a regression that wrongly set the hardware cursor would move it away
-        // from the origin and fail the assertion below.
         assert!(
             term_area.x > 0 || term_area.y > 0,
             "test setup: agent terminal should be offset from the origin"
         );
-        assert!(
-            app.snapshot_buf.cursor.is_some(),
-            "test setup: the PTY should still expose a cursor to (not) place"
-        );
+        (terminal, term_area)
+    }
 
-        // Not in input mode → the hardware cursor is never positioned and stays
-        // at the backend origin.
+    /// The hardware caret follows KEYS, not fullscreen: the minimized center
+    /// pane shows the caret whenever it is typeable, because keystrokes land
+    /// in the agent's PTY there and IME composition anchors to the hardware
+    /// cursor.
+    #[test]
+    fn minimized_typeable_agent_places_the_hardware_caret() {
+        let mut app = app_with_parked_agent_cursor();
+        app.center_mode = CenterMode::Agent;
+        app.focus = FocusPane::Center;
+        app.input_target = InputTarget::None;
+        app.fullscreen_overlay = FullscreenOverlay::None;
+        wait_for_agent_cursor(&mut app, 4, 9);
+        assert!(app.center_typeable(), "test setup: pane must be typeable");
+
+        let (mut terminal, term_area) = draw_caret_frame(&mut app);
+
+        let expected = (term_area.x + 9, term_area.y + 4);
+        terminal.backend_mut().assert_cursor_position(expected);
+    }
+
+    /// A pane that does not RECEIVE keys must not show the caret: a blinking
+    /// cursor over output nothing types into is a lie. Each state below ends
+    /// typeability, so each must leave the hardware cursor at the origin.
+    #[test]
+    fn non_typeable_agent_views_leave_the_hardware_cursor_at_origin() {
+        // Focus elsewhere: the minimized pane is visible but not focused.
+        {
+            let mut app = app_with_parked_agent_cursor();
+            app.center_mode = CenterMode::Agent;
+            app.focus = FocusPane::Left;
+            app.input_target = InputTarget::None;
+            app.fullscreen_overlay = FullscreenOverlay::None;
+            wait_for_agent_cursor(&mut app, 4, 9);
+            let (mut terminal, _) = draw_caret_frame(&mut app);
+            terminal.backend_mut().assert_cursor_position((0u16, 0u16));
+        }
+        // A dormant-agent fullscreen overlay (input not routed to the PTY).
+        {
+            let mut app = app_with_parked_agent_cursor();
+            app.fullscreen_overlay = FullscreenOverlay::Agent;
+            wait_for_agent_cursor(&mut app, 4, 9);
+            app.input_target = InputTarget::None;
+            let (mut terminal, _) = draw_caret_frame(&mut app);
+            assert!(
+                app.snapshot_buf.cursor.is_some(),
+                "test setup: the PTY should still expose a cursor to (not) place"
+            );
+            terminal.backend_mut().assert_cursor_position((0u16, 0u16));
+        }
+        // A prompt on top of a typeable pane swallows the keys, so no caret.
+        {
+            let mut app = app_with_parked_agent_cursor();
+            app.center_mode = CenterMode::Agent;
+            app.focus = FocusPane::Center;
+            app.input_target = InputTarget::None;
+            app.fullscreen_overlay = FullscreenOverlay::None;
+            wait_for_agent_cursor(&mut app, 4, 9);
+            app.prompt = PromptState::ConfirmQuit {
+                agent_count: 1,
+                terminal_count: 0,
+                focus: ConfirmFocus::Cancel,
+            };
+            assert!(!app.center_typeable());
+            let (mut terminal, _) = draw_caret_frame(&mut app);
+            terminal.backend_mut().assert_cursor_position((0u16, 0u16));
+        }
+    }
+
+    /// Scrolled back, the PTY cursor cell is off-screen and the snapshot
+    /// exposes no cursor, so the caret vanishes (mirroring fullscreen).
+    #[test]
+    fn a_scrolled_back_typeable_pane_shows_no_caret() {
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        // Enough lines to overflow the pane even after the first render
+        // resizes the PTY to the pane's height, so real history remains.
+        let args = vec![
+            "-c".to_string(),
+            "printf 'L%s\\n' $(seq 1 100); sleep 30".to_string(),
+        ];
+        let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 5, 40, 200)
+            .expect("spawn pty");
+        app.engine.providers.insert(session_id, client);
+        app.session_surface = SessionSurface::Agent;
+        app.center_mode = CenterMode::Agent;
+        app.focus = FocusPane::Center;
+        // First draw resizes the PTY to the pane; then wait for history at
+        // the final size before scrolling back.
+        let (_, _) = draw_caret_frame(&mut app);
+        for _ in 0..200 {
+            app.refresh_snapshot_buf();
+            if app.snapshot_buf.scrollback_total > 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            app.snapshot_buf.scrollback_total > 0,
+            "test setup: the child must have produced scrollback"
+        );
+        app.selected_terminal_surface_client()
+            .expect("provider")
+            .scroll(true, 3);
+        app.refresh_snapshot_buf();
+        assert!(app.center_typeable(), "typeability is not scroll state");
+
+        let (mut terminal, _) = draw_caret_frame(&mut app);
+
+        // Scrolled back, the cursor cell maps below the viewport (or not at
+        // all), so the render gate must leave the hardware cursor alone.
+        assert!(
+            app.snapshot_buf
+                .cursor
+                .is_none_or(|c| c.row >= app.snapshot_buf.rows),
+            "test premise: the PTY cursor cell must be out of the viewport"
+        );
         terminal.backend_mut().assert_cursor_position((0u16, 0u16));
     }
 

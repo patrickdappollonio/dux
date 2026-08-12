@@ -18,7 +18,6 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 /// Convert a crossterm key event into the byte sequence a legacy terminal
 /// would send for it. Returns `None` for release events and for combinations
 /// the legacy protocol cannot represent (callers drop those silently).
-#[allow(dead_code)] // Wired into the minimized-typing key path in a later stage.
 pub(crate) fn key_event_to_pty_bytes(key: &KeyEvent) -> Option<Vec<u8>> {
     if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
         return None;

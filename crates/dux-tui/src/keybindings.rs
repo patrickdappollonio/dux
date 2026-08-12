@@ -430,18 +430,17 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             (HintContext::Center, "Terminal"),
         ],
     },
-    // ── Agent tabs (Center-scope; non-interactive only) ───────────
-    // The plain horizontal arrows are defaults alongside the Ctrl ones because a
-    // modified arrow is not universally deliverable: some terminals, multiplexers
-    // and SSH setups never send a distinct Ctrl-Left/Ctrl-Right, so a user with
-    // one of those had no key at all for this. They are safe to bind HERE and
-    // only here: Center scope is reached solely in non-interactive mode, so an
-    // interactive PTY still receives its own arrows verbatim, and no other
-    // Center-scope action claims them (Resize, Browser and Dialog bind the plain
-    // arrows, but each of those short-circuits before the Center dispatch).
+    // ── Agent tabs (Center-scope; never in fullscreen) ────────────
+    // The plain horizontal arrows used to be defaults alongside the Ctrl ones,
+    // justified by Center scope being unreachable while keys flowed to a PTY.
+    // That premise died with minimized typing: the focused center pane now
+    // types into a live agent, so a plain arrow must reach the agent as a
+    // caret move ([`center_typing_owns_key`]), not switch tabs. Only the Ctrl
+    // arrows (and Ctrl-1..9) remain tab keys; a terminal that cannot deliver a
+    // modified arrow can rebind these actions to any deliverable chord.
     BindingDef {
         action: Action::NextTab,
-        default_keys: &[key!(ctrl - Right), key!(Right)],
+        default_keys: &[key!(ctrl - Right)],
         scopes: &[BindingScope::Center],
         help: Some(HelpEntry {
             section: "Agent pane",
@@ -451,7 +450,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
     },
     BindingDef {
         action: Action::PrevTab,
-        default_keys: &[key!(ctrl - Left), key!(Left)],
+        default_keys: &[key!(ctrl - Left)],
         scopes: &[BindingScope::Center],
         help: Some(HelpEntry {
             section: "Agent pane",
@@ -1426,6 +1425,47 @@ pub fn text_field_owns_key(key: impl Into<KeyCombination>) -> bool {
     }
 }
 
+/// Keys the minimized, typeable center pane forwards to the agent's PTY
+/// instead of resolving as dux bindings.
+///
+/// The routing rule is: chords belong to dux, typing belongs to the agent.
+/// Ctrl and Alt chords, Tab/Shift-Tab and the page keys resolve through the
+/// binding ladder as usual; unmodified (or Shift-modified) printables, Enter,
+/// Backspace, Delete, Esc, the arrows and Home/End type into the agent. "Dux
+/// wins" cannot apply literally to plain letters, or `q`, `?`, `[` and `]`
+/// would make the pane untypeable.
+///
+/// The ONE deliberate chord exception is Ctrl+c: it forwards to the agent (the
+/// encoder emits 0x03, SIGINT) because interrupting the agent quickly is the
+/// common intent, and Quit stays reachable via `q` from any non-typeable pane
+/// and via the palette.
+///
+/// The sibling of [`text_field_owns_key`]: `app::input::handle_key` suppresses
+/// the Global and Center binding lookups with it while the pane is typeable
+/// and at the live edge, so hints must not advertise a key it swallows.
+pub fn center_typing_owns_key(key: &KeyEvent) -> bool {
+    let mods = key.modifiers;
+    if mods.contains(KeyModifiers::CONTROL) || mods.contains(KeyModifiers::ALT) {
+        // Ctrl+c is the one chord the agent gets (see above). Any extra
+        // modifier turns it back into a dux-side chord.
+        return key.code == KeyCode::Char('c') && mods == KeyModifiers::CONTROL;
+    }
+    matches!(
+        key.code,
+        KeyCode::Char(_)
+            | KeyCode::Enter
+            | KeyCode::Backspace
+            | KeyCode::Delete
+            | KeyCode::Esc
+            | KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::Home
+            | KeyCode::End
+    )
+}
+
 /// Normalize `BackTab` (sent by crossterm for shift-tab) into `Tab + SHIFT`
 /// so that `key!(shift-tab)` from crokey matches the actual terminal event.
 fn normalize_backtab(kc: KeyCombination) -> KeyCombination {
@@ -2003,6 +2043,55 @@ mod tests {
             KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE),
         ] {
             assert!(!text_field_owns_key(key), "{key:?} reaches the bindings");
+        }
+    }
+
+    #[test]
+    fn center_typing_owns_typing_keys_and_leaves_the_chords_to_dux() {
+        // Typing-owned: these forward into the agent's PTY when the minimized
+        // center pane is typeable.
+        for key in [
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT),
+            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Home, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::End, KeyModifiers::NONE),
+            // The one deliberate chord exception: Ctrl+c interrupts the agent.
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        ] {
+            assert!(center_typing_owns_key(&key), "{key:?} types into the agent");
+        }
+        // Chords belong to dux: these keep resolving through the bindings.
+        for key in [
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
+            KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT),
+            // Extra modifiers on Ctrl+c turn it back into a dux-side chord.
+            KeyEvent::new(
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+            ),
+        ] {
+            assert!(
+                !center_typing_owns_key(&key),
+                "{key:?} reaches the bindings"
+            );
         }
     }
 

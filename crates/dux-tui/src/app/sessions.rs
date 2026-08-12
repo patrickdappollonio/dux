@@ -4071,7 +4071,6 @@ mod tests {
             tick_count: 0,
             start_time: std::time::Instant::now(),
             refusal_blink: None,
-            readonly_nudge_tick: None,
             inactive_collapsed: false,
             inactive_search_dismissed: None,
             inactive_collapse_overridden: false,
