@@ -16,6 +16,7 @@ import {
 } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
+import { setStatusClearSeconds } from "@/lib/notify"
 import { notifyPtyOwner, resetPtyOwnerEpochs } from "@/lib/ptyOwnership"
 import { stubCoarsePointer, type MatchMediaStub } from "@/test/matchMedia"
 
@@ -553,22 +554,24 @@ describe("Ctrl+Shift+v forces a text paste", () => {
 })
 
 describe("the paste report honors the configured dismiss window", () => {
-  it("reads the setting that arrived after mount, not the one missing at mount", async () => {
+  it("uses the setting that arrived after mount, not the one missing at mount", async () => {
     // The paste listener is registered in the mount effect, so it closes over
     // the MOUNT render. Rendering is not gated on the bootstrap document, so at
     // mount the setting is usually absent, and reading it straight out of the
     // closure pinned every clipboard toast to the default for the life of the
     // pane while the DROP path (a JSX handler, rebuilt every render) followed
     // the setting. The two must not disagree.
+    //
+    // The pane no longer holds the setting at all, in a ref or otherwise:
+    // `lib/notify.ts` keeps it and reads it on the way past on every raise, and
+    // the store publishes it when the bootstrap document lands. So the shape of
+    // this test is the same journey with the publisher standing in for the
+    // store: mount with nothing known, learn the setting afterwards, paste.
     uploadDroppedFile.mockResolvedValue(saved("image.png"))
-    mockState = { ...makeState(), bootstrap: undefined } as unknown as DuxState
-    const view = render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    setStatusClearSeconds(undefined)
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
 
-    mockState = makeState()
-    mockState.bootstrap!.status_clear_seconds = 30
-    await act(async () => {
-      view.rerender(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-    })
+    setStatusClearSeconds(30)
     await paste(terminalHost(), [imageItem(png("image.png"))])
 
     const options = vi.mocked(toast.success).mock.calls.at(-1)?.[1] as {
@@ -577,6 +580,7 @@ describe("the paste report honors the configured dismiss window", () => {
     // Success is the 1x rung of the graded window, so this is the configured
     // 30s and not the 6s default.
     expect(options.duration).toBe(30_000)
+    setStatusClearSeconds(undefined)
   })
 })
 
