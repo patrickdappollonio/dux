@@ -85,6 +85,17 @@ function renameNote(saved: { requestedName: string; savedName: string }[]) {
 /// pane drop: every file of one tree drop goes to the one directory the user
 /// dropped on, and that directory cannot move underneath them the way a
 /// shell's `cd` can.
+/// EVERY rung below is `sticky: false`, deliberately and not by default.
+///
+/// A tree drop is durable and visible: the file lands in the folder the user
+/// pointed at, git can see it, and the tree refreshes to show it. Nothing in
+/// the report is the only copy of anything, which is the bar
+/// `NotifyOptions.sticky` sets, so no rung here clears the bar. That is the
+/// difference from the PANE drop's stranded rung, where the full path in the
+/// message is the only place on screen the saved file is named. A refusal is
+/// not sticky either, for the reason it is not on the pane path: the file was
+/// never taken from the user, so it is still on their disk where they dragged
+/// it from.
 export function editorDropToast(
   outcomes: EditorDropOutcome[],
   dir: string,
@@ -98,6 +109,7 @@ export function editorDropToast(
     if (refused.length === 1) {
       return {
         tone: "error",
+        sticky: false,
         message: endSentence(
           `Could not save ${refused[0].requestedName}: ${refused[0].reason}`,
         ),
@@ -105,6 +117,7 @@ export function editorDropToast(
     }
     return {
       tone: "error",
+      sticky: false,
       message: endSentence(
         `Could not save any of the ${refused.length} dropped files. ${reasonList(refused)}`,
       ),
@@ -116,6 +129,7 @@ export function editorDropToast(
   if (refused.length > 0) {
     return {
       tone: "warning",
+      sticky: false,
       message:
         `Saved ${saved.length} of ${outcomes.length} files to ${where}. ` +
         endSentence(`Refused: ${reasonList(refused)}`) +
@@ -128,6 +142,7 @@ export function editorDropToast(
     const one = saved[0]
     return {
       tone: "success",
+      sticky: false,
       message:
         one.requestedName === one.savedName
           ? `Saved ${one.savedName} to ${where}.`
@@ -136,6 +151,7 @@ export function editorDropToast(
   }
   return {
     tone: "success",
+    sticky: false,
     message: `Saved ${saved.length} files to ${where}.` + renameNote(saved),
   }
 }
@@ -282,6 +298,10 @@ export async function performTreeDrop(
   if (files.length === 0 && folders.length === 0) {
     deps.reportFinal({
       tone: "error",
+      // Not sticky: nothing was taken and nothing was saved, so there is
+      // nothing to recover. The instruction is one sentence and the gesture
+      // costs a second to repeat.
+      sticky: false,
       message:
         "Nothing came through in that drop. If you dropped a folder, drop the " +
         "files inside it instead.",

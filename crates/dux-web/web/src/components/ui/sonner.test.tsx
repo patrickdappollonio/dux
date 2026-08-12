@@ -3,7 +3,12 @@ import { act, cleanup, render, screen, waitFor } from "@testing-library/react"
 import { toast } from "sonner"
 import { afterEach, beforeAll, describe, expect, it } from "vitest"
 
-import { TOAST_SWIPE_DIRECTIONS, Toaster } from "./sonner"
+import {
+  TOAST_SWIPE_DIRECTIONS,
+  Toaster,
+  VISIBLE_TOASTS_DESKTOP,
+  VISIBLE_TOASTS_MOBILE,
+} from "./sonner"
 
 // jsdom has no Pointer Events implementation: `setPointerCapture` is missing on
 // Element, and sonner calls it on every pointerdown. Stub it so the swipe
@@ -210,5 +215,44 @@ describe("Toaster swipe to dismiss", () => {
     await screen.findByText("hold still")
     await swipe(toastEl(), -6, 0)
     expect(toastEl().getAttribute("data-removed")).not.toBe("true")
+  })
+})
+
+describe("Toaster stacking depth", () => {
+  // `useIsMobile` reads window.innerWidth through useSyncExternalStore, and
+  // jsdom lets us set it. 768 is the breakpoint the whole app shares.
+  function renderAtWidth(width: number) {
+    window.innerWidth = width
+    render(<Toaster />)
+  }
+
+  async function raise(n: number) {
+    for (let i = 0; i < n; i++) {
+      act(() => {
+        toast.success(`message ${i}`, { duration: Infinity })
+      })
+    }
+    await screen.findByText("message 0")
+  }
+
+  it("shows five at once on a desktop window, where sonner would have shown three", async () => {
+    expect(VISIBLE_TOASTS_DESKTOP).toBe(5)
+    renderAtWidth(1280)
+    await raise(6)
+    // The sixth is queued: sonner keeps it mounted but marks it not visible.
+    const visible = [...document.querySelectorAll("[data-sonner-toast]")].filter(
+      (el) => el.getAttribute("data-visible") === "true",
+    )
+    expect(visible.length).toBe(VISIBLE_TOASTS_DESKTOP)
+  })
+
+  it("keeps three on a phone, where the toasts sit over the terminal", async () => {
+    expect(VISIBLE_TOASTS_MOBILE).toBe(3)
+    renderAtWidth(390)
+    await raise(6)
+    const visible = [...document.querySelectorAll("[data-sonner-toast]")].filter(
+      (el) => el.getAttribute("data-visible") === "true",
+    )
+    expect(visible.length).toBe(VISIBLE_TOASTS_MOBILE)
   })
 })

@@ -16,6 +16,7 @@ import {
 } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
+import { setStatusClearSeconds } from "@/lib/notify"
 import { notifyPtyOwner, resetPtyOwnerEpochs } from "@/lib/ptyOwnership"
 import { stubCoarsePointer, type MatchMediaStub } from "@/test/matchMedia"
 
@@ -386,6 +387,12 @@ beforeEach(() => {
 afterEach(() => {
   cleanup()
   vi.unstubAllGlobals()
+  // The configured window lives in `lib/notify.ts` at module scope, so a test
+  // that sets it must not leave it set. Resetting here rather than at the end
+  // of that test body is what makes it unconditional: a failing assertion
+  // above the reset would otherwise leak a 30s window into every test that
+  // ran after it in this file.
+  setStatusClearSeconds(undefined)
 })
 
 describe("pasting an image onto an agent", () => {
@@ -553,22 +560,24 @@ describe("Ctrl+Shift+v forces a text paste", () => {
 })
 
 describe("the paste report honors the configured dismiss window", () => {
-  it("reads the setting that arrived after mount, not the one missing at mount", async () => {
+  it("uses the setting that arrived after mount, not the one missing at mount", async () => {
     // The paste listener is registered in the mount effect, so it closes over
     // the MOUNT render. Rendering is not gated on the bootstrap document, so at
     // mount the setting is usually absent, and reading it straight out of the
     // closure pinned every clipboard toast to the default for the life of the
     // pane while the DROP path (a JSX handler, rebuilt every render) followed
     // the setting. The two must not disagree.
+    //
+    // The pane no longer holds the setting at all, in a ref or otherwise:
+    // `lib/notify.ts` keeps it and reads it on the way past on every raise, and
+    // the store publishes it when the bootstrap document lands. So the shape of
+    // this test is the same journey with the publisher standing in for the
+    // store: mount with nothing known, learn the setting afterwards, paste.
     uploadDroppedFile.mockResolvedValue(saved("image.png"))
-    mockState = { ...makeState(), bootstrap: undefined } as unknown as DuxState
-    const view = render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    setStatusClearSeconds(undefined)
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
 
-    mockState = makeState()
-    mockState.bootstrap!.status_clear_seconds = 30
-    await act(async () => {
-      view.rerender(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-    })
+    setStatusClearSeconds(30)
     await paste(terminalHost(), [imageItem(png("image.png"))])
 
     const options = vi.mocked(toast.success).mock.calls.at(-1)?.[1] as {

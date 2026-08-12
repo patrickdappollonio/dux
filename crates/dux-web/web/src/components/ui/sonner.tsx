@@ -1,4 +1,6 @@
 import { Toaster as Sonner, type ToasterProps } from "sonner"
+
+import { useIsMobile } from "@/hooks/use-mobile"
 import { CircleCheckIcon, InfoIcon, TriangleAlertIcon, OctagonXIcon, Loader2Icon } from "lucide-react"
 
 // Which drags dismiss a toast.
@@ -38,16 +40,30 @@ const TONE_ICON = {
   loading: "size-4 animate-spin text-muted-foreground",
 } as const
 
+/// How many toasts stack before the rest queue behind them.
+///
+/// sonner's default is 3, which is low for a surface that now carries every
+/// engine status: a multi-step operation can easily have three keyed statuses
+/// open while an unrelated error arrives, and the fourth silently waits behind
+/// them. Five fits comfortably on a desktop window.
+export const VISIBLE_TOASTS_DESKTOP = 5
+
+/// Phones keep sonner's 3. Vertical space is scarce there and the toasts sit
+/// over the terminal, which is the thing the user is reading.
+export const VISIBLE_TOASTS_MOBILE = 3
+
 const Toaster = ({ ...props }: ToasterProps) => {
+  const isMobile = useIsMobile()
   return (
     <Sonner
       theme="dark"
+      visibleToasts={isMobile ? VISIBLE_TOASTS_MOBILE : VISIBLE_TOASTS_DESKTOP}
       className="toaster group"
       position="bottom-center"
       offset={{ bottom: "calc(env(safe-area-inset-bottom) + 2.5rem)" }}
       swipeDirections={TOAST_SWIPE_DIRECTIONS}
       // Every toast now auto-dismisses on a severity-graded timer (see
-      // `lib/statusToast.ts`), so the close button is a shortcut rather than the
+      // `lib/notify.ts`), so the close button is a shortcut rather than the
       // only exit. Keep it for mouse users; touch users swipe.
       closeButton
       icons={{

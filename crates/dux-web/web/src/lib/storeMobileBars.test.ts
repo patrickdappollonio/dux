@@ -259,7 +259,12 @@ describe("mobile bar visibility", () => {
         }) as unknown as Response,
     )
     await expect(mod.setMobileBarVisibility("top", false)).resolves.toBe(false)
-    expect(toastMock.error).toHaveBeenCalledWith("disk full")
+    // With the duration dux's policy gives an error: four times the 6s
+    // default. Before every raise went through `lib/notify.ts` this was
+    // sonner's own bare 4000ms.
+    expect(toastMock.error).toHaveBeenCalledWith("disk full", {
+      duration: 24000,
+    })
   })
 
   it("rolls the optimistic override back and resolves false when the PATCH fails", async () => {

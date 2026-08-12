@@ -17,7 +17,7 @@ import {
   TriangleAlert,
   Undo2,
 } from "lucide-react"
-import { toast } from "sonner"
+import { notifyError } from "@/lib/notify"
 import { git } from "@/lib/git"
 import { FileStatusIcon } from "@/components/FileStatusIcon"
 import { Badge } from "@/components/ui/badge"
@@ -87,7 +87,7 @@ function FileRow({ file, action, sessionId, onOpenDiff }: FileRowProps) {
       // The file moves staged↔unstaged once the engine's changed-files refresh
       // arrives over the socket; that unmounts this row.
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "git operation failed")
+      notifyError(err instanceof Error ? err.message : "git operation failed")
     } finally {
       setBusy(false)
     }
@@ -373,7 +373,7 @@ export function ChangedFiles() {
                     git
                       .push(selectedSessionId)
                       .catch((e) =>
-                        toast.error(e instanceof Error ? e.message : "push failed")
+                        notifyError(e instanceof Error ? e.message : "push failed")
                       )
                   }}
                 >
@@ -386,7 +386,7 @@ export function ChangedFiles() {
                     git
                       .pull(selectedSessionId)
                       .catch((e) =>
-                        toast.error(e instanceof Error ? e.message : "pull failed")
+                        notifyError(e instanceof Error ? e.message : "pull failed")
                       )
                   }}
                 >
@@ -406,7 +406,7 @@ export function ChangedFiles() {
                 <DropdownMenuItem
                   onClick={() => {
                     void forceRefreshChanges().catch((e) =>
-                      toast.error(
+                      notifyError(
                         e instanceof Error ? e.message : "refresh failed"
                       )
                     )

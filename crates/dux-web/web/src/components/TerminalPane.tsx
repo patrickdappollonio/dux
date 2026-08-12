@@ -3,7 +3,6 @@ import { Terminal } from "@xterm/xterm"
 import { FitAddon } from "@xterm/addon-fit"
 import "@xterm/xterm/css/xterm.css"
 import { MonitorSmartphone } from "lucide-react"
-import { toast } from "sonner"
 import { AccessoryBar } from "@/components/AccessoryBar"
 import type { ScrollDir } from "@/components/AccessoryBar"
 import { ComposeBar, RestoreBarsButton } from "@/components/ComposeBar"
@@ -40,8 +39,8 @@ import {
 } from "@/lib/fileDrop"
 import { FileDropApiError, uploadDroppedFile } from "@/lib/fileDropApi"
 import { clipboardPasteAction } from "@/lib/clipboardPaste"
-import { showBusyToast } from "@/lib/busyToast"
-import { showFinalToast } from "@/lib/finalToast"
+import { notify, notifyBusy, notifyError, notifyInfo } from "@/lib/notify"
+import { copyTermSelection, pasteIntoTerm } from "@/lib/termClipboard"
 import { Button } from "@/components/ui/button"
 import {
   Card,
@@ -56,7 +55,6 @@ import { useTypingSurface } from "@/hooks/use-typing-surface"
 import { setTypingSurface } from "@/lib/typingSurface"
 import { dragScrollLines, dragWheelReport } from "@/lib/viewport"
 import { firstFrameResizePlan } from "@/lib/firstFrameResize"
-import { copyToClipboard } from "@/lib/clipboard"
 import { isApplePlatform } from "@/lib/platform"
 import {
   applyModifiers,
@@ -205,53 +203,6 @@ const WHEEL_SCROLL_SENSITIVITY = 3
 // resizeHeldByGesture): the flush is a settle window like any other, giving the
 // keyboard/URL-bar animation that held it time to finish collapsing.
 const RESIZE_SEND_DEBOUNCE_MS = 200
-
-// Copy the terminal's current selection to the clipboard and toast the result.
-// `copyToClipboard` writes via the async Clipboard API in a secure context and
-// falls back SYNCHRONOUSLY to an execCommand hidden-textarea over plain-HTTP, so
-// calling this from inside a user gesture (mouseup, keydown, menu click) keeps
-// the write permitted even over a Tailscale plain-HTTP origin. The deduped toast
-// id makes rapid copy-on-select replace the toast rather than stack it. Module
-// level so it's a stable reference shared by the mount effect and the menu.
-// `refocus` restores focus once the copy settles: the call sites pass the
-// pane's `focusTypingSurface` so focus lands on the ACTIVE typing surface (the
-// compose textarea when the mobile compose bar is up, xterm otherwise) rather
-// than being hardwired to `term.focus()`.
-function copyTermSelection(term: Terminal, refocus: () => void): void {
-  const sel = term.getSelection()
-  if (!sel) return
-  void copyToClipboard(sel)
-    .then((ok) =>
-      ok
-        ? toast.success("Copied to clipboard", { id: "term-copy" })
-        : toast.error("Couldn't copy to clipboard", { id: "term-copy" }),
-    )
-    .finally(refocus)
-}
-
-// Paste the BROWSER clipboard into the terminal via the async Clipboard API.
-// `readText` needs a secure context (HTTPS/localhost) and THROWS synchronously
-// when `navigator.clipboard` is undefined (plain-HTTP) or `readText` is missing
-// (Firefox web content), so we must guard the call — a bare `.catch` cannot
-// catch a synchronous throw. The plain-HTTP/Ctrl-v path (handled by xterm's
-// native paste event) stays the secure-context-free fallback. `term.paste`
-// applies bracketed-paste (DECSET 2004) and newline normalization.
-// `refocus` mirrors `copyTermSelection`'s: the call site passes
-// `focusTypingSurface` so focus returns to the active typing surface.
-function pasteIntoTerm(term: Terminal, refocus: () => void): void {
-  const read = navigator.clipboard?.readText?.()
-  if (!read) {
-    toast.error("Couldn't read clipboard — use Ctrl+v to paste", { id: "term-paste" })
-    refocus()
-    return
-  }
-  void read
-    .then((text) => term.paste(text))
-    .catch(() =>
-      toast.error("Couldn't read clipboard — use Ctrl+v to paste", { id: "term-paste" }),
-    )
-    .finally(refocus)
-}
 
 export function TerminalPane(props: TerminalPaneProps) {
   const { kind, id } = props
@@ -472,17 +423,13 @@ export function TerminalPane(props: TerminalPaneProps) {
   useEffect(() => {
     pastedTextCharsRef.current = pastedTextChars
   }, [pastedTextChars])
-  // The user's configured toast window, mirrored for exactly the same reason.
-  // The upload path is entered from a mount-effect listener as well as from a
-  // JSX handler, and the listener closes over the MOUNT render, where the
-  // bootstrap document has usually not arrived yet: read directly, every
-  // clipboard-paste toast would be pinned to the 6s default for the life of the
-  // pane and a later config change would never reach it, so a drop and a paste
-  // would disagree about how long their report stays up.
-  const statusClearSecondsRef = useRef(bootstrap?.status_clear_seconds)
-  useEffect(() => {
-    statusClearSecondsRef.current = bootstrap?.status_clear_seconds
-  }, [bootstrap?.status_clear_seconds])
+  // There is deliberately no `status_clear_seconds` ref here any more. The
+  // upload path is entered from a mount-effect listener as well as from a JSX
+  // handler, and the listener closes over the MOUNT render, where the bootstrap
+  // document has usually not arrived: a value read from the render closure
+  // pinned every clipboard-paste toast to the pre-bootstrap default for the
+  // life of the pane. `lib/notify.ts` now reads the window at raise time, so
+  // there is nothing left here to capture and nothing left to capture stale.
   // The `Ctrl+Shift+v` / `Cmd+Shift+v` text-paste hatch, armed by the key
   // handler and consumed by the `paste` listener the browser fires immediately
   // afterwards. A one-shot LATCH rather than a lasting preference: it describes
@@ -1140,7 +1087,7 @@ export function TerminalPane(props: TerminalPaneProps) {
         // The chord is not a browser copy event, so we copy the selection
         // ourselves. preventDefault so the browser/devtools don't also act;
         // return false so xterm doesn't process the chord.
-        copyTermSelection(term, focusTypingSurface)
+        void copyTermSelection(term, focusTypingSurface)
         e.preventDefault()
         return false
       }
@@ -1201,14 +1148,31 @@ export function TerminalPane(props: TerminalPaneProps) {
         gesture: "mouse-drag",
       })
       if (action === "copy") {
-        copyTermSelection(term, focusTypingSurface)
+        void copyTermSelection(term, focusTypingSurface)
       } else if (action === "hint") {
         mouseCaptureHintShown = true
-        toast(
+        // THREE things changed here when this moved onto the shared raiser,
+        // and all three are deliberate.
+        //
+        // The fixed id went, and what justifies that is the latch above being
+        // MODULE scope: this fires at most once per page load, across every
+        // pane remount, so there is never a second raise for an id to
+        // deduplicate. (Once per PANE would not have been enough: two panes
+        // would then mean two toasts and no id to merge them.)
+        //
+        // The explicit 8000ms went, and the hint now takes the configured
+        // window (6s by default), 25% shorter on a message the user has to read
+        // and act on. One policy beating a scattering of hand-picked durations
+        // is the point of the change, and the sentence is short; if it proves
+        // too quick in practice the answer is the setting, not a number here.
+        //
+        // And it gained a TONE: this was an untoned `toast()` and is now info,
+        // so it carries sonner's sky info icon where it previously had none.
+        // That is what it is: a neutral instruction, and the icon says so.
+        notifyInfo(
           `This app is using the mouse. Hold ${
             isMac ? "⌥ Option" : "Shift"
           } and drag to select and copy to your device.`,
-          { id: "term-mouse-capture-hint", duration: 8000 },
         )
       }
     }
@@ -2306,7 +2270,7 @@ export function TerminalPane(props: TerminalPaneProps) {
   // (plain-HTTP).
   function onRightClickPaste() {
     const term = termRef.current
-    if (term && isOwnerRef.current) pasteIntoTerm(term, focusTypingSurface)
+    if (term && isOwnerRef.current) void pasteIntoTerm(term, focusTypingSurface)
   }
 
   // WHERE a saved file's path is written, and whether it can be written right
@@ -2438,7 +2402,7 @@ export function TerminalPane(props: TerminalPaneProps) {
       // Same sonner id as the report at the end of THIS drop, so the final
       // REPLACES the spinner in place rather than stacking a second toast, and
       // a concurrent drop cannot paint over either of them.
-      showBusyToast(
+      notifyBusy(
         files.length === 1
           ? `Uploading ${file.name}...`
           : `Uploading ${file.name} (${i + 1} of ${files.length})...`,
@@ -2534,13 +2498,17 @@ export function TerminalPane(props: TerminalPaneProps) {
       pastedTextChars,
     }
     const report = dropToastFor(outcomes, ctx)
-    // Through the SHARED final-toast raiser, so the user's configured dismiss
-    // window applies. A bare sonner call would silently use the library default.
-    // It also retires the spinner's leak guard, since it lands on the same id.
-    showFinalToast(report.tone, report.message, {
-      id: toastId,
-      statusClearSeconds: statusClearSecondsRef.current,
-    })
+    // Through the ONE raiser, so the user's configured dismiss window applies.
+    // A bare sonner call would silently use the library default. It also retires
+    // the spinner's leak guard, since it lands on the same id.
+    //
+    // STICKY when a file was saved but never delivered. The report is then
+    // carrying the full path of a file sitting on disk that the agent has not
+    // been given, and that path exists nowhere else on screen: the user has to
+    // act outside the toast (type the path, or drop the file again) to finish
+    // what they started. A report that clears itself takes the only copy of
+    // that information with it.
+    notify(report.tone, report.message, { id: toastId, sticky: report.sticky })
   }
 
   /// Raise the batch's spinner and make sure something final always replaces it.
@@ -2565,13 +2533,9 @@ export function TerminalPane(props: TerminalPaneProps) {
     try {
       await handleUploadedFiles(files, toastId, sink, pastedTextChars)
     } catch (e) {
-      showFinalToast(
-        "error",
+      notifyError(
         `The upload failed unexpectedly: ${e instanceof Error ? e.message : String(e)}`,
-        {
-          id: toastId,
-          statusClearSeconds: statusClearSecondsRef.current,
-        },
+        { id: toastId },
       )
     }
   }
@@ -2663,7 +2627,7 @@ export function TerminalPane(props: TerminalPaneProps) {
       // point of refusing out loud rather than ignoring it.
       e.preventDefault()
       e.stopPropagation()
-      showFinalToast("error", action.reason, {
+      notifyError(action.reason, {
         // One id PER SUBJECT, not one for the whole listener. A refusal
         // replaces whatever is already on its id, so an image refusal and a
         // text refusal sharing one would erase each other: a viewer who pastes
@@ -2673,7 +2637,6 @@ export function TerminalPane(props: TerminalPaneProps) {
           action.subject === "text"
             ? "clipboard-text-paste"
             : "clipboard-image-paste",
-        statusClearSeconds: statusClearSecondsRef.current,
       })
       return
     }
@@ -2805,15 +2768,32 @@ export function TerminalPane(props: TerminalPaneProps) {
   // latch arms the next direct KEY, and a composed message is not a key; a
   // user who tapped Ctrl intending Ctrl-c should not lose the latch to an
   // unrelated Send.
+  //
+  // All three refusals KEEP the fixed `compose-send` id, which is the opposite
+  // of what the terminal copy and paste notifications now do (see
+  // `lib/termClipboard.ts` for why theirs went away). Send is one deliberate
+  // press producing one of three fixed sentences, and a user who presses it
+  // three times against a dead socket wants one "not connected", not three
+  // identical copies of it stacked up. The id is doing real work here: it also
+  // means the reason REPLACES itself when it changes, so a viewer who takes
+  // over and then hits the size cap sees the new reason rather than two
+  // contradictory ones.
+  //
+  // The hazard is real and is accepted: repeating a failing Send restarts the
+  // 24s error countdown each time, so the toast lingers for a full window after
+  // the LAST attempt rather than the first. That is the correct end of the
+  // trade for a message that is still true while the user keeps trying, and it
+  // is bounded, unlike the copy-on-select case where an incidental gesture the
+  // user never thought of as raising a toast could pin one open indefinitely.
   function sendCompose(text: string): boolean {
     if (!isOwnerRef.current) {
-      toast.error("Another device is driving this terminal. Take over to send.", {
+      notifyError("Another device is driving this terminal. Take over to send.", {
         id: "compose-send",
       })
       return false
     }
     if (!(ptyRef.current?.isOpen ?? false)) {
-      toast.error("Not connected right now. Your message was kept.", {
+      notifyError("Not connected right now. Your message was kept.", {
         id: "compose-send",
       })
       return false
@@ -2821,7 +2801,7 @@ export function TerminalPane(props: TerminalPaneProps) {
     const writes = composeSendWrites(text)
     const totalBytes = writes.reduce((n, w) => n + w.byteLength, 0)
     if (composeSendTooLarge(totalBytes)) {
-      toast.error("Message too large to send. Trim it down and try again.", {
+      notifyError("Message too large to send. Trim it down and try again.", {
         id: "compose-send",
       })
       return false

@@ -381,6 +381,14 @@ export interface EventsServerMessage {
   tone?: string
   /** Status message (`status`). */
   message?: string
+  /** Whether this status waits for the user instead of for a clock (`status`).
+   *  `WireStatus.sticky` carries `#[serde(default)]`, so a current server sends
+   *  the field on EVERY status frame, `true` or `false`. It is optional here
+   *  for compatibility in both directions (a server that predates the field,
+   *  and a replay recorded before it), and an absent field reads as `false`
+   *  rather than as "unknown, better keep it on screen". What earns it is
+   *  documented on `NotifyOptions.sticky` in `lib/notify.ts`. */
+  sticky?: boolean
   /** Server-side status scope (`status`); already scope-filtered by the server,
    *  so the client ignores it. */
   scope?: string

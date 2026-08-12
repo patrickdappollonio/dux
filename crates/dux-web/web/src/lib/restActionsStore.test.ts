@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-// Mock sonner before importing the store so the store's top-level
-// `import { toast } from "sonner"` picks up our spies (mirrors
-// storeStatusToasts.test.ts). A REST 4xx/5xx no longer rides a `/ws`
-// CommandResult, so the store's own `.catch` must surface it as `toast.error`.
+// Mock sonner before importing the store so the raiser the store calls
+// (`lib/notify.ts`) picks up our spies (mirrors storeStatusToasts.test.ts). A
+// REST 4xx/5xx no longer rides a `/ws` CommandResult, so the store's own
+// `.catch` must surface it as an error notification.
 vi.mock("sonner", () => {
   const toast = Object.assign(vi.fn(), {
     success: vi.fn(),
@@ -16,6 +16,12 @@ vi.mock("sonner", () => {
 })
 
 import { toast } from "sonner"
+
+// The window `lib/notify.ts` gives an error: four times the 6s default the
+// bootstrap document carries here. Asserting it (rather than the message alone)
+// is what pins these call sites to dux's policy instead of sonner's own bare
+// 4000ms, which is what they used to get.
+const ERROR_DURATION = 24000
 
 // Whether the next ACTION endpoint (anything other than the boot reads) should
 // fail. Toggled per test before invoking a store action.
@@ -289,7 +295,9 @@ describe("store write actions surface REST errors as a toast", () => {
     actionFails = true
     mod.createAgent("p1", "feat")
     await vi.waitFor(() =>
-      expect(toast.error).toHaveBeenCalledWith("the server said no"),
+      expect(toast.error).toHaveBeenCalledWith("the server said no", {
+        duration: ERROR_DURATION,
+      }),
     )
   })
 
@@ -320,7 +328,9 @@ describe("store write actions surface REST errors as a toast", () => {
     actionFails = true
     mod.deleteSession("s1", false)
     await vi.waitFor(() =>
-      expect(toast.error).toHaveBeenCalledWith("the server said no"),
+      expect(toast.error).toHaveBeenCalledWith("the server said no", {
+        duration: ERROR_DURATION,
+      }),
     )
   })
 
@@ -344,7 +354,9 @@ describe("store write actions surface REST errors as a toast", () => {
     // The overlay is applied synchronously, before the REST call resolves.
     expect(mod.getSnapshot().pendingProjectOrder).toEqual(["p2", "p1"])
     await vi.waitFor(() =>
-      expect(toast.error).toHaveBeenCalledWith("the server said no"),
+      expect(toast.error).toHaveBeenCalledWith("the server said no", {
+        duration: ERROR_DURATION,
+      }),
     )
     // A rejected reorder is never reconciled by a spine, so the overlay must be
     // cleared back to the authoritative order rather than lingering forever.
@@ -360,7 +372,9 @@ describe("store write actions surface REST errors as a toast", () => {
       ids: ["s2", "s1"],
     })
     await vi.waitFor(() =>
-      expect(toast.error).toHaveBeenCalledWith("the server said no"),
+      expect(toast.error).toHaveBeenCalledWith("the server said no", {
+        duration: ERROR_DURATION,
+      }),
     )
     expect(mod.getSnapshot().pendingSessionOrder).toBeNull()
   })
@@ -385,7 +399,9 @@ describe("store write actions surface REST errors as a toast", () => {
     actionStatus = 400
     mod.createAgent("p1", "feat")
     await vi.waitFor(() =>
-      expect(toast.error).toHaveBeenCalledWith("the server said no"),
+      expect(toast.error).toHaveBeenCalledWith("the server said no", {
+        duration: ERROR_DURATION,
+      }),
     )
   })
 

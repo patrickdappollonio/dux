@@ -119,6 +119,33 @@ describe("editorDropToast", () => {
   })
 })
 
+describe("no tree-drop report ever waits for the user", () => {
+  // Every rung of this ladder is `sticky: false`, and it is a decision rather
+  // than a default. A tree drop is DURABLE and VISIBLE: the file lands in the
+  // folder the user pointed at, git can see it, and the tree refreshes to show
+  // it. Nothing in the report is the only copy of anything, which is the bar
+  // `NotifyOptions.sticky` sets. That is the whole difference from the pane
+  // drop's stranded rung, where the path in the message is the only place the
+  // saved file is named.
+  //
+  // A refusal is not sticky either, for the same reason it is not on the pane
+  // path: the file was never taken from the user, so it is still on their disk
+  // exactly where they dragged it from.
+  it("does not pin a success, a partial refusal or a total failure", () => {
+    const rungs: DropToast[] = [
+      editorDropToast([saved("logo.png")], "assets"),
+      editorDropToast([saved("a.png"), saved("b.png")], "assets"),
+      editorDropToast([saved("a.png"), refused("b.png", "too large")], "assets"),
+      editorDropToast([refused("b.png", "too large")], "assets"),
+      editorDropToast(
+        [refused("a.png", "too large"), refused("b.png", "too large")],
+        "assets",
+      ),
+    ]
+    for (const rung of rungs) expect(rung.sticky).toBe(false)
+  })
+})
+
 describe("performTreeDrop", () => {
   function harness(
     upload: (file: File, dir: string) => Promise<{ saved_name: string }>,
@@ -290,6 +317,9 @@ describe("performTreeDrop", () => {
       "Nothing came through in that drop. If you dropped a folder, drop the " +
         "files inside it instead.",
     )
+    // Nothing was taken and nothing was saved, so there is nothing to recover
+    // and no reason to make the user dismiss it.
+    expect(finals[0].sticky).toBe(false)
   })
 })
 

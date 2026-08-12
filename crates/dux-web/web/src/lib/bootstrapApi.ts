@@ -153,7 +153,7 @@ export interface Bootstrap {
   global_env: Record<string, string>
   /** Mirrors `config.ui.status_clear_seconds`: how long an info/success toast
    * stays before auto-clearing. It is the BASE for every tone, not just
-   * info/success: `lib/statusToast.ts` scales warning and error off it. 0 means
+   * info/success: `lib/notify.ts` scales warning and error off it. 0 means
    * "never auto-clear" for final states. Older servers omit it, so consumers
    * fall back to 6. */
   status_clear_seconds: number
