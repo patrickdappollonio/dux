@@ -132,6 +132,27 @@ pub struct StatusTickChanges {
     pub upgraded: Vec<KeyedWireStatus>,    // busy→warning replacements
 }
 
+/// What the controller does with a FINAL status (anything that is not
+/// [`StatusTone::Busy`]: info/success, warning, error).
+///
+/// The distinction exists because a `Busy` is live STATE while a final is an
+/// EVENT. A surface that can be joined late (the web, where every page load and
+/// every reconnect replays the snapshot) must be told about work still in
+/// flight, and must NOT be told about an outcome it legitimately missed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StatusRetention {
+    /// Store a final and keep it until something replaces it. The TUI's single
+    /// status line has no other way to show an outcome, and it is never
+    /// "reconnected", so the last message simply stays on screen.
+    Retain,
+    /// Do not store a final at all. It is still handed to the caller to
+    /// broadcast live (the web emitter sends the `WireStatus` it was given), so
+    /// every client attached AT THE TIME sees it, but it never enters
+    /// [`snapshot`](KeyedStatusController::snapshot) and so is never replayed to
+    /// a connection that arrives afterwards.
+    Emit,
+}
+
 /// A keyed multi-status controller.
 ///
 /// Holds one anonymous slot (for unkeyed transient messages) and a
@@ -154,10 +175,26 @@ pub struct KeyedStatusController {
     /// persists until the user's first action replaces it. Any later `set` on
     /// the anonymous slot clears the pin.
     anon_pinned: bool,
+    /// What happens to a final (non-`Busy`) status. See [`StatusRetention`].
+    retention: StatusRetention,
 }
 
 impl KeyedStatusController {
+    /// A controller that RETAINS finals: the historical behaviour, and what the
+    /// TUI wants. Its single status line shows the last message until something
+    /// replaces it.
     pub fn with_clear_after(clear_after: Duration) -> Self {
+        Self::with_retention(clear_after, StatusRetention::Retain)
+    }
+
+    /// A controller that EMITS finals without retaining them, for a surface
+    /// whose clients can attach late and would otherwise be replayed an outcome
+    /// they never witnessed. This is what the web engine actor uses.
+    pub fn emitting_finals(clear_after: Duration) -> Self {
+        Self::with_retention(clear_after, StatusRetention::Emit)
+    }
+
+    fn with_retention(clear_after: Duration, retention: StatusRetention) -> Self {
         Self {
             anon: None,
             entries: IndexMap::new(),
@@ -165,6 +202,7 @@ impl KeyedStatusController {
             next_seq: 0,
             next_gen: 0,
             anon_pinned: false,
+            retention,
         }
     }
 
@@ -223,15 +261,29 @@ impl KeyedStatusController {
             seq,
         };
 
+        // Under `Emit` a final is not state, it is an event: the caller
+        // broadcasts it live and the controller keeps nothing. The slot it
+        // lands on is still CLEARED, because the final ends the operation whose
+        // `Busy` was sitting there and a leftover spinner would be replayed to
+        // the next connection forever.
+        let retain = match self.retention {
+            StatusRetention::Retain => true,
+            StatusRetention::Emit => tone == StatusTone::Busy,
+        };
+
         match key {
             None => {
-                self.anon = Some(entry);
+                self.anon = if retain { Some(entry) } else { None };
                 // A new anonymous set always clears the pin so the new message
                 // follows normal auto-clear rules (the pin was for the old one).
                 self.anon_pinned = false;
             }
             Some(k) => {
-                self.entries.insert(k, entry);
+                if retain {
+                    self.entries.insert(k, entry);
+                } else {
+                    self.entries.shift_remove(&k);
+                }
             }
         }
 
@@ -309,6 +361,15 @@ impl KeyedStatusController {
                 message: "timed out — check dux.log".to_string(),
                 scope: anon.scope.clone(),
             });
+            // The upgrade produced a final, so `Emit` drops it exactly as it
+            // drops any other final: it is reported in `upgraded` (which the web
+            // broadcasts live, replacing the spinner by key) and then forgotten,
+            // rather than becoming a stale warning replayed to every later
+            // connection. It is deliberately NOT reported as a cleared key: a
+            // clear would dismiss the very warning the user is meant to read.
+            if self.retention == StatusRetention::Emit {
+                self.anon = None;
+            }
         }
 
         // Collect keys to operate on; two passes to avoid borrow issues.
@@ -360,6 +421,11 @@ impl KeyedStatusController {
                     message: entry.message.clone(),
                     scope: entry.scope.clone(),
                 });
+            }
+            // See the anonymous path above: under `Emit` the timed-out Warning
+            // is broadcast and then dropped rather than retained.
+            if self.retention == StatusRetention::Emit {
+                self.entries.shift_remove(&key);
             }
         }
 
@@ -672,6 +738,130 @@ mod tests {
             "after a new set the pin is gone and auto-clear must fire"
         );
         assert!(c.most_recent().is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Retention policy: Retain (TUI) vs Emit (web)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn retain_policy_keeps_a_final_until_something_replaces_it() {
+        // The TUI's contract, pinned so the Emit work cannot quietly change it:
+        // an error stays on the single status line indefinitely.
+        let t0 = Instant::now();
+        let mut c = KeyedStatusController::with_clear_after(Duration::from_secs(6));
+        c.set(t0, Some("push".into()), StatusTone::Error, "Push failed.");
+        c.set(t0, None, StatusTone::Warning, "Heads up.");
+        let _ = c.tick(t0 + Duration::from_secs(3600), Duration::from_secs(20));
+        assert_eq!(
+            c.snapshot().len(),
+            2,
+            "Retain must keep both finals available"
+        );
+        assert_eq!(c.most_recent().unwrap().tone, "warning");
+    }
+
+    #[test]
+    fn emit_policy_never_retains_a_keyed_final() {
+        // A final is an EVENT: the caller broadcasts it live, and it must not sit
+        // in the snapshot waiting to be replayed to the next connection.
+        let t0 = Instant::now();
+        let mut c = KeyedStatusController::emitting_finals(Duration::from_secs(6));
+        c.set(t0, Some("pull".into()), StatusTone::Error, "Pull failed.");
+        assert!(
+            c.snapshot().is_empty(),
+            "an emitted error must not be retained, got {:?}",
+            c.snapshot()
+        );
+        assert!(c.is_empty(), "the controller must hold nothing");
+        for tone in [StatusTone::Info, StatusTone::Warning, StatusTone::Error] {
+            c.set(t0, Some("k".into()), tone, "final");
+            assert!(
+                c.snapshot().is_empty(),
+                "{tone:?} is a final and must not be retained"
+            );
+        }
+    }
+
+    #[test]
+    fn emit_policy_never_retains_an_anonymous_final() {
+        // The anonymous slot is the easy one to forget: an unkeyed error would
+        // otherwise be replayed to every new connection exactly like a keyed one.
+        let t0 = Instant::now();
+        let mut c = KeyedStatusController::emitting_finals(Duration::from_secs(6));
+        c.set(t0, None, StatusTone::Error, "Something broke.");
+        assert!(
+            c.snapshot().is_empty(),
+            "an unkeyed error must not be retained, got {:?}",
+            c.snapshot()
+        );
+        c.set(t0, None, StatusTone::Info, "Saved.");
+        assert!(c.snapshot().is_empty(), "an unkeyed info must not persist");
+    }
+
+    #[test]
+    fn emit_policy_keeps_an_in_flight_busy_in_the_snapshot() {
+        // The other direction: a browser joining mid-operation MUST learn about
+        // work still running, keyed or not.
+        let t0 = Instant::now();
+        let mut c = KeyedStatusController::emitting_finals(Duration::from_secs(6));
+        c.set(t0, Some("pull".into()), StatusTone::Busy, "Pulling\u{2026}");
+        c.set(t0, None, StatusTone::Busy, "Loading\u{2026}");
+        assert_eq!(c.snapshot().len(), 2, "both busys must be replayable");
+    }
+
+    #[test]
+    fn emit_policy_final_dismisses_the_busy_it_replaces() {
+        // The final still has to end the operation: a Busy left behind after its
+        // final would be replayed as a spinner that never stops.
+        let t0 = Instant::now();
+        let mut c = KeyedStatusController::emitting_finals(Duration::from_secs(6));
+        c.set(t0, Some("pull".into()), StatusTone::Busy, "Pulling\u{2026}");
+        c.set(t0, None, StatusTone::Busy, "Loading\u{2026}");
+        c.set(t0, Some("pull".into()), StatusTone::Error, "Pull failed.");
+        c.set(t0, None, StatusTone::Info, "Loaded.");
+        assert!(
+            c.snapshot().is_empty(),
+            "each final must remove the busy on its own slot, got {:?}",
+            c.snapshot()
+        );
+    }
+
+    #[test]
+    fn emit_policy_reports_a_stranded_busy_upgrade_without_retaining_it() {
+        // The busy-timeout upgrade produces a Warning, which is a final. Under
+        // Emit it is broadcast (so whoever is watching the spinner sees it stop)
+        // and then dropped, so a later connection is not told about a timeout it
+        // did not witness.
+        let t0 = Instant::now();
+        let busy_timeout = Duration::from_secs(20);
+        let mut c = KeyedStatusController::emitting_finals(Duration::from_secs(6));
+        c.set(
+            t0,
+            Some("launch".into()),
+            StatusTone::Busy,
+            "Launching\u{2026}",
+        );
+        c.set(t0, None, StatusTone::Busy, "Loading\u{2026}");
+        let changes = c.tick(t0 + busy_timeout, busy_timeout);
+        assert_eq!(
+            changes.upgraded.len(),
+            2,
+            "both stranded busys must be reported as upgraded"
+        );
+        assert!(changes.upgraded.iter().all(|u| u.tone == "warning"));
+        assert!(
+            c.snapshot().is_empty(),
+            "the timed-out warnings must not be retained, got {:?}",
+            c.snapshot()
+        );
+        // Nothing may be reported as CLEARED: the client replaces the toast by
+        // key from the upgraded broadcast, and a clear would dismiss the warning
+        // the user is meant to read.
+        assert!(
+            changes.cleared_keys.is_empty(),
+            "an upgrade is a replacement, not a dismissal"
+        );
     }
 
     #[test]

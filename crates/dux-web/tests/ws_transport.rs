@@ -460,6 +460,89 @@ async fn saw_status(ws: &mut ClientWs, needle: &str, timeout: Duration) -> bool 
     false
 }
 
+/// Whether a `status` event of the given tone arrives within the window,
+/// regardless of its wording. Used by the replay test, which cares that an
+/// outcome of that tone reached (or did not reach) a connection, not about the
+/// exact sentence a git failure produced.
+async fn saw_status_tone(ws: &mut ClientWs, tone: &str, timeout: Duration) -> Option<String> {
+    let needle = format!("\"tone\":\"{tone}\"");
+    let deadline = tokio::time::Instant::now() + timeout;
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Some(Ok(m))) = tokio::time::timeout(Duration::from_millis(200), ws.next()).await
+            && let Ok(t) = m.into_text()
+            && t.contains("\"event\":\"status\"")
+            && t.contains(&needle)
+        {
+            return Some(t.to_string());
+        }
+    }
+    None
+}
+
+/// The replay bug, as the user hit it: an operation fails, its error toast is
+/// broadcast to everyone watching, and then a NEW browser opens the page. That
+/// browser missed the event and must not be told about it, or an hour-old
+/// failure is re-raised as a fresh toast on every page load, every new tab and
+/// every reconnect.
+///
+/// The status is deliberately raised WITHOUT an `X-Connection-Id`, so its scope
+/// is `All` and per-connection filtering cannot make this pass for the wrong
+/// reason. The already-attached connection seeing it is the control.
+#[tokio::test]
+async fn a_finished_operations_error_is_never_replayed_to_a_later_connection() {
+    let (addr, _tmp) = boot().await;
+
+    // The browser that is already open when the operation runs.
+    let (mut ws_a, _id_a) = connect_events(addr).await;
+
+    // Deleting s1 with its worktree runs an async removal whose git call fails
+    // (the seeded worktree path is a plain directory, not a linked worktree), so
+    // the keyed busy resolves into a real error final: exactly the shape of the
+    // toast users were seeing resurrected on every page load.
+    let client = reqwest::Client::new();
+    let resp = client
+        .delete(format!(
+            "http://{addr}/api/v1/sessions/s1?delete_worktree=true"
+        ))
+        .send()
+        .await
+        .expect("DELETE session");
+    assert_eq!(
+        resp.status().as_u16(),
+        204,
+        "the delete is accepted; the failure arrives as a status"
+    );
+
+    // Control: the connection that was watching DID receive the error.
+    let seen = saw_status_tone(&mut ws_a, "error", Duration::from_secs(10)).await;
+    assert!(
+        seen.is_some(),
+        "the attached connection must receive the broadcast error"
+    );
+
+    // Let the actor settle so any snapshot write has landed; the point of the
+    // test is that time passing does NOT make the error replayable.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // The journey: a new browser opens the page afterwards.
+    let (mut ws_b, _id_b) = connect_events(addr).await;
+    let replayed = saw_status_tone(&mut ws_b, "error", Duration::from_secs(2)).await;
+    assert!(
+        replayed.is_none(),
+        "a connection that opened after the failure must not be told about it, got {replayed:?}"
+    );
+
+    // And a reconnect is the same journey again: a third connection is likewise
+    // owed nothing, so the error cannot be resurrected by reconnecting either.
+    let (mut ws_c, _id_c) = connect_events(addr).await;
+    assert!(
+        saw_status_tone(&mut ws_c, "error", Duration::from_secs(1))
+            .await
+            .is_none(),
+        "the error must not come back on any later connection"
+    );
+}
+
 /// `POST /api/v1/sessions` (kind=new) creates a session and returns 201 + the new
 /// session object, and its status toasts are scoped to the originating connection
 /// (`X-Connection-Id`): the originating `/ws/events` sees the create status, a
