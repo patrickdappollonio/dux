@@ -3511,6 +3511,61 @@ mod tests {
     }
 
     #[test]
+    fn the_published_snapshot_always_matches_the_controller_and_is_never_spuriously_empty() {
+        // Answers, deterministically, the question a container harness raised:
+        // can a connection's connect-time replay ever observe an EMPTY snapshot
+        // while an operation's status is open?
+        //
+        // No. The watch has no intermediate state (a `send` swaps the value
+        // atomically and `borrow` returns a whole value), and the only empty
+        // value ever published is the channel's initial one. So after every
+        // operation the published vec must equal `controller.snapshot()`
+        // exactly, and must be non-empty whenever the controller holds anything.
+        //
+        // The ORDERING that makes this matter is in `send`: the snapshot is
+        // written BEFORE the live broadcast. So any observer that has seen a
+        // status frame is guaranteed that a replay taken afterwards contains it,
+        // and an observer keyed off something even later (a REST response) is
+        // guaranteed it all the more.
+        let (mut e, snap_rx) = make_emitter();
+        let check =
+            |snap_rx: &watch::Receiver<Vec<KeyedWireStatus>>, e: &StatusEmitter, at: &str| {
+                let published = snap_rx.borrow().clone();
+                let truth = e.controller.snapshot();
+                assert_eq!(
+                    published, truth,
+                    "published snapshot diverged from the controller at {at}"
+                );
+                if !truth.is_empty() {
+                    assert!(
+                        !published.is_empty(),
+                        "published an EMPTY snapshot while {} status(es) were open at {at}",
+                        truth.len()
+                    );
+                }
+            };
+
+        let _ = e.send(WireStatus::keyed("pull", "busy", "Pulling\u{2026}"));
+        check(&snap_rx, &e, "after a busy");
+        let _ = e.send(WireStatus::keyed("pull", "info", "Pulled."));
+        check(&snap_rx, &e, "after the final that replaces it");
+        let _ = e.send(WireStatus::keyed("push", "busy", "Pushing\u{2026}"));
+        check(&snap_rx, &e, "after a second operation opens");
+        let _ = e.send(WireStatus::new("info", "Saved."));
+        check(&snap_rx, &e, "after an unkeyed final");
+        e.clear("push".to_string());
+        check(&snap_rx, &e, "after an explicit clear");
+        e.tick(Instant::now());
+        check(&snap_rx, &e, "after an idle tick");
+        e.tick(Instant::now() + FINAL_REPLAY_WINDOW + Duration::from_secs(1));
+        check(&snap_rx, &e, "after the purge tick");
+        assert!(
+            snap_rx.borrow().is_empty(),
+            "and once everything has aged out, empty is the CORRECT answer"
+        );
+    }
+
+    #[test]
     fn emitter_clear_cannot_dismiss_a_sticky_toast() {
         // The web half of the sticky guard, at the layer that actually emits the
         // frame. A `status_cleared` is what dismisses a toast in the browser, so
