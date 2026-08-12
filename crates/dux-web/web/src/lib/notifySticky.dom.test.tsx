@@ -4,7 +4,13 @@ import { afterEach, beforeAll, describe, expect, it } from "vitest"
 
 import { Toaster } from "@/components/ui/sonner"
 
-import { notifyError, notifySuccess, setStatusClearSeconds } from "./notify"
+import {
+  notifyBusy,
+  notifyError,
+  notifySuccess,
+  notifyWarning,
+  setStatusClearSeconds,
+} from "./notify"
 
 // A sticky notification waits for the user instead of for a clock. That is only
 // acceptable if the user can actually get rid of it, so this file proves BOTH
@@ -91,6 +97,55 @@ describe("a sticky notification", () => {
     await waitFor(() => {
       expect(toastEl().getAttribute("data-removed")).toBe("true")
     })
+  })
+})
+
+describe("a sticky notification that REPLACED a spinner on the same id", () => {
+  // This is the only shape production actually raises. The file-drop path
+  // raises `notifyBusy` on a per-drop id before every upload and then raises
+  // the report on that same id, so the sticky warning is always a `loading`
+  // toast being taken over, never a fresh one.
+  //
+  // It is worth its own test because sonner gates the close button AND the
+  // swipe on the same thing, `toastType === 'loading'`, and a handoff is
+  // exactly the case where one could plausibly be left behind. A sticky toast
+  // with neither exit would be unremovable for the life of the page.
+  async function busyThenSticky(message: string) {
+    render(<Toaster />)
+    act(() => {
+      notifyBusy("Uploading shot.png...", { id: "drop-1" })
+    })
+    await screen.findByText("Uploading shot.png...")
+    // The spinner has no exits at all, which is what makes the handoff matter.
+    expect(document.querySelector("[data-close-button]")).toBeNull()
+    act(() => {
+      notifyWarning(message, { id: "drop-1", sticky: true })
+    })
+    await screen.findByText(message)
+  }
+
+  it("gets the close button the spinner it replaced was refused", async () => {
+    await busyThenSticky("Saved shot.png, but the path was not sent.")
+    expect(document.querySelector("[data-close-button]")).not.toBeNull()
+  })
+
+  it("can be swiped away, which the spinner it replaced could not", async () => {
+    await busyThenSticky("Saved shot.png, but the path was not sent.")
+    await swipe(toastEl(), -120, 0)
+    await waitFor(() => {
+      expect(toastEl().getAttribute("data-removed")).toBe("true")
+    })
+  })
+
+  it("still waits, where the same handoff without sticky would have cleared", async () => {
+    // Be exact about what this measures: the sticky duration surviving the
+    // handoff, on a window short enough that an ordinary warning would be gone.
+    // It does NOT measure the leak guard, which fires a minute out and is
+    // pinned against the clock in `notify.test.ts` instead.
+    setStatusClearSeconds(0.25)
+    await busyThenSticky("Saved shot.png, but the path was not sent.")
+    await new Promise((resolve) => setTimeout(resolve, 1500))
+    expect(toastEl().getAttribute("data-removed")).not.toBe("true")
   })
 })
 

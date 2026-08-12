@@ -910,6 +910,17 @@ describe("when a file cannot be pasted", () => {
     const message = vi.mocked(toast.warning).mock.calls[0][0] as string
     expect(message).toContain("not sent")
     expect(message).toContain("/tmp/p1/shot.png")
+
+    // And it WAITS. This is the one rung of the whole ladder that does, and it
+    // is the join between two things that were each tested alone: the report
+    // asking to be pinned, and the raiser honouring the ask. With the pane
+    // dropping `sticky` on the way past, both halves stayed green while the
+    // path in this message quietly took the ordinary 12s warning window and
+    // then took the only on-screen copy of where the file went with it.
+    const options = vi.mocked(toast.warning).mock.calls[0][1] as {
+      duration: number
+    }
+    expect(options.duration).toBe(Infinity)
   })
 
   it("does not claim a paste when the socket has closed", async () => {
