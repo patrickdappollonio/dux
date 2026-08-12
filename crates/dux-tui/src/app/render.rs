@@ -58,6 +58,24 @@ fn tab_strip_start_index(seg_w: &[u16], avail: u16, focused_idx: usize) -> usize
     start.min(focused_idx)
 }
 
+/// The text a tab pill shows: the tab's strip POSITION (1-based) in front of
+/// its provider label, e.g. `1 codex`, `2 claude`. The ordinal is the tab's
+/// switch-key address (the Ctrl-1..9 defaults, and the count Ctrl-Left/Right
+/// walks through), so it follows strip order — session-slot tab first, then
+/// extra tabs in creation order — and RENUMBERS when a tab closes: it is a
+/// position, never a stable id. Every pill is numbered, including positions
+/// past 9 (which have no Ctrl-N default but are still an address for
+/// Ctrl-Left/Right counting and for rebinding): a mixed strip where some
+/// pills carry a leading number and some don't reads like two kinds of tab,
+/// and the disambiguation suffix (`codex 2`) would make an un-numbered tenth
+/// pill genuinely ambiguous next to a numbered second one. Position 4 is not
+/// special-cased either: `select_tab_4` ships unbound (legacy terminals send
+/// the same byte for Ctrl-4 and the macro bar's Ctrl-\), but the pill is
+/// still the address users rebind to and count against.
+fn tab_pill_label(position: usize, label: &str) -> String {
+    format!("{position} {label}")
+}
+
 /// How an agent row's project tag should be rendered. Decided purely from the
 /// project the session points at, so both the full-width row's inline tag and
 /// the collapsed icon rail agree on when to surface a warning marker.
@@ -2169,7 +2187,15 @@ impl App {
             .iter()
             .map(|id| self.tab_provider_label(session, id))
             .collect();
-        let labels = tab_labels(&providers.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+        // Each pill leads with its strip ordinal (`1 codex`, `2 claude`): the
+        // visible address for the tab switch keys. See `tab_pill_label` for
+        // why every pill is numbered and why ordinals renumber on close.
+        let labels: Vec<String> =
+            tab_labels(&providers.iter().map(|s| s.as_str()).collect::<Vec<_>>())
+                .iter()
+                .enumerate()
+                .map(|(i, l)| tab_pill_label(i + 1, l))
+                .collect();
 
         let [strip_area, term_area] = Layout::default()
             .direction(Direction::Vertical)
@@ -10777,13 +10803,16 @@ mod tests {
         );
         // Symmetric padding: the right margin mirrors the left (space +
         // dot-width + space), for both the focused and the unfocused box.
+        // Each label leads with its strip ordinal (the tab switch-key
+        // address): session-slot "codex" is position 1, the extra "claude"
+        // tab position 2.
         assert!(
-            labels.contains("│ ● claude   │"),
-            "the focused label must be padded symmetrically, got: {labels}"
+            labels.contains("│ ● 2 claude   │"),
+            "the focused label must carry its ordinal and symmetric padding, got: {labels}"
         );
         assert!(
-            labels.contains("│   codex   │"),
-            "the unfocused label must be padded symmetrically, got: {labels}"
+            labels.contains("│   1 codex   │"),
+            "the unfocused label must carry its ordinal and symmetric padding, got: {labels}"
         );
 
         // The focused box uses the shared focused border/title styles (the
@@ -10818,6 +10847,75 @@ mod tests {
                 .any(|(sym, fg, _)| sym == "╭" && *fg == app.theme.border_normal),
             "unfocused tab boxes must use the normal border color"
         );
+    }
+
+    /// Decision 7: every pill leads with its strip ordinal — the visible
+    /// address the tab switch keys count against — and the ordinal is a
+    /// POSITION, never a stable id: closing a tab renumbers every pill after
+    /// it. Position 4 renders like any other (its Ctrl-4 default is absent
+    /// because legacy terminals send the same byte as the macro bar's Ctrl-\,
+    /// but the address itself stays visible and rebindable).
+    #[test]
+    fn tab_strip_ordinals_renumber_when_a_tab_closes() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        // Session-slot tab is "codex" (test_support); add two extras.
+        seed_render_tab(&mut app, &session_id, "tab-2", "claude", 1);
+        seed_render_tab(&mut app, &session_id, "tab-3", "opencode", 2);
+        app.set_focused_tab(&session_id, &session_id);
+
+        let area = Rect::new(0, 0, 80, 24);
+        let label_row = Rect::new(area.x, area.y + 1, area.width, 1);
+        let render_labels = |app: &mut App| -> String {
+            let backend = TestBackend::new(80, 24);
+            let mut terminal = Terminal::new(backend).expect("terminal");
+            terminal
+                .draw(|frame| {
+                    app.render_agent_tab_strip_if_needed(frame, area, true);
+                })
+                .expect("render frame");
+            strip_row_cells(&terminal, label_row)
+                .into_iter()
+                .map(|(sym, _, _)| sym)
+                .collect()
+        };
+
+        let labels = render_labels(&mut app);
+        for expected in ["1 codex", "2 claude", "3 opencode"] {
+            assert!(
+                labels.contains(expected),
+                "pill labels must lead with their strip ordinal; wanted {expected:?} in: {labels}"
+            );
+        }
+
+        // Close the middle tab: opencode moves from position 3 to position 2.
+        app.engine.agent_tabs.remove("tab-2");
+        let labels = render_labels(&mut app);
+        assert!(
+            labels.contains("2 opencode"),
+            "closing a tab must renumber later pills (positions, not ids), got: {labels}"
+        );
+        assert!(
+            !labels.contains("3 opencode"),
+            "the old ordinal must not survive the close, got: {labels}"
+        );
+        assert!(
+            !labels.contains("claude"),
+            "the closed tab must be gone from the strip, got: {labels}"
+        );
+    }
+
+    /// `tab_pill_label` is position-driven and numbers EVERY pill, including
+    /// positions past 9 (no Ctrl-N default, still an address for
+    /// Ctrl-Left/Right counting and rebinds).
+    #[test]
+    fn tab_pill_label_numbers_all_positions() {
+        assert_eq!(tab_pill_label(1, "codex"), "1 codex");
+        assert_eq!(tab_pill_label(4, "claude"), "4 claude");
+        assert_eq!(tab_pill_label(10, "codex 2"), "10 codex 2");
     }
 
     /// Width/truncation math: the strip must never draw past the pane width,
