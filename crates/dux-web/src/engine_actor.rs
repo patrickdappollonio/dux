@@ -3511,6 +3511,48 @@ mod tests {
     }
 
     #[test]
+    fn emitter_clear_cannot_dismiss_a_sticky_toast() {
+        // The web half of the sticky guard, at the layer that actually emits the
+        // frame. A `status_cleared` is what dismisses a toast in the browser, so
+        // if a clear could fire on a sticky key the whole feature would be
+        // decorative: a clear names nothing but a key, and every engine-raised
+        // final is keyed.
+        let (tx, _rx) = broadcast::channel::<WireStatus>(16);
+        let (clear_tx, mut crx) = broadcast::channel::<Option<String>>(16);
+        let (snap_tx, snap_rx) = watch::channel::<Vec<KeyedWireStatus>>(vec![]);
+        let mut e = StatusEmitter {
+            tx,
+            clear_tx,
+            snapshot_tx: snap_tx,
+            controller: KeyedStatusController::emitting_finals(),
+            generations: std::collections::HashMap::new(),
+        };
+        let _ = e.send(WireStatus::keyed("del", "error", "Worktree delete failed.").sticky());
+        assert_eq!(snap_rx.borrow().len(), 1);
+
+        e.clear("del".to_string());
+
+        assert_eq!(
+            snap_rx.borrow().len(),
+            1,
+            "a sticky status must survive a clear"
+        );
+        assert!(
+            crx.try_recv().is_err(),
+            "and NO status_cleared frame may go out, or the browser dismisses it"
+        );
+
+        // The control: an ordinary final on another key still clears normally.
+        let _ = e.send(WireStatus::keyed("push", "error", "Push failed."));
+        e.clear("push".to_string());
+        assert_eq!(
+            crx.try_recv().ok(),
+            Some(Some("push".to_string())),
+            "a non-sticky final must still be dismissible"
+        );
+    }
+
+    #[test]
     fn emitter_clear_is_a_no_op_when_a_newer_status_replaced_the_key() {
         // LOW 5: a commit-msg clear must not dismiss a concurrent same-key
         // generate's busy. The emitter stores the generation from the busy it

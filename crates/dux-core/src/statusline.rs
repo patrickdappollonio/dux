@@ -358,14 +358,36 @@ impl KeyedStatusController {
     }
 
     /// Remove a keyed entry IFF the carried generation matches the stored one
-    /// (the clear-race guard).
+    /// (the clear-race guard) AND the entry is not [`sticky`].
     ///
-    /// - `generation == None` clears unconditionally (used by the auto-clear
-    ///   tick for expired Info entries).
+    /// - `generation == None` skips the generation check (but NOT the sticky
+    ///   one).
     ///
-    /// Returns `true` if anything was removed.
+    /// A STICKY entry is never removed by a clear, whichever form is used. A
+    /// clear means "the operation ended with nothing to say"; a sticky final
+    /// means "something is half-done and is waiting for you". Those cannot both
+    /// be true of one key, and the sticky final is the newer, more specific
+    /// fact. Without this guard `sticky` would be decorative for every
+    /// engine-raised status, because a clear names nothing but a key and every
+    /// keyed final is reachable by one. If an operation genuinely supersedes a
+    /// sticky message it must SAY so with a new [`set`](Self::set) on the key,
+    /// which still replaces it; silently removing the message is not an option
+    /// the user can act on.
+    ///
+    /// This cannot strand anything. Under [`StatusRetention::Emit`] the replay
+    /// window in [`tick`](Self::tick) still retires a sticky entry, and it does
+    /// so silently, so the snapshot does not grow and the toast on screen is
+    /// left for the user to dismiss.
+    ///
+    /// Returns `true` if anything was removed, so a caller that broadcasts a
+    /// dismissal only does it when one actually happened.
+    ///
+    /// [`sticky`]: KeyedWireStatus::sticky
     pub fn clear(&mut self, key: &str, generation: Option<Generation>) -> bool {
         if let Some(entry) = self.entries.get(key) {
+            if entry.sticky {
+                return false;
+            }
             let matches = match generation {
                 None => true,
                 Some(g) => entry.generation == g,
@@ -1055,6 +1077,71 @@ mod tests {
         assert!(
             c.most_recent().unwrap().sticky,
             "the single-line projection must carry the flag too"
+        );
+    }
+
+    #[test]
+    fn a_clear_can_never_dismiss_a_sticky_status() {
+        // `sticky` means "this waits for the user". A server-side clear says
+        // "the operation ended with nothing to say", which cannot be true of a
+        // key that just reported something half-done: the sticky final is the
+        // newer and more specific fact. If a clear could retire it, sticky would
+        // be decorative for every engine-raised status, since a clear names only
+        // a key and every keyed final is reachable by one.
+        let t0 = Instant::now();
+        let mut c = KeyedStatusController::emitting_finals();
+        let g = c.set_scoped(
+            t0,
+            Some("del".into()),
+            StatusTone::Error,
+            "Worktree delete failed.",
+            super::StatusScope::All,
+            true,
+        );
+        // Neither the generation-matched clear nor the unconditional one may
+        // touch it, and both must SAY they did nothing so the caller does not
+        // broadcast a dismissal.
+        assert!(!c.clear("del", Some(g)), "a matching clear must be refused");
+        assert!(
+            !c.clear("del", None),
+            "an unconditional clear must be refused"
+        );
+        assert_eq!(c.snapshot().len(), 1, "the sticky status must survive");
+        assert!(c.snapshot()[0].sticky);
+
+        // The control: the same clear on a NON-sticky entry still works, so this
+        // is a guard on stickiness and not a broken clear.
+        let g2 = c.set(t0, Some("push".into()), StatusTone::Error, "Push failed.");
+        assert!(c.clear("push", Some(g2)), "an ordinary final still clears");
+
+        // And a sticky status is not immortal. A REPLACEMENT still replaces it,
+        // because a later `set` carries new information for the user...
+        c.set(
+            t0,
+            Some("del".into()),
+            StatusTone::Info,
+            "Cleaned up after all.",
+        );
+        assert_eq!(c.snapshot()[0].tone, "info");
+        // ...and under Emit the replay window still retires it, so refusing the
+        // clear cannot strand an entry in the snapshot forever.
+        let mut c = KeyedStatusController::emitting_finals();
+        c.set_scoped(
+            t0,
+            Some("del".into()),
+            StatusTone::Error,
+            "Worktree delete failed.",
+            super::StatusScope::All,
+            true,
+        );
+        let changes = c.tick(t0 + FINAL_REPLAY_WINDOW, BUSY_TIMEOUT);
+        assert!(
+            c.snapshot().is_empty(),
+            "the window still purges a sticky entry"
+        );
+        assert!(
+            changes.cleared_keys.is_empty(),
+            "and does so silently, so the toast on screen is left alone"
         );
     }
 
