@@ -2793,6 +2793,7 @@ impl App {
 
             let macro_key = self.bindings.label_for(Action::OpenMacroBar);
             let next_pane = self.bindings.label_for(Action::FocusNext);
+            let next_tab = self.bindings.label_for(Action::NextTab);
             let live_edge = self.bindings.labels_for(Action::ScrollToBottom);
             let hint_line = if is_input && self.scroll_mode_active() {
                 // Scroll mode swallows every non-scroll key (see
@@ -2867,6 +2868,23 @@ impl App {
                 spans.push(Span::styled(" fullscreen  ", desc_style));
                 spans.extend(self.theme.dim_key_badge_default(&next_pane));
                 spans.push(Span::styled(" next pane", desc_style));
+                // Decision 6 says the surviving tab-switch chords are loud in
+                // HINTS, not only docs: with plain arrows now typing into the
+                // agent, the chords are the only tab keys left, so an agent
+                // with something to switch to names the next-tab chord here.
+                // A tab hint on a single-tab agent is noise, so it needs 2+.
+                let tab_count = self
+                    .selected_session()
+                    .map(|s| self.session_tab_ids(&s.id).len())
+                    .unwrap_or(0);
+                if matches!(active_surface, SessionSurface::Agent)
+                    && tab_count >= 2
+                    && !next_tab.is_empty()
+                {
+                    spans.push(Span::styled("  ", desc_style));
+                    spans.extend(self.theme.dim_key_badge_default(&next_tab));
+                    spans.push(Span::styled(" next tab", desc_style));
+                }
                 if !self.filtered_macros("").is_empty() && !macro_key.is_empty() {
                     spans.push(Span::styled("  ", desc_style));
                     spans.extend(self.theme.dim_key_badge_default(&macro_key));
@@ -11523,6 +11541,49 @@ mod tests {
             hint.contains(&next_pane_key) && hint.contains("next pane"),
             "the hint must name the next-pane key {next_pane_key:?}; row was {hint:?}"
         );
+        assert!(
+            !hint.contains("next tab"),
+            "a single-tab agent gets no tab hint (it would be noise); row was {hint:?}"
+        );
+    }
+
+    /// With two or more tabs the typeable hint names the tab-switch chord
+    /// (decision 6: the surviving chords are loud in HINTS, not only docs).
+    #[test]
+    fn typeable_pane_hint_names_the_tab_switch_chord_with_two_tabs() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = app_with_parked_agent_cursor();
+        app.center_mode = CenterMode::Agent;
+        app.focus = FocusPane::Center;
+        app.input_target = InputTarget::None;
+        app.fullscreen_overlay = FullscreenOverlay::None;
+        let session_id = app.engine.sessions[0].id.clone();
+        seed_render_tab(&mut app, &session_id, "tab-2", "claude", 1);
+        assert!(app.center_typeable(), "test setup: pane must be typeable");
+
+        let backend = TestBackend::new(180, 40);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+
+        let rows = buffer_rows(terminal.backend().buffer());
+        let hint = rows
+            .iter()
+            .find(|row| row.contains("Typing goes to the agent."))
+            .unwrap_or_else(|| {
+                panic!(
+                    "the typeable pane must say where typing goes; frame was:\n{}",
+                    rows.join("\n")
+                )
+            });
+        let next_tab_key = app.bindings.label_for(Action::NextTab);
+        assert!(
+            hint.contains(&next_tab_key) && hint.contains("next tab"),
+            "with 2+ tabs the hint must name the tab-switch chord {next_tab_key:?}; row was {hint:?}"
+        );
     }
 
     /// A live agent whose pane is NOT focused offers the activate key as
@@ -12608,7 +12669,7 @@ mod tests {
 
     // ── PTY cell colors render verbatim in every mode ──────────────
 
-    /// The non-interactive (minimized, read-only) agent pane must paint the
+    /// The non-interactive (minimized, not focused) agent pane must paint the
     /// child's colors verbatim. The old desaturation (dim foreground,
     /// grayscaled background) is gone: the caret and the hint bar carry the
     /// mode signal now, not a washed-out palette.

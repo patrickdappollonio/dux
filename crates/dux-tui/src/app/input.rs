@@ -7920,6 +7920,13 @@ impl App {
     /// never launches — only an explicit action launches"). When
     /// `allow_launch` is false and the target agent is dormant, this either
     /// minimizes a (defensively possible) fullscreen overlay or is a no-op.
+    ///
+    /// The two callers also part ways on a LIVE agent (decision 9): the
+    /// explicit activate action (`allow_launch`, i.e. Enter and the sidebar
+    /// double-click) focuses the windowed TYPEABLE center pane, while the
+    /// fullscreen toggle reopens fullscreen, matching its meaning everywhere
+    /// else. `InteractAgent` keeps its own jump-straight-to-fullscreen path
+    /// in `handle_left_key` (decision 11).
     fn activate_selected_left_item(&mut self, allow_launch: bool) -> Result<()> {
         match self.left_items().get(self.selected_left) {
             Some(LeftItem::Session(_)) => {
@@ -7931,8 +7938,19 @@ impl App {
                     .map(|s| self.engine.providers.contains_key(&s.id))
                     .unwrap_or(false)
                 {
-                    self.input_target = InputTarget::Agent;
-                    self.fullscreen_overlay = FullscreenOverlay::Agent;
+                    if allow_launch {
+                        // Enter (and the sidebar double-click) lands on the
+                        // windowed typeable pane: snap to the live edge and
+                        // leave fullscreen and the raw-input target off, so
+                        // `center_typeable()` routes keystrokes to the agent
+                        // from right here.
+                        self.reset_pty_scrollback();
+                        self.input_target = InputTarget::None;
+                        self.fullscreen_overlay = FullscreenOverlay::None;
+                    } else {
+                        self.input_target = InputTarget::Agent;
+                        self.fullscreen_overlay = FullscreenOverlay::Agent;
+                    }
                 } else if self.selected_session().is_some() {
                     if allow_launch {
                         // Enter from the sidebar focuses the minimized
@@ -9078,10 +9096,21 @@ impl App {
         }
         let key = self.bindings.label_for(Action::ToggleFullscreen);
         if return_to_projects {
-            self.set_info(format!(
-                "Minimized the agent pane. dux keys are active again and \
-                 typing still reaches the agent. Press {key} for fullscreen."
-            ));
+            // Same truthfulness rule as `close_top_overlay`: promise typing
+            // only when the minimized pane actually types (the provider can
+            // have died in the same breath as the minimize, and a dormant
+            // pane has nothing to type into).
+            if self.center_typeable() {
+                self.set_info(format!(
+                    "Minimized the agent pane. dux keys are active again and \
+                     typing still reaches the agent. Press {key} for fullscreen."
+                ));
+            } else {
+                self.set_info(format!(
+                    "Minimized the agent pane. dux keys are active again. \
+                     Press {key} to go fullscreen again."
+                ));
+            }
         } else {
             self.set_info(format!(
                 "Exited the fullscreen terminal. Press {key} to reopen it."
@@ -18455,6 +18484,70 @@ cyan = "#00ffff"
         );
     }
 
+    /// Minimizing promises typing only while the pane still TYPES: with a
+    /// live provider the message says keystrokes keep reaching the agent.
+    #[test]
+    fn exit_interactive_message_promises_typing_while_the_pane_types() {
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        app.engine.providers.insert(
+            session_id,
+            PtyClient::spawn(
+                "sh",
+                &["-c".to_string(), "printf ready; sleep 30".to_string()],
+                std::path::Path::new("."),
+                10,
+                10,
+                100,
+            )
+            .expect("spawn pty"),
+        );
+        app.focus = FocusPane::Center;
+        app.center_mode = CenterMode::Agent;
+        app.input_target = InputTarget::Agent;
+        app.session_surface = SessionSurface::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+
+        app.exit_interactive_mode();
+
+        assert!(app.center_typeable(), "test setup: pane must be typeable");
+        assert!(
+            app.status
+                .message()
+                .contains("typing still reaches the agent"),
+            "a typeable pane's minimize message promises typing; got {:?}",
+            app.status.message()
+        );
+    }
+
+    /// When the provider died in the same breath as the minimize there is
+    /// nothing to type into, and the message must not claim otherwise
+    /// (matching the `close_top_overlay` twin's truthfulness rule).
+    #[test]
+    fn exit_interactive_message_does_not_promise_typing_without_a_live_pty() {
+        let mut app = test_app(default_bindings());
+        // No provider: the pane minimizes onto a dormant surface.
+        app.focus = FocusPane::Center;
+        app.center_mode = CenterMode::Agent;
+        app.input_target = InputTarget::Agent;
+        app.session_surface = SessionSurface::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+
+        app.exit_interactive_mode();
+
+        assert!(!app.center_typeable());
+        assert!(
+            !app.status.message().contains("typing still reaches"),
+            "a dead pane's minimize message must not promise typing; got {:?}",
+            app.status.message()
+        );
+        assert!(
+            app.status.message().contains("Minimized the agent pane"),
+            "the message still names the minimize; got {:?}",
+            app.status.message()
+        );
+    }
+
     /// The Center-scope tab keys are reachable straight after minimizing.
     ///
     /// This is the concrete cost of the old focus jump: the tab keys are
@@ -18679,6 +18772,77 @@ cyan = "#00ffff"
             !recv_dispatched_launch_request(&app).wants_fullscreen,
             "Enter's launch is minimized-seeking: it lands focused-but-minimized (decision 10)"
         );
+    }
+
+    /// Enter from the sidebar on a LIVE agent focuses the windowed TYPEABLE
+    /// center pane (decision 9): no fullscreen, no raw-input target, snapped
+    /// to the live edge, typeable through the derived predicate.
+    #[test]
+    fn enter_from_left_on_a_live_agent_focuses_the_windowed_typeable_pane() {
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        app.engine.providers.insert(
+            session_id.clone(),
+            PtyClient::spawn(
+                "sh",
+                &["-c".to_string(), "printf ready; sleep 30".to_string()],
+                std::path::Path::new("."),
+                10,
+                10,
+                100,
+            )
+            .expect("spawn pty"),
+        );
+        app.focus = FocusPane::Left;
+        // Park the pane in scroll mode so the snap to the live edge is
+        // observable (Enter must land at the live edge, not in history).
+        app.scroll_mode.insert(session_id);
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+
+        assert_eq!(app.focus, FocusPane::Center);
+        assert_eq!(
+            app.fullscreen_overlay,
+            FullscreenOverlay::None,
+            "Enter focuses the windowed pane, never fullscreen (decision 9)"
+        );
+        assert_eq!(app.input_target, InputTarget::None);
+        assert!(
+            app.center_typeable(),
+            "the pane must type into the agent after Enter"
+        );
+        assert!(
+            !app.scroll_mode_active(),
+            "Enter must snap the pane to the live edge"
+        );
+    }
+
+    /// The fullscreen toggle from the sidebar KEEPS reopening fullscreen for
+    /// a live agent: only the explicit activate action lands windowed.
+    #[test]
+    fn ctrl_g_from_left_on_a_live_agent_opens_fullscreen() {
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        app.engine.providers.insert(
+            session_id,
+            PtyClient::spawn(
+                "sh",
+                &["-c".to_string(), "printf ready; sleep 30".to_string()],
+                std::path::Path::new("."),
+                10,
+                10,
+                100,
+            )
+            .expect("spawn pty"),
+        );
+        app.focus = FocusPane::Left;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))
+            .unwrap();
+
+        assert_eq!(app.input_target, InputTarget::Agent);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Agent);
     }
 
     /// A relaunch initiated FROM the fullscreen relaunch screen keeps the
