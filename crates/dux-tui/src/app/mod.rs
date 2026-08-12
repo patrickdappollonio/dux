@@ -255,6 +255,13 @@ pub struct App {
     pub(crate) mouse_layout: MouseLayoutState,
     pub(crate) overlay_layout: OverlayMouseLayoutState,
     pub(crate) mouse_drag: Option<ResizeDragState>,
+    /// A mouse button pressed inside the WINDOWED center pane that is being
+    /// forwarded to a mouse-aware child (decision 9): holds the SGR button
+    /// code of the pressed button (0 left, 1 middle, 2 right) from press to
+    /// release, so the drag's motion reports and the final release reach the
+    /// child even when the pointer leaves the pane. `None` when no forwarded
+    /// button is held.
+    pub(crate) center_mouse_forward: Option<u16>,
     pub(crate) last_mouse_click: Option<RecentMouseClick>,
     /// Tracks an in-flight modal-button press: which button received
     /// mouse-down and whether the cursor is still inside it. Set on
@@ -2895,6 +2902,7 @@ impl App {
             mouse_layout: MouseLayoutState::default(),
             overlay_layout: OverlayMouseLayoutState::default(),
             mouse_drag: None,
+            center_mouse_forward: None,
             last_mouse_click: None,
             pressed_button: None,
             interactive_patterns,

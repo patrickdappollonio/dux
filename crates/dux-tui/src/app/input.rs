@@ -475,6 +475,16 @@ fn pct_from_columns(columns: u16, total_width: u16) -> u16 {
     (((u32::from(columns) * 100) + (u32::from(total_width) / 2)) / u32::from(total_width)) as u16
 }
 
+/// SGR button code for a pressed/released mouse button: 0 left, 1 middle,
+/// 2 right (xterm's encoding; motion adds bit 32 at the call site).
+fn sgr_button_code(button: MouseButton) -> u16 {
+    match button {
+        MouseButton::Left => 0,
+        MouseButton::Middle => 1,
+        MouseButton::Right => 2,
+    }
+}
+
 pub(crate) fn startup_command_log_visual_lines(content: &str, width: u16) -> Vec<String> {
     if width == 0 {
         return Vec::new();
@@ -7938,6 +7948,120 @@ impl App {
         self.note_user_scroll();
     }
 
+    /// Begin forwarding a pressed mouse button to the WINDOWED center child
+    /// (decision 9). Returns `true` when the press was forwarded: focus moves
+    /// to Center, the translated SGR press is written to the focused
+    /// surface's PTY, and the button is held in `center_mouse_forward` so the
+    /// drag's motion reports and the eventual release follow it. Returns
+    /// `false` (leaving the click to the ordinary focus/double-click
+    /// handling) when any gate fails:
+    /// - not windowed (fullscreen keeps its raw-input mouse path),
+    /// - the center pane is not showing the agent surface,
+    /// - the click carries a modifier (Shift/Alt/Ctrl clicks stay dux's
+    ///   host-selection story, exactly as in a real terminal emulator),
+    /// - the click lands outside the terminal content area,
+    /// - the pane is scrolled back (the scroll vocabulary owns it),
+    /// - the surface is dormant or the child has no mouse tracking on
+    ///   (a click then just focuses, today's behavior).
+    fn begin_center_mouse_forward(&mut self, mouse: &MouseEvent) -> bool {
+        if !matches!(self.fullscreen_overlay, FullscreenOverlay::None)
+            || !matches!(self.center_mode, CenterMode::Agent)
+            || !mouse.modifiers.is_empty()
+        {
+            return false;
+        }
+        let MouseEventKind::Down(button) = mouse.kind else {
+            return false;
+        };
+        let Some(term_area) = self.mouse_layout.agent_term else {
+            return false;
+        };
+        if !contains_point(term_area, mouse.column, mouse.row) {
+            return false;
+        }
+        if self.scroll_mode_active() {
+            return false;
+        }
+        let Some(provider) = self.selected_terminal_surface_client() else {
+            return false;
+        };
+        if !provider.has_mouse_mode() {
+            return false;
+        }
+        let cb = sgr_button_code(button);
+        self.focus = FocusPane::Center;
+        self.center_mouse_forward = Some(cb);
+        self.write_center_mouse_report(cb, b'M', mouse.column, mouse.row);
+        true
+    }
+
+    /// Mid-drag motion for a forwarded button. Motion reports are sent only
+    /// when the child asked for them (DECSET 1002/1003), with coordinates
+    /// clamped to the pane edge exactly as a real emulator clamps a drag that
+    /// leaves the window.
+    fn continue_center_mouse_forward(&mut self, mouse: &MouseEvent) {
+        let Some(cb) = self.center_mouse_forward else {
+            return;
+        };
+        if !self
+            .selected_terminal_surface_client()
+            .is_some_and(|p| p.has_mouse_drag_mode())
+        {
+            return;
+        }
+        // Bit 32 marks a motion report carrying the held button.
+        self.write_center_mouse_report(cb + 32, b'M', mouse.column, mouse.row);
+    }
+
+    /// Release of a forwarded button. The release must ALWAYS be delivered,
+    /// clamped to the pane edge when the pointer has left the pane: a dropped
+    /// release leaves the child holding a stuck button.
+    fn finish_center_mouse_forward(&mut self, mouse: &MouseEvent) {
+        let Some(cb) = self.center_mouse_forward.take() else {
+            return;
+        };
+        self.write_center_mouse_report(cb, b'm', mouse.column, mouse.row);
+    }
+
+    /// Write one SGR mouse report to the focused center surface, clamping the
+    /// screen coordinates into the terminal content area and rebasing them to
+    /// the pane origin via `translate_sgr_mouse` (the same path the forwarded
+    /// wheel takes). Stamps the pointer window so the repaint the report
+    /// provokes is not read as the agent working; the report classifies
+    /// itself (press/release arm the short Button window, motion arms
+    /// nothing), keeping this in lockstep with `classify_pty_write`.
+    fn write_center_mouse_report(&mut self, cb: u16, final_byte: u8, column: u16, row: u16) {
+        let Some(term_area) = self.mouse_layout.agent_term else {
+            return;
+        };
+        if term_area.width == 0 || term_area.height == 0 {
+            return;
+        }
+        let column = column.clamp(term_area.x, term_area.x + term_area.width - 1);
+        let row = row.clamp(term_area.y, term_area.y + term_area.height - 1);
+        let screen_seq = format!(
+            "\x1b[<{cb};{};{}{}",
+            column + 1,
+            row + 1,
+            final_byte as char
+        )
+        .into_bytes();
+        let Some(translated) =
+            crate::raw_input::translate_sgr_mouse(&screen_seq, term_area.x, term_area.y)
+        else {
+            return;
+        };
+        let Some(provider) = self.selected_terminal_surface_client() else {
+            return;
+        };
+        let _ = provider.write_bytes(&translated);
+        if let Some(report) = dux_core::pty::decode_mouse_report(&translated)
+            && let Some(id) = self.selected_terminal_surface_id()
+        {
+            self.engine.note_pty_pointer(&id, report);
+        }
+    }
+
     /// Handle a left-click on the agent tab strip. Returns true if the click
     /// landed on a tab (focus it). There is deliberately no "+" add button:
     /// new tabs are created via the `new-agent-tab` palette command or the
@@ -8195,6 +8319,17 @@ impl App {
                     return false;
                 }
 
+                // After the divider and tab-strip short-circuits (the mouse
+                // "dux wins" rule): a plain click inside the windowed agent
+                // surface of a mouse-aware child is the child's, so it is
+                // focused AND forwarded (decision 9). Skipping the
+                // double-click bookkeeping below is deliberate: with a
+                // mouse-mode child a double click is just two forwarded
+                // clicks, never a maximize.
+                if self.begin_center_mouse_forward(&mouse) {
+                    return false;
+                }
+
                 match self.mouse_target(mouse.column, mouse.row) {
                     Some(MouseTarget::LeftPane) => {
                         self.focus = FocusPane::Left;
@@ -8277,6 +8412,20 @@ impl App {
                     }
                     None => {}
                 }
+            }
+            // Middle/right presses forward exactly like left ones (SGR codes
+            // 1 and 2); when the gates refuse (no mouse-mode child, modifier
+            // held, outside the pane) they keep doing nothing, as before.
+            MouseEventKind::Down(MouseButton::Middle | MouseButton::Right) => {
+                if self.begin_center_mouse_forward(&mouse) {
+                    return false;
+                }
+            }
+            MouseEventKind::Drag(_) if self.center_mouse_forward.is_some() => {
+                self.continue_center_mouse_forward(&mouse);
+            }
+            MouseEventKind::Up(_) if self.center_mouse_forward.is_some() => {
+                self.finish_center_mouse_forward(&mouse);
             }
             MouseEventKind::Drag(MouseButton::Left) if self.mouse_drag.is_some() => {
                 self.update_dragged_panes(mouse.column, mouse.row);
@@ -8789,6 +8938,7 @@ mod tests {
     use super::DOUBLE_CLICK_THRESHOLD;
     use super::components::{ButtonPressedTarget, PressedButton};
     use crate::app::ConfirmFocus;
+    use crate::app::ResizeDragState;
     use crate::app::input::{
         configure_focus, configure_project_text_input, cursor_from_single_line_position,
     };
@@ -13768,6 +13918,284 @@ not_a_real_action = ["x"]
             "a mouse-aware child owns its clicks, so a double click must not maximize"
         );
         assert_eq!(app.input_target, InputTarget::None);
+    }
+
+    // -- Windowed click forwarding to a mouse-aware child (decision 9) --
+
+    /// Wire a `cat -v` child that first enables the given DECSET modes as the
+    /// selected session's provider, install the synthetic layout, and wait
+    /// until the embedded terminal has parsed the mode sets. `cat -v` echoes
+    /// every byte the child receives in caret notation, so the child's own
+    /// grid is the proof of what was forwarded.
+    fn install_mouse_forward_child(app: &mut App, decsets: &str) {
+        let session_id = app.engine.sessions[0].id.clone();
+        let cmd = format!("stty raw -echo; printf '{decsets}'; exec cat -v");
+        let client = PtyClient::spawn(
+            "/bin/sh",
+            &["-c".to_string(), cmd],
+            std::path::Path::new("."),
+            24,
+            80,
+            100,
+        )
+        .expect("spawn pty");
+        app.engine.providers.insert(session_id, client);
+        app.selected_left = 1;
+        app.session_surface = SessionSurface::Agent;
+        app.center_mode = CenterMode::Agent;
+        install_mouse_layout(app);
+        if decsets.is_empty() {
+            // No modes to wait for; give the shell a moment to exec cat.
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            return;
+        }
+        for _ in 0..400 {
+            if app
+                .selected_terminal_surface_client()
+                .is_some_and(|p| p.has_mouse_mode())
+            {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("the child never enabled mouse tracking");
+    }
+
+    fn forwarded_echo(app: &App) -> String {
+        app.selected_terminal_surface_client()
+            .expect("provider")
+            .snapshot()
+            .cells
+            .iter()
+            .map(|cell| cell.symbol.as_str())
+            .collect()
+    }
+
+    /// Poll until the child has echoed `needle`, returning the rendered grid.
+    fn wait_for_forwarded_echo(app: &App, needle: &str) -> String {
+        let mut rendered = String::new();
+        for _ in 0..400 {
+            rendered = forwarded_echo(app);
+            if rendered.contains(needle) {
+                return rendered;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("the child never echoed {needle:?}; grid was: {rendered:?}");
+    }
+
+    /// A plain left click inside the windowed pane of a `?1000h` child is
+    /// focused AND forwarded as a translated SGR press, stamped as a pointer
+    /// report — and a rapid second click is just a second forwarded click,
+    /// never a maximize.
+    #[test]
+    fn windowed_click_on_a_mouse_mode_child_forwards_the_translated_press() {
+        let mut app = test_app(default_bindings());
+        install_mouse_forward_child(&mut app, "\\033[?1000h");
+        app.focus = FocusPane::Left;
+
+        // agent_term is (21,1,55,16); a click at screen (30,5) translates to
+        // child cell (10,5) in 1-based SGR coordinates.
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
+
+        assert_eq!(app.focus, FocusPane::Center, "the click still focuses");
+        assert_eq!(
+            app.center_mouse_forward,
+            Some(0),
+            "the press must arm the forwarding drag state"
+        );
+        let session_id = app.engine.sessions[0].id.clone();
+        assert!(
+            app.engine.pty_pointer.contains_key(&session_id),
+            "a forwarded press must stamp the pointer window, not typing"
+        );
+        wait_for_forwarded_echo(&app, "[<0;10;5M");
+
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 30, 5));
+        assert_eq!(app.center_mouse_forward, None);
+        wait_for_forwarded_echo(&app, "[<0;10;5m");
+
+        // The rapid second click: forwarded again, no maximize (decision 9).
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 30, 5));
+        let rendered = wait_for_forwarded_echo(&app, "[<0;10;5m^[[<0;10;5M");
+        assert_eq!(
+            app.fullscreen_overlay,
+            FullscreenOverlay::None,
+            "a double click on a mouse-mode child is two forwarded clicks, not a maximize; got {rendered:?}"
+        );
+        assert_eq!(app.input_target, InputTarget::None);
+    }
+
+    /// With button-drag tracking (`?1002h`) on, dragging a held button sends
+    /// motion reports (button + 32), clamped to the pane edge mid-drag.
+    #[test]
+    fn windowed_drag_sends_motion_reports_to_a_drag_tracking_child() {
+        let mut app = test_app(default_bindings());
+        install_mouse_forward_child(&mut app, "\\033[?1002h");
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
+        app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 35, 6));
+        wait_for_forwarded_echo(&app, "[<32;15;6M");
+
+        // A drag that leaves the pane is clamped to the edge, like xterm.
+        app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 0, 0));
+        wait_for_forwarded_echo(&app, "[<32;1;1M");
+
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 35, 6));
+        wait_for_forwarded_echo(&app, "[<0;15;6m");
+    }
+
+    /// A click-only (`?1000h`) child gets presses and releases but NO motion
+    /// reports: a real emulator would never send it any.
+    #[test]
+    fn windowed_drag_sends_no_motion_to_a_click_only_child() {
+        let mut app = test_app(default_bindings());
+        install_mouse_forward_child(&mut app, "\\033[?1000h");
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
+        app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 35, 6));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 35, 6));
+
+        let rendered = wait_for_forwarded_echo(&app, "[<0;15;6m");
+        assert!(
+            !rendered.contains("[<32;"),
+            "a 1000-only child must receive no motion reports; got {rendered:?}"
+        );
+    }
+
+    /// The RELEASE must always be delivered, even when the pointer left the
+    /// pane: its coordinates clamp to the pane edge. (Deleting the clamp
+    /// makes the translation reject the out-of-pane coordinates and drop the
+    /// release, leaving the child with a stuck button — this test fails.)
+    #[test]
+    fn windowed_release_outside_the_pane_is_clamped_and_delivered() {
+        let mut app = test_app(default_bindings());
+        install_mouse_forward_child(&mut app, "\\033[?1000h");
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
+        wait_for_forwarded_echo(&app, "[<0;10;5M");
+
+        // (0,0) is far outside agent_term (21,1,55,16): clamped to the pane's
+        // top-left content cell, which is (1,1) in child coordinates.
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 0, 0));
+
+        assert_eq!(
+            app.center_mouse_forward, None,
+            "the release must disarm the forwarding state"
+        );
+        wait_for_forwarded_echo(&app, "[<0;1;1m");
+    }
+
+    /// A modified click (Shift/Alt/Ctrl held) is NOT forwarded: it stays
+    /// dux's host-selection story, exactly as in a real emulator.
+    #[test]
+    fn windowed_modified_click_is_not_forwarded() {
+        let mut app = test_app(default_bindings());
+        install_mouse_forward_child(&mut app, "\\033[?1000h");
+        app.focus = FocusPane::Left;
+
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 30,
+            row: 5,
+            modifiers: KeyModifiers::SHIFT,
+        });
+
+        assert_eq!(app.focus, FocusPane::Center, "the click still focuses");
+        assert_eq!(app.center_mouse_forward, None);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let rendered = forwarded_echo(&app);
+        assert!(
+            !rendered.contains("[<"),
+            "a modified click must not reach the child; got {rendered:?}"
+        );
+    }
+
+    /// A child without mouse tracking keeps today's behavior: the click only
+    /// focuses the pane and nothing reaches the PTY.
+    #[test]
+    fn windowed_click_on_a_child_without_mouse_mode_only_focuses() {
+        let mut app = test_app(default_bindings());
+        install_mouse_forward_child(&mut app, "");
+        app.focus = FocusPane::Left;
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
+
+        assert_eq!(app.focus, FocusPane::Center);
+        assert_eq!(app.center_mouse_forward, None);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let rendered = forwarded_echo(&app);
+        assert!(
+            !rendered.contains("[<"),
+            "no mouse mode means no forwarded reports; got {rendered:?}"
+        );
+    }
+
+    /// While scrolled back the scroll vocabulary owns the pane, so a click is
+    /// not forwarded (it would land on cells the child is not showing).
+    #[test]
+    fn windowed_click_is_not_forwarded_while_scrolled_back() {
+        let mut app = test_app(default_bindings());
+        install_mouse_forward_child(&mut app, "\\033[?1000h");
+        let session_id = app.engine.sessions[0].id.clone();
+        app.scroll_mode.insert(session_id);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
+
+        assert_eq!(app.center_mouse_forward, None);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let rendered = forwarded_echo(&app);
+        assert!(
+            !rendered.contains("[<"),
+            "a scrolled-back pane must not forward clicks; got {rendered:?}"
+        );
+    }
+
+    /// The divider grip is dux's (the mouse "dux wins" rule): when a divider
+    /// column overlaps the terminal rect, the resize drag wins over click
+    /// forwarding.
+    #[test]
+    fn windowed_divider_drag_wins_over_click_forwarding() {
+        let mut app = test_app(default_bindings());
+        install_mouse_forward_child(&mut app, "\\033[?1000h");
+        // Stretch the recorded terminal rect over the left divider column
+        // (center.x == 20 in the synthetic layout) so the two claims overlap.
+        app.mouse_layout.agent_term = Some(Rect::new(20, 1, 56, 16));
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 20, 5));
+
+        assert_eq!(
+            app.mouse_drag,
+            Some(ResizeDragState::LeftDivider),
+            "the divider grab must win"
+        );
+        assert_eq!(app.center_mouse_forward, None);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let rendered = forwarded_echo(&app);
+        assert!(
+            !rendered.contains("[<"),
+            "a divider grab must not also forward a click; got {rendered:?}"
+        );
+        // Clean up the drag so the Up arm does not persist pane widths.
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 20, 5));
+    }
+
+    /// Middle and right buttons forward with their SGR codes (1 and 2).
+    #[test]
+    fn windowed_middle_and_right_clicks_forward_their_button_codes() {
+        let mut app = test_app(default_bindings());
+        install_mouse_forward_child(&mut app, "\\033[?1000h");
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Right), 30, 5));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Right), 30, 5));
+        wait_for_forwarded_echo(&app, "[<2;10;5M");
+        wait_for_forwarded_echo(&app, "[<2;10;5m");
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Middle), 30, 5));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Middle), 30, 5));
+        wait_for_forwarded_echo(&app, "[<1;10;5M");
+        wait_for_forwarded_echo(&app, "[<1;10;5m");
     }
 
     #[test]

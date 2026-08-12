@@ -1375,6 +1375,14 @@ impl PtyClient {
         self.terminal.lock().is_ok_and(|t| t.has_mouse_mode())
     }
 
+    /// Whether the child asked for MOTION reports (DECSET 1002/1003). Callers
+    /// forwarding a mouse drag send motion reports only when this is true; a
+    /// 1000-only child receives presses and releases alone, matching what a
+    /// real terminal emulator would send it.
+    pub fn has_mouse_drag_mode(&self) -> bool {
+        self.terminal.lock().is_ok_and(|t| t.has_mouse_drag_mode())
+    }
+
     /// Whether the child process has enabled bracketed paste (DECSET 2004).
     /// When true, pasted text should be delivered wrapped in `ESC[200~` /
     /// `ESC[201~` so the child can tell it apart from typed keystrokes;
@@ -2030,6 +2038,15 @@ impl TerminalState {
     /// (e.g. via DECSET 1000/1002/1003).
     fn has_mouse_mode(&self) -> bool {
         self.term.mode().intersects(TermMode::MOUSE_MODE)
+    }
+
+    /// Whether the child asked for MOTION reports (DECSET 1002 button-drag or
+    /// 1003 any-motion). A 1000-only child gets presses and releases but no
+    /// motion, exactly as a real terminal emulator would send.
+    fn has_mouse_drag_mode(&self) -> bool {
+        self.term
+            .mode()
+            .intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION)
     }
 
     /// Whether the child process has switched to the alternate screen buffer
@@ -5740,6 +5757,35 @@ mod tests {
         assert!(
             !terminal.has_mouse_mode(),
             "mouse mode should be disabled after DECRST 1000"
+        );
+    }
+
+    /// DECSET 1000 alone is click tracking, not drag tracking: a 1000-only
+    /// child must not be handed motion reports a real emulator would never
+    /// send it. 1002 (button-drag) and 1003 (any-motion) both count.
+    #[test]
+    fn mouse_drag_mode_requires_1002_or_1003() {
+        let mut terminal = TerminalState::with_scrollback(24, 80, 100);
+        assert!(!terminal.has_mouse_drag_mode(), "off by default");
+
+        terminal.process(b"\x1b[?1000h");
+        assert!(
+            !terminal.has_mouse_drag_mode(),
+            "click-only tracking (1000) must not enable motion reports"
+        );
+
+        terminal.process(b"\x1b[?1002h");
+        assert!(
+            terminal.has_mouse_drag_mode(),
+            "button-drag tracking (1002) enables motion reports"
+        );
+        terminal.process(b"\x1b[?1002l");
+        assert!(!terminal.has_mouse_drag_mode());
+
+        terminal.process(b"\x1b[?1003h");
+        assert!(
+            terminal.has_mouse_drag_mode(),
+            "any-motion tracking (1003) enables motion reports"
         );
     }
 
