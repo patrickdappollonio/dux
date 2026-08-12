@@ -5622,6 +5622,15 @@ export function saveConfigEditor(content: string): void {
       // the running config untouched (no adopt, no `config.changed`) until the user
       // explicitly runs "Reload config". The toast states exactly that so the lack
       // of a visible change isn't mistaken for a no-op.
+      //
+      // STICKY was weighed here and declined, and it is the closest call on the
+      // list: the user does have to act outside the toast, and the edit sits
+      // inert until they do, which is the first half of the rule. What it fails
+      // is the second half. Nothing is lost. The file is written, the setting
+      // survives a reload of the page and a restart of the browser, and the
+      // action the toast names is a permanent entry in the cog menu rather than
+      // something only this sentence knows about. Pinning it would spend the
+      // sticky budget on a reminder rather than on a rescue.
       closeConfigEditor()
       notifySuccess("Saved config.toml. Run “Reload config” to apply it.")
     })

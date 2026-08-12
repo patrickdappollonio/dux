@@ -1140,9 +1140,24 @@ export function TerminalPane(props: TerminalPaneProps) {
         void copyTermSelection(term, focusTypingSurface)
       } else if (action === "hint") {
         mouseCaptureHintShown = true
-        // No id: `mouseCaptureHintShown` already makes this once per pane, and
-        // no fixed duration either, so the hint follows the user's configured
-        // window like every other notification.
+        // THREE things changed here when this moved onto the shared raiser,
+        // and all three are deliberate.
+        //
+        // The fixed id went, and what justifies that is the latch above being
+        // MODULE scope: this fires at most once per page load, across every
+        // pane remount, so there is never a second raise for an id to
+        // deduplicate. (Once per PANE would not have been enough: two panes
+        // would then mean two toasts and no id to merge them.)
+        //
+        // The explicit 8000ms went, and the hint now takes the configured
+        // window (6s by default), 25% shorter on a message the user has to read
+        // and act on. One policy beating a scattering of hand-picked durations
+        // is the point of the change, and the sentence is short; if it proves
+        // too quick in practice the answer is the setting, not a number here.
+        //
+        // And it gained a TONE: this was an untoned `toast()` and is now info,
+        // so it carries sonner's sky info icon where it previously had none.
+        // That is what it is: a neutral instruction, and the icon says so.
         notifyInfo(
           `This app is using the mouse. Hold ${
             isMac ? "⌥ Option" : "Shift"
@@ -2492,6 +2507,23 @@ export function TerminalPane(props: TerminalPaneProps) {
   // latch arms the next direct KEY, and a composed message is not a key; a
   // user who tapped Ctrl intending Ctrl-c should not lose the latch to an
   // unrelated Send.
+  //
+  // All three refusals KEEP the fixed `compose-send` id, which is the opposite
+  // of what the terminal copy and paste notifications now do (see
+  // `lib/termClipboard.ts` for why theirs went away). Send is one deliberate
+  // press producing one of three fixed sentences, and a user who presses it
+  // three times against a dead socket wants one "not connected", not three
+  // identical copies of it stacked up. The id is doing real work here: it also
+  // means the reason REPLACES itself when it changes, so a viewer who takes
+  // over and then hits the size cap sees the new reason rather than two
+  // contradictory ones.
+  //
+  // The hazard is real and is accepted: repeating a failing Send restarts the
+  // 24s error countdown each time, so the toast lingers for a full window after
+  // the LAST attempt rather than the first. That is the correct end of the
+  // trade for a message that is still true while the user keeps trying, and it
+  // is bounded, unlike the copy-on-select case where an incidental gesture the
+  // user never thought of as raising a toast could pin one open indefinitely.
   function sendCompose(text: string): boolean {
     if (!isOwnerRef.current) {
       notifyError("Another device is driving this terminal. Take over to send.", {

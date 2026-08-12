@@ -22,6 +22,23 @@ import { describe, expect, it } from "vitest"
 //
 // This is the same idiom as the TUI's `KNOWN_DUAL_MODE_VIOLATIONS`: a named
 // list asserted as an exact set, not a subset.
+//
+// WHAT IT IS NOT. This catches an ACCIDENT, not an evasion, and saying so
+// matters because a check that reads like a guarantee gets trusted like one. It
+// greps text; it does not parse TypeScript. Concretely:
+//
+//   - `stripComments` below has no string or template awareness, so a `//`
+//     inside a string literal deletes the rest of that PHYSICAL LINE. That can
+//     hide a real import as easily as it can raise a false one.
+//   - the pattern knows two spellings, a `from` clause and an `import()` call
+//     with a literal. It does not know `require`, a bare side-effect import, a
+//     dynamic import built from a template literal or a variable, or a
+//     re-export laundering the module through a third file.
+//
+// None of those is a plausible way for somebody to reach for a toast in a
+// hurry, which is the failure this exists to catch: 91 call sites that each
+// typed the obvious import. Anyone determined to get around it can, and the
+// answer to that is review, not a cleverer regex.
 
 const SRC = join(fileURLToPath(new URL(".", import.meta.url)), "..")
 

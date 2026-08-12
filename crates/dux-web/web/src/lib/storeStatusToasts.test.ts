@@ -119,9 +119,11 @@ function status(
   message: string,
   sticky?: boolean,
 ) {
-  // `sticky` is omitted from the frame unless asked for, mirroring the server's
-  // `skip_serializing_if`: an older server, and every ordinary status, sends no
-  // such field at all.
+  // `sticky` is omitted from the frame unless a test asks for it, which is the
+  // COMPATIBILITY shape rather than the current server's: `WireStatus.sticky`
+  // carries `#[serde(default)]`, so a current server sends the field on every
+  // frame. A frame without one comes from a server that predates it, and the
+  // third test below is what pins that reading.
   const extra = sticky === undefined ? {} : { sticky }
   mod.eventsSocket.onEvent(
     key == null

@@ -387,6 +387,12 @@ beforeEach(() => {
 afterEach(() => {
   cleanup()
   vi.unstubAllGlobals()
+  // The configured window lives in `lib/notify.ts` at module scope, so a test
+  // that sets it must not leave it set. Resetting here rather than at the end
+  // of that test body is what makes it unconditional: a failing assertion
+  // above the reset would otherwise leak a 30s window into every test that
+  // ran after it in this file.
+  setStatusClearSeconds(undefined)
 })
 
 describe("pasting an image onto an agent", () => {
@@ -580,7 +586,6 @@ describe("the paste report honors the configured dismiss window", () => {
     // Success is the 1x rung of the graded window, so this is the configured
     // 30s and not the 6s default.
     expect(options.duration).toBe(30_000)
-    setStatusClearSeconds(undefined)
   })
 })
 
