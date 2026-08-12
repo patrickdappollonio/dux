@@ -1083,7 +1083,12 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
       revalidateDirs,
       refreshSearchIndex,
       reportBusy: (message) => notifyBusy(message, { id: toastId }),
-      reportFinal: (t) => notify(t.tone, t.message, { id: toastId }),
+      // `sticky` is forwarded rather than dropped, so the decision stays in the
+      // one place that makes it (`editorDropToast`, where every rung says
+      // false, and says why). Hardcoding it here would put a second opinion
+      // next to the first; omitting it, as this line used to, silently made a
+      // tree drop unpinnable whatever the report asked for.
+      reportFinal: (t) => notify(t.tone, t.message, { id: toastId, sticky: t.sticky }),
     })
   }
 
