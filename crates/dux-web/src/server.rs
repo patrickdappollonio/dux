@@ -1803,9 +1803,12 @@ async fn send_pty_connected(sink: &SharedSink, conn_id: u64, generation: u64) ->
 
 /// Outbound `/ws/events` status event: the one event carrying an inline payload
 /// (a toast has nothing to GET). Shape:
-/// `{ "event": "status", "key": "op-7", "tone": "info", "message": "…", "scope": "all" }`.
+/// `{ "event": "status", "key": "op-7", "tone": "info", "message": "…", "scope": "all",
+/// "sticky": false }`.
 /// The server has already filtered on `scope`, but it is serialized for wire
-/// parity so a client may render/correlate it.
+/// parity so a client may render/correlate it. `sticky` tells the client to hold
+/// the toast until the user dismisses it instead of retiring it on a timer; see
+/// [`dux_core::statusline::KeyedWireStatus::sticky`].
 #[derive(serde::Serialize)]
 struct WireStatusEvent {
     event: &'static str,
@@ -1814,6 +1817,7 @@ struct WireStatusEvent {
     tone: String,
     message: String,
     scope: StatusScope,
+    sticky: bool,
 }
 
 /// Outbound `/ws/events` status-clear event: dismiss the toast for `key` (a keyed
@@ -2108,6 +2112,7 @@ async fn handle_events_socket(
                             tone: status.tone,
                             message: status.message,
                             scope: status.scope,
+                            sticky: status.sticky,
                         };
                         if send_status_event(&sink, &ev).await.is_err() {
                             break;
@@ -2404,6 +2409,7 @@ fn status_events(snapshot: &[KeyedWireStatus], conn_id: &str) -> Vec<WireStatusE
             tone: e.tone.clone(),
             message: e.message.clone(),
             scope: e.scope.clone(),
+            sticky: e.sticky,
         })
         .collect()
 }
@@ -3659,6 +3665,7 @@ mod tests {
             tone: "busy".into(),
             message: "Pulling\u{2026}".into(),
             scope: StatusScope::All,
+            sticky: false,
         }];
         let events = status_events(&snapshot, "conn");
         assert_eq!(events.len(), 1);
@@ -3670,7 +3677,7 @@ mod tests {
         let json = serde_json::to_string(&events[0]).unwrap();
         assert_eq!(
             json,
-            r#"{"event":"status","key":"pull","tone":"busy","message":"Pulling…","scope":"all"}"#
+            r#"{"event":"status","key":"pull","tone":"busy","message":"Pulling…","scope":"all","sticky":false}"#
         );
     }
 
@@ -3683,18 +3690,21 @@ mod tests {
                 tone: "busy".into(),
                 message: "Pulling\u{2026}".into(),
                 scope: StatusScope::All,
+                sticky: false,
             },
             KeyedWireStatus {
                 key: Some("commit".into()),
                 tone: "info".into(),
                 message: "Changes committed.".into(),
                 scope: StatusScope::All,
+                sticky: false,
             },
             KeyedWireStatus {
                 key: None,
                 tone: "warning".into(),
                 message: "Worktree dirty.".into(),
                 scope: StatusScope::All,
+                sticky: false,
             },
         ];
         let events = status_events(&snapshot, "conn");
@@ -3712,12 +3722,14 @@ mod tests {
                 tone: "info".into(),
                 message: String::new(),
                 scope: StatusScope::All,
+                sticky: false,
             },
             KeyedWireStatus {
                 key: Some("other".into()),
                 tone: "busy".into(),
                 message: "Working\u{2026}".into(),
                 scope: StatusScope::All,
+                sticky: false,
             },
         ];
         let events = status_events(&snapshot, "conn");
@@ -3891,12 +3903,14 @@ mod tests {
                 tone: "busy".into(),
                 message: "Pushing\u{2026}".into(),
                 scope: StatusScope::Connection("A".into()),
+                sticky: false,
             },
             KeyedWireStatus {
                 key: Some("commit".into()),
                 tone: "info".into(),
                 message: "Changes committed.".into(),
                 scope: StatusScope::All,
+                sticky: false,
             },
         ];
         // Connection B joins: it sees only the `All` status, not A's busy.

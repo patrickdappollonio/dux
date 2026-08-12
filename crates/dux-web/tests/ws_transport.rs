@@ -515,9 +515,14 @@ async fn a_finished_operations_error_is_never_replayed_to_a_later_connection() {
 
     // Control: the connection that was watching DID receive the error.
     let seen = saw_status_tone(&mut ws_a, "error", Duration::from_secs(10)).await;
+    let seen = seen.expect("the attached connection must receive the broadcast error");
+
+    // And it arrives STICKY, end to end from the engine resolver to the wire: a
+    // failed worktree removal leaves an orphaned directory on disk that only the
+    // user can clear, so this toast must wait for them rather than time out.
     assert!(
-        seen.is_some(),
-        "the attached connection must receive the broadcast error"
+        seen.contains("\"sticky\":true"),
+        "a half-done delete must be marked sticky on the wire, got {seen}"
     );
 
     // Let the actor settle so any snapshot write has landed; the point of the

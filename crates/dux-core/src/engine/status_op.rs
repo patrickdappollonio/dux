@@ -32,7 +32,13 @@ fn next_status_id() -> String {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Final {
     /// Replace the spinner with a transient success / persistent failure line.
-    Message { tone: StatusTone, text: String },
+    /// `sticky` marks the rare outcome that must wait for the user rather than
+    /// retiring on a timer; see [`Final::sticky`].
+    Message {
+        tone: StatusTone,
+        text: String,
+        sticky: bool,
+    },
     /// Deliberately dismiss the pending status with NO replacement message.
     /// Reads in review as "no final message needed here, empty is fine".
     Clear,
@@ -43,22 +49,42 @@ impl Final {
         Final::Message {
             tone: StatusTone::Info,
             text: text.into(),
+            sticky: false,
         }
     }
     pub fn warning(text: impl Into<String>) -> Self {
         Final::Message {
             tone: StatusTone::Warning,
             text: text.into(),
+            sticky: false,
         }
     }
     pub fn error(text: impl Into<String>) -> Self {
         Final::Message {
             tone: StatusTone::Error,
             text: text.into(),
+            sticky: false,
         }
     }
     pub fn clear() -> Self {
         Final::Clear
+    }
+
+    /// Mark this outcome as one that waits for the user (builder form, chained
+    /// onto one of the tone constructors). A [`Final::Clear`] has no message to
+    /// keep, so it is returned unchanged.
+    ///
+    /// Reserve it for outcomes where the user must act OUTSIDE the toast to
+    /// recover, or where something may have been lost or left half-done.
+    pub fn sticky(self) -> Self {
+        match self {
+            Final::Message { tone, text, .. } => Final::Message {
+                tone,
+                text,
+                sticky: true,
+            },
+            Final::Clear => Final::Clear,
+        }
     }
 }
 
@@ -110,11 +136,12 @@ impl ResolvedFinal {
     pub fn into_reaction(self) -> crate::engine::EventReaction {
         use crate::engine::EventReaction;
         match self.outcome {
-            Final::Message { tone, text } => EventReaction::Status(StatusUpdate {
+            Final::Message { tone, text, sticky } => EventReaction::Status(StatusUpdate {
                 tone,
                 message: text,
                 key: Some(self.key),
                 scope: self.scope,
+                sticky,
             }),
             Final::Clear => EventReaction::ClearStatus(self.key),
         }
@@ -292,21 +319,24 @@ mod tests {
             Final::info("ok"),
             Final::Message {
                 tone: StatusTone::Info,
-                text: "ok".into()
+                text: "ok".into(),
+                sticky: false,
             }
         );
         assert_eq!(
             Final::error("bad"),
             Final::Message {
                 tone: StatusTone::Error,
-                text: "bad".into()
+                text: "bad".into(),
+                sticky: false,
             }
         );
         assert_eq!(
             Final::warning("hmm"),
             Final::Message {
                 tone: StatusTone::Warning,
-                text: "hmm".into()
+                text: "hmm".into(),
+                sticky: false,
             }
         );
         assert_eq!(Final::clear(), Final::Clear);

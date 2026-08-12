@@ -437,11 +437,19 @@ impl Engine {
                             self.projects.retain(|p| p.id != id);
                             self.config.projects = prev_config_projects;
                             if let Err(db_err) = self.session_store.delete_project(&id) {
-                                return Ok(EventReaction::Status(StatusUpdate::error(format!(
-                                    "Project add failed and couldn't be cleaned up — it may \
-                                     reappear on restart. Config error: {e:#}. DB cleanup error: \
-                                     {db_err:#}"
-                                ))));
+                                // STICKY: the rollback itself failed, so dux is
+                                // knowingly leaving a half-removed project behind
+                                // and says it may come back on restart. Recovery
+                                // is in config.toml and the database, outside any
+                                // toast.
+                                return Ok(EventReaction::Status(
+                                    StatusUpdate::error(format!(
+                                        "Project add failed and couldn't be cleaned up — it may \
+                                         reappear on restart. Config error: {e:#}. DB cleanup \
+                                         error: {db_err:#}"
+                                    ))
+                                    .sticky(),
+                                ));
                             }
                             Ok(EventReaction::Status(StatusUpdate::error(format!(
                                 "Project add failed and was rolled back — config.toml could \
@@ -624,13 +632,23 @@ impl Engine {
                                 Final::info(status_message.clone())
                             }
                             CreateLaunchOutcome::StartupFailed { branch_name, error } => {
+                                // STICKY: the agent exists but its provisioning
+                                // stopped part-way, so the worktree is in an
+                                // unknown state, and the message itself sends the
+                                // user to the startup command logs, which is an
+                                // action outside the toast.
                                 Final::error(format!(
                                     "Startup command failed for agent \"{branch_name}\": {error}. \
                                      Run read-startup-command-logs for details."
                                 ))
+                                .sticky()
                             }
                             CreateLaunchOutcome::PersistFailed { error } => {
-                                Final::error(format!("Failed to persist session: {error}"))
+                                // STICKY: the worktree was created but its session
+                                // row was not saved, so dux will not know about it
+                                // after a restart and the directory is left behind
+                                // for the user to deal with by hand.
+                                Final::error(format!("Failed to persist session: {error}")).sticky()
                             }
                             CreateLaunchOutcome::Failed { message } => {
                                 Final::error(message.clone())
@@ -820,9 +838,13 @@ impl Engine {
                 success_message,
             } => match crate::git::commit(&worktree_path, &message) {
                 Ok(_) => Ok(EventReaction::Status(StatusUpdate::info(success_message))),
-                Err(e) => Ok(EventReaction::Status(StatusUpdate::error(format!(
-                    "Commit failed: {e}"
-                )))),
+                // STICKY: the commit message the user just wrote is not saved
+                // anywhere by the failure, and git may have left the index
+                // partly staged. Recovering means going back to the message or
+                // to git, both outside the toast.
+                Err(e) => Ok(EventReaction::Status(
+                    StatusUpdate::error(format!("Commit failed: {e}")).sticky(),
+                )),
             },
 
             Command::Push { worktree_path } => {
@@ -2619,7 +2641,7 @@ mod tests {
         let op = project_refresh_status_op("Refreshing...".to_string(), "demo");
         let resolved = op.resolve(&Ok(outcome));
         match resolved.outcome {
-            crate::engine::Final::Message { tone, text } => {
+            crate::engine::Final::Message { tone, text, .. } => {
                 assert_eq!(tone, StatusTone::Info);
                 assert!(text.contains("no origin remote"), "got: {text}");
             }
@@ -2644,7 +2666,7 @@ mod tests {
         let op = project_refresh_status_op("Refreshing...".to_string(), "demo");
         let resolved = op.resolve(&result);
         match resolved.outcome {
-            crate::engine::Final::Message { tone, text } => {
+            crate::engine::Final::Message { tone, text, .. } => {
                 assert_eq!(tone, StatusTone::Warning, "got: {text}");
                 assert!(
                     text.contains("Continuing from the local branch state"),

@@ -77,6 +77,12 @@ pub struct StatusUpdate {
     /// command mint sites so a web operation's toasts reach only the
     /// originating connection. The TUI ignores it.
     pub scope: StatusScope,
+    /// Whether the surface must hold this message until the user dismisses it.
+    /// Set it only when the user must act OUTSIDE the toast to recover, or when
+    /// something may have been lost or left half-done. See
+    /// [`crate::statusline::KeyedWireStatus::sticky`]; the TUI ignores it (a
+    /// single status line already waits for the next message).
+    pub sticky: bool,
 }
 
 impl StatusUpdate {
@@ -86,6 +92,7 @@ impl StatusUpdate {
             message: message.into(),
             key: None,
             scope: StatusScope::All,
+            sticky: false,
         }
     }
     /// SEALED: a `Busy` status may only be born from a [`StatusOp`] (its
@@ -100,6 +107,7 @@ impl StatusUpdate {
             message: message.into(),
             key: None,
             scope: StatusScope::All,
+            sticky: false,
         }
     }
     #[allow(dead_code)]
@@ -109,6 +117,7 @@ impl StatusUpdate {
             message: message.into(),
             key: None,
             scope: StatusScope::All,
+            sticky: false,
         }
     }
     pub fn error(message: impl Into<String>) -> Self {
@@ -117,6 +126,7 @@ impl StatusUpdate {
             message: message.into(),
             key: None,
             scope: StatusScope::All,
+            sticky: false,
         }
     }
 
@@ -130,7 +140,16 @@ impl StatusUpdate {
             message: message.into(),
             key: Some(key.into()),
             scope: StatusScope::All,
+            sticky: false,
         }
+    }
+
+    /// Mark this status as one that waits for the user (builder form). Reserved
+    /// for the small set of outcomes where the user must act outside the toast
+    /// to recover, or where something may have been lost or left half-done.
+    pub fn sticky(mut self) -> Self {
+        self.sticky = true;
+        self
     }
 
     /// Attach a correlation key to this update (builder form). Lets callers

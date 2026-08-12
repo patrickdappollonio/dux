@@ -103,6 +103,9 @@ pub struct KeyedStatus {
     /// web actor sets it from the originating connection so per-connection
     /// filtering can suppress other clients' operation toasts.
     pub scope: StatusScope,
+    /// Whether this status waits for the user instead of leaving on its own.
+    /// See the field of the same name on [`KeyedWireStatus`].
+    pub sticky: bool,
     pub generation: Generation,
     /// Wall-clock time when this status was last set. Used for auto-clear and
     /// busy-timeout decisions in `tick`.
@@ -122,6 +125,19 @@ pub struct KeyedWireStatus {
     /// filtered per connection (a mid-operation joiner must not receive another
     /// connection's in-progress `Busy`). Defaults to [`StatusScope::All`].
     pub scope: StatusScope,
+    /// Whether the surface must keep this message up until the user dismisses
+    /// it, rather than retiring it on a timer.
+    ///
+    /// Deliberately ORTHOGONAL to tone. A catastrophic error is still visually
+    /// an error, so a `Critical` tone would have put every call site on a
+    /// spectrum with no clear line and duplicated every icon and colour
+    /// decision. This flag answers one crisp question instead: does this
+    /// message wait for the user, or does it leave on its own?
+    ///
+    /// The rule for setting it, and it is meant to stay rare: the user must act
+    /// OUTSIDE the toast to recover, or something may have been lost or left
+    /// half-done. Everything else self-dismisses.
+    pub sticky: bool,
 }
 
 /// What `tick` changed, so the web actor can broadcast precise StatusCleared /
@@ -231,13 +247,15 @@ impl KeyedStatusController {
         tone: StatusTone,
         message: impl Into<String>,
     ) -> Generation {
-        self.set_scoped(now, key, tone, message, StatusScope::All)
+        self.set_scoped(now, key, tone, message, StatusScope::All, false)
     }
 
     /// Like [`set`](Self::set) but records the status's delivery [`StatusScope`].
     /// `set` delegates here with [`StatusScope::All`], so TUI call sites (which
     /// ignore scope) need no change; the web actor calls this with the
-    /// originating connection's scope so the snapshot can be filtered.
+    /// originating connection's scope so the snapshot can be filtered, and its
+    /// `sticky` flag so a status that must wait for the user survives the
+    /// surface's own auto-dismiss timer.
     pub fn set_scoped(
         &mut self,
         now: Instant,
@@ -245,6 +263,7 @@ impl KeyedStatusController {
         tone: StatusTone,
         message: impl Into<String>,
         scope: StatusScope,
+        sticky: bool,
     ) -> Generation {
         let generation = Generation(self.next_gen);
         let seq = self.next_seq;
@@ -256,6 +275,7 @@ impl KeyedStatusController {
             tone,
             message: message.into(),
             scope,
+            sticky,
             generation,
             since: now,
             seq,
@@ -360,6 +380,9 @@ impl KeyedStatusController {
                 tone: StatusTone::Warning.as_wire().to_string(),
                 message: "timed out — check dux.log".to_string(),
                 scope: anon.scope.clone(),
+                // A timeout says only that dux stopped hearing about an
+                // operation. Nothing is known to be lost, so it is not sticky.
+                sticky: false,
             });
             // The upgrade produced a final, so `Emit` drops it exactly as it
             // drops any other final: it is reported in `upgraded` (which the web
@@ -412,6 +435,9 @@ impl KeyedStatusController {
                 self.next_seq += 1;
                 entry.tone = StatusTone::Warning;
                 entry.message = "timed out — check dux.log".to_string();
+                // See the anonymous path: a timeout reports lost contact, not
+                // lost work.
+                entry.sticky = false;
                 entry.generation = generation;
                 entry.since = now;
                 entry.seq = seq;
@@ -420,6 +446,7 @@ impl KeyedStatusController {
                     tone: StatusTone::Warning.as_wire().to_string(),
                     message: entry.message.clone(),
                     scope: entry.scope.clone(),
+                    sticky: entry.sticky,
                 });
             }
             // See the anonymous path above: under `Emit` the timed-out Warning
@@ -442,6 +469,7 @@ impl KeyedStatusController {
                 tone: anon.tone.as_wire().to_string(),
                 message: anon.message.clone(),
                 scope: anon.scope.clone(),
+                sticky: anon.sticky,
             });
         }
         for entry in self.entries.values() {
@@ -450,6 +478,7 @@ impl KeyedStatusController {
                 tone: entry.tone.as_wire().to_string(),
                 message: entry.message.clone(),
                 scope: entry.scope.clone(),
+                sticky: entry.sticky,
             });
         }
         out
@@ -482,6 +511,7 @@ impl KeyedStatusController {
             tone: winner.tone.as_wire().to_string(),
             message: winner.message.clone(),
             scope: winner.scope.clone(),
+            sticky: winner.sticky,
         })
     }
 
@@ -861,6 +891,40 @@ mod tests {
         assert!(
             changes.cleared_keys.is_empty(),
             "an upgrade is a replacement, not a dismissal"
+        );
+    }
+
+    #[test]
+    fn sticky_is_off_by_default_and_travels_into_the_snapshot() {
+        // The flag is orthogonal to tone, so it has to be carried rather than
+        // derived: an ordinary error is NOT sticky and only a status that asked
+        // for it comes back sticky.
+        use super::{StatusScope, StatusTone as T};
+        let t0 = Instant::now();
+        let mut c = KeyedStatusController::with_clear_after(Duration::ZERO);
+        c.set(t0, Some("ordinary".into()), T::Error, "Push failed.");
+        c.set_scoped(
+            t0,
+            Some("halfdone".into()),
+            T::Error,
+            "Worktree delete failed.",
+            StatusScope::All,
+            true,
+        );
+        let snap = c.snapshot();
+        let ordinary = snap
+            .iter()
+            .find(|e| e.key.as_deref() == Some("ordinary"))
+            .expect("ordinary entry");
+        let halfdone = snap
+            .iter()
+            .find(|e| e.key.as_deref() == Some("halfdone"))
+            .expect("sticky entry");
+        assert!(!ordinary.sticky, "the default must be non-sticky");
+        assert!(halfdone.sticky, "a sticky status must stay sticky");
+        assert!(
+            c.most_recent().unwrap().sticky,
+            "the single-line projection must carry the flag too"
         );
     }
 

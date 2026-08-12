@@ -1911,7 +1911,7 @@ mod tests {
             anyhow::anyhow!("connection refused"),
         )));
         match resolved.outcome {
-            dux_core::engine::Final::Message { tone, text } => {
+            dux_core::engine::Final::Message { tone, text, .. } => {
                 assert_eq!(tone, dux_core::statusline::StatusTone::Error);
                 assert!(text.contains("connection refused"), "{text}");
             }

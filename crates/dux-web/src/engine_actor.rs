@@ -2064,6 +2064,7 @@ impl StatusEmitter {
             tone,
             status.message.as_str(),
             status.scope.clone(),
+            status.sticky,
         );
         if let Some(ref k) = status.key {
             self.generations.insert(k.clone(), generation);
@@ -2104,6 +2105,7 @@ impl StatusEmitter {
                 tone: up.tone,
                 message: up.message,
                 scope: up.scope,
+                sticky: up.sticky,
             });
         }
     }

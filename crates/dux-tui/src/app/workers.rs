@@ -1465,7 +1465,7 @@ impl App {
         // No op stashed: apply the SAME final anonymously (no key), preserving the
         // pre-op behavior. `reconnect_final` is the single wording source.
         match dux_core::engine::launch_outcome_final(&outcome) {
-            dux_core::engine::Final::Message { tone, text } => {
+            dux_core::engine::Final::Message { tone, text, .. } => {
                 self.status.set(std::time::Instant::now(), None, tone, text);
             }
             dux_core::engine::Final::Clear => {
