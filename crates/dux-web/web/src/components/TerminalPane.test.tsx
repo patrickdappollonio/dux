@@ -35,7 +35,40 @@ class TermStub {
   rows = 24
   cols = 80
   textarea = { setAttribute() {}, blur() {} }
-  buffer = { active: { type: "normal" } }
+  // The scrollback the selection tests read words out of. `lines` is the whole
+  // buffer and `viewportY` is the first line on screen, so a test can scroll
+  // and see the pane resolve a DIFFERENT absolute row from the same finger
+  // position. `getLine`/`getCell` mirror the shape `rowCells` consumes; only
+  // single-width cells are modelled here, because the wide-glyph rules are
+  // pinned against a REAL xterm buffer in `lib/termselect.xterm.test.ts`.
+  lines: string[] = ["git status --porcelain", "second line here"]
+  buffer = {
+    active: {
+      type: "normal",
+      viewportY: 0,
+      getLine: (y: number) => {
+        const text = this.lines[y]
+        if (text === undefined) return undefined
+        return {
+          length: this.cols,
+          getCell: (x: number) => ({
+            getChars: () => text[x] ?? "",
+            getWidth: () => 1,
+          }),
+        }
+      },
+    },
+  }
+  // xterm's selection model, faithful to the one thing the pane depends on:
+  // `select(col, row, length)` is a forward start-plus-length whose length
+  // WRAPS across rows at `cols` (`SelectionModel.finalSelectionEnd`).
+  selection: { col: number; row: number; length: number } | null = null
+  select(col: number, row: number, length: number) {
+    this.selection = { col, row, length }
+  }
+  hasSelection() {
+    return this.selection !== null && this.selection.length > 0
+  }
   modes = {
     mouseTrackingMode: "none",
     applicationCursorKeysMode: false,
@@ -150,12 +183,38 @@ class TermStub {
   attachCustomKeyEventHandler() {}
   focus() {}
   getSelection() {
-    return ""
+    const sel = this.selection
+    if (!sel || sel.length <= 0) return ""
+    let out = ""
+    let remaining = sel.length
+    let row = sel.row
+    let col = sel.col
+    while (remaining > 0) {
+      const take = Math.min(remaining, this.cols - col)
+      const text = this.lines[row] ?? ""
+      out += text.slice(col, col + take).padEnd(0)
+      remaining -= take
+      row++
+      col = 0
+      if (remaining > 0) out += "\n"
+    }
+    return out
   }
   selectAll() {}
-  scrollLines() {}
+  // Counted and applied: the auto-scroll test asserts BOTH that the pane
+  // scrolled and that the row the selection then resolves to moved with it.
+  scrollLineCalls: number[] = []
+  scrollLines(amount: number) {
+    this.scrollLineCalls.push(amount)
+    this.buffer.active.viewportY = Math.max(
+      0,
+      this.buffer.active.viewportY + amount,
+    )
+  }
   scrollToBottom() {}
-  clearSelection() {}
+  clearSelection() {
+    this.selection = null
+  }
   reset() {}
   paste() {}
   write(_data: unknown, cb?: () => void) {
@@ -229,11 +288,25 @@ vi.mock("@xterm/addon-fit", () => ({ FitAddon: FitStub }))
 // Spy on sonner so the compose bar's refused-send tests can assert the user
 // was told WHY the message stayed in the buffer (owner/offline/oversized).
 const toastError = vi.fn()
+// Plain `toast(...)` bodies, so the long-press suite can assert that selecting
+// over a mouse-tracking app does NOT produce the mouse-only "hold Shift and
+// drag" hint.
+const toastCalls: unknown[] = []
 vi.mock("sonner", () => ({
-  toast: Object.assign(vi.fn(), {
+  toast: Object.assign((...args: unknown[]) => void toastCalls.push(args[0]), {
     success: vi.fn(),
     error: (...args: unknown[]) => toastError(...args),
   }),
+}))
+// What reached the clipboard. The real helper needs `navigator.clipboard` or
+// `document.execCommand`, neither of which jsdom provides, so a stub is the
+// only way to tell "copied" from "tried and failed".
+const copied: string[] = []
+vi.mock("@/lib/clipboard", () => ({
+  copyToClipboard: async (text: string) => {
+    copied.push(text)
+    return true
+  },
 }))
 vi.mock("@/lib/suppressViewerReports", () => ({ suppressViewerReports: () => {} }))
 const notifyRegistrations: { title: () => string }[] = []
@@ -364,6 +437,8 @@ beforeEach(() => {
   FitStub.nextDims = null
   notifyRegistrations.length = 0
   toastError.mockClear()
+  toastCalls.length = 0
+  copied.length = 0
   mockState = makeState()
   installStubs()
   // The `pty.owner` epoch high-water marks are module-global; reset so a handover
@@ -2362,5 +2437,223 @@ describe("TerminalPane typing-surface toggle", () => {
     mockState = state
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     expect(screen.queryByRole("button", { name: /^Typing surface:/ })).toBeNull()
+  })
+})
+
+// Long-press text selection. A browser synthesizes mouse events for a TAP and
+// for nothing else, so xterm's own selection service never sees a touch drag;
+// the pane drives xterm's selection model itself through the pure helpers in
+// `lib/termselect.ts`. These tests are about the WIRING: that the long press
+// picks a word, that the drag re-selects the normalized span, that the lift
+// copies, and that none of the other touch branches got broken doing it.
+//
+// Geometry comes from `TermStub.mouseGeometry`: the `.xterm-screen` rect starts
+// at (100, 50) with 10x20 cells and an 80x24 grid, and the stub buffer's first
+// line is "git status --porcelain".
+describe("TerminalPane long-press text selection", () => {
+  const LONG_PRESS_MS = 400
+  const container = () => screen.getByTestId("terminal-container")
+  const term = () => {
+    const t = TermStub.instances.at(-1)
+    if (!t) throw new Error("no term constructed")
+    return t
+  }
+  // The centre of the ZERO-based cell (col, row).
+  const at = (col: number, row: number) => ({
+    clientX: 100 + col * 10 + 5,
+    clientY: 50 + row * 20 + 10,
+  })
+  const press = (point: { clientX: number; clientY: number }) => {
+    fireEvent.touchStart(container(), { touches: [point] })
+    act(() => {
+      vi.advanceTimersByTime(LONG_PRESS_MS)
+    })
+  }
+  const move = (point: { clientX: number; clientY: number }) =>
+    fireEvent.touchMove(container(), { touches: [point] })
+  const lift = (point: { clientX: number; clientY: number }) =>
+    fireEvent.touchEnd(container(), { touches: [], changedTouches: [point] })
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it("selects the word under the finger on a long press", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    press(at(6, 0))
+    expect(term().getSelection()).toBe("status")
+  })
+
+  it("selects nothing where there is nothing, rather than the nearest word", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    // Column 60 of the first line is past the end of the text: blank cells.
+    press(at(60, 0))
+    expect(term().getSelection().trim()).toBe("")
+  })
+
+  it("extends the selection as the finger drags forward", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    press(at(6, 0))
+    move(at(13, 0))
+    expect(term().getSelection()).toBe("status --p")
+  })
+
+  it("normalizes a backwards drag instead of collapsing the selection", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    press(at(6, 0))
+    move(at(0, 0))
+    expect(term().getSelection()).toBe("git status")
+  })
+
+  it("carries the selection onto the next row", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    press(at(4, 0))
+    move(at(5, 1))
+    expect(term().getSelection()).toBe("status --porcelain\nsecond")
+  })
+
+  it("auto-scrolls one row per move once the finger passes the bottom edge", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    press(at(6, 0))
+    const below = { clientX: at(6, 0).clientX, clientY: 50 + 480 + 30 }
+    move(below)
+    move(below)
+    // One row per move, never a magnitude, and the viewport really moved.
+    expect(term().scrollLineCalls).toEqual([1, 1])
+    expect(term().buffer.active.viewportY).toBe(2)
+  })
+
+  it("auto-scrolls the other way above the top edge", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    // Scrolled back five rows, so the press lands on a real line and there is
+    // somewhere above the viewport to scroll to.
+    term().lines = ["one two", "b", "c", "d", "e", "git status here", "g"]
+    term().buffer.active.viewportY = 5
+    press(at(6, 0))
+    move({ clientX: at(6, 0).clientX, clientY: 50 - 30 })
+    expect(term().scrollLineCalls).toEqual([-1])
+  })
+
+  it("does not scroll the scrollback while a selection drag is in flight", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    press(at(6, 0))
+    // A long vertical drag that stays inside the screen: it must extend the
+    // selection and move the viewport not at all.
+    move(at(6, 10))
+    expect(term().scrollLineCalls).toEqual([])
+    expect(term().getSelection()).not.toBe("")
+  })
+
+  it("leaves no selection behind when the gesture was a scroll", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    fireEvent.touchStart(container(), { touches: [at(6, 0)] })
+    // Move past the 8px threshold BEFORE the long press could fire.
+    fireEvent.touchMove(container(), { touches: [at(6, 5)] })
+    act(() => {
+      vi.advanceTimersByTime(LONG_PRESS_MS * 2)
+    })
+    expect(term().getSelection()).toBe("")
+    expect(term().scrollLineCalls.length).toBeGreaterThan(0)
+  })
+
+  it("a second finger cancels the pending long press", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    fireEvent.touchStart(container(), { touches: [at(6, 0)] })
+    fireEvent.touchStart(container(), { touches: [at(6, 0), at(10, 0)] })
+    act(() => {
+      vi.advanceTimersByTime(LONG_PRESS_MS * 2)
+    })
+    expect(term().getSelection()).toBe("")
+  })
+
+  it("clears the selection on the NEXT tap", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    press(at(6, 0))
+    lift(at(6, 0))
+    expect(term().getSelection()).toBe("status")
+    fireEvent.touchStart(container(), { touches: [at(20, 0)] })
+    lift(at(20, 0))
+    expect(term().getSelection()).toBe("")
+  })
+
+  it("copies on lift and leaves the selection painted", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    press(at(6, 0))
+    lift(at(6, 0))
+    expect(copied).toEqual(["status"])
+    expect(term().getSelection()).toBe("status")
+  })
+
+  it("copies nothing on lift when copy-on-select is off", () => {
+    const state = makeState()
+    ;(state.bootstrap as unknown as { copy_on_select?: boolean }).copy_on_select =
+      false
+    mockState = state
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    press(at(6, 0))
+    lift(at(6, 0))
+    expect(copied).toEqual([])
+    expect(term().getSelection()).toBe("status")
+  })
+
+  // The touch equivalent of the desktop force-local-selection modifier (Shift
+  // on Linux/Windows, Option on macOS). Claude Code and opencode both enable
+  // mouse tracking, so a long press that forwarded instead of selecting would
+  // leave every real agent pane unselectable by finger.
+  it("selects locally over a mouse-tracking app and forwards nothing", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const t = term()
+    t.modes.mouseTrackingMode = "vt200"
+    t.mouse?.setProtocol("VT200")
+    t.mouse?.setEncoding("SGR")
+    const pty = FakePtySocket.instances.at(-1)
+    if (!pty) throw new Error("no pty constructed")
+    press(at(6, 0))
+    move(at(13, 0))
+    lift(at(13, 0))
+    expect(t.getSelection()).toBe("status --p")
+    expect(pty.sendInput.mock.calls).toEqual([])
+    // And no "hold Shift and drag" hint: that advice is for a mouse, and the
+    // long press just selected perfectly well without it.
+    expect(toastCalls.map(String).join(" ")).not.toMatch(/Shift|Option/)
+  })
+
+  // A long press is not a tap, so the compose-bar focus redirect must not run:
+  // raising the soft keyboard over the text the user is selecting takes half
+  // the screen away mid-gesture.
+  it("does not raise the soft keyboard", () => {
+    Object.defineProperty(window, "innerWidth", { value: 500, configurable: true })
+    const pointer = stubCoarsePointer()
+    try {
+      render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+      const compose = screen.getByRole("textbox", { name: "Message" })
+      // The pane focuses the compose box on mount (so the keyboard types into
+      // the buffer from the first moment). Let it go first, or this asserts
+      // nothing: the question is whether the LONG PRESS pulls focus back.
+      ;(compose as HTMLTextAreaElement).blur()
+      expect(document.activeElement).not.toBe(compose)
+      press(at(6, 0))
+      const prevented = !lift(at(6, 0))
+      expect(term().getSelection()).toBe("status")
+      expect(document.activeElement).not.toBe(compose)
+      // Nor does it preventDefault the touchend, which is the redirect's own
+      // mechanism; a long press simply is not that branch.
+      expect(prevented).toBe(false)
+    } finally {
+      pointer.restore()
+    }
+  })
+
+  it("suppresses the platform callout and context menu on the terminal", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    // iOS raises its own magnifier and share menu over a long press unless the
+    // element opts out; Android fires `contextmenu`.
+    expect(container().className).toContain("[-webkit-touch-callout:none]")
+    fireEvent.pointerDown(container(), { pointerType: "touch" })
+    const menu = fireEvent.contextMenu(container())
+    expect(menu).toBe(false)
   })
 })
