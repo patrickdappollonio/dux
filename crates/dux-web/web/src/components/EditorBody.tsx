@@ -28,7 +28,7 @@ import {
 } from "lucide-react"
 import { useDefaultLayout } from "react-resizable-panels"
 import type { PanelImperativeHandle } from "react-resizable-panels"
-import { toast } from "sonner"
+import { notify, notifyBusy, notifyError, notifySuccess, notifyWarning } from "@/lib/notify"
 import { fileApi } from "@/lib/fileApi"
 import { OPEN_IN_EDITORS } from "@/lib/editors"
 import {
@@ -76,8 +76,6 @@ import { performTreeDrop } from "@/lib/editorDrop"
 import type { DroppedItems } from "@/lib/editorDrop"
 import { nextFileDropToastId } from "@/lib/fileDrop"
 import { uploadDroppedFile } from "@/lib/fileDropApi"
-import { showBusyToast } from "@/lib/busyToast"
-import { showFinalToast } from "@/lib/finalToast"
 import { cn } from "@/lib/utils"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { useObjectUrl } from "@/hooks/use-object-url"
@@ -518,7 +516,7 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
         setSearchTruncated(result.truncated ?? false)
       })
       .catch(() => {
-        toast.error("could not index worktree files for search")
+        notifyError("could not index worktree files for search")
       })
   }
 
@@ -893,8 +891,8 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
           })
           editorSetTabDirty(sessionId, tabId, false)
         }
-        if (outcome.tone === "warning") toast.warning(outcome.message)
-        else toast.success(outcome.message)
+        if (outcome.tone === "warning") notifyWarning(outcome.message)
+        else notifySuccess(outcome.message)
       })
       .catch((e) => {
         // The DRAFT IS KEPT, deliberately, and this is the whole answer to a
@@ -909,7 +907,7 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
         // need a size on every tree entry and an escaped-length estimate on
         // the client, to guard a case that costs nothing when it happens
         // because of this line.
-        toast.error(e instanceof Error ? e.message : "could not save file")
+        notifyError(e instanceof Error ? e.message : "could not save file")
       })
       .finally(() => {
         setSavingTabId((id) => (id === tabId ? null : id))
@@ -946,9 +944,9 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
       .openInEditor(sessionId, activeTab.path, editorKey)
       // "Opening" not "Opened": we spawned the editor but can't confirm a window
       // actually appeared (e.g. a headless server would launch-then-exit).
-      .then((editor) => toast.success(`Opening in ${editor}…`))
+      .then((editor) => notifySuccess(`Opening in ${editor}…`))
       .catch((e) =>
-        toast.error(e instanceof Error ? e.message : "could not open in editor"),
+        notifyError(e instanceof Error ? e.message : "could not open in editor"),
       )
       .finally(() => setOpeningEditor(false))
   }
@@ -978,7 +976,7 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
         return refreshSearchIndex()
       })
       .catch((e) => {
-        toast.error(
+        notifyError(
           e instanceof Error
             ? e.message
             : `could not create ${kind === "file" ? "file" : "folder"}`,
@@ -1005,7 +1003,7 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
         return refreshSearchIndex()
       })
       .catch((e) => {
-        toast.error(e instanceof Error ? e.message : "could not rename")
+        notifyError(e instanceof Error ? e.message : "could not rename")
       })
   }
 
@@ -1024,7 +1022,7 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
       retargetTabs: (from, to) => editorRenameTabPaths(sessionId, from, to),
       revalidateDirs,
       refreshSearchIndex,
-      reportError: (message) => toast.error(message),
+      reportError: (message) => notifyError(message),
     })
   }
 
@@ -1051,7 +1049,7 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
         return refreshSearchIndex()
       })
       .catch((e) => {
-        toast.error(e instanceof Error ? e.message : "could not delete")
+        notifyError(e instanceof Error ? e.message : "could not delete")
         // A failed delete (e.g. a permission error mid-`remove_dir_all`, or
         // another client racing the same path) can still leave the tree
         // cache stale relative to whatever is actually left on disk after a
@@ -1084,12 +1082,8 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
         uploadDroppedFile(file, { pty: sessionId, conn: null, dir: into }),
       revalidateDirs,
       refreshSearchIndex,
-      reportBusy: (message) => showBusyToast(message, { id: toastId }),
-      reportFinal: (t) =>
-        showFinalToast(t.tone, t.message, {
-          id: toastId,
-          statusClearSeconds: bootstrap?.status_clear_seconds,
-        }),
+      reportBusy: (message) => notifyBusy(message, { id: toastId }),
+      reportFinal: (t) => notify(t.tone, t.message, { id: toastId }),
     })
   }
 

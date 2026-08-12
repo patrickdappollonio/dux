@@ -8,7 +8,7 @@ import {
   FolderOpen,
   FolderPlus,
 } from "lucide-react"
-import { toast } from "sonner"
+import { notifyError } from "@/lib/notify"
 
 import { BrailleSpinner } from "@/components/BrailleSpinner"
 import { Badge } from "@/components/ui/badge"
@@ -78,7 +78,7 @@ function NewFolderControl({ browsePath }: { browsePath: string }) {
       })
       .catch((e) => {
         setCreating(false)
-        toast.error(
+        notifyError(
           e instanceof Error ? e.message : "Could not create the folder.",
         )
       })

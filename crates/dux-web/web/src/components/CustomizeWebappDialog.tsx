@@ -1,6 +1,6 @@
 import { Fragment, useRef, useState } from "react"
 import { Check } from "lucide-react"
-import { toast } from "sonner"
+import { notifyError, notifyInfo, notifySuccess } from "@/lib/notify"
 
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Button } from "@/components/ui/button"
@@ -337,12 +337,12 @@ function NotificationPermissionRow({ enabledInConfig }: { enabledInConfig: boole
       const result = await Notification.requestPermission()
       setPermission(result)
       if (result === "granted") {
-        toast.success("Browser notifications enabled for dux.")
+        notifySuccess("Browser notifications enabled for dux.")
       } else {
-        toast.info("Browser notifications were not granted.")
+        notifyInfo("Browser notifications were not granted.")
       }
     } catch {
-      toast.error("Could not request notification permission.")
+      notifyError("Could not request notification permission.")
     }
   }
 
@@ -522,7 +522,7 @@ async function persist(
         .toggleGithubIntegration()
         .then(() => true)
         .catch((e) => {
-          toast.error(
+          notifyError(
             e instanceof Error ? e.message : "Could not toggle GitHub integration.",
           )
           return false
@@ -582,7 +582,7 @@ function CustomizeWebappForm({
   // defaults over whatever the operator actually configured.
   const requireBootstrap = (): boolean => {
     if (bootstrap) return true
-    toast.error("Instance settings aren't loaded yet, try again in a moment.")
+    notifyError("Instance settings aren't loaded yet, try again in a moment.")
     return false
   }
 

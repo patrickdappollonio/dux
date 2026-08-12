@@ -12,7 +12,7 @@
 // generated SVG is always a validated `#rrggbb` from the map below, so nothing
 // untrusted is ever interpolated into the markup.
 
-import { toast } from "sonner"
+import { notifyInfo } from "./notify"
 
 // The brand-duck cutout path: a visually-validated asset traced from
 // `public/dux-logo.png` by `scripts/gen-duck-favicon.mjs`. Even-odd fill so the
@@ -155,7 +155,7 @@ export function applyFavicon(raw: string | null | undefined): void {
   if (faviconIsLegacy(raw)) {
     if (raw !== lastNoticedLegacy) {
       lastNoticedLegacy = raw ?? null
-      toast.info(
+      notifyInfo(
         `The configured favicon '${(raw ?? "").trim()}' is no longer supported, ` +
           `showing the default duck. Pick a color in the Preferences dialog, ` +
           `opened from the cog menu in the top-right.`,

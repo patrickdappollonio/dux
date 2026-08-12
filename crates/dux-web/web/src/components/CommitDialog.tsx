@@ -1,6 +1,6 @@
 import { useState } from "react"
 import { Loader2 } from "lucide-react"
-import { toast } from "sonner"
+import { notifyError } from "@/lib/notify"
 import { git } from "@/lib/git"
 import { Button } from "@/components/ui/button"
 import {
@@ -26,7 +26,7 @@ export function CommitDialog() {
       await git.commit(commitTarget, commitDraft.trim())
       closeCommit()
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "commit failed")
+      notifyError(err instanceof Error ? err.message : "commit failed")
     } finally {
       setCommitting(false)
     }

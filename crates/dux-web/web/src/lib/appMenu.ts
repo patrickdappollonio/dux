@@ -42,7 +42,7 @@ import {
   Wrench,
   type LucideIcon,
 } from "lucide-react"
-import { toast } from "sonner"
+import { notifyError } from "./notify"
 
 import { configApi } from "@/lib/configApi"
 import { addProjectMenuItems, newAgentMenuItems } from "@/lib/creationMenus"
@@ -213,7 +213,7 @@ export function appMenuModel(ctx: AppMenuContext): AppMenuEntry[] {
             configApi
               .reload()
               .catch((e) =>
-                toast.error(
+                notifyError(
                   e instanceof Error ? e.message : "Could not reload the config.",
                 ),
               )

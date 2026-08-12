@@ -1,4 +1,4 @@
-import { toast } from "sonner"
+import { notifyError, notifySuccess } from "./notify"
 
 import { copyToClipboard } from "@/lib/clipboard"
 
@@ -7,7 +7,7 @@ import { copyToClipboard } from "@/lib/clipboard"
 export function clipboardWorktree(path: string): void {
   void copyToClipboard(path).then((ok) =>
     ok
-      ? toast.success("Copied local path to clipboard")
-      : toast.error("Couldn't copy the path"),
+      ? notifySuccess("Copied local path to clipboard")
+      : notifyError("Couldn't copy the path"),
   )
 }

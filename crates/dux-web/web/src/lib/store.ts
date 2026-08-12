@@ -1,6 +1,4 @@
 import { useSyncExternalStore } from "react"
-import { toast } from "sonner"
-
 import { sanitizeAgentName } from "./agentName"
 import { git } from "./git"
 import { projectsApi, type PatchProjectBody } from "./projectsApi"
@@ -38,11 +36,13 @@ import {
 } from "./bootstrapApi"
 import { firstLoadApi } from "./firstLoadApi"
 import {
-  cancelBusyToastGuard,
-  dismissBusyToast,
-  showBusyToast,
-} from "./busyToast"
-import { type FinalTone, showFinalToast } from "./finalToast"
+  dismissNotification,
+  notifyError,
+  notifyInfo,
+  notifyStatus,
+  notifySuccess,
+  setStatusClearSeconds,
+} from "./notify"
 import { attentionCount, formatTabTitle } from "./attention"
 import { applyAttentionFavicon } from "./favicon"
 import { resolveInstanceTitle } from "./instanceTitle"
@@ -981,13 +981,13 @@ eventsSocket.onEvent = (ev: EventsServerMessage) => {
         })
       }
     }
-    showStatusToast(ev.key, ev.tone ?? "info", ev.message ?? "")
+    showStatusToast(ev.key, ev.tone ?? "info", ev.message ?? "", ev.sticky ?? false)
     return
   }
   // Dismiss the toast whose id matches the cleared key (anonymous slot when null).
   if (ev.event === "status_cleared") {
     // The toast is going now, so any guard armed for it is moot.
-    dismissBusyToast(ev.key ?? ANON_TOAST_ID)
+    dismissNotification(ev.key ?? ANON_TOAST_ID)
     return
   }
   // A `config.changed` event invalidates the bootstrap document (the server's
@@ -1239,7 +1239,7 @@ export async function forceRefreshChanges(): Promise<void> {
   }
   const slice = state.changes
   if (slice.sessionId !== id || slice.phase !== "loaded") return
-  toast.success(
+  notifySuccess(
     `Changed files refreshed: ${slice.staged.length} staged, ` +
       `${slice.unstaged.length} unstaged.`
   )
@@ -1285,6 +1285,12 @@ function loadBootstrap(): void {
 // confirmed `show_changes_pane`, and the override is dropped once it matches so
 // config becomes the single source of truth across every client.
 function applyBootstrap(b: Bootstrap): void {
+  // Publish the user's auto-clear window to the one raiser, which reads it on
+  // the way past on every notification. Nothing downstream captures it, so
+  // nothing downstream can hold a stale copy: a config edit reaches the next
+  // notification raised anywhere in the app, including one raised from a mount
+  // effect that ran long before the bootstrap document landed.
+  setStatusClearSeconds(b.status_clear_seconds)
   setState({
     bootstrap: b,
     changesPaneOverride:
@@ -1765,36 +1771,21 @@ function clearPendingClientIntent(): Partial<DuxState> {
 // anonymous update a new transient toast instead of an in-place update.
 const ANON_TOAST_ID = "dux-anon-status"
 
-// Route a keyed (or anonymous) engine status to both the status bar and a
-// sonner toast. The key acts as the sonner id so updates re-render in place
-// (busy → success swaps the spinner without a new toast) and clears can dismiss
-// by id.
+// Route a keyed (or anonymous) engine status to a notification. The key acts as
+// the notification id so updates re-render in place (busy → success swaps the
+// spinner without a new toast) and clears can dismiss by id.
 //
-// Every tone auto-dismisses; the window is graded by severity off the user's
-// `ui.status_clear_seconds` and computed by `statusToastDuration`, which owns
-// the policy (including the busy leak guard and the `0` opt-out).
+// `lib/notify.ts` owns everything else: the severity-graded window, the busy
+// leak guard, the `0` opt-out, and `sticky`. A status arrives sticky when the
+// engine says so, and an absent flag means not sticky.
 function showStatusToast(
   key: string | null | undefined,
   tone: string,
   message: string,
+  sticky: boolean,
 ): void {
-  if (!message) return
   const id = key ?? ANON_TOAST_ID // no key → stable anonymous-slot id
-  // Whatever was armed for this id is now stale: this call replaces the toast.
-  cancelBusyToastGuard(id)
-  if (tone === "busy") {
-    // Through the ONE shared busy raiser, which owns the leak guard sonner
-    // makes necessary. The file-drop spinner uses the same one.
-    showBusyToast(message, { id })
-    return
-  }
-  // Every other tone goes through the ONE shared final-toast raiser, so a
-  // client-originated toast (the file-drop report) and an engine status can
-  // never disagree about the configured dismiss window.
-  showFinalToast(tone as FinalTone, message, {
-    id,
-    statusClearSeconds: state.bootstrap?.status_clear_seconds,
-  })
+  notifyStatus(tone, message, { id, sticky })
 }
 
 // Boot: connect the events socket and fetch the initial workspace data. No
@@ -3097,7 +3088,7 @@ export function createTerminal(sessionId: string): void {
       selectTerminal(created.terminal_id, { kind: "session", sessionId }),
     )
     .catch((e) =>
-      toast.error(
+      notifyError(
         e instanceof Error ? e.message : "Could not create the terminal.",
       ),
     )
@@ -3112,7 +3103,7 @@ export function createProjectTerminal(projectId: string): void {
       selectTerminal(created.terminal_id, { kind: "project", projectId }),
     )
     .catch((e) =>
-      toast.error(
+      notifyError(
         e instanceof Error ? e.message : "Could not create the project terminal.",
       ),
     )
@@ -3128,7 +3119,7 @@ export function createStandaloneTerminal(): void {
       selectTerminal(created.terminal_id, { kind: "standalone" }),
     )
     .catch((e) =>
-      toast.error(
+      notifyError(
         e instanceof Error
           ? e.message
           : "Could not create the standalone terminal.",
@@ -3189,7 +3180,7 @@ export function deleteTerminal(terminalId: string): void {
   if (owner === undefined) return
   const request = terminalDeleteRequest(owner, terminalId)
   request.catch((e) =>
-    toast.error(
+    notifyError(
       e instanceof Error ? e.message : "Could not close the terminal.",
     ),
   )
@@ -3218,7 +3209,7 @@ export function addTab(sessionId: string, provider?: string): void {
     })
     .catch((e) => {
       clearInFlight()
-      toast.error(e instanceof Error ? e.message : "Could not create the tab.")
+      notifyError(e instanceof Error ? e.message : "Could not create the tab.")
     })
 }
 
@@ -3280,7 +3271,7 @@ export function closeTab(sessionId: string, tabId: string): void {
       if (liveSibling) selectTab(sessionId, liveSibling.id)
     })
     .catch((e) =>
-      toast.error(e instanceof Error ? e.message : "Could not close the tab."),
+      notifyError(e instanceof Error ? e.message : "Could not close the tab."),
     )
 }
 
@@ -3293,14 +3284,14 @@ export async function retargetTab(
   provider: string,
 ): Promise<boolean> {
   if (!providerIsConfigured(provider)) {
-    toast.error(`Provider "${provider}" is not configured.`)
+    notifyError(`Provider "${provider}" is not configured.`)
     return false
   }
   try {
     await tabsApi.patch(sessionId, tabId, provider)
     return true
   } catch (e) {
-    toast.error(e instanceof Error ? e.message : "Could not change the provider.")
+    notifyError(e instanceof Error ? e.message : "Could not change the provider.")
     return false
   }
 }
@@ -3326,7 +3317,7 @@ export function handleTabGone(tabId: string): void {
   setState({
     startedDormantTabs: state.startedDormantTabs.filter((t) => t !== tabId),
   })
-  toast.error("This tab was closed elsewhere.")
+  notifyError("This tab was closed elsewhere.")
 }
 
 // Open the discard-confirmation dialog for an unstaged file. The TUI confirms
@@ -3347,7 +3338,7 @@ export function closeDiscard(): void {
 export function discardFile(sessionId: string, path: string): void {
   git
     .discard(sessionId, path)
-    .catch((e) => toast.error(e instanceof Error ? e.message : "discard failed"))
+    .catch((e) => notifyError(e instanceof Error ? e.message : "discard failed"))
 }
 
 export function openCommit(sessionId: string): void {
@@ -3605,7 +3596,7 @@ export function deleteSession(sessionId: string, deleteWorktree: boolean): void 
       // flight). The server already surfaces that message over the /ws status
       // stream, so don't toast it a second time. Mirrors `toastCreateError`.
       if (e instanceof SessionsApiError && e.status === 409) return
-      toast.error(
+      notifyError(
         e instanceof Error ? e.message : "Could not delete the session.",
       )
     })
@@ -3641,7 +3632,7 @@ export async function renameSession(
     await sessionsApi.patch(sessionId, { title })
     return true
   } catch (e) {
-    toast.error(e instanceof Error ? e.message : "Could not rename the session.")
+    notifyError(e instanceof Error ? e.message : "Could not rename the session.")
     return false
   }
 }
@@ -3681,7 +3672,7 @@ export function submitAttachPullRequest(): void {
   if (!pr) return
   closeAttachPullRequest()
   sessionsApi.attachPullRequest(id, pr).catch((e) => {
-    toast.error(
+    notifyError(
       e instanceof Error ? e.message : "Could not attach the pull request.",
     )
   })
@@ -3692,7 +3683,7 @@ export function submitAttachPullRequest(): void {
 // and the server's info status rides the toast stream.
 export function detachPullRequest(sessionId: string): void {
   sessionsApi.detachPullRequest(sessionId).catch((e) => {
-    toast.error(
+    notifyError(
       e instanceof Error ? e.message : "Could not detach the pull request.",
     )
   })
@@ -3728,14 +3719,14 @@ export async function changeAgentProvider(
   provider: string,
 ): Promise<boolean> {
   if (!providerIsConfigured(provider)) {
-    toast.error(`Provider "${provider}" is not configured.`)
+    notifyError(`Provider "${provider}" is not configured.`)
     return false
   }
   try {
     await sessionsApi.patch(sessionId, { provider })
     return true
   } catch (e) {
-    toast.error(e instanceof Error ? e.message : "Could not change the provider.")
+    notifyError(e instanceof Error ? e.message : "Could not change the provider.")
     return false
   }
 }
@@ -3749,7 +3740,7 @@ export function toggleSessionAutoReopen(
   sessionsApi
     .patch(sessionId, { auto_reopen: enabled })
     .catch((e) =>
-      toast.error(
+      notifyError(
         e instanceof Error ? e.message : "Could not update auto-reopen.",
       ),
     )
@@ -3770,7 +3761,7 @@ export function reconnectSession(sessionId: string, force: boolean): void {
   sessionsApi
     .reconnect(sessionId, force)
     .catch((e) =>
-      toast.error(
+      notifyError(
         e instanceof Error ? e.message : "Could not reconnect the session.",
       ),
     )
@@ -3798,7 +3789,7 @@ export function saveGlobalEnv(env: Record<string, string>): void {
   configApi
     .persistGlobalEnv(env)
     .catch((e) =>
-      toast.error(
+      notifyError(
         e instanceof Error ? e.message : "Could not save the global environment.",
       ),
     )
@@ -3945,7 +3936,7 @@ export function rerunStartupCommand(sessionId: string): void {
   sessionsApi
     .rerunStartupCommand(sessionId)
     .catch((e) =>
-      toast.error(
+      notifyError(
         e instanceof Error
           ? e.message
           : "Could not rerun the startup command.",
@@ -3998,7 +3989,7 @@ function runBrowse(path: string | null): void {
     .catch((e) => {
       if (!state.addProjectOpen) return
       setState({ browseEntries: [], browseLoading: false })
-      toast.error(
+      notifyError(
         e instanceof Error ? e.message : "Could not browse the directory.",
       )
     })
@@ -4118,7 +4109,7 @@ export function addProject(path: string, name: string): void {
   projectsApi
     .create({ path, name })
     .catch((e) =>
-      toast.error(e instanceof Error ? e.message : "Could not add the project."),
+      notifyError(e instanceof Error ? e.message : "Could not add the project."),
     )
 }
 
@@ -4130,7 +4121,7 @@ export function addProjectCheckoutDefault(path: string, name: string): void {
   projectsApi
     .create({ path, name, checkout_default: true })
     .catch((e) =>
-      toast.error(e instanceof Error ? e.message : "Could not add the project."),
+      notifyError(e instanceof Error ? e.message : "Could not add the project."),
     )
 }
 
@@ -4141,7 +4132,7 @@ export function addProjectCreateInitialCommit(path: string, name: string): void 
   projectsApi
     .create({ path, name, create_initial_commit: true })
     .catch((e) =>
-      toast.error(e instanceof Error ? e.message : "Could not add the project."),
+      notifyError(e instanceof Error ? e.message : "Could not add the project."),
     )
 }
 
@@ -4153,7 +4144,7 @@ export function initProject(path: string, name: string): void {
   projectsApi
     .create({ path, name, init_repo: true })
     .catch((e) =>
-      toast.error(e instanceof Error ? e.message : "Could not add the project."),
+      notifyError(e instanceof Error ? e.message : "Could not add the project."),
     )
 }
 
@@ -4169,7 +4160,7 @@ export function removeProject(projectId: string): void {
   projectsApi
     .remove(projectId)
     .catch((e) =>
-      toast.error(e instanceof Error ? e.message : "Could not remove the project."),
+      notifyError(e instanceof Error ? e.message : "Could not remove the project."),
     )
 }
 
@@ -4190,7 +4181,7 @@ export function deleteProject(projectId: string): void {
   projectsApi
     .deleteWithWorktrees(projectId)
     .catch((e) =>
-      toast.error(e instanceof Error ? e.message : "Could not delete the project."),
+      notifyError(e instanceof Error ? e.message : "Could not delete the project."),
     )
 }
 
@@ -4212,14 +4203,14 @@ export async function updateProjectSettings(
     patch.provider != null &&
     !providerIsConfigured(patch.provider)
   ) {
-    toast.error(`Provider "${patch.provider}" is not configured.`)
+    notifyError(`Provider "${patch.provider}" is not configured.`)
     return false
   }
   try {
     await projectsApi.patch(projectId, patch)
     return true
   } catch (e) {
-    toast.error(
+    notifyError(
       e instanceof Error ? e.message : "Could not update project settings.",
     )
     return false
@@ -4233,7 +4224,7 @@ export async function updateProjectSettings(
 export function pullProject(projectId: string): void {
   projectsApi
     .pull(projectId)
-    .catch((e) => toast.error(e instanceof Error ? e.message : "pull failed"))
+    .catch((e) => notifyError(e instanceof Error ? e.message : "pull failed"))
 }
 
 // Open the confirm dialog for switching a project's source checkout back to its
@@ -4255,7 +4246,7 @@ export function checkoutDefaultBranch(projectId: string): void {
   projectsApi
     .checkoutDefault(projectId)
     .catch((e) =>
-      toast.error(e instanceof Error ? e.message : "checkout failed")
+      notifyError(e instanceof Error ? e.message : "checkout failed")
     )
 }
 
@@ -4295,7 +4286,7 @@ function loadProjectWorktrees(projectId: string): void {
     .catch((e) => {
       if (state.attachWorktreeTarget !== projectId) return
       setState({ attachWorktreeEntries: [], attachWorktreeLoading: false })
-      toast.error(
+      notifyError(
         e instanceof Error ? e.message : "Could not list the worktrees.",
       )
     })
@@ -4336,14 +4327,14 @@ export function deleteProjectWorktree(
   projectsApi
     .deleteWorktree(projectId, worktreePath)
     .then(() => {
-      toast.success(`Removed the worktree at ${worktreePath}.`)
+      notifySuccess(`Removed the worktree at ${worktreePath}.`)
       if (state.attachWorktreeTarget === projectId) {
         loadProjectWorktrees(projectId)
       }
       loadProjectWorktreeCounts()
     })
     .catch((e) =>
-      toast.error(
+      notifyError(
         e instanceof Error ? e.message : "Could not remove the worktree.",
       ),
     )
@@ -4569,7 +4560,7 @@ export function toggleCreateAgentRandomize(): void {
 // toasts. Network failures (`status === 0`) and all other codes are surfaced.
 function toastCreateError(e: unknown, fallback: string): void {
   if (e instanceof SessionsApiError && e.status === 409) return
-  toast.error(e instanceof Error ? e.message : fallback)
+  notifyError(e instanceof Error ? e.message : fallback)
 }
 
 // Ask the server to create a new agent in a project. An empty name lets the
@@ -4633,7 +4624,7 @@ export function setAgentSort(sort: FlatSortKey): void {
   setState({ agentSort: sort })
   configApi.setAgentSort(sort).catch((e) => {
     setState({ agentSort: null })
-    toast.error(
+    notifyError(
       e instanceof Error ? e.message : "Could not change the agent sort.",
     )
   })
@@ -4770,13 +4761,13 @@ function submitPrReferenceFirst(reference: string, name: string): void {
         // checkout of this" is a certainty dux does not have, and the one
         // project that mattered may be exactly the unreadable one. dux does not
         // clone, and neither wording may imply it might.
-        toast.error(
+        notifyError(
           resolved.uninspected_summary
             ? `No project dux could check is a checkout of ${repository}, and dux could not check every project (${resolved.uninspected_summary}). Choose a project that already has it, or add one from a directory on disk.`
             : `No project in dux is a checkout of ${repository}. Choose a project that already has it, or add one from a directory on disk.`,
         )
       } else {
-        toast.info(
+        notifyInfo(
           `${resolved.projects.length} projects are checkouts of ${repository}. Choose which one this agent belongs in.`,
         )
       }
@@ -4797,7 +4788,7 @@ function submitPrReferenceFirst(reference: string, name: string): void {
       // dialog asking something else entirely.
       if (state.createAgentPrRequestId !== generation) return
       setState({ createAgentPrResolving: false, createAgentPrRequestId: null })
-      toast.error(
+      notifyError(
         e instanceof Error
           ? e.message
           : "Could not work out which project that pull request is in.",
@@ -4851,7 +4842,7 @@ export function reorderAgents(orderedIds: string[]): void {
     // linger forever. Clear it so the UI snaps back to the authoritative order,
     // then surface the failure.
     setState({ pendingAgentOrder: null })
-    toast.error(e instanceof Error ? e.message : "Could not reorder the agents.")
+    notifyError(e instanceof Error ? e.message : "Could not reorder the agents.")
   })
 }
 
@@ -4868,7 +4859,7 @@ export function reorderTerminals(orderedIds: string[]): void {
     // linger forever. Clear it so the UI snaps back to the authoritative order,
     // then surface the failure.
     setState({ pendingTerminalOrder: null })
-    toast.error(e instanceof Error ? e.message : "Could not reorder the terminals.")
+    notifyError(e instanceof Error ? e.message : "Could not reorder the terminals.")
   })
 }
 
@@ -4883,7 +4874,7 @@ export function reorderSessions(projectId: string, orderedIds: string[]): void {
       // compounding on the next drag. Clear the order overlays so the UI snaps back
       // to the authoritative spine order, then surface the failure.
       setState(clearPendingOrders())
-      toast.error(
+      notifyError(
         e instanceof Error ? e.message : "Could not reorder the sessions.",
       )
     })
@@ -4918,7 +4909,7 @@ export function sortAgents(by: SortKey): void {
     sessionsApi
       .reorder(project.id, orderedIds)
       .catch((e) =>
-        toast.error(
+        notifyError(
           e instanceof Error ? e.message : "Could not reorder the sessions.",
         ),
       )
@@ -4938,7 +4929,7 @@ export function reorderProjects(orderedIds: string[]): void {
       // the optimistic overlay would persist indefinitely. Clear it back to the
       // authoritative order before surfacing the error.
       setState(clearPendingOrders())
-      toast.error(
+      notifyError(
         e instanceof Error ? e.message : "Could not reorder the projects.",
       )
     })
@@ -5014,13 +5005,13 @@ export function saveMacros(macros: MacroView[]): void {
   // so saving would wipe the server's macros. Refuse until we hold the
   // authoritative list (the Save button is also disabled in this window).
   if (state.bootstrap === null) {
-    toast.error("Macros aren't loaded yet. Try again in a moment.")
+    notifyError("Macros aren't loaded yet. Try again in a moment.")
     return
   }
   configApi
     .updateMacros(macros)
     .catch((e) =>
-      toast.error(e instanceof Error ? e.message : "Could not save the macros."),
+      notifyError(e instanceof Error ? e.message : "Could not save the macros."),
     )
   closeMacrosDialog()
 }
@@ -5037,14 +5028,14 @@ export function persistMacroOrder(macros: MacroView[]): Promise<boolean> {
   // Same guard as saveMacros: before bootstrap loads the draft was seeded
   // empty, and a wholesale PUT from that base would wipe the server's macros.
   if (state.bootstrap === null) {
-    toast.error("Macros aren't loaded yet. Try again in a moment.")
+    notifyError("Macros aren't loaded yet. Try again in a moment.")
     return Promise.resolve(false)
   }
   return configApi
     .updateMacros(macros)
     .then(() => true)
     .catch((e) => {
-      toast.error(
+      notifyError(
         e instanceof Error ? e.message : "Could not reorder the macros.",
       )
       return false
@@ -5169,7 +5160,7 @@ export function setChangesPaneVisibility(next: boolean): Promise<boolean> {
       // Roll the optimistic override back so the pane doesn't strand in the
       // toggled state when the persist fails.
       setState({ changesPaneOverride: null })
-      toast.error(
+      notifyError(
         e instanceof Error ? e.message : "Could not toggle the Changes pane.",
       )
       return false
@@ -5232,7 +5223,7 @@ export function setMobileBarVisibility(
       // while this write was in flight, and rolling back over it would snap
       // the bar to a state the user already corrected.
       if (state[key] === next) setState({ [key]: prev })
-      toast.error(
+      notifyError(
         e instanceof Error
           ? e.message
           : "Could not save the mobile bar preference.",
@@ -5333,7 +5324,7 @@ export function restoreMobileBars(): Promise<boolean> {
         rollback.mobileAccessoryBarOverride = prevAccessory
       }
       if (Object.keys(rollback).length) setState(rollback)
-      toast.error(
+      notifyError(
         e instanceof Error ? e.message : "Could not restore the mobile bars.",
       )
       return false
@@ -5473,7 +5464,7 @@ export function openReleaseNotes(): void {
     .catch((e) => {
       const message =
         e instanceof Error ? e.message : "Could not load the release notes."
-      toast.error(message)
+      notifyError(message)
       if (state.firstLoad === null) return
       if (state.firstLoad.screen !== "whats_new") return
       setState({
@@ -5513,7 +5504,7 @@ export function closeFirstLoad(): void {
     // The durable record was not written, so this launch's screen is still
     // pending: drop the guard again so the next bootstrap can re-offer it.
     setState({ firstLoadDismissed: false })
-    toast.error(
+    notifyError(
       e instanceof Error
         ? e.message
         : "Could not record this screen as seen; it may appear again.",
@@ -5536,7 +5527,7 @@ export function setInstanceIdentity(body: {
     .setInstanceIdentity(body)
     .then(() => true)
     .catch((e) => {
-      toast.error(
+      notifyError(
         e instanceof Error ? e.message : "Could not rename this instance.",
       )
       return false
@@ -5557,7 +5548,7 @@ export function saveSettings(
     .patchSettings(patch)
     .then(() => true)
     .catch((e) => {
-      toast.error(e instanceof Error ? e.message : "Could not save settings.")
+      notifyError(e instanceof Error ? e.message : "Could not save settings.")
       return false
     })
 }
@@ -5570,7 +5561,7 @@ export function killSessionPty(sessionId: string): void {
   sessionsApi
     .kill(sessionId)
     .catch((e) =>
-      toast.error(
+      notifyError(
         e instanceof Error ? e.message : "Could not kill the agent.",
       ),
     )
@@ -5632,7 +5623,7 @@ export function saveConfigEditor(content: string): void {
       // explicitly runs "Reload config". The toast states exactly that so the lack
       // of a visible change isn't mistaken for a no-op.
       closeConfigEditor()
-      toast.success("Saved config.toml. Run “Reload config” to apply it.")
+      notifySuccess("Saved config.toml. Run “Reload config” to apply it.")
     })
     .catch((e) => {
       setState({
