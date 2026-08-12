@@ -1949,81 +1949,16 @@ impl RuntimeBindings {
 
 /// Convert a `KeyCombination` to the raw byte sequence a terminal would send.
 /// Returns `None` for key types that can't be represented as bytes (e.g. mouse
-/// buttons or function keys beyond F4 in SS3 mode).
+/// buttons or function keys beyond F12).
+///
+/// This is a thin adapter over `key_encode::encode_key`, which owns the one
+/// key-to-bytes table; do not grow a second copy of that table here.
 pub(crate) fn key_combination_to_bytes(kc: &KeyCombination) -> Option<Vec<u8>> {
-    let norm = kc.normalized();
-    let has_ctrl = norm.modifiers.contains(KeyModifiers::CONTROL);
-    let has_alt = norm.modifiers.contains(KeyModifiers::ALT);
-    let has_shift = norm.modifiers.contains(KeyModifiers::SHIFT);
-
-    // We only encode simple cases: no combined Ctrl+Alt+Shift, etc.
-    // Interactive-mode intercepted bindings are typically plain keys or Ctrl+key.
-
     use crokey::OneToThree::One;
 
+    let norm = kc.normalized();
     match norm.codes {
-        One(KeyCode::Char(c)) if has_ctrl && !has_alt && !has_shift => {
-            // Ctrl+letter → control character 0x01..0x1a
-            // Also handle some non-letter Ctrl combos:
-            //   Ctrl+\  → 0x1c  (FS)
-            //   Ctrl+]  → 0x1d  (GS)
-            //   Ctrl+^  → 0x1e  (RS)
-            //   Ctrl+_  → 0x1f  (US)
-            let lower = c.to_ascii_lowercase();
-            if lower.is_ascii_lowercase() {
-                Some(vec![lower as u8 - b'a' + 1])
-            } else {
-                match c {
-                    '\\' => Some(vec![0x1c]),
-                    ']' => Some(vec![0x1d]),
-                    '^' => Some(vec![0x1e]),
-                    '_' => Some(vec![0x1f]),
-                    _ => None,
-                }
-            }
-        }
-        One(KeyCode::Char(c)) if !has_ctrl && !has_alt && !has_shift => {
-            let mut buf = [0u8; 4];
-            let s = c.encode_utf8(&mut buf);
-            Some(s.as_bytes().to_vec())
-        }
-        One(KeyCode::Char(c)) if has_alt && !has_ctrl && !has_shift => {
-            // Alt+key → ESC + key
-            let mut buf = vec![0x1b];
-            let mut char_buf = [0u8; 4];
-            let s = c.encode_utf8(&mut char_buf);
-            buf.extend_from_slice(s.as_bytes());
-            Some(buf)
-        }
-        One(KeyCode::Esc) => Some(vec![0x1b]),
-        One(KeyCode::Enter) => Some(vec![0x0d]),
-        One(KeyCode::Tab) if !has_shift => Some(vec![0x09]),
-        One(KeyCode::BackTab) => {
-            // Shift+Tab → ESC [ Z
-            Some(vec![0x1b, b'[', b'Z'])
-        }
-        One(KeyCode::Backspace) => Some(vec![0x7f]),
-        One(KeyCode::Delete) => Some(vec![0x1b, b'[', b'3', b'~']),
-        One(KeyCode::Up) if !has_ctrl && !has_alt && !has_shift => Some(vec![0x1b, b'[', b'A']),
-        One(KeyCode::Down) if !has_ctrl && !has_alt && !has_shift => Some(vec![0x1b, b'[', b'B']),
-        One(KeyCode::Right) if !has_ctrl && !has_alt && !has_shift => Some(vec![0x1b, b'[', b'C']),
-        One(KeyCode::Left) if !has_ctrl && !has_alt && !has_shift => Some(vec![0x1b, b'[', b'D']),
-        One(KeyCode::Home) => Some(vec![0x1b, b'[', b'H']),
-        One(KeyCode::End) => Some(vec![0x1b, b'[', b'F']),
-        One(KeyCode::PageUp) => Some(vec![0x1b, b'[', b'5', b'~']),
-        One(KeyCode::PageDown) => Some(vec![0x1b, b'[', b'6', b'~']),
-        One(KeyCode::F(1)) => Some(vec![0x1b, b'O', b'P']),
-        One(KeyCode::F(2)) => Some(vec![0x1b, b'O', b'Q']),
-        One(KeyCode::F(3)) => Some(vec![0x1b, b'O', b'R']),
-        One(KeyCode::F(4)) => Some(vec![0x1b, b'O', b'S']),
-        One(KeyCode::F(5)) => Some(vec![0x1b, b'[', b'1', b'5', b'~']),
-        One(KeyCode::F(6)) => Some(vec![0x1b, b'[', b'1', b'7', b'~']),
-        One(KeyCode::F(7)) => Some(vec![0x1b, b'[', b'1', b'8', b'~']),
-        One(KeyCode::F(8)) => Some(vec![0x1b, b'[', b'1', b'9', b'~']),
-        One(KeyCode::F(9)) => Some(vec![0x1b, b'[', b'2', b'0', b'~']),
-        One(KeyCode::F(10)) => Some(vec![0x1b, b'[', b'2', b'1', b'~']),
-        One(KeyCode::F(11)) => Some(vec![0x1b, b'[', b'2', b'3', b'~']),
-        One(KeyCode::F(12)) => Some(vec![0x1b, b'[', b'2', b'4', b'~']),
+        One(code) => crate::key_encode::encode_key(code, norm.modifiers),
         _ => None,
     }
 }

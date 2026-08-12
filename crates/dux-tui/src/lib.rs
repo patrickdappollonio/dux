@@ -10,6 +10,7 @@ mod diff;
 // shared by rule with the web's viewed-ping grace. Re-exported so existing
 // `crate::focus::...` paths keep resolving.
 pub(crate) use dux_core::focus;
+mod key_encode;
 mod keybindings;
 mod raw_input;
 mod server_screen;
