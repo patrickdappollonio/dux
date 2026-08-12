@@ -909,6 +909,14 @@ pub struct WireStatus {
     /// connection's own id.
     #[serde(default)]
     pub scope: StatusScope,
+    /// Whether the client must hold this toast until the user dismisses it,
+    /// instead of retiring it on the usual timer. Defaults to `false` when
+    /// absent from the wire. See
+    /// [`dux_core::statusline::KeyedWireStatus::sticky`] for the rule.
+    ///
+    /// [`dux_core::statusline::KeyedWireStatus::sticky`]: crate::statusline::KeyedWireStatus::sticky
+    #[serde(default)]
+    pub sticky: bool,
 }
 
 impl WireStatus {
@@ -919,6 +927,7 @@ impl WireStatus {
             message: message.into(),
             key: None,
             scope: StatusScope::All,
+            sticky: false,
         }
     }
 
@@ -933,7 +942,17 @@ impl WireStatus {
             message: message.into(),
             key: Some(key.into()),
             scope: StatusScope::All,
+            sticky: false,
         }
+    }
+
+    /// Builder that marks a status as one that waits for the user. See
+    /// [`dux_core::statusline::KeyedWireStatus::sticky`] for when to use it.
+    ///
+    /// [`dux_core::statusline::KeyedWireStatus::sticky`]: crate::statusline::KeyedWireStatus::sticky
+    pub fn sticky(mut self) -> Self {
+        self.sticky = true;
+        self
     }
 
     /// Builder that attaches a correlation key to an existing status.
@@ -954,6 +973,7 @@ impl WireStatus {
             message: update.message.clone(),
             key: update.key.clone(),
             scope: update.scope.clone(),
+            sticky: update.sticky,
         }
     }
 }
@@ -2279,9 +2299,13 @@ impl Engine {
             ))
         })
         .on_failure(move |err: &String| {
+            // STICKY, for the same reason as the agent-side startup failure in
+            // `command.rs`: provisioning stopped part-way, so the worktree is in
+            // an unknown state, and the message sends the user to the logs.
             crate::engine::Final::error(format!(
                 "Startup command failed for project \"{failure_name}\": {err}. Open the startup command logs for details."
             ))
+            .sticky()
         });
         let run = crate::startup::StartupCommandRun {
             project,
@@ -2359,18 +2383,27 @@ impl Engine {
                     WebCheckoutOutcome::Ok { target_branch } => Final::info(format!(
                         "Checked out \"{target_branch}\" for project \"{project_name}\"."
                     )),
+                    // STICKY: the checkout stopped part-way and the repository
+                    // is left on whatever branch it landed on. The message says
+                    // outright that the fix is in the user's terminal, which is
+                    // as far outside the toast as recovery gets.
                     WebCheckoutOutcome::Failed {
                         target_branch,
                         repo_path,
                     } => Final::error(format!(
                         "Couldn't check out \"{target_branch}\" in {repo_path} — resolve in your terminal and retry."
-                    )),
+                    ))
+                    .sticky(),
                     WebCheckoutOutcome::AlreadyLeading { current_branch } => Final::info(format!(
                         "Project \"{project_name}\" is already on the leading branch \"{current_branch}\"."
                     )),
+                    // STICKY: same shape, same instruction. dux cannot proceed
+                    // and is asking the user to go and settle the repository's
+                    // default branch by hand before retrying.
                     WebCheckoutOutcome::Heuristic { current_branch } => Final::error(format!(
                         "Can't determine the default branch for project \"{project_name}\" while it is on \"{current_branch}\". Resolve the default branch in your terminal and retry."
-                    )),
+                    ))
+                    .sticky(),
                     WebCheckoutOutcome::InspectFailed { error } => Final::error(format!(
                         "Couldn't inspect the default branch for project \"{project_name}\": {error}"
                     )),
@@ -2464,12 +2497,17 @@ impl Engine {
                     WebAddProjectOutcome::Added { status_message } => {
                         Final::info(status_message.clone())
                     }
+                    // STICKY: the project was added but the branch switch it
+                    // was supposed to make did not happen, so the checkout is
+                    // not where the user asked for it and the message sends
+                    // them to their terminal to finish the job.
                     WebAddProjectOutcome::SwitchFailed {
                         target_branch,
                         repo_path,
                     } => Final::error(format!(
                         "Couldn't check out \"{target_branch}\" in {repo_path} — resolve in your terminal and retry."
-                    )),
+                    ))
+                    .sticky(),
                     WebAddProjectOutcome::AddFailed { message } => Final::error(message.clone()),
                 }
             },
@@ -3204,11 +3242,20 @@ impl Engine {
                                     WebDeleteOutcome::SucceededGone => {
                                         Final::info("Agent and worktree removed.")
                                     }
+                                    // STICKY: the agent row is already gone from
+                                    // the UI but its worktree is still on disk, so
+                                    // the user is left with an orphaned directory
+                                    // only `git worktree remove` will clear.
                                     WebDeleteOutcome::Failed { message } => {
                                         Final::error(format!("Worktree delete failed: {message}"))
+                                            .sticky()
                                     }
+                                    // STICKY: same half-done delete from the other
+                                    // side, the worktree went but the records did
+                                    // not, so the agent can come back on restart.
                                     WebDeleteOutcome::CleanupFailed { message } => {
                                         Final::error(format!("Session cleanup failed: {message}"))
+                                            .sticky()
                                     }
                                 }
                             },
@@ -3435,8 +3482,11 @@ impl Engine {
                 _ => WebFollowupStatuses::default(),
             },
             None => match crate::engine::launch_outcome_final(&outcome) {
-                crate::engine::Final::Message { tone, text } => WebFollowupStatuses {
-                    statuses: vec![WireStatus::new(tone.as_wire(), text)],
+                crate::engine::Final::Message { tone, text, sticky } => WebFollowupStatuses {
+                    statuses: vec![{
+                        let s = WireStatus::new(tone.as_wire(), text);
+                        if sticky { s.sticky() } else { s }
+                    }],
                     clear_keys: Vec::new(),
                 },
                 // No op and no busy to dismiss: nothing to do.
@@ -10372,6 +10422,50 @@ mod tests {
             wire_statuses_from_reaction(&ok).is_empty(),
             "a successful worktree listing must not emit a status"
         );
+    }
+
+    #[test]
+    fn wire_status_sticky_defaults_to_false_and_round_trips() {
+        // Every constructor starts non-sticky, the builder is the only way in,
+        // and a payload from an older peer that has no `sticky` field at all
+        // deserializes to false rather than failing.
+        assert!(!WireStatus::new("error", "boom").sticky);
+        assert!(!WireStatus::keyed("k", "error", "boom").sticky);
+        let marked = WireStatus::new("error", "boom").sticky();
+        assert!(marked.sticky);
+        let json = serde_json::to_string(&marked).unwrap();
+        assert!(json.contains("\"sticky\":true"), "got {json}");
+        let back: WireStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, marked);
+        let legacy: WireStatus =
+            serde_json::from_str(r#"{"tone":"error","message":"boom"}"#).unwrap();
+        assert!(!legacy.sticky, "an absent field must read as not sticky");
+    }
+
+    #[test]
+    fn a_sticky_final_reaches_the_wire_status_unchanged() {
+        // The chain a marked call site depends on: `Final::sticky()` sets the
+        // flag, `into_reaction` copies it onto the `StatusUpdate`, and
+        // `WireStatus::from_update` copies it onto the wire. A break anywhere in
+        // that chain silently un-sticks every marked site at once.
+        use crate::engine::{EventReaction, Final, ResolvedFinal};
+        let reaction = ResolvedFinal::new("k", Final::error("Worktree delete failed.").sticky())
+            .into_reaction();
+        let EventReaction::Status(update) = reaction else {
+            panic!("expected a Status reaction");
+        };
+        assert!(update.sticky, "the update must carry the flag");
+        assert!(
+            WireStatus::from_update(&update).sticky,
+            "the wire status must carry the flag"
+        );
+        // The control: an unmarked final of the same tone is not sticky.
+        let plain = ResolvedFinal::new("k", Final::error("Push failed.")).into_reaction();
+        let EventReaction::Status(plain) = plain else {
+            panic!("expected a Status reaction");
+        };
+        assert!(!plain.sticky);
+        assert!(!WireStatus::from_update(&plain).sticky);
     }
 
     #[test]
