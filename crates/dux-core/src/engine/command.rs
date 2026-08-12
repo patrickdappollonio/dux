@@ -444,7 +444,7 @@ impl Engine {
                                 // toast.
                                 return Ok(EventReaction::Status(
                                     StatusUpdate::error(format!(
-                                        "Project add failed and couldn't be cleaned up — it may \
+                                        "Project add failed and couldn't be cleaned up, it may \
                                          reappear on restart. Config error: {e:#}. DB cleanup \
                                          error: {db_err:#}"
                                     ))
