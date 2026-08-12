@@ -1,6 +1,6 @@
 ---
 title: The workspace in the browser
-description: The three-pane web layout, deep links, the browser terminals, the one-writer take-over model, copy-on-select, right-click paste and image paste, Shift-Enter soft newlines, companion terminals, and the mobile hub-and-spoke shell.
+description: The three-pane web layout, deep links, the browser terminals, the one-writer take-over model, copy-on-select, right-click paste and image paste, press-and-hold selection on a touch screen, Shift-Enter soft newlines, self-clearing messages, companion terminals, and the mobile hub-and-spoke shell.
 group: Web UI
 order: 61
 ---
@@ -145,7 +145,8 @@ The web terminal copies and pastes the way a real terminal does, no menu require
   **Preferences** (the cog menu).
 - **Right-click to paste** (with a mouse or pen). It reads your browser clipboard
   and sends it to the agent. On plain HTTP, where the browser blocks clipboard
-  reads, dux nudges you toward `Ctrl+v` instead.
+  reads, dux nudges you toward `Ctrl+v` instead. On a touch screen the same
+  press-and-hold gesture belongs to selection instead, which is the next section.
 - A fixed set of chords works too, and it is not user-configurable: `Ctrl+Shift+c`,
   `Ctrl+Insert`, or `Cmd+c` to copy, and `Ctrl+v`, `Ctrl+Shift+v`, or `Cmd+v` to
   paste, with `Ctrl+c` staying SIGINT as it should.
@@ -252,12 +253,19 @@ down.
 ## Messages
 
 Progress and results arrive as small messages at the bottom of the screen, and
-**they clear themselves.** How long one stays depends on how much it matters:
-a success or a note uses your `ui.status_clear_seconds` window (six seconds by
-default), a warning stays twice that, and an error four times, so the thing you
-most need to read is the thing that waits longest. Setting
-`ui.status_clear_seconds = 0` turns auto-clearing off entirely. You can also
-dismiss any message early by swiping it away, or with its close button.
+**they clear themselves.** How long a finished one stays depends on how much it
+matters: a success or a note uses your `ui.status_clear_seconds` window (six
+seconds by default), a warning stays twice that, and an error four times, so the
+thing you most need to read is the thing that waits longest. Setting
+`ui.status_clear_seconds = 0` turns auto-clearing off entirely. You can dismiss a
+finished message early by swiping it away, or with its close button.
+
+A message about work still in flight is a spinner, and it behaves differently on
+purpose: no close button and no swipe, because what it is reporting has not
+happened yet. It is replaced in place by its own result the moment there is one.
+If that result never arrives, because the connection dropped mid-operation, the
+spinner gives up after a minute rather than claiming forever that something is
+still running.
 
 A small number stay until you dismiss them, and the rule is narrow on purpose:
 a message waits only when **you have to go and do something outside it**, or when

@@ -855,7 +855,10 @@ pub struct UiConfig {
     /// warning/error messages are unaffected: they persist until replaced. The
     /// web's toasts use this as a base for every tone (warning 2x, error 4x),
     /// because a toast you have to click away is friction a status line is not.
-    /// 0 disables auto-clear entirely.
+    /// On the web that grading is applied entirely in the browser: the setting
+    /// has no server-side clearing effect there, and the few messages marked
+    /// sticky (they wait for the user) ignore it. 0 disables auto-clear
+    /// entirely.
     pub status_clear_seconds: u16,
     pub branch_sync_interval: u16,
     pub show_diff_line_numbers: bool,
@@ -868,8 +871,10 @@ pub struct UiConfig {
     /// [`MAX_PR_POLL_INTERVAL_SECONDS`].
     pub pr_poll_interval_seconds: u16,
     /// Whether selecting text in the web terminal auto-copies it to the
-    /// clipboard (X11-style "highlight to copy"). Changing it from the web's
-    /// Preferences dialog persists the new value here. Web-only behavior.
+    /// clipboard (X11-style "highlight to copy"). Covers both gestures: a mouse
+    /// drag, and the lift at the end of a touch press-and-hold selection.
+    /// Changing it from the web's Preferences dialog persists the new value
+    /// here. Web-only behavior.
     pub copy_on_select: bool,
     /// A font name installed on the VIEWING device, placed ahead of dux's
     /// bundled web terminal font stack so the bundled faces still fill in

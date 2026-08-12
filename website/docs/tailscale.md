@@ -113,8 +113,9 @@ handful of APIs there. What that actually costs you:
 - **`Ctrl+v` still works**, which is why that is the hint. dux intercepts the chord
   and lets the browser's native paste event feed the terminal, and that path needs no
   secure context at all.
-- **Copying still works.** Select-to-copy, the copy chords, and "copy local path" all
-  fall back to the legacy copy path inside your click, so they are unaffected.
+- **Copying still works.** Select-to-copy, the press-and-hold selection you use on
+  a phone, the copy chords, and "copy local path" all fall back to the legacy copy
+  path inside your click or your touch, so they are unaffected.
 - **An agent writing your clipboard (`OSC 52`) silently does nothing.** The
   `clipboard_passthrough` setting still reads as enabled and no error appears, so if
   you are wondering why an agent's clipboard write never landed, this is why.

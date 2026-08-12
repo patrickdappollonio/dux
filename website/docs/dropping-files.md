@@ -103,7 +103,10 @@ The details:
   still on the clipboard and which chord pastes it literally: *"That paste was
   41320 characters, so dux saved it as a file rather than typing it into the
   agent."* If the save itself fails it says it **tried** to save, and the
-  clipboard note is how you get your text back.
+  clipboard note is how you get your text back. That one waits for you instead
+  of clearing itself: dux cancelled the paste to make room for a file that never
+  arrived, so your text is neither typed nor saved and the message is the thing
+  telling you how to get it back.
 - **`Ctrl+Shift+v` pastes it as text anyway.** The same hatch as image-wins,
   for the same reason, and for that one keystroke only.
 - **Set it to `0` to switch it off** and long pastes go to the prompt verbatim,
@@ -442,8 +445,10 @@ from its side. dux sends the correct bytes; the receiving tool rewrites them.
   Anything over 1000 characters is filed away as generic pasted content, and the
   quoting dux adds counts toward that. dux measures the finished paste rather than
   the file's own path, and when it would go over the limit it does not send it at
-  all: the toast tells you the file was saved, gives you its full path, and says
-  the agent will not pick it up automatically. The limit belongs to Codex itself,
+  all: the report tells you the file was saved, gives you its full path, and says
+  the agent will not pick it up automatically. That report waits for you rather
+  than clearing itself, since the path in it is the only one you have got. The
+  limit belongs to Codex itself,
   not to a quoting style and not to what you called the provider block: it applies
   whichever `web_dragdrop_paste` value you give Codex, it follows Codex under any
   block name you like (`[providers.myagent] command = "codex"` still gets it), and
@@ -508,10 +513,13 @@ paste it here. Nothing is left on the server to clean up.
 If you lose input to another device in the moment between the file being saved
 and its path being pasted, dux tells you plainly: the file **was** saved, here
 is its full path, and the path was not sent. You can then take over input and
-paste it yourself. The same honesty applies on a phone: if the compose box goes
-away mid-upload (you rotated to a wide layout, or switched the box off), dux
-reports the file as saved-but-not-added with its full path rather than claiming
-it joined a message you can no longer see.
+paste it yourself. That particular message is one of the few that **waits for
+you** instead of clearing itself, because it is holding the only copy of that
+path anywhere on screen, and a report that timed out would take the path with it.
+Dismiss it once you have what you need. The same honesty applies on a phone: if
+the compose box goes away mid-upload (you rotated to a wide layout, or switched
+the box off), dux reports the file as saved-but-not-added with its full path
+rather than claiming it joined a message you can no longer see.
 
 ## Limits, and switching it off
 

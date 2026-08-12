@@ -359,7 +359,7 @@ fn config_schema() -> Vec<ConfigEntry> {
         ConfigEntry::Field {
             key: "status_clear_seconds",
             comment: Some(CommentSource::Static(
-                "# Seconds before a transient status message auto-clears.\n# In the TUI status line this applies to success/info confirmations only;\n# busy/pending messages stay until the operation finishes, and warnings and\n# errors stay until replaced.\n# In the web UI every toast dismisses itself, and this is the base window:\n# warnings stay up twice as long and errors four times as long, so this one\n# number grades all of them.\n# Set to 0 to disable auto-clear (messages persist until the next one).",
+                "# Seconds before a transient status message auto-clears.\n# In the TUI status line this applies to success/info confirmations only;\n# busy/pending messages stay until the operation finishes, and warnings and\n# errors stay until replaced.\n# In the web UI the browser owns how long a message stays on screen, and this\n# is the base window it grades by severity: warnings stay up twice as long and\n# errors four times as long, so this one number moves all of them. A handful of\n# web messages wait for you instead, the ones holding something you would\n# otherwise lose (a file that was saved but never handed to the agent, say);\n# those are unaffected by this setting.\n# Set to 0 to disable auto-clear (in the TUI, messages persist until the next\n# one; in the web UI they stay until you dismiss them).",
             )),
             value_fn: |c| FieldValue::U16(c.ui.status_clear_seconds),
         },
@@ -405,7 +405,7 @@ fn config_schema() -> Vec<ConfigEntry> {
         ConfigEntry::Field {
             key: "copy_on_select",
             comment: Some(CommentSource::Static(
-                "# Web UI only: auto-copy selected terminal text to the clipboard\n# (X11-style \"highlight to copy\"). When enabled, dragging a selection in\n# the browser terminal copies it; Ctrl-Shift-c / Ctrl-Insert (or Cmd-c on a\n# Mac) copy regardless. Change it at runtime from the web UI's Preferences\n# dialog.",
+                "# Web UI only: auto-copy selected terminal text to the clipboard\n# (X11-style \"highlight to copy\"). When enabled, dragging a selection in\n# the browser terminal copies it, and so does lifting your finger after a\n# press-and-hold selection on a touch screen; Ctrl-Shift-c / Ctrl-Insert (or\n# Cmd-c on a Mac) copy regardless. Change it at runtime from the web UI's\n# Preferences dialog.",
             )),
             value_fn: |c| FieldValue::Bool(c.ui.copy_on_select),
         },
