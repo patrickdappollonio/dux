@@ -452,7 +452,7 @@ impl Engine {
                                 ));
                             }
                             Ok(EventReaction::Status(StatusUpdate::error(format!(
-                                "Project add failed and was rolled back — config.toml could \
+                                "Project add failed and was rolled back; config.toml could \
                                  not be updated: {e:#}"
                             ))))
                         }
@@ -639,7 +639,7 @@ impl Engine {
                                 // action outside the toast.
                                 Final::error(format!(
                                     "Startup command failed for agent \"{branch_name}\": {error}. \
-                                     Run read-startup-command-logs for details."
+                                     Open the startup command logs for details."
                                 ))
                                 .sticky()
                             }
@@ -838,13 +838,18 @@ impl Engine {
                 success_message,
             } => match crate::git::commit(&worktree_path, &message) {
                 Ok(_) => Ok(EventReaction::Status(StatusUpdate::info(success_message))),
-                // STICKY: the commit message the user just wrote is not saved
-                // anywhere by the failure, and git may have left the index
-                // partly staged. Recovering means going back to the message or
-                // to git, both outside the toast.
-                Err(e) => Ok(EventReaction::Status(
-                    StatusUpdate::error(format!("Commit failed: {e}")).sticky(),
-                )),
+                // Deliberately NOT sticky, and the reasoning is worth keeping
+                // because the first pass got it wrong twice. `git commit` does
+                // not partially apply, so a failure leaves the index exactly as
+                // it was; and the web dialog keeps the typed message on failure
+                // (it only closes on success), so nothing is lost either. The
+                // usual causes are a rejected pre-commit hook or nothing staged,
+                // where the recovery is pressing the button again, inside the UI.
+                // It is also a FREQUENT failure, and marking frequent failures
+                // sticky is how the budget gets spent on the wrong ones.
+                Err(e) => Ok(EventReaction::Status(StatusUpdate::error(format!(
+                    "Commit failed: {e}"
+                )))),
             },
 
             Command::Push { worktree_path } => {

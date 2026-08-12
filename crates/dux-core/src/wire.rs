@@ -2383,18 +2383,27 @@ impl Engine {
                     WebCheckoutOutcome::Ok { target_branch } => Final::info(format!(
                         "Checked out \"{target_branch}\" for project \"{project_name}\"."
                     )),
+                    // STICKY: the checkout stopped part-way and the repository
+                    // is left on whatever branch it landed on. The message says
+                    // outright that the fix is in the user's terminal, which is
+                    // as far outside the toast as recovery gets.
                     WebCheckoutOutcome::Failed {
                         target_branch,
                         repo_path,
                     } => Final::error(format!(
                         "Couldn't check out \"{target_branch}\" in {repo_path} — resolve in your terminal and retry."
-                    )),
+                    ))
+                    .sticky(),
                     WebCheckoutOutcome::AlreadyLeading { current_branch } => Final::info(format!(
                         "Project \"{project_name}\" is already on the leading branch \"{current_branch}\"."
                     )),
+                    // STICKY: same shape, same instruction. dux cannot proceed
+                    // and is asking the user to go and settle the repository's
+                    // default branch by hand before retrying.
                     WebCheckoutOutcome::Heuristic { current_branch } => Final::error(format!(
                         "Can't determine the default branch for project \"{project_name}\" while it is on \"{current_branch}\". Resolve the default branch in your terminal and retry."
-                    )),
+                    ))
+                    .sticky(),
                     WebCheckoutOutcome::InspectFailed { error } => Final::error(format!(
                         "Couldn't inspect the default branch for project \"{project_name}\": {error}"
                     )),
@@ -2488,12 +2497,17 @@ impl Engine {
                     WebAddProjectOutcome::Added { status_message } => {
                         Final::info(status_message.clone())
                     }
+                    // STICKY: the project was added but the branch switch it
+                    // was supposed to make did not happen, so the checkout is
+                    // not where the user asked for it and the message sends
+                    // them to their terminal to finish the job.
                     WebAddProjectOutcome::SwitchFailed {
                         target_branch,
                         repo_path,
                     } => Final::error(format!(
                         "Couldn't check out \"{target_branch}\" in {repo_path} — resolve in your terminal and retry."
-                    )),
+                    ))
+                    .sticky(),
                     WebAddProjectOutcome::AddFailed { message } => Final::error(message.clone()),
                 }
             },

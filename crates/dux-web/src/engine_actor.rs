@@ -1691,11 +1691,22 @@ pub(crate) fn run_engine_loop(
                 )
                 && let Err(e) = engine.persist_projects_to_config()
             {
-                let _ = thread_status_tx.send(WireStatus::keyed(
-                    "config-write",
-                    "error",
-                    format!("Saved to the database, but config.toml could not be updated: {e:#}"),
-                ));
+                // STICKY: SQLite and the portable config now disagree about
+                // the same project. That is textbook half-done, and dux treats
+                // config/DB divergence as a first-class hazard elsewhere (a
+                // later TUI start reads the config, not the database, so the
+                // change silently reverts). Fixing it means editing config.toml,
+                // outside anything the toast can offer.
+                let _ = thread_status_tx.send(
+                    WireStatus::keyed(
+                        "config-write",
+                        "error",
+                        format!(
+                            "Saved to the database, but config.toml could not be updated: {e:#}"
+                        ),
+                    )
+                    .sticky(),
+                );
             }
 
             // A reload worker re-read config.toml; apply the new config to the
