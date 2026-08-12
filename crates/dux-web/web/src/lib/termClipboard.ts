@@ -70,14 +70,14 @@ export async function pasteIntoTerm(
 ): Promise<void> {
   const read = navigator.clipboard?.readText?.()
   if (!read) {
-    notifyError("Couldn't read clipboard — use Ctrl+v to paste")
+    notifyError("Couldn't read clipboard, use Ctrl+v to paste")
     refocus()
     return
   }
   try {
     term.paste(await read)
   } catch {
-    notifyError("Couldn't read clipboard — use Ctrl+v to paste")
+    notifyError("Couldn't read clipboard, use Ctrl+v to paste")
   } finally {
     refocus()
   }
