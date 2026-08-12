@@ -13406,7 +13406,22 @@ mod tests {
         use ratatui::backend::TestBackend;
 
         let app = test_app(default_bindings());
-        for width in [40u16, 55, 72, 100] {
+        // The no-wrap width is MEASURED from the content, not guessed. The help
+        // page prints the ABSOLUTE path of the config file, so its longest line
+        // is as long as wherever that config happens to live. This test used to
+        // hardcode 100, which held only while the suite ran with a short
+        // `TMPDIR`: pointing `TMPDIR` at a deeper directory pushed that one line
+        // to 106 columns, and the test then failed reporting a wrap that had
+        // nothing to do with the wrapping code it exists to check. Asking the
+        // content how wide it is keeps the assertion about wrapping.
+        let widest = app
+            .help_content_lines(400)
+            .iter()
+            .map(|l| l.width())
+            .max()
+            .unwrap_or(0);
+        let wide = u16::try_from(widest.max(100)).unwrap_or(u16::MAX);
+        for width in [40u16, 55, 72, wide] {
             let lines = app.help_content_lines(width as usize);
             // Tall enough that neither rendering is clipped at the bottom.
             let height = u16::try_from(lines.len() * 3).unwrap_or(u16::MAX).max(10);
@@ -13437,9 +13452,10 @@ mod tests {
                 );
             }
             // ...and at the narrow widths the wrap really did happen, or the
-            // comparison would prove nothing. At 100 columns nothing wraps, which
-            // is itself worth pinning: a wide terminal's help page is untouched.
-            if width < 100 {
+            // comparison would prove nothing. At a width no narrower than the
+            // widest line nothing wraps, which is itself worth pinning: a wide
+            // terminal's help page is untouched.
+            if width < wide {
                 assert!(
                     wrapped.len() > lines.len(),
                     "width {width} must wrap the help content"
@@ -13448,7 +13464,7 @@ mod tests {
                 assert_eq!(
                     wrapped.len(),
                     lines.len(),
-                    "nothing should wrap at {width} columns"
+                    "nothing should wrap at {width} columns (widest line is {widest})"
                 );
             }
         }
