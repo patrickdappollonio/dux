@@ -61,7 +61,10 @@ export function DeleteSessionDialog() {
             onCheckedChange={setDeleteWorktree}
           />
           <label htmlFor="delete-worktree" className="text-sm">
-            Also delete the git worktree on disk (irreversible)
+            {/* The branch is named because this path deletes it: the agent's
+               current branch and, when it drifted, the one it was born on. The
+               TUI's checkbox has always said so. */}
+            Also delete the git worktree and its branch (irreversible)
           </label>
         </div>
         <div className="h-2" />

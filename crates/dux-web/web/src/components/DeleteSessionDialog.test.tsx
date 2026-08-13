@@ -65,6 +65,20 @@ describe("DeleteSessionDialog", () => {
     expect(screen.getByText(/quacky-mallard/)).toBeTruthy()
   })
 
+  it("says the branch goes too, because this path deletes it", () => {
+    // The checkbox used to promise only the worktree while the same code path
+    // also ran `git branch -D`, on the current branch AND the one the agent was
+    // born on. The TUI's checkbox has always said "worktree and branch"; the web
+    // has to say it as well or the user is agreeing to less than happens.
+    seed("s1", [session1])
+    render(<DeleteSessionDialog />)
+    expect(
+      screen.getByRole("checkbox", {
+        name: "Also delete the git worktree and its branch (irreversible)",
+      }),
+    ).toBeTruthy()
+  })
+
   it("calls closeDelete when the session vanishes mid-open", () => {
     seed("s1", [session1])
     const { rerender } = render(<DeleteSessionDialog />)

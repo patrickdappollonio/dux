@@ -79,7 +79,11 @@ scoped to that project and a bare `123` is perfectly meaningful.
   restart or for reclaiming work a deleted agent left behind. Each unused
   worktree also carries a `⋯` menu with **Delete worktree…**, which removes the
   directory from disk after a confirmation naming the branch and the full path.
-  The branch itself is kept: dux removes the working directory and nothing else.
+  That confirmation carries an **"Also delete the branch"** checkbox, ticked by
+  default, because a branch left behind is what makes creating an agent under
+  that name later fail with "branch already exists". Untick it and dux removes
+  the working directory and nothing else. A worktree that is not on a branch
+  has no branch to offer, so the checkbox does not appear.
   A worktree that already has an agent names that agent and offers no delete,
   because removing it from under a live agent leaves a broken session. Delete
   the agent instead.
@@ -178,9 +182,11 @@ Two very different endings, and the difference matters:
   confirmation first. Companion terminals, unlike agents, are **destroyed** when
   killed, not detached.
 - **Delete** removes the agent from dux entirely. The confirmation includes an
-  unchecked "Also delete the git worktree on disk (irreversible)" box, so by
-  default your worktree and its work survive even a delete. This is the one
-  destructive per-agent action dux tints red, and it always confirms first.
+  unchecked "Also delete the git worktree and its branch (irreversible)" box, so
+  by default your worktree and its work survive even a delete. Tick it and both
+  go: the branch the agent is on now, and the one it was created on if it has
+  since moved. This is the one destructive per-agent action dux tints red, and
+  it always confirms first.
 
 Worktrees are your data, so dux never removes or mutates them casually. Deleting
 an agent leaves its worktree on disk unless you explicitly opt in, which is

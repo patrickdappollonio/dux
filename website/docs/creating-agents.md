@@ -276,12 +276,13 @@ for that project's repository. Worktrees are grouped into two categories:
 The browser's **Worktrees** dialog lists managed worktrees only. To adopt an
 external one, use the `new-agent-from-worktree` palette command in the terminal
 UI. The browser dialog is also a small manager: an unused worktree's `⋯` menu
-offers **Delete worktree…**, which removes the directory from disk (the branch
-survives) after a confirmation that names the branch, names the full path, and
-says specifically when there are uncommitted changes to lose. The project picker
-in front of it labels each project with how many worktrees it has, so an empty
-project is a choice rather than a surprise, and the dialog offers **Back** to
-return to that list.
+offers **Delete worktree…**, which removes the directory from disk after a
+confirmation that names the branch, names the full path, and says specifically
+when there are uncommitted changes to lose. That confirmation also offers to
+delete the branch, ticked by default; untick it and the branch survives. The
+project picker in front of it labels each project with how many worktrees it
+has, so an empty project is a choice rather than a surprise, and the dialog
+offers **Back** to return to that list.
 
 The main checkout itself is not selectable; dux keeps that for you to work in
 outside of agent sessions.
