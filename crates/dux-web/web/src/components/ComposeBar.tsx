@@ -80,6 +80,19 @@ const MAX_ROWS = 3
 // vertical padding so it means "MAX_ROWS lines of CONTENT", not "MAX_ROWS
 // lines minus the box chrome".
 function autosize(el: HTMLTextAreaElement): void {
+  // AN EMPTY BUFFER IS ONE ROW BY DEFINITION, so it is not measured at all:
+  // the inline sizing is dropped and the class-level `min-h-10` owns the rest
+  // height, exactly as it does before the box has ever grown. This is the
+  // reported bug's fix (type a long message, Send, the text clears and the box
+  // stays tall) and it is deliberately a short circuit rather than a better
+  // measurement: the measured path could not be made to fail in a test, so
+  // rather than guess at which browser-side reflow quirk produced the stale
+  // read, the one state where the answer needs no reading stops reading.
+  if (el.value === "") {
+    el.style.height = ""
+    el.style.overflowY = ""
+    return
+  }
   el.style.height = "auto"
   const style = getComputedStyle(el)
   const line = parseFloat(style.lineHeight) || 20

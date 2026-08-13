@@ -176,6 +176,47 @@ describe("ComposeBar", () => {
     expect(ta.style.overflowY).toBe("auto")
   })
 
+  // The on-device report: type a long message, Send, the text clears and the
+  // box stays tall. An EMPTY buffer is one row by definition, so the box drops
+  // its inline sizing entirely and lets the class-level minimum own the rest
+  // height; no measurement is consulted, so no measurement can get it wrong.
+  // The probe makes `scrollHeight` follow the element's own value the way a
+  // real browser's would (one 20px line per line of text), so the grow half is
+  // real rather than a fixed stub.
+  it("drops its inline sizing when the send clears the buffer", () => {
+    render(<Harness />)
+    const ta = textarea()
+    Object.defineProperty(ta, "offsetHeight", { value: 52, configurable: true })
+    Object.defineProperty(ta, "clientHeight", { value: 50, configurable: true })
+    Object.defineProperty(ta, "scrollHeight", {
+      configurable: true,
+      get(this: HTMLTextAreaElement) {
+        return 20 * Math.max(1, this.value.split("\n").length)
+      },
+    })
+    fireEvent.change(ta, { target: { value: "one\ntwo" } })
+    expect(ta.style.height).toBe("42px")
+    fireEvent.pointerDown(sendButton())
+    expect(ta.value).toBe("")
+    expect(ta.style.height).toBe("")
+    expect(ta.style.overflowY).toBe("")
+  })
+
+  // The same reset when the parent rewrites the draft to empty by any other
+  // route (a refused send is not the only way a buffer empties: selecting all
+  // and deleting is the ordinary one).
+  it("drops its inline sizing when the buffer is emptied by editing", () => {
+    render(<Harness />)
+    const ta = textarea()
+    Object.defineProperty(ta, "offsetHeight", { value: 52, configurable: true })
+    Object.defineProperty(ta, "clientHeight", { value: 50, configurable: true })
+    Object.defineProperty(ta, "scrollHeight", { value: 60, configurable: true })
+    fireEvent.change(ta, { target: { value: "one\ntwo" } })
+    expect(ta.style.height).toBe("62px")
+    fireEvent.change(ta, { target: { value: "" } })
+    expect(ta.style.height).toBe("")
+  })
+
   it("matches the terminal's 14px type, not the browser-default 16px", () => {
     // The xterm canvas next door renders at fontSize 14 (see TerminalPane's
     // Terminal options); text-base (16px) visibly towers over it on a phone.
