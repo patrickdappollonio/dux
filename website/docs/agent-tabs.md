@@ -109,7 +109,8 @@ In the terminal UI, switching is keyboard-driven and the keys are yours to rebin
 (the in-app help overlay always shows your current bindings). The defaults are
 modifier chords, and chords stay dux's even while you're typing into the agent in
 the windowed pane, so you can hop tabs mid-sentence without ever leaving the
-keyboard. Each pill shows its position number in its label, so the switch-by-number
+keyboard. Each pill carries its position number in its own little cell, divider
+and all, so the switch-by-number
 keys always have a visible address. One deliberate quirk on fullscreen: there, keys
 belong to the agent verbatim and the strip isn't even drawn, so minimize first to
 hop between tabs.

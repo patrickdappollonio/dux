@@ -58,22 +58,24 @@ fn tab_strip_start_index(seg_w: &[u16], avail: u16, focused_idx: usize) -> usize
     start.min(focused_idx)
 }
 
-/// The text a tab pill shows: the tab's strip POSITION (1-based) in front of
-/// its provider label, e.g. `1 codex`, `2 claude`. The ordinal is the tab's
-/// switch-key address (the Ctrl-1..9 defaults, and the count Ctrl-Left/Right
-/// walks through), so it follows strip order — session-slot tab first, then
-/// extra tabs in creation order — and RENUMBERS when a tab closes: it is a
+/// The ordinal cell a tab pill carries in its own SEGMENT, left of the label
+/// and behind a full-height divider (`│ 1 │ codex │`): one space, the tab's
+/// strip POSITION (1-based), one space, so the cell's width follows the
+/// number's own width (` 1 `, ` 10 `). The ordinal is the tab's switch-key
+/// address (the Ctrl-1..9 defaults, and the count Ctrl-Left/Right walks
+/// through), so it follows strip order (session-slot tab first, then extra
+/// tabs in creation order) and RENUMBERS when a tab closes: it is a
 /// position, never a stable id. Every pill is numbered, including positions
 /// past 9 (which have no Ctrl-N default but are still an address for
 /// Ctrl-Left/Right counting and for rebinding): a mixed strip where some
-/// pills carry a leading number and some don't reads like two kinds of tab,
-/// and the disambiguation suffix (`codex 2`) would make an un-numbered tenth
-/// pill genuinely ambiguous next to a numbered second one. Position 4 is not
-/// special-cased either: `select_tab_4` ships unbound (legacy terminals send
-/// the same byte for Ctrl-4 and the macro bar's Ctrl-\), but the pill is
-/// still the address users rebind to and count against.
-fn tab_pill_label(position: usize, label: &str) -> String {
-    format!("{position} {label}")
+/// pills carry a numbered segment and some don't reads like two kinds of
+/// tab, and the disambiguation suffix (`codex 2`) would make an un-numbered
+/// tenth pill genuinely ambiguous next to a numbered second one. Position 4
+/// is not special-cased either: `select_tab_4` ships unbound (legacy
+/// terminals send the same byte for Ctrl-4 and the macro bar's Ctrl-\), but
+/// the pill is still the address users rebind to and count against.
+fn tab_pill_ordinal_cell(position: usize) -> String {
+    format!(" {position} ")
 }
 
 /// How an agent row's project tag should be rendered. Decided purely from the
@@ -2187,15 +2189,13 @@ impl App {
             .iter()
             .map(|id| self.tab_provider_label(session, id))
             .collect();
-        // Each pill leads with its strip ordinal (`1 codex`, `2 claude`): the
-        // visible address for the tab switch keys. See `tab_pill_label` for
-        // why every pill is numbered and why ordinals renumber on close.
+        // Each pill carries its strip ordinal in its own SEGMENT left of the
+        // label (`│ 1 │ codex │`): the visible address for the tab switch
+        // keys. See `tab_pill_ordinal_cell` for why every pill is numbered
+        // and why ordinals renumber on close.
         let labels: Vec<String> =
-            tab_labels(&providers.iter().map(|s| s.as_str()).collect::<Vec<_>>())
-                .iter()
-                .enumerate()
-                .map(|(i, l)| tab_pill_label(i + 1, l))
-                .collect();
+            tab_labels(&providers.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+        let seg_ordinal: Vec<String> = (1..=labels.len()).map(tab_pill_ordinal_cell).collect();
 
         let [strip_area, term_area] = Layout::default()
             .direction(Direction::Vertical)
@@ -2208,7 +2208,8 @@ impl App {
         // needed (decided below, once the segment widths are known).
         let strip_width = strip_area.width;
 
-        // Label text per tab (the content INSIDE each box). All tabs are
+        // Label-cell text per tab (the content right of the ordinal segment's
+        // divider). All tabs are
         // generic — no per-tab marker — except the focused tab, which is
         // prefixed with the shared solid dot glyph so the active tab is
         // unambiguous even without color (matches the "●" = active/present
@@ -2233,15 +2234,21 @@ impl App {
                 }
             })
             .collect();
-        // +2 per segment for the box's border columns, +1 for the gap that
-        // separates adjacent boxes. Measured in real display columns
-        // (unicode-width via `CellWidth`), not `chars().count()`: a
-        // char-count measure undercounts double-width CJK/emoji glyphs in
-        // custom provider labels, which would overflow the segment's
-        // recorded region and paint over the add button.
+        // Per segment: the ordinal cell, +2 for the box's border columns, +1
+        // for the full-height divider between the ordinal and label cells,
+        // +1 for the gap that separates adjacent boxes. Measured in real
+        // display columns (unicode-width via `CellWidth`), not
+        // `chars().count()`: a char-count measure undercounts double-width
+        // CJK/emoji glyphs in custom provider labels, which would overflow
+        // the segment's recorded region.
+        let seg_ord_w: Vec<u16> = seg_ordinal
+            .iter()
+            .map(|t| t.as_str().cell_width())
+            .collect();
         let mut seg_w: Vec<u16> = seg_content
             .iter()
-            .map(|t| t.as_str().cell_width() + 3)
+            .zip(&seg_ord_w)
+            .map(|(t, ow)| t.as_str().cell_width() + ow + 4)
             .collect();
 
         // Choose a start index so the focused tab is visible within `avail`.
@@ -2274,12 +2281,15 @@ impl App {
         if let Some(focused_w) = seg_w.get(focused_idx).copied()
             && focused_w > avail
         {
-            // Reserve the box's 2 border columns plus the inter-box gap; fit
-            // the rest of the content (dot/gutter + label + padding) into
-            // what remains.
-            let budget = avail.saturating_sub(3);
+            // Truncation applies to the LABEL cell only: the ordinal segment
+            // always renders whole (it is the switch-key address). Reserve
+            // the ordinal cell, the box's 2 border columns, the divider and
+            // the inter-box gap; fit the rest of the content (dot/gutter +
+            // label + padding) into what remains.
+            let budget = avail.saturating_sub(seg_ord_w[focused_idx] + 4);
             seg_content[focused_idx] = truncate_to_width(&seg_content[focused_idx], budget);
-            seg_w[focused_idx] = seg_content[focused_idx].as_str().cell_width() + 3;
+            seg_w[focused_idx] =
+                seg_content[focused_idx].as_str().cell_width() + seg_ord_w[focused_idx] + 4;
         }
 
         let start = tab_strip_start_index(&seg_w, avail, focused_idx);
@@ -2324,23 +2334,42 @@ impl App {
             let active = tab_ids[i] == focused_id;
             let border_style = self.theme.border_style(active);
             let label_style = self.theme.title_style(active);
-            // Inner width in display columns: the segment minus its 2 border
-            // columns and the trailing inter-box gap.
-            let inner_w = seg_w[i].saturating_sub(3);
-            let horizontal = corners.horizontal_top.repeat(inner_w as usize);
-            let top = format!("{}{}{}", corners.top_left, horizontal, corners.top_right);
+            // The pill is two cells behind one frame: the ordinal cell, a
+            // full-height divider joined to the frame with light-set tees
+            // (matching the rounded corners), then the label cell. Widths in
+            // display columns: the ordinal cell is `ord_w`, the label cell is
+            // the segment minus the ordinal, the 2 border columns, the
+            // divider and the trailing inter-box gap.
+            let ord_w = seg_ord_w[i];
+            let label_w = seg_w[i].saturating_sub(ord_w + 4);
+            let top = format!(
+                "{}{}{}{}{}",
+                corners.top_left,
+                corners.horizontal_top.repeat(ord_w as usize),
+                ratatui::symbols::line::HORIZONTAL_DOWN,
+                corners.horizontal_top.repeat(label_w as usize),
+                corners.top_right
+            );
             let bottom = format!(
-                "{}{}{}",
+                "{}{}{}{}{}",
                 corners.bottom_left,
-                corners.horizontal_bottom.repeat(inner_w as usize),
+                corners.horizontal_bottom.repeat(ord_w as usize),
+                ratatui::symbols::line::HORIZONTAL_UP,
+                corners.horizontal_bottom.repeat(label_w as usize),
                 corners.bottom_right
             );
             buf.set_string(x, top_y, &top, border_style);
             buf[(x, mid_y)]
                 .set_symbol(corners.vertical_left)
                 .set_style(border_style);
-            buf.set_string(x + 1, mid_y, &seg_content[i], label_style);
-            buf[(x + 1 + inner_w, mid_y)]
+            buf.set_string(x + 1, mid_y, &seg_ordinal[i], label_style);
+            // The divider takes the border style, like the tees: it is part
+            // of the frame, not the text.
+            buf[(x + 1 + ord_w, mid_y)]
+                .set_symbol(ratatui::symbols::line::VERTICAL)
+                .set_style(border_style);
+            buf.set_string(x + 2 + ord_w, mid_y, &seg_content[i], label_style);
+            buf[(x + 2 + ord_w + label_w, mid_y)]
                 .set_symbol(corners.vertical_right)
                 .set_style(border_style);
             buf.set_string(x, bot_y, &bottom, border_style);
@@ -10879,10 +10908,11 @@ mod tests {
             "each tab must close with rounded bottom corners, got: {bottom}"
         );
 
-        let labels: String = strip_row_cells(&terminal, label_row)
+        let label_syms: Vec<String> = strip_row_cells(&terminal, label_row)
             .into_iter()
             .map(|(sym, _, _)| sym)
             .collect();
+        let labels: String = label_syms.concat();
         assert!(
             labels.contains('●'),
             "the focused tab must carry the active-dot glyph, got: {labels}"
@@ -10891,19 +10921,53 @@ mod tests {
             labels.contains('│'),
             "the label row must carry the boxes' vertical borders, got: {labels}"
         );
-        // Symmetric padding: the right margin mirrors the left (space +
-        // dot-width + space), for both the focused and the unfocused box.
-        // Each label leads with its strip ordinal (the tab switch-key
-        // address): session-slot "codex" is position 1, the extra "claude"
-        // tab position 2.
+        // The ordinal (the tab switch-key address) sits in its own SEGMENT
+        // left of the label, behind a full-height divider: session-slot
+        // "codex" is position 1, the extra "claude" tab position 2. The label
+        // cell keeps its symmetric padding (the right margin mirrors the
+        // left: space + dot-width + space).
         assert!(
-            labels.contains("│ ● 2 claude   │"),
-            "the focused label must carry its ordinal and symmetric padding, got: {labels}"
+            labels.contains("│ 2 │ ● claude   │"),
+            "the focused pill must carry its ordinal segment and padded label, got: {labels}"
         );
         assert!(
-            labels.contains("│   1 codex   │"),
-            "the unfocused label must carry its ordinal and symmetric padding, got: {labels}"
+            labels.contains("│ 1 │   codex   │"),
+            "the unfocused pill must carry its ordinal segment and padded label, got: {labels}"
         );
+
+        // The divider is JOINED to the frame: each pill's top border carries a
+        // `┬` tee directly above the divider column and the bottom border a
+        // `┴` directly below it (light box-drawing set, matching ╭╮╰╯).
+        let top_syms: Vec<String> = strip_row_cells(&terminal, top_row)
+            .into_iter()
+            .map(|(sym, _, _)| sym)
+            .collect();
+        let bottom_syms: Vec<String> = strip_row_cells(&terminal, bottom_row)
+            .into_iter()
+            .map(|(sym, _, _)| sym)
+            .collect();
+        let tee_columns: Vec<usize> = top_syms
+            .iter()
+            .enumerate()
+            .filter(|(_, sym)| *sym == "┬")
+            .map(|(x, _)| x)
+            .collect();
+        assert_eq!(
+            tee_columns.len(),
+            2,
+            "each of the two pills must carry exactly one top tee, got: {top}",
+            top = top_syms.concat()
+        );
+        for x in tee_columns {
+            assert_eq!(
+                label_syms[x], "│",
+                "the label row must carry the divider under each top tee (col {x})"
+            );
+            assert_eq!(
+                bottom_syms[x], "┴",
+                "the bottom border must carry a `┴` tee under each divider (col {x})"
+            );
+        }
 
         // The focused box uses the shared focused border/title styles (the
         // mini-pane idiom of `themed_block`); the unfocused box the normal
@@ -10936,6 +11000,20 @@ mod tests {
                 .iter()
                 .any(|(sym, fg, _)| sym == "╭" && *fg == app.theme.border_normal),
             "unfocused tab boxes must use the normal border color"
+        );
+        // The tees are part of the frame, so they take the pill's border style
+        // (focused and unfocused alike); no new theme token.
+        assert!(
+            top_cells
+                .iter()
+                .any(|(sym, fg, _)| sym == "┬" && *fg == app.theme.border_focused),
+            "the focused pill's tee must use the focused border color"
+        );
+        assert!(
+            top_cells
+                .iter()
+                .any(|(sym, fg, _)| sym == "┬" && *fg == app.theme.border_normal),
+            "the unfocused pill's tee must use the normal border color"
         );
     }
 
@@ -10974,10 +11052,11 @@ mod tests {
         };
 
         let labels = render_labels(&mut app);
-        for expected in ["1 codex", "2 claude", "3 opencode"] {
+        for expected in ["│ 1 │ ● codex", "│ 2 │   claude", "│ 3 │   opencode"] {
             assert!(
                 labels.contains(expected),
-                "pill labels must lead with their strip ordinal; wanted {expected:?} in: {labels}"
+                "each pill must carry its strip ordinal in its own segment; wanted \
+                 {expected:?} in: {labels}"
             );
         }
 
@@ -10985,11 +11064,11 @@ mod tests {
         app.engine.agent_tabs.remove("tab-2");
         let labels = render_labels(&mut app);
         assert!(
-            labels.contains("2 opencode"),
+            labels.contains("│ 2 │   opencode"),
             "closing a tab must renumber later pills (positions, not ids), got: {labels}"
         );
         assert!(
-            !labels.contains("3 opencode"),
+            !labels.contains("│ 3 │"),
             "the old ordinal must not survive the close, got: {labels}"
         );
         assert!(
@@ -10998,14 +11077,55 @@ mod tests {
         );
     }
 
-    /// `tab_pill_label` is position-driven and numbers EVERY pill, including
-    /// positions past 9 (no Ctrl-N default, still an address for
-    /// Ctrl-Left/Right counting and rebinds).
+    /// `tab_pill_ordinal_cell` is position-driven and numbers EVERY pill,
+    /// including positions past 9 (no Ctrl-N default, still an address for
+    /// Ctrl-Left/Right counting and rebinds): the cell is one space, the
+    /// number, one space, so its width follows the number's own width.
     #[test]
-    fn tab_pill_label_numbers_all_positions() {
-        assert_eq!(tab_pill_label(1, "codex"), "1 codex");
-        assert_eq!(tab_pill_label(4, "claude"), "4 claude");
-        assert_eq!(tab_pill_label(10, "codex 2"), "10 codex 2");
+    fn tab_pill_ordinal_cell_numbers_all_positions() {
+        assert_eq!(tab_pill_ordinal_cell(1), " 1 ");
+        assert_eq!(tab_pill_ordinal_cell(4), " 4 ");
+        assert_eq!(tab_pill_ordinal_cell(10), " 10 ");
+    }
+
+    /// A two-digit ordinal widens its own segment and never leaks into the
+    /// label cell: position 10 renders as `│ 10 │` with the divider intact.
+    #[test]
+    fn tab_strip_two_digit_ordinal_keeps_its_own_segment() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        for i in 0..9 {
+            seed_render_tab(
+                &mut app,
+                &session_id,
+                &format!("tab-{i}"),
+                "codex",
+                i as i64,
+            );
+        }
+        app.set_focused_tab(&session_id, "tab-8");
+
+        let width = 200u16;
+        let backend = TestBackend::new(width, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let area = Rect::new(0, 0, width, 24);
+        terminal
+            .draw(|frame| {
+                app.render_agent_tab_strip_if_needed(frame, area, true);
+            })
+            .expect("render frame");
+
+        let labels: String = strip_row_cells(&terminal, Rect::new(0, 1, width, 1))
+            .into_iter()
+            .map(|(sym, _, _)| sym)
+            .collect();
+        assert!(
+            labels.contains("│ 10 │"),
+            "position 10 must keep its ordinal segment whole, got: {labels}"
+        );
     }
 
     /// Width/truncation math: the strip must never draw past the pane width,
