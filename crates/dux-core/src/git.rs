@@ -1178,16 +1178,83 @@ fn remove_path_if_exists(path: &Path) -> Result<()> {
 /// `initial_branch` is the branch the agent was born on and never moves. Delete
 /// only the first and the birth branch survives the agent, which is exactly how
 /// "create foo, delete foo, recreate foo" ends in "branch already exists".
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RemoveResult {
-    /// The branch the worktree was on was already gone when dux tried to delete
-    /// it (so `git branch -D` reported a failure that is not an error here).
-    pub branch_already_deleted: bool,
-    /// What happened to a DISTINCT birth branch: `Some(false)` when dux deleted
-    /// it here, `Some(true)` when it was already gone, and `None` when there was
-    /// no distinct birth branch to delete (the agent never drifted, or the
-    /// caller passed none).
-    pub initial_branch_already_deleted: Option<bool>,
+    /// What happened to the branch the worktree was on.
+    pub branch: BranchDeletion,
+    /// What happened to a DISTINCT birth branch, and `None` when there was no
+    /// distinct birth branch to delete (the agent never drifted, or the caller
+    /// passed none).
+    pub initial_branch: Option<BranchDeletion>,
+}
+
+/// What `git branch -D` did to one branch.
+///
+/// Three answers rather than two, because a failed `-D` means two very
+/// different things and dux used to report both as "already gone". MEASURED on
+/// git 2.55: a branch that is CHECKED OUT in another worktree makes `-D` exit 1
+/// with "cannot delete branch 'x' used by worktree at ...", and the branch is
+/// still there afterwards. Saying it was already gone is then the exact
+/// opposite of the truth, and the collision it was meant to warn about (create
+/// foo, delete foo, recreate foo) silently survives.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum BranchDeletion {
+    /// git deleted the branch here.
+    #[default]
+    Deleted,
+    /// There was no such branch to delete. Not an error: somebody else already
+    /// removed it, or dux was told about a branch that never existed.
+    AlreadyGone,
+    /// git refused, and the branch is STILL THERE. Carries git's own reason
+    /// line so the message can say why rather than guessing.
+    Refused { reason: String },
+}
+
+impl BranchDeletion {
+    /// git's reason for refusing, or `None` when it did not refuse.
+    pub fn refused_reason(&self) -> Option<&str> {
+        match self {
+            BranchDeletion::Refused { reason } => Some(reason),
+            _ => None,
+        }
+    }
+}
+
+/// The recovery sentence for a branch git REFUSED to delete: what happened, why
+/// (in git's own words), and the two ways out. Shared so the TUI status line and
+/// the web toast say the same thing.
+///
+/// Both surfaces need this because a surviving branch is what makes recreating
+/// an agent under the same name fail later, and the failure surfaces far away
+/// from the deletion that caused it.
+pub fn branch_refusal_note(branch: &str, reason: &str) -> String {
+    let reason = clean_git_reason(reason);
+    format!(
+        "Git refused to delete branch \"{branch}\": {reason} Delete it yourself with \
+         git branch -D \"{branch}\", or give the next agent a different name."
+    )
+}
+
+/// git's stderr line, tidied for a status message: the "error: " prefix dropped
+/// (the sentence around it already says something went wrong) and a full stop
+/// added when git did not end with one.
+///
+/// An empty reason becomes a plain statement rather than a dangling colon, which
+/// is the shape a git build that says nothing at all would otherwise produce.
+fn clean_git_reason(reason: &str) -> String {
+    let trimmed = reason.trim();
+    let trimmed = trimmed
+        .strip_prefix("error: ")
+        .or_else(|| trimmed.strip_prefix("fatal: "))
+        .unwrap_or(trimmed);
+    if trimmed.is_empty() {
+        return "git gave no reason.".to_string();
+    }
+    if trimmed.ends_with('.') || trimmed.ends_with('!') || trimmed.ends_with('?') {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}.")
+    }
 }
 
 impl RemoveResult {
@@ -1197,24 +1264,34 @@ impl RemoveResult {
     ///
     /// Lives here so the TUI status line and the web toast say the same thing.
     pub fn initial_branch_note(&self, initial_branch: &str) -> Option<String> {
-        match self.initial_branch_already_deleted? {
-            false => Some(format!(
+        match self.initial_branch.as_ref()? {
+            BranchDeletion::Deleted => Some(format!(
                 "Its original branch \"{initial_branch}\" was deleted too."
             )),
-            true => Some(format!(
+            BranchDeletion::AlreadyGone => Some(format!(
                 "Its original branch \"{initial_branch}\" was already gone."
+            )),
+            BranchDeletion::Refused { reason } => Some(format!(
+                "Its original branch \"{initial_branch}\" is still there. {}",
+                branch_refusal_note(initial_branch, reason)
             )),
         }
     }
 }
 
-/// Force-delete one branch, best effort. Returns `true` when git deleted it and
-/// `false` when it did not (already gone, or still checked out somewhere).
+/// Force-delete one branch, best effort, reporting which of the three things
+/// happened.
 ///
 /// `--` so the name is read as a REF and never as an option. Without it a ref
 /// that plumbing created as `--delete` is parsed as the flag and survives the
 /// cleanup. Measured on git 2.55.
-fn delete_branch_force(repo_path: &Path, branch_name: &str) -> Result<bool> {
+///
+/// A failure is then disambiguated with PLUMBING rather than by reading git's
+/// prose: `show-ref --verify` answers whether the ref is still there, which is
+/// the whole question. `--end-of-options` guards the positional (MEASURED:
+/// `show-ref` accepts it), and a fully qualified `refs/heads/...` cannot lead
+/// with a dash anyway, so the guard is belt and braces.
+fn delete_branch_force(repo_path: &Path, branch_name: &str) -> Result<BranchDeletion> {
     let output = Command::new("git")
         .args([
             "-C",
@@ -1225,7 +1302,39 @@ fn delete_branch_force(repo_path: &Path, branch_name: &str) -> Result<bool> {
             branch_name,
         ])
         .output()?;
-    Ok(output.status.success())
+    if output.status.success() {
+        return Ok(BranchDeletion::Deleted);
+    }
+    if !branch_still_exists(repo_path, branch_name) {
+        return Ok(BranchDeletion::AlreadyGone);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let reason = stderr
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("")
+        .to_string();
+    Ok(BranchDeletion::Refused { reason })
+}
+
+/// Whether `refs/heads/<branch_name>` still resolves. Best effort: a git that
+/// cannot answer is read as "gone", which keeps the old behaviour rather than
+/// inventing a refusal nobody can act on.
+fn branch_still_exists(repo_path: &Path, branch_name: &str) -> bool {
+    Command::new("git")
+        .args([
+            "-C",
+            repo_path.to_string_lossy().as_ref(),
+            "show-ref",
+            "--verify",
+            "--quiet",
+            "--end-of-options",
+            &format!("refs/heads/{branch_name}"),
+        ])
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false)
 }
 
 /// Remove a worktree from disk and from git's registry, and DO NOT touch its
@@ -1327,18 +1436,18 @@ pub fn remove_worktree(
     // The worktree half is shared with `remove_worktree_keep_branch`; only the
     // branch deletions below are this function's own.
     remove_worktree_keep_branch(repo_path, worktree_path)?;
-    let branch_deleted = delete_branch_force(repo_path, branch_name)?;
+    let branch = delete_branch_force(repo_path, branch_name)?;
     // Only a DISTINCT, non-empty birth branch is a second thing to delete. An
     // empty one comes from a session record that never had it recorded.
-    let initial_branch_already_deleted = match initial_branch {
+    let initial = match initial_branch {
         Some(initial) if !initial.is_empty() && initial != branch_name => {
-            Some(!delete_branch_force(repo_path, initial)?)
+            Some(delete_branch_force(repo_path, initial)?)
         }
         _ => None,
     };
     Ok(RemoveResult {
-        branch_already_deleted: !branch_deleted,
-        initial_branch_already_deleted,
+        branch,
+        initial_branch: initial,
     })
 }
 
@@ -4997,8 +5106,9 @@ mod tests {
         run_git(repo.path(), &["update-ref", "refs/heads/--delete", "HEAD"]);
         let result =
             remove_worktree(repo.path(), &repo.path().join("gone"), "--delete", None).unwrap();
-        assert!(
-            !result.branch_already_deleted,
+        assert_eq!(
+            result.branch,
+            BranchDeletion::Deleted,
             "the branch should have been deleted, not read as the --delete flag"
         );
         let listed = std::process::Command::new("git")
@@ -5039,10 +5149,10 @@ mod tests {
 
         let result = remove_worktree(repo.path(), &wt, "drifted", Some("born-here")).unwrap();
 
-        assert!(!result.branch_already_deleted);
+        assert_eq!(result.branch, BranchDeletion::Deleted);
         assert_eq!(
-            result.initial_branch_already_deleted,
-            Some(false),
+            result.initial_branch,
+            Some(BranchDeletion::Deleted),
             "the birth branch was deleted here, so the message can say so"
         );
         let branches = branch_list(repo.path());
@@ -5065,8 +5175,8 @@ mod tests {
 
         let result = remove_worktree(repo.path(), &wt, "steady", Some("steady")).unwrap();
 
-        assert!(!result.branch_already_deleted);
-        assert_eq!(result.initial_branch_already_deleted, None);
+        assert_eq!(result.branch, BranchDeletion::Deleted);
+        assert_eq!(result.initial_branch, None);
         assert!(result.initial_branch_note("steady").is_none());
     }
 
@@ -5081,11 +5191,111 @@ mod tests {
 
         let result = remove_worktree(repo.path(), &wt, "drifted", Some("born-here")).unwrap();
 
-        assert_eq!(result.initial_branch_already_deleted, Some(true));
+        assert_eq!(result.initial_branch, Some(BranchDeletion::AlreadyGone));
         assert_eq!(
             result.initial_branch_note("born-here").as_deref(),
             Some("Its original branch \"born-here\" was already gone.")
         );
+    }
+
+    /// The verified bug: `git branch -D` also fails when the branch is CHECKED
+    /// OUT in another worktree, and dux used to call every failure "already
+    /// gone". The branch is still there, so the message said the opposite of
+    /// the truth and the name collision it exists to warn about survived
+    /// silently.
+    #[test]
+    fn remove_worktree_reports_a_branch_git_refused_to_delete() {
+        let repo = init_test_repo();
+        let wt = add_worktree(repo.path(), "drifted");
+        // A SECOND worktree holds `born-here`, which is exactly what makes git
+        // refuse: the branch is checked out somewhere else.
+        let holder = add_worktree(repo.path(), "born-here");
+        assert!(holder.exists());
+
+        let result = remove_worktree(repo.path(), &wt, "drifted", Some("born-here")).unwrap();
+
+        let Some(BranchDeletion::Refused { reason }) = result.initial_branch.clone() else {
+            panic!("expected a refusal, got {:?}", result.initial_branch);
+        };
+        assert!(
+            reason.contains("born-here"),
+            "git's own reason must be carried through: {reason}"
+        );
+        let branches = branch_list(repo.path());
+        assert!(
+            branches.contains("born-here"),
+            "the refused branch really is still there: {branches}"
+        );
+        let note = result
+            .initial_branch_note("born-here")
+            .expect("a refusal is worth a sentence");
+        assert!(
+            note.contains("still there") && note.contains("git branch -D \"born-here\""),
+            "the note must be honest and actionable: {note}"
+        );
+    }
+
+    /// The same refusal on the branch the worktree itself was on, which is the
+    /// half the delete message narrates first.
+    #[test]
+    fn remove_worktree_reports_a_refused_current_branch() {
+        let repo = init_test_repo();
+        let wt = add_worktree(repo.path(), "shared");
+        // Point the removed worktree's record at a branch a DIFFERENT worktree
+        // is holding, the shape a stale session record produces.
+        let holder = add_worktree(repo.path(), "held-elsewhere");
+        assert!(holder.exists());
+
+        let result = remove_worktree(repo.path(), &wt, "held-elsewhere", None).unwrap();
+
+        assert!(
+            matches!(result.branch, BranchDeletion::Refused { .. }),
+            "expected a refusal, got {:?}",
+            result.branch
+        );
+        assert!(
+            branch_list(repo.path()).contains("held-elsewhere"),
+            "the branch survives the refusal"
+        );
+    }
+
+    /// A branch nobody ever created is still "already gone", not a refusal: the
+    /// disambiguation is a plumbing question about the ref, not a reading of
+    /// git's prose.
+    #[test]
+    fn remove_worktree_reports_a_never_existing_branch_as_already_gone() {
+        let repo = init_test_repo();
+
+        let result = remove_worktree(
+            repo.path(),
+            &repo.path().join("gone"),
+            "no-such-branch",
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(result.branch, BranchDeletion::AlreadyGone);
+    }
+
+    #[test]
+    fn a_refusal_note_names_the_branch_the_reason_and_the_way_out() {
+        let note = branch_refusal_note(
+            "feat",
+            "error: cannot delete branch 'feat' used by worktree at '/tmp/w'",
+        );
+        assert_eq!(
+            note,
+            "Git refused to delete branch \"feat\": cannot delete branch 'feat' used by \
+             worktree at '/tmp/w'. Delete it yourself with git branch -D \"feat\", or give \
+             the next agent a different name."
+        );
+    }
+
+    #[test]
+    fn a_git_reason_is_tidied_without_being_rewritten() {
+        assert_eq!(clean_git_reason("error: boom"), "boom.");
+        assert_eq!(clean_git_reason("fatal: boom."), "boom.");
+        assert_eq!(clean_git_reason("  "), "git gave no reason.");
     }
 
     /// The refname tenet, applied to the SECOND deletion path: without `--` git
@@ -5103,8 +5313,8 @@ mod tests {
         let result = remove_worktree(repo.path(), &wt, "drifted", Some("--delete")).unwrap();
 
         assert_eq!(
-            result.initial_branch_already_deleted,
-            Some(false),
+            result.initial_branch,
+            Some(BranchDeletion::Deleted),
             "the ref should have been deleted, not read as the --delete flag"
         );
         let branches = branch_list(repo.path());
@@ -5123,7 +5333,7 @@ mod tests {
 
         let result = remove_worktree(repo.path(), &wt, "steady", Some("")).unwrap();
 
-        assert_eq!(result.initial_branch_already_deleted, None);
+        assert_eq!(result.initial_branch, None);
     }
 
     /// The defect this pins is the worst shape in the family: git obeys the

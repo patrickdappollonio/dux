@@ -13,6 +13,7 @@
 // status + the parsed server message; the caller surfaces it as a sonner toast.
 
 import { getConnectionId } from "./connection"
+import type { DeleteWorktreeReply } from "./worktreeDelete"
 import type {
   BranchWarningView,
   InspectKind,
@@ -132,8 +133,12 @@ export const projectsApi = {
   // server defaults it to false when the parameter is absent, so a request that
   // says nothing never deletes a branch; the confirmation dialog is what decides
   // to ask, and it only asks when the worktree actually has a branch.
+  // The reply reports what actually happened to the branch (`deleted`,
+  // `already_gone`, `refused` with git's reason, or absent when nothing was
+  // attempted), because the request's own flag says what was ASKED FOR and
+  // `git branch -D` can refuse.
   deleteWorktree: (id: string, worktreePath: string, deleteBranch: boolean) =>
-    request<void>(
+    request<DeleteWorktreeReply>(
       "DELETE",
       `/api/v1/projects/${encodeURIComponent(id)}/worktrees?path=${encodeURIComponent(worktreePath)}&delete_branch=${deleteBranch}`,
     ),

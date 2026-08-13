@@ -534,7 +534,9 @@ impl App {
                     // line — the op owns the final message now.
                     if let Err(e) = self.finish_delete_session(
                         &session_id,
-                        WorktreeRemoval::Performed { branches },
+                        WorktreeRemoval::Performed {
+                            branches: branches.clone(),
+                        },
                         false,
                     ) {
                         self.set_error(format!(

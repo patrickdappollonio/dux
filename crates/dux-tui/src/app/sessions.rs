@@ -1809,20 +1809,38 @@ impl App {
         dux_core::engine::status_op(busy_message).resolve_in_handler(
             move |o: &TuiDeleteOutcome| match o {
                 TuiDeleteOutcome::SucceededPresent { branches } => {
-                    let base = if branches.branch_already_deleted {
-                        format!(
-                            "Deleted agent (branch \"{branch_name}\" was already removed)."
-                        )
-                    } else {
-                        format!(
+                    let base = match &branches.branch {
+                        dux_core::git::BranchDeletion::Deleted => format!(
                             "Deleted {provider} agent from project \"{project_name}\" with branch \"{branch_name}\"."
-                        )
+                        ),
+                        dux_core::git::BranchDeletion::AlreadyGone => format!(
+                            "Deleted agent (branch \"{branch_name}\" was already removed)."
+                        ),
+                        // git refused, so the branch is STILL THERE: say so,
+                        // give git's reason, and name the way out.
+                        dux_core::git::BranchDeletion::Refused { reason } => format!(
+                            "Deleted agent, but its branch \"{branch_name}\" is still there. {}",
+                            dux_core::git::branch_refusal_note(&branch_name, reason)
+                        ),
                     };
                     // Only when the agent drifted off its birth branch, which is
                     // deleted too; see `git::RemoveResult::initial_branch_note`.
-                    match branches.initial_branch_note(&initial_branch) {
-                        Some(note) => dux_core::engine::Final::info(format!("{base} {note}")),
-                        None => dux_core::engine::Final::info(base),
+                    let message = match branches.initial_branch_note(&initial_branch) {
+                        Some(note) => format!("{base} {note}"),
+                        None => base,
+                    };
+                    // A surviving branch is a leftover the user has to act on,
+                    // so it is a warning rather than the ordinary info line.
+                    if branches.branch.refused_reason().is_some()
+                        || branches
+                            .initial_branch
+                            .as_ref()
+                            .and_then(|b| b.refused_reason())
+                            .is_some()
+                    {
+                        dux_core::engine::Final::warning(message)
+                    } else {
+                        dux_core::engine::Final::info(message)
                     }
                 }
                 TuiDeleteOutcome::SucceededGone {
@@ -1940,22 +1958,30 @@ impl App {
                     ));
                 }
                 WorktreeRemoval::Performed { branches } => {
-                    let mut message = if branches.branch_already_deleted {
-                        format!(
+                    let mut message = match &branches.branch {
+                        dux_core::git::BranchDeletion::Deleted => {
+                            let project_name = project
+                                .as_ref()
+                                .map(|p| p.name.as_str())
+                                .unwrap_or("<unknown>");
+                            format!(
+                                "Deleted {} agent from project \"{}\" with branch \"{}\".",
+                                session.provider.as_str(),
+                                project_name,
+                                session.branch_name,
+                            )
+                        }
+                        dux_core::git::BranchDeletion::AlreadyGone => format!(
                             "Deleted agent (branch \"{}\" was already removed).",
                             session.branch_name,
-                        )
-                    } else {
-                        let project_name = project
-                            .as_ref()
-                            .map(|p| p.name.as_str())
-                            .unwrap_or("<unknown>");
-                        format!(
-                            "Deleted {} agent from project \"{}\" with branch \"{}\".",
-                            session.provider.as_str(),
-                            project_name,
+                        ),
+                        // Refused means the branch SURVIVED, which is the
+                        // opposite of what this line used to claim.
+                        dux_core::git::BranchDeletion::Refused { reason } => format!(
+                            "Deleted agent, but its branch \"{}\" is still there. {}",
                             session.branch_name,
-                        )
+                            dux_core::git::branch_refusal_note(&session.branch_name, reason),
+                        ),
                     };
                     // Only when the agent DRIFTED off the branch it was born on:
                     // that second branch is deleted too and the line must say so
@@ -1964,7 +1990,17 @@ impl App {
                         message.push(' ');
                         message.push_str(&note);
                     }
-                    self.set_info(message);
+                    let refused = branches.branch.refused_reason().is_some()
+                        || branches
+                            .initial_branch
+                            .as_ref()
+                            .and_then(|b| b.refused_reason())
+                            .is_some();
+                    if refused {
+                        self.set_warning(message);
+                    } else {
+                        self.set_info(message);
+                    }
                 }
             }
         }
@@ -6349,13 +6385,13 @@ mod tests {
     /// author the line. The wording must stay byte-identical to the legacy path.
     #[test]
     fn async_delete_success_resolves_op_with_exact_wording() {
-        for (branch_already_deleted, expected) in [
+        for (branch, expected) in [
             (
-                false,
+                dux_core::git::BranchDeletion::Deleted,
                 "Deleted claude agent from project \"demo\" with branch \"branch-s1\".",
             ),
             (
-                true,
+                dux_core::git::BranchDeletion::AlreadyGone,
                 "Deleted agent (branch \"branch-s1\" was already removed).",
             ),
         ] {
@@ -6377,18 +6413,14 @@ mod tests {
                 .send(WorkerEvent::WorktreeRemoveCompleted {
                     session_id: "s1".to_string(),
                     result: Ok(dux_core::git::RemoveResult {
-                        branch_already_deleted,
-                        initial_branch_already_deleted: None,
+                        branch: branch.clone(),
+                        initial_branch: None,
                     }),
                 })
                 .expect("channel send");
             app.drain_events();
 
-            assert_eq!(
-                app.status.message(),
-                expected,
-                "branch_already_deleted={branch_already_deleted}",
-            );
+            assert_eq!(app.status.message(), expected, "branch outcome {branch:?}",);
             assert!(
                 !app.engine.sessions.iter().any(|s| s.id == "s1"),
                 "session should be cleaned up after async success",
@@ -6420,8 +6452,8 @@ mod tests {
             (
                 WorktreeRemoval::Performed {
                     branches: dux_core::git::RemoveResult {
-                        branch_already_deleted: true,
-                        initial_branch_already_deleted: None,
+                        branch: dux_core::git::BranchDeletion::AlreadyGone,
+                        initial_branch: None,
                     },
                 },
                 "Deleted agent (branch \"branch-s1\" was already removed).",
@@ -6447,7 +6479,7 @@ mod tests {
                 ),
                 project_still_has_sessions: false,
             };
-            app.apply_finish_delete_session_outcome("s1", outcome, removal, true);
+            app.apply_finish_delete_session_outcome("s1", outcome, removal.clone(), true);
             assert_eq!(app.status.message(), expected, "variant {removal:?}");
         }
     }
@@ -6473,8 +6505,8 @@ mod tests {
             outcome,
             WorktreeRemoval::Performed {
                 branches: dux_core::git::RemoveResult {
-                    branch_already_deleted: false,
-                    initial_branch_already_deleted: Some(false),
+                    branch: dux_core::git::BranchDeletion::Deleted,
+                    initial_branch: Some(dux_core::git::BranchDeletion::Deleted),
                 },
             },
             true,

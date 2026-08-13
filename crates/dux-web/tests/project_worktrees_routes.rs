@@ -176,6 +176,12 @@ async fn delete(addr: SocketAddr, project: &str, path: &Path) -> (u16, String) {
     delete_with(addr, project, path, "").await
 }
 
+/// The delete reply body as JSON (the route answers 200 with a small document
+/// reporting what happened to the branch).
+fn reply(body: &str) -> serde_json::Value {
+    serde_json::from_str(body).unwrap_or_else(|e| panic!("body is not JSON ({e}): {body}"))
+}
+
 /// The delete request with extra query, e.g. `"&delete_branch=true"`.
 async fn delete_with(addr: SocketAddr, project: &str, path: &Path, extra: &str) -> (u16, String) {
     let resp = reqwest::Client::new()
@@ -243,7 +249,11 @@ async fn deleting_an_adoptable_worktree_removes_it_from_disk_and_from_git() {
     let f = boot().await;
     assert!(f.free.exists());
     let (status, body) = delete(f.addr, "p1", &f.free).await;
-    assert_eq!(status, 204, "got {body}");
+    assert_eq!(status, 200, "got {body}");
+    assert!(
+        reply(&body)["branch"].is_null(),
+        "no branch deletion was asked for, so the reply claims nothing: {body}"
+    );
     assert!(!f.free.exists(), "the worktree directory must be gone");
 
     // Gone from the listing too, which also proves git's registry was updated
@@ -266,7 +276,7 @@ async fn deleting_a_worktree_does_not_delete_its_branch() {
     // route must not do it.
     let f = boot().await;
     let (status, body) = delete(f.addr, "p1", &f.free).await;
-    assert_eq!(status, 204, "got {body}");
+    assert_eq!(status, 200, "got {body}");
     let out = std::process::Command::new("git")
         .args(["branch", "--list", "free"])
         .current_dir(f._tmp.path().join("repo"))
@@ -290,11 +300,55 @@ async fn deleting_a_worktree_with_delete_branch_removes_the_branch_too() {
 
     let (status, body) = delete_with(f.addr, "p1", &f.free, "&delete_branch=true").await;
 
-    assert_eq!(status, 204, "got {body}");
+    assert_eq!(status, 200, "got {body}");
+    let branch = &reply(&body)["branch"];
+    assert_eq!(branch["name"], "free", "got {body}");
+    assert_eq!(
+        branch["outcome"], "deleted",
+        "the reply must report the OUTCOME, which is what the toast reads: {body}"
+    );
     assert!(!f.free.exists(), "the worktree directory must be gone");
     assert!(
         !branch_exists(&repo, "free"),
         "the branch must be gone when the request asked for it"
+    );
+}
+
+#[tokio::test]
+async fn deleting_a_worktree_reports_a_branch_git_refused_to_delete() {
+    // `git branch -D` does not only fail when the branch is already gone: it
+    // also refuses a branch that is CHECKED OUT somewhere. The route used to
+    // answer a bare 204 and the client toasted "and deleted its branch" off its
+    // own checkbox, which is the exact opposite of what happened. The reply now
+    // carries the outcome, and the branch really does survive.
+    //
+    // The state is built deterministically with plumbing: pointing the source
+    // checkout's HEAD at `free` is what makes git refuse, and it is the same
+    // refusal a user reaches by having the branch checked out elsewhere.
+    let f = boot().await;
+    let repo = f._tmp.path().join("repo");
+    git(&repo, &["symbolic-ref", "HEAD", "refs/heads/free"]);
+
+    let (status, body) = delete_with(f.addr, "p1", &f.free, "&delete_branch=true").await;
+
+    assert_eq!(status, 200, "got {body}");
+    let branch = &reply(&body)["branch"];
+    assert_eq!(branch["name"], "free", "got {body}");
+    assert_eq!(branch["outcome"], "refused", "got {body}");
+    assert!(
+        branch["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("free"),
+        "git's own reason must reach the client: {body}"
+    );
+    assert!(
+        !f.free.exists(),
+        "the worktree still goes; only the branch deletion was refused"
+    );
+    assert!(
+        branch_exists(&repo, "free"),
+        "the refused branch is still there, which is what the reply now says"
     );
 }
 
@@ -307,7 +361,11 @@ async fn deleting_a_worktree_with_delete_branch_false_keeps_the_branch() {
 
     let (status, body) = delete_with(f.addr, "p1", &f.free, "&delete_branch=false").await;
 
-    assert_eq!(status, 204, "got {body}");
+    assert_eq!(status, 200, "got {body}");
+    assert!(
+        reply(&body)["branch"].is_null(),
+        "nothing was attempted, so the reply reports no branch outcome: {body}"
+    );
     assert!(branch_exists(&repo, "free"), "the branch must survive");
 }
 
@@ -346,7 +404,11 @@ async fn deleting_a_detached_worktree_with_delete_branch_still_works() {
 
     let (status, body) = delete_with(f.addr, "p1", &loose, "&delete_branch=true").await;
 
-    assert_eq!(status, 204, "got {body}");
+    assert_eq!(status, 200, "got {body}");
+    assert!(
+        reply(&body)["branch"].is_null(),
+        "a detached worktree has no branch, so nothing is claimed: {body}"
+    );
     assert!(!loose.exists(), "the worktree directory must be gone");
     assert!(
         branch_exists(&repo, "main"),

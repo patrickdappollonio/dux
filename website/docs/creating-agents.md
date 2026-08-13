@@ -279,7 +279,9 @@ UI. The browser dialog is also a small manager: an unused worktree's `⋯` menu
 offers **Delete worktree…**, which removes the directory from disk after a
 confirmation that names the branch, names the full path, and says specifically
 when there are uncommitted changes to lose. That confirmation also offers to
-delete the branch, ticked by default; untick it and the branch survives. The
+delete the branch, ticked by default; untick it and the branch survives. Git
+can also refuse the deletion, and then dux reports the branch as still there
+with git's own reason rather than claiming otherwise. The
 project picker in front of it labels each project with how many worktrees it
 has, so an empty project is a choice rather than a surprise, and the dialog
 offers **Back** to return to that list.

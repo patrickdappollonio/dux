@@ -8,7 +8,10 @@
 //!   holds, each with its dirtiness. 404 for an unknown project id.
 //! - `DELETE /api/v1/projects/:id/worktrees?path=`: remove ONE managed worktree
 //!   from disk. Refuses anything that is not a managed worktree of that project
-//!   (404) and anything an agent is attached to (409).
+//!   (404) and anything an agent is attached to (409). Answers 200 with a small
+//!   body reporting what happened to the branch, because `git branch -D` can
+//!   REFUSE (a branch checked out in another worktree) and the client must not
+//!   report the checkbox it sent as the outcome.
 //! - `GET /api/v1/projects/worktree-counts`: how many managed worktrees each
 //!   project has, so the project picker can label its rows before the user
 //!   drills in and finds an empty list.
@@ -247,6 +250,55 @@ enum DeleteResolution {
     Removable(PathBuf, Option<String>),
 }
 
+/// What the removal did to the worktree's branch, when it was asked to touch it
+/// at all. `None` on the reply means no branch deletion was attempted (the
+/// request did not ask, or the worktree is detached), so the client must not
+/// claim one either way.
+///
+/// This exists because the route used to answer a bare 204 and the client then
+/// toasted "and deleted its branch" off its own CHECKBOX, which says what was
+/// requested and not what happened: `git branch -D` refuses a branch checked
+/// out in another worktree, and the toast asserted the opposite.
+#[derive(Serialize)]
+struct BranchOutcomeReply {
+    /// The branch the removal targeted.
+    name: String,
+    /// `deleted`, `already_gone` or `refused`.
+    outcome: &'static str,
+    /// git's own reason, on `refused` only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
+impl BranchOutcomeReply {
+    fn from_core(name: String, deletion: &dux_core::git::BranchDeletion) -> Self {
+        match deletion {
+            dux_core::git::BranchDeletion::Deleted => Self {
+                name,
+                outcome: "deleted",
+                reason: None,
+            },
+            dux_core::git::BranchDeletion::AlreadyGone => Self {
+                name,
+                outcome: "already_gone",
+                reason: None,
+            },
+            dux_core::git::BranchDeletion::Refused { reason } => Self {
+                name,
+                outcome: "refused",
+                reason: Some(reason.clone()),
+            },
+        }
+    }
+}
+
+/// The 200 body of a successful removal.
+#[derive(Serialize)]
+struct DeleteWorktreeReply {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    branch: Option<BranchOutcomeReply>,
+}
+
 async fn delete_worktree(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
@@ -290,6 +342,7 @@ async fn delete_worktree(
             Some(entry) if entry.existing_session_id.is_some() => DeleteResolution::Attached,
             Some(entry) => DeleteResolution::Removable(entry.path, entry.branch),
         };
+        let mut branch_outcome: Option<BranchOutcomeReply> = None;
         if let DeleteResolution::Removable(path, branch) = &resolution {
             match (delete_branch, branch) {
                 // The user asked for the branch too. `remove_worktree` deletes
@@ -297,8 +350,12 @@ async fn delete_worktree(
                 // branch here, because a worktree with no agent has no record of
                 // what it was born on.
                 (true, Some(branch)) => {
-                    dux_core::git::remove_worktree(&repo_path, path, branch, None)
+                    let removed = dux_core::git::remove_worktree(&repo_path, path, branch, None)
                         .map_err(|e| format!("{e:#}"))?;
+                    branch_outcome = Some(BranchOutcomeReply::from_core(
+                        branch.clone(),
+                        &removed.branch,
+                    ));
                 }
                 // Either the request did not ask, or the worktree is detached
                 // and there is no branch to delete. Worktree only.
@@ -308,22 +365,27 @@ async fn delete_worktree(
                 }
             }
         }
-        Ok::<_, String>(resolution)
+        Ok::<_, String>((resolution, branch_outcome))
     })
     .await;
 
     match result {
-        Ok(Ok(DeleteResolution::NotManaged)) => (
+        Ok(Ok((DeleteResolution::NotManaged, _))) => (
             StatusCode::NOT_FOUND,
             "that is not a managed worktree of this project",
         )
             .into_response(),
-        Ok(Ok(DeleteResolution::Attached)) => (
+        Ok(Ok((DeleteResolution::Attached, _))) => (
             StatusCode::CONFLICT,
             "an agent is attached to that worktree; delete the agent instead",
         )
             .into_response(),
-        Ok(Ok(DeleteResolution::Removable(..))) => StatusCode::NO_CONTENT.into_response(),
+        // 200 with a body rather than the old bare 204: the client has to be
+        // told what happened to the branch, because it cannot infer it from the
+        // checkbox it sent.
+        Ok(Ok((DeleteResolution::Removable(..), branch))) => {
+            Json(DeleteWorktreeReply { branch }).into_response()
+        }
         Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,

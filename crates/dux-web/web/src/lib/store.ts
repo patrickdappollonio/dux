@@ -37,12 +37,14 @@ import {
 import { firstLoadApi } from "./firstLoadApi"
 import {
   dismissNotification,
+  notify,
   notifyError,
   notifyInfo,
   notifyStatus,
   notifySuccess,
   setStatusClearSeconds,
 } from "./notify"
+import { worktreeDeleteReport } from "./worktreeDelete"
 import { attentionCount, formatTabTitle } from "./attention"
 import { applyAttentionFavicon } from "./favicon"
 import { resolveInstanceTitle } from "./instanceTitle"
@@ -4327,12 +4329,12 @@ export function deleteProjectWorktree(
 ): void {
   projectsApi
     .deleteWorktree(projectId, worktreePath, deleteBranch)
-    .then(() => {
-      notifySuccess(
-        deleteBranch
-          ? `Removed the worktree at ${worktreePath} and deleted its branch.`
-          : `Removed the worktree at ${worktreePath}. Its branch is still there.`,
-      )
+    .then((reply) => {
+      // The report comes from the SERVER'S answer, never from `deleteBranch`:
+      // that flag is what was asked for, and `git branch -D` refuses a branch
+      // that is still checked out somewhere. See lib/worktreeDelete.ts.
+      const report = worktreeDeleteReport(worktreePath, reply)
+      notify(report.tone, report.message, { sticky: report.sticky })
       if (state.attachWorktreeTarget === projectId) {
         loadProjectWorktrees(projectId)
       }

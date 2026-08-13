@@ -83,7 +83,10 @@ scoped to that project and a bare `123` is perfectly meaningful.
   default, because a branch left behind is what makes creating an agent under
   that name later fail with "branch already exists". Untick it and dux removes
   the working directory and nothing else. A worktree that is not on a branch
-  has no branch to offer, so the checkbox does not appear.
+  has no branch to offer, so the checkbox does not appear. Git can refuse a
+  branch deletion (a branch checked out somewhere else, for instance), and when
+  it does the worktree still goes and dux tells you the branch survived, quotes
+  git's reason, and leaves the branch to you.
   A worktree that already has an agent names that agent and offers no delete,
   because removing it from under a live agent leaves a broken session. Delete
   the agent instead.
@@ -185,7 +188,8 @@ Two very different endings, and the difference matters:
   unchecked "Also delete the git worktree and its branch (irreversible)" box, so
   by default your worktree and its work survive even a delete. Tick it and both
   go: the branch the agent is on now, and the one it was created on if it has
-  since moved. This is the one destructive per-agent action dux tints red, and
+  since moved. If git refuses to delete one of them, dux says which branch is
+  still there and why rather than reporting a deletion that did not happen. This is the one destructive per-agent action dux tints red, and
   it always confirms first.
 
 Worktrees are your data, so dux never removes or mutates them casually. Deleting

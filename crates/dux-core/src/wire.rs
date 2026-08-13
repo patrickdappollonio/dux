@@ -1125,14 +1125,21 @@ pub fn delete_session_status_message(
     match removal {
         WorktreeRemoval::Performed { branches } => {
             let branch = &outcome.session.branch_name;
-            let mut message = if branches.branch_already_deleted {
-                format!(
-                    "Deleted agent \"{name}\" and removed its worktree. Its branch \"{branch}\" was already gone."
-                )
-            } else {
-                format!(
+            let mut message = match &branches.branch {
+                crate::git::BranchDeletion::Deleted => format!(
                     "Deleted agent \"{name}\", removed its worktree and deleted its branch \"{branch}\"."
-                )
+                ),
+                crate::git::BranchDeletion::AlreadyGone => format!(
+                    "Deleted agent \"{name}\" and removed its worktree. Its branch \"{branch}\" was already gone."
+                ),
+                // A branch git REFUSED to delete is still there, so the line
+                // must not claim otherwise: it names the branch, gives git's
+                // reason, and says what the user can do about it.
+                crate::git::BranchDeletion::Refused { reason } => format!(
+                    "Deleted agent \"{name}\" and removed its worktree, but its branch \
+                     \"{branch}\" is still there. {}",
+                    crate::git::branch_refusal_note(branch, reason)
+                ),
             };
             // Said only when the agent DRIFTED off the branch it was born on,
             // so the ordinary case still reads as one branch and the drifted
@@ -3298,7 +3305,7 @@ impl Engine {
                         vec![pending]
                     }
                     BeginDeleteSessionOutcome::Inline { removal } => {
-                        let removal = *removal;
+                        let removal = removal.clone();
                         self.finish_delete_and_status(&view.session_id, removal)
                     }
                 }
@@ -3312,7 +3319,7 @@ impl Engine {
                     self.finish_delete_and_status(
                         session_id,
                         WorktreeRemoval::Performed {
-                            branches: *branches,
+                            branches: branches.clone(),
                         },
                     )
                 } else {
@@ -4174,8 +4181,8 @@ mod tests {
                 "drifted",
                 "born-here",
                 crate::git::RemoveResult {
-                    branch_already_deleted: false,
-                    initial_branch_already_deleted: Some(false),
+                    branch: crate::git::BranchDeletion::Deleted,
+                    initial_branch: Some(crate::git::BranchDeletion::Deleted),
                 },
             ),
             "Deleted agent \"agent-one\", removed its worktree and deleted its branch \
@@ -4187,8 +4194,8 @@ mod tests {
                 "drifted",
                 "born-here",
                 crate::git::RemoveResult {
-                    branch_already_deleted: true,
-                    initial_branch_already_deleted: Some(true),
+                    branch: crate::git::BranchDeletion::AlreadyGone,
+                    initial_branch: Some(crate::git::BranchDeletion::AlreadyGone),
                 },
             ),
             "Deleted agent \"agent-one\" and removed its worktree. Its branch \"drifted\" was \

@@ -494,7 +494,7 @@ pub enum ProjectPersistenceView {
 /// 1:1 to a user-facing status message; the illegal "delete requested, no
 /// siblings, but no result" state has no representation. Replaces the former
 /// `(delete_worktree: bool, remove_outcome: Option<bool>)` pair.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WorktreeRemoval {
     /// Deletion NOT requested; worktree shared with sibling sessions.
     PreservedShared,
@@ -2966,8 +2966,8 @@ mod tests {
             outcome.removal,
             WorktreeRemoval::Performed {
                 branches: crate::git::RemoveResult {
-                    branch_already_deleted: false,
-                    initial_branch_already_deleted: Some(false),
+                    branch: crate::git::BranchDeletion::Deleted,
+                    initial_branch: Some(crate::git::BranchDeletion::Deleted),
                 },
             },
             "both branches must be reported so the status line can name them"
@@ -4150,8 +4150,8 @@ mod tests {
         let reaction = engine.process_worker_event(WorkerEvent::WorktreeRemoveCompleted {
             session_id: "s1".to_string(),
             result: Ok(crate::git::RemoveResult {
-                branch_already_deleted: true,
-                initial_branch_already_deleted: None,
+                branch: crate::git::BranchDeletion::AlreadyGone,
+                initial_branch: None,
             }),
         });
 
@@ -4165,7 +4165,7 @@ mod tests {
                 our_busy_message,
             } => {
                 assert_eq!(session_id, "s1");
-                assert!(branches.branch_already_deleted);
+                assert_eq!(branches.branch, crate::git::BranchDeletion::AlreadyGone);
                 assert_eq!(our_busy_message.as_deref(), Some("Deleting agent \"s1\"…"));
             }
             other => panic!(
