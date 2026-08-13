@@ -1170,20 +1170,75 @@ fn remove_path_if_exists(path: &Path) -> Result<()> {
     }
 }
 
+/// What a worktree removal did to the branches involved.
+///
+/// Two branches, because an agent's branch can DRIFT: `branch_name` is kept in
+/// step with whatever the worktree is actually on (the branch-sync poller
+/// rewrites it, and the user may `git switch -c` inside the worktree), while
+/// `initial_branch` is the branch the agent was born on and never moves. Delete
+/// only the first and the birth branch survives the agent, which is exactly how
+/// "create foo, delete foo, recreate foo" ends in "branch already exists".
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RemoveResult {
+    /// The branch the worktree was on was already gone when dux tried to delete
+    /// it (so `git branch -D` reported a failure that is not an error here).
     pub branch_already_deleted: bool,
+    /// What happened to a DISTINCT birth branch: `Some(false)` when dux deleted
+    /// it here, `Some(true)` when it was already gone, and `None` when there was
+    /// no distinct birth branch to delete (the agent never drifted, or the
+    /// caller passed none).
+    pub initial_branch_already_deleted: Option<bool>,
+}
+
+impl RemoveResult {
+    /// A sentence naming what happened to the agent's ORIGINAL branch, for the
+    /// status message. `None` when the agent never drifted, so the message says
+    /// nothing extra rather than mentioning a branch the user never saw.
+    ///
+    /// Lives here so the TUI status line and the web toast say the same thing.
+    pub fn initial_branch_note(&self, initial_branch: &str) -> Option<String> {
+        match self.initial_branch_already_deleted? {
+            false => Some(format!(
+                "Its original branch \"{initial_branch}\" was deleted too."
+            )),
+            true => Some(format!(
+                "Its original branch \"{initial_branch}\" was already gone."
+            )),
+        }
+    }
+}
+
+/// Force-delete one branch, best effort. Returns `true` when git deleted it and
+/// `false` when it did not (already gone, or still checked out somewhere).
+///
+/// `--` so the name is read as a REF and never as an option. Without it a ref
+/// that plumbing created as `--delete` is parsed as the flag and survives the
+/// cleanup. Measured on git 2.55.
+fn delete_branch_force(repo_path: &Path, branch_name: &str) -> Result<bool> {
+    let output = Command::new("git")
+        .args([
+            "-C",
+            repo_path.to_string_lossy().as_ref(),
+            "branch",
+            "-D",
+            "--",
+            branch_name,
+        ])
+        .output()?;
+    Ok(output.status.success())
 }
 
 /// Remove a worktree from disk and from git's registry, and DO NOT touch its
 /// branch.
 ///
-/// This is the half of [`remove_worktree`] that the web worktree manager wants.
-/// Deleting a branch is a second, separate act of destruction: `git branch -D`
-/// force-deletes it even when it holds commits that exist nowhere else, and a
-/// user who asked to remove a worktree has not asked for that. The branch is
-/// left behind, which is recoverable in a way the branch's commits would not be.
-/// [`remove_worktree`] (the agent-delete path, where dux created the branch and
-/// owns its whole lifecycle) keeps deleting it.
+/// This is the half of [`remove_worktree`] that the callers who were NOT asked
+/// to delete a branch want. Deleting a branch is a second, separate act of
+/// destruction: `git branch -D` force-deletes it even when it holds commits that
+/// exist nowhere else, so it happens only when the user asked for it. The web
+/// worktree manager asks per removal (its confirmation carries a checkbox, and
+/// a request that does not mention the branch lands here); [`remove_worktree`]
+/// is the agent-delete path, where dux created the branch and owns its whole
+/// lifecycle, so it always deletes.
 ///
 /// `--force` matches the existing behavior: a worktree with uncommitted work is
 /// removed anyway, so every caller must confirm with the user first.
@@ -1250,30 +1305,40 @@ pub fn worktree_is_dirty(worktree_path: &Path) -> Result<bool> {
     Ok(!output.stdout.is_empty())
 }
 
+/// Remove a worktree and delete the branches the agent owned.
+///
+/// `branch_name` is the branch the worktree is on NOW. `initial_branch` is the
+/// branch the agent was born on, and it is deleted too when it differs: the
+/// agent's branch drifts (the branch-sync poller rewrites `branch_name`, and a
+/// `git switch -c` inside the worktree is an ordinary thing to do), and a birth
+/// branch left behind is what makes recreating an agent under its old name fail
+/// with "branch already exists". Pass `None` when the caller knows the two are
+/// the same by construction.
+///
+/// Both deletions are BEST EFFORT: a branch git will not delete is reported in
+/// the [`RemoveResult`] so the status message can say so, never an error. Only
+/// the worktree removal itself can fail this call.
 pub fn remove_worktree(
     repo_path: &Path,
     worktree_path: &Path,
     branch_name: &str,
+    initial_branch: Option<&str>,
 ) -> Result<RemoveResult> {
     // The worktree half is shared with `remove_worktree_keep_branch`; only the
-    // branch deletion below is this function's own.
+    // branch deletions below are this function's own.
     remove_worktree_keep_branch(repo_path, worktree_path)?;
-    // Best-effort branch deletion.
-    let branch_output = Command::new("git")
-        .args([
-            "-C",
-            repo_path.to_string_lossy().as_ref(),
-            "branch",
-            "-D",
-            // `--` so the name is read as a REF and never as an option. Without
-            // it a ref plumbing created as `--delete` is parsed as the flag and
-            // survives the cleanup. Measured on git 2.55.
-            "--",
-            branch_name,
-        ])
-        .output()?;
+    let branch_deleted = delete_branch_force(repo_path, branch_name)?;
+    // Only a DISTINCT, non-empty birth branch is a second thing to delete. An
+    // empty one comes from a session record that never had it recorded.
+    let initial_branch_already_deleted = match initial_branch {
+        Some(initial) if !initial.is_empty() && initial != branch_name => {
+            Some(!delete_branch_force(repo_path, initial)?)
+        }
+        _ => None,
+    };
     Ok(RemoveResult {
-        branch_already_deleted: !branch_output.status.success(),
+        branch_already_deleted: !branch_deleted,
+        initial_branch_already_deleted,
     })
 }
 
@@ -4930,7 +4995,8 @@ mod tests {
         // `git branch` refuses to create a dash-leading name, but plumbing does
         // not, and such a ref is what dux would then be asked to clean up.
         run_git(repo.path(), &["update-ref", "refs/heads/--delete", "HEAD"]);
-        let result = remove_worktree(repo.path(), &repo.path().join("gone"), "--delete").unwrap();
+        let result =
+            remove_worktree(repo.path(), &repo.path().join("gone"), "--delete", None).unwrap();
         assert!(
             !result.branch_already_deleted,
             "the branch should have been deleted, not read as the --delete flag"
@@ -4943,6 +5009,121 @@ mod tests {
             !String::from_utf8_lossy(&listed.stdout).contains("--delete"),
             "the ref should be gone"
         );
+    }
+
+    /// Every local branch of the repo, one per line, for the drift tests below.
+    fn branch_list(repo_path: &Path) -> String {
+        let listed = std::process::Command::new("git")
+            .args([
+                "-C",
+                repo_path.to_string_lossy().as_ref(),
+                "for-each-ref",
+                "--format=%(refname:short)",
+                "refs/heads/",
+            ])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&listed.stdout).to_string()
+    }
+
+    /// The reported bug: create an agent, let its branch drift, delete it, and
+    /// the BIRTH branch survives, so recreating the agent under its old name
+    /// fails with "branch already exists". Both branches must go.
+    #[test]
+    fn remove_worktree_also_deletes_a_drifted_initial_branch() {
+        let repo = init_test_repo();
+        let wt = add_worktree(repo.path(), "born-here");
+        // Drift exactly as a user does: switch the worktree onto a new branch.
+        // `born-here` stays behind, and the poller rewrites `branch_name`.
+        run_git(&wt, &["switch", "-c", "drifted"]);
+
+        let result = remove_worktree(repo.path(), &wt, "drifted", Some("born-here")).unwrap();
+
+        assert!(!result.branch_already_deleted);
+        assert_eq!(
+            result.initial_branch_already_deleted,
+            Some(false),
+            "the birth branch was deleted here, so the message can say so"
+        );
+        let branches = branch_list(repo.path());
+        assert!(
+            !branches.contains("drifted"),
+            "the current branch must be gone: {branches}"
+        );
+        assert!(
+            !branches.contains("born-here"),
+            "the birth branch must be gone too: {branches}"
+        );
+    }
+
+    /// An agent that never drifted has ONE branch, and the result must say so
+    /// rather than claiming a second deletion the message would then narrate.
+    #[test]
+    fn remove_worktree_reports_no_initial_branch_when_it_matches_the_current_one() {
+        let repo = init_test_repo();
+        let wt = add_worktree(repo.path(), "steady");
+
+        let result = remove_worktree(repo.path(), &wt, "steady", Some("steady")).unwrap();
+
+        assert!(!result.branch_already_deleted);
+        assert_eq!(result.initial_branch_already_deleted, None);
+        assert!(result.initial_branch_note("steady").is_none());
+    }
+
+    /// A birth branch someone already deleted by hand is not a failure, and the
+    /// message must not claim dux deleted it.
+    #[test]
+    fn remove_worktree_reports_an_initial_branch_that_was_already_gone() {
+        let repo = init_test_repo();
+        let wt = add_worktree(repo.path(), "born-here");
+        run_git(&wt, &["switch", "-c", "drifted"]);
+        run_git(repo.path(), &["branch", "-D", "--", "born-here"]);
+
+        let result = remove_worktree(repo.path(), &wt, "drifted", Some("born-here")).unwrap();
+
+        assert_eq!(result.initial_branch_already_deleted, Some(true));
+        assert_eq!(
+            result.initial_branch_note("born-here").as_deref(),
+            Some("Its original branch \"born-here\" was already gone.")
+        );
+    }
+
+    /// The refname tenet, applied to the SECOND deletion path: without `--` git
+    /// reads the birth branch's name as a flag and leaves the ref behind while
+    /// still exiting 0, so dux would report a clean delete of something it never
+    /// touched.
+    #[test]
+    fn remove_worktree_deletes_an_initial_branch_whose_name_looks_like_an_option() {
+        let repo = init_test_repo();
+        let wt = add_worktree(repo.path(), "drifted");
+        // `git branch` refuses to create a dash-leading name; plumbing does not,
+        // and such a ref really can reach dux.
+        run_git(repo.path(), &["update-ref", "refs/heads/--delete", "HEAD"]);
+
+        let result = remove_worktree(repo.path(), &wt, "drifted", Some("--delete")).unwrap();
+
+        assert_eq!(
+            result.initial_branch_already_deleted,
+            Some(false),
+            "the ref should have been deleted, not read as the --delete flag"
+        );
+        let branches = branch_list(repo.path());
+        assert!(
+            !branches.contains("--delete"),
+            "the ref should be gone: {branches}"
+        );
+    }
+
+    /// An empty birth branch (a session record that never recorded one) is not
+    /// a branch to delete, and must not turn into a `git branch -D ""`.
+    #[test]
+    fn remove_worktree_ignores_an_empty_initial_branch() {
+        let repo = init_test_repo();
+        let wt = add_worktree(repo.path(), "steady");
+
+        let result = remove_worktree(repo.path(), &wt, "steady", Some("")).unwrap();
+
+        assert_eq!(result.initial_branch_already_deleted, None);
     }
 
     /// The defect this pins is the worst shape in the family: git obeys the

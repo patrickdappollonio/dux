@@ -518,7 +518,7 @@ impl App {
             }
             EventReaction::WorktreeRemoveSucceeded {
                 session_id,
-                branch_already_deleted,
+                branches,
                 our_busy_message: _,
             } => {
                 // The "Removing worktree …" busy now rides a keyed
@@ -534,9 +534,7 @@ impl App {
                     // line — the op owns the final message now.
                     if let Err(e) = self.finish_delete_session(
                         &session_id,
-                        WorktreeRemoval::Performed {
-                            branch_already_deleted,
-                        },
+                        WorktreeRemoval::Performed { branches },
                         false,
                     ) {
                         self.set_error(format!(
@@ -544,10 +542,8 @@ impl App {
                         ));
                     } else if let Some(op) = op {
                         self.apply_reaction(
-                            op.resolve(&TuiDeleteOutcome::SucceededPresent {
-                                branch_already_deleted,
-                            })
-                            .into_reaction(),
+                            op.resolve(&TuiDeleteOutcome::SucceededPresent { branches })
+                                .into_reaction(),
                         );
                     }
                 } else if let Some(op) = op {
@@ -881,8 +877,11 @@ impl App {
                         // `WorktreeRemoveCompleted` resolves exactly this spinner.
                         if let Err(e) = self.finish_delete_session(
                             &session_id,
+                            // Placeholder: the session is vanished NOW; the real
+                            // branch report arrives with the deferred removal,
+                            // which authors the final message.
                             WorktreeRemoval::Performed {
-                                branch_already_deleted: false,
+                                branches: dux_core::git::RemoveResult::default(),
                             },
                             false,
                         ) {

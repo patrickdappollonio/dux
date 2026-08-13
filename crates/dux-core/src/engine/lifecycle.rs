@@ -101,6 +101,10 @@ pub struct DeferredWorktreeRemoval {
     pub project_path: String,
     pub worktree_path: String,
     pub branch_name: String,
+    /// The branch the agent was BORN on, captured at delete time. Deleted too
+    /// when it differs from `branch_name`, or an agent whose branch drifted
+    /// leaves its birth branch behind (see `git::remove_worktree`).
+    pub initial_branch: String,
     /// The Busy status message to show while the removal runs (set when the
     /// worker is finally spawned, after the PTY is reaped).
     pub busy_message: String,
@@ -3042,6 +3046,7 @@ mod tests {
                 project_path: "/tmp/p".to_string(),
                 worktree_path: worktree.path().to_string_lossy().to_string(),
                 branch_name: "feat".to_string(),
+                initial_branch: "feat".to_string(),
                 busy_message: "removing".to_string(),
             },
         });

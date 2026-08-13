@@ -219,7 +219,7 @@ pub enum EventReaction {
     // -- Worktree delete follow-up. --
     WorktreeRemoveSucceeded {
         session_id: String,
-        branch_already_deleted: bool,
+        branches: crate::git::RemoveResult,
         our_busy_message: Option<String>,
     },
     WorktreeRemoveFailed {
@@ -502,25 +502,25 @@ pub enum WorktreeRemoval {
     PreservedOrphan,
     /// Deletion requested but skipped because siblings still use the worktree.
     SkippedForSiblings,
-    /// Worktree removed. `branch_already_deleted` mirrors git's report.
-    Performed { branch_already_deleted: bool },
+    /// Worktree removed. `branches` mirrors git's report for BOTH branches the
+    /// removal targets: the one the worktree was on and, when the agent drifted,
+    /// the one it was born on.
+    Performed { branches: crate::git::RemoveResult },
 }
 
 impl WorktreeRemoval {
     /// Derive the removal outcome for a synchronous (inline / `do_delete`)
     /// decision, given user intent and whether siblings share the worktree.
-    /// `performed` is `Some(branch_already_deleted)` when git actually removed
-    /// the worktree, `None` when it was not run. The caller guarantees
-    /// `performed.is_some()` exactly when `delete_worktree && !other_sessions`.
+    /// `performed` is `Some(result)` when git actually removed the worktree,
+    /// `None` when it was not run. The caller guarantees `performed.is_some()`
+    /// exactly when `delete_worktree && !other_sessions`.
     fn from_decision(
         delete_worktree: bool,
         other_sessions_on_worktree: bool,
-        performed: Option<bool>,
+        performed: Option<crate::git::RemoveResult>,
     ) -> Self {
         match (delete_worktree, other_sessions_on_worktree, performed) {
-            (_, _, Some(branch_already_deleted)) => WorktreeRemoval::Performed {
-                branch_already_deleted,
-            },
+            (_, _, Some(branches)) => WorktreeRemoval::Performed { branches },
             (true, true, None) => WorktreeRemoval::SkippedForSiblings,
             (false, true, None) => WorktreeRemoval::PreservedShared,
             (false, false, None) => WorktreeRemoval::PreservedOrphan,
@@ -1337,6 +1337,10 @@ impl Engine {
                 std::path::Path::new(&project.path),
                 std::path::Path::new(&session.worktree_path),
                 &session.branch_name,
+                // The BIRTH branch too: `branch_name` tracks whatever the
+                // worktree drifted onto, so deleting only that leaves the
+                // original behind and recreating the agent collides with it.
+                Some(session.initial_branch.as_str()),
             ) {
                 Ok(result) => result,
                 Err(err) => {
@@ -1344,7 +1348,7 @@ impl Engine {
                     return Err(err);
                 }
             };
-            Some(result.branch_already_deleted)
+            Some(result)
         } else {
             None
         };
@@ -1437,6 +1441,7 @@ impl Engine {
                 project_path: project.path.clone(),
                 worktree_path: session.worktree_path.clone(),
                 branch_name: session.branch_name.clone(),
+                initial_branch: session.initial_branch.clone(),
                 busy_message: format!(
                     "Removing worktree for agent \"{}\"\u{2026}",
                     session.branch_name
@@ -1564,6 +1569,7 @@ impl Engine {
             project_path,
             worktree_path,
             branch_name,
+            initial_branch,
             busy_message,
         } = req;
         // Guard against a duplicate worker (e.g. a project delete racing the
@@ -1579,8 +1585,9 @@ impl Engine {
                     std::path::Path::new(&project_path),
                     std::path::Path::new(&worktree_path),
                     &branch_name,
+                    // The BIRTH branch too; see `git::remove_worktree`.
+                    Some(initial_branch.as_str()),
                 )
-                .map(|r| r.branch_already_deleted)
                 .map_err(|e| format!("{e:#}"))
             }))
             .unwrap_or_else(|payload| {
@@ -2463,9 +2470,9 @@ impl Engine {
                 let our_busy_msg = self.deletion_busy_messages.remove(&session_id);
 
                 match result {
-                    Ok(branch_already_deleted) => EventReaction::WorktreeRemoveSucceeded {
+                    Ok(branches) => EventReaction::WorktreeRemoveSucceeded {
                         session_id,
-                        branch_already_deleted,
+                        branches,
                         our_busy_message: our_busy_msg,
                     },
                     Err(msg) => EventReaction::WorktreeRemoveFailed {
@@ -2894,6 +2901,91 @@ mod tests {
         );
         // The delete aborted, so the session record survives.
         assert!(engine.sessions.iter().any(|s| s.id == "s1"));
+    }
+
+    /// The reported journey, end to end through the engine and a REAL repo:
+    /// create an agent, let its branch drift, delete it with its worktree, and
+    /// recreating it under the old name must not hit "branch already exists".
+    /// Before the fix the birth branch survived, because the delete only ever
+    /// saw `branch_name`, which the branch-sync poller had already rewritten.
+    #[test]
+    fn deleting_an_agent_whose_branch_drifted_removes_the_branch_it_was_born_on() {
+        fn git(dir: &std::path::Path, args: &[&str]) {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+
+        let (mut engine, tmp) = test_engine();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "--initial-branch=main"]);
+        git(&repo, &["config", "user.email", "t@example.com"]);
+        git(&repo, &["config", "user.name", "t"]);
+        std::fs::write(repo.join("f.txt"), "hi").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "init"]);
+
+        let worktree = tmp.path().join("wt-born-here");
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "born-here",
+                worktree.to_str().unwrap(),
+            ],
+        );
+        // The drift: the user switches the worktree onto a new branch, and the
+        // branch-sync poller rewrites `branch_name` to follow it.
+        git(&worktree, &["switch", "-c", "drifted"]);
+
+        engine
+            .projects
+            .push(sample_project("p1", repo.to_str().unwrap()));
+        let mut session = sample_session("s1", "p1", "drifted");
+        session.initial_branch = "born-here".to_string();
+        session.worktree_path = worktree.to_str().unwrap().to_string();
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+
+        let outcome = engine
+            .do_delete_session("s1", true)
+            .unwrap()
+            .expect("the delete should have run");
+
+        assert_eq!(
+            outcome.removal,
+            WorktreeRemoval::Performed {
+                branches: crate::git::RemoveResult {
+                    branch_already_deleted: false,
+                    initial_branch_already_deleted: Some(false),
+                },
+            },
+            "both branches must be reported so the status line can name them"
+        );
+        let listed = std::process::Command::new("git")
+            .args(["-C", repo.to_str().unwrap(), "branch", "--list"])
+            .output()
+            .unwrap();
+        let branches = String::from_utf8_lossy(&listed.stdout);
+        assert!(
+            !branches.contains("drifted"),
+            "the current branch must be gone: {branches}"
+        );
+        assert!(
+            !branches.contains("born-here"),
+            "the branch the agent was born on must be gone too, or recreating it \
+             fails with \"branch already exists\": {branches}"
+        );
     }
 
     #[test]
@@ -4057,7 +4149,10 @@ mod tests {
 
         let reaction = engine.process_worker_event(WorkerEvent::WorktreeRemoveCompleted {
             session_id: "s1".to_string(),
-            result: Ok(true),
+            result: Ok(crate::git::RemoveResult {
+                branch_already_deleted: true,
+                initial_branch_already_deleted: None,
+            }),
         });
 
         assert!(!engine.pending_deletions.contains("s1"));
@@ -4066,11 +4161,11 @@ mod tests {
         match reaction {
             EventReaction::WorktreeRemoveSucceeded {
                 session_id,
-                branch_already_deleted,
+                branches,
                 our_busy_message,
             } => {
                 assert_eq!(session_id, "s1");
-                assert!(branch_already_deleted);
+                assert!(branches.branch_already_deleted);
                 assert_eq!(our_busy_message.as_deref(), Some("Deleting agent \"s1\"…"));
             }
             other => panic!(
@@ -6108,9 +6203,11 @@ mod tests {
         let sid = "s1".to_string();
         let handle = std::thread::spawn(move || {
             use std::panic::AssertUnwindSafe;
-            let result = std::panic::catch_unwind(AssertUnwindSafe(|| -> Result<bool, String> {
-                panic!("simulated git failure");
-            }))
+            let result = std::panic::catch_unwind(AssertUnwindSafe(
+                || -> Result<crate::git::RemoveResult, String> {
+                    panic!("simulated git failure");
+                },
+            ))
             .unwrap_or_else(|payload| {
                 let reason = crate::engine::format_panic_payload(payload);
                 Err(format!("Worker panicked: {reason}"))

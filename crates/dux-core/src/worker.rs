@@ -509,13 +509,13 @@ pub enum WorkerEvent {
     },
     RefsChanged(String),
     /// Background `git worktree remove` for a session-initiated delete has
-    /// finished. On `Ok`, the boolean indicates whether the branch was
-    /// already gone (used for the status message). On `Err`, the message is
+    /// finished. On `Ok`, the result says what happened to each branch the
+    /// removal targeted (used for the status message). On `Err`, the message is
     /// the formatted error; the session record must be preserved so the user
     /// can retry.
     WorktreeRemoveCompleted {
         session_id: String,
-        result: Result<bool, String>,
+        result: Result<crate::git::RemoveResult, String>,
     },
     /// Background `git switch <target_branch>` run from a non-default branch
     /// warning modal has finished. On `Ok`, the main loop continues the

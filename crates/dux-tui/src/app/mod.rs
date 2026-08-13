@@ -582,8 +582,11 @@ pub struct PendingChangedFilesRefresh {
 /// to the final user message.
 pub enum TuiDeleteOutcome {
     /// Git removal succeeded and the session record is still present (the normal
-    /// case — cleanup runs now). `branch_already_deleted` selects the message.
-    SucceededPresent { branch_already_deleted: bool },
+    /// case — cleanup runs now). `branches` selects the message, and carries
+    /// the birth branch's fate as well when the agent had drifted.
+    SucceededPresent {
+        branches: dux_core::git::RemoveResult,
+    },
     /// Git removal succeeded but the session was already removed by another path
     /// (e.g. its project was deleted) before the worker reported back. Resolve to
     /// the legacy "Worktree removal finished." line when our busy was still

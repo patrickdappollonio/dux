@@ -632,7 +632,14 @@ fn remove_session_worktree(paths: &DuxPaths, session: &crate::model::AgentSessio
     // a stale worktree ref that made the branch undeletable. Continue-on-error is
     // preserved: a factory reset must press on past any single failure.
     if let Some(project_path) = session.project_path.as_deref() {
-        let _ = git::remove_worktree(Path::new(project_path), worktree, &session.branch_name);
+        // The birth branch too: a factory reset that left a drifted agent's
+        // original branch behind would not be a reset.
+        let _ = git::remove_worktree(
+            Path::new(project_path),
+            worktree,
+            &session.branch_name,
+            Some(session.initial_branch.as_str()),
+        );
     }
 
     // Belt-and-suspenders for the factory-reset guarantee: ensure the directory is

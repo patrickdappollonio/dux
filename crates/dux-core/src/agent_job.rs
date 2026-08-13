@@ -631,6 +631,9 @@ pub fn run_create_agent_job(
                 &repo_path,
                 Path::new(&session.worktree_path),
                 &session.branch_name,
+                // A rollback of a create: the agent was born moments ago and
+                // its branch cannot have drifted, so there is no second branch.
+                None,
             );
         }
         let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
@@ -681,6 +684,8 @@ pub fn run_create_agent_job(
                             &repo_path,
                             Path::new(&session.worktree_path),
                             &session.branch_name,
+                            // Rollback of a create: no drift is possible yet.
+                            None,
                         );
                     }
                     let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
@@ -729,6 +734,8 @@ pub fn run_create_agent_job(
                                 &repo_path,
                                 Path::new(&session.worktree_path),
                                 &session.branch_name,
+                                // Rollback of a create: no drift is possible yet.
+                                None,
                             );
                         }
                         let message = match &check_error {
@@ -881,6 +888,8 @@ pub fn run_agent_launch_job(request: AgentLaunchRequest, worker_tx: Sender<Worke
                 Path::new(repo_path),
                 Path::new(&request.session.worktree_path),
                 &request.session.branch_name,
+                // Rollback of a create: no drift is possible yet.
+                None,
             );
         }
         let _ = worker_tx.send(WorkerEvent::AgentLaunchFailed(Box::new(
@@ -919,6 +928,8 @@ pub fn run_agent_launch_job(request: AgentLaunchRequest, worker_tx: Sender<Worke
                     Path::new(repo_path),
                     Path::new(&request.session.worktree_path),
                     &request.session.branch_name,
+                    // Rollback of a create: no drift is possible yet.
+                    None,
                 );
             }
             let message = if matches!(request.kind, AgentLaunchKind::Create { .. }) {

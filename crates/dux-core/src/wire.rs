@@ -1123,8 +1123,25 @@ pub fn delete_session_status_message(
         .clone()
         .unwrap_or_else(|| outcome.session.branch_name.clone());
     match removal {
-        WorktreeRemoval::Performed { .. } => {
-            format!("Deleted agent \"{name}\" and removed its worktree.")
+        WorktreeRemoval::Performed { branches } => {
+            let branch = &outcome.session.branch_name;
+            let mut message = if branches.branch_already_deleted {
+                format!(
+                    "Deleted agent \"{name}\" and removed its worktree. Its branch \"{branch}\" was already gone."
+                )
+            } else {
+                format!(
+                    "Deleted agent \"{name}\", removed its worktree and deleted its branch \"{branch}\"."
+                )
+            };
+            // Said only when the agent DRIFTED off the branch it was born on,
+            // so the ordinary case still reads as one branch and the drifted
+            // case never leaves the user guessing what became of the other.
+            if let Some(note) = branches.initial_branch_note(&outcome.session.initial_branch) {
+                message.push(' ');
+                message.push_str(&note);
+            }
+            message
         }
         WorktreeRemoval::PreservedShared => {
             format!("Deleted agent \"{name}\". Worktree kept (shared with other agents).")
@@ -3271,7 +3288,10 @@ impl Engine {
                         let _ = self.apply(Command::FinishDeleteSession {
                             session_id: view.session_id.clone(),
                             removal: WorktreeRemoval::Performed {
-                                branch_already_deleted: false,
+                                // Placeholder: the session is vanished NOW and the
+                                // real branch report arrives with the deferred
+                                // removal, which authors the final message.
+                                branches: crate::git::RemoveResult::default(),
                             },
                             update_status: false,
                         });
@@ -3285,14 +3305,14 @@ impl Engine {
             }
             EventReaction::WorktreeRemoveSucceeded {
                 session_id,
-                branch_already_deleted,
+                branches,
                 ..
             } => {
                 if self.sessions.iter().any(|s| s.id == *session_id) {
                     self.finish_delete_and_status(
                         session_id,
                         WorktreeRemoval::Performed {
-                            branch_already_deleted: *branch_already_deleted,
+                            branches: *branches,
                         },
                     )
                 } else {
@@ -4123,6 +4143,58 @@ mod tests {
     use crate::statusline::StatusTone;
     use crate::worker::WorkerEvent;
     use std::path::Path;
+
+    /// The web's delete line must account for BOTH branches the removal
+    /// targets. It used to say only "removed its worktree", which is true and
+    /// incomplete: the branch went too, and for a drifted agent so did a second
+    /// branch the message never mentioned.
+    #[test]
+    fn delete_message_names_the_branch_and_the_drifted_original() {
+        fn message(branch: &str, initial: &str, branches: crate::git::RemoveResult) -> String {
+            let mut session = sample_session("s1", "p1", branch);
+            session.title = Some("agent-one".to_string());
+            session.initial_branch = initial.to_string();
+            let outcome = FinishDeleteSessionOutcome {
+                session,
+                project: None,
+                other_sessions_on_worktree: false,
+                project_still_has_sessions: false,
+            };
+            delete_session_status_message(&outcome, &WorktreeRemoval::Performed { branches })
+        }
+
+        // No drift: one branch, named.
+        assert_eq!(
+            message("feat", "feat", crate::git::RemoveResult::default()),
+            "Deleted agent \"agent-one\", removed its worktree and deleted its branch \"feat\"."
+        );
+        // Drifted: the birth branch went too, and the line says so.
+        assert_eq!(
+            message(
+                "drifted",
+                "born-here",
+                crate::git::RemoveResult {
+                    branch_already_deleted: false,
+                    initial_branch_already_deleted: Some(false),
+                },
+            ),
+            "Deleted agent \"agent-one\", removed its worktree and deleted its branch \
+             \"drifted\". Its original branch \"born-here\" was deleted too."
+        );
+        // Neither branch was dux's to delete: the message must not claim it did.
+        assert_eq!(
+            message(
+                "drifted",
+                "born-here",
+                crate::git::RemoveResult {
+                    branch_already_deleted: true,
+                    initial_branch_already_deleted: Some(true),
+                },
+            ),
+            "Deleted agent \"agent-one\" and removed its worktree. Its branch \"drifted\" was \
+             already gone. Its original branch \"born-here\" was already gone."
+        );
+    }
 
     #[test]
     fn wire_status_without_scope_field_deserializes_to_all() {
@@ -7756,7 +7828,7 @@ mod tests {
 
         let reaction = EventReaction::WorktreeRemoveSucceeded {
             session_id: "s1".to_string(),
-            branch_already_deleted: false,
+            branches: crate::git::RemoveResult::default(),
             our_busy_message: None,
         };
         let statuses = engine.drive_delete_followup(&reaction);
@@ -7915,7 +7987,7 @@ mod tests {
 
         let reaction = EventReaction::WorktreeRemoveSucceeded {
             session_id: "s1".to_string(),
-            branch_already_deleted: false,
+            branches: crate::git::RemoveResult::default(),
             our_busy_message: None,
         };
         let statuses = engine.drive_delete_followup(&reaction);
@@ -7992,7 +8064,7 @@ mod tests {
         // No session present in `engine.sessions`; the worker reports success.
         let reaction = EventReaction::WorktreeRemoveSucceeded {
             session_id: "s1".to_string(),
-            branch_already_deleted: false,
+            branches: crate::git::RemoveResult::default(),
             our_busy_message: None,
         };
         let statuses = engine.drive_delete_followup(&reaction);

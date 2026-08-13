@@ -1775,7 +1775,7 @@ impl App {
         session_id: &str,
         busy_message: String,
     ) -> dux_core::engine::HandlerStatusOp<TuiDeleteOutcome> {
-        let (provider, branch_name, name, project_name) = self
+        let (provider, branch_name, initial_branch, name, project_name) = self
             .engine
             .sessions
             .iter()
@@ -1783,6 +1783,10 @@ impl App {
             .map(|s| {
                 let provider = s.provider.as_str().to_string();
                 let branch_name = s.branch_name.clone();
+                // Captured here, with the session still present, because the
+                // removal's report can name a SECOND branch (the one the agent
+                // was born on) and the session is gone by the time it lands.
+                let initial_branch = s.initial_branch.clone();
                 let name = s.title.as_deref().unwrap_or(&s.branch_name).to_string();
                 let project_name = self
                     .engine
@@ -1791,10 +1795,11 @@ impl App {
                     .find(|p| p.id == s.project_id)
                     .map(|p| p.name.clone())
                     .unwrap_or_else(|| "<unknown>".to_string());
-                (provider, branch_name, name, project_name)
+                (provider, branch_name, initial_branch, name, project_name)
             })
             .unwrap_or_else(|| {
                 (
+                    String::new(),
                     String::new(),
                     String::new(),
                     String::new(),
@@ -1803,17 +1808,21 @@ impl App {
             });
         dux_core::engine::status_op(busy_message).resolve_in_handler(
             move |o: &TuiDeleteOutcome| match o {
-                TuiDeleteOutcome::SucceededPresent {
-                    branch_already_deleted,
-                } => {
-                    if *branch_already_deleted {
-                        dux_core::engine::Final::info(format!(
+                TuiDeleteOutcome::SucceededPresent { branches } => {
+                    let base = if branches.branch_already_deleted {
+                        format!(
                             "Deleted agent (branch \"{branch_name}\" was already removed)."
-                        ))
+                        )
                     } else {
-                        dux_core::engine::Final::info(format!(
+                        format!(
                             "Deleted {provider} agent from project \"{project_name}\" with branch \"{branch_name}\"."
-                        ))
+                        )
+                    };
+                    // Only when the agent drifted off its birth branch, which is
+                    // deleted too; see `git::RemoveResult::initial_branch_note`.
+                    match branches.initial_branch_note(&initial_branch) {
+                        Some(note) => dux_core::engine::Final::info(format!("{base} {note}")),
+                        None => dux_core::engine::Final::info(base),
                     }
                 }
                 TuiDeleteOutcome::SucceededGone {
@@ -1930,26 +1939,32 @@ impl App {
                         session.worktree_path,
                     ));
                 }
-                WorktreeRemoval::Performed {
-                    branch_already_deleted,
-                } => {
-                    if branch_already_deleted {
-                        self.set_info(format!(
+                WorktreeRemoval::Performed { branches } => {
+                    let mut message = if branches.branch_already_deleted {
+                        format!(
                             "Deleted agent (branch \"{}\" was already removed).",
                             session.branch_name,
-                        ));
+                        )
                     } else {
                         let project_name = project
                             .as_ref()
                             .map(|p| p.name.as_str())
                             .unwrap_or("<unknown>");
-                        self.set_info(format!(
+                        format!(
                             "Deleted {} agent from project \"{}\" with branch \"{}\".",
                             session.provider.as_str(),
                             project_name,
                             session.branch_name,
-                        ));
+                        )
+                    };
+                    // Only when the agent DRIFTED off the branch it was born on:
+                    // that second branch is deleted too and the line must say so
+                    // rather than leaving the user to discover it.
+                    if let Some(note) = branches.initial_branch_note(&session.initial_branch) {
+                        message.push(' ');
+                        message.push_str(&note);
                     }
+                    self.set_info(message);
                 }
             }
         }
@@ -6106,7 +6121,7 @@ mod tests {
             .worker_tx
             .send(WorkerEvent::WorktreeRemoveCompleted {
                 session_id: "s1".to_string(),
-                result: Ok(false),
+                result: Ok(dux_core::git::RemoveResult::default()),
             })
             .expect("channel send");
         app.drain_events();
@@ -6149,7 +6164,7 @@ mod tests {
             .worker_tx
             .send(WorkerEvent::WorktreeRemoveCompleted {
                 session_id: "s1".to_string(),
-                result: Ok(false),
+                result: Ok(dux_core::git::RemoveResult::default()),
             })
             .expect("channel send");
         app.drain_events();
@@ -6196,7 +6211,7 @@ mod tests {
             .worker_tx
             .send(WorkerEvent::WorktreeRemoveCompleted {
                 session_id: "s1".to_string(),
-                result: Ok(false),
+                result: Ok(dux_core::git::RemoveResult::default()),
             })
             .expect("channel send");
         app.drain_events();
@@ -6361,7 +6376,10 @@ mod tests {
                 .worker_tx
                 .send(WorkerEvent::WorktreeRemoveCompleted {
                     session_id: "s1".to_string(),
-                    result: Ok(branch_already_deleted),
+                    result: Ok(dux_core::git::RemoveResult {
+                        branch_already_deleted,
+                        initial_branch_already_deleted: None,
+                    }),
                 })
                 .expect("channel send");
             app.drain_events();
@@ -6401,13 +6419,16 @@ mod tests {
             ),
             (
                 WorktreeRemoval::Performed {
-                    branch_already_deleted: true,
+                    branches: dux_core::git::RemoveResult {
+                        branch_already_deleted: true,
+                        initial_branch_already_deleted: None,
+                    },
                 },
                 "Deleted agent (branch \"branch-s1\" was already removed).",
             ),
             (
                 WorktreeRemoval::Performed {
-                    branch_already_deleted: false,
+                    branches: dux_core::git::RemoveResult::default(),
                 },
                 "Deleted claude agent from project \"demo\" with branch \"branch-s1\".",
             ),
@@ -6429,6 +6450,41 @@ mod tests {
             app.apply_finish_delete_session_outcome("s1", outcome, removal, true);
             assert_eq!(app.status.message(), expected, "variant {removal:?}");
         }
+    }
+
+    /// A drifted agent loses TWO branches, so the status line must name the
+    /// second one. Saying only "with branch <current>" is not a lie by itself,
+    /// but it leaves the user unaware that their original branch is gone.
+    #[test]
+    fn delete_status_names_the_branch_the_agent_was_born_on_when_it_drifted() {
+        let mut session = make_session("s1", "claude", "/tmp/wt");
+        session.initial_branch = "born-here".to_string();
+        let project = make_project("project-1", "claude");
+        let mut app = test_app_with_sessions(vec![session.clone()], vec![project.clone()]);
+        let outcome = FinishDeleteSessionOutcome {
+            session,
+            project: Some(project),
+            other_sessions_on_worktree: false,
+            project_still_has_sessions: false,
+        };
+
+        app.apply_finish_delete_session_outcome(
+            "s1",
+            outcome,
+            WorktreeRemoval::Performed {
+                branches: dux_core::git::RemoveResult {
+                    branch_already_deleted: false,
+                    initial_branch_already_deleted: Some(false),
+                },
+            },
+            true,
+        );
+
+        assert_eq!(
+            app.status.message(),
+            "Deleted claude agent from project \"demo\" with branch \"branch-s1\". \
+             Its original branch \"born-here\" was deleted too."
+        );
     }
 
     #[test]
