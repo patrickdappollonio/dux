@@ -440,8 +440,9 @@ function HighlightedText({ text, query }: { text: string; query: string }) {
 
 // The two-line agent row: line one is the Bot (with the verbatim working bob +
 // attention pulse + name shimmer cues) + name + PR link + relative time; line two
-// is the clickable project tag, a colored state word, and (when they diverge) the
-// branch and a tab count. Uses ONLY fields that exist today.
+// is the clickable project tag, a colored state word, and a tab count. The
+// branch is deliberately absent (see line two below). Uses ONLY fields that
+// exist today.
 function AgentFlatRow({
   session,
   projectName,
@@ -468,7 +469,6 @@ function AgentFlatRow({
     session.typing,
   )
   const word = stateWord(session)
-  const branchDiverges = session.branch_name !== label
   const tabCount = session.tabs.length
 
   const { changes } = useDux()
@@ -597,8 +597,8 @@ function AgentFlatRow({
                     typing, so this is the sole cue. */}
                 {typing ? <TypingCaret /> : null}
               </span>
-              {/* Line two: display-only project + state word + branch + tabs.
-                  Sans throughout to match the app; only the branch is mono. */}
+              {/* Line two: display-only project + state word + tabs. Sans
+                  throughout to match the app. */}
               <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
                 <ProjectTag name={projectName} query={query} />
                 <Dot className="text-muted-foreground" />
@@ -614,14 +614,14 @@ function AgentFlatRow({
                 >
                   {word.label}
                 </span>
-                {branchDiverges ? (
-                  <>
-                    <Dot className="text-muted-foreground" />
-                    <span className="min-w-0 truncate font-mono">
-                      <HighlightedText text={session.branch_name} query={query} />
-                    </span>
-                  </>
-                ) : null}
+                {/* No branch here, by decision. The row used to print the branch
+                    whenever it differed from the agent's name, which on a drifted
+                    agent meant a long mono branch inline on every row: noise, and
+                    worst on a tablet. The branch's one home is the top bar's
+                    branch chip (InsetHeader), which shows the CURRENT branch and
+                    carries the drift note on hover. The branch stays searchable
+                    (lib/agentSearch.ts still matches on it); a branch-only query
+                    simply highlights nothing visible. */}
                 {tabCount > 1 ? (
                   <>
                     <Dot className="text-muted-foreground" />

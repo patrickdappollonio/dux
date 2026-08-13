@@ -296,6 +296,34 @@ describe("FlatAgentList quiet-tail search auto-expand", () => {
   })
 })
 
+// The agent row never prints the agent's branch, not even when the branch has
+// drifted away from the agent's name. The branch's one home is the top bar's
+// branch chip (see InsetHeader): a long branch inline made the row noisy on a
+// tablet, and the row already says everything it needs to about the agent.
+describe("FlatAgentList agent row branch", () => {
+  it("does not render the branch on a row whose branch diverges from its name", () => {
+    // "Alpha" sits on "feat/silver": the classic drifted row.
+    render(<FlatAgentList handlers={handlers} />)
+    expect(screen.getByText("Alpha")).toBeTruthy()
+    expect(screen.queryByText("feat/silver")).toBeNull()
+    expect(document.body.textContent).not.toContain("feat/silver")
+  })
+
+  it("keeps the rest of line two: the project tag, the state word, the tab count", () => {
+    const state = makeState("name")
+    state.spine!.sessions = state.spine!.sessions.map((s) =>
+      s.id === "alpha"
+        ? ({ ...s, tabs: [{ id: "alpha" }, { id: "alpha-2" }] } as SessionView)
+        : s,
+    )
+    mockState = state
+    render(<FlatAgentList handlers={handlers} />)
+    expect(screen.getAllByText("Repo").length).toBeGreaterThan(0)
+    expect(screen.getAllByText("Idle").length).toBeGreaterThan(0)
+    expect(screen.getByText("2 tabs")).toBeTruthy()
+  })
+})
+
 // The search-match highlight: the matched part of a row's NAME (the field the
 // filter searched and the row displays) wraps in a token-styled emphasis span.
 describe("FlatAgentList search-match highlight", () => {
@@ -335,12 +363,14 @@ describe("FlatAgentList search-match highlight", () => {
     expect(marks.some((m) => m.parentElement?.textContent === "Repo")).toBe(true)
   })
 
-  it("highlights a branch hit on the agent row's second line", () => {
+  it("highlights nothing for a branch-only hit, because the row no longer shows the branch", () => {
+    // The branch stays SEARCHABLE (agentSearch matches on branch_name) but the
+    // row never prints it, so a query that hits only the branch filters the row
+    // in and highlights nothing. Accepted: the branch's home is the top bar.
     mockState = withQuery("silver")
     render(<FlatAgentList handlers={handlers} />)
-    const mark = screen.getByText("silver")
-    expect(mark.className).toContain("bg-primary")
-    expect(mark.parentElement?.textContent).toBe("feat/silver")
+    expect(screen.getByText("Alpha")).toBeTruthy()
+    expect(screen.queryByText("silver")).toBeNull()
   })
 
   it("highlights an owner-label hit on the terminal row's second line", () => {
