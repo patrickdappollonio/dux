@@ -16,6 +16,13 @@ export type MonacoInstance = typeof monaco
 interface CodeEditorProps {
   // The worktree-relative path — Monaco infers the language from its extension.
   path: string
+  // The user's per-file language override, from the header's language picker.
+  // `undefined` means no override, which is the default: the `language` prop
+  // is then absent and Monaco's own URI inference decides, exactly as before.
+  // Changing it re-languages the live model (the wrapper calls
+  // `setModelLanguage` on a prop change), so a pick applies without a remount
+  // and without touching the buffer.
+  language?: string
   value: string
   onChange: (value: string) => void
   onSave: () => void
@@ -30,6 +37,7 @@ interface CodeEditorProps {
 
 export default function CodeEditor({
   path,
+  language,
   value,
   onChange,
   onSave,
@@ -59,6 +67,7 @@ export default function CodeEditor({
       // this from the documentElement class instead.
       theme="vs-dark"
       path={path}
+      language={language}
       value={value}
       onChange={(v) => onChange(v ?? "")}
       onMount={handleMount}

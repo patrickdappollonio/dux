@@ -12,6 +12,7 @@ import {
   CircleAlert,
   Ellipsis,
   ExternalLink,
+  Code2,
   Eye,
   FileCode2,
   FilePlus,
@@ -25,6 +26,7 @@ import {
   RotateCw,
   Save,
   Search,
+  Wand2,
   X,
 } from "lucide-react"
 import type { PanelImperativeHandle } from "react-resizable-panels"
@@ -62,6 +64,13 @@ import {
   deletedMessage,
   renamedMessage,
 } from "@/lib/editorMutations"
+import {
+  effectiveLanguageLabel,
+  languageOverrideFor,
+  languagePickerEntries,
+  withLanguageOverride,
+} from "@/lib/editorLanguage"
+import type { RegisteredLanguage } from "@/lib/editorLanguage"
 import { isLocalAccessHost } from "@/lib/localAccess"
 import {
   EDITOR_CONTENT_MIN_SIZE_PROP,
@@ -108,6 +117,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuSub,
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
@@ -326,6 +336,29 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
   // "Open editor" request in flight.
   const [openingEditor, setOpeningEditor] = useState(false)
 
+  // The language picker's two pieces of state.
+  //
+  // The REGISTRY, read off Monaco once the editor surface is actually up. It
+  // is fetched through a DYNAMIC import so this module never pulls the
+  // multi-MB Monaco bundle into the main chunk; the import resolves to the
+  // same chunk CodeEditor and DiffViewer already lazy-load, so by the time a
+  // text tab is on screen it costs nothing extra. It is read in an effect
+  // rather than from CodeEditor's `onReady` because the picker must also work
+  // in DIFF mode, where CodeEditor never mounts.
+  const [registeredLanguages, setRegisteredLanguages] = useState<
+    RegisteredLanguage[]
+  >([])
+  // The OVERRIDES, keyed by tab PATH, one entry per file the user has
+  // corrected. Session-lived and deliberately NOT persisted: a language
+  // override is a reaction to what is on screen right now, and a file
+  // reopened later re-infers, which is the behavior a user gets from every
+  // other editor. It also means there is no stored shape to migrate when
+  // Monaco's language ids move. Closing the editor clears it with the
+  // component.
+  const [languageOverrides, setLanguageOverrides] = useState<
+    Map<string, string>
+  >(() => new Map())
+
   // Explorer panel layout, persisted by dux rather than by the panel
   // library's `useDefaultLayout`. That hook is the reuse-before-invent
   // answer and it was the previous one, but what it persists is a `Layout`,
@@ -426,6 +459,48 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
   // server is the user's own machine. Enable for local-access URLs; for remote
   // URLs keep the control but disable it with an explanatory tooltip.
   const localAccess = isLocalAccessHost(window.location.hostname)
+
+  // The language picker, derived. It renders only for a TEXT tab (an image
+  // has no language to pick) and only once the registry has been read: an
+  // empty list would give a control whose menu is empty and whose trigger
+  // always reads "Plain text".
+  const languageTabPath = activeTab !== null && !isImageTab ? activeTab.path : null
+  useEffect(() => {
+    if (languageTabPath === null) return
+    let cancelled = false
+    // The registry does not change after the grammars register at import
+    // time, so this runs once and then short-circuits on the state check.
+    void import("@/lib/monacoSetup")
+      .then((m) => {
+        if (!cancelled) setRegisteredLanguages(m.monaco.languages.getLanguages())
+      })
+      // Monaco failing to load is already fatal for the pane behind us, which
+      // reports it; the picker simply does not appear.
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [languageTabPath])
+  const languageChoices = useMemo(
+    () => languagePickerEntries(registeredLanguages),
+    [registeredLanguages],
+  )
+  const activeLanguageOverride = languageOverrideFor(
+    languageOverrides,
+    languageTabPath,
+  )
+  const activeLanguageLabel = effectiveLanguageLabel(
+    languageOverrides,
+    languageTabPath,
+    registeredLanguages,
+  )
+  const showLanguagePicker = languageTabPath !== null && languageChoices.length > 0
+  function pickLanguage(id: string | null): void {
+    if (languageTabPath === null) return
+    setLanguageOverrides((prev) =>
+      withLanguageOverride(prev, languageTabPath, id),
+    )
+  }
 
   // The changed-files slice, trusted only when it belongs to THIS editor's
   // session (the editor always operates on the selected session, but a fast
@@ -1135,6 +1210,42 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
 
   const openPath = activeTab?.path ?? null
 
+  // The language menu's rows, shared by the desktop trigger and the phone
+  // fold's submenu so the two cannot drift. "Auto" first, above a separator,
+  // because it is the state every file starts in and the one a user goes
+  // looking for to undo a pick; it CLEARS the override rather than selecting
+  // a language, so it is checked exactly when no override is set.
+  function languagePickerItems(): React.ReactNode {
+    return (
+      <>
+        <DropdownMenuItem
+          aria-current={activeLanguageOverride === undefined ? "true" : undefined}
+          onClick={() => pickLanguage(null)}
+        >
+          <Wand2 />
+          Auto
+          {activeLanguageOverride === undefined && <Check className="ml-auto" />}
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        {languageChoices.map((choice) => (
+          <DropdownMenuItem
+            key={choice.id}
+            aria-current={
+              activeLanguageOverride === choice.id ? "true" : undefined
+            }
+            onClick={() => pickLanguage(choice.id)}
+          >
+            <Code2 />
+            {choice.label}
+            {activeLanguageOverride === choice.id && (
+              <Check className="ml-auto" />
+            )}
+          </DropdownMenuItem>
+        ))}
+      </>
+    )
+  }
+
   return (
     <>
       {/* Header: open file path, view toggle, dirty indicator, actions.
@@ -1269,6 +1380,35 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
             {showPreview && activeTab?.mode === "file" ? "Edit" : "Preview"}
           </Button>
         )}
+        {/* Language picker. Monaco's own inference from the file's URI is
+            still the default (dux ships no filename table; a ".lock" opens
+            as plain text), and this is the escape hatch for the file it
+            guesses wrong. The trigger NAMES the language in force, so it is
+            also the only place the editor says what it decided. Same cluster
+            idiom as Open local editor: size="sm" ghost with a trailing
+            chevron. The menu carries ~82 rows and scrolls on the content's
+            own max-h-(--available-height) + overflow-y-auto. */}
+        {showLanguagePicker && (
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              render={
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="max-md:hidden"
+                  aria-label={`Syntax language: ${activeLanguageLabel}`}
+                />
+              }
+            >
+              <Code2 />
+              {activeLanguageLabel}
+              <ChevronDown />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              {languagePickerItems()}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
         {/* Open in a local GUI editor — a menu of supported editors. A disabled
             trigger swallows hover events (pointer-events:none), so the tooltip
             lives on a wrapping span that always receives them. */}
@@ -1396,6 +1536,22 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
                   )}
                   {showPreview ? "Hide preview" : "Show preview"}
                 </DropdownMenuItem>
+              )}
+              {/* The language picker, folded like every other secondary
+                  control. The submenu content needs its own scroll cap: the
+                  top-level menu content ships one, DropdownMenuSubContent
+                  does not, and this is the one submenu in the app long
+                  enough to need it. */}
+              {showLanguagePicker && (
+                <DropdownMenuSub>
+                  <DropdownMenuSubTrigger>
+                    <Code2 />
+                    {activeLanguageLabel}
+                  </DropdownMenuSubTrigger>
+                  <DropdownMenuSubContent className="max-h-(--available-height) overflow-y-auto">
+                    {languagePickerItems()}
+                  </DropdownMenuSubContent>
+                </DropdownMenuSub>
               )}
               {/* Present for image tabs too, matching the inline control. */}
               <DropdownMenuSub>
@@ -1719,6 +1875,7 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
                       >
                         <DiffViewer
                           path={activeTab.path}
+                          language={activeLanguageOverride}
                           original={activeBuffer?.diff?.original ?? ""}
                           modified={activeBuffer?.diff?.modified ?? ""}
                           allDelete={
@@ -1771,6 +1928,7 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
                   >
                     <CodeEditor
                       path={activeTab.path}
+                      language={activeLanguageOverride}
                       value={activeBuffer?.draft ?? ""}
                       onChange={handleDraftChange}
                       onSave={save}

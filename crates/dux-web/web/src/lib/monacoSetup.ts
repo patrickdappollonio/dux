@@ -18,7 +18,7 @@ import * as monaco from "monaco-editor/esm/vs/editor/edcore.main"
 import "@/monacoLanguages"
 import editorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker"
 
-import { extensionForPath, fileNameForPath } from "@/lib/pathExt"
+import { inferredLanguageId } from "@/lib/editorLanguage"
 
 // Self-host: point the wrapper at the bundled `monaco` instance and supply the
 // one worker via a Vite `?worker` import (a hashed chunk rust-embed bakes into
@@ -95,15 +95,9 @@ export { monaco }
 // that collide with the editor's. Returns `undefined` (→ plaintext) when no
 // registered language claims the extension.
 export function monacoLanguageForPath(path: string): string | undefined {
-  const ext = extensionForPath(path)
-  const file = fileNameForPath(path)
-  for (const lang of monaco.languages.getLanguages()) {
-    if (ext && lang.extensions?.some((e) => e.toLowerCase() === ext)) {
-      return lang.id
-    }
-    if (lang.filenames?.some((f) => f.toLowerCase() === file)) {
-      return lang.id
-    }
-  }
-  return undefined
+  // The walk itself lives in `lib/editorLanguage`, which takes the registry as
+  // an argument and so can be unit-tested; this only supplies the registry.
+  // The language PICKER resolves the same question through the same function,
+  // which is what keeps the two from drifting apart.
+  return inferredLanguageId(path, monaco.languages.getLanguages())
 }

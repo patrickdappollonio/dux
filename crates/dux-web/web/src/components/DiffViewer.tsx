@@ -9,6 +9,10 @@ import { allDeleteDiffOptions } from "@/lib/diffPresentation"
 interface DiffViewerProps {
   // Worktree-relative path — used only to pick the syntax language for both sides.
   path: string
+  // The user's per-file language override, from the header's language picker.
+  // When set it wins over the path-derived guess, for both sides of the diff:
+  // a file the picker had to correct is just as wrong in diff mode.
+  language?: string
   // File content at HEAD ("" for an added file → all-insert diff).
   original: string
   // Working-copy content ("" for a deleted file → all-delete diff).
@@ -28,13 +32,16 @@ interface DiffViewerProps {
 // dark theme. Default export so it lazy-loads as its own chunk (see EditorOverlay).
 export default function DiffViewer({
   path,
+  language: languageOverride,
   original,
   modified,
   allDelete = false,
 }: DiffViewerProps) {
   // Path only changes when the user switches files; memoize so the language scan
-  // doesn't repeat on every parent re-render.
-  const language = useMemo(() => monacoLanguageForPath(path), [path])
+  // doesn't repeat on every parent re-render. An override skips the scan
+  // entirely rather than being applied on top of it.
+  const inferred = useMemo(() => monacoLanguageForPath(path), [path])
+  const language = languageOverride ?? inferred
 
   // The two TextModels the diff widget holds, captured on mount so we can
   // dispose them ourselves on unmount. We MUST manage them because @monaco-

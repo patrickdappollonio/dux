@@ -106,12 +106,18 @@ function codeEditorStub() {
     default: ({
       value,
       onChange,
+      language,
     }: {
       value: string
       onChange: (v: string) => void
+      language?: string
     }) => (
       <textarea
         data-testid="code-editor"
+        // The language override the header's picker resolved, surfaced so the
+        // picker tests can read what was actually handed to Monaco. Empty
+        // means no override, which is "let Monaco infer from the URI".
+        data-language={language ?? ""}
         value={value}
         onChange={(e) => onChange(e.target.value)}
       />
@@ -130,16 +136,19 @@ function diffViewerStub() {
       original,
       modified,
       allDelete,
+      language,
     }: {
       original: string
       modified: string
       allDelete?: boolean
+      language?: string
     }) => (
       <div
         data-testid="diff-viewer"
         data-original={original}
         data-modified={modified}
         data-all-delete={String(allDelete ?? false)}
+        data-language={language ?? ""}
       />
     ),
   }
@@ -162,6 +171,20 @@ vi.mock("react-resizable-panels", async (importOriginal) => {
   }
   return { ...actual, Panel }
 })
+
+// The language registry the picker reads at runtime. The real module pulls
+// the multi-MB Monaco bundle and cannot load under vitest at all (see
+// lib/pathExt.ts), and EditorBody reaches it through a DYNAMIC import, which
+// vi.mock intercepts just the same.
+const LANGUAGES = [
+  { id: "plaintext", aliases: ["Plain Text", "text"], extensions: [".txt"] },
+  { id: "typescript", aliases: ["TypeScript"], extensions: [".ts"] },
+  { id: "toml", aliases: ["TOML"], extensions: [".toml"] },
+]
+vi.mock("@/lib/monacoSetup", () => ({
+  monaco: { languages: { getLanguages: () => LANGUAGES } },
+  monacoLanguageForPath: () => undefined,
+}))
 
 const toastError = vi.fn()
 const toastSuccess = vi.fn()
@@ -1168,5 +1191,111 @@ describe("file mutations confirm themselves", () => {
     await waitFor(() => expect(toastError).toHaveBeenCalled())
     expect(String(toastError.mock.calls[0][0])).toContain("permission denied")
     expect(toastSuccess).not.toHaveBeenCalled()
+  })
+})
+
+// The language picker. Monaco's inference from the file's URI is unchanged
+// and remains the default; this is the per-file escape hatch for the file it
+// guesses wrong, which for a ".lock" or an extensionless script is every
+// time. The override is session-lived and keyed by path.
+describe("the header's language picker", () => {
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    installBootStubs()
+    // The draft cache is module-level and outlives a render, so an earlier
+    // describe's settled fileError for this session would be seeded straight
+    // back in and the pane would never reach the editor arm at all.
+    const { clearSessionDrafts } = await import("@/lib/editorDrafts")
+    clearSessionDrafts(SESSION)
+    // `clearAllMocks` clears calls and KEEPS implementations, and earlier
+    // describes in this file leave `readMock` rejecting and `diffMock`
+    // returning their own sides. Put both back, or the panes never reach the
+    // arm that renders an editor at all.
+    readMock.mockResolvedValue({
+      path: PATH,
+      content: ON_DISK,
+      binary: false,
+      read_only: false,
+    })
+    diffMock.mockResolvedValue({
+      path: PATH,
+      original: "a\n",
+      modified: "b\n",
+      binary: false,
+    })
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.unstubAllGlobals()
+  })
+
+  async function picker(): Promise<HTMLElement> {
+    return await screen.findByRole("button", { name: /^syntax language:/i })
+  }
+
+  it("names the language Monaco would infer, with no override in force", async () => {
+    // src/big.txt: the registry claims ".txt" as plaintext.
+    await mountWithTab(PATH)
+    await screen.findByTestId("code-editor")
+    expect((await picker()).textContent).toContain("Plain text")
+    // And nothing is forced on the editor: the prop is absent, so Monaco's
+    // own URI inference is what decides.
+    expect(
+      screen.getByTestId("code-editor").getAttribute("data-language"),
+    ).toBe("")
+  })
+
+  it("applies a pick to the open editor, and says so on the trigger", async () => {
+    await mountWithTab(PATH)
+    await screen.findByTestId("code-editor")
+    fireEvent.click(await picker())
+    fireEvent.click(await screen.findByRole("menuitem", { name: /^TOML$/ }))
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("code-editor").getAttribute("data-language"),
+      ).toBe("toml"),
+    )
+    expect((await picker()).textContent).toContain("TOML")
+  })
+
+  it("Auto clears the override and hands the file back to Monaco", async () => {
+    await mountWithTab(PATH)
+    await screen.findByTestId("code-editor")
+    fireEvent.click(await picker())
+    fireEvent.click(await screen.findByRole("menuitem", { name: /^TOML$/ }))
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("code-editor").getAttribute("data-language"),
+      ).toBe("toml"),
+    )
+    fireEvent.click(await picker())
+    fireEvent.click(await screen.findByRole("menuitem", { name: /^Auto$/ }))
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("code-editor").getAttribute("data-language"),
+      ).toBe(""),
+    )
+    expect((await picker()).textContent).toContain("Plain text")
+  })
+
+  it("applies to the diff view too, which is just as wrong about the file", async () => {
+    await mountWithTab(PATH, "diff")
+    await screen.findByTestId("diff-viewer")
+    fireEvent.click(await picker())
+    fireEvent.click(await screen.findByRole("menuitem", { name: /^TOML$/ }))
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("diff-viewer").getAttribute("data-language"),
+      ).toBe("toml"),
+    )
+  })
+
+  it("does not render for an image tab, which has no language to pick", async () => {
+    await mountWithTab("assets/logo.png")
+    await screen.findByRole("img")
+    expect(
+      screen.queryByRole("button", { name: /^syntax language:/i }),
+    ).toBeNull()
   })
 })
