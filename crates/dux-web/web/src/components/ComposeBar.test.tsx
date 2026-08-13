@@ -132,9 +132,25 @@ describe("ComposeBar", () => {
     expect(ta.getAttribute("spellcheck")).toBe("true")
   })
 
+  // The default is the command flavour, because a plain shell is what the bar
+  // sits under everywhere except an agent pane; the parent overrides it there.
   it("shows the typing hint as the placeholder", () => {
     render(<Harness />)
     expect(textarea().getAttribute("placeholder")).toBe("Type a command…")
+  })
+
+  it("takes the placeholder the parent gives it", () => {
+    render(
+      <ComposeBar
+        value=""
+        onChange={() => {}}
+        onSend={onSend}
+        placeholder="Write a message to the agent…"
+      />,
+    )
+    expect(textarea().getAttribute("placeholder")).toBe(
+      "Write a message to the agent…",
+    )
   })
 
   it("renders the value the parent passes (controlled input)", () => {

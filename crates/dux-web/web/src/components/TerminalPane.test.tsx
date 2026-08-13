@@ -2399,6 +2399,50 @@ describe("TerminalPane typing surfaces follow the pointer, not the layout", () =
   })
 })
 
+// THE COMPOSE BOX SAYS WHAT IT IS FOR. An agent pane is a conversation, not a
+// shell: prompting for a command there described the wrong activity. Every
+// non-agent PTY surface (companion, project and standalone terminals alike) is
+// a shell, so it keeps the command wording.
+describe("TerminalPane compose placeholder follows the surface", () => {
+  let pointerStub: MatchMediaStub | null = null
+
+  beforeEach(() => {
+    pointerStub = stubCoarsePointer(true)
+  })
+  afterEach(() => {
+    pointerStub?.restore()
+    pointerStub = null
+  })
+
+  const placeholder = () =>
+    (
+      screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement
+    ).getAttribute("placeholder")
+
+  it("asks an agent pane for a message", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(placeholder()).toBe("Write a message to the agent…")
+  })
+
+  it("asks a terminal pane for a command", () => {
+    render(
+      <TerminalPane
+        kind="terminal"
+        id="t1"
+        owner={{ kind: "session", sessionId: "s1" }}
+      />,
+    )
+    expect(placeholder()).toBe("Type a command…")
+  })
+
+  it("asks a standalone terminal for a command too", () => {
+    render(
+      <TerminalPane kind="terminal" id="t2" owner={{ kind: "standalone" }} />,
+    )
+    expect(placeholder()).toBe("Type a command…")
+  })
+})
+
 // THE WAY BACK TRAVELS WITH THE KEYS. `ui.mobile_accessory_bar` is a
 // SERVER-SIDE preference, so hiding it from a phone hides the keys on the
 // tablet too; if the restore affordance stayed gated on the mobile LAYOUT, that

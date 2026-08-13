@@ -44,6 +44,12 @@ interface ComposeBarProps {
   // plain RefObject (not a callback ref) attached directly to the textarea;
   // when absent the component falls back to its own internal ref.
   inputRef?: React.RefObject<HTMLTextAreaElement | null>
+  // What the empty box asks for. The bar sits under two different surfaces and
+  // they want two different things typed into them: an agent pane is a
+  // conversation, every other PTY surface is a shell. The parent knows which
+  // it is, so it says; the default is the shell wording, which is what a bar
+  // rendered without an opinion is sitting under.
+  placeholder?: string
   // Whether the restore-bars button renders: true while at least one of the
   // two hideable mobile bars (the top bar, the accessory keys) is hidden. The
   // compose bar is the one surface guaranteed to still be on screen then, so
@@ -61,6 +67,16 @@ interface ComposeBarProps {
 // left too little PTY visible; three still shows enough of a draft to review,
 // and the box scrolls for anything longer.
 const MAX_ROWS = 3
+
+// The default hint: what the bar asks for when nobody says otherwise, and what
+// every terminal surface (companion, project and standalone alike) asks for.
+// Exported so the agent-pane caller's opposite number can sit beside it.
+export const TERMINAL_PLACEHOLDER = "Type a command…"
+
+// The agent-pane hint. An agent session is a conversation with a CLI, not a
+// shell prompt, and asking for a command there described the wrong activity to
+// exactly the users who type the longest into this box.
+export const AGENT_PLACEHOLDER = "Write a message to the agent…"
 
 // Autosize by measurement, not CSS: `field-sizing: content` is unsupported on
 // OLDER iOS Safari (it shipped in 26.2, Dec 2025), so the JS measurement keeps
@@ -110,6 +126,7 @@ export function ComposeBar({
   onChange,
   onSend,
   inputRef,
+  placeholder = TERMINAL_PLACEHOLDER,
   showRestoreBars = false,
   onRestoreBars,
 }: ComposeBarProps) {
@@ -167,7 +184,7 @@ export function ComposeBar({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         rows={1}
-        placeholder="Type a command…"
+        placeholder={placeholder}
         aria-label="Message"
         // Native keyboard assistance ON, deliberately the opposite of xterm's
         // hidden textarea (which forces all of these off because a PTY stream

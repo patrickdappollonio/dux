@@ -5,7 +5,12 @@ import "@xterm/xterm/css/xterm.css"
 import { MonitorSmartphone } from "lucide-react"
 import { AccessoryBar } from "@/components/AccessoryBar"
 import type { ScrollDir } from "@/components/AccessoryBar"
-import { ComposeBar, RestoreBarsButton } from "@/components/ComposeBar"
+import {
+  AGENT_PLACEHOLDER,
+  ComposeBar,
+  RestoreBarsButton,
+  TERMINAL_PLACEHOLDER,
+} from "@/components/ComposeBar"
 import {
   COMPOSE_SUBMIT_DELAY_MS,
   composeSendTooLarge,
@@ -3268,6 +3273,15 @@ export function TerminalPane(props: TerminalPaneProps) {
               onChange={setComposeText}
               onSend={sendCompose}
               inputRef={composeInputRef}
+              // WHAT THIS SURFACE IS FOR, off the pane's own kind: an agent
+              // pane is a conversation with a CLI, every terminal pane is a
+              // shell, and `kind` is the discriminator that already answers
+              // that (a terminal's OWNER kind, session/project/standalone,
+              // varies the spawn directory, not the activity, so all three
+              // get the shell wording).
+              placeholder={
+                kind === "agent" ? AGENT_PLACEHOLDER : TERMINAL_PLACEHOLDER
+              }
               showRestoreBars={restorableBarHidden}
               onRestoreBars={() => void restoreMobileBars()}
             />
