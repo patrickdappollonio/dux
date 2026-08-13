@@ -4,6 +4,7 @@ import type { editor } from "monaco-editor"
 // Shared self-host bootstrap (workers + bundled monaco). Importing it runs the
 // setup once for both the editor and the diff viewer.
 import { monaco } from "@/lib/monacoSetup"
+import { autoRevertLanguageId } from "@/lib/editorLanguage"
 
 // The `monaco` instance's type, re-exported so a consumer (EditorOverlay's
 // `EditorBody`, which owns tab lifecycle and disposes closed tabs' models) can
@@ -19,9 +20,10 @@ interface CodeEditorProps {
   // The user's per-file language override, from the header's language picker.
   // `undefined` means no override, which is the default: the `language` prop
   // is then absent and Monaco's own URI inference decides, exactly as before.
-  // Changing it re-languages the live model (the wrapper calls
-  // `setModelLanguage` on a prop change), so a pick applies without a remount
-  // and without touching the buffer.
+  // Changing it re-languages the live model, so a pick applies without a
+  // remount and without touching the buffer. Setting a language is the
+  // wrapper's own effect; CLEARING one is not (it skips an undefined value),
+  // so the effect below owns that half.
   language?: string
   value: string
   onChange: (value: string) => void
@@ -43,6 +45,37 @@ export default function CodeEditor({
   onSave,
   onReady,
 }: CodeEditorProps) {
+  // The live editor + the monaco instance, captured at onMount. Needed for the
+  // Auto revert below, which the wrapper cannot do for us.
+  const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null)
+  const monacoRef = useRef<typeof monaco | null>(null)
+  // What the last render asked for, so the effect can see the TRANSITION and
+  // not merely the current value.
+  const lastLanguageRef = useRef<{ language?: string; path: string }>({
+    language,
+    path,
+  })
+  // Picking "Auto" clears the `language` prop, and @monaco-editor/react ignores
+  // that: its effect is `model && language && setModelLanguage(...)`, so an
+  // undefined value sets nothing and the model keeps the language the user is
+  // clearing. Do it ourselves, for that one transition only; see
+  // `autoRevertLanguageId` for why a path change is left alone and for the
+  // shebang nuance this accepts.
+  useEffect(() => {
+    const prev = lastLanguageRef.current
+    const next = { language, path }
+    lastLanguageRef.current = next
+    const mon = monacoRef.current
+    const model = editorRef.current?.getModel()
+    if (!mon || !model) return
+    const revertTo = autoRevertLanguageId(
+      prev,
+      next,
+      mon.languages.getLanguages(),
+    )
+    if (revertTo !== null) mon.editor.setModelLanguage(model, revertTo)
+  }, [language, path])
+
   // Ctrl/Cmd+s is bound once on mount, but `onSave` is a fresh closure each
   // render (it reads the latest draft). Route the keybinding through a ref so it
   // always calls the current handler, never a stale one that saves old content.
@@ -56,6 +89,8 @@ export default function CodeEditor({
     ed: editor.IStandaloneCodeEditor,
     mon: typeof monaco,
   ): void {
+    editorRef.current = ed
+    monacoRef.current = mon
     ed.addCommand(mon.KeyMod.CtrlCmd | mon.KeyCode.KeyS, () => saveRef.current())
     onReady?.(mon)
   }

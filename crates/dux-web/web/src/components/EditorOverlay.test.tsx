@@ -1,6 +1,13 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
 import {
@@ -1271,6 +1278,155 @@ describe("the header's language picker", () => {
     )
     fireEvent.click(await picker())
     fireEvent.click(await screen.findByRole("menuitem", { name: /^Auto$/ }))
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("code-editor").getAttribute("data-language"),
+      ).toBe(""),
+    )
+    expect((await picker()).textContent).toContain("Plain text")
+  })
+
+  // The stub above cannot see what the real transition does to a Monaco model
+  // (Monaco does not load under vitest at all), and the wrapper's own effect
+  // SKIPS an undefined language, which is the bug. The decision that fixes it
+  // is `autoRevertLanguageId`, tested un-stubbed in lib/editorLanguage.test.ts;
+  // this asserts only that the picker clears the prop, which is its half.
+  it("follows a rename, so a correction is not silently reverted", async () => {
+    treeMock.mockImplementation(async () => ({
+      dir: "",
+      entries: [
+        {
+          name: "big.txt",
+          path: PATH,
+          is_dir: false,
+          is_symlink: false,
+          expandable: false,
+        },
+      ],
+    }))
+    const { EditorOverlay } = await import("@/components/EditorOverlay")
+    const view = await mountWithTab(PATH)
+    await screen.findByTestId("code-editor")
+    fireEvent.click(await picker())
+    fireEvent.click(await screen.findByRole("menuitem", { name: /^TOML$/ }))
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("code-editor").getAttribute("data-language"),
+      ).toBe("toml"),
+    )
+
+    // The name appears twice, on the tab pill and on the tree row; the tree is
+    // the one with the context menu, so scope the query to the drop surface.
+    const tree = await screen.findByTestId("file-tree-drop-surface")
+    fireEvent.contextMenu(await within(tree).findByText("big.txt"))
+    fireEvent.click(await screen.findByText(/^Rename…$/))
+    fireEvent.change(await screen.findByDisplayValue("big.txt"), {
+      target: { value: "big.toml" },
+    })
+    fireEvent.click(screen.getByRole("button", { name: /^rename$/i }))
+    await waitFor(() => expect(renameMock).toHaveBeenCalled())
+
+    // The store retargets the TAB; `useDux` is stubbed in this file, so the
+    // new path is mirrored in by hand. The override has to have followed, or
+    // the file the user just corrected reverts under them.
+    mockState = {
+      ...mockState,
+      editorTabs: {
+        [SESSION]: {
+          tabs: [
+            {
+              id: TAB_ID,
+              path: "src/big.toml",
+              dirty: false,
+              preview: false,
+              mode: "file" as const,
+            },
+          ],
+          activeId: TAB_ID,
+        },
+      },
+    } as DuxState
+    view.rerender(<EditorOverlay />)
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("code-editor").getAttribute("data-language"),
+      ).toBe("toml"),
+    )
+    treeMock.mockImplementation(async () => ({ dir: "", entries: [] }))
+  })
+
+  // The override is documented to last until the file is CLOSED. It was keyed
+  // by path and never pruned, so closing the tab and opening the same path
+  // again silently re-applied it, and a different file that later took that
+  // path inherited it.
+  it("dies with the tab, so reopening the path re-infers", async () => {
+    const { EditorOverlay } = await import("@/components/EditorOverlay")
+    const other = {
+      id: "tab-2",
+      path: "src/other.txt",
+      dirty: false,
+      preview: false,
+      mode: "file" as const,
+    }
+    const view = await mountWithTab(PATH)
+    // A sibling tab stays open throughout, so the body is never unmounted and
+    // the assertion is about PRUNING rather than about losing the whole map.
+    mockState = {
+      ...mockState,
+      editorTabs: {
+        [SESSION]: {
+          tabs: [
+            {
+              id: TAB_ID,
+              path: PATH,
+              dirty: false,
+              preview: false,
+              mode: "file" as const,
+            },
+            other,
+          ],
+          activeId: TAB_ID,
+        },
+      },
+    } as DuxState
+    view.rerender(<EditorOverlay />)
+    await screen.findByTestId("code-editor")
+    fireEvent.click(await picker())
+    fireEvent.click(await screen.findByRole("menuitem", { name: /^TOML$/ }))
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("code-editor").getAttribute("data-language"),
+      ).toBe("toml"),
+    )
+
+    // Close the corrected tab.
+    mockState = {
+      ...mockState,
+      editorTabs: {
+        [SESSION]: { tabs: [other], activeId: other.id },
+      },
+    } as DuxState
+    view.rerender(<EditorOverlay />)
+    // Reopen the same path as a NEW tab.
+    mockState = {
+      ...mockState,
+      editorTabs: {
+        [SESSION]: {
+          tabs: [
+            other,
+            {
+              id: "tab-3",
+              path: PATH,
+              dirty: false,
+              preview: false,
+              mode: "file" as const,
+            },
+          ],
+          activeId: "tab-3",
+        },
+      },
+    } as DuxState
+    view.rerender(<EditorOverlay />)
     await waitFor(() =>
       expect(
         screen.getByTestId("code-editor").getAttribute("data-language"),

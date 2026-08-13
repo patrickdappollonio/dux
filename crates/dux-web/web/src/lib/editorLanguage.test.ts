@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest"
 
 import {
+  autoRevertLanguageId,
   effectiveLanguageLabel,
   inferredLanguageId,
   languageLabel,
   languageOverrideFor,
   languagePickerEntries,
+  pruneLanguageOverrides,
+  retargetLanguageOverrides,
   PLAIN_TEXT_ID,
   PLAIN_TEXT_LABEL,
   withLanguageOverride,
@@ -162,5 +165,101 @@ describe("withLanguageOverride", () => {
     const after = withLanguageOverride(new Map([["a.txt", "toml"]]), "a.txt", null)
     expect(after.has("a.txt")).toBe(false)
     expect(languageOverrideFor(after, "a.txt")).toBeUndefined()
+  })
+})
+
+describe("autoRevertLanguageId", () => {
+  // The verified bug: @monaco-editor/react skips setModelLanguage when the
+  // prop becomes undefined, so picking Auto left the model on the language the
+  // user was trying to clear while the trigger claimed otherwise.
+  it("reverts to the inferred language when an override is cleared", () => {
+    expect(
+      autoRevertLanguageId(
+        { language: "toml", path: "a.rs" },
+        { path: "a.rs" },
+        REGISTRY,
+      ),
+    ).toBe("rust")
+  })
+
+  it("falls back to plain text when nothing claims the file", () => {
+    expect(
+      autoRevertLanguageId(
+        { language: "toml", path: "notes" },
+        { path: "notes" },
+        REGISTRY,
+      ),
+    ).toBe(PLAIN_TEXT_ID)
+  })
+
+  it("does nothing while an override is set, replaced, or absent throughout", () => {
+    const cases: [{ language?: string; path: string }, { language?: string; path: string }][] = [
+      [{ path: "a.rs" }, { language: "toml", path: "a.rs" }],
+      [{ language: "toml", path: "a.rs" }, { language: "shell", path: "a.rs" }],
+      [{ path: "a.rs" }, { path: "a.rs" }],
+    ]
+    for (const [prev, next] of cases) {
+      expect(autoRevertLanguageId(prev, next, REGISTRY)).toBeNull()
+    }
+  })
+
+  // A path change swaps the model, and Monaco's own inference on a fresh model
+  // is richer than this walk (it reads the first line too), so stepping in
+  // would replace a better answer with a worse one.
+  it("stays out of the way when the file changed", () => {
+    expect(
+      autoRevertLanguageId(
+        { language: "toml", path: "a.rs" },
+        { path: "b.ts" },
+        REGISTRY,
+      ),
+    ).toBeNull()
+  })
+})
+
+describe("retargetLanguageOverrides", () => {
+  it("follows a renamed file so the correction is not silently lost", () => {
+    const after = retargetLanguageOverrides(
+      new Map([["a.txt", "toml"], ["other.txt", "rust"]]),
+      "a.txt",
+      "b.txt",
+    )
+    expect(after.get("b.txt")).toBe("toml")
+    expect(after.has("a.txt")).toBe(false)
+    expect(after.get("other.txt")).toBe("rust")
+  })
+
+  it("follows every file under a moved directory", () => {
+    const after = retargetLanguageOverrides(
+      new Map([
+        ["src/a.txt", "toml"],
+        ["src/deep/b.txt", "rust"],
+        ["srcfile.txt", "shell"],
+      ]),
+      "src",
+      "lib/src",
+    )
+    expect(after.get("lib/src/a.txt")).toBe("toml")
+    expect(after.get("lib/src/deep/b.txt")).toBe("rust")
+    // A sibling whose name merely STARTS with the moved one is untouched.
+    expect(after.get("srcfile.txt")).toBe("shell")
+  })
+})
+
+describe("pruneLanguageOverrides", () => {
+  it("drops a closed file's override so reopening it re-infers", () => {
+    const after = pruneLanguageOverrides(
+      new Map([["a.txt", "toml"], ["b.txt", "rust"]]),
+      new Set(["b.txt"]),
+    )
+    expect(after.has("a.txt")).toBe(false)
+    expect(after.get("b.txt")).toBe("rust")
+  })
+
+  it("returns the same map when every override is still open", () => {
+    const before = new Map([["a.txt", "toml"]])
+    expect(pruneLanguageOverrides(before, new Set(["a.txt", "b.txt"]))).toBe(
+      before,
+    )
   })
 })

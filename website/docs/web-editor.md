@@ -74,8 +74,9 @@ The header also shows the file's syntax language, and it is a dropdown: dux lets
 Monaco guess the language from the file name, and when the guess is wrong (a
 `Cargo.lock` that is really TOML, a config file with no extension) you can pick
 the right one from the full list. The choice applies to the open file, including
-its diff view, and lasts until you close it; **Auto** at the top of the list hands
-the decision back to Monaco.
+its diff view, and follows it if you rename or move it. It lasts until you close
+the file: reopen it later and dux guesses again. **Auto** at the top of the list
+hands the decision back to Monaco.
 
 ## Tabs
 

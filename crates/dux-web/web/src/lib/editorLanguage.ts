@@ -128,6 +128,83 @@ export function effectiveLanguageLabel(
   return lang === undefined ? id : languageLabel(lang)
 }
 
+/// What the live Monaco model's language must be set to after the `language`
+/// prop changed, or `null` when nothing needs doing.
+///
+/// This exists because of a MEASURED gap in @monaco-editor/react 4.7.0: its
+/// language effect reads `let m = editor.getModel(); m && s && setModelLanguage(m, s)`,
+/// so a prop going from a language id to `undefined` sets nothing at all and
+/// the model keeps the language the user is trying to clear. Picking "Auto"
+/// then changed only the trigger's label, which is worse than doing nothing.
+///
+/// So the only case that needs help is the defined-to-undefined transition on
+/// the SAME file. A defined value is the wrapper's job, and a PATH change
+/// swaps the model entirely (the wrapper creates it with an empty language and
+/// Monaco does its own, richer inference, which also reads the first line), so
+/// stepping in there would replace a better answer with a worse one.
+///
+/// The nuance that follows, accepted rather than fought: Monaco's first-open
+/// inference reads shebangs, and this walk only knows extensions and whole
+/// filenames. An explicit Auto on an extensionless shell script therefore lands
+/// on plain text where the first open showed Shell. Reopening the file restores
+/// the richer guess.
+export function autoRevertLanguageId(
+  prev: { language?: string; path: string },
+  next: { language?: string; path: string },
+  langs: readonly RegisteredLanguage[],
+): string | null {
+  if (prev.path !== next.path) return null
+  if (prev.language === undefined || next.language !== undefined) return null
+  return inferredLanguageId(next.path, langs) ?? PLAIN_TEXT_ID
+}
+
+/// Retarget every override that lives under `from` onto `to`, mirroring the
+/// tab retargeting in `editorTabs.renameTabPaths` (an exact path match, or a
+/// path inside a renamed DIRECTORY).
+///
+/// Without this a rename silently reverted the language of a file the user had
+/// just corrected, and left the old key behind for an unrelated file that
+/// later took that path to inherit.
+export function retargetLanguageOverrides(
+  overrides: ReadonlyMap<string, string>,
+  from: string,
+  to: string,
+): Map<string, string> {
+  const next = new Map<string, string>()
+  for (const [path, id] of overrides) {
+    if (path === from) next.set(to, id)
+    else if (path.startsWith(`${from}/`)) next.set(to + path.slice(from.length), id)
+    else next.set(path, id)
+  }
+  return next
+}
+
+/// Drop every override whose file is no longer open.
+///
+/// The overrides are session-lived, but "session" has to mean the tab: the docs
+/// promise an override lasts until you close the file, and without this a
+/// closed-and-reopened path came back still overridden. Returns the SAME map
+/// when nothing needs dropping, so a caller can hand it straight to a React
+/// setState and have the render bail out.
+export function pruneLanguageOverrides(
+  overrides: Map<string, string>,
+  openPaths: ReadonlySet<string>,
+): Map<string, string> {
+  let stale = false
+  for (const path of overrides.keys()) {
+    if (!openPaths.has(path)) {
+      stale = true
+      break
+    }
+  }
+  if (!stale) return overrides
+  const next = new Map<string, string>()
+  for (const [path, id] of overrides) {
+    if (openPaths.has(path)) next.set(path, id)
+  }
+  return next
+}
+
 /// Set or clear one path's override. `null` is the picker's "Auto" row: it
 /// REMOVES the entry rather than storing a sentinel, so "no override" has one
 /// representation and `languageOverrideFor` needs no second check.

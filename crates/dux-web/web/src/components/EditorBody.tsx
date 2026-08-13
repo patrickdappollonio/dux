@@ -68,6 +68,8 @@ import {
   effectiveLanguageLabel,
   languageOverrideFor,
   languagePickerEntries,
+  pruneLanguageOverrides,
+  retargetLanguageOverrides,
   withLanguageOverride,
 } from "@/lib/editorLanguage"
 import type { RegisteredLanguage } from "@/lib/editorLanguage"
@@ -495,6 +497,13 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
     registeredLanguages,
   )
   const showLanguagePicker = languageTabPath !== null && languageChoices.length > 0
+  // Follow a renamed or moved file, so a correction the user just made is not
+  // silently reverted, and so the old key is not left behind for whatever file
+  // lands on that path next. Mirrors `editorTabs.renameTabPaths`, directory
+  // prefixes included.
+  function retargetOverrides(from: string, to: string): void {
+    setLanguageOverrides((prev) => retargetLanguageOverrides(prev, from, to))
+  }
   function pickLanguage(id: string | null): void {
     if (languageTabPath === null) return
     setLanguageOverrides((prev) =>
@@ -890,6 +899,15 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setBuffers((prev) => pruneByIds(prev, liveIds))
     setPreviewOpenTabIds((prev) => pruneSetByIds(prev, liveIds))
+    // The language overrides are keyed by PATH, so they prune against the same
+    // open-path set the model disposal above uses, and for the same reason: an
+    // override is documented to last until the file is closed, and one left
+    // behind is re-applied when that path is reopened (or inherited by a
+    // different file that later takes it). This covers every way a tab leaves,
+    // the close action and the vanished-tab paths alike, because all of them
+    // end in `tabs` losing the entry. `pruneLanguageOverrides` returns the same
+    // map when nothing is stale, so this is a no-op setState otherwise.
+    setLanguageOverrides((prev) => pruneLanguageOverrides(prev, currentPaths))
     fileRequestTokenRef.current = pruneByIds(fileRequestTokenRef.current, liveIds)
     diffRequestTokenRef.current = pruneByIds(diffRequestTokenRef.current, liveIds)
   }, [tabs])
@@ -1109,6 +1127,7 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
         setRenameEntryTarget(null)
         notifySuccess(renamedMessage(from, to))
         editorRenameTabPaths(sessionId, from, to)
+        retargetOverrides(from, to)
         revalidateDirs([parentDir(from), parentDir(to)])
         return refreshSearchIndex()
       })
@@ -1129,7 +1148,10 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
     return performMove(moveEntryTarget.path, destDir, {
       rename: (from, to) => fileApi.rename(sessionId, from, to),
       clearTarget: () => setMoveEntryTarget(null),
-      retargetTabs: (from, to) => editorRenameTabPaths(sessionId, from, to),
+      retargetTabs: (from, to) => {
+        editorRenameTabPaths(sessionId, from, to)
+        retargetOverrides(from, to)
+      },
       revalidateDirs,
       refreshSearchIndex,
       reportSuccess: (message) => notifySuccess(message),
@@ -1538,17 +1560,18 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
                 </DropdownMenuItem>
               )}
               {/* The language picker, folded like every other secondary
-                  control. The submenu content needs its own scroll cap: the
-                  top-level menu content ships one, DropdownMenuSubContent
-                  does not, and this is the one submenu in the app long
-                  enough to need it. */}
+                  control. This is the one submenu in the app long enough to
+                  need a scroll cap, and it already has one:
+                  DropdownMenuSubContent renders DropdownMenuContent, whose
+                  base classes carry max-h-(--available-height) plus
+                  overflow-y-auto. Repeating them here bought nothing. */}
               {showLanguagePicker && (
                 <DropdownMenuSub>
                   <DropdownMenuSubTrigger>
                     <Code2 />
                     {activeLanguageLabel}
                   </DropdownMenuSubTrigger>
-                  <DropdownMenuSubContent className="max-h-(--available-height) overflow-y-auto">
+                  <DropdownMenuSubContent>
                     {languagePickerItems()}
                   </DropdownMenuSubContent>
                 </DropdownMenuSub>
