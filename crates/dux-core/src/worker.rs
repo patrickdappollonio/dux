@@ -14,7 +14,13 @@ use crate::storage::StoredPr;
 #[derive(Clone, Debug)]
 pub struct ProjectWorktreeEntry {
     pub path: PathBuf,
+    /// The row LABEL: the branch when there is one, else a "detached <sha>"
+    /// stand-in. Good for display and useless for deciding anything.
     pub branch_name: String,
+    /// The real branch, `None` for a detached worktree. Separate from
+    /// `branch_name` because "is there a branch here to delete?" cannot be
+    /// answered from a label that invents one.
+    pub branch: Option<String>,
     pub is_managed_by_dux: bool,
     pub existing_session_id: Option<String>,
     pub is_external: bool,

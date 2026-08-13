@@ -173,9 +173,14 @@ async fn list(addr: SocketAddr, project: &str) -> (u16, serde_json::Value) {
 }
 
 async fn delete(addr: SocketAddr, project: &str, path: &Path) -> (u16, String) {
+    delete_with(addr, project, path, "").await
+}
+
+/// The delete request with extra query, e.g. `"&delete_branch=true"`.
+async fn delete_with(addr: SocketAddr, project: &str, path: &Path, extra: &str) -> (u16, String) {
     let resp = reqwest::Client::new()
         .delete(format!(
-            "http://{addr}/api/v1/projects/{project}/worktrees?path={}",
+            "http://{addr}/api/v1/projects/{project}/worktrees?path={}{extra}",
             // Temp-dir paths are plain ASCII with slashes, which need no
             // percent-encoding inside a query value.
             path.to_string_lossy()
@@ -185,6 +190,18 @@ async fn delete(addr: SocketAddr, project: &str, path: &Path) -> (u16, String) {
         .unwrap();
     let status = resp.status().as_u16();
     (status, resp.text().await.unwrap_or_default())
+}
+
+/// Whether the repo still has a local branch by this name.
+fn branch_exists(repo: &Path, branch: &str) -> bool {
+    let out = std::process::Command::new("git")
+        .args(["for-each-ref", "--format=%(refname:short)", "refs/heads/"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .any(|line| line == branch)
 }
 
 fn entry<'a>(body: &'a serde_json::Value, branch: &str) -> &'a serde_json::Value {
@@ -259,6 +276,93 @@ async fn deleting_a_worktree_does_not_delete_its_branch() {
         String::from_utf8_lossy(&out.stdout).contains("free"),
         "the branch must survive the worktree removal"
     );
+}
+
+#[tokio::test]
+async fn deleting_a_worktree_with_delete_branch_removes_the_branch_too() {
+    // The other half of the same journey: the manager's confirmation carries a
+    // checkbox, and when the user leaves it on the branch goes with the
+    // worktree. Without this a deleted worktree leaves its branch behind, and
+    // recreating an agent under that name fails with "branch already exists".
+    let f = boot().await;
+    let repo = f._tmp.path().join("repo");
+    assert!(branch_exists(&repo, "free"));
+
+    let (status, body) = delete_with(f.addr, "p1", &f.free, "&delete_branch=true").await;
+
+    assert_eq!(status, 204, "got {body}");
+    assert!(!f.free.exists(), "the worktree directory must be gone");
+    assert!(
+        !branch_exists(&repo, "free"),
+        "the branch must be gone when the request asked for it"
+    );
+}
+
+#[tokio::test]
+async fn deleting_a_worktree_with_delete_branch_false_keeps_the_branch() {
+    // An explicit `false` must behave exactly like the absent parameter, or the
+    // checkbox has no off position.
+    let f = boot().await;
+    let repo = f._tmp.path().join("repo");
+
+    let (status, body) = delete_with(f.addr, "p1", &f.free, "&delete_branch=false").await;
+
+    assert_eq!(status, 204, "got {body}");
+    assert!(branch_exists(&repo, "free"), "the branch must survive");
+}
+
+#[tokio::test]
+async fn deleting_a_detached_worktree_with_delete_branch_still_works() {
+    // Detaching HEAD inside a worktree is an ordinary thing to do, and the
+    // client sends no `delete_branch` for such a row. A request that asks for it
+    // anyway (a hand-written one, a stale tab) must not be an error: there is
+    // simply no branch to delete, so the worktree goes and nothing else does.
+    let f = boot().await;
+    let repo = f._tmp.path().join("repo");
+    let loose = f._tmp.path().join("worktrees").join("repo").join("loose");
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            loose.to_string_lossy().as_ref(),
+        ],
+    );
+
+    let (status, body) = list(f.addr, "p1").await;
+    assert_eq!(status, 200, "got {body}");
+    let detached = body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["worktree_path"].as_str() == Some(loose.to_string_lossy().as_ref()))
+        .unwrap_or_else(|| panic!("no entry for the detached worktree in {body}"));
+    assert!(
+        detached["branch"].is_null(),
+        "a detached worktree has no branch: {detached}"
+    );
+
+    let (status, body) = delete_with(f.addr, "p1", &loose, "&delete_branch=true").await;
+
+    assert_eq!(status, 204, "got {body}");
+    assert!(!loose.exists(), "the worktree directory must be gone");
+    assert!(
+        branch_exists(&repo, "main"),
+        "nothing else may be deleted in its place"
+    );
+}
+
+#[tokio::test]
+async fn the_listing_publishes_the_real_branch_so_the_checkbox_knows_it_exists() {
+    // The row label falls back to "detached <sha>" for a branchless worktree, so
+    // the client cannot tell a branch from a label. `branch` is the real answer,
+    // and it is what decides whether the delete confirmation offers a checkbox.
+    let f = boot().await;
+    let (status, body) = list(f.addr, "p1").await;
+    assert_eq!(status, 200, "got {body}");
+    assert_eq!(entry(&body, "free")["branch"], "free");
 }
 
 #[tokio::test]

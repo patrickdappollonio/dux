@@ -4,6 +4,7 @@ import { Ellipsis, FileWarning, FolderGit2, Trash2 } from "lucide-react"
 import { BrailleSpinner } from "@/components/BrailleSpinner"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Button } from "@/components/ui/button"
+import { Checkbox } from "@/components/ui/checkbox"
 import {
   Dialog,
   DialogContent,
@@ -100,8 +101,18 @@ function WorktreeRowBody({
 // and the FULL path, says what is lost, and says it cannot be undone. A dirty
 // worktree gets its own sentence rather than a generic warning, because "there
 // is work in here that exists nowhere else" is the whole reason to stop.
+//
+// The branch checkbox DEFAULTS ON. Leaving a worktree's branch behind is what
+// makes recreating an agent under that name fail with "branch already exists",
+// and by the time someone is in this dialog they mean to be rid of the thing;
+// the dialog already says the removal is forcible and unrecoverable, so the
+// branch is not a bigger step than the one being confirmed. The SERVER still
+// defaults to false, so a request that says nothing never deletes a branch.
 function ConfirmDeleteWorktree() {
   const { deleteWorktreeTarget, attachWorktreeEntries } = useDux()
+  // The component stays mounted across opens, so every close path resets this
+  // to its default, or the next confirmation opens carrying the last answer.
+  const [deleteBranch, setDeleteBranch] = useState(true)
   // The listing is refetched after every delete, so it is a live truth this
   // dialog can close itself on: a worktree that left the list (removed from
   // another tab, adopted by an agent) is no longer this dialog's subject.
@@ -115,24 +126,36 @@ function ConfirmDeleteWorktree() {
   const open = useVanishedTargetGuard(
     deleteWorktreeTarget !== null,
     stillListed,
-    closeDeleteWorktree,
+    () => {
+      setDeleteBranch(true)
+      closeDeleteWorktree()
+    },
   )
   const entry = deleteWorktreeTarget?.entry
+  // A detached worktree has no branch, so there is no choice to offer and the
+  // request must not ask for one.
+  const branch = entry?.branch ?? null
+
+  function handleCancel() {
+    setDeleteBranch(true)
+    closeDeleteWorktree()
+  }
 
   function handleConfirm() {
     if (!deleteWorktreeTarget) return
     deleteProjectWorktree(
       deleteWorktreeTarget.projectId,
       deleteWorktreeTarget.entry.worktree_path,
+      branch !== null && deleteBranch,
     )
-    closeDeleteWorktree()
+    handleCancel()
   }
 
   return (
     <Dialog
       open={open}
       onOpenChange={(o) => {
-        if (!o) closeDeleteWorktree()
+        if (!o) handleCancel()
       }}
     >
       <DialogContent showCloseButton={false} destructive>
@@ -154,15 +177,41 @@ function ConfirmDeleteWorktree() {
               in there that is not committed exists anywhere else.
             </p>
           ) : null}
-          <p className="text-muted-foreground">
-            The branch <span className="font-mono">{entry?.branch_name}</span> is
-            kept. Only the working directory is removed.
-          </p>
+          {branch === null ? (
+            <p className="text-muted-foreground">
+              This worktree is not on a branch, so there is no branch to keep or
+              delete. Only the working directory is removed.
+            </p>
+          ) : deleteBranch ? (
+            <p>
+              The branch <span className="font-mono">{branch}</span> will be
+              deleted with it, forcibly. Any commits on it that are not merged
+              anywhere else go too.
+            </p>
+          ) : (
+            <p className="text-muted-foreground">
+              The branch <span className="font-mono">{branch}</span> is kept.
+              Only the working directory is removed.
+            </p>
+          )}
         </div>
-        {/* Misclick-safe spacing between the warning and the buttons. */}
+        {branch !== null ? (
+          <div className="flex items-center gap-2">
+            <Checkbox
+              id="delete-worktree-branch"
+              checked={deleteBranch}
+              onCheckedChange={setDeleteBranch}
+            />
+            <label htmlFor="delete-worktree-branch" className="text-sm">
+              Also delete the branch {branch}
+            </label>
+          </div>
+        ) : null}
+        {/* Misclick-safe spacing between the warning (and the checkbox, which
+           must not sit flush against the buttons) and the footer. */}
         <div className="h-2" />
         <DialogFooter>
-          <Button variant="outline" autoFocus onClick={closeDeleteWorktree}>
+          <Button variant="outline" autoFocus onClick={handleCancel}>
             Cancel
           </Button>
           <Button variant="destructive" onClick={handleConfirm}>

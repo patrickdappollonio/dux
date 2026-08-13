@@ -12681,6 +12681,7 @@ not_a_real_action = ["x"]
             entries: vec![ProjectWorktreeEntry {
                 path: PathBuf::from("/tmp/has-agent"),
                 branch_name: "main".to_string(),
+                branch: Some("main".to_string()),
                 is_managed_by_dux: true,
                 existing_session_id: Some("session-1".to_string()),
                 is_external: false,
@@ -12713,6 +12714,7 @@ not_a_real_action = ["x"]
             entries: vec![ProjectWorktreeEntry {
                 path: worktree_path.clone(),
                 branch_name: "orphan".to_string(),
+                branch: Some("orphan".to_string()),
                 is_managed_by_dux: true,
                 existing_session_id: None,
                 is_external: false,
@@ -12764,6 +12766,7 @@ not_a_real_action = ["x"]
             entries: vec![ProjectWorktreeEntry {
                 path: worktree_path,
                 branch_name: "feature/other-name".to_string(),
+                branch: Some("feature/other-name".to_string()),
                 is_managed_by_dux: true,
                 existing_session_id: None,
                 is_external: false,
@@ -12868,6 +12871,7 @@ not_a_real_action = ["x"]
             entries: vec![ProjectWorktreeEntry {
                 path: worktree_path.clone(),
                 branch_name: "feature".to_string(),
+                branch: Some("feature".to_string()),
                 is_managed_by_dux: false,
                 existing_session_id: None,
                 is_external: true,
@@ -12912,6 +12916,7 @@ not_a_real_action = ["x"]
             entries: vec![ProjectWorktreeEntry {
                 path: worktree_path,
                 branch_name: "feature".to_string(),
+                branch: Some("feature".to_string()),
                 is_managed_by_dux: false,
                 existing_session_id: None,
                 is_external: true,

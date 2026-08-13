@@ -236,7 +236,12 @@ export interface DirEntryView {
 // worktree already has an agent and can't be attached again.
 export interface ProjectWorktreeEntryView {
   worktree_path: string
+  // The row LABEL: the branch when there is one, else a "detached <sha>"
+  // stand-in the server invents for display.
   branch_name: string
+  // The real branch, null for a detached worktree. `branch_name` cannot answer
+  // "is there a branch here to delete?", so the delete confirmation reads this.
+  branch: string | null
   adoptable: boolean
   reason: string | null
   // Whether the worktree holds uncommitted work (staged, unstaged or

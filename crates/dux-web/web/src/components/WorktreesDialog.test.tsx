@@ -70,6 +70,7 @@ function entry(
   return {
     worktree_path: LONG_PATH,
     branch_name: LONG_BRANCH,
+    branch: LONG_BRANCH,
     adoptable: true,
     reason: null,
     dirty: false,
@@ -188,6 +189,71 @@ describe("WorktreesDialog", () => {
     const confirm = screen.getByTestId("delete-worktree-confirm")
     expect(confirm.textContent).not.toContain("uncommitted changes")
     expect(confirm.textContent).toContain("cannot be undone")
+  })
+
+  // The confirm dialog opens ON TOP of the worktree list, and base-ui marks the
+  // whole tree `aria-hidden` while two dialogs are stacked, so every role query
+  // inside the confirmation needs `hidden: true`. The older confirm tests dodge
+  // this by reading a testid instead.
+  it("defaults the branch checkbox ON and deletes the branch with the worktree", () => {
+    // The maintainer's decision: this dialog already says the removal is
+    // forcible and has no trash, and deleting the branch is what the user came
+    // for. The server still defaults to false for a request that says nothing.
+    const target = entry({ worktree_path: "/wt/messy", branch_name: "messy", branch: "messy" })
+    seed([target], {
+      deleteWorktreeTarget: { projectId: "p1", entry: target },
+    } as unknown as Partial<DuxState>)
+    render(<WorktreesDialog />)
+
+    const box = screen.getByRole("checkbox", {
+      name: /also delete the branch messy/i,
+      hidden: true,
+    })
+    expect(box.getAttribute("aria-checked")).toBe("true")
+    const confirm = screen.getByTestId("delete-worktree-confirm")
+    expect(confirm.textContent).toContain("will be deleted")
+    expect(confirm.textContent).not.toContain("is kept")
+
+    fireEvent.click(screen.getByRole("button", { name: "Delete worktree", hidden: true }))
+    expect(deleteProjectWorktree).toHaveBeenCalledWith("p1", "/wt/messy", true)
+  })
+
+  it("keeps the branch, and says so, once the checkbox is unticked", () => {
+    const target = entry({ worktree_path: "/wt/messy", branch_name: "messy", branch: "messy" })
+    seed([target], {
+      deleteWorktreeTarget: { projectId: "p1", entry: target },
+    } as unknown as Partial<DuxState>)
+    render(<WorktreesDialog />)
+
+    fireEvent.click(
+      screen.getByRole("checkbox", {
+        name: /also delete the branch messy/i,
+        hidden: true,
+      }),
+    )
+
+    const confirm = screen.getByTestId("delete-worktree-confirm")
+    expect(confirm.textContent).toContain("is kept")
+    fireEvent.click(screen.getByRole("button", { name: "Delete worktree", hidden: true }))
+    expect(deleteProjectWorktree).toHaveBeenCalledWith("p1", "/wt/messy", false)
+  })
+
+  it("offers no branch checkbox for a detached worktree", () => {
+    // There is no branch to delete, so offering the choice would be a lie and
+    // the request must not ask for one.
+    const target = entry({
+      worktree_path: "/wt/loose",
+      branch_name: "detached 1a2b3c4",
+      branch: null,
+    })
+    seed([target], {
+      deleteWorktreeTarget: { projectId: "p1", entry: target },
+    } as unknown as Partial<DuxState>)
+    render(<WorktreesDialog />)
+
+    expect(screen.queryByRole("checkbox", { hidden: true })).toBeNull()
+    fireEvent.click(screen.getByRole("button", { name: "Delete worktree", hidden: true }))
+    expect(deleteProjectWorktree).toHaveBeenCalledWith("p1", "/wt/loose", false)
   })
 
   it("offers Back only when the user drilled in from the project picker", () => {

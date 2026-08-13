@@ -72,6 +72,11 @@ pub fn routes() -> Router<AppState> {
 struct ProjectWorktreeEntryView {
     worktree_path: String,
     branch_name: String,
+    /// The real branch, `null` for a detached worktree. `branch_name` is a
+    /// display LABEL that invents a "detached <sha>" string, so it cannot
+    /// answer "is there a branch here to delete?". The delete confirmation
+    /// offers its branch checkbox only when this is set.
+    branch: Option<String>,
     adoptable: bool,
     reason: Option<String>,
     /// Whether the worktree holds uncommitted work (staged, unstaged, or
@@ -151,6 +156,7 @@ fn classify_managed_worktrees(
                 dirty: dux_core::git::worktree_is_dirty(&entry.path).unwrap_or(false),
                 worktree_path: entry.path.to_string_lossy().to_string(),
                 branch_name: entry.branch_name,
+                branch: entry.branch,
                 adoptable: entry.is_selectable,
                 reason: if entry.is_selectable {
                     None
@@ -215,6 +221,13 @@ async fn list_worktree_counts(State(state): State<AppState>) -> Response {
 struct DeleteWorktreeQuery {
     #[serde(default)]
     path: String,
+    /// Also force-delete the branch the worktree is on. Defaults to false, so a
+    /// missing query parameter never deletes user data (the precedent set by the
+    /// agent-delete route's `delete_worktree`). The manager's confirmation
+    /// dialog defaults its checkbox ON and sends `true`; a detached worktree has
+    /// no branch to name and sends nothing.
+    #[serde(default)]
+    delete_branch: bool,
 }
 
 /// What the delete request resolved to. Kept as a type so the three answers are
@@ -229,8 +242,9 @@ enum DeleteResolution {
     /// restatement of the UI rule: removing a worktree from under a live agent
     /// leaves a broken session, and deleting the agent is the supported route.
     Attached,
-    /// Removable; carries the canonical path git knows it by.
-    Removable(PathBuf),
+    /// Removable; carries the canonical path git knows it by and the branch it
+    /// is on (`None` when detached, which is nothing to delete).
+    Removable(PathBuf, Option<String>),
 }
 
 async fn delete_worktree(
@@ -252,6 +266,7 @@ async fn delete_worktree(
     };
 
     let requested = query.path.clone();
+    let delete_branch = query.delete_branch;
     let repo_path = PathBuf::from(&project.path);
     // Classify and remove in ONE off-thread hop, both because the classification
     // shells to git and because the removal must be decided against a fresh
@@ -273,13 +288,25 @@ async fn delete_worktree(
         let resolution = match found {
             None => DeleteResolution::NotManaged,
             Some(entry) if entry.existing_session_id.is_some() => DeleteResolution::Attached,
-            Some(entry) => DeleteResolution::Removable(entry.path),
+            Some(entry) => DeleteResolution::Removable(entry.path, entry.branch),
         };
-        if let DeleteResolution::Removable(path) = &resolution {
-            // Worktree only: the branch is left alone. See
-            // `git::remove_worktree_keep_branch` for why.
-            dux_core::git::remove_worktree_keep_branch(&repo_path, path)
-                .map_err(|e| format!("{e:#}"))?;
+        if let DeleteResolution::Removable(path, branch) = &resolution {
+            match (delete_branch, branch) {
+                // The user asked for the branch too. `remove_worktree` deletes
+                // the branch the worktree is on; there is no second, drifted
+                // branch here, because a worktree with no agent has no record of
+                // what it was born on.
+                (true, Some(branch)) => {
+                    dux_core::git::remove_worktree(&repo_path, path, branch, None)
+                        .map_err(|e| format!("{e:#}"))?;
+                }
+                // Either the request did not ask, or the worktree is detached
+                // and there is no branch to delete. Worktree only.
+                _ => {
+                    dux_core::git::remove_worktree_keep_branch(&repo_path, path)
+                        .map_err(|e| format!("{e:#}"))?;
+                }
+            }
         }
         Ok::<_, String>(resolution)
     })
@@ -296,7 +323,7 @@ async fn delete_worktree(
             "an agent is attached to that worktree; delete the agent instead",
         )
             .into_response(),
-        Ok(Ok(DeleteResolution::Removable(_))) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Ok(DeleteResolution::Removable(..))) => StatusCode::NO_CONTENT.into_response(),
         Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,

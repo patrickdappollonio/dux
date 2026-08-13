@@ -128,10 +128,14 @@ export const projectsApi = {
   // fresh classification: a path that is not a managed worktree of this project
   // is a 404 and one an agent holds is a 409, so the UI's rules are not the only
   // thing standing between a stale list and a destroyed worktree.
-  deleteWorktree: (id: string, worktreePath: string) =>
+  // `deleteBranch` force-deletes the branch the worktree is on as well. The
+  // server defaults it to false when the parameter is absent, so a request that
+  // says nothing never deletes a branch; the confirmation dialog is what decides
+  // to ask, and it only asks when the worktree actually has a branch.
+  deleteWorktree: (id: string, worktreePath: string, deleteBranch: boolean) =>
     request<void>(
       "DELETE",
-      `/api/v1/projects/${encodeURIComponent(id)}/worktrees?path=${encodeURIComponent(worktreePath)}`,
+      `/api/v1/projects/${encodeURIComponent(id)}/worktrees?path=${encodeURIComponent(worktreePath)}&delete_branch=${deleteBranch}`,
     ),
   // Managed-worktree counts for every project, so the project picker can label
   // its rows and an empty project is a choice rather than a surprise.

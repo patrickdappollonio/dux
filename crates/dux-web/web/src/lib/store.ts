@@ -4323,11 +4323,16 @@ export function closeDeleteWorktree(): void {
 export function deleteProjectWorktree(
   projectId: string,
   worktreePath: string,
+  deleteBranch: boolean,
 ): void {
   projectsApi
-    .deleteWorktree(projectId, worktreePath)
+    .deleteWorktree(projectId, worktreePath, deleteBranch)
     .then(() => {
-      notifySuccess(`Removed the worktree at ${worktreePath}.`)
+      notifySuccess(
+        deleteBranch
+          ? `Removed the worktree at ${worktreePath} and deleted its branch.`
+          : `Removed the worktree at ${worktreePath}. Its branch is still there.`,
+      )
       if (state.attachWorktreeTarget === projectId) {
         loadProjectWorktrees(projectId)
       }

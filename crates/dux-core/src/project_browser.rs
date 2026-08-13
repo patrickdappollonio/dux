@@ -204,6 +204,7 @@ pub fn classify_project_worktrees(
             ProjectWorktreeEntry {
                 path: canonical_path,
                 branch_name: worktree.label(),
+                branch: worktree.branch_name.clone(),
                 is_managed_by_dux,
                 existing_session_id,
                 is_external,
