@@ -164,6 +164,15 @@ function CollapsedAgentRail({
   )
 }
 
+// The transparent hit slop both edge affordances wear, so a FINGER can find a
+// 4px line. The painted strip stays 1 unit wide; a centred ::after grows to 5
+// units (20px, the panel library's own coarse-pointer minimum for a resize
+// target) only under a coarse pointer, so a mouse near the sidebar edge keeps
+// hitting the content behind it. Same pseudo-element trick as
+// components/ui/resizable.tsx.
+const EDGE_HIT_SLOP =
+  "after:absolute after:inset-y-0 after:left-1/2 after:w-1 after:-translate-x-1/2 pointer-coarse:after:w-5"
+
 // Edge affordance pinned to the sidebar's right edge: drag-to-resize when
 // expanded, click-to-expand when collapsed. Desktop only. The clamp band and the
 // auto-collapse decision live in lib/sidebarResize.ts so they stay unit-testable.
@@ -182,7 +191,10 @@ function SidebarResizeHandle() {
         data-sidebar="expand-handle"
         aria-label="Expand sidebar"
         onClick={() => setOpen(true)}
-        className="absolute inset-y-0 -right-1 z-30 w-1 cursor-e-resize hover:bg-sidebar-border"
+        className={cn(
+          "absolute inset-y-0 -right-1 z-30 w-1 cursor-e-resize hover:bg-sidebar-border",
+          EDGE_HIT_SLOP,
+        )}
       />
     )
   }
@@ -227,7 +239,16 @@ function SidebarResizeHandle() {
     <div
       data-sidebar="resize-handle"
       onPointerDown={handlePointerDown}
-      className="absolute inset-y-0 -right-1 z-30 w-1 cursor-col-resize hover:bg-sidebar-border"
+      // `touch-none` is load-bearing, not decoration: without it the browser
+      // claims a finger's horizontal drag as a page pan and answers with
+      // `pointercancel`, which this handler (correctly) treats as drag-end, so
+      // the divider never moves under a finger. The panel library hard-codes
+      // the same `touch-action: none` on its own Separator for this exact
+      // reason (react-resizable-panels issue 662).
+      className={cn(
+        "absolute inset-y-0 -right-1 z-30 w-1 cursor-col-resize touch-none hover:bg-sidebar-border",
+        EDGE_HIT_SLOP,
+      )}
     />
   )
 }

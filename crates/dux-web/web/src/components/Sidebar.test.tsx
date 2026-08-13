@@ -698,6 +698,118 @@ describe("AppSidebar resize affordances", () => {
       container.querySelector('[data-sidebar="expand-handle"]'),
     ).toBeNull()
   })
+
+  // ── Touch ──────────────────────────────────────────────────────────────
+  // A finger could not move this divider: the element suppressed no
+  // touch-action, so the browser claimed the gesture as a pan and fired
+  // `pointercancel`, which the handler treats as drag-end; and the hit target
+  // was 4px wide, well under the 20px the panel library itself uses as its
+  // coarse-pointer minimum. Both are asserted on the CLASS, which is where the
+  // fix lives (jsdom implements neither gesture arbitration nor hit testing, so
+  // the browser behaviour is not reproducible here).
+  it("suppresses touch-action on the drag handle so a finger drag is not stolen as a pan", () => {
+    mockState = makeState()
+    const { container } = render(
+      <SidebarProvider>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+
+    const handle = container.querySelector(
+      '[data-sidebar="resize-handle"]',
+    ) as HTMLElement
+    expect(handle.className).toContain("touch-none")
+  })
+
+  it("gives the drag handle a coarse-pointer hit slop wider than its painted line", () => {
+    mockState = makeState()
+    const { container } = render(
+      <SidebarProvider>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+
+    const handle = container.querySelector(
+      '[data-sidebar="resize-handle"]',
+    ) as HTMLElement
+    // The painted line stays 1 unit (4px) wide; a transparent ::after grows to
+    // 5 units (20px) under a coarse pointer. Same trick components/ui/resizable.tsx uses.
+    expect(handle.className).toContain("after:absolute")
+    expect(handle.className).toContain("pointer-coarse:after:w-5")
+    expect(handle.className).toContain("w-1")
+  })
+
+  it("gives the collapsed expand handle the same coarse-pointer hit slop", () => {
+    mockState = makeState()
+    const { container } = render(
+      <SidebarProvider defaultOpen={false}>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+
+    const expand = container.querySelector(
+      '[data-sidebar="expand-handle"]',
+    ) as HTMLElement
+    expect(expand.className).toContain("after:absolute")
+    expect(expand.className).toContain("pointer-coarse:after:w-5")
+  })
+
+  it("resizes and persists from a touch-pointer drag", () => {
+    mockState = makeState()
+    const { container } = render(
+      <SidebarProvider>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+
+    const handle = container.querySelector(
+      '[data-sidebar="resize-handle"]',
+    ) as HTMLElement
+    handle.setPointerCapture = () => {}
+
+    fireEvent.pointerDown(handle, {
+      pointerId: 7,
+      pointerType: "touch",
+      clientX: 240,
+    })
+    act(() => {
+      window.dispatchEvent(new MouseEvent("pointermove", { clientX: 336 }))
+      window.dispatchEvent(new MouseEvent("pointerup", { clientX: 336 }))
+    })
+
+    expect(localStorage.getItem("dux:sidebar-width")).toBe("21rem")
+  })
+
+  it("cleans up its window listeners when the gesture is cancelled", () => {
+    mockState = makeState()
+    const { container } = render(
+      <SidebarProvider>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+
+    const handle = container.querySelector(
+      '[data-sidebar="resize-handle"]',
+    ) as HTMLElement
+    handle.setPointerCapture = () => {}
+
+    fireEvent.pointerDown(handle, {
+      pointerId: 8,
+      pointerType: "touch",
+      clientX: 240,
+    })
+    act(() => {
+      window.dispatchEvent(new MouseEvent("pointermove", { clientX: 336 }))
+      window.dispatchEvent(new Event("pointercancel"))
+    })
+    // Nothing is persisted by a cancel, and a later stray move must no longer
+    // move the sidebar: the listeners are gone.
+    expect(localStorage.getItem("dux:sidebar-width")).toBeNull()
+    act(() => {
+      window.dispatchEvent(new MouseEvent("pointermove", { clientX: 400 }))
+    })
+    expect(localStorage.getItem("dux:sidebar-width")).toBeNull()
+  })
 })
 
 describe("sidebarResizeRelease threshold", () => {
