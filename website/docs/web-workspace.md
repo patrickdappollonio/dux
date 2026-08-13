@@ -356,13 +356,21 @@ nothing in your config. It appears only under **Automatic**, since Always and
 Never have already answered the question.
 
 Terminal rows are precious on a phone, so the chrome around the terminal is
-hideable. Every terminal screen's `⋯` menu (agent, project, and standalone
+hideable. Every phone terminal screen's `⋯` menu (agent, project, and standalone
 terminals alike) has **Hide top bar** (which on the agent screen also takes
 the tab strip with it) and **Hide terminal keys**, each backed by its own
 preference, and the reclaimed rows go straight back to the terminal. While
 anything is hidden, a show-bars button appears below the terminal (next to
 the compose box, or on its own slim row if you keep the compose bar off): one
 tap brings both bars back. Both toggles live in Preferences too.
+
+Those preferences live on the server, so they follow you to every device. The
+top bar is the phone shell's own chrome and simply does not exist in the wide
+layout, but the terminal keys travel with your pointer, so hiding them from your
+phone also hides them on the tablet you pick up next. The show-bars button
+therefore appears wherever the keys themselves would, the wide touch layout
+included: turning the keys off from one device never leaves another without a
+way to ask for them back.
 
 ## Install it like an app
 

@@ -300,14 +300,14 @@ describe("CustomizeWebappDialog", () => {
     expect(saveSettings.mock.calls[0][0].ui).toEqual({ mobile_top_bar: true })
   })
 
-  it("the mobile terminal-keys row reflects an active override the same way", async () => {
+  it("the touch terminal-keys row reflects an active override the same way", async () => {
     seed({ mobile_accessory_bar: true } as Partial<Bootstrap>)
     ;(
       mockState as unknown as { mobileAccessoryBarOverride: boolean | null }
     ).mobileAccessoryBarOverride = false
     render(<CustomizeWebappDialog />)
 
-    const sw = screen.getByLabelText("Mobile terminal keys")
+    const sw = screen.getByLabelText("Touch terminal keys")
     expect(sw.getAttribute("aria-checked")).toBe("false")
 
     fireEvent.click(sw)

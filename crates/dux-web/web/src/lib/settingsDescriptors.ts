@@ -231,6 +231,10 @@ export const SETTING_GROUPS: SettingGroup[] = [
       },
       {
         key: "ui.mobile_top_bar",
+        // "Mobile" is accurate here and deliberately kept: the top bar is the
+        // phone shell's own chrome (MobileShell renders it and nothing else
+        // does), so unlike the keys below it genuinely does not exist in the
+        // wide layout.
         label: "Mobile terminal top bar",
         description:
           "On phones, shows the terminal screen's top bar: the back chevron, branch crumb and actions, plus the agent tab strip. Hide it to give those rows to the terminal; bring it back with the show-bars button below the terminal or from this Preferences dialog.",
@@ -242,9 +246,14 @@ export const SETTING_GROUPS: SettingGroup[] = [
       },
       {
         key: "ui.mobile_accessory_bar",
-        label: "Mobile terminal keys",
+        // The key stays `mobile_accessory_bar` for compatibility, but the copy
+        // says TOUCH: the keys travel with the pointer, so a tablet in
+        // landscape gets them inside the desktop layout, and this preference
+        // is shared across your devices. Naming it "phones" sent a user
+        // looking for a bar that was never the phone's alone.
+        label: "Touch terminal keys",
         description:
-          "On phones, shows the terminal-keys bar (Esc, Tab, Ctrl, Alt and the arrows) above the compose box. Hide it to give those rows to the terminal; bring it back with the show-bars button below the terminal or from this Preferences dialog.",
+          "On a touch device, shows the terminal-keys bar (Esc, Tab, Ctrl, Alt and the arrows) above the compose box, in the wide layout as well as on a phone. Hide it to give those rows to the terminal; bring it back with the show-bars button below the terminal or from this Preferences dialog.",
         surface: "web",
         control: { kind: "bool" },
         default: true,
