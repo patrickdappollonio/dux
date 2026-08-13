@@ -170,6 +170,15 @@ function CollapsedAgentRail({
 // target) only under a coarse pointer, so a mouse near the sidebar edge keeps
 // hitting the content behind it. Same pseudo-element trick as
 // components/ui/resizable.tsx.
+// The 20px coarse slop overlaps about 8px of each neighbour: the sidebar rows'
+// right edge on one side and the center pane's left edge on the other. Both
+// absorb a stray press harmlessly (a row press only selects; the terminal edge
+// carries no control), which is the per-axis justification the touch-target
+// tenet asks for. Rebuilding the sidebar as a resizable panel group was
+// evaluated and rejected: it would fight SidebarProvider's CSS-variable width
+// model for no visible gain; the two things the library's handle has that this
+// rail lacked are touch-action suppression and this hit slop, so those are
+// copied instead.
 const EDGE_HIT_SLOP =
   "after:absolute after:inset-y-0 after:left-1/2 after:w-1 after:-translate-x-1/2 pointer-coarse:after:w-5"
 
