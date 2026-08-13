@@ -386,8 +386,25 @@ export function TerminalPane(props: TerminalPaneProps) {
   // this pane); the pair decides whether the compose bar shows its restore
   // button, the escape hatch that brings BOTH bars back in one tap.
   const accessoryBarVisible = mobileAccessoryBarVisible(duxState)
-  const anyMobileBarHidden =
-    !mobileTopBarVisible(duxState) || !accessoryBarVisible
+  // IS SOMETHING THIS SHELL WOULD OTHERWISE SHOW CURRENTLY HIDDEN? That, and
+  // only that, is what puts the restore button on screen. The two bars answer
+  // it on DIFFERENT axes and it is the whole reason this is not one flag:
+  //
+  //   - The accessory keys are a TOUCH SURFACE, so they travel with
+  //     `touchSurfaces`, the very predicate that mounts them, desktop shell
+  //     included. Both preferences are stored SERVER-SIDE and shared across
+  //     devices, so hiding the keys from a phone hides them on a coarse-pointer
+  //     tablet too; while this was gated on the mobile LAYOUT that tablet got
+  //     the desktop shell with no keys, no toggle and no way back. A dead end.
+  //   - The top bar is the MOBILE SHELL's own chrome, rendered by MobileShell
+  //     and by nothing else, so its preference hides nothing in the desktop
+  //     shell and must not put an unexplained button under a desktop terminal.
+  //
+  // Restoring is still one tap for BOTH (`restoreMobileBars`): the button says
+  // "show hidden bars", not "show the one you are missing".
+  const restorableBarHidden =
+    (touchSurfaces && !accessoryBarVisible) ||
+    (isMobile && !mobileTopBarVisible(duxState))
   // Whether dropping a file onto this pane does anything at all. `[server]
   // file_drop_max_bytes = 0` switches the feature off, so the whole drag
   // surface goes with it (see `paneAcceptsFileDrag`). Read reactively rather than
@@ -679,9 +696,16 @@ export function TerminalPane(props: TerminalPaneProps) {
   // terminal is the flexible row when it has company and simply fills its
   // parent when it does not. The bars are owner-only, so a viewer's pane is
   // never a column.
+  //
+  // The minimal restore row counts as company: with the compose bar off and
+  // the keys hidden it is the ONLY thing below the terminal, and leaving it
+  // out here made the desktop shell drop the row that carries the way back.
   const inColumn =
     isMobile ||
-    (isOwner && ((touchSurfaces && accessoryBarVisible) || composeBarEnabled))
+    (isOwner &&
+      ((touchSurfaces && accessoryBarVisible) ||
+        composeBarEnabled ||
+        restorableBarHidden))
 
   // Mirror of `isOwner` for the stable mount-effect closures (onData, the resize
   // senders) to read synchronously. Kept in sync only at the mutation points
@@ -3244,18 +3268,19 @@ export function TerminalPane(props: TerminalPaneProps) {
               onChange={setComposeText}
               onSend={sendCompose}
               inputRef={composeInputRef}
-              showRestoreBars={isMobile && anyMobileBarHidden}
+              showRestoreBars={restorableBarHidden}
               onRestoreBars={() => void restoreMobileBars()}
             />
-          ) : isMobile && anyMobileBarHidden ? (
+          ) : restorableBarHidden ? (
             // The compose bar is off AND a bar is hidden: without this the
             // terminal screen would be completely chrome-free, and the app
             // ships as a standalone PWA where no browser Back button exists.
             // A minimal bottom row carries ONLY the same restore button the
             // compose bar would (the shared RestoreBarsButton), so the way
-            // back is always one visible tap. MOBILE ONLY, because the two
-            // hideable bars it restores are the mobile shell's own chrome; the
-            // desktop shell has never hidden anything to restore.
+            // back is always one visible tap. It appears in the DESKTOP shell
+            // too, on a coarse pointer: the accessory keys belong to that
+            // shell as well, so a hidden key row is just as much a dead end
+            // there (see `restorableBarHidden`).
             <div className="flex shrink-0 items-end gap-1.5 border-t bg-background px-1 py-1">
               <RestoreBarsButton
                 onRestoreBars={() => void restoreMobileBars()}

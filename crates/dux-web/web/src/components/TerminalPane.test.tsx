@@ -2399,6 +2399,99 @@ describe("TerminalPane typing surfaces follow the pointer, not the layout", () =
   })
 })
 
+// THE WAY BACK TRAVELS WITH THE KEYS. `ui.mobile_accessory_bar` is a
+// SERVER-SIDE preference, so hiding it from a phone hides the keys on the
+// tablet too; if the restore affordance stayed gated on the mobile LAYOUT, that
+// tablet got the desktop shell with no keys and no way to ask for them back.
+// The affordance therefore follows the same predicate that mounts the bars.
+describe("TerminalPane restore affordance follows the touch surfaces", () => {
+  let pointerStub: MatchMediaStub | null = null
+
+  const setWidth = (value: number) =>
+    Object.defineProperty(window, "innerWidth", { value, configurable: true })
+
+  beforeEach(() => setWidth(1200))
+  afterEach(() => {
+    setWidth(1200)
+    pointerStub?.restore()
+    pointerStub = null
+  })
+
+  const hideAccessoryBar = () => {
+    const state = makeState()
+    ;(
+      state.bootstrap as unknown as { mobile_accessory_bar?: boolean }
+    ).mobile_accessory_bar = false
+    return state
+  }
+  const restoreButton = () =>
+    screen.queryByRole("button", { name: "Show hidden bars" })
+
+  it("offers the restore button in the DESKTOP shell on a coarse pointer", () => {
+    pointerStub = stubCoarsePointer(true)
+    mockState = hideAccessoryBar()
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    // The dead end: keys gone, desktop layout, and before this the button too.
+    expect(screen.queryByRole("button", { name: "Esc" })).toBeNull()
+    expect(restoreButton()).toBeTruthy()
+  })
+
+  it("one tap brings the keys back", () => {
+    pointerStub = stubCoarsePointer(true)
+    mockState = hideAccessoryBar()
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    fireEvent.click(restoreButton()!)
+    const fetchSpy = globalThis.fetch as unknown as ReturnType<typeof vi.fn>
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "/api/v1/config/settings",
+      expect.objectContaining({
+        method: "PATCH",
+        body: JSON.stringify({
+          ui: { mobile_top_bar: true, mobile_accessory_bar: true },
+          quiet: true,
+        }),
+      }),
+    )
+  })
+
+  // With the compose bar off too there is no bar left to carry the button, so
+  // the pane's own minimal row must carry it in the desktop shell as well.
+  it("falls back to the minimal row when the compose bar is off too", () => {
+    pointerStub = stubCoarsePointer(true)
+    const state = hideAccessoryBar()
+    ;(state.bootstrap as unknown as { compose_bar?: string }).compose_bar =
+      "never"
+    mockState = state
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
+    expect(restoreButton()).toBeTruthy()
+  })
+
+  // A fine-pointer desktop never had the keys in the first place, so there is
+  // nothing hidden from it and nothing to restore.
+  it("offers nothing on a fine pointer", () => {
+    pointerStub = stubCoarsePointer(false)
+    mockState = hideAccessoryBar()
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(restoreButton()).toBeNull()
+  })
+
+  // The TOP bar is the mobile shell's own chrome. The desktop shell never
+  // renders it, so its preference being off hides nothing here and must not
+  // put an unexplained button under a desktop terminal.
+  it("ignores the top-bar preference in the desktop shell", () => {
+    pointerStub = stubCoarsePointer(true)
+    const state = makeState()
+    ;(
+      state.bootstrap as unknown as { mobile_top_bar?: boolean }
+    ).mobile_top_bar = false
+    mockState = state
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(screen.getByRole("button", { name: "Esc" })).toBeTruthy()
+    expect(restoreButton()).toBeNull()
+  })
+})
+
 // THE TOGGLE. A tablet with a keyboard case attached wants direct typing; the
 // same tablet without it wants the buffered box, and the browser cannot tell
 // the two apart (measured). So the user swaps it, transiently, per device.
