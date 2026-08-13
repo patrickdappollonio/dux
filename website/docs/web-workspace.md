@@ -135,6 +135,12 @@ macOS") with a **Take over** button. Click it and input snaps to you, most-recen
 claim wins. Nothing is lost, the other device simply becomes the watcher until it
 takes over in turn. It is a polite hand-off, not a fight.
 
+If the watching device's own connection to the terminal has dropped, taking over
+reconnects it first and then claims, so you get the current screen rather than a
+blank one. If that connection has given up entirely, the card steps aside for the
+**Connection lost** notice and its **Reconnect** button, because a Take over
+button over a socket that is not there would only look like it worked.
+
 ### Clipboard: the classic terminal model
 
 The web terminal copies and pastes the way a real terminal does, no menu required:

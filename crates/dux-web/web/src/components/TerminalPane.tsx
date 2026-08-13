@@ -2294,16 +2294,34 @@ export function TerminalPane(props: TerminalPaneProps) {
     const term = termRef.current
     const pty = ptyRef.current
     if (term && pty) {
-      // Only claim now if our connection id is known: the server stamps the
-      // resulting `pty.owner` with our id, and we must be able to recognise it as
-      // ours or the handover echo would immediately revoke this optimistic claim.
-      // If the `connected` frame has not landed yet (myConnIdRef null), defer the
-      // claim to the next `onConnected` via a one-shot flag instead of sending a
-      // claim whose owner we cannot match.
-      if (myConnIdRef.current !== null) {
+      // Only claim now if our connection id is known AND the socket can actually
+      // carry the frame: the server stamps the resulting `pty.owner` with our id,
+      // and we must be able to recognise it as ours or the handover echo would
+      // immediately revoke this optimistic claim. `sendResize` reports whether
+      // the frame went on the wire, and its answer is the third health check,
+      // since `isOpen` can be true a moment before a close lands.
+      const claimed =
+        myConnIdRef.current !== null &&
+        pty.isOpen &&
         pty.sendResize(term.rows, term.cols)
-      } else {
+      if (!claimed) {
+        // The claim could not be made: our id is unknown, or the socket is
+        // closed / mid-reconnect / has spent its retry budget for good. Deferring
+        // to the next `connected` frame alone is not enough, because a socket that
+        // gave up produces no further frames on its own and nothing else here ever
+        // reopens it: the pane would sit under an optimistic "I own this" with a
+        // black terminal until the user switched agents (which remounts, and it
+        // was that remount, not the take-over, that fixed it).
+        //
+        // So reopen it ourselves. `connect()` refills the retry budget, and the
+        // reopen replays the server's scrollback through the existing
+        // reset-then-repaint path, which is the ONLY thing that repaints this
+        // viewport: the child's SIGWINCH redraw is a no-op when the size it is
+        // told matches the size it already has. The one-shot flag then fires the
+        // claim from the resulting `connected` frame, once we have an id the
+        // handover echo can be matched against.
         pendingClaimRef.current = true
+        pty.connect()
       }
     }
     // Refocus the active typing surface (the compose textarea when the mobile
@@ -3196,8 +3214,20 @@ export function TerminalPane(props: TerminalPaneProps) {
           stays mounted underneath, still receiving output, so reclaiming is
           instant — but it is covered and its input is gated off). A solid
           bg-background overlay so it reads as "instead of" the terminal rather
-          than a banner over it. */}
-      {!isOwner ? (
+          than a banner over it.
+
+          It yields to the connection-lost affordance above. This card paints
+          solid over the whole pane and renders AFTER those overlays, so a
+          non-owner whose socket has died would otherwise see only "Take over"
+          and never the Reconnect button: the health of the connection would be
+          invisible behind exactly the surface that needs it. Suppressing the
+          card here (rather than lifting the overlays' z-order) keeps one state
+          on screen at a time; raising the overlays instead would leave this
+          solid card painted underneath a floating Reconnect box, reading as two
+          stacked answers to one question. The condition mirrors the overlay's
+          own `connectionLost && !offline`, so when the app-wide offline overlay
+          owns the signal the card stays exactly as it was. */}
+      {!isOwner && !(connectionLost && !offline) ? (
         <div className="absolute inset-0 z-20 flex items-center justify-center bg-background p-4">
           <Card className="w-full max-w-sm text-center">
             <CardHeader className="items-center gap-3">

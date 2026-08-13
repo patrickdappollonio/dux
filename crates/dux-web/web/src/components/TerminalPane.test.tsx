@@ -596,6 +596,94 @@ describe("TerminalPane take-over device naming", () => {
   })
 })
 
+// TAKING OVER OVER A SICK SOCKET. The take-over card sits on top of a socket
+// this client cannot see the health of, and the claim IS a resize frame: on a
+// socket that is closed (or has given up entirely) the frame is dropped on the
+// floor, the optimistic ownership flip stands, and the pane shows a black,
+// input-less terminal until the user switches agents (which remounts and
+// replays). These pin the recovery: an unusable socket is reconnected (which
+// resets the retry budget AND re-requests the server's scrollback replay) and
+// the claim is deferred to the resulting `connected` frame, while a healthy
+// socket keeps the cheap one-frame claim.
+describe("TerminalPane take-over over an unhealthy socket", () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  // Mount and let the deferred first-frame resize settle, then clear both spies
+  // so a test observes only what its own click causes.
+  const mountSettled = () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    act(() => {
+      vi.advanceTimersByTime(400)
+    })
+    const pty = last()
+    pty.sendResize.mockClear()
+    pty.connect.mockClear()
+    return pty
+  }
+
+  it("reconnects and defers the claim when the socket cannot carry it", () => {
+    const pty = mountSettled()
+    act(() => pty.onConnected("conn-self"))
+    act(() => notifyPtyOwner("s1", "conn-other"))
+    // The socket drops. Our connection id is dead (the pane nulls it) and a
+    // frame written now goes nowhere: `sendResize` says so by returning false.
+    act(() => pty.onReconnecting())
+    pty.isOpen = false
+    pty.sendResize.mockReturnValue(false)
+    pty.connect.mockClear()
+    fireEvent.click(screen.getByText("Take over"))
+    // The pane must reopen the socket itself rather than waiting for a
+    // `connected` frame a stopped socket will never produce.
+    expect(pty.connect).toHaveBeenCalledTimes(1)
+    // The reopen mints a fresh connection id, and THAT is when the deferred
+    // claim goes out, stamped with an id we can recognise as ours.
+    pty.sendResize.mockReturnValue(true)
+    act(() => {
+      pty.onOpen()
+      pty.onConnected("conn-2")
+    })
+    expect(pty.sendResize).toHaveBeenCalledTimes(1)
+    expect(pty.sendResize).toHaveBeenCalledWith(24, 80)
+  })
+
+  it("claims in place, without reconnecting, when the socket is healthy", () => {
+    const pty = mountSettled()
+    act(() => pty.onConnected("conn-self"))
+    act(() => notifyPtyOwner("s1", "conn-other"))
+    pty.sendResize.mockClear()
+    pty.connect.mockClear()
+    fireEvent.click(screen.getByText("Take over"))
+    expect(pty.sendResize).toHaveBeenCalledTimes(1)
+    expect(pty.sendResize).toHaveBeenCalledWith(24, 80)
+    // The cheap path: a working socket is never torn down and reopened, which
+    // would cost a full scrollback replay for nothing.
+    expect(pty.connect).not.toHaveBeenCalled()
+  })
+
+  it("shows the Reconnect affordance, not the take-over card, on a dead socket", () => {
+    const pty = mountSettled()
+    act(() => pty.onConnected("conn-self"))
+    act(() => notifyPtyOwner("s1", "conn-other"))
+    expect(screen.getByText("Take over")).toBeTruthy()
+    // The socket gives up for good. The take-over card is a solid, full-pane
+    // overlay painted ABOVE the connection overlays, so leaving it up hides the
+    // one control that can fix this: the non-owner would click Take over into a
+    // socket that is not there.
+    act(() => pty.onReconnecting())
+    pty.emit("failed")
+    expect(screen.getByText("Connection lost.")).toBeTruthy()
+    expect(screen.queryByText("Take over")).toBeNull()
+    pty.connect.mockClear()
+    fireEvent.click(screen.getByText("Reconnect"))
+    expect(pty.connect).toHaveBeenCalledTimes(1)
+  })
+})
+
 // The pane is the only surface that KNOWS a PTY's input ownership (from
 // `pty.owner` handovers on its own socket), so it publishes the verdict into
 // the store ledger the agent ⋯ menu gates its mutating entries on.
