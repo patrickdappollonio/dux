@@ -21,8 +21,9 @@ export function resolveInstanceTitle(raw: string | null | undefined): string {
  * the instance title; the standalone editor tab prefixes "Editor" so the two
  * tabs can be told apart in a tab strip full of dux instances. The separator
  * is an em dash by the maintainer's explicit choice for this one string.
- * The attention-count prefix (formatTabTitle) wraps OUTSIDE this, so a
- * flagged agent still surfaces in the editor tab's title.
+ * The attention-count prefix (formatTabTitle) wraps OUTSIDE this, but the
+ * editor tab's count is always zero (see `attentionCountForSurface`), so a
+ * flagged agent never reaches this title.
  */
 export function pageTitle(base: string, standaloneEditor: boolean): string {
   return standaloneEditor ? `Editor — ${base}` : base

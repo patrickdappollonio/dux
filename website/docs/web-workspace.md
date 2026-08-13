@@ -276,7 +276,9 @@ A failed pull does not wait, because nothing was lost and you can simply try
 again.
 
 If several arrive at once they stack, five deep on a desktop and three on a
-phone, and the rest queue behind them.
+phone, and the rest queue behind them. They stack here, in the workspace tab:
+the standalone editor tab opts out of workspace-wide messages and shows only
+what you do in it.
 
 One thing worth knowing if you keep a tab open on a flaky connection: when the
 browser reconnects, dux tells it about work that is **still running**, plus any

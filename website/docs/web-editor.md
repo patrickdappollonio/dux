@@ -28,6 +28,12 @@ link). The standalone tab is nothing but the editor, full-viewport, with the
 agent's name at the top. There is no in-app link back to the workspace — the
 tab is yours, so your browser's Back button or closing the tab is the way out.
 
+The standalone tab is also deliberately quiet. Workspace messages and the
+"needs you" count in the tab title belong to the workspace tab, so the editor
+tab shows neither, even for the agent whose worktree you are editing. What the
+editor itself does still tells you there: saves, renames, deletes and uploads
+confirm in the tab you did them in.
+
 The editor overlay is **desktop-only**: Monaco is a poor experience on a touch
 screen, so on a phone the overlay does not open. The standalone tab is the
 deliberate exception. It works on phones, best-effort, with the file explorer

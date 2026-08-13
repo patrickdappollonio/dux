@@ -354,7 +354,8 @@ export interface ResourceEvent {
 //     separate `terminals.changed` frame);
 //   - control frames migrated off the retired `/ws`: `connected` (id = the
 //     per-connection id echoed via `X-Connection-Id`), `status`
-//     (key?/tone/message, plus a server-side `scope` the client ignores), and
+//     (key?/tone/message, plus a `scope` the standalone editor tab reads to
+//     stay quiet for workspace broadcasts), and
 //     `status_cleared` (key?).
 // Fields beyond `event` are optional so one handler can switch on `event` and
 // read only the fields that frame carries.
@@ -394,9 +395,13 @@ export interface EventsServerMessage {
    *  rather than as "unknown, better keep it on screen". What earns it is
    *  documented on `NotifyOptions.sticky` in `lib/notify.ts`. */
   sticky?: boolean
-  /** Server-side status scope (`status`); already scope-filtered by the server,
-   *  so the client ignores it. */
-  scope?: string
+  /** Status scope (`status`): the literal `"all"` for a workspace broadcast, or
+   *  `{connection: "<id>"}` for one addressed to a single connection (that is
+   *  the serialized shape, so this is not a plain string). The server has
+   *  already delivered it only where it belongs; the client reads it for one
+   *  further decision, in `lib/statusRouting.ts`: the standalone editor tab
+   *  renders addressed statuses only and stays quiet for broadcasts. */
+  scope?: string | { connection: string }
 }
 
 // Client -> server interest frames. Topics are opaque strings: coarse app-wide

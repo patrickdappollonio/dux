@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest"
-import { attentionCount, formatTabTitle } from "./attention"
+import {
+  attentionCount,
+  attentionCountForSurface,
+  formatTabTitle,
+} from "./attention"
 import type { SessionView } from "./types"
 
 function session(id: string, needs_attention: boolean): SessionView {
@@ -37,6 +41,20 @@ describe("attentionCount", () => {
         session("c", true),
       ]),
     ).toBe(2)
+  })
+})
+
+describe("attentionCountForSurface", () => {
+  const flagged = [session("a", true), session("b", true), session("c", false)]
+
+  it("counts flagged sessions on the workspace surface", () => {
+    expect(attentionCountForSurface(flagged, false)).toBe(2)
+    expect(attentionCountForSurface([], false)).toBe(0)
+  })
+
+  it("is always zero in the standalone editor tab", () => {
+    expect(attentionCountForSurface(flagged, true)).toBe(0)
+    expect(attentionCountForSurface([], true)).toBe(0)
   })
 })
 

@@ -45,8 +45,9 @@ import {
   setStatusClearSeconds,
 } from "./notify"
 import { worktreeDeleteReport } from "./worktreeDelete"
-import { attentionCount, formatTabTitle } from "./attention"
+import { attentionCountForSurface, formatTabTitle } from "./attention"
 import { applyAttentionFavicon } from "./favicon"
+import { statusToastAllowed } from "./statusRouting"
 import { pageTitle, resolveInstanceTitle } from "./instanceTitle"
 import { type Spine, fetchSpine } from "./spineApi"
 import { resolveFocusedTab, shouldRefireFocusPut } from "./agentTabs"
@@ -958,7 +959,10 @@ eventsSocket.onEvent = (ev: EventsServerMessage) => {
     return
   }
   // Engine status toasts, migrated off the retired `/ws`. The server already
-  // scope-filtered, so the `scope` field is ignored client-side. An error-toned
+  // scope-filtered per connection; the client reads `scope` for one further,
+  // surface-level decision: the standalone editor tab renders only statuses
+  // addressed to its own connection and drops the workspace broadcasts
+  // (`statusToastAllowed`). That gate is on the RENDERING only. An error-toned
   // async status also voids any in-flight create-focus (the create likely failed)
   // and unwinds any optimistic reorder overlay — mirroring the old `onStatus`.
   if (ev.event === "status") {
@@ -983,7 +987,12 @@ eventsSocket.onEvent = (ev: EventsServerMessage) => {
         })
       }
     }
-    showStatusToast(ev.key, ev.tone ?? "info", ev.message ?? "", ev.sticky ?? false)
+    // Only the toast is surface-gated. The state above applies on every
+    // surface: it is invisible in the editor tab either way, and forking store
+    // state per surface would be a new bug class for no rendering difference.
+    if (statusToastAllowed(ev.scope, state.standaloneEditor)) {
+      showStatusToast(ev.key, ev.tone ?? "info", ev.message ?? "", ev.sticky ?? false)
+    }
     return
   }
   // Dismiss the toast whose id matches the cleared key (anonymous slot when null).
@@ -1339,12 +1348,16 @@ function applyBootstrap(b: Bootstrap): void {
 // count prefix on the browser-tab title and a cyan dot composited onto the
 // favicon, both driven by how many agents are flagged in the current spine. This
 // runs whenever the count could change (a spine apply) or the base title/favicon
-// changes (a bootstrap/config.changed). `applyAttentionFavicon` composes at most
+// changes (a bootstrap/config.changed), or the surface bit flips (the standalone
+// editor tab reports no attention at all). `applyAttentionFavicon` composes at most
 // once per state and no-ops when nothing changed, so calling this on every spine
 // apply is cheap. Self-guards on the DOM.
 function refreshAttentionChrome(): void {
   if (typeof document === "undefined") return
-  const count = attentionCount(state.spine?.sessions ?? [])
+  const count = attentionCountForSurface(
+    state.spine?.sessions ?? [],
+    state.standaloneEditor,
+  )
   const base = pageTitle(
     resolveInstanceTitle(state.bootstrap?.title),
     state.standaloneEditor,
@@ -5102,6 +5115,9 @@ export function navigateUp(): void {
     state.editorRoute === null
   ) {
     setState({ standaloneEditor: false })
+    // The surface bit drives the tab title and the attention count, so it has
+    // to be re-rendered wherever the flag drops.
+    refreshAttentionChrome()
   }
   if (state.mobileScreen === "changes" && state.selectedTarget) {
     setState({ mobileScreen: "terminal" })

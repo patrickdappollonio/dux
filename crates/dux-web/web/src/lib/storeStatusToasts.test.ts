@@ -440,6 +440,79 @@ describe("engine status → sonner toast routing", () => {
   })
 })
 
+// The standalone editor tab (`#/editor/agent/<id>`) is deliberately quiet: it
+// renders only statuses addressed to its own connection, never the workspace
+// broadcasts. Boot the store on a standalone hash so `state.standaloneEditor` is
+// true from the first frame, then push scoped frames through the same arm.
+describe("the standalone editor tab", () => {
+  function bootStandalone() {
+    vi.stubGlobal("location", {
+      host: "localhost:0",
+      hash: "#/editor/agent/s1",
+    })
+  }
+
+  function scopedStatus(
+    mod: StoreModule,
+    key: string,
+    tone: string,
+    message: string,
+    scope: unknown,
+  ) {
+    mod.eventsSocket.onEvent({
+      event: "status",
+      key,
+      tone,
+      message,
+      scope,
+    } as Parameters<typeof mod.eventsSocket.onEvent>[0])
+  }
+
+  it("drops a workspace broadcast", async () => {
+    bootStandalone()
+    const mod = await loadStore()
+    const { toast } = await import("sonner")
+    expect(mod.getSnapshot().standaloneEditor).toBe(true)
+
+    scopedStatus(mod, "pull", "warning", "Agent exited.", "all")
+    expect(toast.warning).not.toHaveBeenCalled()
+  })
+
+  it("renders a status addressed to this connection", async () => {
+    bootStandalone()
+    const mod = await loadStore()
+    const { toast } = await import("sonner")
+
+    scopedStatus(mod, "save", "info", "Saved.", { connection: "c1" })
+    expect(toast.success).toHaveBeenCalledWith("Saved.", {
+      id: "save",
+      duration: 6000,
+    })
+  })
+
+  it("still dismisses on status_cleared, which is unconditional", async () => {
+    bootStandalone()
+    const mod = await loadStore()
+    const { toast } = await import("sonner")
+
+    statusCleared(mod, "pull")
+    expect(toast.dismiss).toHaveBeenCalledWith("pull")
+  })
+
+  it("leaves the workspace tab showing broadcasts", async () => {
+    // Same frame, ordinary surface: the gate is surface-scoped, not global.
+    const mod = await loadStore()
+    const { toast } = await import("sonner")
+    expect(mod.getSnapshot().standaloneEditor).toBe(false)
+
+    scopedStatus(mod, "pull", "warning", "Agent exited.", "all")
+    expect(toast.warning).toHaveBeenCalledWith("Agent exited.", {
+      id: "pull",
+      duration: 12000,
+    })
+  })
+})
+
 describe("an engine status that says it waits for the user", () => {
   it("is pinned when the frame carries sticky", async () => {
     const mod = await loadStoreWithBootstrap()

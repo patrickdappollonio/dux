@@ -106,6 +106,9 @@ beforeEach(() => {
   vi.stubGlobal("WebSocket", FakeWebSocket)
   vi.stubGlobal("fetch", fetchMock)
   document.head.innerHTML = ""
+  // The surface is read from the hash at store boot, so every test starts on
+  // the ordinary workspace address unless it says otherwise.
+  window.location.hash = ""
   vi.resetModules()
 })
 
@@ -154,5 +157,21 @@ describe("store attention chrome (browser-tab count)", () => {
     // Flag cleared → prefix gone.
     await pushSpine(mod, makeSpine({ sessions: [session("s1", false)] }))
     expect(document.title).toBe(BASE_TITLE)
+  })
+
+  it("never counts in the standalone editor tab, however many agents are flagged", async () => {
+    // The editor tab is not the thing needing attention, so its title keeps the
+    // "Editor" prefix and never grows a "(N) " one.
+    window.location.hash = "#/editor/agent/s1"
+    spineBody = makeSpine({ sessions: [session("s1", true), session("s2", true)] })
+    const mod = await loadStore()
+    expect(mod.getSnapshot().standaloneEditor).toBe(true)
+    expect(document.title).toBe(`Editor — ${BASE_TITLE}`)
+
+    await pushSpine(
+      mod,
+      makeSpine({ sessions: [session("s1", true), session("s2", true)] }),
+    )
+    expect(document.title).toBe(`Editor — ${BASE_TITLE}`)
   })
 })

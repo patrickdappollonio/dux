@@ -18,6 +18,20 @@ export function attentionCount(sessions: SessionView[]): number {
 }
 
 /**
+ * The attention count for the surface the tab is rendering. The workspace tab
+ * counts flagged agents; the standalone editor tab always reports zero, so it
+ * grows neither the `(N)` title prefix nor the favicon dot. The editor is not
+ * the thing needing attention, and the workspace tab is where that signal
+ * belongs.
+ */
+export function attentionCountForSurface(
+  sessions: SessionView[],
+  standaloneEditor: boolean,
+): number {
+  return standaloneEditor ? 0 : attentionCount(sessions)
+}
+
+/**
  * The browser-tab title: the resolved instance title, prefixed with the count in
  * parentheses when at least one agent needs attention (e.g. `(2) dux`), and the
  * bare title when the count is zero. `baseTitle` is the already-resolved
