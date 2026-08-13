@@ -11,6 +11,7 @@ vi.mock("@/lib/store", async (importOriginal) => {
     ...actual,
     useDux: () => mockState,
     setChangesPaneVisibility: vi.fn(),
+    showChangesPane: vi.fn(),
   }
 })
 
@@ -522,8 +523,8 @@ describe("InsetHeader show-Changes button", () => {
   // way back (the sidebar rail-button pattern applied to the right panel).
   it("renders only while the Changes pane is hidden, and clicking it shows the pane", async () => {
     const store = await import("@/lib/store")
-    const setVisibility = vi.mocked(store.setChangesPaneVisibility)
-    setVisibility.mockClear()
+    const show = vi.mocked(store.showChangesPane)
+    show.mockClear()
 
     mockState = {
       ...stateFor("main", "main"),
@@ -532,7 +533,42 @@ describe("InsetHeader show-Changes button", () => {
     render(<InsetHeader />)
     const button = screen.getByRole("button", { name: /show changes pane/i })
     fireEvent.click(button)
-    expect(setVisibility).toHaveBeenCalledWith(true)
+    // The healing show, not the bare preference write: a pane that was dragged
+    // to nothing must come back at a width, not at zero.
+    expect(show).toHaveBeenCalled()
+  })
+
+  it("renders when the preference says visible but the pane is zero-width", async () => {
+    // The stuck state this gate exists for: a divider dragged off the edge left
+    // the pane at 0% while the preference still said "visible", so the button
+    // (gated on the preference alone) stayed away and the pane's own hide item
+    // was inside the zero. Nothing on screen could bring it back.
+    const store = await import("@/lib/store")
+    const show = vi.mocked(store.showChangesPane)
+    show.mockClear()
+
+    mockState = {
+      ...stateFor("main", "main"),
+      bootstrap: { show_changes_pane: true },
+      changesPanePercent: 0,
+    } as unknown as DuxState
+    render(<InsetHeader />)
+    const button = screen.getByRole("button", { name: /show changes pane/i })
+    fireEvent.click(button)
+    expect(show).toHaveBeenCalled()
+  })
+
+  it("draws no pane-boundary rule while the pane is zero-width", () => {
+    // Same reason as the hidden case: there is no divider below to continue.
+    mockState = {
+      ...stateFor("main", "main"),
+      bootstrap: { show_changes_pane: true },
+      changesPanePercent: 0,
+    } as unknown as DuxState
+    render(<InsetHeader />)
+    const macros = screen.getByRole("button", { name: /run a macro/i })
+    const cluster = macros.nextElementSibling as HTMLElement
+    expect(cluster.className).not.toContain("border-l")
   })
 
   it("does not render while the Changes pane is visible", () => {

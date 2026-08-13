@@ -60,8 +60,11 @@ The pane header's `⋯` **Actions** menu carries the rest:
   has no file watcher, so a change dux did not make itself is only picked up by
   the next poll. This is the "I just did that, look again" button.
 - **Hide Changes pane** tucks the whole pane away when you want the terminal full
-  width. Bring it back from the **Show the Changes pane** row in **Preferences**:
-  hiding the pane takes this menu with it.
+  width. Dragging the split all the way closed does the same thing, and means the
+  same thing. Either way a button appears in the header, on the right, to bring
+  the pane back at a sensible width; the **Show the Changes pane** row in
+  **Preferences** is the other way in, since hiding the pane takes this menu
+  with it.
 
 ## The PR banner
 

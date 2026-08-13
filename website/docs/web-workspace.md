@@ -26,7 +26,9 @@ On a desktop-width screen it is three panes:
   when nothing is selected.
 - The **right Changes pane** shows what the focused agent has changed. You can
   resize the split, or hide the Changes pane entirely when you want the terminal
-  full width. See [Git without leaving the browser](/docs/web-git).
+  full width; dragging the split shut is just another way of hiding it, and the
+  header grows a button to bring it back. See
+  [Git without leaving the browser](/docs/web-git).
 
 A slim header up top shows breadcrumbs (agent, provider, project, branch) and a
 **cog** button that opens the app menu. The cog menu is the browser's map: it holds

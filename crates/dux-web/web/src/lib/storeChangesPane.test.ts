@@ -234,3 +234,102 @@ describe("Changes-pane visibility", () => {
     )
   })
 })
+
+// The pane could be dragged to zero width, and the zero was nobody's business:
+// the preference still said "visible", so the header's reopen button (gated on
+// the preference alone) stayed away, and the pane's own hide item was inside the
+// zero-width pane. The pane was unreachable until a reload. These are the pure
+// halves of the fix; the panel wiring is asserted in App.test.tsx.
+describe("Changes-pane width", () => {
+  it("setChangesPanePercent clamps to 0..100 and drops a no-op write", async () => {
+    const mod = await loadStore()
+    expect(mod.getSnapshot().changesPanePercent).toBe(
+      mod.CHANGES_PANE_DEFAULT_PERCENT,
+    )
+
+    mod.setChangesPanePercent(42.5)
+    expect(mod.getSnapshot().changesPanePercent).toBe(42.5)
+
+    // Writing the same value again must not produce a new snapshot: this
+    // setter runs on every pointer move of a divider drag.
+    const before = mod.getSnapshot()
+    mod.setChangesPanePercent(42.5)
+    expect(mod.getSnapshot()).toBe(before)
+
+    mod.setChangesPanePercent(-10)
+    expect(mod.getSnapshot().changesPanePercent).toBe(0)
+    mod.setChangesPanePercent(1000)
+    expect(mod.getSnapshot().changesPanePercent).toBe(100)
+  })
+
+  it("isChangesPaneDragCollapse fires only on a measured expanded-to-zero step", async () => {
+    const mod = await loadStore()
+    // A real drag-collapse: it was open, now it is at the collapsedSize (0%,
+    // plus an epsilon for float slop, the same threshold isExplorerCollapsed uses).
+    expect(mod.isChangesPaneDragCollapse(0, 26)).toBe(true)
+    expect(mod.isChangesPaneDragCollapse(0.4, 14)).toBe(true)
+    // Not a collapse: still open, or already collapsed (so nothing changed).
+    expect(mod.isChangesPaneDragCollapse(14, 26)).toBe(false)
+    expect(mod.isChangesPaneDragCollapse(0, 0)).toBe(false)
+    // The FIRST report of a panel's life has no previous size. Treating that as
+    // a collapse would hide the pane during mount, before anything is measured.
+    expect(mod.isChangesPaneDragCollapse(0, undefined)).toBe(false)
+  })
+
+  it("changesPaneEffectivelyHidden: off by preference, or on but dragged to nothing", async () => {
+    const mod = await loadStore()
+    type S = ReturnType<typeof mod.getSnapshot>
+    const hidden = (override: boolean | null, percent: number) =>
+      mod.changesPaneEffectivelyHidden({
+        changesPaneOverride: override,
+        bootstrap: { show_changes_pane: true },
+        changesPanePercent: percent,
+      } as unknown as S)
+
+    expect(hidden(true, 26)).toBe(false)
+    // Hidden by preference. The percent is stale and irrelevant (the spacer
+    // reads zero here), so it must not be what decides.
+    expect(hidden(false, 26)).toBe(true)
+    expect(hidden(false, 0)).toBe(true)
+    // The state this whole fix exists for: the preference says visible and the
+    // pane is nonetheless zero-width.
+    expect(hidden(true, 0)).toBe(true)
+    expect(hidden(true, 0.5)).toBe(true)
+  })
+
+  it("collapseChangesPaneFromDrag hides the pane through the same preference the menu writes", async () => {
+    const mod = await loadStore()
+    mod.collapseChangesPaneFromDrag()
+    expect(mod.getSnapshot().changesPaneOverride).toBe(false)
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      "/api/v1/ui/changes-pane",
+      expect.objectContaining({
+        method: "PUT",
+        body: JSON.stringify({ visible: false }),
+      }),
+    )
+
+    // Already hidden: no second write. The panel can report zero more than once
+    // (an unmount measures too), and each write is a config PUT.
+    const calls = fetchMock.mock.calls.length
+    mod.collapseChangesPaneFromDrag()
+    expect(fetchMock.mock.calls.length).toBe(calls)
+  })
+
+  it("showChangesPane restores the default width when the pane was dragged to nothing", async () => {
+    const mod = await loadStore()
+    mod.setChangesPanePercent(0)
+    mod.showChangesPane()
+    expect(mod.getSnapshot().changesPanePercent).toBe(
+      mod.CHANGES_PANE_DEFAULT_PERCENT,
+    )
+    expect(mod.getSnapshot().changesPaneOverride).toBe(true)
+  })
+
+  it("showChangesPane keeps a width the user chose", async () => {
+    const mod = await loadStore()
+    mod.setChangesPanePercent(44)
+    mod.showChangesPane()
+    expect(mod.getSnapshot().changesPanePercent).toBe(44)
+  })
+})

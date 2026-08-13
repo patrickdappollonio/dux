@@ -15,9 +15,9 @@ import {
   type HeaderChip,
 } from "@/lib/headerSubject"
 import {
-  changesPaneVisible,
+  changesPaneEffectivelyHidden,
   changesSpacerPercent,
-  setChangesPaneVisibility,
+  showChangesPane,
   useDux,
 } from "@/lib/store"
 import { matchOwner } from "@/lib/terminalOwner"
@@ -258,31 +258,40 @@ export function InsetHeader() {
           line; the color is the default border token, the same `--border` the
           divider's `bg-border` resolves to.
 
-          Only while the Changes pane is VISIBLE: with the pane hidden there is
-          no divider below to continue, and the spacer has collapsed to the
-          control cluster, so the rule would just float mid-header. */}
+          Only while the Changes pane is actually ON SCREEN: hidden, there is
+          no divider below to continue and the spacer has collapsed to the
+          control cluster, so the rule would just float mid-header. The gate is
+          `changesPaneEffectivelyHidden`, not the preference, so a pane the
+          user dragged to nothing counts as hidden too. */}
       <div
         className={cn(
           "flex min-w-fit shrink-0 items-center justify-end gap-2",
-          changesPaneVisible(dux) && "self-stretch border-l",
+          !changesPaneEffectivelyHidden(dux) && "self-stretch border-l",
         )}
         style={{ width: `${spacer}%` }}
       >
         {/* The way back to a hidden Changes pane. Hiding it unmounts the pane
             (and the pane's own ⋯ menu with it), so the reopen control must live
-            outside the pane — the sidebar's rail-only expand button applied to
+            outside the pane: the sidebar's rail-only expand button applied to
             the right panel. Same persisted preference write as the hide item;
             outline variant so it reads as one family with the AppMenu trigger
             beside it. Icon only, deliberately: unlike Macros and Settings it is
             transient chrome that exists only while the pane is away. Desktop
-            only by construction: InsetHeader mounts only in DesktopShell. */}
-        {!changesPaneVisible(dux) && (
+            only by construction: InsetHeader mounts only in DesktopShell.
+
+            It shows for a ZERO-WIDTH pane as well, not just a hidden one. A
+            divider dragged off the edge used to leave the pane at 0% with the
+            preference still reading "visible", which took this button away and
+            put the pane's own hide item inside the zero: nothing on screen
+            could bring it back. `showChangesPane` is the healing form, which
+            restores a width as well as the preference. */}
+        {changesPaneEffectivelyHidden(dux) && (
           <SimpleTooltip content="Show Changes pane">
             <Button
               variant="outline"
               size="icon"
               aria-label="Show Changes pane"
-              onClick={() => setChangesPaneVisibility(true)}
+              onClick={() => showChangesPane()}
             >
               <PanelRightOpen />
             </Button>

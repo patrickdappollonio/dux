@@ -5173,6 +5173,67 @@ export function changesSpacerPercent(s: DuxState): number {
   return changesPaneVisible(s) ? s.changesPanePercent : 0
 }
 
+// A collapsed collapsible panel snaps to its collapsedSize, which defaults to
+// 0% (the Changes panel does not override it); the epsilon is that zero plus
+// float slop in the reported percentages. Same threshold, and same reasoning,
+// as `isExplorerCollapsed` in lib/editorLayout.ts.
+export const CHANGES_PANE_COLLAPSE_EPSILON = 1
+
+// Did this layout report take the Changes panel from a measured, open width to
+// nothing? That is a user dragging the divider off the edge, and it is the one
+// thing that used to strand the pane: zero-width but still "visible", so no
+// reopen control anywhere on screen (its own ⋯ menu was inside the zero).
+//
+// `prevPercent` is undefined on a panel's very FIRST report, before anything has
+// been measured. That is not a collapse; treating it as one would hide the pane
+// during its own mount.
+export function isChangesPaneDragCollapse(
+  percent: number,
+  prevPercent: number | undefined,
+): boolean {
+  if (prevPercent === undefined) return false
+  return (
+    prevPercent >= CHANGES_PANE_COLLAPSE_EPSILON &&
+    percent < CHANGES_PANE_COLLAPSE_EPSILON
+  )
+}
+
+// Is the Changes pane out of the user's reach right now? Either the preference
+// is off, or it is on and the pane is nonetheless zero-width. The header's
+// reopen button and the pane-boundary rule both gate on this rather than on the
+// preference alone, so a pane that is somehow zero-width still has a way back.
+//
+// Note it reads `changesPanePercent` RAW, not `changesSpacerPercent`: the spacer
+// is defined as zero while the preference is off, so it cannot tell the two
+// hidden states apart.
+export function changesPaneEffectivelyHidden(s: DuxState): boolean {
+  if (!changesPaneVisible(s)) return true
+  return s.changesPanePercent < CHANGES_PANE_COLLAPSE_EPSILON
+}
+
+// A divider drag that collapsed the pane writes the SAME preference the pane's
+// hide item writes, so "hidden by drag" and "hidden by menu" are one state with
+// one way back. This is the sidebar's own precedent: dragging its edge past the
+// threshold sets the same collapsed state its collapse button does.
+//
+// Guarded on the current visibility because a panel can report zero more than
+// once (its unmount is measured too) and each write is a config PUT.
+export function collapseChangesPaneFromDrag(): void {
+  if (!changesPaneVisible(state)) return
+  setChangesPaneVisibility(false)
+}
+
+// Show the Changes pane, healing a width of nothing on the way. The preference
+// and the split are unrelated variables, so re-showing a pane that was dragged
+// to zero would otherwise re-show a zero. A width the user actually chose is
+// left alone.
+export function showChangesPane(): void {
+  if (state.changesPanePercent < CHANGES_PANE_COLLAPSE_EPSILON) {
+    setChangesPanePercent(CHANGES_PANE_DEFAULT_PERCENT)
+  }
+  setChangesPaneVisibility(true)
+}
+
 // Set the Changes pane's visibility and persist it (config.ui.show_changes_pane).
 // The override is set optimistically for an instant response; the server writes
 // config.ui.show_changes_pane and emits `config.changed`, the refetched bootstrap

@@ -1,4 +1,6 @@
 import type * as React from "react"
+import { useEffect, useRef } from "react"
+import type { PanelImperativeHandle } from "react-resizable-panels"
 
 import { AddProjectDialog } from "@/components/AddProjectDialog"
 import { AgentEnvDialog } from "@/components/AgentEnvDialog"
@@ -51,8 +53,11 @@ import { Toaster } from "@/components/ui/sonner"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { useVisualViewportHeight } from "@/hooks/use-visual-viewport"
 import {
+  CHANGES_PANE_COLLAPSE_EPSILON,
   CHANGES_PANE_DEFAULT_PERCENT,
   changesPaneVisible,
+  collapseChangesPaneFromDrag,
+  isChangesPaneDragCollapse,
   setChangesPanePercent,
   useDux,
 } from "@/lib/store"
@@ -106,7 +111,9 @@ function GlobalOverlays() {
   )
 }
 
-function DesktopShell() {
+// Exported for the unit tests, which drive the panel callbacks directly; `App`
+// below is still the only production caller.
+export function DesktopShell() {
   const dux = useDux()
   const { sidebarWidth } = dux
   // The Changes pane honours config.ui.show_changes_pane (via the bootstrap
@@ -115,6 +122,36 @@ function DesktopShell() {
   // hidden, the terminal panel takes the full width and the handle + panel are
   // unmounted (no leftover sliver).
   const showChanges = changesPaneVisible(dux)
+
+  // The Changes panel's imperative handle, and the visibility it had on the
+  // previous render. Both exist for the re-show below.
+  const changesPanelRef = useRef<PanelImperativeHandle | null>(null)
+  const wasShowingChangesRef = useRef(showChanges)
+
+  // RE-SHOW AT A REAL WIDTH. The library caches this group's layout, keyed by
+  // the joined panel ids, and prefers that cache over `defaultSize` when the
+  // panels re-register (`mutableState.layouts[ids] ?? defaultLayout ??
+  // computed`, react-resizable-panels 4.11.2). So a pane that left at zero
+  // width comes BACK at zero, and nothing but a page reload used to clear it.
+  // There is no API to drop the cache, so the pane is measured on the way back
+  // in and resized if it returned as nothing.
+  //
+  // Only on the hidden→shown transition: the first mount has no cache to fight
+  // (the panel is at its defaultSize), and a live drag must never be argued
+  // with mid-gesture.
+  useEffect(() => {
+    const reshown = showChanges && !wasShowingChangesRef.current
+    wasShowingChangesRef.current = showChanges
+    if (!reshown) return
+    const handle = changesPanelRef.current
+    if (!handle) return
+    if (handle.getSize().asPercentage >= CHANGES_PANE_COLLAPSE_EPSILON) return
+    handle.resize(`${CHANGES_PANE_DEFAULT_PERCENT}%`)
+    // The header's spacer mirrors this number, so it has to move with the
+    // panel; the group's own layout report would follow, but not before the
+    // next frame.
+    setChangesPanePercent(CHANGES_PANE_DEFAULT_PERCENT)
+  }, [showChanges])
 
   return (
     <SidebarProvider
@@ -145,15 +182,24 @@ function DesktopShell() {
               )
             }
           >
-            {/* The terminal panel's defaultSize drops to 100 when the Changes
+            {/* The terminal panel's defaultSize drops to 100% when the Changes
                 panel is absent so it fills the width (no leftover sliver). The
                 ids keep the two panels stable across the conditional mount.
                 Note: a user-dragged split is NOT yet persisted across hide/show
-                (defaultSize only applies on mount). */}
+                (defaultSize only applies on mount).
+
+                UNITS: never a bare number. react-resizable-panels v4 reads a
+                bare number as PIXELS, so `minSize={14}` was a fourteen-PIXEL
+                floor rather than 14%, and the pane could be dragged down to a
+                sliver and, being collapsible, snapped from there to nothing.
+                Every size here is an explicit string with its unit spelled
+                out; see the units note at the top of lib/editorLayout.ts. */}
             <ResizablePanel
               id="terminal-pane"
-              defaultSize={showChanges ? 100 - CHANGES_PANE_DEFAULT_PERCENT : 100}
-              minSize={30}
+              defaultSize={
+                showChanges ? `${100 - CHANGES_PANE_DEFAULT_PERCENT}%` : "100%"
+              }
+              minSize="30%"
             >
               <TerminalArea />
             </ResizablePanel>
@@ -162,9 +208,32 @@ function DesktopShell() {
                 <ResizableHandle />
                 <ResizablePanel
                   id="changes-pane"
-                  defaultSize={CHANGES_PANE_DEFAULT_PERCENT}
-                  minSize={14}
+                  panelRef={changesPanelRef}
+                  defaultSize={`${CHANGES_PANE_DEFAULT_PERCENT}%`}
+                  minSize="14%"
+                  // Still collapsible: dragging the divider off the edge is a
+                  // legitimate way to put the pane away. What changed is that
+                  // it now WRITES that intent. The preference and the split are
+                  // separate variables, so a silent collapse left the pane at
+                  // zero width while the preference still said "visible": the
+                  // header's reopen button stayed away, the pane's own hide
+                  // item was inside the zero-width pane, and the pane was
+                  // stuck until a reload. Mapping the collapse onto the
+                  // preference makes hidden-by-drag and hidden-by-menu one
+                  // state with one way back. Same precedent as the sidebar,
+                  // where dragging the edge past its threshold sets exactly the
+                  // state the collapse button sets.
                   collapsible
+                  onResize={(size, _id, prevSize) => {
+                    if (
+                      isChangesPaneDragCollapse(
+                        size.asPercentage,
+                        prevSize?.asPercentage,
+                      )
+                    ) {
+                      collapseChangesPaneFromDrag()
+                    }
+                  }}
                 >
                   <ChangedFiles />
                 </ResizablePanel>
