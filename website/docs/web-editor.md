@@ -61,9 +61,21 @@ read-only badge where it applies, and **Save** and **Close**.
 The explorer pane is yours to shape: drag the divider to resize it, or collapse it
 entirely with the toggle at the left end of the header when you want the whole
 width for the file. Your width and collapsed/expanded choice are remembered in the
-browser, so the editor reopens the way you left it.
+browser, so the editor reopens the way you left it. The width is remembered in
+pixels, on purpose: whether the editor is the overlay or its own browser tab, the
+tree renders at the same width instead of growing with the window.
 
-Save with the button or with `Ctrl+S` / `Cmd+S`. A toast confirms the write.
+Save with the button or with `Ctrl+S` / `Cmd+S`. A toast confirms the write, and
+the same goes for the file operations: creating, renaming, moving, and deleting a
+file or folder each confirm with a toast naming what happened, or tell you plainly
+when something went wrong.
+
+The header also shows the file's syntax language, and it is a dropdown: dux lets
+Monaco guess the language from the file name, and when the guess is wrong (a
+`Cargo.lock` that is really TOML, a config file with no extension) you can pick
+the right one from the full list. The choice applies to the open file, including
+its diff view, and lasts until you close it; **Auto** at the top of the list hands
+the decision back to Monaco.
 
 ## Tabs
 
