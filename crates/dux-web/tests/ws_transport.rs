@@ -993,6 +993,97 @@ async fn nested_agent_pty_socket_streams_bytes() {
     );
 }
 
+/// Read Binary frames off `ws` until the accumulated bytes contain `needle` or
+/// the deadline passes; returns everything read. Text frames (the `connected`
+/// handshake) and pings are skipped, exactly as the browser client ignores them
+/// for the purposes of terminal content.
+async fn accumulate_until(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    needle: &str,
+    within: Duration,
+) -> Vec<u8> {
+    let mut acc = Vec::new();
+    let deadline = tokio::time::Instant::now() + within;
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Some(Ok(m))) = tokio::time::timeout(Duration::from_millis(300), ws.next()).await {
+            if let Message::Binary(b) = m {
+                acc.extend_from_slice(&b);
+            }
+            if String::from_utf8_lossy(&acc).contains(needle) {
+                break;
+            }
+        }
+    }
+    acc
+}
+
+/// The two halves of the server contract that the web client's take-over
+/// recovery leans on, pinned over a real socket.
+///
+/// The client's fix for "take over while my socket is dead" is: reopen the
+/// socket, then claim. That only works because (1) a SECOND connection to a PTY
+/// another connection currently owns is still replayed the scrollback on open,
+/// which is the only thing that repaints a black viewport (the child's SIGWINCH
+/// redraw is a no-op when the size it is handed already matches), and (2) a
+/// resize frame from that second connection IS the claim, so its stdin is
+/// forwarded from then on. Neither is obvious from the route code, and a change
+/// to either would break take-over on the web while every client-side test
+/// stayed green.
+#[tokio::test]
+async fn a_second_pty_connection_is_replayed_scrollback_and_claims_by_resizing() {
+    let (addr, _tmp) = boot().await;
+    let url = format!("ws://{addr}/ws/sessions/s1/pty");
+
+    // Connection A attaches, claims by sizing, and puts something in the
+    // scrollback so the replay has content worth asserting on.
+    let (mut ws_a, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("connect first pty socket");
+    ws_a.send(Message::Text(r#"{"rows":24,"cols":80}"#.into()))
+        .await
+        .unwrap();
+    ws_a.send(Message::Binary(b"dux-owner-a-marker\n".to_vec().into()))
+        .await
+        .unwrap();
+    let echoed = accumulate_until(&mut ws_a, "dux-owner-a-marker", Duration::from_secs(8)).await;
+    assert!(
+        String::from_utf8_lossy(&echoed).contains("dux-owner-a-marker"),
+        "the owning connection's stdin never echoed; got {} bytes",
+        echoed.len()
+    );
+
+    // Connection B attaches while A still owns input. It must be replayed the
+    // scrollback unconditionally: this is the frame a reopened socket relies on
+    // to repaint after a take-over.
+    let (mut ws_b, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("connect second pty socket");
+    let replay = accumulate_until(&mut ws_b, "dux-owner-a-marker", Duration::from_secs(8)).await;
+    assert!(
+        String::from_utf8_lossy(&replay).contains("dux-owner-a-marker"),
+        "a second connection was not replayed the scrollback while another owns the PTY; got {} bytes",
+        replay.len()
+    );
+
+    // B claims with a resize, and its stdin is forwarded from then on. A
+    // non-owner's stdin is dropped server-side, so the echo IS the proof that
+    // ownership flipped.
+    ws_b.send(Message::Text(r#"{"rows":30,"cols":100}"#.into()))
+        .await
+        .unwrap();
+    ws_b.send(Message::Binary(b"dux-taker-b-marker\n".to_vec().into()))
+        .await
+        .unwrap();
+    let after = accumulate_until(&mut ws_b, "dux-taker-b-marker", Duration::from_secs(8)).await;
+    assert!(
+        String::from_utf8_lossy(&after).contains("dux-taker-b-marker"),
+        "the second connection's resize did not claim input ownership; got {} bytes",
+        after.len()
+    );
+}
+
 /// One byte past the 16 MiB message cap dux is expected to configure, written
 /// as a LITERAL and deliberately NOT derived from
 /// `dux_web::server::MAX_WS_MESSAGE_SIZE`.
