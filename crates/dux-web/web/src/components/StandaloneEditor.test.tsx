@@ -244,9 +244,15 @@ describe("the standalone editor shell", () => {
     // A .ts file offers no draft preview, so the fold (like the inline
     // header) carries no preview item for it.
     expect(screen.queryByRole("menuitem", { name: /show preview/i })).toBeNull()
-    expect(
-      screen.getByRole("menuitem", { name: /open local editor/i }),
-    ).toBeTruthy()
+    const openLocal = screen.getByRole("menuitem", {
+      name: /open local editor/i,
+    })
+    expect(openLocal).toBeTruthy()
+    // The same laptop the desktop trigger carries: one action, one glyph,
+    // whichever surface it is reached from. It must not be the external-link
+    // arrow, which belongs to the control that opens a browser tab.
+    expect(openLocal.querySelector("svg.lucide-laptop")).toBeTruthy()
+    expect(openLocal.querySelector("svg.lucide-external-link")).toBeNull()
   })
 
   it("the ⋯ menu offers the preview toggle for a previewable file", async () => {

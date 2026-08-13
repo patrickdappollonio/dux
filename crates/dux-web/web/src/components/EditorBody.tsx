@@ -17,6 +17,7 @@ import {
   FilePlus,
   FileText,
   GitCompare,
+  Laptop,
   Loader2,
   PanelLeftClose,
   PanelLeftOpen,
@@ -1281,7 +1282,13 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
                   {openingEditor ? (
                     <Loader2 className="motion-safe:animate-spin" />
                   ) : (
-                    <ExternalLink />
+                    // A LAPTOP, not an external-link arrow. This spawns a GUI
+                    // editor on the machine dux runs on; "Open in new tab" two
+                    // controls along is the one that opens a link, and it keeps
+                    // the arrow because that is the web's convention for it.
+                    // Sharing one glyph between two adjacent controls that do
+                    // different things made the pair unreadable at a glance.
+                    <Laptop />
                   )}
                   Open local editor
                   <ChevronDown />
@@ -1380,7 +1387,9 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
               {/* Present for image tabs too, matching the inline control. */}
               <DropdownMenuSub>
                 <DropdownMenuSubTrigger disabled={!localAccess || openingEditor}>
-                  <ExternalLink />
+                  {/* Same laptop as the desktop trigger: one action, one
+                      glyph, whichever surface it is reached from. */}
+                  <Laptop />
                   Open local editor
                 </DropdownMenuSubTrigger>
                 <DropdownMenuSubContent>

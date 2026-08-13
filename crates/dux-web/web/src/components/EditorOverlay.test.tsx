@@ -896,6 +896,36 @@ describe("editor panel units and scroll surfaces", () => {
   })
 })
 
+// The two "open" controls in the header sit next to each other and do
+// completely different things: one spawns a GUI editor on the machine dux
+// runs on, the other opens a link in a new browser tab. Both carried the
+// external-link arrow, so the pair read as one control accidentally
+// duplicated. The link keeps the arrow, which is what the arrow means on the
+// web; the local spawn takes a laptop.
+describe("the header's two open controls are told apart by their icons", () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    installBootStubs()
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.unstubAllGlobals()
+  })
+
+  it("gives them different icons, and the arrow to the one that is a link", async () => {
+    await mountWithTab(PATH)
+    const local = screen.getByText("Open local editor").closest("button")!
+    const newTab = screen.getByText("Open in new tab").closest("a")!
+    // Exact class match, not a substring: lucide names are prefixes of each
+    // other ("lucide-laptop" of "lucide-laptop-minimal").
+    expect(local.querySelector("svg.lucide-laptop")).toBeTruthy()
+    expect(local.querySelector("svg.lucide-external-link")).toBeNull()
+    expect(newTab.querySelector("svg.lucide-external-link")).toBeTruthy()
+    expect(newTab.querySelector("svg.lucide-laptop")).toBeNull()
+  })
+})
+
 // The header row must not change height as its controls come and go: the
 // File/Diff segmented control (an h-7 button inside p-0.5 + border) is the
 // tallest thing the row can hold, and without a floor the row shrinks when no
