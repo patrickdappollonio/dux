@@ -17,6 +17,7 @@ function deps(overrides: Partial<MoveEntryDeps> = {}) {
       calls.push("refreshSearchIndex")
       return Promise.resolve()
     }),
+    reportSuccess: vi.fn(() => calls.push("reportSuccess")),
     reportError: vi.fn(() => calls.push("reportError")),
     ...overrides,
   }
@@ -65,10 +66,33 @@ describe("performMove", () => {
     expect(calls).toEqual([
       "rename",
       "clearTarget",
+      // Before the refetches: the confirmation is about the move, which has
+      // already landed, and a rejected revalidation must not turn a
+      // successful move into silence.
+      "reportSuccess",
       "retargetTabs",
       "revalidateDirs",
       "refreshSearchIndex",
     ])
+  })
+
+  // A move that succeeded used to say nothing at all. It now confirms once,
+  // naming the entry and where it went.
+  it("confirms the move exactly once, naming the entry and the destination", async () => {
+    const { d } = deps()
+    await performMove("src/a/notes.md", "docs", d)
+    expect(d.reportSuccess).toHaveBeenCalledTimes(1)
+    expect(d.reportSuccess).toHaveBeenCalledWith(
+      "Moved src/a/notes.md to docs/",
+    )
+  })
+
+  it("names the worktree root rather than an empty destination", async () => {
+    const { d } = deps()
+    await performMove("docs/notes.md", "", d)
+    expect(d.reportSuccess).toHaveBeenCalledWith(
+      "Moved docs/notes.md to the worktree root",
+    )
   })
 
   // A refused move (an occupied destination, a containment refusal) must
@@ -85,6 +109,7 @@ describe("performMove", () => {
     })
     await performMove("src/a.ts", "lib", d)
     expect(calls).toEqual(["reportError"])
+    expect(d.reportSuccess).not.toHaveBeenCalled()
     expect(d.reportError).toHaveBeenCalledWith(
       "refusing to rename, destination already exists: lib/a.ts",
     )

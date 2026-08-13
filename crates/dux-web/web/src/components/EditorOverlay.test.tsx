@@ -63,10 +63,21 @@ const diffMock = vi.fn(async () => ({
   modified: "",
   binary: false,
 }))
+// The mutation calls, captured so the toast tests can resolve or reject them
+// and read what the editor said afterwards. `vi.clearAllMocks` clears calls
+// and keeps implementations, so these keep resolving across tests.
+const treeMock = vi.fn(async () => ({
+  dir: "",
+  entries: [] as unknown[],
+}))
+const createFileMock = vi.fn(async (..._a: unknown[]) => {})
+const createDirMock = vi.fn(async (..._a: unknown[]) => {})
+const renameMock = vi.fn(async (..._a: unknown[]) => {})
+const removeMock = vi.fn(async (..._a: unknown[]) => {})
 vi.mock("@/lib/fileApi", () => ({
   fileApi: {
     list: vi.fn(async () => ({ files: [PATH], truncated: false })),
-    tree: vi.fn(async () => ({ dir: "", entries: [] })),
+    tree: (...a: unknown[]) => (treeMock as unknown as (...x: unknown[]) => unknown)(...a),
     read: () => readMock(),
     // The real builder's shape, duplicated here because the module is fully
     // mocked: the image-pane test asserts the exact URL the <img> gets.
@@ -75,10 +86,10 @@ vi.mock("@/lib/fileApi", () => ({
     diff: () => diffMock(),
     write: (...args: unknown[]) => writeMock(...args),
     openInEditor: vi.fn(),
-    createFile: vi.fn(),
-    createDir: vi.fn(),
-    rename: vi.fn(),
-    remove: vi.fn(),
+    createFile: (...a: unknown[]) => createFileMock(...a),
+    createDir: (...a: unknown[]) => createDirMock(...a),
+    rename: (...a: unknown[]) => renameMock(...a),
+    remove: (...a: unknown[]) => removeMock(...a),
   },
 }))
 
@@ -137,10 +148,10 @@ vi.mock("@/components/DiffViewer", diffViewerStub)
 vi.mock("./DiffViewer", diffViewerStub)
 
 // Panel props recorded at render time, so the panel-unit tests can assert the
-// editor hands react-resizable-panels STRING percentages. v4 reads a bare
-// number as PIXELS (defaultSize={22} mounted the explorer ~22px wide), so a
-// future bare number must fail here. The real Panel still renders (spread
-// actual), keeping every other test on the genuine library.
+// sizes the editor hands react-resizable-panels: pixels for the explorer (so
+// the modal and the standalone tab render the same tree) and a percentage for
+// the content pane, every one with its unit spelled out. The real Panel still
+// renders (spread actual), keeping every other test on the genuine library.
 const recordedPanelProps: Array<Record<string, unknown>> = []
 vi.mock("react-resizable-panels", async (importOriginal) => {
   const actual =
@@ -153,9 +164,10 @@ vi.mock("react-resizable-panels", async (importOriginal) => {
 })
 
 const toastError = vi.fn()
+const toastSuccess = vi.fn()
 vi.mock("sonner", () => ({
   toast: Object.assign(vi.fn(), {
-    success: vi.fn(),
+    success: (...a: unknown[]) => toastSuccess(...a),
     error: (...a: unknown[]) => toastError(...a),
     warning: vi.fn(),
     loading: vi.fn(),
@@ -1063,5 +1075,98 @@ describe("a file drop that misses the tree", () => {
     }
     expect(fireEvent.dragOver(surface, textDrag)).toBe(true)
     expect(fireEvent.drop(surface, textDrag)).toBe(true)
+  })
+})
+
+// Every file mutation the editor performs now CONFIRMS itself. They used to
+// land in silence: the dialog closed, the tree refetched, and nothing said
+// what had happened. Delete is the sharp one, because its dialog closes the
+// moment it is confirmed rather than when the request settles, so a
+// successful delete left no trace on screen at all.
+describe("file mutations confirm themselves", () => {
+  const ENTRY = {
+    name: "notes.md",
+    path: "notes.md",
+    is_dir: false,
+    is_symlink: false,
+    expandable: false,
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    installBootStubs()
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.unstubAllGlobals()
+    // The tree mock's implementation survives clearAllMocks, so put the
+    // default back for the rest of the file.
+    treeMock.mockImplementation(async () => ({ dir: "", entries: [] }))
+  })
+
+  // Opens the tree row's context menu and clicks one of its items.
+  async function rowMenu(item: RegExp): Promise<void> {
+    treeMock.mockImplementation(async () => ({ dir: "", entries: [ENTRY] }))
+    await mountWithTab(PATH)
+    const row = await screen.findByText("notes.md")
+    fireEvent.contextMenu(row)
+    fireEvent.click(await screen.findByText(item))
+  }
+
+  it("says what it created, naming the file", async () => {
+    await mountWithTab(PATH)
+    fireEvent.click(screen.getByRole("button", { name: /new file/i }))
+    fireEvent.change(await screen.findByPlaceholderText("example.ts"), {
+      target: { value: "new.ts" },
+    })
+    fireEvent.click(screen.getByRole("button", { name: /^create$/i }))
+    await waitFor(() => expect(createFileMock).toHaveBeenCalled())
+    await waitFor(() =>
+      expect(toastSuccess).toHaveBeenCalledWith(
+        "Created file new.ts",
+        expect.anything(),
+      ),
+    )
+    expect(toastSuccess).toHaveBeenCalledTimes(1)
+    expect(toastError).not.toHaveBeenCalled()
+  })
+
+  it("says what it renamed, and to what", async () => {
+    await rowMenu(/^Rename…$/)
+    const field = await screen.findByDisplayValue("notes.md")
+    fireEvent.change(field, { target: { value: "notes.txt" } })
+    fireEvent.click(screen.getByRole("button", { name: /^rename$/i }))
+    await waitFor(() => expect(renameMock).toHaveBeenCalled())
+    await waitFor(() =>
+      expect(toastSuccess).toHaveBeenCalledWith(
+        "Renamed notes.md to notes.txt",
+        expect.anything(),
+      ),
+    )
+    expect(toastSuccess).toHaveBeenCalledTimes(1)
+  })
+
+  it("says what it deleted, even though the dialog is already gone", async () => {
+    await rowMenu(/^Delete…$/)
+    fireEvent.click(await screen.findByRole("button", { name: /^delete$/i }))
+    await waitFor(() => expect(removeMock).toHaveBeenCalled())
+    await waitFor(() =>
+      expect(toastSuccess).toHaveBeenCalledWith(
+        "Deleted file notes.md",
+        expect.anything(),
+      ),
+    )
+    expect(toastSuccess).toHaveBeenCalledTimes(1)
+    expect(toastError).not.toHaveBeenCalled()
+  })
+
+  it("a refused delete still reports the failure, and never claims success", async () => {
+    removeMock.mockRejectedValueOnce(new Error("permission denied"))
+    await rowMenu(/^Delete…$/)
+    fireEvent.click(await screen.findByRole("button", { name: /^delete$/i }))
+    await waitFor(() => expect(toastError).toHaveBeenCalled())
+    expect(String(toastError.mock.calls[0][0])).toContain("permission denied")
+    expect(toastSuccess).not.toHaveBeenCalled()
   })
 })

@@ -9,6 +9,7 @@
 // request itself was already covered; this ordering never was.
 
 import { moveTarget, parentDir } from "@/lib/fileTreeOps"
+import { movedMessage } from "@/lib/editorMutations"
 
 export interface MoveEntryDeps {
   /** The wire call. A move deliberately reuses the rename route. */
@@ -20,6 +21,8 @@ export interface MoveEntryDeps {
   /** Force the lazy file tree to refetch these directories. */
   revalidateDirs: (dirs: string[]) => void
   refreshSearchIndex: () => Promise<void>
+  /** Confirm the move, naming the entry and where it went. */
+  reportSuccess: (message: string) => void
   reportError: (message: string) => void
 }
 
@@ -35,6 +38,10 @@ export function performMove(
     .rename(from, to)
     .then(() => {
       deps.clearTarget()
+      // Said before the refetches, not after: the confirmation is about the
+      // move, which has already landed, and a rejected revalidation must not
+      // turn a successful move into silence.
+      deps.reportSuccess(movedMessage(from, destDir))
       deps.retargetTabs(from, to)
       // Both ends: the source directory lost an entry and the destination
       // gained one, and the tree caches them independently.

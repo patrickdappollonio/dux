@@ -57,6 +57,11 @@ import {
   renameTarget as computeRenameTarget,
 } from "@/lib/fileTreeOps"
 import { performMove } from "@/lib/moveEntry"
+import {
+  createdMessage,
+  deletedMessage,
+  renamedMessage,
+} from "@/lib/editorMutations"
 import { isLocalAccessHost } from "@/lib/localAccess"
 import {
   EDITOR_CONTENT_MIN_SIZE_PROP,
@@ -997,6 +1002,7 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
     return create
       .then(() => {
         setNewEntryTarget(null)
+        notifySuccess(createdMessage(kind, path))
         revalidateDirs([dir])
         if (kind === "file") {
           editorOpenFile(sessionId, path, { mode: "file", pin: true })
@@ -1026,6 +1032,7 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
       .rename(sessionId, from, to)
       .then(() => {
         setRenameEntryTarget(null)
+        notifySuccess(renamedMessage(from, to))
         editorRenameTabPaths(sessionId, from, to)
         revalidateDirs([parentDir(from), parentDir(to)])
         return refreshSearchIndex()
@@ -1050,6 +1057,7 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
       retargetTabs: (from, to) => editorRenameTabPaths(sessionId, from, to),
       revalidateDirs,
       refreshSearchIndex,
+      reportSuccess: (message) => notifySuccess(message),
       reportError: (message) => notifyError(message),
     })
   }
@@ -1072,6 +1080,11 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
     fileApi
       .remove(sessionId, target.path)
       .then(() => {
+        // The one confirmation that is load-bearing rather than merely
+        // polite: the dialog closed the moment it was confirmed (see above),
+        // so without this a delete leaves no trace on screen at all and the
+        // user is left reading the tree to work out whether it happened.
+        notifySuccess(deletedMessage(target.path, target.isDir))
         editorCloseTabsUnderPath(sessionId, target.path)
         revalidateDirs([parentDir(target.path)])
         return refreshSearchIndex()
