@@ -276,6 +276,34 @@ describe("Changes-pane width", () => {
     expect(mod.isChangesPaneDragCollapse(0, undefined)).toBe(false)
   })
 
+  it("changesPaneCollapseStep latches a pointer collapse and commits only at release", async () => {
+    const mod = await loadStore()
+    const step = (
+      percent: number,
+      prevPercent: number | undefined,
+      pointerDown: boolean,
+      armed: boolean,
+    ) =>
+      mod.changesPaneCollapseStep({ percent, prevPercent, pointerDown, armed })
+
+    // Mid-drag the write waits: flipping the preference here unmounts the panel
+    // under the library while the pointer is still down.
+    expect(step(0, 26, true, false)).toBe("arm")
+    // The same collapse with nothing held down (a keyboard resize of the
+    // separator) has no gesture to wait for.
+    expect(step(0, 26, false, false)).toBe("commit")
+    // Dragged back out before release: the escape hatch. Releasing now keeps
+    // the pane.
+    expect(step(20, 0, true, true)).toBe("disarm")
+    // Still collapsed and still held: nothing to do, and re-arming would be a
+    // second write's worth of noise.
+    expect(step(0, 0, true, true)).toBe("none")
+    // An ordinary resize, armed or not, says nothing.
+    expect(step(18, 26, true, false)).toBe("none")
+    // A panel's first report has no previous size; it is not a collapse.
+    expect(step(0, undefined, true, false)).toBe("none")
+  })
+
   it("changesPaneEffectivelyHidden: off by preference, or on but dragged to nothing", async () => {
     const mod = await loadStore()
     type S = ReturnType<typeof mod.getSnapshot>

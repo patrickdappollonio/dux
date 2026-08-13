@@ -111,6 +111,13 @@ function stateWith(showChanges: boolean, percent = 26): DuxState {
   } as unknown as DuxState
 }
 
+// jsdom has no PointerEvent constructor; the shell only reads the type, and it
+// listens on `window` in the capture phase, so a bare Event dispatched there is
+// exactly what it sees.
+function pointer(type: "pointerdown" | "pointerup" | "pointercancel"): void {
+  window.dispatchEvent(new Event(type))
+}
+
 function panel(id: string): PanelProps | undefined {
   return recordedPanelProps.find((p) => p.id === id)
 }
@@ -177,7 +184,7 @@ describe("DesktopShell panel units", () => {
 })
 
 describe("DesktopShell drag-collapse", () => {
-  it("hides the pane through the preference when a drag takes it to zero", () => {
+  it("hides the pane through the preference when a collapse arrives with no gesture in flight", () => {
     mockState = stateWith(true)
     render(<DesktopShell />)
     const onResize = panel("changes-pane")!.onResize!
@@ -192,6 +199,51 @@ describe("DesktopShell drag-collapse", () => {
     // Hidden-by-drag and hidden-by-menu are now ONE state, so the header's
     // reopen button appears. Without this the pane was unreachable.
     expect(collapseFromDrag).toHaveBeenCalledTimes(1)
+  })
+
+  it("waits for the pointer to come up before writing a dragged collapse", () => {
+    mockState = stateWith(true)
+    render(<DesktopShell />)
+    const onResize = panel("changes-pane")!.onResize!
+
+    act(() => pointer("pointerdown"))
+    act(() => {
+      onResize({ asPercentage: 0.5, inPixels: 8 }, "changes-pane", {
+        asPercentage: 26,
+        inPixels: 400,
+      })
+    })
+    // Writing here would flip the preference and unmount the panel and its
+    // separator MID-GESTURE. react-resizable-panels 4.11.2 then re-registers
+    // the pre-unmount group on its own pointerup, leaving a detached separator
+    // that hit-tests as a phantom zone at the viewport's corner and leaking a
+    // registry entry per collapse.
+    expect(collapseFromDrag).not.toHaveBeenCalled()
+
+    act(() => pointer("pointerup"))
+    expect(collapseFromDrag).toHaveBeenCalledTimes(1)
+  })
+
+  it("keeps the pane when the drag comes back out before release", () => {
+    mockState = stateWith(true)
+    render(<DesktopShell />)
+    const onResize = panel("changes-pane")!.onResize!
+
+    act(() => pointer("pointerdown"))
+    act(() => {
+      onResize({ asPercentage: 0.5, inPixels: 8 }, "changes-pane", {
+        asPercentage: 26,
+        inPixels: 400,
+      })
+      onResize({ asPercentage: 20, inPixels: 320 }, "changes-pane", {
+        asPercentage: 0.5,
+        inPixels: 8,
+      })
+    })
+    act(() => pointer("pointerup"))
+    // Dragging past the snap and back out before letting go is the escape from
+    // an accidental collapse; committing at the snap took it away.
+    expect(collapseFromDrag).not.toHaveBeenCalled()
   })
 
   it("says nothing about an ordinary resize, or about a panel's first report", () => {

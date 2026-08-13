@@ -61,7 +61,9 @@ The pane header's `⋯` **Actions** menu carries the rest:
   the next poll. This is the "I just did that, look again" button.
 - **Hide Changes pane** tucks the whole pane away when you want the terminal full
   width. Dragging the split all the way closed does the same thing, and means the
-  same thing. Either way a button appears in the header, on the right, to bring
+  same thing, though it only counts when you let go: drag past the snap and back
+  out again before releasing and the pane stays. Either way a button appears in
+  the header, on the right, to bring
   the pane back at a sensible width; the **Show the Changes pane** row in
   **Preferences** is the other way in, since hiding the pane takes this menu
   with it.

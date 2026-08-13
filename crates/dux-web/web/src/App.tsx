@@ -57,7 +57,7 @@ import {
   CHANGES_PANE_DEFAULT_PERCENT,
   changesPaneVisible,
   collapseChangesPaneFromDrag,
-  isChangesPaneDragCollapse,
+  changesPaneCollapseStep,
   setChangesPanePercent,
   useDux,
 } from "@/lib/store"
@@ -153,6 +153,49 @@ export function DesktopShell() {
     setChangesPanePercent(CHANGES_PANE_DEFAULT_PERCENT)
   }, [showChanges])
 
+  // THE DRAG-COLLAPSE LATCH. `changesPaneCollapseStep` explains why the write
+  // waits for the end of the gesture; these two refs are the state it reads.
+  // Refs rather than state on purpose: both change on pointer-move cadence and
+  // neither is rendered, so a re-render per report would be pure cost.
+  const pointerDownRef = useRef(false)
+  const collapseArmedRef = useRef(false)
+
+  // The gesture tracker. One persistent subscription rather than a listener
+  // installed when the latch arms: the latch needs to know whether a pointer is
+  // down BEFORE it decides to arm, so the tracker has to be listening already,
+  // and a second one-shot listener would only add an ordering hazard against
+  // this one clearing the flag.
+  //
+  // Capture phase, on `window`: a stranded latch is the original bug back again
+  // (a zero-width pane whose preference still says visible), so the release
+  // must not be droppable by anything calling stopPropagation on the way up.
+  // Any pointer counts as a gesture; the panel only reports a collapse while
+  // its own separator is being dragged, and a collapse that arrives with some
+  // unrelated pointer held down is still committed, just on that pointer's
+  // release.
+  //
+  // The commit runs while the panel is still mounted and the pointer is already
+  // up, so the library is out of its drag by the time React unmounts anything.
+  useEffect(() => {
+    const onDown = () => {
+      pointerDownRef.current = true
+    }
+    const onUp = () => {
+      pointerDownRef.current = false
+      if (!collapseArmedRef.current) return
+      collapseArmedRef.current = false
+      collapseChangesPaneFromDrag()
+    }
+    window.addEventListener("pointerdown", onDown, true)
+    window.addEventListener("pointerup", onUp, true)
+    window.addEventListener("pointercancel", onUp, true)
+    return () => {
+      window.removeEventListener("pointerdown", onDown, true)
+      window.removeEventListener("pointerup", onUp, true)
+      window.removeEventListener("pointercancel", onUp, true)
+    }
+  }, [])
+
   return (
     <SidebarProvider
       style={{ "--sidebar-width": sidebarWidth } as React.CSSProperties}
@@ -223,14 +266,23 @@ export function DesktopShell() {
                   // state with one way back. Same precedent as the sidebar,
                   // where dragging the edge past its threshold sets exactly the
                   // state the collapse button sets.
+                  //
+                  // The write is deferred to the end of the gesture; see the
+                  // latch above and `changesPaneCollapseStep`.
                   collapsible
                   onResize={(size, _id, prevSize) => {
-                    if (
-                      isChangesPaneDragCollapse(
-                        size.asPercentage,
-                        prevSize?.asPercentage,
-                      )
-                    ) {
+                    const step = changesPaneCollapseStep({
+                      percent: size.asPercentage,
+                      prevPercent: prevSize?.asPercentage,
+                      pointerDown: pointerDownRef.current,
+                      armed: collapseArmedRef.current,
+                    })
+                    if (step === "arm") {
+                      collapseArmedRef.current = true
+                    } else if (step === "disarm") {
+                      collapseArmedRef.current = false
+                    } else if (step === "commit") {
+                      collapseArmedRef.current = false
                       collapseChangesPaneFromDrag()
                     }
                   }}

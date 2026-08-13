@@ -5198,6 +5198,47 @@ export function isChangesPaneDragCollapse(
   )
 }
 
+// What a layout report means for the drag-collapse latch.
+//
+//   arm     a collapse arrived mid-gesture; remember it, write nothing yet
+//   commit  write the preference now
+//   disarm  the pane came back out before the pointer was released
+//   none    nothing to do
+export type ChangesPaneCollapseStep = "none" | "arm" | "commit" | "disarm"
+
+// WHY THE LATCH. Writing the visibility preference the instant the panel
+// reports zero unmounts the panel and its separator while the pointer is still
+// down. react-resizable-panels 4.11.2 re-registers the pre-unmount group object
+// from its own `pointerup` handler, so the group survives as a zombie: its
+// detached separator still hit-tests, as a phantom strip at the viewport's
+// top-left corner that swallows presses, and the registry leaks one entry per
+// collapse until the page is reloaded.
+//
+// So the collapse is decided during the drag and written at the end of it. That
+// also restores the escape the instant write took away: drag past the snap,
+// drag back out, release, and the pane stays. While the gesture finishes, the
+// panel simply sits at ~0% width, which is the library's own supported
+// collapsed state.
+//
+// `pointerDown` is what tells a drag apart from the paths that have no gesture
+// to wait for (the separator's arrow-key resize, or anything that resizes the
+// panel programmatically); those commit immediately, because there is no
+// pointerup coming to commit them later.
+export function changesPaneCollapseStep(args: {
+  percent: number
+  prevPercent: number | undefined
+  pointerDown: boolean
+  armed: boolean
+}): ChangesPaneCollapseStep {
+  if (isChangesPaneDragCollapse(args.percent, args.prevPercent)) {
+    return args.pointerDown ? "arm" : "commit"
+  }
+  if (args.armed && args.percent >= CHANGES_PANE_COLLAPSE_EPSILON) {
+    return "disarm"
+  }
+  return "none"
+}
+
 // Is the Changes pane out of the user's reach right now? Either the preference
 // is off, or it is on and the pane is nonetheless zero-width. The header's
 // reopen button and the pane-boundary rule both gate on this rather than on the
