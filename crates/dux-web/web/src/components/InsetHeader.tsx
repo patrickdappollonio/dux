@@ -23,6 +23,7 @@ import {
 import { matchOwner } from "@/lib/terminalOwner"
 import { terminalsForOwner, terminalTitle } from "@/lib/terminals"
 import type { SessionView, TerminalView } from "@/lib/types"
+import { cn } from "@/lib/utils"
 
 // The desktop center-pane top bar: ONE ROW OF CHIPS naming what you are looking
 // at, each a glyph followed by its value, then the pane's controls on the right.
@@ -243,8 +244,28 @@ export function InsetHeader() {
           with the terminal pane that just grew under it. It is also the floor
           that keeps the buttons intact if the user drags the Changes pane
           narrower than they are. */}
+      {/* The rule at the pane boundary. It is a BORDER ON THE CLUSTER rather
+          than a `<Separator>` element in front of it, and that is deliberate:
+          the cluster's leading edge is exactly the Changes panel's left edge
+          (that is the whole point of sizing it to the panel's percentage), so a
+          border there lands on the boundary for free. A separate element would
+          sit between Macros and the cluster and collect the header's `gap-2` on
+          BOTH sides, pushing Macros 9px off the pane edge it is supposed to sit
+          on, which is the float this change exists to fix.
+
+          `self-stretch` against the header's `items-center` makes it span the
+          full 48px, so it and the panel divider below read as one continuous
+          line; the color is the default border token, the same `--border` the
+          divider's `bg-border` resolves to.
+
+          Only while the Changes pane is VISIBLE: with the pane hidden there is
+          no divider below to continue, and the spacer has collapsed to the
+          control cluster, so the rule would just float mid-header. */}
       <div
-        className="flex min-w-fit shrink-0 items-center justify-end gap-2"
+        className={cn(
+          "flex min-w-fit shrink-0 items-center justify-end gap-2",
+          changesPaneVisible(dux) && "self-stretch border-l",
+        )}
         style={{ width: `${spacer}%` }}
       >
         {/* The way back to a hidden Changes pane. Hiding it unmounts the pane
