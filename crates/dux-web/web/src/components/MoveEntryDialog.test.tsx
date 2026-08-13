@@ -179,9 +179,13 @@ describe("MoveEntryDialog", () => {
     await waitFor(() => screen.getByRole("button", { name: /^lib$/ }))
     fireEvent.click(screen.getByRole("button", { name: /^lib$/ }))
     await waitFor(() => screen.getByRole("button", { name: /^util$/ }))
-    await waitFor(() =>
-      expect(document.activeElement).toBe(upOneLevel()),
-    )
+    // Focus lands from an effect that runs after the listing resolves, and
+    // under a loaded full suite that can take longer than waitFor's default
+    // 1s window: this assertion flaked twice in two days and passed in
+    // isolation every time. The wait is what is generous, not the behaviour.
+    await waitFor(() => expect(document.activeElement).toBe(upOneLevel()), {
+      timeout: 5000,
+    })
   })
 
   it("can climb back up towards the worktree root", async () => {
