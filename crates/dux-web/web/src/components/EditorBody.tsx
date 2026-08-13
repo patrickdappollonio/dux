@@ -26,7 +26,6 @@ import {
   Search,
   X,
 } from "lucide-react"
-import { useDefaultLayout } from "react-resizable-panels"
 import type { PanelImperativeHandle } from "react-resizable-panels"
 import { notify, notifyBusy, notifyError, notifySuccess, notifyWarning } from "@/lib/notify"
 import { fileApi } from "@/lib/fileApi"
@@ -63,13 +62,15 @@ import {
   EDITOR_CONTENT_PANEL_ID,
   EDITOR_LAYOUT_ID,
   editorMountLayout,
-  EXPLORER_DEFAULT_SIZE_PROP,
+  EXPLORER_LAYOUT_KEY,
   EXPLORER_MIN_SIZE_PROP,
   EXPLORER_PANEL_ID,
   explorerExpandTarget,
+  explorerMountSize,
   isExplorerCollapsed,
-  lastExpandedExplorerSize,
-  sanitizeEditorLayout,
+  nextExpandedExplorerPx,
+  parseExplorerLayout,
+  serializeExplorerLayout,
 } from "@/lib/editorLayout"
 import { isImagePreviewPath, previewKind } from "@/lib/editorPreview"
 import { performTreeDrop } from "@/lib/editorDrop"
@@ -138,6 +139,36 @@ const MarkdownPreview = lazy(() => import("./MarkdownPreview"))
 // Cap how many results the search list renders so a 1-char query in a huge repo
 // can't mount thousands of rows.
 const MAX_SEARCH_RESULTS = 300
+
+// The two lines of I/O around the explorer's persisted width. The decisions
+// (what the value means, what an unrecognised one does) are all in the pure
+// helpers in lib/editorLayout.ts; these only touch storage.
+//
+// Both swallow: `localStorage` THROWS on access in a browser with site data
+// disabled, and an explorer that fails to remember its width is not a reason
+// to fail to open the editor.
+function readExplorerLayoutRaw(): string | null {
+  try {
+    return localStorage.getItem(EXPLORER_LAYOUT_KEY)
+  } catch {
+    return null
+  }
+}
+
+function writeExplorerLayout(px: number | null, collapsed: boolean): void {
+  // Nothing worth remembering yet: the panel has never reported a usable
+  // width (a first open that was collapsed before it was ever dragged), and
+  // writing a placeholder would just be discarded on the way back in.
+  if (px === null) return
+  try {
+    localStorage.setItem(
+      EXPLORER_LAYOUT_KEY,
+      serializeExplorerLayout({ px, collapsed }),
+    )
+  } catch {
+    // Storage refused; the width lasts for this session only.
+  }
+}
 
 interface EditorBodyProps {
   sessionId: string
@@ -289,21 +320,17 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
   // "Open editor" request in flight.
   const [openingEditor, setOpeningEditor] = useState(false)
 
-  // Explorer panel layout: persisted by the panel library's OWN
-  // useDefaultLayout (per tenet: reuse before invent; hand-rolled persistence
-  // is exactly what this hook exists to replace). One shared localStorage
-  // layout keyed by EDITOR_LAYOUT_ID. `onLayoutChanged` is the current
-  // callback; `onLayoutChange` is deprecated and deliberately unused.
-  const { defaultLayout, onLayoutChanged } = useDefaultLayout({
-    id: EDITOR_LAYOUT_ID,
-    panelIds: [EXPLORER_PANEL_ID, EDITOR_CONTENT_PANEL_ID],
-    storage: localStorage,
-  })
-  // Drop a stored layout carrying the sliver-explorer artifact (persisted
-  // while defaultSize was a bare number the library read as pixels); see
-  // sanitizeEditorLayout. Everything below reads the sanitized layout so the
-  // seeds and the mount agree.
-  const storedLayout = sanitizeEditorLayout(defaultLayout)
+  // Explorer panel layout, persisted by dux rather than by the panel
+  // library's `useDefaultLayout`. That hook is the reuse-before-invent
+  // answer and it was the previous one, but what it persists is a `Layout`,
+  // which is percentages by definition, and a percentage is precisely what
+  // makes the explorer two different widths in the two shells. See
+  // lib/editorLayout.ts's header. Read ONCE, at mount, into state: the panel
+  // props below are only consulted at mount too, so a value that changed
+  // mid-session would be a lie either way.
+  const [storedExplorer] = useState(() =>
+    parseExplorerLayout(readExplorerLayoutRaw()),
+  )
   // On a phone the STANDALONE editor starts with the explorer collapsed
   // (settled decision: phone standalone is best-effort, and the viewport
   // barely fits Monaco alone). Read at mount by editorMountLayout below;
@@ -311,41 +338,41 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
   // has since expanded, and it cannot, because a defaultLayout only applies
   // at mount.
   const isMobile = useIsMobile()
-  const startExplorerCollapsed = standalone && isMobile
-  // What the group actually mounts with: the stored layout, or a true
-  // 0%/100% collapse for the phone standalone case — overriding whatever a
-  // desktop visit persisted under the same localStorage key. Structural on
-  // purpose: mounting collapsed (rather than relying only on the
-  // belt-and-braces collapse() effect below) leaves no frame where the
-  // explorer renders expanded and no race with the library's initial layout.
-  const mountLayout = editorMountLayout(storedLayout, startExplorerCollapsed)
-  // The header toggle's icon/label state. Seeded from the mount layout (so a
-  // collapsed explorer stays collapsed across opens, and the phone
-  // standalone's forced-collapsed mount shows "Show" from the first frame;
-  // with nothing stored the desktop overlay starts expanded) and kept
-  // current by onLayoutChanged, which fires for drag-collapse and toggle
-  // alike.
-  const [explorerCollapsed, setExplorerCollapsed] = useState(() =>
-    isExplorerCollapsed(mountLayout),
+  const startExplorerCollapsed =
+    (standalone && isMobile) || (storedExplorer?.collapsed ?? false)
+  // What the group actually mounts with: undefined in the ordinary case, so
+  // the explorer panel's own PIXEL defaultSize decides its width, or a true
+  // 0%/100% collapse when this open starts collapsed. Structural on purpose:
+  // mounting collapsed (rather than relying only on the belt-and-braces
+  // collapse() effect below) leaves no frame where the explorer renders
+  // expanded and no race with the library's initial layout.
+  const mountLayout = editorMountLayout(startExplorerCollapsed)
+  // The header toggle's icon/label state. Seeded from the same flag the mount
+  // layout is (so a collapsed explorer stays collapsed across opens, and the
+  // phone standalone's forced-collapsed mount shows "Show" from the first
+  // frame) and kept current by onLayoutChanged, which fires for drag-collapse
+  // and toggle alike.
+  const [explorerCollapsed, setExplorerCollapsed] = useState(
+    startExplorerCollapsed,
   )
   const explorerPanelRef = useRef<PanelImperativeHandle | null>(null)
-  // The last width the explorer had while expanded, seeded from the persisted
-  // layout and folded forward on every layout report. Toggling open resizes
+  // The last width the explorer had while expanded, IN PIXELS, seeded from
+  // storage and folded forward on every layout report. Toggling open resizes
   // to THIS rather than calling `panel.expand()`: expand() falls back to
   // minSize when it has no in-memory expand size (a fresh page load after
-  // collapsing), which would reopen the explorer at a 12% sliver.
-  const lastExpandedExplorerSizeRef = useRef<number | null>(
-    lastExpandedExplorerSize(storedLayout, null),
+  // collapsing), which would reopen the explorer at the minimum.
+  const lastExpandedExplorerPxRef = useRef<number | null>(
+    storedExplorer?.px ?? null,
   )
   function toggleExplorer(): void {
     const panel = explorerPanelRef.current
     if (!panel) return
     if (panel.isCollapsed()) {
-      // On a phone the expand target ignores the remembered width (usually a
-      // desktop-sized 22%, an ~86px sliver at 390px) and opens to the widest
-      // width the content pane's minimum permits. See explorerExpandTarget.
+      // On a phone the expand target ignores the remembered pixel width and
+      // opens to the widest width the content pane's minimum permits, as a
+      // percentage. See explorerExpandTarget.
       panel.resize(
-        explorerExpandTarget(lastExpandedExplorerSizeRef.current, isMobile),
+        explorerExpandTarget(lastExpandedExplorerPxRef.current, isMobile),
       )
     } else {
       panel.collapse()
@@ -1425,19 +1452,24 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
           orientation="horizontal"
           id={EDITOR_LAYOUT_ID}
           defaultLayout={mountLayout}
+          // The collapse half of the report comes from the layout the library
+          // hands us (a collapsed panel is zero in every unit); the WIDTH half
+          // is read off the panel in PIXELS, because that is the unit dux
+          // stores and the layout has no way to express it.
           onLayoutChanged={(layout) => {
-            onLayoutChanged(layout)
-            setExplorerCollapsed(isExplorerCollapsed(layout))
-            lastExpandedExplorerSizeRef.current = lastExpandedExplorerSize(
-              layout,
-              lastExpandedExplorerSizeRef.current,
+            const collapsed = isExplorerCollapsed(layout)
+            setExplorerCollapsed(collapsed)
+            lastExpandedExplorerPxRef.current = nextExpandedExplorerPx(
+              explorerPanelRef.current?.getSize().inPixels,
+              lastExpandedExplorerPxRef.current,
             )
+            writeExplorerLayout(lastExpandedExplorerPxRef.current, collapsed)
           }}
           className="size-full"
         >
-          {/* Size props are STRING percentages (see editorLayout.ts): the
-              panel library reads a bare number as PIXELS, which is how the
-              explorer once mounted ~22px wide. The inline overflow:hidden
+          {/* Size props carry EXPLICIT units (see editorLayout.ts): the
+              explorer in px so both shells render the same tree, the content
+              pane in % as the relative half of the pair. The inline overflow:hidden
               overrides the library wrapper's own overflow:auto (a className
               cannot beat an inline style) so each pane owns its scrolling:
               the tree/search ScrollAreas here, Monaco and the preview panes
@@ -1448,8 +1480,16 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
           <ResizablePanel
             id={EXPLORER_PANEL_ID}
             panelRef={explorerPanelRef}
-            defaultSize={EXPLORER_DEFAULT_SIZE_PROP}
+            defaultSize={explorerMountSize(storedExplorer)}
             minSize={EXPLORER_MIN_SIZE_PROP}
+            // Keep the explorer's PIXEL width when the group resizes (a
+            // window drag, the phone rotating, the modal's cap kicking in),
+            // rather than rescaling it proportionally: a width that moved
+            // with the container would be back to meaning different things
+            // in the two shells. The content pane keeps the library's default
+            // relative behavior, which is also the "at least one relative
+            // panel" the group requires.
+            groupResizeBehavior="preserve-pixel-size"
             style={{ overflow: "hidden" }}
             collapsible
           >

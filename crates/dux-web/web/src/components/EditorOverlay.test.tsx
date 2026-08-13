@@ -3,6 +3,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
+import {
+  EXPLORER_DEFAULT_SIZE_PX,
+  EXPLORER_LAYOUT_KEY,
+  EXPLORER_MIN_SIZE_PX,
+} from "@/lib/editorLayout"
 
 // What this file exists for, and it is one property.
 //
@@ -803,14 +808,18 @@ describe("a deleted file in the editor", () => {
   })
 })
 
-// The editor's panel sizes must be STRING percentages: react-resizable-panels
-// v4 treats a bare number as PIXELS, which is the "explorer opens ~20px wide"
-// bug. And each panel's inner wrapper (the div the library gives
-// `overflow: auto`) must be clipped to `hidden` so the only scroll surface in
-// the content pane is Monaco's own (and each preview pane's own); the
-// wrapper's auto scrollbars are what stacked nested scrollbars around the
-// diff view. The pixel truth of both is the preview-env screenshot pass; what
-// is pinned here is the contract the components hand the library.
+// The editor's explorer is sized in PIXELS and the content pane in percent,
+// each with its unit spelled out, so the modal (capped at min(80rem,
+// 100%-2rem)) and the standalone tab (uncapped) render the SAME tree: 22% was
+// ~281px in one and ~563px in the other. The matching assertion for the other
+// shell lives in StandaloneEditor.test.tsx, against the same constants.
+//
+// And each panel's inner wrapper (the div the library gives `overflow: auto`)
+// must be clipped to `hidden` so the only scroll surface in the content pane
+// is Monaco's own (and each preview pane's own); the wrapper's auto scrollbars
+// are what stacked nested scrollbars around the diff view. The pixel truth of
+// both is the preview-env screenshot pass; what is pinned here is the contract
+// the components hand the library.
 describe("editor panel units and scroll surfaces", () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -823,16 +832,56 @@ describe("editor panel units and scroll surfaces", () => {
     vi.unstubAllGlobals()
   })
 
-  it("hands the panel library string percentages, never bare numbers", async () => {
+  it("sizes the explorer in pixels and the content pane in percent", async () => {
     await mountWithTab(PATH)
     const explorer = recordedPanelProps.find((p) => p.id === "editor-explorer")
     const content = recordedPanelProps.find((p) => p.id === "editor-content")
     expect(explorer).toBeTruthy()
     expect(content).toBeTruthy()
-    // A bare number here is pixels and re-opens the sliver-explorer bug.
-    expect(explorer!.defaultSize).toBe("22%")
-    expect(explorer!.minSize).toBe("12%")
+    expect(explorer!.defaultSize).toBe(`${EXPLORER_DEFAULT_SIZE_PX}px`)
+    expect(explorer!.minSize).toBe(`${EXPLORER_MIN_SIZE_PX}px`)
     expect(content!.minSize).toBe("30%")
+    // A percentage here is the bug: it is a different width in each shell.
+    expect(String(explorer!.defaultSize)).not.toContain("%")
+    // And the width must not rescale when the group does, or it would be
+    // container-relative again by another route.
+    expect(explorer!.groupResizeBehavior).toBe("preserve-pixel-size")
+  })
+
+  it("restores a persisted pixel width, so a resize in either shell carries over", async () => {
+    localStorage.setItem(
+      EXPLORER_LAYOUT_KEY,
+      JSON.stringify({ px: 420, collapsed: false }),
+    )
+    await mountWithTab(PATH)
+    const explorer = recordedPanelProps.find((p) => p.id === "editor-explorer")
+    expect(explorer!.defaultSize).toBe("420px")
+  })
+
+  it("ignores a layout left behind by the percentage era instead of exploding", async () => {
+    localStorage.setItem(
+      EXPLORER_LAYOUT_KEY,
+      JSON.stringify({ "editor-explorer": 22, "editor-content": 78 }),
+    )
+    await mountWithTab(PATH)
+    const explorer = recordedPanelProps.find((p) => p.id === "editor-explorer")
+    expect(explorer!.defaultSize).toBe(`${EXPLORER_DEFAULT_SIZE_PX}px`)
+  })
+
+  it("mounts collapsed when that is what was persisted, keeping the width to reopen at", async () => {
+    localStorage.setItem(
+      EXPLORER_LAYOUT_KEY,
+      JSON.stringify({ px: 420, collapsed: true }),
+    )
+    await mountWithTab(PATH)
+    const explorer = recordedPanelProps.find((p) => p.id === "editor-explorer")
+    // The width survives the collapse (it is what reopening restores); the
+    // collapse itself is carried by the group's mount layout, which the
+    // toggle's accessible name reflects from the first frame.
+    expect(explorer!.defaultSize).toBe("420px")
+    expect(
+      await screen.findByRole("button", { name: /show the file explorer/i }),
+    ).toBeTruthy()
   })
 
   it("clips both panel wrappers so panes own their scrolling", async () => {

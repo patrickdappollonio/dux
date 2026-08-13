@@ -1,20 +1,56 @@
-// The editor's resizable-panel layout constants and the collapse-state
-// derivation, kept free of React so they are unit-testable in node.
+// The editor's resizable-panel layout constants, the collapse-state
+// derivation, and the explorer's own persistence, kept free of React so they
+// are unit-testable in node.
 //
-// Persistence is the panel library's own (`useDefaultLayout` +
-// `onLayoutChanged` in EditorOverlay, storing into localStorage under
-// EDITOR_LAYOUT_ID), deliberately not hand-rolled. A Layout is
-// {panelId: percentage}; a collapsible panel collapses to its collapsedSize,
-// which defaults to 0%.
+// THE POINT OF THIS MODULE, in one sentence: the file explorer is the SAME
+// WIDTH in both shells. The editor body composes into two of them, the modal
+// overlay (capped at `min(80rem, 100% - 2rem)`) and the standalone whole-tab
+// surface (uncapped), and a PERCENTAGE means two different widths there: 22%
+// of a capped modal is ~281px while 22% of a 2560px tab is ~563px, the same
+// tree rendered at double the width depending on which door you came in by.
+// So the explorer is sized in PIXELS and only the content pane is relative.
+//
+// UNITS, because the panel library takes both and the reader has to know
+// which is which. react-resizable-panels v4 reads a bare NUMBER as PIXELS
+// (parseSizeAndUnit: number -> "px") and a string as whatever unit it carries
+// (a bare string is a percentage). Every size dux hands it is an EXPLICIT
+// string with its unit spelled out: `"280px"` for the explorer, `"30%"` for
+// the content pane. Never a bare number: it would mean pixels, which is what
+// the explorer wants, but a reader cannot tell a deliberate 280 from the
+// accidental 22 that once mounted the explorer as a 22-pixel sliver.
+//
+// PERSISTENCE is dux's own here, deliberately, and this is a departure from
+// "reuse before invent". The library's `useDefaultLayout` hook persists a
+// `Layout`, and a `Layout` is defined as a map of panel id to PERCENTAGE
+// (0..100) with no unit of its own, so a width stored through it comes back
+// as a fraction of whichever shell wrote it and the two shells disagree again
+// the moment either one is resized. There is no percent value that fixes
+// that. So the explorer's width is stored, in pixels, under dux's own key.
 
+/// The panel group's id. Also the stem of the abandoned library storage key
+/// (see EXPLORER_LAYOUT_KEY).
 export const EDITOR_LAYOUT_ID = "dux-editor-layout"
 export const EXPLORER_PANEL_ID = "editor-explorer"
 export const EDITOR_CONTENT_PANEL_ID = "editor-content"
+
+/// Where the explorer's width and collapse state live.
+///
+/// A key of dux's own rather than the library's. `useDefaultLayout` namespaces
+/// its entry as `react-resizable-panels:dux-editor-layout:<panel ids>`, so the
+/// two can never collide; a value written by the previous, percentage-based
+/// version of this module is simply left behind, unread, and
+/// `parseExplorerLayout` explains what happens to a value in the OLD shape
+/// that does reach it.
+export const EXPLORER_LAYOUT_KEY = "dux-editor-explorer"
 
 // True when the stored/reported layout says the explorer panel is collapsed.
 // Undefined (nothing stored yet) and a layout missing the explorer's entry
 // both read as expanded: the desktop overlay starts expanded, and a stale or
 // foreign layout must never hide the explorer by accident.
+//
+// This still reads the library's percentage `Layout`, because that is what
+// `onLayoutChanged` reports and collapse is the one question a percentage can
+// still answer: a collapsed panel is 0 in every unit.
 export function isExplorerCollapsed(
   layout: { [id: string]: number } | undefined,
 ): boolean {
@@ -27,107 +63,131 @@ export function isExplorerCollapsed(
   return typeof size === "number" && size < 1
 }
 
-// The size the explorer mounts at, and the fallback width the toggle expands
-// to when no expanded width was ever recorded. A NUMBER in the percent domain
-// (0..100) because it is compared/combined with the stored Layout's values,
-// which are percentages.
-export const EXPLORER_DEFAULT_SIZE = 22
+// The width the explorer mounts at when nothing was ever stored, and the
+// fallback the toggle expands to. PIXELS, so the modal and the standalone tab
+// render the same tree: 280px is the measured width of the previous 22% in
+// the capped modal (~281px), which is the shell the explorer was tuned in.
+export const EXPLORER_DEFAULT_SIZE_PX = 280
 
-// The explorer's minimum expanded width and the content pane's minimum width,
-// as percentages of the group (the same domain as the stored Layout).
-export const EXPLORER_MIN_SIZE = 12
+// The explorer's minimum expanded width, in pixels: below roughly this a
+// nested path is all ellipsis and the row actions crowd the name.
+export const EXPLORER_MIN_SIZE_PX = 200
+
+// The content pane's minimum width, still a PERCENTAGE of the group. It is
+// the relative half of the pair (the library requires at least one panel that
+// preserves its relative size when the group resizes) and it is also what
+// caps the phone expand target below.
 export const EDITOR_CONTENT_MIN_SIZE = 30
 
-// The values actually handed to the Panel PROPS (defaultSize/minSize). STRING
-// percentages on purpose: react-resizable-panels v4 reads a bare NUMBER as
-// PIXELS (parseSizeAndUnit: number -> "px"; only a string is a percentage),
-// so `defaultSize={22}` mounted the explorer ~22px wide, the sliver-explorer
-// bug. Never pass the numeric twins to a panel prop.
-export const EXPLORER_DEFAULT_SIZE_PROP = `${EXPLORER_DEFAULT_SIZE}%`
-export const EXPLORER_MIN_SIZE_PROP = `${EXPLORER_MIN_SIZE}%`
+// The values actually handed to the Panel PROPS (defaultSize/minSize).
+// Explicit units on every one; see the units note in this file's header for
+// why never a bare number.
+export const EXPLORER_DEFAULT_SIZE_PROP = `${EXPLORER_DEFAULT_SIZE_PX}px`
+export const EXPLORER_MIN_SIZE_PROP = `${EXPLORER_MIN_SIZE_PX}px`
 export const EDITOR_CONTENT_MIN_SIZE_PROP = `${EDITOR_CONTENT_MIN_SIZE}%`
 
-// Repair for layouts persisted while the pixel-unit bug was live: with
-// `defaultSize={22}` read as 22px, `useDefaultLayout` stored the resulting
-// sliver (~2% on a typical group) into localStorage, so fixing the props
-// alone would keep restoring the sliver on every open. An explorer entry
-// that is "expanded" (past isExplorerCollapsed's epsilon) yet below the
-// minimum size cannot come from a live drag (the library clamps a drag to
-// minSize or snaps it to collapsed), so it can only be that artifact, and
-// the whole stored layout is dropped so the mount falls back to the string
-// default sizes. Honest layouts (collapsed, at/above minimum, or missing the
-// entry entirely) pass through by reference.
-export function sanitizeEditorLayout(
-  layout: { [id: string]: number } | undefined,
-): { [id: string]: number } | undefined {
-  if (!layout) return undefined
-  const size = layout[EXPLORER_PANEL_ID]
-  if (typeof size === "number" && size >= 1 && size < EXPLORER_MIN_SIZE) {
-    return undefined
-  }
-  // A sub-1% nonzero entry READS as collapsed (isExplorerCollapsed's
-  // epsilon), but handed to the group as a defaultLayout it renders as a
-  // literal 0.5%-ish flex-grow: a few-pixel sliver that is neither hidden
-  // nor usable, with the toggle saying "Show". The library only ever
-  // persists exactly 0 for a real collapse, so anything in (0, 1) is float
-  // slop or a foreign artifact; snap it to a true 0 and keep the layout's
-  // sum intact so the group still accepts it.
-  if (typeof size === "number" && size > 0 && size < 1) {
-    const out: { [id: string]: number } = { ...layout, [EXPLORER_PANEL_ID]: 0 }
-    const content = layout[EDITOR_CONTENT_PANEL_ID]
-    if (typeof content === "number") {
-      out[EDITOR_CONTENT_PANEL_ID] = parseFloat((content + size).toFixed(3))
-    }
-    return out
-  }
-  return layout
+/// What dux persists about the explorer: the width it had while expanded, in
+/// pixels, and whether it is currently collapsed. The two are independent on
+/// purpose, so collapsing and reopening restores the width rather than the
+/// minimum.
+export interface StoredExplorerLayout {
+  px: number
+  collapsed: boolean
 }
 
-// The layout handed to the panel group at mount: the (sanitized) stored
-// layout, except when the surface starts with the explorer collapsed (a
-// phone standalone open), where the explorer must MOUNT collapsed. A
+// Read the stored explorer layout out of a raw storage value.
+//
+// MIGRATION. Anything that is not this exact shape is DISCARDED and the
+// explorer falls back to its default width. That includes every layout
+// persisted by the previous percentage-based version of this module (both the
+// library's `{"editor-explorer,editor-content": {layout: [22, 78]}}` under its
+// own namespaced key and a bare `{"editor-explorer": 22}`). Discarded rather
+// than converted, because a percentage cannot be turned into a pixel width
+// without the width of the group that produced it, that group belonged to
+// whichever shell happened to write it last, and preferring one shell's
+// arithmetic is exactly the bug the pixel switch exists to remove. The cost of
+// discarding is one explorer that opens at 280px and is dragged once.
+export function parseExplorerLayout(
+  raw: string | null | undefined,
+): StoredExplorerLayout | null {
+  if (!raw) return null
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return null
+  }
+  if (typeof parsed !== "object" || parsed === null) return null
+  const { px, collapsed } = parsed as { px?: unknown; collapsed?: unknown }
+  if (typeof px !== "number" || !Number.isFinite(px) || px <= 0) return null
+  if (typeof collapsed !== "boolean") return null
+  return { px, collapsed }
+}
+
+/// The value written back to storage.
+export function serializeExplorerLayout(state: StoredExplorerLayout): string {
+  return JSON.stringify({ px: state.px, collapsed: state.collapsed })
+}
+
+// The `defaultSize` the explorer panel mounts with: the stored pixel width, or
+// the pixel default when nothing honest was stored. A stored width BELOW the
+// minimum cannot come from a live drag (the library clamps a drag to minSize
+// or snaps it to collapsed), so it is an artifact and the default is used
+// instead.
+export function explorerMountSize(
+  stored: StoredExplorerLayout | null,
+): string {
+  if (stored === null || stored.px < EXPLORER_MIN_SIZE_PX) {
+    return EXPLORER_DEFAULT_SIZE_PROP
+  }
+  return `${stored.px}px`
+}
+
+// The layout handed to the panel group at mount. It exists for ONE case:
+// starting COLLAPSED, where the explorer must mount at a true zero. A
 // defaultLayout override rather than only an imperative `panel.collapse()`
 // from a mount effect: mounting collapsed leaves no frame where the panel
-// renders expanded, cannot race the library's own deferred initial layout,
-// and wins over an expanded layout persisted by a desktop visit sharing the
-// same localStorage key.
+// renders expanded and cannot race the library's own deferred initial layout.
+// Every other case returns undefined, letting the panel's pixel `defaultSize`
+// decide the width; a percentage layout could not express it.
 export function editorMountLayout(
-  stored: { [id: string]: number } | undefined,
   startCollapsed: boolean,
 ): { [id: string]: number } | undefined {
-  if (!startCollapsed) return stored
+  if (!startCollapsed) return undefined
   return { [EXPLORER_PANEL_ID]: 0, [EDITOR_CONTENT_PANEL_ID]: 100 }
 }
 
-// Fold a layout report into the last-expanded-width memory: an expanded
-// layout records the explorer's current size; a collapsed layout (or one
-// missing the entry) keeps the previous memory rather than recording the
-// collapsed 0%.
-export function lastExpandedExplorerSize(
-  layout: { [id: string]: number } | undefined,
+// Fold a reported pixel width into the last-expanded-width memory. A width
+// that is not a usable number, or one below the minimum, keeps the previous
+// memory: the panel reports 0 while collapsed, and it reports 0 in jsdom,
+// where nothing has a width at all, and neither is a width the user chose.
+export function nextExpandedExplorerPx(
+  reported: number | null | undefined,
   prev: number | null,
 ): number | null {
-  if (!layout || isExplorerCollapsed(layout)) return prev
-  const size = layout[EXPLORER_PANEL_ID]
-  return typeof size === "number" ? size : prev
+  if (typeof reported !== "number" || !Number.isFinite(reported)) return prev
+  const px = Math.round(reported)
+  if (px < EXPLORER_MIN_SIZE_PX) return prev
+  return px
 }
 
 // What the toggle passes to `panel.resize()` when opening a collapsed
-// explorer. A string percentage on purpose: the imperative handle reads a
-// bare number as PIXELS. `panel.expand()` is not used because it falls back
-// to minSize when no in-memory expand size exists (a fresh page load after
-// collapsing), which would open the explorer at a 12% sliver.
+// explorer. A string with its unit on purpose (a bare number would be pixels
+// by accident rather than by decision). `panel.expand()` is not used because
+// it falls back to minSize when no in-memory expand size exists (a fresh page
+// load after collapsing), which would open the explorer at the minimum.
 //
-// On a phone the remembered/default width is ignored entirely: the memory on
-// the shared localStorage key is usually a desktop-sized 22%, which at 390px
-// is an ~86px tree (measured; technically open, practically unusable). The
-// phone target is 100% minus the content pane's minimum — the widest width
-// the group's constraints permit (70% ≈ 273px at 390px), chosen because
-// anything larger is clamped back by EDITOR_CONTENT_MIN_SIZE anyway.
+// On a phone the remembered/default width is ignored entirely and the target
+// stays a PERCENTAGE: a fixed 280px on a 390px viewport leaves the content
+// pane 110px, and the point of the pixel width (two shells, one width) does
+// not apply to a viewport that has no room for it. The phone target is 100%
+// minus the content pane's minimum, the widest width the group's constraints
+// permit (70% ≈ 273px at 390px), chosen because anything larger is clamped
+// back by EDITOR_CONTENT_MIN_SIZE anyway.
 export function explorerExpandTarget(
-  lastExpanded: number | null,
+  lastExpandedPx: number | null,
   mobile = false,
 ): string {
   if (mobile) return `${100 - EDITOR_CONTENT_MIN_SIZE}%`
-  return `${lastExpanded ?? EXPLORER_DEFAULT_SIZE}%`
+  return `${lastExpandedPx ?? EXPLORER_DEFAULT_SIZE_PX}px`
 }

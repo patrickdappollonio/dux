@@ -3,6 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { cleanup, fireEvent, render, screen } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
+import {
+  EXPLORER_DEFAULT_SIZE_PX,
+  EXPLORER_MIN_SIZE_PX,
+} from "@/lib/editorLayout"
 
 // The standalone editor surface: a whole browser tab that is nothing but the
 // editor (plan (b)). What is pinned here: the shell composes EditorBody (the
@@ -61,6 +65,23 @@ function codeEditorStub() {
 }
 vi.mock("@/components/CodeEditor", codeEditorStub)
 vi.mock("./CodeEditor", codeEditorStub)
+
+// Panel props recorded at render time. This shell is the UNCAPPED half of the
+// width question: the overlay's DialogContent caps at min(80rem, 100%-2rem)
+// and this one fills the tab, so a PERCENTAGE explorer was ~281px there and
+// ~563px here. The assertion is that both shells hand the library the same
+// pixel sizes; its twin lives in EditorOverlay.test.tsx, against the same
+// constants. The real Panel still renders (spread actual).
+const recordedPanelProps: Array<Record<string, unknown>> = []
+vi.mock("react-resizable-panels", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("react-resizable-panels")>()
+  const Panel = (props: Parameters<typeof actual.Panel>[0]) => {
+    recordedPanelProps.push(props as unknown as Record<string, unknown>)
+    return <actual.Panel {...props} />
+  }
+  return { ...actual, Panel }
+})
 
 vi.mock("sonner", () => ({
   toast: Object.assign(vi.fn(), {
@@ -256,6 +277,23 @@ describe("the standalone editor shell", () => {
     expect(
       await screen.findByRole("menuitem", { name: /show preview/i }),
     ).toBeTruthy()
+  })
+
+  it("gives the explorer the same pixel width the modal shell gives it", async () => {
+    recordedPanelProps.length = 0
+    await seedState({})
+    const { StandaloneEditorShell } = await import(
+      "@/components/StandaloneEditor"
+    )
+    render(<StandaloneEditorShell />)
+    await screen.findByTestId("code-editor")
+    const explorer = recordedPanelProps.find((p) => p.id === "editor-explorer")
+    expect(explorer).toBeTruthy()
+    expect(explorer!.defaultSize).toBe(`${EXPLORER_DEFAULT_SIZE_PX}px`)
+    expect(explorer!.minSize).toBe(`${EXPLORER_MIN_SIZE_PX}px`)
+    // The whole point: no percentage, because this shell is a different width
+    // from the modal and a percentage would resolve differently in each.
+    expect(String(explorer!.defaultSize)).not.toContain("%")
   })
 
   it("renders the not-found screen when the address names a vanished agent", async () => {
