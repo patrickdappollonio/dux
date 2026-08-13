@@ -47,7 +47,7 @@ import {
 import { worktreeDeleteReport } from "./worktreeDelete"
 import { attentionCount, formatTabTitle } from "./attention"
 import { applyAttentionFavicon } from "./favicon"
-import { resolveInstanceTitle } from "./instanceTitle"
+import { pageTitle, resolveInstanceTitle } from "./instanceTitle"
 import { type Spine, fetchSpine } from "./spineApi"
 import { resolveFocusedTab, shouldRefireFocusPut } from "./agentTabs"
 import {
@@ -1345,7 +1345,10 @@ function applyBootstrap(b: Bootstrap): void {
 function refreshAttentionChrome(): void {
   if (typeof document === "undefined") return
   const count = attentionCount(state.spine?.sessions ?? [])
-  const base = resolveInstanceTitle(state.bootstrap?.title)
+  const base = pageTitle(
+    resolveInstanceTitle(state.bootstrap?.title),
+    state.standaloneEditor,
+  )
   document.title = formatTabTitle(base, count)
   applyAttentionFavicon(state.bootstrap?.favicon, count > 0)
 }
@@ -2254,6 +2257,10 @@ function applyUrlRoute(): void {
   // swap surfaces with no code of its own.
   if (route.standalone !== state.standaloneEditor) {
     setState({ standaloneEditor: route.standalone })
+    // The tab title carries an "Editor" prefix on the standalone surface, so
+    // it must re-render the moment the surface bit flips (the other refresh
+    // triggers are spine applies and bootstraps, which need not coincide).
+    refreshAttentionChrome()
   }
   const spine = state.spine
   if (!spine) {

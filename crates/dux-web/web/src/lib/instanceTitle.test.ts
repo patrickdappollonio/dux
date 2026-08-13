@@ -1,6 +1,20 @@
 import { describe, expect, it } from "vitest"
 
-import { DEFAULT_INSTANCE_TITLE, resolveInstanceTitle } from "./instanceTitle"
+import {
+  DEFAULT_INSTANCE_TITLE,
+  pageTitle,
+  resolveInstanceTitle,
+} from "./instanceTitle"
+
+describe("pageTitle", () => {
+  it("prefixes the standalone editor tab so it reads as its own surface", () => {
+    expect(pageTitle("dux @ devbox", true)).toBe("Editor — dux @ devbox")
+  })
+
+  it("leaves the workspace tab's title as the instance title alone", () => {
+    expect(pageTitle("dux @ devbox", false)).toBe("dux @ devbox")
+  })
+})
 
 describe("resolveInstanceTitle", () => {
   it("returns a configured title verbatim", () => {

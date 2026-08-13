@@ -15,3 +15,15 @@ export function resolveInstanceTitle(raw: string | null | undefined): string {
   const normalized = (raw ?? "").replace(/[\r\n\t]+/g, " ").trim()
   return normalized === "" ? DEFAULT_INSTANCE_TITLE : normalized
 }
+
+/**
+ * The browser-tab title for the current surface. The workspace tab is simply
+ * the instance title; the standalone editor tab prefixes "Editor" so the two
+ * tabs can be told apart in a tab strip full of dux instances. The separator
+ * is an em dash by the maintainer's explicit choice for this one string.
+ * The attention-count prefix (formatTabTitle) wraps OUTSIDE this, so a
+ * flagged agent still surfaces in the editor tab's title.
+ */
+export function pageTitle(base: string, standaloneEditor: boolean): string {
+  return standaloneEditor ? `Editor — ${base}` : base
+}
