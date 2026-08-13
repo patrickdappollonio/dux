@@ -2399,6 +2399,60 @@ describe("TerminalPane typing surfaces follow the pointer, not the layout", () =
   })
 })
 
+// THE CARET STAYS SOLID WHILE THE COMPOSE BAR HOLDS FOCUS. xterm is never
+// focused in that mode by design, so its unfocused caret is the only one the
+// user ever sees, and the conventional hollow outline says "asleep" about a
+// live prompt. The option follows the state, because the Box/Direct toggle
+// flips it mid-session.
+describe("TerminalPane inactive cursor style", () => {
+  let pointerStub: MatchMediaStub | null = null
+
+  beforeEach(async () => {
+    const mod = await import("@/lib/typingSurface")
+    mod.setTypingSurface(null)
+  })
+  afterEach(() => {
+    pointerStub?.restore()
+    pointerStub = null
+  })
+
+  it("opens solid when the compose bar is the typing surface", async () => {
+    pointerStub = stubCoarsePointer(true)
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    await act(async () => {})
+    expect(TermStub.instances.at(-1)!.options.cursorInactiveStyle).toBe("block")
+  })
+
+  it("opens with the conventional outline when it is not", async () => {
+    pointerStub = stubCoarsePointer(false)
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    await act(async () => {})
+    expect(TermStub.instances.at(-1)!.options.cursorInactiveStyle).toBe(
+      "outline",
+    )
+  })
+
+  it("follows the typing-surface toggle on the SAME terminal", async () => {
+    pointerStub = stubCoarsePointer(true)
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    await act(async () => {})
+    const term = TermStub.instances.at(-1)!
+    expect(term.options.cursorInactiveStyle).toBe("block")
+
+    // Direct typing: xterm gets focus again, so the convention comes back.
+    fireEvent.pointerDown(
+      screen.getByRole("button", { name: /^Typing surface:/ }),
+    )
+    expect(TermStub.instances.at(-1)).toBe(term)
+    expect(term.options.cursorInactiveStyle).toBe("outline")
+
+    fireEvent.pointerDown(
+      screen.getByRole("button", { name: /^Typing surface:/ }),
+    )
+    expect(term.options.cursorInactiveStyle).toBe("block")
+  })
+})
+
 // THE COMPOSE BOX SAYS WHAT IT IS FOR. An agent pane is a conversation, not a
 // shell: prompting for a command there described the wrong activity. Every
 // non-agent PTY surface (companion, project and standalone terminals alike) is

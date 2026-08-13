@@ -17,6 +17,7 @@ import {
   composeSendWrites,
   composeBarMode,
   composeBarShown,
+  inactiveCursorStyle,
   insertIntoComposeDraft,
   touchSurfacesApply,
   typingSurfaceToggleOffered,
@@ -507,6 +508,18 @@ export function TerminalPane(props: TerminalPaneProps) {
   useEffect(() => {
     composeActiveRef.current = composeBarEnabled
   }, [composeBarEnabled])
+  // Keep an OPEN terminal's unfocused-caret style in step with the typing
+  // surface. The Box/Direct toggle and a preference flip both change the
+  // answer mid-session, and xterm options are mutable in place (verified
+  // against the installed 6.0.0: only `cols` and `rows` are read-only), so
+  // this never touches the terminal's identity. Before the mount effect has
+  // run `termRef` is null and this is a no-op; the mount reads the same helper
+  // through the ref above, so a remount opens with the right value.
+  useEffect(() => {
+    const term = termRef.current
+    if (!term) return
+    term.options.cursorInactiveStyle = inactiveCursorStyle(composeBarEnabled)
+  }, [composeBarEnabled])
   // The compose textarea, owned by ComposeBar but targeted from here: the
   // tap-to-focus redirect and the scroll-gesture keyboard dismissal both need
   // to focus/blur it from outside the component.
@@ -893,6 +906,13 @@ export function TerminalPane(props: TerminalPaneProps) {
       fontFamily,
       fontSize,
       cursorBlink: true,
+      // The unfocused caret. With the compose bar up xterm never holds focus,
+      // so this is the ONLY caret that client ever renders; see
+      // `inactiveCursorStyle` for why that flips it off the default outline.
+      // Read from the ref because this mount effect is stable per target; the
+      // dedicated effect below keeps an OPEN terminal in step with the live
+      // value.
+      cursorInactiveStyle: inactiveCursorStyle(composeActiveRef.current),
       convertEol: false,
       scrollback: scrollbackRef.current,
       // One wheel notch = 3 lines of local scrollback (see the constant's doc).

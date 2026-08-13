@@ -9,6 +9,7 @@ import {
   composeBarVisible,
   composeBarShown,
   insertIntoComposeDraft,
+  inactiveCursorStyle,
   touchSurfacesApply,
   typingSurfaceToggleOffered,
 } from "./composebar"
@@ -275,5 +276,21 @@ describe("typingSurfaceToggleOffered", () => {
     expect(typingSurfaceToggleOffered("auto", false)).toBe(false)
     expect(typingSurfaceToggleOffered("always", true)).toBe(false)
     expect(typingSurfaceToggleOffered("never", true)).toBe(false)
+  })
+})
+
+describe("inactiveCursorStyle", () => {
+  // With the compose bar up, xterm NEVER holds focus (the textarea does), so
+  // its unfocused cursor is what the user looks at for the whole session. The
+  // hollow outline reads as "this terminal is asleep" when it is in fact the
+  // live prompt, so that mode gets a solid block.
+  it("is a solid block while the compose bar is the typing surface", () => {
+    expect(inactiveCursorStyle(true)).toBe("block")
+  })
+
+  // Direct typing focuses xterm, so its unfocused cursor means what it means
+  // in any real terminal: focus is elsewhere. Leave the convention alone.
+  it("keeps the conventional outline when typing goes straight to xterm", () => {
+    expect(inactiveCursorStyle(false)).toBe("outline")
   })
 })

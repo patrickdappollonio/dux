@@ -212,3 +212,25 @@ export function typingSurfaceToggleOffered(
 ): boolean {
   return mode === "auto" && touchSurfacesApply(mode, coarsePointer)
 }
+
+/**
+ * The cursor style xterm should paint while it does NOT have focus.
+ *
+ * Verified against the installed @xterm/xterm 6.0.0: `cursorInactiveStyle`
+ * accepts 'outline' | 'block' | 'bar' | 'underline' | 'none', defaults to
+ * 'outline', and is not in the read-only option list (only `cols` and `rows`
+ * are), so it can be reassigned on a live terminal.
+ *
+ * The compose bar changes what "unfocused" MEANS. Normally an unfocused
+ * terminal is one you are not typing at, and every real emulator hollows the
+ * caret to say so. With the compose bar up, xterm is never focused by design
+ * (the textarea holds focus for the whole session) while the prompt on screen
+ * is the live one, so the outline states something false all the time. That
+ * mode gets the solid block; direct typing keeps the convention, because there
+ * the unfocused caret means exactly what it says.
+ */
+export function inactiveCursorStyle(
+  composeBarActive: boolean
+): "block" | "outline" {
+  return composeBarActive ? "block" : "outline"
+}

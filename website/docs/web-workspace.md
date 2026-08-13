@@ -323,7 +323,10 @@ into a terminal gives a phone keyboard nothing to fix. Enter adds a newline
 instead of submitting, so multi-line prompts read the way you wrote them; Send
 delivers the whole message and presses Enter for you, and an empty Send is a
 plain Enter for confirming menus and prompts. Tapping the terminal drops you into
-the compose box (a refused send keeps your draft and tells you why).
+the compose box (a refused send keeps your draft and tells you why). Because the
+box holds the keyboard focus the whole time, the terminal's own caret stays a
+solid block rather than hollowing out the way an unfocused terminal normally
+would: the prompt you are writing to should not look asleep.
 
 Whether the compose bar appears is the `ui.compose_bar` setting, a Preferences
 row with three values. **Automatic** (the default) asks your browser whether you
