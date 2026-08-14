@@ -1722,6 +1722,8 @@ impl App {
         self.prompt = PromptState::ConfirmDeleteAgent {
             session_id: session.id.clone(),
             branch_name: session.branch_name.clone(),
+            initial_branch: session.initial_branch.clone(),
+            branch_provenance: session.branch_provenance,
             focus: DeleteAgentFocus::Cancel, // Cancel is the safe default
             delete_worktree: false,          // Opt-in destructive action
             worktree_shared,

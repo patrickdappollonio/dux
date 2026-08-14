@@ -79,6 +79,59 @@ describe("DeleteSessionDialog", () => {
     ).toBeTruthy()
   })
 
+  it("says the branch is kept when the agent attached to one it did not create", () => {
+    // Promising to delete a branch dux will deliberately keep is the same class
+    // of bug from the other direction: the dialog has to describe what happens.
+    seed("s3", [
+      {
+        id: "s3",
+        title: "attached",
+        branch_name: "develop",
+        initial_branch: "develop",
+        branch_provenance: "attached",
+      },
+    ])
+    render(<DeleteSessionDialog />)
+    expect(
+      screen.getByRole("checkbox", {
+        name: "Also delete the git worktree, keeping its branch (irreversible)",
+      }),
+    ).toBeTruthy()
+    expect(
+      screen.getByText(/existed before this agent, so dux keeps it/),
+    ).toBeTruthy()
+  })
+
+  it("says an adopted branch came with its worktree", () => {
+    seed("s4", [
+      {
+        id: "s4",
+        title: "adopted",
+        branch_name: "main",
+        initial_branch: "main",
+        branch_provenance: "adopted",
+      },
+    ])
+    render(<DeleteSessionDialog />)
+    expect(
+      screen.getByText(
+        /came with the worktree this agent adopted, so dux keeps it/,
+      ),
+    ).toBeTruthy()
+  })
+
+  it("keeps the branch-deleting copy for a server too old to say", () => {
+    // An older server omits the field and deletes the branch either way, so the
+    // absent case must not quietly promise the safer behavior.
+    seed("s1", [session1])
+    render(<DeleteSessionDialog />)
+    expect(
+      screen.getByRole("checkbox", {
+        name: "Also delete the git worktree and its branch (irreversible)",
+      }),
+    ).toBeTruthy()
+  })
+
   it("calls closeDelete when the session vanishes mid-open", () => {
     seed("s1", [session1])
     const { rerender } = render(<DeleteSessionDialog />)

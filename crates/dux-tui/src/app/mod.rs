@@ -1573,6 +1573,14 @@ pub(crate) enum PromptState {
     ConfirmDeleteAgent {
         session_id: String,
         branch_name: String,
+        /// The branch the agent was born on, needed by the copy: when it differs
+        /// from `branch_name` the agent drifted, and a kept-branch delete keeps
+        /// both of them.
+        initial_branch: String,
+        /// Where the branch came from. Decides whether the checkbox promises to
+        /// delete the branch or to keep it (see
+        /// [`super::render::delete_agent_checkbox_label`]).
+        branch_provenance: dux_core::model::BranchProvenance,
         focus: DeleteAgentFocus,
         delete_worktree: bool,
         /// True when one or more other sessions share this worktree. In that

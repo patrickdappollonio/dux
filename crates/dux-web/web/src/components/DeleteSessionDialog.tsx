@@ -17,6 +17,13 @@ export function DeleteSessionDialog() {
 
   const session = spine?.sessions.find((s) => s.id === deleteTarget)
   const name = session?.title || session?.branch_name
+  // dux force-deletes the branch only when dux created it. An agent attached to
+  // an existing branch, or adopted along with an existing worktree, gives up its
+  // worktree and keeps its branch, so the checkbox must not promise otherwise.
+  // A server too old to send the field is a server that deletes the branch, so
+  // the absent case takes the branch-deleting copy.
+  const provenance = session?.branch_provenance ?? "created"
+  const branchIsKept = provenance !== "created"
   // The component stays mounted across opens, so a vanish-close must also
   // reset the checkbox, otherwise the NEXT delete confirm opens pre-checked
   // with "also delete the worktree". Wrap the hook's close callback to do both.
@@ -64,9 +71,21 @@ export function DeleteSessionDialog() {
             {/* The branch is named because this path deletes it: the agent's
                current branch and, when it drifted, the one it was born on. The
                TUI's checkbox has always said so. */}
-            Also delete the git worktree and its branch (irreversible)
+            {branchIsKept
+              ? "Also delete the git worktree, keeping its branch (irreversible)"
+              : "Also delete the git worktree and its branch (irreversible)"}
           </label>
         </div>
+        {branchIsKept && (
+          <p className="text-sm text-muted-foreground">
+            The branch &ldquo;{session?.initial_branch || session?.branch_name}
+            &rdquo;{" "}
+            {provenance === "adopted"
+              ? "came with the worktree this agent adopted"
+              : "existed before this agent"}
+            , so dux keeps it.
+          </p>
+        )}
         <div className="h-2" />
         <DialogFooter>
           <Button variant="outline" onClick={handleCancel}>

@@ -159,6 +159,13 @@ export interface SessionView {
    * this never changes after creation, so the UI can flag when the current branch
    * has drifted from the original. */
   initial_branch: string
+  /** Where the branch came from, which decides whether deleting the agent may
+   * delete the branch: dux created it, the agent attached to a branch that
+   * already existed, or it was adopted along with an existing worktree. An older
+   * server omits it, and an older server is one that deletes the branch either
+   * way, so a missing value reads as "created": the copy must describe what the
+   * server it is talking to will actually do. */
+  branch_provenance?: "created" | "attached" | "adopted"
   /** The branch this agent was forked from (the leading branch at creation). */
   source_branch: string
   worktree_path: string

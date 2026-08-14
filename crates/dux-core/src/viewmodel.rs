@@ -439,6 +439,10 @@ pub struct SessionView {
     /// `branch_name` (the current branch, which tracks the worktree). When they
     /// differ the current branch has drifted since creation.
     pub initial_branch: String,
+    /// Where the agent's branch came from ("created" | "attached" | "adopted"),
+    /// which decides whether deleting the agent may delete the branch. The
+    /// delete dialog's copy turns on it.
+    pub branch_provenance: String,
     /// The branch this agent was forked from (its fork point / leading branch).
     pub source_branch: String,
     pub worktree_path: String,
@@ -860,6 +864,7 @@ impl SessionView {
             provider: s.provider.as_str().to_string(),
             branch_name: s.branch_name.clone(),
             initial_branch: s.initial_branch.clone(),
+            branch_provenance: s.branch_provenance.as_str().to_string(),
             source_branch: s.source_branch.clone(),
             worktree_path: s.worktree_path.clone(),
             status: s.status.as_str().to_string(),
@@ -1352,6 +1357,22 @@ mod tests {
         assert_eq!(view.branch_name, "cur");
         assert_eq!(view.initial_branch, "orig");
         assert_eq!(view.source_branch, "main");
+    }
+
+    #[test]
+    fn session_view_carries_branch_provenance_for_the_delete_dialog() {
+        // The browser's delete confirm has to say whether the branch goes or
+        // stays, so the projection has to tell it which kind of agent this is.
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/repo"));
+        let mut s = sample_session("s1", "p1", "develop");
+        s.branch_provenance = crate::model::BranchProvenance::AttachedExisting;
+        engine.sessions.push(s);
+
+        let view = &engine.spine().sessions[0];
+        assert_eq!(view.branch_provenance, "attached");
+        let json = serde_json::to_value(view).expect("serialize");
+        assert_eq!(json["branch_provenance"], "attached");
     }
 
     #[test]

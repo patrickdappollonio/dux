@@ -18050,6 +18050,8 @@ cyan = "#00ffff"
         app.prompt = PromptState::ConfirmDeleteAgent {
             session_id: app.engine.sessions[0].id.clone(),
             branch_name: app.engine.sessions[0].branch_name.clone(),
+            initial_branch: "wt-branch".to_string(),
+            branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
             focus: DeleteAgentFocus::Cancel,
             delete_worktree: false,
             worktree_shared: false,
@@ -20026,6 +20028,8 @@ cyan = "#00ffff"
         app.prompt = PromptState::ConfirmDeleteAgent {
             session_id: app.engine.sessions[0].id.clone(),
             branch_name: app.engine.sessions[0].branch_name.clone(),
+            initial_branch: "wt-branch".to_string(),
+            branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
             focus: DeleteAgentFocus::Cancel,
             delete_worktree: false,
             worktree_shared: false,
@@ -20045,6 +20049,8 @@ cyan = "#00ffff"
         app.prompt = PromptState::ConfirmDeleteAgent {
             session_id: app.engine.sessions[0].id.clone(),
             branch_name: app.engine.sessions[0].branch_name.clone(),
+            initial_branch: "wt-branch".to_string(),
+            branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
             focus: DeleteAgentFocus::Cancel,
             delete_worktree: false,
             worktree_shared: false,
@@ -20075,6 +20081,8 @@ cyan = "#00ffff"
         app.prompt = PromptState::ConfirmDeleteAgent {
             session_id: app.engine.sessions[0].id.clone(),
             branch_name: app.engine.sessions[0].branch_name.clone(),
+            initial_branch: "wt-branch".to_string(),
+            branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
             focus: DeleteAgentFocus::Cancel,
             delete_worktree: false,
             worktree_shared: false,
@@ -20119,6 +20127,8 @@ cyan = "#00ffff"
         app.prompt = PromptState::ConfirmDeleteAgent {
             session_id: app.engine.sessions[0].id.clone(),
             branch_name: app.engine.sessions[0].branch_name.clone(),
+            initial_branch: "wt-branch".to_string(),
+            branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
             focus: DeleteAgentFocus::Cancel,
             delete_worktree: false,
             worktree_shared: false,
@@ -20159,6 +20169,8 @@ cyan = "#00ffff"
         app.prompt = PromptState::ConfirmDeleteAgent {
             session_id: app.engine.sessions[0].id.clone(),
             branch_name: app.engine.sessions[0].branch_name.clone(),
+            initial_branch: "wt-branch".to_string(),
+            branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
             focus: DeleteAgentFocus::Cancel,
             delete_worktree: false,
             worktree_shared: false,
@@ -28781,6 +28793,8 @@ cyan = "#00ffff"
         app.prompt = PromptState::ConfirmDeleteAgent {
             session_id: "s1".to_string(),
             branch_name: "b".to_string(),
+            initial_branch: "wt-branch".to_string(),
+            branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
             focus: DeleteAgentFocus::Cancel,
             delete_worktree: false,
             worktree_shared: false,

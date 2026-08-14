@@ -972,6 +972,8 @@ mod tests {
                 PromptState::ConfirmDeleteAgent {
                     session_id: "s1".to_string(),
                     branch_name: "b".to_string(),
+                    initial_branch: "wt-branch".to_string(),
+                    branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
                     focus: DeleteAgentFocus::Cancel,
                     delete_worktree: false,
                     worktree_shared: false,
