@@ -52,7 +52,6 @@ pub enum Action {
     SelectTab7,
     SelectTab8,
     SelectTab9,
-    ExitInteractive,
     OpenMacroBar,
     OpenCurrentPullRequest,
     AttachPullRequest,
@@ -230,7 +229,6 @@ impl Action {
             Action::SelectTab7 => "select_tab_7",
             Action::SelectTab8 => "select_tab_8",
             Action::SelectTab9 => "select_tab_9",
-            Action::ExitInteractive => "exit_interactive",
             Action::OpenMacroBar => "open_macro_bar",
             Action::OpenCurrentPullRequest => "open_current_pull_request",
             Action::AttachPullRequest => "attach_pull_request",
@@ -392,9 +390,6 @@ impl Action {
             Action::NewProjectTerminal => "Open a terminal for a project you pick.",
             Action::NewStandaloneTerminal => {
                 "Open a standalone terminal in your home directory, belonging to no project or agent."
-            }
-            Action::ExitInteractive => {
-                "Minimize the fullscreen agent pane. Unbound by default: the fullscreen toggle covers both directions, and this name is kept so existing custom binds keep working."
             }
             Action::OpenMacroBar => {
                 "Open the macro command bar to send text macros. Works over the windowed agent pane and in fullscreen."
@@ -574,8 +569,7 @@ impl Action {
             | Action::DeleteSession
             | Action::DeleteTerminal => Some("Projects pane"),
             Action::NewAgentFromPr | Action::ManageProjects | Action::ManageWorktrees => None,
-            Action::ExitInteractive
-            | Action::OpenMacroBar
+            Action::OpenMacroBar
             | Action::OpenCurrentPullRequest
             | Action::ToggleFullscreen
             | Action::ScrollPageUp

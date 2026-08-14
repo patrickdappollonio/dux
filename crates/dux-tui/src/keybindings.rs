@@ -590,24 +590,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         hint_contexts: &[],
     },
     BindingDef {
-        // The documented alias for "minimize": it keeps its config name and
-        // its action so custom binds keep working, but it has NO default keys
-        // anymore. Ctrl-g moved to `ToggleFullscreen`, which owns the
-        // fullscreen toggle in both directions.
-        action: Action::ExitInteractive,
-        default_keys: &[],
-        scopes: &[
-            BindingScope::Interactive,
-            BindingScope::Center,
-            BindingScope::Left,
-        ],
-        help: Some(HelpEntry {
-            section: "Agent pane",
-            description: "Minimize the fullscreen agent pane",
-        }),
-        hint_contexts: &[],
-    },
-    BindingDef {
         // Center scope (decision 4): the chord also opens the bar over the
         // minimized typeable pane; being a chord, the typing bypass never
         // swallows it.
@@ -649,9 +631,10 @@ pub const BINDING_DEFS: &[BindingDef] = &[
     BindingDef {
         // The fullscreen toggle. In the Center scope it maximizes the focused
         // agent (launching a dormant tab fullscreen-seeking); in Interactive
-        // scope its byte pattern minimizes, same as `ExitInteractive`; in the
-        // Left scope it reopens fullscreen for a live selected agent without
-        // launching a dormant one.
+        // scope its byte pattern minimizes; in the Left scope it reopens
+        // fullscreen for a live selected agent without launching a dormant
+        // one. It absorbed the retired `exit_interactive` action, whose
+        // bindings the config loader folds into this one.
         action: Action::ToggleFullscreen,
         default_keys: &[key!(ctrl - g)],
         scopes: &[
@@ -2303,16 +2286,11 @@ mod tests {
     }
 
     /// An action that ships with no default key but still carries a help entry
-    /// (ExitInteractive, the unbound minimize alias) must not render a broken
-    /// row with an empty key badge: `help_sections` skips label-less entries.
+    /// (SelectTab4) must not render a broken row with an empty key badge:
+    /// `help_sections` skips label-less entries.
     #[test]
     fn help_sections_skips_unbound_actions_instead_of_rendering_empty_keys() {
         let bindings = default_bindings();
-        assert_eq!(
-            bindings.labels_for(Action::ExitInteractive),
-            "",
-            "fixture: exit_interactive ships unbound"
-        );
         assert_eq!(
             bindings.labels_for(Action::SelectTab4),
             "",
@@ -2845,7 +2823,6 @@ mod tests {
     #[test]
     fn new_actions_are_in_binding_defs() {
         let actions_in_defs: Vec<Action> = BINDING_DEFS.iter().map(|d| d.action).collect();
-        assert!(actions_in_defs.contains(&Action::ExitInteractive));
         assert!(actions_in_defs.contains(&Action::CloseOverlay));
         assert!(actions_in_defs.contains(&Action::ResizeGrow));
         assert!(actions_in_defs.contains(&Action::StageUnstage));
@@ -3236,8 +3213,7 @@ mod tests {
     fn interactive_byte_patterns_matches_defaults() {
         let bindings = default_bindings();
         let patterns = bindings.interactive_byte_patterns();
-        // ToggleFullscreen default is Ctrl-g → 0x07 (ExitInteractive keeps
-        // its name for custom binds but ships with no default keys).
+        // ToggleFullscreen default is Ctrl-g → 0x07.
         let result = patterns.match_sequence(&[0x07]);
         assert!(result.is_some());
         assert_eq!(result.unwrap().0, Action::ToggleFullscreen);

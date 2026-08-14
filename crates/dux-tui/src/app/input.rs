@@ -73,7 +73,7 @@ fn configure_project_text_input_mut(prompt: &mut PromptState) -> Option<&mut Tex
 }
 
 /// Maximum size of `loading_input_buf`. During the loading phase we
-/// accumulate bytes only to detect a (possibly multi-byte) ExitInteractive
+/// accumulate bytes only to detect a (possibly multi-byte) ToggleFullscreen
 /// binding. Since any realistic binding fits in well under this cap, we
 /// truncate to the trailing window to bound memory and scan cost even when
 /// the user pastes large amounts of text while the agent is starting.
@@ -957,13 +957,10 @@ impl App {
                 Action::MoveDown => self.move_left_cursor_down(),
                 Action::MoveUp => self.move_left_cursor_up(),
                 Action::FocusAgent => self.activate_selected_left_item(true)?,
-                // From the sidebar, the fullscreen toggle (and its minimize
-                // alias) reopens fullscreen for a live agent and never
-                // launches a dormant one; `InteractAgent` stays the explicit
-                // jump-to-fullscreen.
-                Action::ExitInteractive | Action::ToggleFullscreen => {
-                    self.activate_selected_left_item(false)?
-                }
+                // From the sidebar, the fullscreen toggle reopens fullscreen
+                // for a live agent and never launches a dormant one;
+                // `InteractAgent` stays the explicit jump-to-fullscreen.
+                Action::ToggleFullscreen => self.activate_selected_left_item(false)?,
                 Action::OpenProjectBrowser => {
                     self.open_project_browser()?;
                 }
@@ -1118,7 +1115,7 @@ impl App {
             match action {
                 Action::MoveDown => self.move_left_cursor_down(),
                 Action::MoveUp => self.move_left_cursor_up(),
-                Action::FocusAgent | Action::ExitInteractive | Action::ToggleFullscreen => {
+                Action::FocusAgent | Action::ToggleFullscreen => {
                     // Open terminal overlay for the selected terminal item.
                     self.open_terminal_from_terminal_list()?;
                 }
@@ -1166,7 +1163,6 @@ impl App {
                         self.activate_center_agent(true, true)?;
                     }
                 }
-                Action::ExitInteractive if !in_diff => self.activate_center_agent(false, false)?,
                 Action::OpenMacroBar if !in_diff => {
                     // Decision 4: the macro chord works over the minimized
                     // pane too. Mirror the fullscreen intercept's gates: no
@@ -2415,7 +2411,7 @@ impl App {
         // Don't forward input until the agent has produced visible output.
         // Keystrokes during the loading phase would reach a process that
         // isn't ready for them. We still drain stdin above to prevent
-        // buffer accumulation. However, we still honour ExitInteractive so
+        // buffer accumulation. However, we still honour ToggleFullscreen so
         // the user can minimize a loading agent.
         //
         // Bytes are accumulated into a dedicated `loading_input_buf` (not
@@ -2742,9 +2738,8 @@ impl App {
                     self.raw_input_parser.clear();
                     return Ok(false);
                 }
-                // In fullscreen both the toggle and its documented minimize
-                // alias mean the same thing: leave fullscreen.
-                SeqAction::Intercept(Action::ExitInteractive | Action::ToggleFullscreen, _, _) => {
+                // In fullscreen the toggle means one thing: leave fullscreen.
+                SeqAction::Intercept(Action::ToggleFullscreen, _, _) => {
                     flush_forward_batch(
                         &mut forward_batch,
                         is_scrolled_back,
@@ -6856,7 +6851,7 @@ impl App {
                     // running; fall back to the session-slot tab only when
                     // nothing else is live. This also resets the snapshot so
                     // the target tab's PTY renders immediately, and keeps the
-                    // next ExitInteractive (activate) from relaunching a
+                    // next fullscreen toggle (activate) from relaunching a
                     // dormant tab.
                     let target = self
                         .engine
@@ -8154,7 +8149,7 @@ impl App {
 
     /// Activate the selected Projects-pane item. `allow_launch` distinguishes
     /// the explicit activate action (`FocusAgent`/Enter, always launches a
-    /// dormant agent) from `ExitInteractive` (Ctrl-g by default), which must
+    /// dormant agent) from `ToggleFullscreen` (Ctrl-g by default), which must
     /// never launch a dormant agent per the Agent Tabs tenet ("focus alone
     /// never launches — only an explicit action launches"). When
     /// `allow_launch` is false and the target agent is dormant, this either
@@ -8217,7 +8212,7 @@ impl App {
     /// Activate the focused tab of the Center pane's selected agent.
     /// `allow_launch` distinguishes the explicit activate action
     /// (`FocusAgent`/Enter and `ReconnectAgent`, which always launch a
-    /// dormant tab) from `ExitInteractive` (Ctrl-g by default), which must
+    /// dormant tab) from `ToggleFullscreen` (Ctrl-g by default), which must
     /// never launch a dormant tab per the Agent Tabs tenet. See
     /// `activate_selected_left_item` for the same distinction in the
     /// Projects pane.
@@ -8271,7 +8266,7 @@ impl App {
         Ok(())
     }
 
-    /// Shared behavior for `ExitInteractive` landing on a dormant tab: never
+    /// Shared behavior for `ToggleFullscreen` landing on a dormant tab: never
     /// launch it (only an explicit action launches, per the Agent Tabs
     /// tenet). If the pane happens to be showing a fullscreen overlay,
     /// minimize it so Ctrl-g still "does something" visible; otherwise this
@@ -9327,7 +9322,7 @@ impl App {
     }
 
     /// Reset all state associated with interactive mode (agent or terminal)
-    /// and show a status message. Used by ExitInteractive key handling,
+    /// and show a status message. Used by ToggleFullscreen key handling,
     /// mouse-click-outside-overlay, and the loading-phase exit path.
     pub(crate) fn exit_interactive_mode(&mut self) {
         let return_to_terminal_list =
@@ -9391,16 +9386,15 @@ impl App {
         }
     }
 
-    /// Scan `loading_input_buf` for an ExitInteractive key sequence or a
+    /// Scan `loading_input_buf` for a ToggleFullscreen key sequence or a
     /// mouse left-click outside the fullscreen overlay. Returns `true` if
     /// either was found and interactive mode was exited. Used during the
     /// loading phase when all other input is suppressed.
     pub(crate) fn scan_loading_phase_exit(&mut self) -> bool {
         let (sequences, _) = crate::raw_input::split_sequences(&self.loading_input_buf);
         for seq in &sequences {
-            // Check for a fullscreen-exit keybinding (the toggle or its
-            // minimize alias).
-            if let Some((Action::ExitInteractive | Action::ToggleFullscreen, _)) =
+            // Check for the fullscreen toggle keybinding.
+            if let Some((Action::ToggleFullscreen, _)) =
                 self.interactive_patterns.match_sequence(seq)
             {
                 self.exit_interactive_mode();
@@ -9460,8 +9454,8 @@ impl App {
 
     /// Feed newly-read loading-phase bytes through the shared
     /// `raw_input_parser`, then scan for a focus report and an
-    /// ExitInteractive trigger. Focus is applied first so a focus report
-    /// bundled in the same read as an ExitInteractive trigger is still
+    /// ToggleFullscreen trigger. Focus is applied first so a focus report
+    /// bundled in the same read as a ToggleFullscreen trigger is still
     /// observed even though `scan_loading_phase_exit` returns early on a
     /// match. Returns whether interactive mode was exited.
     pub(crate) fn scan_loading_phase(&mut self, new_bytes: &[u8]) -> bool {
@@ -19082,14 +19076,14 @@ cyan = "#00ffff"
         );
     }
 
-    /// A custom `exit_interactive` bind keeps working as the documented
-    /// minimize alias, and (bound to a chord) it also re-enters fullscreen
-    /// from the minimized center pane through the same activation. The custom
-    /// key must be a CHORD to reach the bindings from the typeable pane: a
-    /// typing-owned key like Home now belongs to the agent there.
+    /// A custom exit key migrated off the retired `exit_interactive` still
+    /// minimizes the fullscreen pane, and (bound to a chord) it re-enters
+    /// fullscreen from the minimized center pane through the same activation.
+    /// The custom key must be a CHORD to reach the bindings from the typeable
+    /// pane: a typing-owned key like Home now belongs to the agent there.
     #[test]
-    fn custom_exit_interactive_key_reopens_a_minimized_agent() {
-        let bindings = bindings_with_overrides(&[(Action::ExitInteractive, &["ctrl-e"])]);
+    fn a_migrated_custom_exit_key_reopens_a_minimized_agent() {
+        let bindings = bindings_with_overrides(&[(Action::ToggleFullscreen, &["ctrl-e"])]);
         let mut app = test_app(bindings);
         app.interactive_patterns = app.bindings.interactive_byte_patterns();
         let session_id = app.engine.sessions[0].id.clone();
@@ -19111,7 +19105,7 @@ cyan = "#00ffff"
         app.session_surface = SessionSurface::Agent;
         app.fullscreen_overlay = FullscreenOverlay::Agent;
 
-        // Ctrl-e is 0x05 on the wire; the raw path must honor the alias.
+        // Ctrl-e is 0x05 on the wire; the raw path must honor the custom key.
         app.process_raw_input_bytes(&[0x05]).unwrap();
 
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
@@ -19178,7 +19172,7 @@ cyan = "#00ffff"
 
     /// The fullscreen toggle is an EXPLICIT action, so on a dormant tab it
     /// launches, seeking fullscreen (decision 10 keeps fullscreen-seeking
-    /// launches landing fullscreen). This replaces the old ExitInteractive
+    /// launches landing fullscreen). This replaces the old exit-interactive
     /// no-op: Ctrl-g now belongs to `ToggleFullscreen`.
     #[test]
     fn ctrl_g_on_a_dormant_tab_windowed_launches_seeking_fullscreen() {
@@ -19205,11 +19199,13 @@ cyan = "#00ffff"
         );
     }
 
-    /// The minimize ALIAS (`exit_interactive`, rebound to a chord) keeps its
-    /// old promise: it never launches a dormant tab.
+    /// A custom exit key migrated off the retired `exit_interactive` is now
+    /// the fullscreen toggle, so on a dormant tab it LAUNCHES rather than
+    /// doing nothing. That gain is the point of the merge, and it is pinned
+    /// here so nobody reads it as a regression.
     #[test]
-    fn the_exit_interactive_alias_on_a_dormant_tab_never_launches() {
-        let bindings = bindings_with_overrides(&[(Action::ExitInteractive, &["ctrl-e"])]);
+    fn a_migrated_custom_exit_key_on_a_dormant_tab_launches_seeking_fullscreen() {
+        let bindings = bindings_with_overrides(&[(Action::ToggleFullscreen, &["ctrl-e"])]);
         let mut app = test_app(bindings);
         app.focus = FocusPane::Center;
         app.center_mode = CenterMode::Agent;
@@ -19219,14 +19215,16 @@ cyan = "#00ffff"
         app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL))
             .unwrap();
 
-        assert_eq!(app.input_target, InputTarget::None);
-        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
         assert!(
-            !app.engine
+            app.engine
                 .is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch(
                     "session-1".into()
                 )),
-            "the minimize alias must not dispatch a launch for a dormant tab"
+            "the migrated key is the fullscreen toggle, an explicit action that launches"
+        );
+        assert!(
+            recv_dispatched_launch_request(&app).wants_fullscreen,
+            "the migrated key's launch must be fullscreen-seeking (decision 10)"
         );
     }
 
@@ -19399,7 +19397,7 @@ cyan = "#00ffff"
 
     /// The dormant-agent fullscreen (an exited tab's "relaunch" screen) is a
     /// non-interactive overlay: every ordinary escape hatch must leave it, not
-    /// just ExitInteractive. Esc dismisses it like any other overlay.
+    /// just the fullscreen toggle. Esc dismisses it like any other overlay.
     #[test]
     fn esc_minimizes_dormant_agent_fullscreen() {
         let mut app = test_app(default_bindings());
@@ -21840,13 +21838,13 @@ cyan = "#00ffff"
         let mut app = app_with_scrolled_back_pty();
         assert_eq!(app.input_target, InputTarget::Agent);
 
-        // Feed Ctrl-g (0x07) — ExitInteractive should still work.
+        // Feed Ctrl-g (0x07) — the fullscreen toggle should still work.
         let result = app.process_raw_input_bytes(&[0x07]).unwrap();
         assert!(!result);
         assert_eq!(
             app.input_target,
             InputTarget::None,
-            "ExitInteractive must work even when scrolled back"
+            "the fullscreen toggle must work even when scrolled back"
         );
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
     }
@@ -22333,10 +22331,10 @@ cyan = "#00ffff"
 
     /// A batch that ends in an intercepted action which LEAVES the function
     /// early still has to stamp the bytes it flushed on the way out. The
-    /// ExitInteractive arm flushes the pending forward batch to the PTY and then
+    /// ToggleFullscreen arm flushes the pending forward batch to the PTY and then
     /// returns before the tail, so without an explicit stamp those keystrokes
     /// reached the child and recorded nothing, and their echo read as the agent
-    /// working. ExitInteractive's default binding is Ctrl-g (0x07).
+    /// working. ToggleFullscreen's default binding is Ctrl-g (0x07).
     #[test]
     fn input_flushed_on_the_exit_interactive_path_still_records_pty_input() {
         let (mut app, session_id) = app_with_live_agent_pty();
@@ -23015,7 +23013,7 @@ cyan = "#00ffff"
     }
 
     /// Ctrl-g from the Left pane reopens fullscreen for a live selected agent
-    /// (the old ExitInteractive-from-Left behavior) and never launches a
+    /// (the old exit-interactive-from-Left behavior) and never launches a
     /// dormant one.
     #[test]
     fn ctrl_g_from_left_reopens_fullscreen_for_a_live_agent() {
@@ -23033,7 +23031,7 @@ cyan = "#00ffff"
 
     #[test]
     fn timed_out_bare_esc_can_exit_interactive() {
-        let bindings = bindings_with_overrides(&[(Action::ExitInteractive, &["esc"])]);
+        let bindings = bindings_with_overrides(&[(Action::ToggleFullscreen, &["esc"])]);
         let mut app = app_with_scrolled_back_pty();
         app.bindings = bindings;
         app.interactive_patterns = app.bindings.interactive_byte_patterns();
@@ -23050,14 +23048,14 @@ cyan = "#00ffff"
         assert_eq!(
             app.input_target,
             InputTarget::None,
-            "timed-out bare ESC should resolve as ExitInteractive"
+            "timed-out bare ESC should resolve as ToggleFullscreen"
         );
         assert!(app.raw_input_buf.is_empty());
     }
 
     #[test]
     fn pending_esc_before_sgr_mouse_does_not_leave_printable_tail() {
-        let bindings = bindings_with_overrides(&[(Action::ExitInteractive, &["esc"])]);
+        let bindings = bindings_with_overrides(&[(Action::ToggleFullscreen, &["esc"])]);
         let mut app = app_with_scrolled_back_pty();
         app.bindings = bindings;
         app.interactive_patterns = app.bindings.interactive_byte_patterns();
@@ -23102,7 +23100,7 @@ cyan = "#00ffff"
 
     #[test]
     fn app_preserves_alt_key_before_timeout_resolution() {
-        let bindings = bindings_with_overrides(&[(Action::ExitInteractive, &["esc"])]);
+        let bindings = bindings_with_overrides(&[(Action::ToggleFullscreen, &["esc"])]);
         let mut app = app_with_scrolled_back_pty();
         app.bindings = bindings;
         app.interactive_patterns = app.bindings.interactive_byte_patterns();
@@ -23417,7 +23415,7 @@ cyan = "#00ffff"
         );
     }
 
-    // ── Loading-phase ExitInteractive tests ─────────────────────────
+    // ── Loading-phase fullscreen-toggle tests ──────────────────────
 
     #[test]
     fn loading_phase_exit_interactive_single_byte_binding() {
@@ -23426,7 +23424,7 @@ cyan = "#00ffff"
         app.fullscreen_overlay = FullscreenOverlay::Agent;
         app.session_surface = SessionSurface::Agent;
 
-        // Default ExitInteractive is Ctrl-g (0x07). Put it in loading_input_buf
+        // Default ToggleFullscreen is Ctrl-g (0x07). Put it in loading_input_buf
         // as scan_loading_phase_exit reads from there.
         app.loading_input_buf = vec![0x07];
         assert!(
@@ -23439,16 +23437,16 @@ cyan = "#00ffff"
 
     #[test]
     fn loading_phase_exit_interactive_multi_byte_binding() {
-        // Rebind ExitInteractive to Home (ESC [ H) — a multi-byte sequence.
-        let bindings = bindings_with_overrides(&[(Action::ExitInteractive, &["home"])]);
+        // Rebind ToggleFullscreen to Home (ESC [ H) — a multi-byte sequence.
+        let bindings = bindings_with_overrides(&[(Action::ToggleFullscreen, &["home"])]);
         let mut app = test_app(bindings);
 
         // Verify the binding was registered as an interactive byte pattern.
         let result = app.interactive_patterns.match_sequence(&[0x1b, b'[', b'H']);
         assert_eq!(
             result.map(|(a, _)| a),
-            Some(Action::ExitInteractive),
-            "ESC [ H must resolve to ExitInteractive in interactive patterns"
+            Some(Action::ToggleFullscreen),
+            "ESC [ H must resolve to ToggleFullscreen in interactive patterns"
         );
 
         app.input_target = InputTarget::Agent;
@@ -23459,7 +23457,7 @@ cyan = "#00ffff"
         app.loading_input_buf = b"\x1b[H".to_vec();
         assert!(
             app.scan_loading_phase_exit(),
-            "scan_loading_phase_exit must detect multi-byte ExitInteractive"
+            "scan_loading_phase_exit must detect a multi-byte ToggleFullscreen"
         );
         assert_eq!(app.input_target, InputTarget::None);
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
@@ -23467,8 +23465,8 @@ cyan = "#00ffff"
 
     #[test]
     fn loading_phase_exit_interactive_fragmented_across_reads() {
-        // Rebind ExitInteractive to Home (ESC [ H) — a multi-byte sequence.
-        let bindings = bindings_with_overrides(&[(Action::ExitInteractive, &["home"])]);
+        // Rebind ToggleFullscreen to Home (ESC [ H) — a multi-byte sequence.
+        let bindings = bindings_with_overrides(&[(Action::ToggleFullscreen, &["home"])]);
         let mut app = test_app(bindings);
         app.input_target = InputTarget::Agent;
         app.fullscreen_overlay = FullscreenOverlay::Agent;
@@ -23561,7 +23559,7 @@ cyan = "#00ffff"
     #[test]
     fn loading_phase_cap_still_matches_exit_interactive_at_tail() {
         // Ensure that after a large paste, a trailing single-byte
-        // ExitInteractive (Ctrl-g) still triggers exit.
+        // ToggleFullscreen (Ctrl-g) still triggers exit.
         let mut app = test_app(default_bindings());
         app.input_target = InputTarget::Agent;
         app.fullscreen_overlay = FullscreenOverlay::Agent;
@@ -23995,7 +23993,7 @@ cyan = "#00ffff"
 
     #[test]
     fn bracket_paste_skips_intercept_matching() {
-        // Ctrl-g (0x07) normally triggers ExitInteractive. Inside a
+        // Ctrl-g (0x07) normally triggers ToggleFullscreen. Inside a
         // bracket paste it should be forwarded, not intercepted.
         // (The `cat` child never enables DECSET 2004, so on this path the
         // markers are stripped and only the body is forwarded; the byte
@@ -24023,7 +24021,7 @@ cyan = "#00ffff"
         // Build input: ESC[200~ + Ctrl-g + ESC[201~
         let mut input = Vec::new();
         input.extend_from_slice(crate::raw_input::BRACKET_PASTE_START);
-        input.push(0x07); // Ctrl-g — would be ExitInteractive outside paste
+        input.push(0x07); // Ctrl-g — would be ToggleFullscreen outside paste
         input.extend_from_slice(crate::raw_input::BRACKET_PASTE_END);
 
         let result = app.process_raw_input_bytes(&input).unwrap();
@@ -24227,7 +24225,7 @@ cyan = "#00ffff"
         app.terminal_focus.on_focus_lost();
 
         // A single read bundles a focus-in report together with the
-        // ExitInteractive trigger (Ctrl-g). The exit scan returns early on a
+        // ToggleFullscreen trigger (Ctrl-g). The exit scan returns early on a
         // match; the bundled focus report must still be observed rather than
         // dropped by that early return.
         let mut input = Vec::new();
@@ -24243,7 +24241,7 @@ cyan = "#00ffff"
 
         assert!(
             exited,
-            "the ExitInteractive trigger in the bundled read must still fire"
+            "the ToggleFullscreen trigger in the bundled read must still fire"
         );
         assert!(
             app.terminal_focus
@@ -24317,7 +24315,7 @@ cyan = "#00ffff"
         // Enter bracket paste state.
         app.in_bracket_paste = true;
 
-        // Now send ExitInteractive (Ctrl-g) outside of paste context.
+        // Now send ToggleFullscreen (Ctrl-g) outside of paste context.
         // Reset in_bracket_paste first to simulate that the end marker
         // was never received (e.g. malformed paste), but we exit.
         app.in_bracket_paste = false;

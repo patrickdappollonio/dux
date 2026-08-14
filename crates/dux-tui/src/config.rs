@@ -33,7 +33,8 @@ pub fn ensure_config(paths: &DuxPaths) -> Result<Config> {
     // here (they matter only to the TUI's `validate_keys`).
     let migrations_changed = dux_core::config_migrate::apply_load_migrations(&mut doc)?;
     let retired_keys_changed = prune_retired_key_actions(&mut doc);
-    if migrations_changed || retired_keys_changed {
+    let folded_keys_changed = fold_legacy_key_actions(&mut doc);
+    if migrations_changed || retired_keys_changed || folded_keys_changed {
         // blessed sync-direct: deprecation/retirement migration also runs at boot before the queue exists
         dux_core::config_write::write_config_secure(&paths.config_path, &doc.to_string())
             .with_context(|| format!("failed to write {}", paths.config_path.display()))?;
@@ -106,6 +107,120 @@ fn prune_retired_key_actions(doc: &mut DocumentMut) -> bool {
     for action in RETIRED_KEY_ACTIONS {
         if keys.remove(action).is_some() {
             changed = true;
+        }
+    }
+    changed
+}
+
+// ---------------------------------------------------------------------------
+// Folded keybinding actions
+//
+// The other half of the retirement story. A retired action was REMOVED from the
+// app, so its binding is dropped. A FOLDED action was MERGED into another
+// action that still does its job, so its binding must survive under the new
+// name instead of being thrown away.
+//
+// `exit_interactive` is the one such name so far: it used to be the "minimize
+// the fullscreen agent pane" half of what `toggle_fullscreen` now does in both
+// directions. Configs written by an older dux carry it as an ACTIVE row (dux
+// stores resolved defaults as real values), and its default was the very ctrl-g
+// that `toggle_fullscreen` inherited, so leaving it in place aborts startup with
+// a conflict. Folding it also UPGRADES a custom exit key: whatever key used to
+// only minimize now toggles fullscreen in both directions.
+// ---------------------------------------------------------------------------
+
+/// `[keys]` action names that were merged into another action. The binding is
+/// moved to the new name on load (and the migrated document is persisted, like
+/// every other load migration) so the file converges and never has to be
+/// understood twice.
+const FOLDED_KEY_ACTIONS: &[(&str, &str)] = &[("exit_interactive", "toggle_fullscreen")];
+
+/// Read a `[keys]` value as a list of key strings. `None` for any other shape,
+/// which is left for `validate_keys` to report in its own words.
+fn key_string_list(item: &Item) -> Option<Vec<String>> {
+    let array = item.as_value()?.as_array()?;
+    array
+        .iter()
+        .map(|v| v.as_str().map(str::to_string))
+        .collect()
+}
+
+/// Move `[keys]` entries for folded actions onto the action that absorbed them,
+/// unioning with any bindings already there. Returns whether the document
+/// changed.
+///
+/// A comment written directly above the legacy row is that row's TOML decor and
+/// leaves with it. That is deliberate: such a comment describes the row being
+/// folded away, and the generated template already documents the surviving
+/// action in its own words.
+fn fold_legacy_key_actions(doc: &mut DocumentMut) -> bool {
+    let Some(keys) = doc.get_mut("keys").and_then(Item::as_table_mut) else {
+        return false;
+    };
+    let mut changed = false;
+    for (legacy, current) in FOLDED_KEY_ACTIONS {
+        let Some(legacy_item) = keys.remove(legacy) else {
+            continue;
+        };
+        changed = true;
+
+        let legacy_keys = key_string_list(&legacy_item);
+        let existing_keys = keys.get(current).and_then(key_string_list);
+        // An EMPTY legacy row says "I unbound the old action", which says
+        // nothing about the action that absorbed it. Renaming it would quietly
+        // strip the surviving action's own default key, so it is dropped and
+        // nothing else happens.
+        if legacy_keys.as_ref().is_some_and(Vec::is_empty) {
+            dux_core::logger::info(&format!(
+                "[keys] \"{legacy}\" is now part of \"{current}\"; dropped the empty legacy row \
+                 and left \"{current}\" alone"
+            ));
+            continue;
+        }
+        match (legacy_keys, existing_keys) {
+            // Both sides are ordinary key lists: union them, destination first,
+            // so a user who already rebound the surviving action keeps their
+            // order and gains only what the legacy row added.
+            (Some(legacy_keys), Some(existing_keys)) => {
+                let mut merged = existing_keys.clone();
+                for key in legacy_keys {
+                    let already = merged
+                        .iter()
+                        .any(|k| k.trim().eq_ignore_ascii_case(key.trim()));
+                    if !already {
+                        merged.push(key);
+                    }
+                }
+                let mut array = toml_edit::Array::new();
+                for key in &merged {
+                    array.push(key.as_str());
+                }
+                keys[current] = toml_edit::value(array);
+                dux_core::logger::info(&format!(
+                    "[keys] \"{legacy}\" is now part of \"{current}\"; merged its keys in, \
+                     leaving {current} = {merged:?}"
+                ));
+            }
+            // Nothing under the new name yet: a plain rename, value verbatim, so
+            // an unparseable value still reaches `validate_keys` and is reported
+            // rather than silently vanishing here.
+            (_, None) if !keys.contains_key(current) => {
+                keys.insert(current, legacy_item);
+                dux_core::logger::info(&format!(
+                    "[keys] \"{legacy}\" is now part of \"{current}\"; renamed your binding to \
+                     \"{current}\", which toggles the agent pane fullscreen in both directions"
+                ));
+            }
+            // The new name is present but is not a key list (or the legacy value
+            // is not one). Keep what the user wrote under the surviving name and
+            // drop the legacy row; merging two shapes we cannot read would only
+            // invent a binding nobody asked for.
+            _ => {
+                dux_core::logger::warn(&format!(
+                    "[keys] \"{legacy}\" is now part of \"{current}\"; dropped the legacy row \
+                     because it could not be merged into the \"{current}\" value already there"
+                ));
+            }
         }
     }
     changed
@@ -1210,7 +1325,7 @@ fn render_keys_config(
         let config_name = def.action.config_name();
         // Palette-only actions (no key scopes) are configured through the
         // palette, not [keys], and stay out of the template. A key-scoped
-        // action that SHIPS unbound (exit_interactive, select_tab_4) is
+        // action that SHIPS unbound (select_tab_4) is
         // documented as a commented-out row instead of being omitted: the
         // config file is the documentation, and an invisible action is one
         // nobody learns they can bind. A user who bound it gets a real row.
@@ -2161,8 +2276,8 @@ mod tests {
         );
     }
 
-    /// A key-scoped action that SHIPS unbound (the minimize alias, tab 4 under
-    /// the legacy Ctrl-4/Ctrl-\ identity) must still be discoverable from the
+    /// A key-scoped action that SHIPS unbound (tab 4, under the legacy
+    /// Ctrl-4/Ctrl-\ identity) must still be discoverable from the
     /// config file: it renders as a commented-out row with its description.
     /// Palette-only actions (no key scopes) stay out of [keys] entirely.
     #[test]
@@ -2171,7 +2286,19 @@ mod tests {
         let bindings = crate::keybindings::RuntimeBindings::from_keys_config(&config.keys);
         let rendered = render_config(&config, &bindings);
 
-        for name in ["exit_interactive", "select_tab_4"] {
+        // Derived rather than hardcoded: the population of shipped-unbound
+        // actions changes (the minimize alias used to be one of them), and the
+        // rule is about all of them, not about a list kept in step by hand.
+        let unbound: Vec<&str> = keybindings::BINDING_DEFS
+            .iter()
+            .filter(|d| d.default_keys.is_empty() && !d.scopes.is_empty())
+            .map(|d| d.action.config_name())
+            .collect();
+        assert!(
+            unbound.contains(&"select_tab_4"),
+            "fixture: select_tab_4 ships unbound (Ctrl-4 is Ctrl-\\ under the legacy protocol)"
+        );
+        for name in unbound {
             assert!(
                 rendered
                     .lines()
@@ -3209,6 +3336,199 @@ args = [\"-l\"]
         assert!(
             config.providers.get("claude").is_some(),
             "other providers must survive the prune"
+        );
+    }
+}
+
+/// The legacy `exit_interactive` key, folded into `toggle_fullscreen`.
+///
+/// These tests run through `ensure_config` end to end (parse, migrate, persist,
+/// re-parse) because the bug they pin is a STARTUP failure: an older dux wrote
+/// `exit_interactive = ["ctrl-g"]` as an active row, and once ctrl-g became the
+/// `toggle_fullscreen` default, `validate_keys` refused to start.
+#[cfg(test)]
+mod legacy_exit_interactive_tests {
+    use super::*;
+
+    fn temp_paths(root: std::path::PathBuf) -> dux_core::config::DuxPaths {
+        dux_core::config::DuxPaths {
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            lock_path: root.join("dux.lock"),
+            worktrees_root: root.join("worktrees"),
+            root,
+        }
+    }
+
+    /// A config as an older dux would have written it: `[keys]` carries an
+    /// ACTIVE `exit_interactive` row (dux stores resolved defaults as real
+    /// values), optionally alongside a `toggle_fullscreen` row.
+    fn config_with_legacy_row(legacy_row: &str, toggle_row: Option<&str>) -> String {
+        let mut out = String::new();
+        for line in render_default_config().lines() {
+            if line.starts_with("toggle_fullscreen = ") {
+                match toggle_row {
+                    Some(row) => {
+                        out.push_str(row);
+                        out.push('\n');
+                    }
+                    None => continue,
+                }
+                continue;
+            }
+            out.push_str(line);
+            out.push('\n');
+            if line.trim() == "[keys]" {
+                out.push_str(legacy_row);
+                out.push('\n');
+                // Deliberately BELOW the legacy row: a comment written above a
+                // key is that key's decor in TOML and leaves with it, which is
+                // right, since it describes the row being folded away.
+                out.push_str("# A comment the user wrote themselves.\n");
+            }
+        }
+        out
+    }
+
+    fn seeded_config(body: &str) -> (tempfile::TempDir, dux_core::config::DuxPaths, Config) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let paths = temp_paths(dir.path().to_path_buf());
+        fs::write(&paths.config_path, body).expect("seed config");
+        let config = ensure_config(&paths).expect("ensure_config must not fail on a legacy key");
+        (dir, paths, config)
+    }
+
+    /// THE HEADLINE. Every config generated before the fullscreen-toggle merge
+    /// carries `exit_interactive = ["ctrl-g"]`, which now collides with
+    /// `toggle_fullscreen`'s own ctrl-g default and aborts startup.
+    #[test]
+    fn an_old_generated_config_binding_ctrl_g_to_exit_interactive_still_starts() {
+        let body = config_with_legacy_row("exit_interactive = [\"ctrl-g\"]", None);
+        let (_dir, _paths, config) = seeded_config(&body);
+
+        if let Err(msg) = validate_keys(&config.keys) {
+            panic!("a pre-merge config must still start; got:\n{msg}");
+        }
+        assert_eq!(
+            config.keys.bindings.get("toggle_fullscreen"),
+            Some(&vec!["ctrl-g".to_string()]),
+            "the legacy binding must land on toggle_fullscreen"
+        );
+        assert!(
+            !config.keys.bindings.contains_key("exit_interactive"),
+            "the legacy key must not survive the load"
+        );
+    }
+
+    /// The fold persists: the file on disk converges, and the user's own
+    /// comments survive the comment-preserving rewrite.
+    #[test]
+    fn the_fold_is_written_back_and_preserves_user_comments() {
+        let body = config_with_legacy_row("exit_interactive = [\"ctrl-g\"]", None);
+        let (_dir, paths, _config) = seeded_config(&body);
+
+        let saved = fs::read_to_string(&paths.config_path).expect("read");
+        assert!(
+            !saved.contains("exit_interactive"),
+            "the legacy key must be gone from disk:\n{saved}"
+        );
+        assert!(
+            saved
+                .lines()
+                .any(|l| l.trim() == "toggle_fullscreen = [\"ctrl-g\"]"),
+            "the folded binding must be on disk as toggle_fullscreen:\n{saved}"
+        );
+        assert!(
+            saved.contains("# A comment the user wrote themselves."),
+            "the rewrite must preserve user comments:\n{saved}"
+        );
+    }
+
+    /// A CUSTOM exit key migrates, and gains the enter-fullscreen half: that is
+    /// the point of the merge.
+    #[test]
+    fn a_custom_exit_key_migrates_and_now_toggles_fullscreen() {
+        let body = config_with_legacy_row("exit_interactive = [\"ctrl-e\"]", None);
+        let (_dir, _paths, config) = seeded_config(&body);
+
+        assert!(validate_keys(&config.keys).is_ok());
+        assert_eq!(
+            config.keys.bindings.get("toggle_fullscreen"),
+            Some(&vec!["ctrl-e".to_string()]),
+            "a custom exit key becomes the fullscreen toggle key"
+        );
+
+        let bindings = crate::keybindings::RuntimeBindings::from_keys_config(&config.keys);
+        let ctrl_e = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('e'),
+            crossterm::event::KeyModifiers::CONTROL,
+        );
+        for scope in [
+            crate::keybindings::BindingScope::Interactive,
+            crate::keybindings::BindingScope::Center,
+            crate::keybindings::BindingScope::Left,
+        ] {
+            assert_eq!(
+                bindings.lookup(&ctrl_e, scope),
+                Some(crate::keybindings::Action::ToggleFullscreen),
+                "ctrl-e must toggle fullscreen in {scope:?}"
+            );
+        }
+    }
+
+    /// Both keys set: the two lists are unioned and deduped rather than one
+    /// silently winning.
+    #[test]
+    fn both_keys_present_union_and_dedupe() {
+        let body = config_with_legacy_row(
+            "exit_interactive = [\"ctrl-e\", \"ctrl-g\"]",
+            Some("toggle_fullscreen = [\"ctrl-g\"]"),
+        );
+        let (_dir, _paths, config) = seeded_config(&body);
+
+        assert!(validate_keys(&config.keys).is_ok());
+        assert_eq!(
+            config.keys.bindings.get("toggle_fullscreen"),
+            Some(&vec!["ctrl-g".to_string(), "ctrl-e".to_string()]),
+            "the destination keeps its own keys first, then gains the legacy extras once"
+        );
+    }
+
+    /// A user who deliberately UNBOUND the old action wrote an empty row. That
+    /// says nothing about the surviving action, so folding it must not silently
+    /// take ctrl-g away from the fullscreen toggle.
+    #[test]
+    fn an_empty_legacy_row_does_not_unbind_the_surviving_action() {
+        let body = config_with_legacy_row("exit_interactive = []", None);
+        let (_dir, paths, config) = seeded_config(&body);
+
+        assert!(validate_keys(&config.keys).is_ok());
+        let bindings = crate::keybindings::RuntimeBindings::from_keys_config(&config.keys);
+        assert_eq!(
+            bindings.label_for(crate::keybindings::Action::ToggleFullscreen),
+            "Ctrl-g",
+            "the fullscreen toggle must keep its default key"
+        );
+        let saved = fs::read_to_string(&paths.config_path).expect("read");
+        assert!(
+            !saved.contains("exit_interactive"),
+            "the empty legacy row is still dropped:\n{saved}"
+        );
+    }
+
+    /// The fold is not a licence to ignore real conflicts: a genuinely doubled
+    /// key still refuses to start.
+    #[test]
+    fn a_real_conflict_still_fails_after_the_fold() {
+        // The legacy row also carries the macro bar's own chord, so the fold
+        // hands `toggle_fullscreen` a key that genuinely collides.
+        let body = config_with_legacy_row("exit_interactive = [\"ctrl-g\", \"ctrl-\\\\\"]", None);
+        let (_dir, _paths, config) = seeded_config(&body);
+
+        let err = validate_keys(&config.keys).expect_err("a real conflict must still be reported");
+        assert!(
+            err.contains("open_macro_bar") && err.contains("toggle_fullscreen"),
+            "expected the macro-bar conflict, got:\n{err}"
         );
     }
 }

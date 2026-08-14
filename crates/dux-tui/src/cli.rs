@@ -1115,6 +1115,24 @@ mod tests {
         );
     }
 
+    /// `dux config diff` parses the file as written and never runs the load
+    /// migrations, so a not-yet-folded `exit_interactive` row reaches the
+    /// structural walk as an ordinary unknown key. It must be reported like any
+    /// other binding rather than tripping the differ.
+    #[test]
+    fn config_diff_reports_an_unfolded_legacy_key_as_an_ordinary_binding() {
+        let mut config = Config::default();
+        config
+            .keys
+            .bindings
+            .insert("exit_interactive".to_string(), vec!["ctrl-g".to_string()]);
+
+        assert_eq!(
+            collect_config_changes(&config),
+            vec!["keys.exit_interactive: (new) -> [ctrl-g]".to_string()]
+        );
+    }
+
     #[test]
     fn config_diff_truncates_a_long_value_at_forty_characters() {
         let mut config = Config::default();

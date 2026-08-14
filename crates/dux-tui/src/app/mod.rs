@@ -273,7 +273,7 @@ pub struct App {
     pub(crate) interactive_patterns: InteractiveBytePatterns,
     pub(crate) raw_input_parser: crate::raw_input::RawInputParser,
     pub(crate) raw_input_buf: Vec<u8>,
-    /// Separate buffer for scanning ExitInteractive during the loading phase.
+    /// Separate buffer for scanning ToggleFullscreen during the loading phase.
     /// Kept independent of `raw_input_buf` so that suppressed keystrokes
     /// cannot leak into the first post-loading `process_raw_input_bytes` call.
     pub(crate) loading_input_buf: Vec<u8>,
