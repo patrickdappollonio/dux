@@ -306,6 +306,36 @@ export function stampsDiffer(a: FileStamp, b: FileStamp): boolean {
   return a.modified !== b.modified || a.size !== b.size
 }
 
+// The part of the info route's answer the freshness check reads. Structural, so
+// this module stays free of the info panel's own types.
+export interface EntryStampSource {
+  modified: string | null
+  size: number | null
+  target_modified?: string | null
+  target_size?: number | null
+}
+
+// Which of the info route's two stamps this buffer's read is comparable with.
+//
+// The read follows a symlink and stamps the file it actually read from; the
+// info route stats the LINK, deliberately and permanently, because the info
+// panel describes the link rather than whatever it points at. Comparing the
+// one against the other is comparing two different files: it finds a
+// difference every single time, so a symlinked open file read as stale forever
+// and its banner could never be retired.
+//
+// So the route carries both, and this picks the one that answers the question
+// being asked. Presence is the test: only a symlink whose target actually
+// stat'd carries the target fields, so a plain file and a dangling link both
+// fall through to the entry's own stamp, which is exactly what their read
+// stamped too.
+export function stampFromInfo(info: EntryStampSource): FileStamp {
+  const modified = info.target_modified ?? null
+  const size = info.target_size ?? null
+  if (modified !== null || size !== null) return { modified, size }
+  return { modified: info.modified, size: info.size }
+}
+
 // Fold freshly-read disk content into an EXISTING buffer without disturbing
 // `loadedPath`.
 //

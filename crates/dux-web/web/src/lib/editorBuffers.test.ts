@@ -11,6 +11,7 @@ import {
   pruneSetByIds,
   reloadedInPlace,
   shouldSkipFileLoad,
+  stampFromInfo,
   stampsDiffer,
   unionRevalidateBatch,
 } from "./editorBuffers"
@@ -346,6 +347,54 @@ describe("stampsDiffer", () => {
 
   it("treats an unknown mtime on one side as a difference", () => {
     expect(stampsDiffer(base, { modified: null, size: 9 })).toBe(true)
+  })
+})
+
+// Which of the info route's two stamps the freshness check is asking about.
+//
+// The read follows a symlink and stamps the file it actually read; the info
+// route stats the LINK, deliberately, because the panel describes the link.
+// Comparing one against the other found a difference every time, so a
+// symlinked open file read as stale forever and its banner could never be
+// retired.
+describe("stampFromInfo", () => {
+  const link = {
+    modified: "2026-01-01T00:00:00+00:00",
+    size: 12,
+    target_modified: "2026-02-02T00:00:00+00:00",
+    target_size: 9,
+  }
+
+  it("takes the target's stamp when the entry is a symlink that resolved", () => {
+    expect(stampFromInfo(link)).toEqual({
+      modified: "2026-02-02T00:00:00+00:00",
+      size: 9,
+    })
+  })
+
+  it("takes the entry's own stamp for everything else", () => {
+    expect(
+      stampFromInfo({ modified: "2026-01-01T00:00:00+00:00", size: 12 }),
+    ).toEqual({ modified: "2026-01-01T00:00:00+00:00", size: 12 })
+  })
+
+  it("falls back to the entry's own stamp for a dangling link", () => {
+    expect(
+      stampFromInfo({
+        modified: "2026-01-01T00:00:00+00:00",
+        size: 12,
+        target_modified: null,
+        target_size: null,
+      }),
+    ).toEqual({ modified: "2026-01-01T00:00:00+00:00", size: 12 })
+  })
+
+  // A symlinked file the buffer read through is FRESH: the read's stamp and
+  // the target stamp are the same fstat of the same file.
+  it("makes a symlinked file compare equal to what the read stamped", () => {
+    expect(
+      stampsDiffer({ modified: "2026-02-02T00:00:00+00:00", size: 9 }, stampFromInfo(link)),
+    ).toBe(false)
   })
 })
 

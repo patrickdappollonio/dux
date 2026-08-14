@@ -1998,6 +1998,38 @@ describe("when the file changes on disk underneath the editor", () => {
     await waitFor(() => expect(screen.queryByRole("status")).toBeNull())
   })
 
+  // A symlinked file. The read followed the link and stamped the file it
+  // actually read; the info route stats the LINK, on purpose, because the info
+  // panel describes the link. Comparing the buffer's stamp against the link's
+  // finds a difference every single time, which made every symlinked open file
+  // read as permanently stale.
+  it("compares a symlinked file against its target, not against the link", async () => {
+    await mountOne(true)
+    fireEvent.change(editor(), { target: { value: TYPED } })
+    const entry = disk.get(PATH)!
+    infoMock.mockImplementation(async () => ({
+      path: PATH,
+      kind: "symlink" as const,
+      // The link's own stat: the length of the stored target path, and the
+      // moment the link was made. Nothing to do with the bytes on screen.
+      size: 20,
+      modified: "1999-09-09T00:00:00+00:00",
+      mode: "777",
+      permissions: "rwxrwxrwx",
+      symlink_target: "../elsewhere/big.txt",
+      target_modified: entry.modified,
+      target_size: entry.size,
+      git: { state: "clean" as const },
+    }))
+
+    fireEvent(window, new Event("focus"))
+    await waitFor(() => expect(infoMock).toHaveBeenCalled())
+    // Nothing moved, so nothing is offered and nothing is re-read.
+    await waitFor(() => expect(editor().value).toBe(TYPED))
+    expect(screen.queryByRole("status")).toBeNull()
+    expect(readMock).toHaveBeenCalledTimes(1)
+  })
+
   // The draft cache hands a buffer back across a remount with its disk state
   // still on it. That is deliberate (see `loadSessionDrafts`), and it only
   // stays honest because the mount trigger re-checks: a file put back the way

@@ -33,6 +33,12 @@ export interface WorktreeEntryInfo {
   permissions: string
   /** A symlink's target as stored on disk (not resolved). */
   symlink_target: string | null
+  /** The TARGET's mtime and size, present only for a symlink whose target
+   *  could be stat'd. The panel never shows these: they exist because the
+   *  editor's freshness check reads THROUGH a link and would otherwise be
+   *  comparing the target's stamp against the link's. See `stampFromInfo`. */
+  target_modified?: string | null
+  target_size?: number | null
   git: GitStatusView
 }
 

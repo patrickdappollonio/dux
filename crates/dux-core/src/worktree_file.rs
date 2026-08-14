@@ -495,6 +495,16 @@ pub fn write_file_checked(
             // Overwrite an existing regular file.
         }
         Ok(_) => anyhow::bail!("not a regular file: {rel_path}"),
+        // With a token in hand this is not a create at all, whatever the
+        // filesystem looks like: the client is saying "update the file I
+        // read", and that file is gone. Validating the parent first answered a
+        // question nobody asked, and when the parent had gone too (an agent
+        // removing a whole directory, the common way this happens) the browser
+        // got a create-validation refusal instead of the deleted conflict the
+        // save-conflict dialog knows how to offer. `write_checked_existing`
+        // opens without O_CREAT, so it reports the conflict rather than
+        // resurrecting anything.
+        Err(_) if expected.is_some() => {}
         Err(_) => {
             // Creating a new file: the parent directory must already exist and
             // resolve INSIDE the worktree. `is_under` canonicalizes it, so a
@@ -894,6 +904,25 @@ pub struct WorktreeEntryInfo {
     pub permissions: String,
     /// The symlink's target as stored on disk (not resolved), for a symlink.
     pub symlink_target: Option<String>,
+    /// The TARGET's mtime and size, present only when this entry is a symlink
+    /// whose target could be stat'd. `None` for everything else, so presence
+    /// is the client's test rather than a sentinel value.
+    ///
+    /// Why the route carries two stamps rather than one. The info panel
+    /// describes the LINK, on purpose and permanently: following it would
+    /// print a mode, a size and an mtime belonging to a file the user did not
+    /// ask about. But [`read_file`] reads THROUGH the link and stamps the
+    /// descriptor it actually read from, so the editor's freshness check was
+    /// comparing the target's stamp against the link's and finding a
+    /// difference every single time: a symlinked open file read as stale
+    /// forever, and its banner could never be retired.
+    ///
+    /// So both facts travel, and each consumer takes the one it is asking
+    /// about. The mtime goes through the same [`format_mtime`] as every other
+    /// timestamp on the wire, because two formatters would silently disagree
+    /// on the same instant.
+    pub target_modified: Option<String>,
+    pub target_size: Option<u64>,
     pub git: GitStatusView,
 }
 
@@ -993,6 +1022,18 @@ pub fn entry_info(worktree: &Path, rel_path: &str) -> anyhow::Result<WorktreeEnt
     } else {
         None
     };
+    // The FOLLOWING stat, for a symlink only, and only for the freshness
+    // fields. A dangling or unreadable target simply leaves them absent; it is
+    // not an error, because the panel's own answer does not depend on it. See
+    // the field docs on `target_modified` for why both stamps exist.
+    let (target_modified, target_size) = if ft.is_symlink() {
+        match std::fs::metadata(&path) {
+            Ok(target) => (target.modified().ok().map(format_mtime), Some(target.len())),
+            Err(_) => (None, None),
+        }
+    } else {
+        (None, None)
+    };
     // Git tracks files, not directories, so asking about a directory would
     // report on its children instead of on the thing the panel is describing.
     let git = if kind == EntryKind::Dir {
@@ -1008,6 +1049,8 @@ pub fn entry_info(worktree: &Path, rel_path: &str) -> anyhow::Result<WorktreeEnt
         mode: format!("{bits:o}"),
         permissions: symbolic_permissions(bits),
         symlink_target,
+        target_modified,
+        target_size,
         git,
     })
 }
@@ -2405,6 +2448,94 @@ mod tests {
             };
             assert!(write_file_checked(dir.path(), "link.txt", "pwned", Some(&stamp)).is_err());
             assert_eq!(std::fs::read_to_string(&secret).unwrap(), "top secret\n");
+        }
+
+        /// The asymmetry that made every symlinked open file read as stale
+        /// forever: the read stamps the TARGET it actually read from (an
+        /// fstat of the opened descriptor), while the info route stats the
+        /// LINK, deliberately and permanently, because the info panel
+        /// describes the link itself. Comparing one against the other is
+        /// comparing two different files, so the info route carries BOTH.
+        #[test]
+        fn a_symlinks_info_carries_its_targets_stamp_beside_the_links_own() {
+            let dir = worktree();
+            std::os::unix::fs::symlink(dir.path().join("hello.txt"), dir.path().join("link.txt"))
+                .unwrap();
+
+            let read = read_file(dir.path(), "link.txt").unwrap();
+            let info = entry_info(dir.path(), "link.txt").unwrap();
+
+            assert_eq!(info.kind, EntryKind::Symlink);
+            // The link's own stat is untouched: the panel still describes the
+            // link, and its size is the length of the stored target path.
+            assert_ne!(info.size, read.size);
+            // ...and the target's stat is what the editor's freshness check
+            // has to compare its read against.
+            assert_eq!(info.target_size, read.size);
+            assert_eq!(info.target_modified, read.modified);
+        }
+
+        /// Only a symlink whose target stats gets the extra fields, so the
+        /// client can tell "no target" from "target unchanged" by presence.
+        #[test]
+        fn a_plain_file_and_a_dangling_link_carry_no_target_stamp() {
+            let dir = worktree();
+            std::os::unix::fs::symlink("nowhere.txt", dir.path().join("dangling.txt")).unwrap();
+
+            let plain = entry_info(dir.path(), "hello.txt").unwrap();
+            assert_eq!(plain.target_modified, None);
+            assert_eq!(plain.target_size, None);
+
+            let dangling = entry_info(dir.path(), "dangling.txt").unwrap();
+            assert_eq!(dangling.kind, EntryKind::Symlink);
+            assert_eq!(dangling.target_modified, None);
+            assert_eq!(dangling.target_size, None);
+        }
+
+        /// Reads that hand back no text still hand back a stamp. Without one
+        /// the editor has no baseline at all for a binary or read-only tab,
+        /// so it never checks and never notices the file moving.
+        #[test]
+        fn a_binary_and_a_read_only_read_still_carry_their_stamps() {
+            let dir = worktree();
+            std::fs::write(dir.path().join("blob.bin"), [0u8, 159, 146, 150]).unwrap();
+            let binary = read_file(dir.path(), "blob.bin").unwrap();
+            assert!(binary.binary && binary.content.is_empty());
+            assert_eq!(binary.size, Some(4));
+            assert!(binary.modified.is_some());
+
+            std::os::unix::fs::symlink(dir.path().join("hello.txt"), dir.path().join("link.txt"))
+                .unwrap();
+            let read_only = read_file(dir.path(), "link.txt").unwrap();
+            assert!(read_only.read_only);
+            assert_eq!(read_only.size, Some("hi\nthere\n".len() as u64));
+            assert!(read_only.modified.is_some());
+        }
+
+        /// A token in hand means "update the file I read". When that file AND
+        /// the directory it lived in are both gone, the honest answer is still
+        /// the deleted conflict: the create-validation refusal that used to
+        /// come out first answered a question nobody asked, and reached the
+        /// browser as a 400 the conflict dialog cannot route.
+        #[test]
+        fn a_token_survives_the_parent_directory_going_too() {
+            let dir = worktree();
+            std::fs::create_dir(dir.path().join("sub")).unwrap();
+            std::fs::write(dir.path().join("sub/note.txt"), "notes\n").unwrap();
+            let before = read_file(dir.path(), "sub/note.txt").unwrap();
+            let expected = FileStamp {
+                modified: before.modified.clone(),
+                size: before.size.unwrap(),
+            };
+            std::fs::remove_dir_all(dir.path().join("sub")).unwrap();
+
+            let err = write_file_checked(dir.path(), "sub/note.txt", "back\n", Some(&expected))
+                .unwrap_err();
+            let conflict = err
+                .downcast_ref::<WriteConflict>()
+                .expect("a token plus a missing file is a conflict, not a create");
+            assert!(conflict.deleted);
+            assert!(!dir.path().join("sub").exists());
         }
     }
 }

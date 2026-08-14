@@ -45,6 +45,7 @@ import {
   pruneSetByIds,
   reloadedInPlace,
   shouldSkipFileLoad,
+  stampFromInfo,
   stampsDiffer,
   unionRevalidateBatch,
 } from "@/lib/editorBuffers"
@@ -981,7 +982,11 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
       .then((info) => {
         const cur = buffersRef.current.get(tabId)
         if (!cur || isBufferStale(cur, path) || cur.loadedPath !== path) return
-        const onDisk = { modified: info.modified, size: info.size }
+        // The stamp comparable with what THIS buffer's read produced: for a
+        // symlink that is the target's, because the read followed the link.
+        // The stamp comparable with what THIS buffer's read produced: for a
+        // symlink that is the target's, because the read followed the link.
+        const onDisk = stampFromInfo(info)
         const fact = diskFactKey(onDisk)
         const agrees = !stampsDiffer(cur.stamp, onDisk)
         if (agrees || cur.acknowledgedDisk === fact) {
