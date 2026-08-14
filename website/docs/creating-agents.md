@@ -67,6 +67,11 @@ existing local branch, dux asks whether to attach to that branch instead of
 creating a new one, which is useful when you want to continue work that already
 started.
 
+Attaching has a consequence at the other end of the agent's life: dux remembers
+that the branch existed first, and deleting the agent later never deletes it.
+The worktree goes if you ask for it; the branch stays, because it was yours
+before the agent was.
+
 ### Pulling before create
 
 By default dux pulls the leading branch before creating the worktree, so the new
@@ -232,7 +237,9 @@ the fetch targets, so on confirmation dux:
 2. Creates a worktree on that branch.
 
 If the branch already exists locally (for example, from a previous fetch), dux
-attaches to it without fetching again.
+attaches to it without fetching again, and, as with any attach, deleting the
+agent later leaves that branch alone. A branch dux fetched for you is dux's own,
+so that one is cleaned up with the agent.
 
 ### How PR status stays fresh
 
@@ -265,7 +272,8 @@ for that project's repository. Worktrees are grouped into two categories:
 
 - **Managed worktrees**: worktrees already under dux's `worktrees/` directory.
   If one has no agent yet, dux attaches a new session to it without touching the
-  branch or files.
+  branch or files. An adopted worktree's branch came with it, so deleting that
+  agent later removes the worktree and keeps the branch.
 - **External worktrees** (terminal UI only): worktrees that exist in the
   repository but live outside dux's managed directory (for example, one you
   created with `git worktree add` yourself). dux forks these: it creates a new
@@ -281,7 +289,10 @@ confirmation that names the branch, names the full path, and says specifically
 when there are uncommitted changes to lose. That confirmation also offers to
 delete the branch, ticked by default; untick it and the branch survives. Git
 can also refuse the deletion, and then dux reports the branch as still there
-with git's own reason rather than claiming otherwise. The
+with git's own reason rather than claiming otherwise. This dialog is the manual
+override for deleting any branch: deleting an agent only ever deletes branches
+dux created, so when you want a branch gone that dux is deliberately keeping,
+this is where you say so. The
 project picker in front of it labels each project with how many worktrees it
 has, so an empty project is a choice rather than a surprise, and the dialog
 offers **Back** to return to that list.

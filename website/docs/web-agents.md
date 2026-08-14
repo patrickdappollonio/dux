@@ -89,7 +89,10 @@ scoped to that project and a bare `123` is perfectly meaningful.
   git's reason, and leaves the branch to you.
   A worktree that already has an agent names that agent and offers no delete,
   because removing it from under a live agent leaves a broken session. Delete
-  the agent instead.
+  the agent instead. This checkbox is also the manual override for a branch dux
+  will not delete on its own: deleting an agent only ever removes branches dux
+  created, so a branch that came from you outlives its agent and this dialog is
+  where you can still remove it.
 
 **Forking** is different: it starts from an *existing agent*, not the project.
 Open that agent's `⋯` menu and pick **Fork agent…**, which opens the same New
@@ -185,12 +188,17 @@ Two very different endings, and the difference matters:
   confirmation first. Companion terminals, unlike agents, are **destroyed** when
   killed, not detached.
 - **Delete** removes the agent from dux entirely. The confirmation includes an
-  unchecked "Also delete the git worktree and its branch (irreversible)" box, so
-  by default your worktree and its work survive even a delete. Tick it and both
-  go: the branch the agent is on now, and the one it was created on if it has
-  since moved. If git refuses to delete one of them, dux says which branch is
-  still there and why rather than reporting a deletion that did not happen. This is the one destructive per-agent action dux tints red, and
-  it always confirms first.
+  unchecked "also delete the git worktree" box, so by default your worktree and
+  its work survive even a delete. What ticking it does to the branch depends on
+  where that branch came from. For an agent whose branch dux created, both go:
+  the branch the agent is on now, and the one it was created on if it has since
+  moved. For an agent that attached to a branch that already existed, or that was
+  adopted along with an existing worktree, only the worktree goes; the branch is
+  yours, so dux keeps it and the confirmation says so before you tick anything.
+  If git refuses to delete a branch dux did try to remove, dux says which branch
+  is still there and why rather than reporting a deletion that did not happen.
+  This is the one destructive per-agent action dux tints red, and it always
+  confirms first.
 
 Worktrees are your data, so dux never removes or mutates them casually. Deleting
 an agent leaves its worktree on disk unless you explicitly opt in, which is
