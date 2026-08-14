@@ -105,6 +105,10 @@ pub struct DeferredWorktreeRemoval {
     /// when it differs from `branch_name`, or an agent whose branch drifted
     /// leaves its birth branch behind (see `git::remove_worktree`).
     pub initial_branch: String,
+    /// Where the branch came from, captured at delete time. Decides whether the
+    /// removal may delete the branches at all: dux deletes only what it created
+    /// (see `Engine::do_delete_session`).
+    pub branch_provenance: crate::model::BranchProvenance,
     /// The Busy status message to show while the removal runs (set when the
     /// worker is finally spawned, after the PTY is reaped).
     pub busy_message: String,
@@ -3047,6 +3051,7 @@ mod tests {
                 worktree_path: worktree.path().to_string_lossy().to_string(),
                 branch_name: "feat".to_string(),
                 initial_branch: "feat".to_string(),
+                branch_provenance: crate::model::BranchProvenance::CreatedByDux,
                 busy_message: "removing".to_string(),
             },
         });

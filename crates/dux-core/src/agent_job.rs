@@ -30,6 +30,33 @@ enum HeadMismatch {
     Fail,
 }
 
+/// Roll back a create that failed after its worktree existed.
+///
+/// The worktree goes whenever dux made the directory (`owns_worktree`), but the
+/// BRANCH goes only when dux also minted it. Those are two different questions:
+/// attaching to `develop` makes dux the owner of the directory and of nothing
+/// else, and a rollback that deleted the branch too destroyed a branch the user
+/// had before the agent existed.
+///
+/// The provenance is read from the session rather than carried a second time
+/// beside `owns_worktree`, so the rollback and the delete can never disagree
+/// about who owns the branch.
+///
+/// No drifted birth branch is ever passed: the agent was born moments ago and
+/// cannot have moved.
+fn rollback_created_worktree(
+    repo_path: &Path,
+    worktree_path: &Path,
+    branch_name: &str,
+    branch_provenance: BranchProvenance,
+) {
+    if branch_provenance.dux_may_delete_branch() {
+        let _ = git::remove_worktree(repo_path, worktree_path, branch_name, None);
+    } else {
+        let _ = git::remove_worktree_keep_branch(repo_path, worktree_path);
+    }
+}
+
 /// A copy of uncommitted changes planned by a per-request arm and executed in
 /// the common tail, after the provider availability check (so a missing
 /// provider does not throw away completed copy work with the worktree).
@@ -657,13 +684,11 @@ pub fn run_create_agent_job(
     if let Err(hint) = check_provider_available(&provider_cfg) {
         logger::error(&format!("provider not found for {}: {hint}", session.id));
         if owns_worktree {
-            let _ = git::remove_worktree(
+            rollback_created_worktree(
                 &repo_path,
                 Path::new(&session.worktree_path),
                 &session.branch_name,
-                // A rollback of a create: the agent was born moments ago and
-                // its branch cannot have drifted, so there is no second branch.
-                None,
+                session.branch_provenance,
             );
         }
         let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
@@ -710,12 +735,11 @@ pub fn run_create_agent_job(
                         session.worktree_path
                     ));
                     if owns_worktree {
-                        let _ = git::remove_worktree(
+                        rollback_created_worktree(
                             &repo_path,
                             Path::new(&session.worktree_path),
                             &session.branch_name,
-                            // Rollback of a create: no drift is possible yet.
-                            None,
+                            session.branch_provenance,
                         );
                     }
                     let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
@@ -760,12 +784,11 @@ pub fn run_create_agent_job(
                             ));
                         }
                         if owns_worktree {
-                            let _ = git::remove_worktree(
+                            rollback_created_worktree(
                                 &repo_path,
                                 Path::new(&session.worktree_path),
                                 &session.branch_name,
-                                // Rollback of a create: no drift is possible yet.
-                                None,
+                                session.branch_provenance,
                             );
                         }
                         let message = match &check_error {
@@ -914,12 +937,11 @@ pub fn run_agent_launch_job(request: AgentLaunchRequest, worker_tx: Sender<Worke
         } = &request.kind
             && *owns_worktree
         {
-            let _ = git::remove_worktree(
+            rollback_created_worktree(
                 Path::new(repo_path),
                 Path::new(&request.session.worktree_path),
                 &request.session.branch_name,
-                // Rollback of a create: no drift is possible yet.
-                None,
+                request.session.branch_provenance,
             );
         }
         let _ = worker_tx.send(WorkerEvent::AgentLaunchFailed(Box::new(
@@ -954,12 +976,11 @@ pub fn run_agent_launch_job(request: AgentLaunchRequest, worker_tx: Sender<Worke
             } = &request.kind
                 && *owns_worktree
             {
-                let _ = git::remove_worktree(
+                rollback_created_worktree(
                     Path::new(repo_path),
                     Path::new(&request.session.worktree_path),
                     &request.session.branch_name,
-                    // Rollback of a create: no drift is possible yet.
-                    None,
+                    request.session.branch_provenance,
                 );
             }
             let message = if matches!(request.kind, AgentLaunchKind::Create { .. }) {
@@ -1427,6 +1448,72 @@ mod tests {
             session.branch_provenance,
             crate::model::BranchProvenance::Adopted,
             "the adopted worktree's branch predates the agent"
+        );
+    }
+
+    /// Every branch in `repo`, as `git branch --list` sees them.
+    fn branches_in(repo: &Path) -> String {
+        let out = crate::git::test_support::git_command()
+            .args(["branch", "--list"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).to_string()
+    }
+
+    #[test]
+    fn a_failed_attach_create_leaves_the_pre_existing_branch_alone() {
+        // Regression: the create rollback removed the worktree AND deleted the
+        // branch whenever dux had made the directory. For an attach, dux made
+        // the directory but NOT the branch, so a create that failed on a
+        // missing provider destroyed the user's branch on the way out.
+        let repo = init_test_repo();
+        create_branch(repo.path(), "develop");
+        let mut project = test_project(repo.path());
+        project.default_provider = ProviderKind::new("definitely-not-a-real-command-dux");
+        let request = CreateAgentRequest::NewProject {
+            project,
+            custom_name: Some("develop".to_string()),
+            use_existing_branch: true,
+            pull_before_create: false,
+            copy_uncommitted_changes: false,
+        };
+
+        let run = drive_create_job_run(repo.path(), request);
+
+        assert!(
+            run.failure.is_some(),
+            "the unavailable provider must fail the job"
+        );
+        let branches = branches_in(repo.path());
+        assert!(
+            branches.contains("develop"),
+            "the rollback must not delete a branch that existed before the agent: {branches}"
+        );
+    }
+
+    #[test]
+    fn a_failed_fresh_create_still_cleans_up_the_branch_it_minted() {
+        // The other half of the gate: a branch dux created moments ago is dux's
+        // to remove, or the retry collides with "branch already exists".
+        let repo = init_test_repo();
+        let mut project = test_project(repo.path());
+        project.default_provider = ProviderKind::new("definitely-not-a-real-command-dux");
+        let request = CreateAgentRequest::NewProject {
+            project,
+            custom_name: Some("brand-new".to_string()),
+            use_existing_branch: false,
+            pull_before_create: false,
+            copy_uncommitted_changes: false,
+        };
+
+        let run = drive_create_job_run(repo.path(), request);
+
+        assert!(run.failure.is_some(), "the job must fail");
+        let branches = branches_in(repo.path());
+        assert!(
+            !branches.contains("brand-new"),
+            "a branch dux minted for the failed agent must be cleaned up: {branches}"
         );
     }
 

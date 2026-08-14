@@ -521,7 +521,7 @@ pub enum WorkerEvent {
     /// can retry.
     WorktreeRemoveCompleted {
         session_id: String,
-        result: Result<crate::git::RemoveResult, String>,
+        result: Result<crate::engine::RemovedBranches, String>,
     },
     /// Background `git switch <target_branch>` run from a non-default branch
     /// warning modal has finished. On `Ok`, the main loop continues the

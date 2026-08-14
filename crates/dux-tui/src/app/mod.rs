@@ -585,7 +585,7 @@ pub enum TuiDeleteOutcome {
     /// case — cleanup runs now). `branches` selects the message, and carries
     /// the birth branch's fate as well when the agent had drifted.
     SucceededPresent {
-        branches: dux_core::git::RemoveResult,
+        branches: dux_core::engine::RemovedBranches,
     },
     /// Git removal succeeded but the session was already removed by another path
     /// (e.g. its project was deleted) before the worker reported back. Resolve to

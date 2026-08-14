@@ -219,7 +219,7 @@ pub enum EventReaction {
     // -- Worktree delete follow-up. --
     WorktreeRemoveSucceeded {
         session_id: String,
-        branches: crate::git::RemoveResult,
+        branches: RemovedBranches,
         our_busy_message: Option<String>,
     },
     WorktreeRemoveFailed {
@@ -490,6 +490,25 @@ pub enum ProjectPersistenceView {
     },
 }
 
+/// What happened to the agent's BRANCHES when its worktree was removed.
+///
+/// Two answers, because a delete now has two legal shapes. dux deletes the
+/// branches it created; it removes the worktree and keeps the branches when
+/// they are not its own (an agent attached to an existing branch, or adopted
+/// along with an existing worktree). The keep path never calls the branch
+/// deleting code at all, so it has no [`crate::git::RemoveResult`] to report
+/// and must not invent one: a `RemoveResult` full of `Deleted` would be a
+/// straightforward lie, and one full of `AlreadyGone` would be the opposite lie.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RemovedBranches {
+    /// dux deleted the branches it owned; git's per-branch report.
+    Deleted(crate::git::RemoveResult),
+    /// Nothing was deleted. The branches predate dux's ownership, so the
+    /// worktree went and both branches stayed. Carries the provenance so the
+    /// message can say WHY they were kept.
+    Kept(crate::model::BranchProvenance),
+}
+
 /// What happened to the session's worktree during deletion. Each variant maps
 /// 1:1 to a user-facing status message; the illegal "delete requested, no
 /// siblings, but no result" state has no representation. Replaces the former
@@ -502,10 +521,11 @@ pub enum WorktreeRemoval {
     PreservedOrphan,
     /// Deletion requested but skipped because siblings still use the worktree.
     SkippedForSiblings,
-    /// Worktree removed. `branches` mirrors git's report for BOTH branches the
-    /// removal targets: the one the worktree was on and, when the agent drifted,
-    /// the one it was born on.
-    Performed { branches: crate::git::RemoveResult },
+    /// Worktree removed. `branches` says what became of the branches: git's
+    /// report for BOTH branches the removal targeted (the one the worktree was
+    /// on and, when the agent drifted, the one it was born on), or that they
+    /// were deliberately kept because they were not dux's to delete.
+    Performed { branches: RemovedBranches },
 }
 
 impl WorktreeRemoval {
@@ -517,7 +537,7 @@ impl WorktreeRemoval {
     fn from_decision(
         delete_worktree: bool,
         other_sessions_on_worktree: bool,
-        performed: Option<crate::git::RemoveResult>,
+        performed: Option<RemovedBranches>,
     ) -> Self {
         match (delete_worktree, other_sessions_on_worktree, performed) {
             (_, _, Some(branches)) => WorktreeRemoval::Performed { branches },
@@ -1333,19 +1353,38 @@ impl Engine {
             // survives an `Err` (the `?` aborts the delete), and unlike the async
             // `WorktreeRemoveCompleted` handler nothing else would clear the flag,
             // leaving the agent permanently barred from creating/relaunching tabs.
-            let result = match crate::git::remove_worktree(
-                std::path::Path::new(&project.path),
-                std::path::Path::new(&session.worktree_path),
-                &session.branch_name,
-                // The BIRTH branch too: `branch_name` tracks whatever the
-                // worktree drifted onto, so deleting only that leaves the
-                // original behind and recreating the agent collides with it.
-                Some(session.initial_branch.as_str()),
-            ) {
-                Ok(result) => result,
-                Err(err) => {
-                    self.closing_sessions.remove(session_id);
-                    return Err(err);
+            // THE GATE. dux deletes the branches it created and only those.
+            // An agent attached to `develop`, or adopted with an existing
+            // worktree, gives up its worktree and keeps its branches: they were
+            // the user's before the agent existed. Deciding it HERE means the
+            // project-delete cascade (which calls this per agent) inherits it,
+            // so removing a project can no longer take `develop` with it.
+            let result = if session.branch_provenance.dux_may_delete_branch() {
+                match crate::git::remove_worktree(
+                    std::path::Path::new(&project.path),
+                    std::path::Path::new(&session.worktree_path),
+                    &session.branch_name,
+                    // The BIRTH branch too: `branch_name` tracks whatever the
+                    // worktree drifted onto, so deleting only that leaves the
+                    // original behind and recreating the agent collides with it.
+                    Some(session.initial_branch.as_str()),
+                ) {
+                    Ok(result) => RemovedBranches::Deleted(result),
+                    Err(err) => {
+                        self.closing_sessions.remove(session_id);
+                        return Err(err);
+                    }
+                }
+            } else {
+                match crate::git::remove_worktree_keep_branch(
+                    std::path::Path::new(&project.path),
+                    std::path::Path::new(&session.worktree_path),
+                ) {
+                    Ok(()) => RemovedBranches::Kept(session.branch_provenance),
+                    Err(err) => {
+                        self.closing_sessions.remove(session_id);
+                        return Err(err);
+                    }
                 }
             };
             Some(result)
@@ -1442,6 +1481,9 @@ impl Engine {
                 worktree_path: session.worktree_path.clone(),
                 branch_name: session.branch_name.clone(),
                 initial_branch: session.initial_branch.clone(),
+                // Carried to the worker so the deferred removal applies the same
+                // gate the synchronous path does; see `do_delete_session`.
+                branch_provenance: session.branch_provenance,
                 busy_message: format!(
                     "Removing worktree for agent \"{}\"\u{2026}",
                     session.branch_name
@@ -1570,6 +1612,7 @@ impl Engine {
             worktree_path,
             branch_name,
             initial_branch,
+            branch_provenance,
             busy_message,
         } = req;
         // Guard against a duplicate worker (e.g. a project delete racing the
@@ -1581,14 +1624,26 @@ impl Engine {
         std::thread::spawn(move || {
             use std::panic::AssertUnwindSafe;
             let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                crate::git::remove_worktree(
-                    std::path::Path::new(&project_path),
-                    std::path::Path::new(&worktree_path),
-                    &branch_name,
-                    // The BIRTH branch too; see `git::remove_worktree`.
-                    Some(initial_branch.as_str()),
-                )
-                .map_err(|e| format!("{e:#}"))
+                // The same gate as the synchronous path: only branches dux
+                // created are dux's to delete.
+                if branch_provenance.dux_may_delete_branch() {
+                    crate::git::remove_worktree(
+                        std::path::Path::new(&project_path),
+                        std::path::Path::new(&worktree_path),
+                        &branch_name,
+                        // The BIRTH branch too; see `git::remove_worktree`.
+                        Some(initial_branch.as_str()),
+                    )
+                    .map(RemovedBranches::Deleted)
+                    .map_err(|e| format!("{e:#}"))
+                } else {
+                    crate::git::remove_worktree_keep_branch(
+                        std::path::Path::new(&project_path),
+                        std::path::Path::new(&worktree_path),
+                    )
+                    .map(|()| RemovedBranches::Kept(branch_provenance))
+                    .map_err(|e| format!("{e:#}"))
+                }
             }))
             .unwrap_or_else(|payload| {
                 let reason = crate::engine::spawn_worker::format_panic_payload(payload);
@@ -2965,10 +3020,10 @@ mod tests {
         assert_eq!(
             outcome.removal,
             WorktreeRemoval::Performed {
-                branches: crate::git::RemoveResult {
+                branches: crate::engine::RemovedBranches::Deleted(crate::git::RemoveResult {
                     branch: crate::git::BranchDeletion::Deleted,
                     initial_branch: Some(crate::git::BranchDeletion::Deleted),
-                },
+                }),
             },
             "both branches must be reported so the status line can name them"
         );
@@ -2985,6 +3040,229 @@ mod tests {
             !branches.contains("born-here"),
             "the branch the agent was born on must be gone too, or recreating it \
              fails with \"branch already exists\": {branches}"
+        );
+    }
+
+    /// A repo on `main` with one commit, plus the named extra branches.
+    #[cfg(test)]
+    fn repo_with_branches(root: &std::path::Path, branches: &[&str]) -> std::path::PathBuf {
+        fn git(dir: &std::path::Path, args: &[&str]) {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "--initial-branch=main"]);
+        git(&repo, &["config", "user.email", "t@example.com"]);
+        git(&repo, &["config", "user.name", "t"]);
+        std::fs::write(repo.join("f.txt"), "hi").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "init"]);
+        for branch in branches {
+            git(&repo, &["branch", branch]);
+        }
+        repo
+    }
+
+    /// Attach a worktree at `repo/../wt-<branch>` to an EXISTING branch, the way
+    /// the attach create arm does.
+    #[cfg(test)]
+    fn attach_worktree(repo: &std::path::Path, branch: &str) -> std::path::PathBuf {
+        let worktree = repo.parent().unwrap().join(format!("wt-{branch}"));
+        let out = std::process::Command::new("git")
+            .args(["worktree", "add", worktree.to_str().unwrap(), branch])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "worktree add failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        worktree
+    }
+
+    #[cfg(test)]
+    fn branch_list(repo: &std::path::Path) -> String {
+        let out = std::process::Command::new("git")
+            .args(["-C", repo.to_str().unwrap(), "branch", "--list"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).to_string()
+    }
+
+    #[test]
+    fn deleting_an_attached_agent_removes_the_worktree_and_keeps_the_branch() {
+        // The whole point: `develop` existed before the agent, so the checkbox
+        // takes the worktree and nothing else.
+        let (mut engine, tmp) = test_engine();
+        let repo = repo_with_branches(tmp.path(), &["develop"]);
+        let worktree = attach_worktree(&repo, "develop");
+
+        engine
+            .projects
+            .push(sample_project("p1", repo.to_str().unwrap()));
+        let mut session = sample_session("s1", "p1", "develop");
+        session.branch_provenance = crate::model::BranchProvenance::AttachedExisting;
+        session.worktree_path = worktree.to_str().unwrap().to_string();
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+
+        let outcome = engine
+            .do_delete_session("s1", true)
+            .unwrap()
+            .expect("the delete should have run");
+
+        assert_eq!(
+            outcome.removal,
+            WorktreeRemoval::Performed {
+                branches: RemovedBranches::Kept(crate::model::BranchProvenance::AttachedExisting),
+            },
+            "nothing was deleted, so the outcome must not carry a deletion report"
+        );
+        assert!(!worktree.exists(), "the worktree must be gone");
+        let branches = branch_list(&repo);
+        assert!(
+            branches.contains("develop"),
+            "a branch that existed before the agent must survive it: {branches}"
+        );
+    }
+
+    #[test]
+    fn deleting_a_drifted_attached_agent_keeps_both_branches() {
+        // Drift inside an attached agent creates a SECOND branch. Both are kept:
+        // the gate is per agent, not per branch.
+        let (mut engine, tmp) = test_engine();
+        let repo = repo_with_branches(tmp.path(), &["develop"]);
+        let worktree = attach_worktree(&repo, "develop");
+        let out = std::process::Command::new("git")
+            .args(["switch", "-c", "feature-x"])
+            .current_dir(&worktree)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+
+        engine
+            .projects
+            .push(sample_project("p1", repo.to_str().unwrap()));
+        // The branch-sync poller has already followed the drift.
+        let mut session = sample_session("s1", "p1", "feature-x");
+        session.initial_branch = "develop".to_string();
+        session.branch_provenance = crate::model::BranchProvenance::AttachedExisting;
+        session.worktree_path = worktree.to_str().unwrap().to_string();
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+
+        let outcome = engine.do_delete_session("s1", true).unwrap().expect("ran");
+
+        let branches = branch_list(&repo);
+        assert!(
+            branches.contains("develop") && branches.contains("feature-x"),
+            "both branches must survive: {branches}"
+        );
+        // And the message names both, with a reason each: "existed before this
+        // agent" is false of the branch the drift created.
+        let message = crate::wire::delete_session_status_message(&outcome.finish, &outcome.removal);
+        assert!(
+            message.contains("\"feature-x\" was created inside this agent's worktree and was kept")
+                && message.contains("\"develop\" existed before this agent and was kept"),
+            "each kept branch needs its own reason: {message}"
+        );
+    }
+
+    #[test]
+    fn deleting_a_project_keeps_the_branch_of_an_attached_agent() {
+        // The cascade calls `do_delete_session` per agent, so it inherits the
+        // gate: removing a project must not take the user's `develop` with it.
+        let (mut engine, tmp) = test_engine();
+        let repo = repo_with_branches(tmp.path(), &["develop", "dux-made"]);
+        let attached = attach_worktree(&repo, "develop");
+        let owned = attach_worktree(&repo, "dux-made");
+
+        engine
+            .projects
+            .push(sample_project("p1", repo.to_str().unwrap()));
+        let mut a = sample_session("s1", "p1", "develop");
+        a.branch_provenance = crate::model::BranchProvenance::AttachedExisting;
+        a.worktree_path = attached.to_str().unwrap().to_string();
+        engine.session_store.upsert_session(&a).unwrap();
+        engine.sessions.push(a);
+        let mut b = sample_session("s2", "p1", "dux-made");
+        b.branch_provenance = crate::model::BranchProvenance::CreatedByDux;
+        b.worktree_path = owned.to_str().unwrap().to_string();
+        engine.session_store.upsert_session(&b).unwrap();
+        engine.sessions.push(b);
+
+        engine
+            .apply(crate::engine::Command::DeleteProject {
+                project_id: "p1".to_string(),
+                project_name: "repo".to_string(),
+            })
+            .unwrap();
+
+        let branches = branch_list(&repo);
+        assert!(
+            branches.contains("develop"),
+            "the attached agent's pre-existing branch must survive the project delete: {branches}"
+        );
+        assert!(
+            !branches.contains("dux-made"),
+            "a branch dux created is still cleaned up by the cascade: {branches}"
+        );
+    }
+
+    #[test]
+    fn re_adopting_an_orphaned_worktree_launders_a_dux_made_branch_into_a_kept_one() {
+        // ACCEPTED behavior, pinned so nobody "fixes" it by accident. Deleting
+        // without the checkbox keeps the worktree and destroys the session row,
+        // and the provenance dies with it. Re-adopting that orphan yields
+        // Adopted, so a branch dux originally minted now survives deletion.
+        // Unknowable is treated as not-ours: losing a cleanup is recoverable,
+        // losing a branch is not. The worktree manager is the manual way out.
+        let (mut engine, tmp) = test_engine();
+        let repo = repo_with_branches(tmp.path(), &["dux-made"]);
+        let worktree = attach_worktree(&repo, "dux-made");
+
+        engine
+            .projects
+            .push(sample_project("p1", repo.to_str().unwrap()));
+        let mut first = sample_session("s1", "p1", "dux-made");
+        first.branch_provenance = crate::model::BranchProvenance::CreatedByDux;
+        first.worktree_path = worktree.to_str().unwrap().to_string();
+        engine.session_store.upsert_session(&first).unwrap();
+        engine.sessions.push(first);
+
+        // Delete WITHOUT the checkbox: worktree and branch stay, row goes.
+        engine.do_delete_session("s1", false).unwrap().expect("ran");
+        assert!(worktree.exists());
+
+        // Re-adopt the orphan.
+        let mut second = sample_session("s2", "p1", "dux-made");
+        second.branch_provenance = crate::model::BranchProvenance::Adopted;
+        second.worktree_path = worktree.to_str().unwrap().to_string();
+        engine.session_store.upsert_session(&second).unwrap();
+        engine.sessions.push(second);
+
+        let outcome = engine.do_delete_session("s2", true).unwrap().expect("ran");
+
+        assert_eq!(
+            outcome.removal,
+            WorktreeRemoval::Performed {
+                branches: RemovedBranches::Kept(crate::model::BranchProvenance::Adopted),
+            }
+        );
+        let branches = branch_list(&repo);
+        assert!(
+            branches.contains("dux-made"),
+            "the laundered branch survives, deliberately: {branches}"
         );
     }
 
@@ -4149,10 +4427,12 @@ mod tests {
 
         let reaction = engine.process_worker_event(WorkerEvent::WorktreeRemoveCompleted {
             session_id: "s1".to_string(),
-            result: Ok(crate::git::RemoveResult {
-                branch: crate::git::BranchDeletion::AlreadyGone,
-                initial_branch: None,
-            }),
+            result: Ok(crate::engine::RemovedBranches::Deleted(
+                crate::git::RemoveResult {
+                    branch: crate::git::BranchDeletion::AlreadyGone,
+                    initial_branch: None,
+                },
+            )),
         });
 
         assert!(!engine.pending_deletions.contains("s1"));
@@ -4165,6 +4445,9 @@ mod tests {
                 our_busy_message,
             } => {
                 assert_eq!(session_id, "s1");
+                let crate::engine::RemovedBranches::Deleted(branches) = branches else {
+                    panic!("a created-by-dux agent's branches are deleted, not kept");
+                };
                 assert_eq!(branches.branch, crate::git::BranchDeletion::AlreadyGone);
                 assert_eq!(our_busy_message.as_deref(), Some("Deleting agent \"s1\"…"));
             }
@@ -6186,6 +6469,47 @@ mod tests {
     /// `catch_unwind` wrapper added to `begin_delete_session` by spawning an
     /// equivalent thread, triggering a deliberate panic, and asserting that the
     /// synthesised error event arrives on the channel and that
+    #[test]
+    fn the_deferred_removal_worker_honors_provenance_too() {
+        // The async path (a live agent whose PTY must reap first) runs the
+        // removal on a worker, so the gate has to travel with the request. The
+        // synchronous and deferred paths must not disagree about whose branch
+        // it is.
+        let (mut engine, tmp) = test_engine();
+        let repo = repo_with_branches(tmp.path(), &["develop"]);
+        let worktree = attach_worktree(&repo, "develop");
+
+        engine.dispatch_deferred_worktree_removal(crate::engine::DeferredWorktreeRemoval {
+            session_id: "s1".to_string(),
+            project_path: repo.to_string_lossy().to_string(),
+            worktree_path: worktree.to_string_lossy().to_string(),
+            branch_name: "develop".to_string(),
+            initial_branch: "develop".to_string(),
+            branch_provenance: crate::model::BranchProvenance::AttachedExisting,
+            busy_message: "Removing worktree\u{2026}".to_string(),
+        });
+
+        let event = engine
+            .worker_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the worker must report back");
+        match event {
+            crate::worker::WorkerEvent::WorktreeRemoveCompleted { result, .. } => {
+                assert_eq!(
+                    result.unwrap(),
+                    RemovedBranches::Kept(crate::model::BranchProvenance::AttachedExisting)
+                );
+            }
+            _ => panic!("expected a WorktreeRemoveCompleted event"),
+        }
+        assert!(!worktree.exists(), "the worktree still goes");
+        let branches = branch_list(&repo);
+        assert!(
+            branches.contains("develop"),
+            "the pre-existing branch must survive the deferred removal: {branches}"
+        );
+    }
+
     /// `process_worker_event` then clears the pending state.
     #[test]
     fn worktree_remove_panic_posts_failure_event_and_clears_pending() {
@@ -6204,7 +6528,7 @@ mod tests {
         let handle = std::thread::spawn(move || {
             use std::panic::AssertUnwindSafe;
             let result = std::panic::catch_unwind(AssertUnwindSafe(
-                || -> Result<crate::git::RemoveResult, String> {
+                || -> Result<crate::engine::RemovedBranches, String> {
                     panic!("simulated git failure");
                 },
             ))

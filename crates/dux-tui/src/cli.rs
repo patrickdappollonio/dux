@@ -632,14 +632,22 @@ fn remove_session_worktree(paths: &DuxPaths, session: &crate::model::AgentSessio
     // a stale worktree ref that made the branch undeletable. Continue-on-error is
     // preserved: a factory reset must press on past any single failure.
     if let Some(project_path) = session.project_path.as_deref() {
-        // The birth branch too: a factory reset that left a drifted agent's
-        // original branch behind would not be a reset.
-        let _ = git::remove_worktree(
-            Path::new(project_path),
-            worktree,
-            &session.branch_name,
-            Some(session.initial_branch.as_str()),
-        );
+        // The same branch-ownership gate the engine's delete applies, for the
+        // same reason. Both halves matter: a reset that left a drifted agent's
+        // own original branch behind would not be a reset, and a reset that
+        // deleted the user's `develop` because an agent was once attached to it
+        // would not be a reset either, it would be data loss. dux resets what
+        // dux made.
+        if session.branch_provenance.dux_may_delete_branch() {
+            let _ = git::remove_worktree(
+                Path::new(project_path),
+                worktree,
+                &session.branch_name,
+                Some(session.initial_branch.as_str()),
+            );
+        } else {
+            let _ = git::remove_worktree_keep_branch(Path::new(project_path), worktree);
+        }
     }
 
     // Belt-and-suspenders for the factory-reset guarantee: ensure the directory is
@@ -1534,6 +1542,81 @@ mod tests {
                 .expect("session");
             worktree
         }
+    }
+
+    /// A factory reset resets what dux made. An agent attached to a branch the
+    /// user already had gives up its worktree and keeps its branch: deleting
+    /// `develop` because an agent once pointed at it is data loss, not a reset.
+    #[test]
+    fn factory_reset_keeps_a_branch_the_agent_did_not_create() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let repo = tempdir.path().join("repo");
+        fs::create_dir_all(&repo).expect("repo dir");
+        let git = |cwd: &Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .expect("git");
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&repo, &["init", "-b", "main"]);
+        git(&repo, &["config", "user.email", "t@example.com"]);
+        git(&repo, &["config", "user.name", "Test User"]);
+        git(&repo, &["commit", "--allow-empty", "-m", "initial"]);
+        git(&repo, &["branch", "develop"]);
+
+        let worktrees_root = tempdir.path().join("worktrees");
+        fs::create_dir_all(&worktrees_root).expect("worktrees root");
+        let worktree = worktrees_root.join("wt");
+        git(
+            &repo,
+            &["worktree", "add", worktree.to_str().unwrap(), "develop"],
+        );
+
+        let paths = DuxPaths {
+            config_path: tempdir.path().join("config.toml"),
+            sessions_db_path: tempdir.path().join("sessions.sqlite3"),
+            worktrees_root: worktrees_root.clone(),
+            lock_path: tempdir.path().join("dux.lock"),
+            root: tempdir.path().to_path_buf(),
+        };
+        let now = Utc::now();
+        let session = AgentSession {
+            id: "wt".to_string(),
+            project_id: "proj".to_string(),
+            project_path: Some(repo.to_string_lossy().to_string()),
+            provider: ProviderKind::new("claude"),
+            source_branch: "main".to_string(),
+            branch_name: "develop".to_string(),
+            initial_branch: "develop".to_string(),
+            branch_provenance: dux_core::model::BranchProvenance::AttachedExisting,
+            worktree_path: worktree.to_string_lossy().to_string(),
+            title: None,
+            started_providers: Vec::new(),
+            desired_running: false,
+            auto_reopen_enabled: true,
+            status: SessionStatus::Active,
+            created_at: now,
+            updated_at: now,
+            last_focused_tab: None,
+        };
+
+        remove_session_worktree(&paths, &session);
+
+        assert!(!worktree.exists(), "the worktree directory must be removed");
+        let branches = std::process::Command::new("git")
+            .args(["-C", repo.to_str().unwrap(), "branch", "--list", "develop"])
+            .output()
+            .expect("git branch --list");
+        assert!(
+            String::from_utf8_lossy(&branches.stdout).contains("develop"),
+            "a branch that existed before the agent must survive a factory reset",
+        );
     }
 
     /// Convergence regression: factory-reset worktree removal must prune the

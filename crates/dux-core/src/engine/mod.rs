@@ -23,7 +23,7 @@ pub use events::{
     BeginDeleteSessionOutcome, BeginDeleteSessionView, DeleteTerminalView, DetachedSession,
     DispatchAgentLaunchView, DoDeleteSessionOutcome, DoDeleteSessionView, EventReaction,
     FinishDeleteSessionOutcome, FinishDeleteSessionView, ProjectPersistenceOutcome,
-    ProjectPersistenceView, StatusUpdate, WorktreeRemoval,
+    ProjectPersistenceView, RemovedBranches, StatusUpdate, WorktreeRemoval,
 };
 pub use in_flight::{
     BranchRenameDispatch, BranchRenamePlan, BranchRenameRejection, InFlightKey, InFlightSet,

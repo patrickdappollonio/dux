@@ -883,7 +883,9 @@ impl App {
                             // branch report arrives with the deferred removal,
                             // which authors the final message.
                             WorktreeRemoval::Performed {
-                                branches: dux_core::git::RemoveResult::default(),
+                                branches: dux_core::engine::RemovedBranches::Deleted(
+                                    dux_core::git::RemoveResult::default(),
+                                ),
                             },
                             false,
                         ) {
