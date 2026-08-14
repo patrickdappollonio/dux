@@ -1714,6 +1714,40 @@ describe("when the file changes on disk underneath the editor", () => {
     expect(editor().value).toBe(TYPED)
   })
 
+  // "Keep mine" has to MEAN something. Every window focus runs another check,
+  // so without remembering what was dismissed the banner would come straight
+  // back and the button would be decoration.
+  it("does not raise the same change again once it is dismissed", async () => {
+    const view = await mountOne(true)
+    fireEvent.change(editor(), { target: { value: TYPED } })
+    put(PATH, AGENT_TEXT, "2026-02-02T00:00:00+00:00")
+    setTabs([tab(TAB_ID, PATH, true)], TAB_ID, slice(9, 1))
+    view.rerender(<Overlay />)
+    await screen.findByRole("status")
+    fireEvent.click(screen.getByRole("button", { name: /keep mine/i }))
+    await waitFor(() => expect(screen.queryByRole("status")).toBeNull())
+
+    fireEvent(window, new Event("focus"))
+    await waitFor(() => expect(infoMock.mock.calls.length).toBeGreaterThan(1))
+    expect(screen.queryByRole("status")).toBeNull()
+    expect(editor().value).toBe(TYPED)
+  })
+
+  it("raises it again when the file changes a SECOND time", async () => {
+    const view = await mountOne(true)
+    fireEvent.change(editor(), { target: { value: TYPED } })
+    put(PATH, AGENT_TEXT, "2026-02-02T00:00:00+00:00")
+    setTabs([tab(TAB_ID, PATH, true)], TAB_ID, slice(9, 1))
+    view.rerender(<Overlay />)
+    await screen.findByRole("status")
+    fireEvent.click(screen.getByRole("button", { name: /keep mine/i }))
+    await waitFor(() => expect(screen.queryByRole("status")).toBeNull())
+
+    put(PATH, AGENT_TEXT + "and again\n", "2026-03-03T00:00:00+00:00")
+    fireEvent(window, new Event("focus"))
+    expect(await screen.findByRole("status")).toBeInstanceOf(HTMLElement)
+  })
+
   it("says so when the file was deleted, and offers to close the tab", async () => {
     const view = await mountOne(true)
     fireEvent.change(editor(), { target: { value: TYPED } })

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 import {
   baselineSavedBuffer,
   changeSignalFor,
+  diskFactKey,
   emptyBuffer,
   fileLoadSeedBuffer,
   fileSignalMoved,
@@ -426,11 +427,32 @@ describe("baselineSavedBuffer", () => {
   })
 })
 
+// The dismissal memory. A boolean would have made "keep mine" mean "never
+// bother me about this file again", which is wrong the moment the agent
+// touches it a second time; the FACT is what gets remembered.
+describe("diskFactKey", () => {
+  it("is equal for the same stamp and different for a later one", () => {
+    const a = { modified: "2026-01-01T00:00:00+00:00", size: 9 }
+    expect(diskFactKey(a)).toBe(diskFactKey({ ...a }))
+    expect(diskFactKey(a)).not.toBe(diskFactKey({ ...a, size: 10 }))
+    expect(diskFactKey(a)).not.toBe(
+      diskFactKey({ ...a, modified: "2026-02-02T00:00:00+00:00" }),
+    )
+  })
+
+  it("gives absence its own key, never confusable with a stamp", () => {
+    expect(diskFactKey(null)).toBe("deleted")
+    expect(diskFactKey({ modified: null, size: null })).not.toBe("deleted")
+  })
+})
+
 describe("the seeds carry the freshness fields", () => {
   it("a neutral buffer starts fresh, unstamped and unsignalled", () => {
     const b = emptyBuffer("a.ts")
     expect(b.diskState).toBe("fresh")
     expect(b.fileLoadedSignal).toBe("")
     expect(b.stamp).toEqual({ modified: null, size: null })
+    expect(b.diskFact).toBeNull()
+    expect(b.acknowledgedDisk).toBeNull()
   })
 })

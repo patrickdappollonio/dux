@@ -36,6 +36,7 @@ import { OPEN_IN_EDITORS } from "@/lib/editors"
 import {
   baselineSavedBuffer,
   changeSignalFor,
+  diskFactKey,
   emptyBuffer,
   fileLoadSeedBuffer,
   fileSignalMoved,
@@ -890,14 +891,40 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
       })
   }
 
-  function markDiskState(tabId: string, path: string, state: DiskState): void {
+  // Raise the banner for a disk fact the editor could not act on by itself.
+  // `fact` is what the check found (`diskFactKey`), remembered so a dismissal
+  // can be about THIS change rather than about banners in general.
+  function raiseDiskBanner(
+    tabId: string,
+    path: string,
+    state: DiskState,
+    fact: string,
+  ): void {
     setBuffers((prev) => {
       const cur = prev.get(tabId)
-      if (!cur || isBufferStale(cur, path) || cur.diskState === state) {
-        return prev
-      }
+      if (!cur || isBufferStale(cur, path)) return prev
+      if (cur.diskState === state && cur.diskFact === fact) return prev
       const next = new Map(prev)
-      next.set(tabId, { ...cur, diskState: state })
+      next.set(tabId, { ...cur, diskState: state, diskFact: fact })
+      return next
+    })
+  }
+
+  // "Keep mine" / "Keep it open". The banner goes away and stays away for the
+  // change it was reporting; a LATER change on disk is a different fact and
+  // raises it again. The save guard is untouched: acknowledging that someone
+  // else edited the file is not consent to overwrite them, so the next save
+  // still asks.
+  function dismissDiskBanner(tabId: string, path: string): void {
+    setBuffers((prev) => {
+      const cur = prev.get(tabId)
+      if (!cur || isBufferStale(cur, path)) return prev
+      const next = new Map(prev)
+      next.set(tabId, {
+        ...cur,
+        diskState: "fresh",
+        acknowledgedDisk: cur.diskFact,
+      })
       return next
     })
   }
@@ -920,10 +947,13 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
         const cur = buffersRef.current.get(tabId)
         if (!cur || isBufferStale(cur, path) || cur.loadedPath !== path) return
         const onDisk = { modified: info.modified, size: info.size }
-        if (!stampsDiffer(cur.stamp, onDisk)) {
-          // Nothing moved. Adopt the signal that sent us here so the same
-          // movement does not ask again on every render: this is the user's
-          // own save, or the changes slice merely refetching.
+        const fact = diskFactKey(onDisk)
+        if (!stampsDiffer(cur.stamp, onDisk) || cur.acknowledgedDisk === fact) {
+          // Either nothing moved, or the user has already said "keep mine"
+          // about exactly this change. Adopt the signal that sent us here so
+          // the same movement does not ask again on every render: this is the
+          // user's own save, the changes slice merely refetching, or a
+          // dismissal being honoured.
           setBuffers((prev) => {
             const b = prev.get(tabId)
             if (!b || isBufferStale(b, path)) return prev
@@ -939,7 +969,7 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
         // the user is selecting inside. Both get the banner, which is the same
         // offer made in a way that waits for them.
         if (dirty || editorSelectionActive()) {
-          markDiskState(tabId, path, "changed")
+          raiseDiskBanner(tabId, path, "changed", fact)
           return
         }
         reloadFileInPlace(tabId, path)
@@ -950,7 +980,11 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
         // refusal, a dropped connection) says nothing about the file, and a
         // failed CHECK is not worth a toast: the next trigger retries.
         if (e instanceof FileApiError && e.status === 404) {
-          markDiskState(tabId, path, "deleted")
+          const fact = diskFactKey(null)
+          const cur = buffersRef.current.get(tabId)
+          if (cur?.acknowledgedDisk !== fact) {
+            raiseDiskBanner(tabId, path, "deleted", fact)
+          }
         }
       })
       .finally(() => {
@@ -1287,7 +1321,12 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
           // record it: the banner is then truthful behind the dialog, and
           // cancelling leaves the user looking at the offer rather than at
           // nothing.
-          markDiskState(tabId, path, e.deleted ? "deleted" : "changed")
+          raiseDiskBanner(
+            tabId,
+            path,
+            e.deleted ? "deleted" : "changed",
+            diskFactKey(e.deleted ? null : { modified: e.modified, size: e.size }),
+          )
           setSaveConflict({ tabId, path, body, deleted: e.deleted })
           return
         }
@@ -2094,7 +2133,11 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
                   pane: it is a fact about THIS tab, so it travels with the tab
                   rather than floating over the app as a toast. It renders
                   nothing in the ordinary case. */}
+              {/* File mode only: diff mode has its own staleness affordance
+                  (the header's Reload), and a diff the user is reading must
+                  not be reflowed or crowded by a second one. */}
               {activeTab !== null &&
+                activeTab.mode === "file" &&
                 !isBufferStale(activeBuffer, activeTab.path) && (
                   <FileDiskBanner
                     state={activeBuffer?.diskState ?? "fresh"}
@@ -2102,7 +2145,7 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
                     dirty={dirty}
                     onReload={() => requestReload(activeTab.id, activeTab.path)}
                     onDismiss={() =>
-                      markDiskState(activeTab.id, activeTab.path, "fresh")
+                      dismissDiskBanner(activeTab.id, activeTab.path)
                     }
                     onCloseTab={() => editorCloseTab(sessionId, activeTab.id)}
                   />
