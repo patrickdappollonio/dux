@@ -369,17 +369,19 @@ describe("InsetHeader macros and the pane-edge spacer", () => {
   })
 
   it("rules the header at the pane boundary so Macros does not float", () => {
-    // The spacer's leading edge IS the Changes panel's left edge, so a border
-    // there reads as the upward continuation of the panel divider below.
-    // Full-height (self-stretch) so the two lines read as one rule, and the
-    // default border color, which is the same `--border` token the divider's
-    // `bg-border` uses. jsdom computes no layout, so the classes are the check.
+    // The hairline is its own absolutely positioned element at right: spacer%.
+    // Absolute offsets resolve against the header's FULL box while the old
+    // border-l resolved against the padded interior, which drew the rule a few
+    // pixels left of the panel divider below (caught from a real screenshot).
+    // jsdom computes no layout, so the classes and inline offset are the check.
     mockState = { ...stateFor("main", "main"), changesPanePercent: 26 }
     render(<InsetHeader />)
-    const macros = screen.getByRole("button", { name: /run a macro/i })
-    const cluster = macros.nextElementSibling as HTMLElement
-    expect(cluster.className).toContain("border-l")
-    expect(cluster.className).toContain("self-stretch")
+    const rule = screen.getByTestId("changes-divider-continuation")
+    expect(rule.className).toContain("absolute")
+    expect(rule.className).toContain("inset-y-0")
+    expect(rule.className).toContain("bg-border")
+    expect(rule.className).toContain("pointer-events-none")
+    expect(rule.style.right).toBe("26%")
   })
 
   it("draws no rule when the Changes pane is hidden", () => {
@@ -390,10 +392,7 @@ describe("InsetHeader macros and the pane-edge spacer", () => {
       bootstrap: { show_changes_pane: false },
     } as unknown as DuxState
     render(<InsetHeader />)
-    const macros = screen.getByRole("button", { name: /run a macro/i })
-    const cluster = macros.nextElementSibling as HTMLElement
-    expect(cluster.className).not.toContain("border-l")
-    expect(cluster.className).not.toContain("self-stretch")
+    expect(screen.queryByTestId("changes-divider-continuation")).toBeNull()
   })
 
   it("renders no macro trigger when nothing is focused", () => {
@@ -566,9 +565,7 @@ describe("InsetHeader show-Changes button", () => {
       changesPanePercent: 0,
     } as unknown as DuxState
     render(<InsetHeader />)
-    const macros = screen.getByRole("button", { name: /run a macro/i })
-    const cluster = macros.nextElementSibling as HTMLElement
-    expect(cluster.className).not.toContain("border-l")
+    expect(screen.queryByTestId("changes-divider-continuation")).toBeNull()
   })
 
   it("does not render while the Changes pane is visible", () => {

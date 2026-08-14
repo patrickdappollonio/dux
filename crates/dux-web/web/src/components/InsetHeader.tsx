@@ -23,7 +23,6 @@ import {
 import { matchOwner } from "@/lib/terminalOwner"
 import { terminalsForOwner, terminalTitle } from "@/lib/terminals"
 import type { SessionView, TerminalView } from "@/lib/types"
-import { cn } from "@/lib/utils"
 
 // The desktop center-pane top bar: ONE ROW OF CHIPS naming what you are looking
 // at, each a glyph followed by its value, then the pane's controls on the right.
@@ -205,7 +204,27 @@ export function InsetHeader() {
   const spacer = changesSpacerPercent(dux)
 
   return (
-    <header className="flex h-12 shrink-0 items-center gap-2 border-b px-3">
+    <header className="relative flex h-12 shrink-0 items-center gap-2 border-b px-3">
+      {/* The upward continuation of the changes-panel divider. Absolutely
+          positioned on purpose, and this replaced a border-l on the control
+          cluster: the cluster's width percentage resolves against the header's
+          PADDED interior while the panel divider below sits at the same
+          percentage of the FULL width, so the border drew a few pixels left of
+          the line it claims to continue (reported from a real screenshot). An
+          absolute offset resolves against the header's full box, so this
+          hairline lands on the divider at every split, width, and zoom. It is
+          also outside the flex flow, so it collects no `gap-2` and cannot push
+          the macro button off the pane edge. Same visibility rule as before:
+          only while the Changes pane is actually on screen, because hidden
+          there is no divider below to continue. */}
+      {!changesPaneEffectivelyHidden(dux) && (
+        <span
+          aria-hidden="true"
+          data-testid="changes-divider-continuation"
+          className="pointer-events-none absolute inset-y-0 w-px bg-border"
+          style={{ right: `${spacer}%` }}
+        />
+      )}
       {/* The chips share one shrink budget so the header clips instead of
           pushing the right-hand controls off the edge. Buttons win: the chips
           yield, all the way to nothing, and the controls never move or reflow.
@@ -247,27 +266,15 @@ export function InsetHeader() {
       {/* The rule at the pane boundary. It is a BORDER ON THE CLUSTER rather
           than a `<Separator>` element in front of it, and that is deliberate:
           the cluster's leading edge is exactly the Changes panel's left edge
-          (that is the whole point of sizing it to the panel's percentage), so a
-          border there lands on the boundary for free. A separate element would
-          sit between Macros and the cluster and collect the header's `gap-2` on
-          BOTH sides, pushing Macros 9px off the pane edge it is supposed to sit
-          on, which is the float this change exists to fix.
-
-          `self-stretch` against the header's `items-center` makes it span the
-          full 48px, so it and the panel divider below read as one continuous
-          line; the color is the default border token, the same `--border` the
-          divider's `bg-border` resolves to.
-
-          Only while the Changes pane is actually ON SCREEN: hidden, there is
-          no divider below to continue and the spacer has collapsed to the
-          control cluster, so the rule would just float mid-header. The gate is
-          `changesPaneEffectivelyHidden`, not the preference, so a pane the
-          user dragged to nothing counts as hidden too. */}
+          (that is the whole point of sizing it to the panel's percentage).
+          The visible divider continuation is NOT drawn here though: this
+          cluster's percentage resolves against the header's padded interior,
+          which is a few pixels narrower than the panel group below, so a
+          border on this edge misses the real divider line. The hairline at
+          the top of the header (absolutely positioned, full-box percentage)
+          owns that job; see its comment. */}
       <div
-        className={cn(
-          "flex min-w-fit shrink-0 items-center justify-end gap-2",
-          !changesPaneEffectivelyHidden(dux) && "self-stretch border-l",
-        )}
+        className="flex min-w-fit shrink-0 items-center justify-end gap-2"
         style={{ width: `${spacer}%` }}
       >
         {/* The way back to a hidden Changes pane. Hiding it unmounts the pane
