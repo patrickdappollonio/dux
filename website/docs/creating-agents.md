@@ -289,10 +289,17 @@ confirmation that names the branch, names the full path, and says specifically
 when there are uncommitted changes to lose. That confirmation also offers to
 delete the branch, ticked by default; untick it and the branch survives. Git
 can also refuse the deletion, and then dux reports the branch as still there
-with git's own reason rather than claiming otherwise. This dialog is the manual
-override for deleting any branch: deleting an agent only ever deletes branches
-dux created, so when you want a branch gone that dux is deliberately keeping,
-this is where you say so. The
+with git's own reason rather than claiming otherwise.
+
+The terminal UI has the same manager, as the `manage-worktrees` palette
+command: pick a project, pick a worktree, and confirm the same way. Worktrees
+an agent is holding are listed there too, marked and unselectable, because
+removing one from under a live agent leaves a broken session; delete the agent
+instead.
+
+Either manager is the manual override for deleting any branch: deleting an
+agent only ever deletes branches dux created, so when you want a branch gone
+that dux is deliberately keeping, this is where you say so. The
 project picker in front of it labels each project with how many worktrees it
 has, so an empty project is a choice rather than a surprise, and the dialog
 offers **Back** to return to that list.
