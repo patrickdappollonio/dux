@@ -162,6 +162,34 @@ is and **your text is kept**: the tab stays dirty with everything you typed stil
 in it, so you can trim it down and save again, or copy it out. Nothing is
 discarded.
 
+## When the agent edits a file you have open
+
+You and your agent work in the same worktree, so sooner or later it rewrites a
+file you have open. The editor notices, and what it does next depends on whether
+you have typed anything.
+
+**If you have not touched the file**, it just refreshes. The new content appears
+in place, with no banner and nothing to click, and your scroll position and undo
+history come along. That is what you wanted from a file you were only reading.
+
+**If you have unsaved edits**, nothing is taken from you. A notice appears across
+the top of the pane saying the file changed on disk, offering **Reload from
+disk**, which confirms first because it discards everything you typed, and **Keep
+mine**, which dismisses the notice and leaves your text alone. If the file was
+deleted rather than changed, the notice says that instead and offers to close the
+tab or keep your copy open.
+
+**And your save cannot clobber the agent's work.** A save tells the server what
+the file looked like when you opened it, and the server refuses the write if the
+file has moved on since. You get a dialog with the three honest choices:
+overwrite anyway, reload the disk version, or cancel. Cancelling costs nothing,
+your text stays exactly as typed.
+
+dux does not watch the filesystem for any of this. It checks when git reports the
+file as changed, when you come back to the browser window, and when you switch to
+the tab. The one gap left is a file that changes while you sit on its tab with
+the window already focused and git silent, and looking away and back resolves it.
+
 ## Creating, renaming, moving, and deleting files
 
 Right-click anywhere in the file tree to manage files and folders without leaving
