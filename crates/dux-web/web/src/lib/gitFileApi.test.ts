@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { git } from "./git"
-import { fileApi } from "./fileApi"
+import { FileApiError, FileConflictError, fileApi } from "./fileApi"
 
 // The git/file mutation clients are nested under the session resource: the
 // session id is the `:id` path segment (`/api/v1/sessions/:id/git/*` and
@@ -126,5 +126,114 @@ describe("file REST client targets /api/v1/sessions/:id/files/*", () => {
       "/api/v1/sessions/a%2Fb%20c/files/raw?path=sp%20ace%2F%C3%B1.png",
     )
     expect(fetchMock).not.toHaveBeenCalled()
+  })
+})
+
+// The save's freshness guard. The token is opt-in on the wire, and a refusal
+// comes back as a typed error rather than as a status code the caller has to
+// re-parse: the editor routes a conflict to a choice dialog, and everything
+// else to the plain error toast.
+describe("the guarded save", () => {
+  it("omits the token entirely when the caller has none", async () => {
+    await fileApi.write("s1", "a.txt", "hello")
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/sessions/s1/files/write",
+      expect.objectContaining({
+        body: JSON.stringify({ path: "a.txt", content: "hello" }),
+      }),
+    )
+  })
+
+  it("sends both halves of the token when it has both", async () => {
+    await fileApi.write("s1", "a.txt", "hello", {
+      modified: "2026-01-01T00:00:00+00:00",
+      size: 5,
+    })
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/sessions/s1/files/write",
+      expect.objectContaining({
+        body: JSON.stringify({
+          path: "a.txt",
+          content: "hello",
+          expected_modified: "2026-01-01T00:00:00+00:00",
+          expected_size: 5,
+        }),
+      }),
+    )
+  })
+
+  it("sends no token at all when only one half is known", async () => {
+    await fileApi.write("s1", "a.txt", "hello", { modified: null, size: 5 })
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/sessions/s1/files/write",
+      expect.objectContaining({
+        body: JSON.stringify({ path: "a.txt", content: "hello" }),
+      }),
+    )
+  })
+
+  it("turns a 409 into a FileConflictError carrying the current stamp", async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 409,
+      clone: () => ({
+        json: async () => ({
+          modified: "2026-02-02T00:00:00+00:00",
+          size: 42,
+          deleted: false,
+        }),
+      }),
+      json: async () => ({}),
+      text: async () => "",
+      headers: { get: () => null },
+    } as unknown as Response)
+    const err = await fileApi
+      .write("s1", "a.txt", "hello", { modified: "old", size: 5 })
+      .catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(FileConflictError)
+    const conflict = err as FileConflictError
+    expect(conflict.status).toBe(409)
+    expect(conflict.modified).toBe("2026-02-02T00:00:00+00:00")
+    expect(conflict.size).toBe(42)
+    expect(conflict.deleted).toBe(false)
+  })
+
+  it("reports a deleted-underneath refusal as its own rung", async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 409,
+      clone: () => ({
+        json: async () => ({ modified: null, size: null, deleted: true }),
+      }),
+      json: async () => ({}),
+      text: async () => "",
+      headers: { get: () => null },
+    } as unknown as Response)
+    const err = (await fileApi
+      .write("s1", "a.txt", "hello", { modified: "old", size: 5 })
+      .catch((e: unknown) => e)) as FileConflictError
+    expect(err.deleted).toBe(true)
+    expect(String(err.message)).toContain("deleted")
+  })
+
+  it("falls back to a plain error when a 409 body cannot be read", async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 409,
+      clone: () => ({
+        json: async () => {
+          throw new Error("not json")
+        },
+      }),
+      json: async () => ({}),
+      text: async () => "something went wrong",
+      headers: { get: () => null },
+    } as unknown as Response)
+    const err = (await fileApi
+      .write("s1", "a.txt", "hello", { modified: "old", size: 5 })
+      .catch((e: unknown) => e)) as FileApiError
+    expect(err).not.toBeInstanceOf(FileConflictError)
+    expect(err.status).toBe(409)
+    expect(err.message).toBe("something went wrong")
   })
 })

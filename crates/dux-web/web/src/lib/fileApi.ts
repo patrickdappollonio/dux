@@ -20,7 +20,25 @@ export interface WorktreeFile {
   /** True when the server opened this file read-only (outside-resolving symlink
    *  or a .git/ path). The editor must not allow saving. */
   read_only?: boolean
+  /** The freshness token for these bytes: the mtime (RFC 3339, from the
+   *  server's one shared formatter) and the size, taken from an fstat of the
+   *  descriptor the content was read from. The editor keeps it on the buffer,
+   *  compares it against `info` to detect a change on disk, and echoes it back
+   *  with a save so the server can refuse to clobber somebody else's edit.
+   *  Absent from an older server, in which case the guard simply does not
+   *  engage. */
+  modified?: string | null
+  size?: number | null
 }
+
+// What a successful save reports back: the file's stamp AFTER the write. The
+// editor re-baselines on it, so its own save is never mistaken for an edit by
+// something else when the changed-files broadcast lands a moment later.
+export interface WriteResult {
+  modified: string | null
+  size: number
+}
+
 
 // The two raw sides of a changed file (HEAD vs working copy) for the editor's
 // Monaco diff view. `original`/`modified` are "" for an added/deleted side;
@@ -46,6 +64,36 @@ export class FileApiError extends Error {
   }
 }
 
+// A save refused (409) because the file moved underneath the buffer. Carries
+// the file's CURRENT stamp so the editor can offer overwrite/reload without
+// another round trip, and `deleted` because "gone" is a different rung from
+// "changed": there is nothing to reload, only a choice to close or keep.
+//
+// Declared as a subclass of `FileApiError` so a caller that only reads
+// `.message` (or `.status`) still works: an unhandled conflict degrades to the
+// ordinary error toast rather than to a silent failure.
+export class FileConflictError extends FileApiError {
+  readonly modified: string | null
+  readonly size: number | null
+  readonly deleted: boolean
+  constructor(body: {
+    modified: string | null
+    size: number | null
+    deleted: boolean
+  }) {
+    super(
+      409,
+      body.deleted
+        ? "the file was deleted on disk after you opened it"
+        : "the file changed on disk after you opened it",
+    )
+    this.name = "FileConflictError"
+    this.modified = body.modified
+    this.size = body.size
+    this.deleted = body.deleted
+  }
+}
+
 async function postFile<T>(path: string, body: Record<string, unknown>): Promise<T> {
   const resp = await fetch(path, {
     method: "POST",
@@ -54,6 +102,26 @@ async function postFile<T>(path: string, body: Record<string, unknown>): Promise
     body: JSON.stringify(body),
   })
   if (!resp.ok) {
+    // A 409 is the save route's freshness refusal and carries a structured
+    // body. It is parsed HERE, in the one place that knows the wire shape, so
+    // callers route on an error type instead of on a status code plus a
+    // hand-rolled JSON.parse. Anything unparseable falls through to the plain
+    // error below, because a conflict the client cannot read is still an error
+    // the user must see.
+    if (resp.status === 409) {
+      const body = await resp
+        .clone()
+        .json()
+        .catch(() => null)
+      if (body !== null && typeof body === "object" && "deleted" in body) {
+        const b = body as { modified?: string | null; size?: number | null; deleted?: boolean }
+        throw new FileConflictError({
+          modified: b.modified ?? null,
+          size: b.size ?? null,
+          deleted: b.deleted === true,
+        })
+      }
+    }
     const detail = (await resp.text().catch(() => "")).trim()
     throw new FileApiError(
       resp.status,
@@ -125,8 +193,27 @@ export const fileApi = {
   // diff view. The server resolves both sides and the binary flag.
   diff: (sessionId: string, path: string) =>
     postFile<FileDiffContents>(fileUrl(sessionId, "diff"), { path }),
-  write: (sessionId: string, path: string, content: string) =>
-    postFileNoContent(fileUrl(sessionId, "write"), { path, content }),
+  // Save a file's working copy, optionally guarded by the freshness token the
+  // read handed out. With `expected`, a file that moved on disk since it was
+  // read answers 409 and this rejects with a `FileConflictError` carrying the
+  // current stamp; without it the write is unconditional, which is what every
+  // other writer (and any older page) does. The resolved value is the file's
+  // new stamp, which the caller must adopt as its baseline.
+  write: (
+    sessionId: string,
+    path: string,
+    content: string,
+    expected?: { modified: string | null; size: number | null },
+  ) =>
+    postFile<WriteResult>(fileUrl(sessionId, "write"), {
+      path,
+      content,
+      // Both halves or neither: the server treats half a token as no token,
+      // and sending one half would only look like a guard.
+      ...(expected && expected.modified !== null && expected.size !== null
+        ? { expected_modified: expected.modified, expected_size: expected.size }
+        : {}),
+    }),
   // Open the file in a locally-installed GUI editor (server-side spawn) and
   // resolve with the chosen editor's label for a toast. `editor` is the dux-core
   // editor config key (e.g. "vscode") the user picked; the server launches that

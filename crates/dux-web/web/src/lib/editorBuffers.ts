@@ -1,4 +1,41 @@
-import type { FileDiffContents } from "./fileApi"
+import type { FileDiffContents, WorktreeFile } from "./fileApi"
+
+// What the server said about the file when its bytes were handed over: the
+// mtime (RFC 3339, from the shared Rust formatter) and the byte size. The two
+// travel together and are compared together; see `stampsDiffer`.
+export interface FileStamp {
+  modified: string | null
+  size: number | null
+}
+
+// What has happened to the file on disk since this buffer was loaded, as far as
+// the editor has been able to establish. Three states, exhaustively:
+//
+//   fresh    nothing known to have changed (the ordinary case).
+//   changed  a metadata check found different bytes on disk AND the buffer has
+//            unsaved edits, so it cannot silently reload. The banner is up.
+//   deleted  the file is gone. A different rung with a different offer: there
+//            is nothing to reload, only a choice to close or keep the text.
+//
+// A CLEAN buffer never reaches `changed`: it reloads in place instead, which is
+// exactly what the user asked for by having no edits of their own.
+export type DiskState = "fresh" | "changed" | "deleted"
+
+// The part of the store's changed-files slice the freshness helpers read. A
+// structural subset (not an import of `ChangesSlice`) so this module stays free
+// of the store, the way the rest of it is free of React and Monaco.
+export interface ChangesSliceView {
+  phase: string
+  staged: readonly ChangedRowView[]
+  unstaged: readonly ChangedRowView[]
+}
+
+export interface ChangedRowView {
+  path: string
+  status: string
+  additions: number
+  deletions: number
+}
 
 // One tab's Monaco buffer + diff cache, keyed by TAB ID in `EditorBody`'s
 // `buffers` map. `path` is the path this entry was fetched FOR: every read
@@ -47,6 +84,20 @@ export interface TabBuffer {
   // or a plain 404, would retry-loop). A settled error is "don't
   // auto-retry"; the error pane offers a manual Retry action instead.
   errorPath: string | null
+  // The changed-files signal (`changeSignalFor`) as of the moment the read for
+  // this buffer was ISSUED. The mirror of `diffLoadedSignal`, with one
+  // difference that matters: it is captured per request for the request's own
+  // path, not read off a ref when the response resolves. Resolve-time stamping
+  // can record a signal that already reflects a change the returned bytes do
+  // NOT contain, which would mark a stale buffer fresh. Capturing early can
+  // only err the other way, into a wasted re-check.
+  fileLoadedSignal: string
+  // The freshness token for `loaded`: what the file looked like when these
+  // bytes were read (or when this buffer's own save landed). Sent back with a
+  // save so the server can refuse to clobber somebody else's edit.
+  stamp: FileStamp
+  // What the last metadata check found on disk. See `DiskState`.
+  diskState: DiskState
 }
 
 // The neutral seed: a buffer that holds no content and has NO file read in
@@ -67,6 +118,9 @@ export function emptyBuffer(path: string): TabBuffer {
     fileError: null,
     diffError: null,
     errorPath: null,
+    fileLoadedSignal: "",
+    stamp: { modified: null, size: null },
+    diskState: "fresh",
   }
 }
 
@@ -163,6 +217,130 @@ export function pruneSetByIds(
     if (liveIds.has(id)) next.add(id)
   }
   return next
+}
+
+// --- Disk freshness ---------------------------------------------------------
+//
+// dux has no file watcher, deliberately. What it does have is the changed-files
+// broadcast the git poller already produces, and that is the event source these
+// helpers hang off: when the open file's row in that slice moves, SOMETHING
+// happened to the file. What exactly, the slice cannot say, so a moved signal
+// buys a metadata check and never a reload on its own. Two entirely legitimate
+// movers exist that must not cost the user anything: their own save, and the
+// slice's lifecycle churn (a refetch passing through `loading`).
+
+// The per-file change signal: status plus line counts, the same expression the
+// diff view's staleness has always used. Best-effort by nature (an edit that
+// keeps identical +/- counts does not move it), which is why it is only ever
+// one of several triggers for a check, never the proof of anything.
+export function changeSignalFor(
+  slice: ChangesSliceView | null,
+  path: string | null,
+): string {
+  if (path === null || slice === null) return ""
+  const f =
+    slice.unstaged.find((x) => x.path === path) ??
+    slice.staged.find((x) => x.path === path)
+  return f ? `${f.status}:${f.additions}:${f.deletions}` : ""
+}
+
+// Whether the open file's change signal has moved since this buffer was read.
+//
+// The subtlety, and the reason this is a function rather than an inline `!==`:
+// the signal's empty string is ambiguous. It means "git lists nothing for this
+// path", which is a real fact only once the slice has actually LOADED and
+// belongs to this session. Read off a loading, errored, idle or foreign slice
+// it means "we do not know yet", and treating that as absence fires a check on
+// every changes-pane refetch (and, for a clean buffer, a reload). The diff
+// view's equivalent could afford to be sloppy about this because all it did was
+// light a button; this one can move text under the user's cursor.
+export function fileSignalMoved(
+  buffer: TabBuffer | undefined,
+  currentPath: string,
+  slice: ChangesSliceView | null,
+): boolean {
+  if (slice === null || slice.phase !== "loaded") return false
+  if (isBufferStale(buffer, currentPath)) return false
+  const b = buffer!
+  if (b.loadedPath !== currentPath) return false
+  return changeSignalFor(slice, currentPath) !== b.fileLoadedSignal
+}
+
+// Whether two freshness tokens describe different bytes.
+//
+// Both halves are compared. An mtime alone aliases two writes that land inside
+// one coarse clock tick, which is the racing-writer case worth catching; a size
+// alone misses every length-preserving edit. An unknown mtime on one side and a
+// known one on the other is a difference, not a match: the safe direction is a
+// wasted re-read, never a missed one.
+export function stampsDiffer(a: FileStamp, b: FileStamp): boolean {
+  return a.modified !== b.modified || a.size !== b.size
+}
+
+// Fold freshly-read disk content into an EXISTING buffer without disturbing
+// `loadedPath`.
+//
+// That is the whole point, and it is load-bearing rather than tidy: the pane
+// renders `CodeEditor` only while the buffer reports loaded content for the
+// tab's path, so re-seeding through the loading path would unmount it, and
+// @monaco-editor/react DISPOSES the model on unmount. Undo history, scroll
+// position and cursor all live in that model. Keeping `loadedPath` keeps the
+// component mounted, so the new text arrives as a `value` prop change, which
+// the wrapper applies to the retained model.
+//
+// Two consequences of that route are accepted and stated rather than hidden:
+// the push lands as one full-range edit, so it is UNDOABLE (a ctrl-z after an
+// auto-reload steps back to the previous content, not into the agent's), and it
+// moves the cursor. The caller defers the reload while a selection is active
+// for the same reason.
+export function reloadedInPlace(
+  prev: TabBuffer,
+  path: string,
+  file: WorktreeFile,
+  signal: string,
+): TabBuffer {
+  return {
+    ...prev,
+    path,
+    loadedPath: path,
+    loading: false,
+    loaded: file.content,
+    draft: file.content,
+    binary: file.binary,
+    readOnly: file.read_only ?? false,
+    fileError: null,
+    errorPath: null,
+    fileLoadedSignal: signal,
+    stamp: { modified: file.modified ?? null, size: file.size ?? null },
+    diskState: "fresh",
+    // The cached diff describes the content that was just replaced, so it is
+    // no longer an answer about this file; dropping the path makes the diff
+    // effect refetch if the tab is (or becomes) a diff tab.
+    diffLoadedPath: null,
+  }
+}
+
+// Re-baseline a buffer on its own successful save.
+//
+// The user's save moves the changed-files signal exactly like an agent's edit
+// would, so without adopting the server's post-write stamp here, the very next
+// broadcast would send the editor checking its own work, and (worse, before the
+// check existed) reloading over it.
+export function baselineSavedBuffer(
+  prev: TabBuffer,
+  body: string,
+  stamp: FileStamp,
+  signal: string,
+): TabBuffer {
+  return {
+    ...prev,
+    loaded: body,
+    fileLoadedSignal: signal,
+    stamp,
+    diskState: "fresh",
+    // The saved content is a new working copy, so any cached diff is stale.
+    diffLoadedPath: null,
+  }
 }
 
 // One pending batch of directories `FileTree` must force-refetch, and the
