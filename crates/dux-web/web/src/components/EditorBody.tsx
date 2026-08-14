@@ -157,6 +157,7 @@ import {
   editorSetTabDirty,
   editorSetTabMode,
   editorSyncActiveTab,
+  openEditorCloseTab,
   standaloneEditorHash,
   useDux,
 } from "@/lib/store"
@@ -860,7 +861,18 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
   // loading buffer, which drops `loadedPath`, which unmounts `CodeEditor`,
   // which disposes the Monaco model and takes undo history, scroll position
   // and cursor with it. See `reloadedInPlace`.
-  function reloadFileInPlace(tabId: string, path: string): void {
+  //
+  // `requested` separates the two callers. A reload the USER asked for is an
+  // instruction ("replace this with what is on disk"), so it applies whatever
+  // arrives; the only reload that can lose text this way is one the user
+  // already confirmed. A reload the editor decided on its own is a
+  // convenience, and a convenience may never overwrite something typed while
+  // it was in flight.
+  function reloadFileInPlace(
+    tabId: string,
+    path: string,
+    requested = false,
+  ): void {
     const token = (fileRequestTokenRef.current.get(tabId) ?? 0) + 1
     fileRequestTokenRef.current.set(tabId, token)
     const signalAtRequest = changeSignalFor(sliceRef.current, path)
@@ -868,6 +880,29 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
       .read(sessionId, path)
       .then((f) => {
         if (fileRequestTokenRef.current.get(tabId) !== token) return
+        // The buffer was clean when this read was decided, but the read is a
+        // network round trip and the user types through it. Deciding once, at
+        // request time, silently replaces whatever landed in between AND
+        // leaves the tab reading clean, so the loss is invisible. Ask again
+        // now, against the buffer as it actually is.
+        const atResolve = buffersRef.current.get(tabId)
+        const dirtyNow =
+          !requested &&
+          ((atResolve !== undefined &&
+            !isBufferStale(atResolve, path) &&
+            atResolve.draft !== atResolve.loaded) ||
+            (tabsRef.current.find((t) => t.id === tabId)?.dirty ?? false))
+        if (dirtyNow) {
+          // Same offer as any other unresolvable difference: the banner, with
+          // the text the user typed still in front of them.
+          raiseDiskBanner(
+            tabId,
+            path,
+            "changed",
+            diskFactKey({ modified: f.modified ?? null, size: f.size ?? null }),
+          )
+          return
+        }
         setBuffers((prev) => {
           const cur = prev.get(tabId)
           if (!cur || isBufferStale(cur, path)) return prev
@@ -948,7 +983,8 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
         if (!cur || isBufferStale(cur, path) || cur.loadedPath !== path) return
         const onDisk = { modified: info.modified, size: info.size }
         const fact = diskFactKey(onDisk)
-        if (!stampsDiffer(cur.stamp, onDisk) || cur.acknowledgedDisk === fact) {
+        const agrees = !stampsDiffer(cur.stamp, onDisk)
+        if (agrees || cur.acknowledgedDisk === fact) {
           // Either nothing moved, or the user has already said "keep mine"
           // about exactly this change. Adopt the signal that sent us here so
           // the same movement does not ask again on every render: this is the
@@ -957,9 +993,20 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
           setBuffers((prev) => {
             const b = prev.get(tabId)
             if (!b || isBufferStale(b, path)) return prev
-            if (b.fileLoadedSignal === signalAtRequest) return prev
+            // A banner is a claim that the buffer and the file disagree, and
+            // this check just proved they do not. Leaving it up pins a notice
+            // about nothing, which is reachable: a check issued against the
+            // pre-save baseline can resolve AFTER the save re-baselined the
+            // buffer, and its stale answer raises a banner about the user's
+            // own write. Clearing on agreement is what retires it.
+            const stale = agrees && b.diskState !== "fresh"
+            if (b.fileLoadedSignal === signalAtRequest && !stale) return prev
             const next = new Map(prev)
-            next.set(tabId, { ...b, fileLoadedSignal: signalAtRequest })
+            next.set(tabId, {
+              ...b,
+              fileLoadedSignal: signalAtRequest,
+              ...(stale ? { diskState: "fresh" as const, diskFact: null } : {}),
+            })
             return next
           })
           return
@@ -967,9 +1014,15 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
         const dirty = tabsRef.current.find((t) => t.id === tabId)?.dirty ?? false
         // A dirty buffer is never replaced without asking, and neither is one
         // the user is selecting inside. Both get the banner, which is the same
-        // offer made in a way that waits for them.
-        if (dirty || editorSelectionActive()) {
+        // offer made in a way that waits for them, but they are NOT the same
+        // situation and the copy must not pretend otherwise: only one of them
+        // has anything to lose.
+        if (dirty) {
           raiseDiskBanner(tabId, path, "changed", fact)
+          return
+        }
+        if (editorSelectionActive()) {
+          raiseDiskBanner(tabId, path, "paused", fact)
           return
         }
         reloadFileInPlace(tabId, path)
@@ -1362,7 +1415,7 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
   function requestReload(tabId: string, path: string): void {
     const isDirty = tabsRef.current.find((t) => t.id === tabId)?.dirty ?? false
     if (!isDirty) {
-      reloadFileInPlace(tabId, path)
+      reloadFileInPlace(tabId, path, true)
       return
     }
     setReloadTarget({ tabId, path })
@@ -2147,7 +2200,15 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
                     onDismiss={() =>
                       dismissDiskBanner(activeTab.id, activeTab.path)
                     }
-                    onCloseTab={() => editorCloseTab(sessionId, activeTab.id)}
+                    // Same route the tab strip's own close takes, and here it
+                    // matters more: the file is GONE, so a dirty buffer is
+                    // the last copy of that text anywhere. Closing it without
+                    // the confirm would be the one destructive action in the
+                    // editor that never asks.
+                    onCloseTab={() => {
+                      if (dirty) openEditorCloseTab(sessionId, activeTab.id)
+                      else editorCloseTab(sessionId, activeTab.id)
+                    }}
                   />
                 )}
               <div className="relative min-h-0 flex-1">
@@ -2366,7 +2427,7 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
         }
         onClose={() => setReloadTarget(null)}
         onConfirm={() => {
-          reloadFileInPlace(reloadTarget!.tabId, reloadTarget!.path)
+          reloadFileInPlace(reloadTarget!.tabId, reloadTarget!.path, true)
           setReloadTarget(null)
         }}
       />

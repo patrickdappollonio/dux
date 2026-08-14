@@ -45,6 +45,12 @@ const TYPED = "original contents\nplus a great deal more that the server refuses
 let mockState: DuxState
 const editorSetTabDirtyMock = vi.fn()
 const closeEditorMock = vi.fn()
+// The two ways a tab can be closed, spied so the deleted-file banner's "Close
+// tab" can be checked for taking the SAME route the tab strip's own close
+// takes: straight through when there is nothing to lose, and through the
+// dirty-tab confirm when there is.
+const editorCloseTabMock = vi.fn()
+const openEditorCloseTabMock = vi.fn()
 vi.mock("@/lib/store", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/store")>()
   return {
@@ -52,6 +58,8 @@ vi.mock("@/lib/store", async (importOriginal) => {
     useDux: () => mockState,
     editorSetTabDirty: editorSetTabDirtyMock,
     closeEditor: (...a: unknown[]) => closeEditorMock(...a),
+    editorCloseTab: (...a: unknown[]) => editorCloseTabMock(...a),
+    openEditorCloseTab: (...a: unknown[]) => openEditorCloseTabMock(...a),
   }
 })
 
@@ -134,18 +142,38 @@ vi.mock("@/lib/fileApi", async (importOriginal) => ({
 // EditorOverlay lazy-imports it by RELATIVE path, so that specifier is what has
 // to be mocked; the alias is mocked too, so a later import-style change cannot
 // silently unmock it and drag real Monaco into jsdom.
+// Whether the stand-in editor should report a non-empty selection. Monaco is
+// the only thing that knows in production, so the stub hands `onReady` a fake
+// instance shaped like the one narrow read `EditorBody` makes of it.
+let selectionActive = false
 function codeEditorStub() {
   return {
     default: ({
       value,
       onChange,
       language,
+      onReady,
     }: {
       value: string
       onChange: (v: string) => void
       language?: string
+      onReady?: (mon: unknown) => void
     }) => (
       <textarea
+        ref={() => {
+          // The whole surface `EditorBody` touches on the instance: the
+          // selection read the freshness check makes, and the model lookup
+          // its disposal effect makes.
+          onReady?.({
+            Uri: { parse: (p: string) => p },
+            editor: {
+              getEditors: () => [
+                { getSelection: () => ({ isEmpty: () => !selectionActive }) },
+              ],
+              getModel: () => null,
+            },
+          })
+        }}
         data-testid="code-editor"
         // The language override the header's picker resolved, surfaced so the
         // picker tests can read what was actually handed to Monaco. Empty
@@ -1572,6 +1600,7 @@ describe("when the file changes on disk underneath the editor", () => {
     const { clearSessionDrafts } = await import("@/lib/editorDrafts")
     clearSessionDrafts(SESSION)
     Overlay = (await import("@/components/EditorOverlay")).EditorOverlay
+    selectionActive = false
     disk = new Map()
     put(PATH, ON_DISK, "2026-01-01T00:00:00+00:00")
     put(OTHER, "other file\n", "2026-01-01T00:00:00+00:00")
@@ -1822,5 +1851,173 @@ describe("when the file changes on disk underneath the editor", () => {
     await waitFor(() => expect(writeMock).toHaveBeenCalledTimes(2))
     expect(writeMock.mock.calls[1][2]).toBe(TYPED)
     expect(writeMock.mock.calls[1][3]).toBeUndefined()
+  })
+
+  // The gap between deciding "this buffer is clean, reload it" and the bytes
+  // arriving is a whole network round trip, and the user is typing through it.
+  // Deciding once, at request time, throws those keystrokes away and leaves
+  // the tab reading clean, so the loss is invisible. The decision has to be
+  // taken again when the answer lands.
+  it("keeps text typed while an in-place reload was in flight", async () => {
+    await mountOne()
+    put(PATH, AGENT_TEXT, "2026-02-02T00:00:00+00:00")
+
+    // Hold the reload's read open so the keystrokes can land inside it.
+    let releaseRead: (() => void) | null = null
+    const held = new Promise<void>((resolve) => {
+      releaseRead = resolve
+    })
+    const answer = {
+      path: PATH,
+      content: AGENT_TEXT,
+      binary: false,
+      read_only: false,
+      modified: "2026-02-02T00:00:00+00:00",
+      size: AGENT_TEXT.length,
+    }
+    readMock.mockImplementationOnce(async () => {
+      await held
+      return answer
+    })
+
+    fireEvent(window, new Event("focus"))
+    await waitFor(() => expect(readMock).toHaveBeenCalledTimes(2))
+
+    fireEvent.change(editor(), { target: { value: TYPED } })
+    releaseRead!()
+
+    const banner = await screen.findByRole("status")
+    expect(banner.textContent).toContain("changed on disk")
+    expect(editor().value).toBe(TYPED)
+  })
+
+  // The file is GONE, so the buffer is the last copy of the text in existence.
+  // Closing the tab from the banner therefore has to ask exactly the way the
+  // tab strip's own close does.
+  it("asks before closing a deleted file's tab that still holds edits", async () => {
+    const view = await mountOne(true)
+    fireEvent.change(editor(), { target: { value: TYPED } })
+    disk.delete(PATH)
+    setTabs([tab(TAB_ID, PATH, true)], TAB_ID, slice(9, 1))
+    view.rerender(<Overlay />)
+    await screen.findByRole("status")
+
+    fireEvent.click(screen.getByRole("button", { name: /close tab/i }))
+    expect(openEditorCloseTabMock).toHaveBeenCalledWith(SESSION, TAB_ID)
+    expect(editorCloseTabMock).not.toHaveBeenCalled()
+  })
+
+  it("closes a deleted file's clean tab straight away", async () => {
+    const view = await mountOne()
+    disk.delete(PATH)
+    setTabs([tab(TAB_ID, PATH)], TAB_ID, slice(9, 1))
+    view.rerender(<Overlay />)
+    await screen.findByRole("status")
+
+    fireEvent.click(screen.getByRole("button", { name: /close tab/i }))
+    expect(editorCloseTabMock).toHaveBeenCalledWith(SESSION, TAB_ID)
+    expect(openEditorCloseTabMock).not.toHaveBeenCalled()
+  })
+
+  // A clean buffer with a live selection gets the banner too, but for a
+  // completely different reason, and telling the user they have unsaved edits
+  // when they have none is the kind of wrong that makes people distrust the
+  // next warning.
+  it("says the reload is paused, not that there are unsaved edits, when a selection is active", async () => {
+    const view = await mountOne()
+    selectionActive = true
+    put(PATH, AGENT_TEXT, "2026-02-02T00:00:00+00:00")
+    setTabs([tab(TAB_ID, PATH)], TAB_ID, slice(9, 1))
+    view.rerender(<Overlay />)
+
+    const banner = await screen.findByRole("status")
+    expect(banner.textContent).toContain("changed on disk")
+    expect(banner.textContent).toContain("selection")
+    expect(banner.textContent).not.toContain("unsaved edits")
+    expect(editor().value).toBe(ON_DISK)
+
+    // And the offer still works: nothing is dirty, so it reloads with no
+    // destructive confirm in the way.
+    fireEvent.click(screen.getByRole("button", { name: /reload from disk/i }))
+    await waitFor(() => expect(editor().value).toBe(AGENT_TEXT))
+  })
+
+  // The interleaving: a check goes out against the pre-save stamp, the save
+  // lands and re-baselines, and the check's answer arrives describing the
+  // file the buffer now holds. Adopting the signal without clearing the state
+  // pins a banner about a change that is the user's own save.
+  it("clears a banner when a later check finds the buffer and the disk agree", async () => {
+    await mountOne(true)
+    fireEvent.change(editor(), { target: { value: TYPED } })
+
+    // A check goes out against the pre-save baseline and is held open.
+    let releaseInfo: (() => void) | null = null
+    const held = new Promise<void>((resolve) => {
+      releaseInfo = resolve
+    })
+    const preSave = {
+      path: PATH,
+      kind: "file" as const,
+      size: ON_DISK.length,
+      modified: "2026-01-01T00:00:00+00:00",
+      mode: "644",
+      permissions: "rw-r--r--",
+      symlink_target: null,
+      git: { state: "clean" as const },
+    }
+    infoMock.mockImplementationOnce(async () => {
+      await held
+      return preSave
+    })
+    fireEvent(window, new Event("focus"))
+    await waitFor(() => expect(infoMock).toHaveBeenCalledTimes(1))
+
+    // The save lands underneath it and re-baselines the buffer on the bytes
+    // now on disk.
+    writeMock.mockResolvedValueOnce({
+      modified: "2026-03-03T00:00:00+00:00",
+      size: TYPED.length,
+    })
+    put(PATH, TYPED, "2026-03-03T00:00:00+00:00")
+    fireEvent.click(screen.getByRole("button", { name: /save/i }))
+    // Wait for the save to have LANDED in the buffer, not merely to have been
+    // sent: the re-baseline is what the stale check then disagrees with.
+    await waitFor(() =>
+      expect(editorSetTabDirtyMock).toHaveBeenCalledWith(SESSION, TAB_ID, false),
+    )
+
+    // Now the stale check answers, describing the file as it was BEFORE the
+    // save. It disagrees with the new baseline, so a banner goes up about a
+    // change that is the user's own save.
+    releaseInfo!()
+    await screen.findByRole("status")
+
+    // The next check compares the buffer against a disk that matches it
+    // exactly. That is the moment the banner has to come down.
+    fireEvent(window, new Event("focus"))
+    await waitFor(() => expect(screen.queryByRole("status")).toBeNull())
+  })
+
+  // The draft cache hands a buffer back across a remount with its disk state
+  // still on it. That is deliberate (see `loadSessionDrafts`), and it only
+  // stays honest because the mount trigger re-checks: a file put back the way
+  // the buffer has it must lose the banner.
+  it("re-checks a buffer restored from the draft cache on mount", async () => {
+    const view = await mountOne(true)
+    fireEvent.change(editor(), { target: { value: TYPED } })
+    put(PATH, AGENT_TEXT, "2026-02-02T00:00:00+00:00")
+    setTabs([tab(TAB_ID, PATH, true)], TAB_ID, slice(9, 1))
+    view.rerender(<Overlay />)
+    await screen.findByRole("status")
+    cleanup()
+
+    // Remount onto the same session: the cached buffer comes back with its
+    // banner, and the mount check is the only thing that can question it.
+    put(PATH, ON_DISK, "2026-01-01T00:00:00+00:00")
+    setTabs([tab(TAB_ID, PATH, true)], TAB_ID, slice(9, 1))
+    render(<Overlay />)
+    await screen.findByTestId("code-editor")
+    await waitFor(() => expect(screen.queryByRole("status")).toBeNull())
+    expect(editor().value).toBe(TYPED)
   })
 })

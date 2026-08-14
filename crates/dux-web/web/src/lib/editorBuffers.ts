@@ -9,17 +9,25 @@ export interface FileStamp {
 }
 
 // What has happened to the file on disk since this buffer was loaded, as far as
-// the editor has been able to establish. Three states, exhaustively:
+// the editor has been able to establish. Four states, exhaustively:
 //
 //   fresh    nothing known to have changed (the ordinary case).
 //   changed  a metadata check found different bytes on disk AND the buffer has
 //            unsaved edits, so it cannot silently reload. The banner is up.
+//   paused   the same difference on a CLEAN buffer, held back only because a
+//            selection is live in the editor and an in-place reload would
+//            collapse it. Nothing is at risk here, so the banner must not say
+//            there are unsaved edits: it is a "your reload is waiting for you"
+//            notice, and the offer is the reload the editor would have done
+//            unasked.
 //   deleted  the file is gone. A different rung with a different offer: there
 //            is nothing to reload, only a choice to close or keep the text.
 //
-// A CLEAN buffer never reaches `changed`: it reloads in place instead, which is
-// exactly what the user asked for by having no edits of their own.
-export type DiskState = "fresh" | "changed" | "deleted"
+// A CLEAN buffer reaches `changed` only through the resolve-time re-check in
+// `EditorBody.reloadFileInPlace`: it was clean when the reload was decided and
+// the user typed during the round trip, so the arriving bytes may no longer be
+// applied silently.
+export type DiskState = "fresh" | "changed" | "paused" | "deleted"
 
 // The part of the store's changed-files slice the freshness helpers read. A
 // structural subset (not an import of `ChangesSlice`) so this module stays free
@@ -312,8 +320,9 @@ export function stampsDiffer(a: FileStamp, b: FileStamp): boolean {
 // Two consequences of that route are accepted and stated rather than hidden:
 // the push lands as one full-range edit, so it is UNDOABLE (a ctrl-z after an
 // auto-reload steps back to the previous content, not into the agent's), and it
-// moves the cursor. The caller defers the reload while a selection is active
-// for the same reason.
+// moves the cursor. For the same reason the caller does not apply it at all
+// while a selection is active: it raises the `paused` banner instead and lets
+// the user ask for the reload when they are ready.
 export function reloadedInPlace(
   prev: TabBuffer,
   path: string,

@@ -39,6 +39,10 @@ export function FileDiskBanner({
 }: FileDiskBannerProps) {
   if (state === "fresh") return null
   const deleted = state === "deleted"
+  // The clean-but-selecting rung. Nothing is at risk, so saying "you have
+  // unsaved edits" here would be a plain untruth, and the next warning the
+  // user reads is worth less for it.
+  const paused = state === "paused"
   return (
     <div
       // A live region: the banner appears without the user having done
@@ -56,6 +60,11 @@ export function FileDiskBanner({
           <>
             <span className="font-mono break-all">{path}</span> was deleted on
             disk. {dirty ? "Your unsaved edits are still here." : "The text here is the last copy the editor read."}
+          </>
+        ) : paused ? (
+          <>
+            <span className="font-mono break-all">{path}</span> changed on
+            disk. A selection is active here, so the reload is paused.
           </>
         ) : (
           <>

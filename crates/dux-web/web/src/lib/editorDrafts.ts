@@ -29,6 +29,19 @@ const cache = new Map<string, Map<string, TabBuffer>>()
 // with the component that started it, and restoring it would make
 // `shouldSkipFileLoad` skip the re-read and park the tab on a spinner
 // forever. The remount re-fetches that path from scratch instead.
+//
+// Everything else comes back untouched, INCLUDING the disk-freshness fields
+// (`diskState`, `diskFact`, `acknowledgedDisk`), and that is a decision rather
+// than an oversight. Those fields are facts about the file, not about the
+// component: if the file on disk had moved away from this buffer before the
+// editor was closed, it has still moved away when it reopens, and dropping the
+// banner would hide a live difference at exactly the moment the user comes
+// back to look at the text. The same goes for a dismissal: "keep mine" was an
+// answer about a specific change, and re-asking it because a panel was closed
+// and reopened would make the button mean nothing. Neither field is ever a
+// save token, so a restored one cannot authorize an overwrite, and the mount
+// trigger in `EditorBody` re-checks every restored buffer, so a stale banner
+// is retired by the next check rather than living forever.
 export function loadSessionDrafts(sessionId: string): Map<string, TabBuffer> {
   const entry = cache.get(sessionId)
   const restored = new Map<string, TabBuffer>()
