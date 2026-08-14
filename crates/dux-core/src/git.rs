@@ -1318,6 +1318,20 @@ fn delete_branch_force(repo_path: &Path, branch_name: &str) -> Result<BranchDele
     Ok(BranchDeletion::Refused { reason })
 }
 
+/// Force-delete a branch dux minted moments ago and then failed to build the
+/// agent around, best effort.
+///
+/// This exists for the one window the worktree rollback cannot cover: a branch
+/// that already exists while its worktree does not, so there is nothing for
+/// [`remove_worktree`] to remove. It routes through the same
+/// `delete_branch_force` (so the `--` guard and the plumbing-based
+/// disambiguation are shared, and no new git call surface is added) and
+/// discards the outcome: the caller is already reporting a failure and a
+/// stubborn ref is not a second thing to say.
+pub(crate) fn delete_created_branch_best_effort(repo_path: &Path, branch_name: &str) {
+    let _ = delete_branch_force(repo_path, branch_name);
+}
+
 /// Whether `refs/heads/<branch_name>` still resolves. Best effort: a git that
 /// cannot answer is read as "gone", which keeps the old behaviour rather than
 /// inventing a refusal nobody can act on.

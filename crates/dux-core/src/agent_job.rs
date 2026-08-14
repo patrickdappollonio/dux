@@ -392,6 +392,19 @@ pub fn run_create_agent_job(
                         "PR worktree creation failed for {} #{}: {err}",
                         owner_repo, number
                     ));
+                    // THE RESPONSIBILITY BOUNDARY. The fetch above minted
+                    // `refs/heads/<resolved_name>`, and the worktree that the
+                    // provenance-driven rollback keys off does not exist, so
+                    // nothing else in this job would ever remove that ref. From
+                    // the next line on (worktree created, session built) the
+                    // rollback owns the branch and this cleanup must not run,
+                    // or the two would both delete it.
+                    //
+                    // Only when dux minted it: an attach found the user's
+                    // branch already there and it survives the failure.
+                    if !attach_existing {
+                        git::delete_created_branch_best_effort(&repo_path, &resolved_name);
+                    }
                     let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
                         status_op_id: create_key.clone(),
                         message: format!(
@@ -1063,6 +1076,17 @@ mod tests {
     /// Drive `run_create_agent_job` for an arbitrary request against `repo`
     /// and collect every event the job emitted.
     fn drive_create_job_run(repo: &Path, request: CreateAgentRequest) -> JobRun {
+        drive_create_job_run_with_setup(repo, request, |_| {})
+    }
+
+    /// Same, with a hook that runs against the job's `DuxPaths` before the job
+    /// starts, so a test can sabotage the worktree destination and force a
+    /// deterministic `git worktree add` failure.
+    fn drive_create_job_run_with_setup(
+        repo: &Path,
+        request: CreateAgentRequest,
+        setup: impl FnOnce(&DuxPaths),
+    ) -> JobRun {
         let paths_root = tempfile::tempdir().unwrap();
         let paths = DuxPaths {
             root: paths_root.path().to_path_buf(),
@@ -1072,6 +1096,7 @@ mod tests {
             lock_path: paths_root.path().join("dux.lock"),
         };
         std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+        setup(&paths);
 
         let _ = repo; // repo is referenced by the request; kept alive by caller.
         let (tx, rx) = mpsc::channel();
@@ -1351,6 +1376,19 @@ mod tests {
         // The fetch arm mints `refs/heads/<name>` itself, so that ref is dux's
         // to clean up (and leaving it behind is what makes recreating the agent
         // collide). Simulated with a local "remote" so no network is needed.
+        let (_origin, repo) = pr_repo_with_fake_origin();
+        let session = drive_create_job(repo.path(), pull_request_request(repo.path(), None, false));
+        assert_eq!(session.branch_name, "pr-head");
+        assert_eq!(
+            session.branch_provenance,
+            crate::model::BranchProvenance::CreatedByDux,
+            "dux minted this local branch from the PR head"
+        );
+    }
+
+    /// A repo whose `origin` is a local repo carrying `refs/pull/42/head`, so
+    /// the PR arm's fetch resolves without a network.
+    fn pr_repo_with_fake_origin() -> (tempfile::TempDir, tempfile::TempDir) {
         let origin = init_test_repo();
         crate::git::test_support::git_command()
             .args(["checkout", "-b", "pr-head"])
@@ -1362,6 +1400,10 @@ mod tests {
             .current_dir(origin.path())
             .output()
             .unwrap();
+        git_in(
+            origin.path(),
+            &["update-ref", "refs/pull/42/head", "refs/heads/pr-head"],
+        );
 
         let repo = init_test_repo();
         git_in(
@@ -1373,30 +1415,75 @@ mod tests {
                 origin.path().to_string_lossy().as_ref(),
             ],
         );
-        // `fetch_pull_request_head` fetches `pull/<n>/head`; give the fake
-        // origin that ref so the fetch resolves locally.
-        git_in(
-            origin.path(),
-            &["update-ref", "refs/pull/42/head", "refs/heads/pr-head"],
-        );
+        (origin, repo)
+    }
 
-        let request = CreateAgentRequest::PullRequest {
-            project: test_project(repo.path()),
+    fn pull_request_request(
+        repo: &Path,
+        custom_name: Option<&str>,
+        use_existing: bool,
+    ) -> CreateAgentRequest {
+        CreateAgentRequest::PullRequest {
+            project: test_project(repo),
             host: "github.com".to_string(),
             owner_repo: "owner/repo".to_string(),
             number: 42,
             title: "Fix the bug".to_string(),
             state: "OPEN".to_string(),
             head_branch: "pr-head".to_string(),
-            custom_name: None,
-            use_existing_branch: false,
-        };
-        let session = drive_create_job(repo.path(), request);
-        assert_eq!(session.branch_name, "pr-head");
-        assert_eq!(
-            session.branch_provenance,
-            crate::model::BranchProvenance::CreatedByDux,
-            "dux minted this local branch from the PR head"
+            custom_name: custom_name.map(str::to_string),
+            use_existing_branch: use_existing,
+        }
+    }
+
+    /// Put a plain FILE where the worktree wants to go: `git worktree add`
+    /// then fails deterministically, with no network, no timing, and no load.
+    fn block_worktree_path(paths: &DuxPaths, branch: &str) {
+        let project_root = paths.worktrees_root.join("repo");
+        std::fs::create_dir_all(&project_root).unwrap();
+        std::fs::write(project_root.join(branch), b"in the way").unwrap();
+    }
+
+    #[test]
+    fn a_failed_pr_worktree_deletes_the_branch_the_fetch_minted() {
+        // The fetch mints `refs/heads/pr-head` BEFORE the worktree exists, so
+        // no session (and no provenance-driven rollback) covers this window.
+        // Left behind, the ref makes the next create under the same name hit
+        // the "branch already exists" attach prompt.
+        let (_origin, repo) = pr_repo_with_fake_origin();
+        let run = drive_create_job_run_with_setup(
+            repo.path(),
+            pull_request_request(repo.path(), None, false),
+            |paths| block_worktree_path(paths, "pr-head"),
+        );
+        let failure = run
+            .failure
+            .expect("the worktree add must still fail loudly");
+        assert!(
+            failure.contains("Failed to create a worktree for PR #42"),
+            "the error must still surface: {failure}"
+        );
+        assert!(
+            !crate::git::local_branch_exists(repo.path(), "pr-head"),
+            "the branch dux minted moments ago must not outlive the failed create"
+        );
+    }
+
+    #[test]
+    fn a_failed_pr_worktree_keeps_a_branch_that_already_existed() {
+        // Attaching means the branch was the user's first. A failed create
+        // must not take it with it.
+        let (_origin, repo) = pr_repo_with_fake_origin();
+        create_branch(repo.path(), "pr-agent");
+        let run = drive_create_job_run_with_setup(
+            repo.path(),
+            pull_request_request(repo.path(), Some("pr-agent"), true),
+            |paths| block_worktree_path(paths, "pr-agent"),
+        );
+        assert!(run.failure.is_some(), "the worktree add must still fail");
+        assert!(
+            crate::git::local_branch_exists(repo.path(), "pr-agent"),
+            "dux did not create this branch, so a failed create must keep it"
         );
     }
 
