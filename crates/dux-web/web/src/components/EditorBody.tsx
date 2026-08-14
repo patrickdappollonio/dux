@@ -31,18 +31,27 @@ import {
 } from "lucide-react"
 import type { PanelImperativeHandle } from "react-resizable-panels"
 import { notify, notifyBusy, notifyError, notifySuccess, notifyWarning } from "@/lib/notify"
-import { fileApi } from "@/lib/fileApi"
+import { FileApiError, FileConflictError, fileApi } from "@/lib/fileApi"
 import { OPEN_IN_EDITORS } from "@/lib/editors"
 import {
+  baselineSavedBuffer,
+  changeSignalFor,
   emptyBuffer,
   fileLoadSeedBuffer,
+  fileSignalMoved,
   isBufferStale,
   pruneByIds,
   pruneSetByIds,
+  reloadedInPlace,
   shouldSkipFileLoad,
+  stampsDiffer,
   unionRevalidateBatch,
 } from "@/lib/editorBuffers"
-import type { TabBuffer } from "@/lib/editorBuffers"
+import type {
+  ChangesSliceView,
+  DiskState,
+  TabBuffer,
+} from "@/lib/editorBuffers"
 import { isAllDeleteDiff } from "@/lib/diffPresentation"
 import {
   loadSessionDrafts,
@@ -100,7 +109,12 @@ import { useObjectUrl } from "@/hooks/use-object-url"
 import type { MonacoInstance } from "@/components/CodeEditor"
 import { DeleteEntryDialog } from "@/components/DeleteEntryDialog"
 import type { DeleteEntryTarget } from "@/components/DeleteEntryDialog"
+import { ConfirmReloadFileDialog } from "@/components/ConfirmReloadFileDialog"
+import type { ReloadFileTarget } from "@/components/ConfirmReloadFileDialog"
 import { EditorIcon } from "@/components/EditorIcon"
+import { FileDiskBanner } from "@/components/FileDiskBanner"
+import { SaveConflictDialog } from "@/components/SaveConflictDialog"
+import type { SaveConflictTarget } from "@/components/SaveConflictDialog"
 import { EditorTabsStrip } from "@/components/EditorTabsStrip"
 import { FileStatusIcon } from "@/components/FileStatusIcon"
 import { Button } from "@/components/ui/button"
@@ -134,6 +148,7 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area"
 import {
   closeEditor,
+  editorCloseTab,
   editorCloseTabsUnderPath,
   editorOpenFile,
   editorPinTab,
@@ -253,6 +268,15 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
     tabsRef.current = tabs
   })
 
+  // The live buffers and changed-files slice, for the same reason `tabsRef`
+  // exists: the freshness check and the save both resolve LATER, and they must
+  // decide against the buffer and the slice as they are at that moment, not as
+  // they were when the request went out.
+  const buffersRef = useRef(buffers)
+  useEffect(() => {
+    buffersRef.current = buffers
+  })
+
   const [savingTabId, setSavingTabId] = useState<string | null>(null)
   // Paths with a save currently in flight, independent of `savingTabId`
   // (which is keyed by tab id and only tracks the one tab the Save button UI
@@ -307,6 +331,16 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
   // vanishes; the guard lives inside the dialog, next to the fetch that
   // learns about it.
   const [fileInfoTarget, setFileInfoTarget] = useState<FileInfoTarget | null>(
+    null,
+  )
+  // The two disk-freshness dialogs. Both are local like the four above, but
+  // unlike them they DO have a live truth to close on, so each is given one:
+  // the reload confirm has a `present` predicate recomputed from the buffer
+  // (see below), and the save conflict closes itself when its tab goes away.
+  const [reloadTarget, setReloadTarget] = useState<ReloadFileTarget | null>(
+    null,
+  )
+  const [saveConflict, setSaveConflict] = useState<SaveConflictTarget | null>(
     null,
   )
   // Bumped by `revalidateDirs` after a create/rename/delete lands, so
@@ -540,14 +574,14 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
   // babel-plugin-react-compiler, so there is no runtime auto-memoization
   // here. This expression genuinely re-evaluates on every render; the two
   // scans are just cheap enough that that's fine.
-  const openFileSignal = (() => {
-    if (activeTabPath === null || !slice) return ""
-    const f =
-      slice.unstaged.find((x) => x.path === activeTabPath) ??
-      slice.staged.find((x) => x.path === activeTabPath)
-    return f ? `${f.status}:${f.additions}:${f.deletions}` : ""
-  })()
+  const openFileSignal = changeSignalFor(slice, activeTabPath)
   const openFileSignalRef = useRef("")
+  // The slice as of the last render, for the callbacks that resolve later and
+  // need the signal for a path that may not be the active tab's.
+  const sliceRef = useRef<ChangesSliceView | null>(slice)
+  useEffect(() => {
+    sliceRef.current = slice
+  })
 
   // The diff is cached per tab+path; ready when the loaded diff is for the
   // active tab's CURRENT path. While ready, a change-signal differing from the
@@ -662,6 +696,12 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
   function loadFileBuffer(tabId: string, path: string): void {
     const token = (fileRequestTokenRef.current.get(tabId) ?? 0) + 1
     fileRequestTokenRef.current.set(tabId, token)
+    // Captured HERE, per request, for the request's own path. The diff path
+    // stamps from a ref at RESOLVE time, which is an inherited race: a signal
+    // that moved while the read was in flight describes a change the returned
+    // bytes may not contain, and stamping it would mark a stale buffer fresh.
+    // Capturing before the request can only err into a wasted re-check.
+    const signalAtRequest = changeSignalFor(sliceRef.current, path)
     // Seed/replace this tab's buffer for the new path, marking it `loading`
     // since a read is now in flight. This is the re-key step the preview-
     // replace fix depends on: without it, a stale buffer entry for the tab's
@@ -691,6 +731,9 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
             binary: f.binary,
             readOnly: f.read_only ?? false,
             fileError: null,
+            fileLoadedSignal: signalAtRequest,
+            stamp: { modified: f.modified ?? null, size: f.size ?? null },
+            diskState: "fresh",
           })
           return next
         })
@@ -773,6 +816,193 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
     activeBuffer?.loading,
     activeBuffer?.errorPath,
   ])
+
+  // --- Disk freshness -------------------------------------------------------
+  //
+  // dux has no file watcher and is not getting one here. What it has is the
+  // changed-files broadcast, the window's focus event, and the user switching
+  // tabs; all three are moments when the file on screen might not be the file
+  // on disk any more. Each of them buys the same thing: ONE metadata check.
+  // Never a reload straight off a trigger, because two of the triggers move for
+  // reasons that are not a change at all (the user's own save moves the
+  // changed-files signal; a slice refetch moves it twice), and a reload on
+  // those would be silent data loss dressed up as a feature.
+  //
+  // What the check cannot see is a change made while the tab stays focused and
+  // untouched and git says nothing new. That gap is the file-info panel's own,
+  // accepted for the same reason: the alternative is a poll, and the next
+  // focus, tab activation or commit closes it.
+
+  // Paths with a freshness check in flight, per tab, so the three triggers
+  // firing together cost one request rather than three.
+  const freshnessCheckRef = useRef<Map<string, string>>(new Map())
+
+  // Is the user in the middle of selecting something in the editor? An
+  // auto-reload pushes a full-range edit into the model, which collapses a
+  // selection and moves the cursor; doing that mid-drag is the one case where
+  // "keep it current" is more annoying than helpful. Monaco is the only thing
+  // that knows, and it is a cheap synchronous read, so ask it. No editor
+  // mounted (diff mode, tests, Monaco still loading) means no selection.
+  function editorSelectionActive(): boolean {
+    const mon = monacoRef.current
+    if (!mon) return false
+    try {
+      return mon.editor
+        .getEditors()
+        .some((ed) => ed.getSelection()?.isEmpty() === false)
+    } catch {
+      return false
+    }
+  }
+
+  // Re-read `path` INTO the existing buffer. Not `loadFileBuffer`: that seeds a
+  // loading buffer, which drops `loadedPath`, which unmounts `CodeEditor`,
+  // which disposes the Monaco model and takes undo history, scroll position
+  // and cursor with it. See `reloadedInPlace`.
+  function reloadFileInPlace(tabId: string, path: string): void {
+    const token = (fileRequestTokenRef.current.get(tabId) ?? 0) + 1
+    fileRequestTokenRef.current.set(tabId, token)
+    const signalAtRequest = changeSignalFor(sliceRef.current, path)
+    fileApi
+      .read(sessionId, path)
+      .then((f) => {
+        if (fileRequestTokenRef.current.get(tabId) !== token) return
+        setBuffers((prev) => {
+          const cur = prev.get(tabId)
+          if (!cur || isBufferStale(cur, path)) return prev
+          const next = new Map(prev)
+          next.set(tabId, reloadedInPlace(cur, path, f, signalAtRequest))
+          return next
+        })
+        editorSetTabDirty(sessionId, tabId, false)
+      })
+      .catch((e) => {
+        if (fileRequestTokenRef.current.get(tabId) !== token) return
+        // A reload that fails leaves the buffer exactly as it was: the text on
+        // screen is still the last thing successfully read, which is better
+        // than an error pane over content the user can still copy out. The
+        // banner stays up, so the offer to retry is still there.
+        notifyError(
+          e instanceof Error
+            ? `could not reload from disk: ${e.message}`
+            : "could not reload from disk",
+        )
+      })
+  }
+
+  function markDiskState(tabId: string, path: string, state: DiskState): void {
+    setBuffers((prev) => {
+      const cur = prev.get(tabId)
+      if (!cur || isBufferStale(cur, path) || cur.diskState === state) {
+        return prev
+      }
+      const next = new Map(prev)
+      next.set(tabId, { ...cur, diskState: state })
+      return next
+    })
+  }
+
+  // The check itself: one `info` request, then a decision.
+  function checkDiskFreshness(tabId: string, path: string): void {
+    const buffer = buffersRef.current.get(tabId)
+    // Only a settled, loaded buffer for this exact path has anything to
+    // compare. An unstamped one is an older server that sends no mtime; there
+    // is no baseline, so there is nothing to check and nothing to guard.
+    if (!buffer || isBufferStale(buffer, path)) return
+    if (buffer.loadedPath !== path) return
+    if (buffer.stamp.modified === null && buffer.stamp.size === null) return
+    if (freshnessCheckRef.current.get(tabId) === path) return
+    freshnessCheckRef.current.set(tabId, path)
+    const signalAtRequest = changeSignalFor(sliceRef.current, path)
+    fileApi
+      .info(sessionId, path)
+      .then((info) => {
+        const cur = buffersRef.current.get(tabId)
+        if (!cur || isBufferStale(cur, path) || cur.loadedPath !== path) return
+        const onDisk = { modified: info.modified, size: info.size }
+        if (!stampsDiffer(cur.stamp, onDisk)) {
+          // Nothing moved. Adopt the signal that sent us here so the same
+          // movement does not ask again on every render: this is the user's
+          // own save, or the changes slice merely refetching.
+          setBuffers((prev) => {
+            const b = prev.get(tabId)
+            if (!b || isBufferStale(b, path)) return prev
+            if (b.fileLoadedSignal === signalAtRequest) return prev
+            const next = new Map(prev)
+            next.set(tabId, { ...b, fileLoadedSignal: signalAtRequest })
+            return next
+          })
+          return
+        }
+        const dirty = tabsRef.current.find((t) => t.id === tabId)?.dirty ?? false
+        // A dirty buffer is never replaced without asking, and neither is one
+        // the user is selecting inside. Both get the banner, which is the same
+        // offer made in a way that waits for them.
+        if (dirty || editorSelectionActive()) {
+          markDiskState(tabId, path, "changed")
+          return
+        }
+        reloadFileInPlace(tabId, path)
+      })
+      .catch((e) => {
+        // Gone is its own rung: there is nothing to reload, so the banner
+        // offers to close the tab or keep the text. Any other failure (a
+        // refusal, a dropped connection) says nothing about the file, and a
+        // failed CHECK is not worth a toast: the next trigger retries.
+        if (e instanceof FileApiError && e.status === 404) {
+          markDiskState(tabId, path, "deleted")
+        }
+      })
+      .finally(() => {
+        if (freshnessCheckRef.current.get(tabId) === path) {
+          freshnessCheckRef.current.delete(tabId)
+        }
+      })
+  }
+
+  // Trigger 1: the open file's row in the changed-files broadcast moved.
+  useEffect(() => {
+    if (!activeTab || activeTab.mode !== "file") return
+    if (!fileSignalMoved(activeBuffer, activeTab.path, slice)) return
+    checkDiskFreshness(activeTab.id, activeTab.path)
+    // Keyed on the two things that make the predicate flip; the helpers are
+    // plain functions with a fresh identity each render (see `loadFileBuffer`).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    activeTab?.mode,
+    activeTab?.id,
+    activeTab?.path,
+    openFileSignal,
+    slice?.phase,
+    activeBuffer?.fileLoadedSignal,
+    activeBuffer?.loadedPath,
+  ])
+
+  // Trigger 2: the window regained focus. One listener for both shells, the
+  // file-info panel's precedent exactly, and for the same reason: coming back
+  // to a tab is when its facts are most likely to be stale, and it costs one
+  // request instead of a timer that runs forever. It also catches what the
+  // signal is blind to, an ignored file or an edit that keeps the same +/-
+  // counts.
+  useEffect(() => {
+    if (!activeTab || activeTab.mode !== "file") return
+    const tabId = activeTab.id
+    const path = activeTab.path
+    const revalidate = () => checkDiskFreshness(tabId, path)
+    window.addEventListener("focus", revalidate)
+    return () => window.removeEventListener("focus", revalidate)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab?.mode, activeTab?.id, activeTab?.path])
+
+  // Trigger 3: this tab became the active one. Keyed on the tab identity, so
+  // it fires on MOUNT too, which is the case that matters most: the buffer may
+  // have come back from the module-level draft cache, having sat there while
+  // the editor was closed, and nothing else would ever question it.
+  useEffect(() => {
+    if (!activeTab || activeTab.mode !== "file") return
+    checkDiskFreshness(activeTab.id, activeTab.path)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab?.mode, activeTab?.id, activeTab?.path])
 
   // Fetch and store a tab's diff cache for `path`. Extracted for the same
   // reason as `loadFileBuffer` above; also a plain function for the same
@@ -980,11 +1210,26 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
     }
   }
 
+  // Save the active tab. `expected` is the freshness token, present for an
+  // ordinary save and deliberately ABSENT for the conflict dialog's Overwrite:
+  // dropping the token is exactly what "yes, I know, do it anyway" means on
+  // this route.
   function save(): void {
     if (!activeTab || binary || isSaving || !dirty) return
-    const tabId = activeTab.id
-    const path = activeTab.path
-    const body = activeBuffer?.draft ?? ""
+    writeBuffer(
+      activeTab.id,
+      activeTab.path,
+      activeBuffer?.draft ?? "",
+      activeBuffer?.stamp,
+    )
+  }
+
+  function writeBuffer(
+    tabId: string,
+    path: string,
+    body: string,
+    expected?: { modified: string | null; size: number | null },
+  ): void {
     setSavingTabId(tabId)
     setSavingPaths((prev) => {
       const next = new Set(prev)
@@ -992,8 +1237,8 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
       return next
     })
     fileApi
-      .write(sessionId, path, body)
-      .then(() => {
+      .write(sessionId, path, body, expected)
+      .then((result) => {
         // Re-check the LIVE tabs list at RESOLVE time (via `tabsRef`, kept
         // current every render), not the `tabs` this closure captured when
         // `save()` was called: a delete confirmed while the write was in
@@ -1012,7 +1257,19 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
             const cur = prev.get(tabId)
             if (!cur || isBufferStale(cur, path)) return prev
             const next = new Map(prev)
-            next.set(tabId, { ...cur, loaded: body, diffLoadedPath: null })
+            // Re-baseline on the server's post-write stamp, and re-stamp the
+            // change signal: this save is about to move that signal, and
+            // without adopting both, the editor would go looking for somebody
+            // else's edit and find its own.
+            next.set(
+              tabId,
+              baselineSavedBuffer(
+                cur,
+                body,
+                { modified: result.modified, size: result.size },
+                changeSignalFor(sliceRef.current, path),
+              ),
+            )
             return next
           })
           editorSetTabDirty(sessionId, tabId, false)
@@ -1021,6 +1278,19 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
         else notifySuccess(outcome.message)
       })
       .catch((e) => {
+        // A freshness refusal is not a failure to report, it is a question to
+        // ask: the file on disk is somebody else's work now, and only the user
+        // can say whose version wins. The draft is kept here exactly as it is
+        // for every other refusal, so cancelling costs nothing.
+        if (e instanceof FileConflictError) {
+          // The server just told us what no check had established yet, so
+          // record it: the banner is then truthful behind the dialog, and
+          // cancelling leaves the user looking at the offer rather than at
+          // nothing.
+          markDiskState(tabId, path, e.deleted ? "deleted" : "changed")
+          setSaveConflict({ tabId, path, body, deleted: e.deleted })
+          return
+        }
         // The DRAFT IS KEPT, deliberately, and this is the whole answer to a
         // refused save. Nothing here touches `setBuffers` or clears the dirty
         // flag, so the text stays exactly as typed and the tab stays dirty:
@@ -1044,6 +1314,19 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
           return next
         })
       })
+  }
+
+  // The banner's "Reload from disk". Confirmed only when there is something to
+  // lose: with no unsaved edits the reload is exactly what the auto-reload
+  // would have done unasked, and a confirm for "replace text you did not
+  // write" is a dialog that teaches people to click through dialogs.
+  function requestReload(tabId: string, path: string): void {
+    const isDirty = tabsRef.current.find((t) => t.id === tabId)?.dirty ?? false
+    if (!isDirty) {
+      reloadFileInPlace(tabId, path)
+      return
+    }
+    setReloadTarget({ tabId, path })
   }
 
   // Reload the diff for the active tab: the "file changed underneath you"
@@ -1806,7 +2089,25 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
             minSize={EDITOR_CONTENT_MIN_SIZE_PROP}
             style={{ overflow: "hidden" }}
           >
-            <div className="relative h-full min-w-0">
+            <div className="relative flex h-full min-w-0 flex-col">
+              {/* The disk-freshness notice, above the content and inside the
+                  pane: it is a fact about THIS tab, so it travels with the tab
+                  rather than floating over the app as a toast. It renders
+                  nothing in the ordinary case. */}
+              {activeTab !== null &&
+                !isBufferStale(activeBuffer, activeTab.path) && (
+                  <FileDiskBanner
+                    state={activeBuffer?.diskState ?? "fresh"}
+                    path={activeTab.path}
+                    dirty={dirty}
+                    onReload={() => requestReload(activeTab.id, activeTab.path)}
+                    onDismiss={() =>
+                      markDiskState(activeTab.id, activeTab.path, "fresh")
+                    }
+                    onCloseTab={() => editorCloseTab(sessionId, activeTab.id)}
+                  />
+                )}
+              <div className="relative min-h-0 flex-1">
               {activeTab === null ? (
                 <div className="flex h-full items-center justify-center px-4 text-center text-sm text-muted-foreground">
                   Select a file from the tree to view or edit it.
@@ -1962,6 +2263,7 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
                   </Suspense>
                 </ChunkBoundary>
               )}
+              </div>
             </div>
           </ResizablePanel>
         </ResizablePanelGroup>
@@ -2007,6 +2309,50 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
         sessionId={sessionId}
         target={fileInfoTarget}
         onClose={() => setFileInfoTarget(null)}
+      />
+      {/* Discarding your own edits for what is on disk. The vanished-target
+          predicate is "still worth asking": the tab still exists, is still
+          dirty, and the file is still reported changed. Saving, reverting, or
+          reloading from another surface while this is open all retire it. */}
+      <ConfirmReloadFileDialog
+        target={reloadTarget}
+        present={
+          reloadTarget !== null &&
+          (tabs.find((t) => t.id === reloadTarget.tabId)?.dirty ?? false) &&
+          buffers.get(reloadTarget.tabId)?.diskState === "changed"
+        }
+        onClose={() => setReloadTarget(null)}
+        onConfirm={() => {
+          reloadFileInPlace(reloadTarget!.tabId, reloadTarget!.path)
+          setReloadTarget(null)
+        }}
+      />
+      {/* The 409. Its own target vanishes with the tab (nothing else can
+          resolve a conflict that is waiting on an answer), so the guard is a
+          plain tab lookup rather than the shared hook's two-value form. */}
+      <SaveConflictDialog
+        target={
+          saveConflict !== null &&
+          tabs.some((t) => t.id === saveConflict.tabId)
+            ? saveConflict
+            : null
+        }
+        onClose={() => setSaveConflict(null)}
+        onOverwrite={() => {
+          const target = saveConflict!
+          setSaveConflict(null)
+          // No token: the whole meaning of Overwrite is to save without the
+          // guard, and the body is the one the refused save carried.
+          writeBuffer(target.tabId, target.path, target.body)
+        }}
+        onReload={() => {
+          const target = saveConflict!
+          setSaveConflict(null)
+          // Straight into the destructive confirm: taking the disk version
+          // throws away everything the user typed, and that is the same act
+          // the banner's Reload asks about.
+          requestReload(target.tabId, target.path)
+        }}
       />
       <DeleteEntryDialog
         target={deleteEntryTarget}

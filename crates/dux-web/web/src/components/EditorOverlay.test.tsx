@@ -55,12 +55,32 @@ vi.mock("@/lib/store", async (importOriginal) => {
   }
 })
 
-const writeMock = vi.fn()
-const readMock = vi.fn(async () => ({
+// Resolves with the save route's real success body (the file's fresh stamp),
+// which the editor adopts as its new baseline. Tests that care override it.
+const writeMock = vi.fn(async (..._a: unknown[]) => ({
+  modified: "2026-01-01T00:00:00+00:00",
+  size: 0,
+}))
+const readMock = vi.fn(async (..._a: unknown[]) => ({
   path: PATH,
   content: ON_DISK,
   binary: false,
   read_only: false,
+}))
+// The freshness check's endpoint. The default answer is deliberately shaped
+// like a file whose stamp the buffer does NOT have (the unstamped `readMock`
+// above): with no baseline there is nothing to compare, so no check runs and
+// the pre-existing suites see no extra requests. The disk-freshness suite at
+// the bottom of this file installs a real mock disk behind both.
+const infoMock = vi.fn(async (..._a: unknown[]) => ({
+  path: PATH,
+  kind: "file" as const,
+  size: ON_DISK.length,
+  modified: "2026-01-01T00:00:00+00:00",
+  mode: "644",
+  permissions: "rw-r--r--",
+  symlink_target: null,
+  git: { state: "clean" as const },
 }))
 // The real endpoint's FileDiffContents shape; per-test overrides set the sides
 // the diff-mode preview tests assert against.
@@ -81,11 +101,17 @@ const createFileMock = vi.fn(async (..._a: unknown[]) => {})
 const createDirMock = vi.fn(async (..._a: unknown[]) => {})
 const renameMock = vi.fn(async (..._a: unknown[]) => {})
 const removeMock = vi.fn(async (..._a: unknown[]) => {})
-vi.mock("@/lib/fileApi", () => ({
+// Only `fileApi` is replaced: the module also exports the error CLASSES the
+// editor routes on (`FileApiError`, `FileConflictError`), and a factory that
+// dropped them would make an `instanceof` check throw at runtime instead of
+// failing a test honestly.
+vi.mock("@/lib/fileApi", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/fileApi")>()),
   fileApi: {
     list: vi.fn(async () => ({ files: [PATH], truncated: false })),
+    info: (...a: unknown[]) => infoMock(...a),
     tree: (...a: unknown[]) => (treeMock as unknown as (...x: unknown[]) => unknown)(...a),
-    read: () => readMock(),
+    read: (...a: unknown[]) => readMock(...a),
     // The real builder's shape, duplicated here because the module is fully
     // mocked: the image-pane test asserts the exact URL the <img> gets.
     rawUrl: (sessionId: string, path: string) =>
@@ -322,7 +348,10 @@ describe("a save the server refuses", () => {
   // dirty flag. If this stops firing, the test above has stopped proving
   // anything and both fail together.
   it("is distinguishable from an accepted save, which does clear the flag", async () => {
-    writeMock.mockResolvedValue(undefined)
+    writeMock.mockResolvedValue({
+      modified: "2026-01-01T00:00:00+00:00",
+      size: TYPED.length,
+    })
     await mountWithDirtyTab()
 
     fireEvent.click(screen.getByRole("button", { name: /save/i }))
@@ -1453,5 +1482,311 @@ describe("the header's language picker", () => {
     expect(
       screen.queryByRole("button", { name: /^syntax language:/i }),
     ).toBeNull()
+  })
+})
+
+// --- The file changes on disk underneath the editor -------------------------
+//
+// The bug, reported and reproduced: an agent edits a file the web editor has
+// open, and the editor keeps showing the old text forever. Three mechanisms
+// stacked to guarantee it (the load effect never re-reads a loaded path, the
+// draft cache restores the stale buffer across remounts, and Monaco reattaches
+// the retained model), and the save on top of that was unconditional, so
+// saving the stale buffer destroyed the agent's work.
+//
+// These drive the whole journey through the real component with a mock disk
+// behind /read and /info, because the interesting part is not any one helper:
+// it is which of the three triggers fires, what it does to a clean versus a
+// dirty buffer, and what the user is offered when the editor cannot decide.
+describe("when the file changes on disk underneath the editor", () => {
+  const OTHER = "src/other.txt"
+  const AGENT_TEXT = "the agent rewrote this\n"
+  const TAB_B = "tab-b"
+
+  // The mock disk: one record per path, mutated mid-test to stand in for the
+  // agent's edit. Both /read and /info answer from it, which is what makes the
+  // metadata check meaningful (a check that could not disagree with the read
+  // would prove nothing).
+  let disk: Map<string, { content: string; modified: string; size: number }>
+
+  function put(path: string, content: string, modified: string) {
+    disk.set(path, { content, modified, size: content.length })
+  }
+
+  function slice(additions: number, deletions: number) {
+    return {
+      sessionId: SESSION,
+      phase: "loaded" as const,
+      rev: 1,
+      staged: [],
+      unstaged: [
+        { path: PATH, status: "M", additions, deletions, staged: false },
+      ],
+      error: null,
+    }
+  }
+
+  function tab(id: string, path: string, dirty = false) {
+    return { id, path, dirty, preview: false, mode: "file" as const }
+  }
+
+  function setTabs(
+    tabs: ReturnType<typeof tab>[],
+    activeId: string,
+    changes?: unknown,
+  ) {
+    mockState = {
+      ...mockState,
+      ...(changes === undefined ? {} : { changes }),
+      editorTabs: { [SESSION]: { tabs, activeId } },
+    } as DuxState
+  }
+
+  // The component under test, imported once per test so `rerender` has
+  // something to hand back in (the suite mocks modules, so it cannot be a
+  // top-level import).
+  let Overlay: () => React.ReactElement
+
+  async function mountOne(dirty = false) {
+    const { getSnapshot } = await import("@/lib/store")
+    mockState = {
+      ...getSnapshot(),
+      editorTarget: { sessionId: SESSION, initialPath: PATH },
+      editorTabs: {
+        [SESSION]: { tabs: [tab(TAB_ID, PATH, dirty)], activeId: TAB_ID },
+      },
+    } as DuxState
+    const view = render(<Overlay />)
+    const box = (await screen.findByTestId("code-editor")) as HTMLTextAreaElement
+    await waitFor(() => expect(box.value).toBe(ON_DISK))
+    return view
+  }
+
+  function editor() {
+    return screen.getByTestId("code-editor") as HTMLTextAreaElement
+  }
+
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    installBootStubs()
+    const { clearSessionDrafts } = await import("@/lib/editorDrafts")
+    clearSessionDrafts(SESSION)
+    Overlay = (await import("@/components/EditorOverlay")).EditorOverlay
+    disk = new Map()
+    put(PATH, ON_DISK, "2026-01-01T00:00:00+00:00")
+    put(OTHER, "other file\n", "2026-01-01T00:00:00+00:00")
+    readMock.mockImplementation(async (_sessionId?: unknown, path?: unknown) => {
+      const entry = disk.get(String(path))
+      if (!entry) throw new Error("no such file")
+      return {
+        path: String(path),
+        content: entry.content,
+        binary: false,
+        read_only: false,
+        modified: entry.modified,
+        size: entry.size,
+      }
+    })
+    infoMock.mockImplementation(async (_sessionId?: unknown, path?: unknown) => {
+      const entry = disk.get(String(path))
+      if (!entry) {
+        const { FileApiError } = await import("@/lib/fileApi")
+        throw new FileApiError(404, "no such entry in the worktree")
+      }
+      return {
+        path: String(path),
+        kind: "file" as const,
+        size: entry.size,
+        modified: entry.modified,
+        mode: "644",
+        permissions: "rw-r--r--",
+        symlink_target: null,
+        git: { state: "clean" as const },
+      }
+    })
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.unstubAllGlobals()
+  })
+
+  // The reported journey, end to end.
+  it("shows the new content after switching away and back", async () => {
+    const view = await mountOne()
+    put(PATH, AGENT_TEXT, "2026-02-02T00:00:00+00:00")
+    setTabs([tab(TAB_ID, PATH), tab(TAB_B, OTHER)], TAB_B, slice(9, 1))
+    view.rerender(<Overlay />)
+    await waitFor(() => expect(editor().value).toBe("other file\n"))
+
+    setTabs([tab(TAB_ID, PATH), tab(TAB_B, OTHER)], TAB_ID)
+    view.rerender(<Overlay />)
+    await waitFor(() => expect(editor().value).toBe(AGENT_TEXT))
+  })
+
+  it("reloads a clean buffer in place as soon as the change signal moves", async () => {
+    const view = await mountOne()
+    put(PATH, AGENT_TEXT, "2026-02-02T00:00:00+00:00")
+    setTabs([tab(TAB_ID, PATH)], TAB_ID, slice(9, 1))
+    view.rerender(<Overlay />)
+    await waitFor(() => expect(editor().value).toBe(AGENT_TEXT))
+    // Silently: a buffer with nothing to lose is exactly what the user asked
+    // to be kept current, so there is no banner to dismiss.
+    expect(screen.queryByRole("status")).toBeNull()
+  })
+
+  // The no-op movers. The user's own save moves the signal too, and so does
+  // the changes slice merely refetching; neither may cost anything.
+  it("checks but does not re-read when the signal moved and the file did not", async () => {
+    const view = await mountOne()
+    setTabs([tab(TAB_ID, PATH)], TAB_ID, slice(9, 1))
+    view.rerender(<Overlay />)
+    await waitFor(() => expect(infoMock).toHaveBeenCalled())
+    expect(readMock).toHaveBeenCalledTimes(1)
+    expect(editor().value).toBe(ON_DISK)
+  })
+
+  it("does not check at all while the changes slice is still loading", async () => {
+    const view = await mountOne()
+    setTabs([tab(TAB_ID, PATH)], TAB_ID, {
+      sessionId: SESSION,
+      phase: "loading",
+      rev: 1,
+      staged: [],
+      unstaged: [],
+      error: null,
+    })
+    view.rerender(<Overlay />)
+    await waitFor(() => expect(editor().value).toBe(ON_DISK))
+    expect(infoMock).not.toHaveBeenCalled()
+  })
+
+  // Focus catches what the signal is blind to: a git-ignored file, or an edit
+  // that happens to keep the same +/- counts.
+  it("catches a change on window focus even when the signal never moves", async () => {
+    await mountOne()
+    put(PATH, AGENT_TEXT, "2026-02-02T00:00:00+00:00")
+    fireEvent(window, new Event("focus"))
+    await waitFor(() => expect(editor().value).toBe(AGENT_TEXT))
+  })
+
+  it("never silently replaces a buffer with unsaved edits", async () => {
+    const view = await mountOne(true)
+    fireEvent.change(editor(), { target: { value: TYPED } })
+    put(PATH, AGENT_TEXT, "2026-02-02T00:00:00+00:00")
+    setTabs([tab(TAB_ID, PATH, true)], TAB_ID, slice(9, 1))
+    view.rerender(<Overlay />)
+
+    const banner = await screen.findByRole("status")
+    expect(banner.textContent).toContain("changed on disk")
+    expect(editor().value).toBe(TYPED)
+    expect(readMock).toHaveBeenCalledTimes(1)
+  })
+
+  it("reloads a dirty buffer only after the destructive confirm", async () => {
+    const view = await mountOne(true)
+    fireEvent.change(editor(), { target: { value: TYPED } })
+    put(PATH, AGENT_TEXT, "2026-02-02T00:00:00+00:00")
+    setTabs([tab(TAB_ID, PATH, true)], TAB_ID, slice(9, 1))
+    view.rerender(<Overlay />)
+    await screen.findByRole("status")
+
+    fireEvent.click(screen.getByRole("button", { name: /reload from disk/i }))
+    // Cancel first: the escape hatch must actually leave the text alone.
+    fireEvent.click(await screen.findByRole("button", { name: /keep my edits/i }))
+    expect(editor().value).toBe(TYPED)
+
+    fireEvent.click(screen.getByRole("button", { name: /reload from disk/i }))
+    fireEvent.click(await screen.findByRole("button", { name: /discard & reload/i }))
+    await waitFor(() => expect(editor().value).toBe(AGENT_TEXT))
+  })
+
+  it("lets the user keep their version and dismiss the banner", async () => {
+    const view = await mountOne(true)
+    fireEvent.change(editor(), { target: { value: TYPED } })
+    put(PATH, AGENT_TEXT, "2026-02-02T00:00:00+00:00")
+    setTabs([tab(TAB_ID, PATH, true)], TAB_ID, slice(9, 1))
+    view.rerender(<Overlay />)
+    await screen.findByRole("status")
+
+    fireEvent.click(screen.getByRole("button", { name: /keep mine/i }))
+    await waitFor(() => expect(screen.queryByRole("status")).toBeNull())
+    expect(editor().value).toBe(TYPED)
+  })
+
+  it("says so when the file was deleted, and offers to close the tab", async () => {
+    const view = await mountOne(true)
+    fireEvent.change(editor(), { target: { value: TYPED } })
+    disk.delete(PATH)
+    setTabs([tab(TAB_ID, PATH, true)], TAB_ID, slice(9, 1))
+    view.rerender(<Overlay />)
+
+    const banner = await screen.findByRole("status")
+    expect(banner.textContent).toContain("deleted on disk")
+    expect(editor().value).toBe(TYPED)
+    expect(
+      screen.getByRole("button", { name: /close tab/i }),
+    ).toBeInstanceOf(HTMLElement)
+  })
+
+  // The data-loss half.
+  it("sends the freshness token with a save and re-baselines on the answer", async () => {
+    writeMock.mockResolvedValue({
+      modified: "2026-03-03T00:00:00+00:00",
+      size: TYPED.length,
+    })
+    const view = await mountOne(true)
+    fireEvent.change(editor(), { target: { value: TYPED } })
+    fireEvent.click(screen.getByRole("button", { name: /save/i }))
+    await waitFor(() => expect(writeMock).toHaveBeenCalled())
+    expect(writeMock.mock.calls[0][3]).toEqual({
+      modified: "2026-01-01T00:00:00+00:00",
+      size: ON_DISK.length,
+    })
+
+    // The save moved the changed-files signal, as the user's own save always
+    // does. That must not send the editor chasing its own work: the buffer
+    // re-baselined on the write's answer, so the check that follows finds
+    // nothing and nothing is re-read.
+    put(PATH, TYPED, "2026-03-03T00:00:00+00:00")
+    setTabs([tab(TAB_ID, PATH, false)], TAB_ID, slice(12, 1))
+    view.rerender(<Overlay />)
+    await waitFor(() => expect(infoMock).toHaveBeenCalled())
+    expect(readMock).toHaveBeenCalledTimes(1)
+    expect(editor().value).toBe(TYPED)
+  })
+
+  it("routes a refused save to the conflict dialog, not to an error toast", async () => {
+    const { FileConflictError } = await import("@/lib/fileApi")
+    writeMock.mockRejectedValueOnce(
+      new FileConflictError({
+        modified: "2026-02-02T00:00:00+00:00",
+        size: AGENT_TEXT.length,
+        deleted: false,
+      }),
+    )
+    await mountOne(true)
+    fireEvent.change(editor(), { target: { value: TYPED } })
+    put(PATH, AGENT_TEXT, "2026-02-02T00:00:00+00:00")
+    fireEvent.click(screen.getByRole("button", { name: /save/i }))
+
+    expect(
+      await screen.findByText(/changed after you opened it/i),
+    ).toBeInstanceOf(HTMLElement)
+    expect(toastError).not.toHaveBeenCalled()
+    // The draft is untouched by a refused save, exactly as for every other
+    // refusal.
+    expect(editor().value).toBe(TYPED)
+
+    // Overwrite re-sends the same body with NO token, which is the only way
+    // to mean "yes, I know, do it anyway".
+    writeMock.mockResolvedValueOnce({
+      modified: "2026-04-04T00:00:00+00:00",
+      size: TYPED.length,
+    })
+    fireEvent.click(screen.getByRole("button", { name: /^overwrite$/i }))
+    await waitFor(() => expect(writeMock).toHaveBeenCalledTimes(2))
+    expect(writeMock.mock.calls[1][2]).toBe(TYPED)
+    expect(writeMock.mock.calls[1][3]).toBeUndefined()
   })
 })
