@@ -19,6 +19,13 @@
 //! given the single-tenant trusted-access model); it is gated to local-access
 //! clients in the UI and is a harmless no-op when spawned on a headless server.
 //!
+//! A save may carry the freshness token the read handed out, as the pair
+//! `expected_modified`/`expected_size`. With it, the write is refused with a 409 when the file
+//! moved underneath the editor's buffer, which is the whole answer to an agent
+//! and a browser editing the same file; without it the write is unconditional,
+//! exactly as it always was. See `WriteOp` and
+//! `dux_core::worktree_file::write_file_checked`.
+//!
 //! All routes are served like every other API route, with the host-allowlist
 //! and same-origin guard applied app-wide, and run the file I/O OFF the async reactor
 //! (`spawn_blocking`). After a write, the changed-files cache is invalidated so a
@@ -53,6 +60,41 @@ struct ReadOp {
 struct WriteOp {
     path: String,
     content: String,
+    /// The freshness token the editor was handed by `read` (or by this route's
+    /// own success body), echoed back so the server can refuse to overwrite a
+    /// file that moved underneath the buffer.
+    ///
+    /// Optional, and the guard is opt-in BY PRESENCE of BOTH halves: a client
+    /// that sends neither (an older page, any other writer) gets exactly the
+    /// unconditional write this route has always done. Half a token is treated
+    /// as no token: enforcing a size against an mtime nobody supplied would be
+    /// comparing against a value the server invented. Both halves are needed
+    /// because mtime granularity is coarse enough that two writes inside one
+    /// tick share a timestamp, which is the very race the guard is for.
+    #[serde(default)]
+    expected_modified: Option<String>,
+    #[serde(default)]
+    expected_size: Option<u64>,
+}
+
+/// A save's success body: the file's stamp AFTER the write. The client
+/// re-baselines on it so its own save is not mistaken for somebody else's edit
+/// the moment the changed-files broadcast moves.
+#[derive(Serialize)]
+struct WriteResult {
+    modified: Option<String>,
+    size: u64,
+}
+
+/// A 409's body. `deleted` is its own field rather than being inferred from a
+/// null `modified`, because a null mtime is a legitimate answer on a filesystem
+/// that reports none, and "changed" and "deleted" are different rungs with
+/// different offers in the UI (reload versus close-or-keep).
+#[derive(Serialize)]
+struct WriteConflictBody {
+    modified: Option<String>,
+    size: Option<u64>,
+    deleted: bool,
 }
 
 #[derive(Deserialize)]
@@ -474,15 +516,38 @@ async fn write_file(
     let wt = worktree.clone();
     let path = op.path;
     let content = op.content;
+    // Both halves or nothing; see `WriteOp::expected_modified`.
+    let expected = op
+        .expected_size
+        .zip(op.expected_modified)
+        .map(|(size, modified)| dux_core::worktree_file::FileStamp {
+            modified: Some(modified),
+            size,
+        });
     // write_file's errors are path/containment validation — client conditions, so
-    // map them to 400.
-    match tokio::task::spawn_blocking(move || {
-        dux_core::worktree_file::write_file(&wt, &path, &content)
+    // map them to 400. The one exception is a freshness conflict, which is a
+    // 409 carrying the file's CURRENT stamp so the browser can offer a choice
+    // (overwrite, reload, cancel) without another round trip.
+    let stamp = match tokio::task::spawn_blocking(move || {
+        dux_core::worktree_file::write_file_checked(&wt, &path, &content, expected.as_ref())
     })
     .await
     {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+        Ok(Ok(stamp)) => stamp,
+        Ok(Err(e)) => {
+            if let Some(conflict) = e.downcast_ref::<dux_core::worktree_file::WriteConflict>() {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(WriteConflictBody {
+                        modified: conflict.current.as_ref().and_then(|s| s.modified.clone()),
+                        size: conflict.current.as_ref().map(|s| s.size),
+                        deleted: conflict.deleted,
+                    }),
+                )
+                    .into_response();
+            }
+            return (StatusCode::BAD_REQUEST, e.to_string()).into_response();
+        }
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -490,9 +555,13 @@ async fn write_file(
             )
                 .into_response();
         }
-    }
+    };
     crate::git_routes::refresh_changed_files_now(&state, session_id, &worktree);
-    StatusCode::OK.into_response()
+    Json(WriteResult {
+        modified: stamp.modified,
+        size: stamp.size,
+    })
+    .into_response()
 }
 
 /// Turn a save-route body rejection into a response the user can act on.
@@ -1319,6 +1388,199 @@ mod tests {
             assert_eq!(
                 std::fs::metadata(wt.join("big.txt")).unwrap().len(),
                 3 * 1024 * 1024
+            );
+        }
+
+        async fn body_json(resp: axum::response::Response) -> serde_json::Value {
+            let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            serde_json::from_slice(&bytes).expect("a JSON body")
+        }
+
+        /// The read route must hand the editor the token a later save sends
+        /// back, or the guard below has nothing to compare against.
+        #[tokio::test]
+        async fn read_returns_the_files_stamp() {
+            let (_tmp, _wt, app) = router_with_session().await;
+            let resp = app
+                .oneshot(json_req(
+                    "/api/v1/sessions/s1/files/read",
+                    serde_json::json!({ "path": "hello.txt" }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = body_json(resp).await;
+            assert_eq!(body["size"], 3);
+            assert!(
+                body["modified"].is_string(),
+                "the read must carry an mtime: {body}"
+            );
+        }
+
+        /// A save's success body is the client's new baseline. Without it the
+        /// user's OWN save moves the changed-files signal and the editor would
+        /// then believe somebody else edited the file.
+        #[tokio::test]
+        async fn a_successful_write_returns_the_fresh_stamp() {
+            let (_tmp, _wt, app) = router_with_session().await;
+            let resp = app
+                .oneshot(json_req(
+                    "/api/v1/sessions/s1/files/write",
+                    serde_json::json!({ "path": "hello.txt", "content": "typed\n" }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = body_json(resp).await;
+            assert_eq!(body["size"], 6);
+            assert!(body["modified"].is_string());
+        }
+
+        #[tokio::test]
+        async fn a_write_with_a_matching_stamp_is_accepted() {
+            let (_tmp, wt, app) = router_with_session().await;
+            let read = app
+                .clone()
+                .oneshot(json_req(
+                    "/api/v1/sessions/s1/files/read",
+                    serde_json::json!({ "path": "hello.txt" }),
+                ))
+                .await
+                .unwrap();
+            let stamp = body_json(read).await;
+            let resp = app
+                .oneshot(json_req(
+                    "/api/v1/sessions/s1/files/write",
+                    serde_json::json!({
+                        "path": "hello.txt",
+                        "content": "mine\n",
+                        "expected_modified": stamp["modified"],
+                        "expected_size": stamp["size"],
+                    }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert_eq!(
+                std::fs::read_to_string(wt.join("hello.txt")).unwrap(),
+                "mine\n"
+            );
+        }
+
+        /// The data-loss fix, end to end: the agent edits the file while the
+        /// editor holds an older buffer, and the save is refused with the facts
+        /// the browser needs to offer a choice.
+        #[tokio::test]
+        async fn a_write_with_a_stale_stamp_is_409_with_the_current_stamp() {
+            let (_tmp, wt, app) = router_with_session().await;
+            let read = app
+                .clone()
+                .oneshot(json_req(
+                    "/api/v1/sessions/s1/files/read",
+                    serde_json::json!({ "path": "hello.txt" }),
+                ))
+                .await
+                .unwrap();
+            let stamp = body_json(read).await;
+            std::fs::write(wt.join("hello.txt"), "the agent's work\n").unwrap();
+
+            let resp = app
+                .oneshot(json_req(
+                    "/api/v1/sessions/s1/files/write",
+                    serde_json::json!({
+                        "path": "hello.txt",
+                        "content": "clobber\n",
+                        "expected_modified": stamp["modified"],
+                        "expected_size": stamp["size"],
+                    }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::CONFLICT);
+            let body = body_json(resp).await;
+            assert_eq!(body["deleted"], false);
+            assert_eq!(body["size"], "the agent's work\n".len());
+            assert!(body["modified"].is_string());
+            assert_eq!(
+                std::fs::read_to_string(wt.join("hello.txt")).unwrap(),
+                "the agent's work\n",
+                "a refused save must leave the file exactly as it was"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_write_onto_a_file_deleted_underneath_is_409_and_creates_nothing() {
+            let (_tmp, wt, app) = router_with_session().await;
+            let read = app
+                .clone()
+                .oneshot(json_req(
+                    "/api/v1/sessions/s1/files/read",
+                    serde_json::json!({ "path": "hello.txt" }),
+                ))
+                .await
+                .unwrap();
+            let stamp = body_json(read).await;
+            std::fs::remove_file(wt.join("hello.txt")).unwrap();
+
+            let resp = app
+                .oneshot(json_req(
+                    "/api/v1/sessions/s1/files/write",
+                    serde_json::json!({
+                        "path": "hello.txt",
+                        "content": "back\n",
+                        "expected_modified": stamp["modified"],
+                        "expected_size": stamp["size"],
+                    }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::CONFLICT);
+            let body = body_json(resp).await;
+            assert_eq!(body["deleted"], true);
+            assert!(body["modified"].is_null());
+            assert!(!wt.join("hello.txt").exists());
+        }
+
+        /// A client that sends no token is every other writer and every older
+        /// page: it must behave exactly as it did before the guard existed.
+        #[tokio::test]
+        async fn a_write_with_no_stamp_still_overwrites_unconditionally() {
+            let (_tmp, wt, app) = router_with_session().await;
+            std::fs::write(wt.join("hello.txt"), "changed by someone else\n").unwrap();
+            let resp = app
+                .oneshot(json_req(
+                    "/api/v1/sessions/s1/files/write",
+                    serde_json::json!({ "path": "hello.txt", "content": "overwritten\n" }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert_eq!(
+                std::fs::read_to_string(wt.join("hello.txt")).unwrap(),
+                "overwritten\n"
+            );
+        }
+
+        /// Half a token is no token: guarding on a size with no mtime (or the
+        /// other way round) would compare against a value nobody supplied.
+        #[tokio::test]
+        async fn a_half_specified_stamp_is_ignored_rather_than_half_enforced() {
+            let (_tmp, wt, app) = router_with_session().await;
+            let resp = app
+                .oneshot(json_req(
+                    "/api/v1/sessions/s1/files/write",
+                    serde_json::json!({
+                        "path": "hello.txt",
+                        "content": "written\n",
+                        "expected_size": 999_999,
+                    }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert_eq!(
+                std::fs::read_to_string(wt.join("hello.txt")).unwrap(),
+                "written\n"
             );
         }
 

@@ -29,6 +29,97 @@ pub struct WorktreeFile {
     /// or a `.git/` path. The UI must grey out Save and ignore the dirty guard.
     #[serde(default)]
     pub read_only: bool,
+    /// The mtime of the bytes in `content`, [`format_mtime`]'s string, taken
+    /// from an `fstat` of the very descriptor the content was read from (see
+    /// [`read_nofollow_stat`]). `None` when the filesystem reports no mtime.
+    ///
+    /// It is the mtime as of BEFORE the read, never after: a post-read stat
+    /// would fold in a write that landed mid-read and hand the client a token
+    /// claiming freshness for content it does not have. Stamping early can only
+    /// err the safe way, by calling a fresh buffer stale.
+    pub modified: Option<String>,
+    /// The size of the bytes read, from the same `fstat`. Half of the freshness
+    /// token; see [`FileStamp`] for why mtime alone will not do.
+    pub size: Option<u64>,
+}
+
+/// What "the file I opened" means on the wire: an mtime plus a size.
+///
+/// The editor sends this back with a save so the server can refuse to overwrite
+/// a file that moved underneath the buffer. Size is not decoration: mtime
+/// granularity is coarse on some filesystems (and deliberately coarsened by
+/// some kernels), so two writes inside one tick share a timestamp, which is
+/// precisely the racing-writer case the guard exists for. Both come from the
+/// same metadata call, so the second half is free.
+///
+/// Comparison is exact equality of both halves. When a filesystem reports no
+/// mtime at all, both sides are `None` and the guard degrades to size-only;
+/// that is stated rather than hidden, and it is still strictly better than the
+/// unconditional write it replaces.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct FileStamp {
+    pub modified: Option<String>,
+    pub size: u64,
+}
+
+impl FileStamp {
+    /// True when `self` still describes `other`, i.e. nothing observable about
+    /// the file has moved.
+    pub fn matches(&self, other: &FileStamp) -> bool {
+        self.size == other.size && self.modified == other.modified
+    }
+}
+
+/// A save refused because the file is not what the client last read.
+///
+/// A dedicated error type (like [`EntryMissing`]) so the HTTP layer can answer
+/// 409 for it and carry the CURRENT stamp back: the browser needs it to offer
+/// "overwrite anyway" without a second round trip, and to re-baseline if the
+/// user reloads.
+#[derive(Debug)]
+pub struct WriteConflict {
+    /// The file's stamp as it is NOW, or `None` when it is gone.
+    pub current: Option<FileStamp>,
+    /// True when the file was deleted underneath the editor. A separate rung
+    /// from "changed": the answer is close-or-keep, not reload, and a guarded
+    /// save must never silently resurrect a file someone removed.
+    pub deleted: bool,
+}
+
+impl std::fmt::Display for WriteConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.deleted {
+            write!(
+                f,
+                "the file was deleted on disk after you opened it; nothing was written"
+            )
+        } else {
+            write!(
+                f,
+                "the file changed on disk after you opened it; nothing was written"
+            )
+        }
+    }
+}
+
+impl std::error::Error for WriteConflict {}
+
+/// The ONE mtime formatter. Every surface that puts an mtime in a payload goes
+/// through it: the read route, the info panel, a save's success body, and a
+/// conflict's body. chrono prints a variable number of fractional digits, so
+/// two independent `to_rfc3339()` call sites can render the same instant as two
+/// different strings and a token comparison would then never match. There is a
+/// test asserting read, info and write all speak this one string.
+pub fn format_mtime(t: std::time::SystemTime) -> String {
+    chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339()
+}
+
+/// The freshness stamp of an already-stat'd entry.
+pub fn stamp_from_meta(meta: &std::fs::Metadata) -> FileStamp {
+    FileStamp {
+        modified: meta.modified().ok().map(format_mtime),
+        size: meta.len(),
+    }
 }
 
 /// Resolve `worktree/rel_path` for READ-only access, bypassing the literal
@@ -128,6 +219,21 @@ pub fn resolve_worktree_path_for_read(
 /// This is `pub` (not `pub(crate)`) because `dux-web`'s `file_routes` uses it
 /// for the TOCTOU-safe read in `read_raw` after `canonicalize()` (cross-crate call).
 pub fn read_nofollow(abs_path: &Path) -> anyhow::Result<Vec<u8>> {
+    read_nofollow_stat(abs_path).map(|(bytes, _)| bytes)
+}
+
+/// [`read_nofollow`] plus the `fstat` of the descriptor the bytes came from,
+/// taken BEFORE the read.
+///
+/// The descriptor is what makes this worth having: a stat of the PATH names
+/// whatever is at that path now, which after a rename or a replace is a
+/// different file than the one that was read. `fstat` describes the open file
+/// itself, so the stamp and the content are guaranteed to be about the same
+/// inode. Taking it before the read rather than after is deliberate: a write
+/// that lands mid-read leaves us reporting the older mtime for newer content,
+/// which makes a fresh buffer look stale (a wasted re-check) instead of making
+/// a stale buffer look fresh (a lost edit).
+pub fn read_nofollow_stat(abs_path: &Path) -> anyhow::Result<(Vec<u8>, std::fs::Metadata)> {
     use rustix::fs::{Mode, OFlags, open as rustix_open};
     use std::io::Read;
     use std::os::unix::io::FromRawFd;
@@ -140,9 +246,10 @@ pub fn read_nofollow(abs_path: &Path) -> anyhow::Result<Vec<u8>> {
 
     // SAFETY: we own the fd returned by rustix_open; it is valid and open.
     let mut f = unsafe { std::fs::File::from_raw_fd(fd.into_raw_fd()) };
+    let meta = f.metadata()?;
     let mut bytes = Vec::new();
     f.read_to_end(&mut bytes)?;
-    Ok(bytes)
+    Ok((bytes, meta))
 }
 
 /// Read a worktree file's working copy as text. A missing file is an error.
@@ -166,7 +273,7 @@ pub fn read_file(worktree: &Path, rel_path: &str) -> anyhow::Result<WorktreeFile
     // to check containment.
     let meta = std::fs::symlink_metadata(&path)?;
 
-    let (bytes, read_only) = if meta.file_type().is_symlink() || is_outside {
+    let (bytes, read_meta, read_only) = if meta.file_type().is_symlink() || is_outside {
         // Either the leaf itself is a symlink, OR an intermediate path component
         // is a symlink that escapes the worktree. In both cases, resolve to the
         // canonical real path and read from there.
@@ -191,7 +298,7 @@ pub fn read_file(worktree: &Path, rel_path: &str) -> anyhow::Result<WorktreeFile
         // target path. If the target changed to yet another symlink between
         // canonicalize() and here, O_NOFOLLOW refuses it (the race window is
         // millisecond-scale and the failure is safe).
-        let bytes = read_nofollow(&target)?;
+        let (bytes, read_meta) = read_nofollow_stat(&target)?;
 
         // `read_only` is true when: the leaf is ANY symlink (write_file refuses
         // all symlinks, so Save would always fail — mark it read-only up front),
@@ -199,6 +306,7 @@ pub fn read_file(worktree: &Path, rel_path: &str) -> anyhow::Result<WorktreeFile
         // inside .git/.
         (
             bytes,
+            read_meta,
             meta.file_type().is_symlink() || is_outside || is_git_dir,
         )
     } else {
@@ -212,16 +320,21 @@ pub fn read_file(worktree: &Path, rel_path: &str) -> anyhow::Result<WorktreeFile
         // worktree by the resolver. Use O_NOFOLLOW so a time-of-check /
         // time-of-use race that replaces the file with a symlink between our
         // stat and open fails safely.
-        let bytes = read_nofollow(&path)?;
-        (bytes, is_git_dir)
+        let (bytes, read_meta) = read_nofollow_stat(&path)?;
+        (bytes, read_meta, is_git_dir)
     };
 
+    // The stamp of the bytes just read, from the fstat of the descriptor they
+    // came from. This is the token a later save sends back.
+    let stamp = stamp_from_meta(&read_meta);
     if !crate::diff::is_renderable_text(&bytes) {
         return Ok(WorktreeFile {
             path: rel_path.to_string(),
             binary: true,
             content: String::new(),
             read_only,
+            modified: stamp.modified,
+            size: Some(stamp.size),
         });
     }
     Ok(WorktreeFile {
@@ -229,6 +342,8 @@ pub fn read_file(worktree: &Path, rel_path: &str) -> anyhow::Result<WorktreeFile
         binary: false,
         content: String::from_utf8(bytes).unwrap_or_default(),
         read_only,
+        modified: stamp.modified,
+        size: Some(stamp.size),
     })
 }
 
@@ -243,6 +358,13 @@ pub fn read_file(worktree: &Path, rel_path: &str) -> anyhow::Result<WorktreeFile
 /// The permission bits match `std::fs::write` (0o666, masked by the process
 /// umask); they apply only when the file is created.
 pub fn write_nofollow(abs_path: &Path, content: &str) -> anyhow::Result<()> {
+    write_nofollow_stamped(abs_path, content).map(|_| ())
+}
+
+/// [`write_nofollow`] plus the stamp of the file it just wrote, taken by
+/// `fstat` on the same descriptor. That stamp is what a client re-baselines on
+/// so its OWN save never looks like somebody else's edit on the next check.
+pub fn write_nofollow_stamped(abs_path: &Path, content: &str) -> anyhow::Result<FileStamp> {
     use rustix::fs::{Mode, OFlags, open as rustix_open};
     use std::io::Write;
     use std::os::unix::io::{FromRawFd, IntoRawFd};
@@ -252,21 +374,83 @@ pub fn write_nofollow(abs_path: &Path, content: &str) -> anyhow::Result<()> {
         OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC | OFlags::NOFOLLOW,
         Mode::from_raw_mode(0o666),
     )
-    .map_err(|e| {
-        if e == rustix::io::Errno::LOOP {
-            anyhow::anyhow!(
-                "refusing to write through a symlink: {}",
-                abs_path.display()
-            )
-        } else {
-            anyhow::anyhow!("open {} for writing: {e}", abs_path.display())
-        }
-    })?;
+    .map_err(|e| open_for_writing_error(e, abs_path))?;
 
     // SAFETY: we own the fd returned by rustix_open; it is valid and open.
     let mut f = unsafe { std::fs::File::from_raw_fd(fd.into_raw_fd()) };
     f.write_all(content.as_bytes())?;
-    Ok(())
+    Ok(stamp_from_meta(&f.metadata()?))
+}
+
+/// Shared phrasing for a failed write-side open, so the guarded and unguarded
+/// paths cannot drift on the one message a user actually sees.
+fn open_for_writing_error(e: rustix::io::Errno, abs_path: &Path) -> anyhow::Error {
+    if e == rustix::io::Errno::LOOP {
+        anyhow::anyhow!(
+            "refusing to write through a symlink: {}",
+            abs_path.display()
+        )
+    } else {
+        anyhow::anyhow!("open {} for writing: {e}", abs_path.display())
+    }
+}
+
+/// Write `content` over an EXISTING file only if it still matches `expected`.
+///
+/// Everything here hangs off one descriptor, and that is the point. The obvious
+/// shape (stat the path, compare, then call [`write_nofollow`]) truncates the
+/// file as part of opening it, so by the time anything could be compared the
+/// other writer's work is already gone; and even a stat that passed would be a
+/// statement about the path, not about the file the write then lands on. So:
+/// open `O_WRONLY | O_NOFOLLOW` with NEITHER `O_CREAT` nor `O_TRUNC` (nothing
+/// is destroyed and nothing is created by the open itself), `fstat` that
+/// descriptor, compare, and only then `ftruncate` + write through it.
+///
+/// `ENOENT` is a conflict, not a create: with a token in hand the client is
+/// saying "update the file I read", and the file it read is gone. Resurrecting
+/// it would undo a deletion the user never saw.
+///
+/// The window this does NOT close is the human one: between the read that
+/// produced `expected` and the save, the user is thinking, and any writer may
+/// land in there. That is exactly the window the guard REPORTS on rather than
+/// prevents. What remains after the guard is only the microseconds between the
+/// `fstat` and the `ftruncate` on the same descriptor.
+fn write_checked_existing(
+    abs_path: &Path,
+    content: &str,
+    expected: &FileStamp,
+) -> anyhow::Result<FileStamp> {
+    use rustix::fs::{Mode, OFlags, open as rustix_open};
+    use std::io::Write;
+    use std::os::unix::io::{FromRawFd, IntoRawFd};
+
+    let fd =
+        rustix_open(abs_path, OFlags::WRONLY | OFlags::NOFOLLOW, Mode::empty()).map_err(|e| {
+            if e == rustix::io::Errno::NOENT {
+                anyhow::Error::new(WriteConflict {
+                    current: None,
+                    deleted: true,
+                })
+            } else {
+                open_for_writing_error(e, abs_path)
+            }
+        })?;
+
+    // SAFETY: we own the fd returned by rustix_open; it is valid and open.
+    let mut f = unsafe { std::fs::File::from_raw_fd(fd.into_raw_fd()) };
+    let current = stamp_from_meta(&f.metadata()?);
+    if !expected.matches(&current) {
+        return Err(anyhow::Error::new(WriteConflict {
+            current: Some(current),
+            deleted: false,
+        }));
+    }
+    // Truncate through the same descriptor rather than reopening: the check
+    // above is only worth something if nothing between it and the write can
+    // point at a different file.
+    f.set_len(0)?;
+    f.write_all(content.as_bytes())?;
+    Ok(stamp_from_meta(&f.metadata()?))
 }
 
 /// Write text to a worktree file, creating it if it does not exist (the editor
@@ -280,7 +464,27 @@ pub fn write_nofollow(abs_path: &Path, content: &str) -> anyhow::Result<()> {
 /// NOT what enforces the symlink rule, because an entry can be replaced between
 /// the stat and the write. The [`write_nofollow`] open is the enforcement, and
 /// it refuses a symlink leaf no matter when the link appeared.
-pub fn write_file(worktree: &Path, rel_path: &str, content: &str) -> anyhow::Result<()> {
+pub fn write_file(worktree: &Path, rel_path: &str, content: &str) -> anyhow::Result<FileStamp> {
+    write_file_checked(worktree, rel_path, content, None)
+}
+
+/// [`write_file`] with an optional freshness guard.
+///
+/// The guard is opt-in BY PRESENCE: with `expected: None` this is byte for byte
+/// the old unconditional write, so the upload/drop route, an older browser tab,
+/// and any future writer keep working exactly as they did. With a stamp, the
+/// write is refused (a [`WriteConflict`]) unless the file still matches it; see
+/// [`write_checked_existing`] for why the comparison and the truncation have to
+/// share one descriptor.
+///
+/// Returns the file's stamp AFTER the write either way, so the caller can hand
+/// it back to the client as its new baseline.
+pub fn write_file_checked(
+    worktree: &Path,
+    rel_path: &str,
+    content: &str,
+    expected: Option<&FileStamp>,
+) -> anyhow::Result<FileStamp> {
     let path = resolve_worktree_path(worktree, rel_path)?;
     // No-follow stat tells existing-file kind apart from "does not exist".
     match std::fs::symlink_metadata(&path) {
@@ -310,7 +514,21 @@ pub fn write_file(worktree: &Path, rel_path: &str, content: &str) -> anyhow::Res
             }
         }
     }
-    write_nofollow(&path, content).map_err(|e| anyhow::anyhow!("{e} (writing {rel_path})"))
+    match expected {
+        // A conflict must reach the caller AS a `WriteConflict` (the HTTP layer
+        // downcasts it for the 409 and its body), so it is the one error here
+        // that is not re-wrapped with the path suffix; its own message already
+        // says what happened.
+        Some(stamp) => write_checked_existing(&path, content, stamp).map_err(|e| {
+            if e.downcast_ref::<WriteConflict>().is_some() {
+                e
+            } else {
+                anyhow::anyhow!("{e} (writing {rel_path})")
+            }
+        }),
+        None => write_nofollow_stamped(&path, content)
+            .map_err(|e| anyhow::anyhow!("{e} (writing {rel_path})")),
+    }
 }
 
 /// Create a new EMPTY file at `rel_path`. Refuses to overwrite an existing entry
@@ -763,10 +981,10 @@ pub fn entry_info(worktree: &Path, rel_path: &str) -> anyhow::Result<WorktreeEnt
         EntryKind::Dir => None,
         _ => Some(meta.len()),
     };
-    let modified = meta
-        .modified()
-        .ok()
-        .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339());
+    // The shared formatter, not a second `to_rfc3339()` call site: the editor
+    // compares this string against the one the read route sent, and chrono's
+    // variable fractional digits would make two formatters silently disagree.
+    let modified = meta.modified().ok().map(format_mtime);
     let bits = meta.permissions().mode() & 0o7777;
     let symlink_target = if ft.is_symlink() {
         std::fs::read_link(&path)
@@ -1967,6 +2185,226 @@ mod tests {
             std::fs::write(dir.path().join(".git/config"), "x\n").unwrap();
             assert!(rename_entry(dir.path(), ".git/config", "config").is_err());
             assert!(!dir.path().join("config").exists());
+        }
+    }
+
+    /// The freshness stamp and the guarded save.
+    ///
+    /// The bug these exist for: the editor's save was unconditional
+    /// last-writer-wins, so a buffer opened before an agent edited the file
+    /// silently destroyed that edit. The guard is opt-in by the PRESENCE of an
+    /// expected stamp, so every other writer keeps today's behavior exactly.
+    mod freshness {
+        use super::*;
+
+        /// Force `path`'s mtime to `to`, so a test can construct the one case
+        /// an mtime-only token cannot see: two different contents sharing a
+        /// timestamp. Real filesystems produce this on their own whenever two
+        /// writes land inside one clock tick; doing it deliberately is the
+        /// deterministic stand-in (a load-driven attempt to race the clock
+        /// would prove nothing when it passed).
+        fn set_mtime(path: &Path, to: std::time::SystemTime) {
+            use rustix::fs::{AtFlags, CWD, Timestamps, utimensat};
+            let dur = to.duration_since(std::time::UNIX_EPOCH).unwrap();
+            let ts = rustix::fs::Timespec {
+                tv_sec: dur.as_secs() as _,
+                tv_nsec: dur.subsec_nanos() as _,
+            };
+            utimensat(
+                CWD,
+                path,
+                &Timestamps {
+                    last_access: ts,
+                    last_modification: ts,
+                },
+                AtFlags::SYMLINK_NOFOLLOW,
+            )
+            .unwrap();
+        }
+
+        #[test]
+        fn read_reports_the_stamp_of_what_it_read() {
+            let dir = worktree();
+            let f = read_file(dir.path(), "hello.txt").unwrap();
+            assert_eq!(f.size, Some("hi\nthere\n".len() as u64));
+            let modified = f.modified.expect("a real filesystem reports an mtime");
+            let on_disk = std::fs::metadata(dir.path().join("hello.txt")).unwrap();
+            assert_eq!(modified, format_mtime(on_disk.modified().unwrap()));
+        }
+
+        /// One formatter, or the token silently never matches. chrono prints a
+        /// variable number of fractional digits, so two independently written
+        /// `to_rfc3339()` call sites can disagree on the SAME instant.
+        #[test]
+        fn read_info_and_write_all_speak_the_same_mtime_string() {
+            let dir = worktree();
+            let read = read_file(dir.path(), "hello.txt").unwrap();
+            let info = entry_info(dir.path(), "hello.txt").unwrap();
+            assert_eq!(read.modified, info.modified);
+            let after = write_file_checked(dir.path(), "hello.txt", "new\n", None).unwrap();
+            let info_after = entry_info(dir.path(), "hello.txt").unwrap();
+            assert_eq!(after.modified, info_after.modified);
+        }
+
+        #[test]
+        fn a_write_with_a_matching_stamp_succeeds_and_returns_the_fresh_one() {
+            let dir = worktree();
+            let before = read_file(dir.path(), "hello.txt").unwrap();
+            let expected = FileStamp {
+                modified: before.modified.clone(),
+                size: before.size.unwrap(),
+            };
+            let fresh = write_file_checked(dir.path(), "hello.txt", "rewritten\n", Some(&expected))
+                .unwrap();
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("hello.txt")).unwrap(),
+                "rewritten\n"
+            );
+            assert_eq!(fresh.size, "rewritten\n".len() as u64);
+            // The returned stamp is the one the client must re-baseline on, so
+            // an immediate second save with it must be accepted.
+            write_file_checked(dir.path(), "hello.txt", "again\n", Some(&fresh)).unwrap();
+        }
+
+        #[test]
+        fn a_stale_stamp_is_refused_and_the_file_is_untouched() {
+            let dir = worktree();
+            let before = read_file(dir.path(), "hello.txt").unwrap();
+            let expected = FileStamp {
+                modified: before.modified.clone(),
+                size: before.size.unwrap(),
+            };
+            // The agent edits the file underneath the open editor.
+            std::fs::write(dir.path().join("hello.txt"), "the agent's work\n").unwrap();
+
+            let err = write_file_checked(dir.path(), "hello.txt", "clobber\n", Some(&expected))
+                .unwrap_err();
+            let conflict = err
+                .downcast_ref::<WriteConflict>()
+                .expect("a stale stamp must surface as a WriteConflict, not a generic error");
+            assert!(!conflict.deleted);
+            let current = conflict.current.as_ref().unwrap();
+            assert_eq!(current.size, "the agent's work\n".len() as u64);
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("hello.txt")).unwrap(),
+                "the agent's work\n",
+                "a refused save must not truncate or write a single byte"
+            );
+        }
+
+        /// The whole reason the token is mtime PLUS size: two writes inside one
+        /// coarse-clock tick share an mtime, and that is exactly the racing
+        /// writer the guard exists for.
+        #[test]
+        fn a_same_mtime_change_of_size_is_still_refused() {
+            let dir = worktree();
+            let before = read_file(dir.path(), "hello.txt").unwrap();
+            let expected = FileStamp {
+                modified: before.modified.clone(),
+                size: before.size.unwrap(),
+            };
+            let stamped = std::fs::metadata(dir.path().join("hello.txt"))
+                .unwrap()
+                .modified()
+                .unwrap();
+            std::fs::write(
+                dir.path().join("hello.txt"),
+                "a longer line from the agent\n",
+            )
+            .unwrap();
+            set_mtime(&dir.path().join("hello.txt"), stamped);
+
+            let err = write_file_checked(dir.path(), "hello.txt", "clobber\n", Some(&expected))
+                .unwrap_err();
+            assert!(
+                err.downcast_ref::<WriteConflict>().is_some(),
+                "an mtime-only token would have accepted this write: {err}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("hello.txt")).unwrap(),
+                "a longer line from the agent\n"
+            );
+        }
+
+        /// Deleted underneath is its own rung: with a token, a missing file is
+        /// a conflict, never a silent resurrection of a file someone removed.
+        #[test]
+        fn a_file_deleted_underneath_is_a_conflict_and_is_not_resurrected() {
+            let dir = worktree();
+            let before = read_file(dir.path(), "hello.txt").unwrap();
+            let expected = FileStamp {
+                modified: before.modified.clone(),
+                size: before.size.unwrap(),
+            };
+            std::fs::remove_file(dir.path().join("hello.txt")).unwrap();
+
+            let err = write_file_checked(
+                dir.path(),
+                "hello.txt",
+                "back from the dead\n",
+                Some(&expected),
+            )
+            .unwrap_err();
+            let conflict = err.downcast_ref::<WriteConflict>().unwrap();
+            assert!(conflict.deleted);
+            assert!(conflict.current.is_none());
+            assert!(
+                !dir.path().join("hello.txt").exists(),
+                "a conflicted save must not recreate the deleted file"
+            );
+        }
+
+        /// Absent token = today's behavior, exactly: overwrite whatever is
+        /// there, and create what is not.
+        #[test]
+        fn no_stamp_keeps_the_old_unconditional_behavior() {
+            let dir = worktree();
+            std::fs::write(dir.path().join("hello.txt"), "changed by someone else\n").unwrap();
+            write_file_checked(dir.path(), "hello.txt", "overwritten\n", None).unwrap();
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("hello.txt")).unwrap(),
+                "overwritten\n"
+            );
+            let fresh = write_file_checked(dir.path(), "brand-new.txt", "hello\n", None).unwrap();
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("brand-new.txt")).unwrap(),
+                "hello\n"
+            );
+            assert_eq!(fresh.size, "hello\n".len() as u64);
+        }
+
+        /// A guarded write shortens the file: the guard must ftruncate, not
+        /// leave the tail of the previous, longer content behind.
+        #[test]
+        fn a_guarded_write_truncates_a_longer_previous_content() {
+            let dir = worktree();
+            std::fs::write(dir.path().join("hello.txt"), "a very long line indeed\n").unwrap();
+            let before = read_file(dir.path(), "hello.txt").unwrap();
+            let expected = FileStamp {
+                modified: before.modified.clone(),
+                size: before.size.unwrap(),
+            };
+            write_file_checked(dir.path(), "hello.txt", "no\n", Some(&expected)).unwrap();
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("hello.txt")).unwrap(),
+                "no\n"
+            );
+        }
+
+        /// The guard must not become a way around the symlink refusal.
+        #[test]
+        fn a_guarded_write_still_refuses_a_symlink_leaf() {
+            let dir = worktree();
+            let outside = tempfile::tempdir().unwrap();
+            let secret = outside.path().join("secret.txt");
+            std::fs::write(&secret, "top secret\n").unwrap();
+            std::os::unix::fs::symlink(&secret, dir.path().join("link.txt")).unwrap();
+            let stamp = FileStamp {
+                modified: None,
+                size: 0,
+            };
+            assert!(write_file_checked(dir.path(), "link.txt", "pwned", Some(&stamp)).is_err());
+            assert_eq!(std::fs::read_to_string(&secret).unwrap(), "top secret\n");
         }
     }
 }
