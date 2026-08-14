@@ -57,7 +57,12 @@
 
 use std::io::Read;
 use std::io::Write;
-use std::os::fd::{AsFd, AsRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, OwnedFd};
+// AsFd is consumed only by the Linux body of verified_path_of (the
+// /proc/self/fd readlink); importing it unconditionally leaves a dead import
+// in the macOS compile, which builds the other body.
+#[cfg(target_os = "linux")]
+use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
 
 use rustix::fs::{AtFlags, Mode, OFlags};
@@ -1270,12 +1275,24 @@ enum ProcessGroup {
     /// at least one process. Deliberately not the same case as `Members`: an
     /// empty one says only that dux does not know, and reading that as "the
     /// group has gone" is what sent a file to the shell's folder instead.
+    #[cfg_attr(
+        not(any(target_os = "linux", test)),
+        allow(
+            dead_code,
+            reason = "constructed only by the Linux scan; every platform matches on it"
+        )
+    )]
     Incomplete(Vec<u32>),
     /// This platform cannot answer at all. Not the same as "no members".
     Unknown,
 }
 
 /// What one process contributed to a group scan.
+///
+/// Gated to Linux plus tests: the scan that produces these runs only on
+/// Linux, but the classification is pure byte-parsing, so the tests that pin
+/// it compile and run on every platform.
+#[cfg(any(target_os = "linux", test))]
 #[derive(Debug, PartialEq, Eq)]
 enum ScanEntry {
     Member,
@@ -1291,7 +1308,7 @@ enum ScanEntry {
 /// the file is world-readable, and the kernel's own way of hiding a process
 /// (the `hidepid` mount option) removes the whole directory from the listing
 /// instead, which is a different thing entirely.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 fn group_scan_step(stat: std::io::Result<Vec<u8>>, pgid: u32) -> ScanEntry {
     match stat {
         Ok(stat) => match stat_process_group(&stat) {
@@ -1420,7 +1437,7 @@ fn process_group_members(pgid: u32) -> ProcessGroup {
 /// process anywhere on the machine refused an ordinary drop). Everything this
 /// parser actually reads is ASCII; only the name it steps over is not, so the
 /// last `)` is exactly the right place to start.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 fn stat_fields_after_comm(stat: &[u8]) -> Option<impl Iterator<Item = &[u8]>> {
     let after_comm = &stat[stat.iter().rposition(|&b| b == b')')? + 1..];
     Some(
@@ -1431,7 +1448,7 @@ fn stat_fields_after_comm(stat: &[u8]) -> Option<impl Iterator<Item = &[u8]>> {
 }
 
 /// The process group id out of a `/proc/<pid>/stat` line.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 fn stat_process_group(stat: &[u8]) -> Option<u32> {
     let field = stat_fields_after_comm(stat)?.nth(2)?;
     std::str::from_utf8(field).ok()?.parse().ok()
@@ -1439,7 +1456,7 @@ fn stat_process_group(stat: &[u8]) -> Option<u32> {
 
 /// The state letter out of a `/proc/<pid>/stat` line: the first field after the
 /// executable name, so `Z` for an exited-but-unreaped process.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 fn stat_process_state(stat: &[u8]) -> Option<u8> {
     stat_fields_after_comm(stat)?.next()?.first().copied()
 }
@@ -2304,6 +2321,9 @@ mod tests {
         );
     }
 
+    // Reads the real /proc, which exists only on Linux; the pure half of
+    // this behavior is pinned by the cross-platform byte-parsing tests.
+    #[cfg(target_os = "linux")]
     #[test]
     fn permission_denied_and_not_found_are_told_apart_on_a_real_process() {
         // The seam above is only honest if the REAL probe classifies the same
@@ -2395,6 +2415,9 @@ mod tests {
         let _ = shell.wait();
     }
 
+    // Reads the real /proc, which exists only on Linux; the pure half of
+    // this behavior is pinned by the cross-platform byte-parsing tests.
+    #[cfg(target_os = "linux")]
     #[test]
     fn an_exited_but_unreaped_process_is_gone_rather_than_alive() {
         // A zombie: the process has exited and nobody has reaped it, so the pid
@@ -2441,6 +2464,9 @@ mod tests {
         child.wait().expect("reap the child");
     }
 
+    // Reads the real /proc, which exists only on Linux; the pure half of
+    // this behavior is pinned by the cross-platform byte-parsing tests.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_surviving_member_answers_for_a_leader_that_was_never_reaped() {
         // The end-to-end shape of the same bug, and the reason the existing
@@ -2501,6 +2527,7 @@ mod tests {
 
     /// Block until `pid` is an exited-but-unreaped process, reading the kernel's
     /// own answer rather than sleeping for a guessed interval.
+    #[cfg(target_os = "linux")]
     fn wait_until_zombie(pid: u32) {
         for _ in 0..2000 {
             if process_is_zombie(pid) {
@@ -2575,6 +2602,9 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
+    // Reads the real /proc, which exists only on Linux; the pure half of
+    // this behavior is pinned by the cross-platform byte-parsing tests.
     #[cfg(target_os = "linux")]
     #[test]
     fn a_process_reaped_between_the_open_and_the_read_is_not_a_member() {
@@ -2692,6 +2722,9 @@ mod tests {
         let _ = shell.wait();
     }
 
+    // Reads the real /proc, which exists only on Linux; the pure half of
+    // this behavior is pinned by the cross-platform byte-parsing tests.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_real_group_scan_finds_a_live_member_and_calls_itself_complete() {
         // The pure classifier above is only honest if the real scan agrees, so
