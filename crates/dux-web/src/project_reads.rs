@@ -131,44 +131,38 @@ async fn list_worktrees(State(state): State<AppState>, AxumPath(id): AxumPath<St
     }
 }
 
-/// Classify a project's git worktrees and project the MANAGED ones (under dux's
-/// worktrees root) into wire-safe entries. External worktrees and the project
-/// checkout are excluded — they are not part of the managed-adoption flow. Each
-/// managed entry is marked adoptable when it has no live agent; otherwise the
-/// reason ("Already has an agent.") is surfaced so the client can disable it.
+/// Project a project's MANAGED worktrees (under dux's worktrees root, minus the
+/// project checkout) into wire-safe entries.
 ///
-/// Runs in `spawn_blocking`: `list_worktrees` shells to git. Returns a
-/// user-facing error string when the git listing fails.
+/// A thin adapter: which worktrees the manager owns, and their dirtiness, is
+/// decided by [`dux_core::worktree_manager::list_manageable_worktrees`], shared
+/// with the TUI's worktree manager so the two surfaces cannot classify
+/// differently. Everything left here is presentation: the wire field names and
+/// the user-facing reason string.
+///
+/// Runs in `spawn_blocking`: the listing shells to git. Returns a user-facing
+/// error string when the git listing fails.
 fn classify_managed_worktrees(
     project: &dux_core::model::Project,
     paths: &dux_core::config::DuxPaths,
     sessions: &[dux_core::model::AgentSession],
 ) -> Result<Vec<ProjectWorktreeEntryView>, String> {
-    let worktrees =
-        dux_core::git::list_worktrees(Path::new(&project.path)).map_err(|e| format!("{e:#}"))?;
-    let entries =
-        dux_core::project_browser::classify_project_worktrees(project, paths, sessions, worktrees)
-            .into_iter()
-            .filter(|entry| entry.is_managed_by_dux && !entry.is_project_checkout)
-            .map(|entry| ProjectWorktreeEntryView {
-                // Dirtiness is per worktree, so this is one `git status` per
-                // managed worktree. A failure (the directory vanished under us,
-                // a git lock) degrades to "clean" rather than failing the whole
-                // listing: the manager is still useful without the warning, and
-                // the delete confirmation always says the removal is forced.
-                dirty: dux_core::git::worktree_is_dirty(&entry.path).unwrap_or(false),
-                worktree_path: entry.path.to_string_lossy().to_string(),
-                branch_name: entry.branch_name,
-                branch: entry.branch,
-                adoptable: entry.is_selectable,
-                reason: if entry.is_selectable {
-                    None
-                } else {
-                    Some("Already has an agent.".to_string())
-                },
-                agent_id: entry.existing_session_id,
-            })
-            .collect();
+    let entries = dux_core::worktree_manager::list_manageable_worktrees(project, paths, sessions)?
+        .into_iter()
+        .map(|entry| ProjectWorktreeEntryView {
+            adoptable: entry.is_removable(),
+            reason: if entry.is_removable() {
+                None
+            } else {
+                Some("Already has an agent.".to_string())
+            },
+            worktree_path: entry.path.to_string_lossy().to_string(),
+            branch_name: entry.label,
+            branch: entry.branch,
+            dirty: entry.dirty,
+            agent_id: entry.attached_session_id,
+        })
+        .collect();
     Ok(entries)
 }
 
@@ -231,23 +225,6 @@ struct DeleteWorktreeQuery {
     /// no branch to name and sends nothing.
     #[serde(default)]
     delete_branch: bool,
-}
-
-/// What the delete request resolved to. Kept as a type so the three answers are
-/// decided in one place (off-thread, against a FRESH classification) and mapped
-/// to statuses at the boundary.
-enum DeleteResolution {
-    /// Not a managed worktree of this project. 404: dux will not remove a
-    /// directory it was not asked about, and an external worktree or the source
-    /// checkout is not the manager's to touch.
-    NotManaged,
-    /// An agent holds it. 409, and this is defence in depth rather than a
-    /// restatement of the UI rule: removing a worktree from under a live agent
-    /// leaves a broken session, and deleting the agent is the supported route.
-    Attached,
-    /// Removable; carries the canonical path git knows it by and the branch it
-    /// is on (`None` when detached, which is nothing to delete).
-    Removable(PathBuf, Option<String>),
 }
 
 /// What the removal did to the worktree's branch, when it was asked to touch it
@@ -317,65 +294,37 @@ async fn delete_worktree(
         return (StatusCode::NOT_FOUND, "unknown project").into_response();
     };
 
-    let requested = query.path.clone();
+    let requested = PathBuf::from(&query.path);
     let delete_branch = query.delete_branch;
-    let repo_path = PathBuf::from(&project.path);
     // Classify and remove in ONE off-thread hop, both because the classification
     // shells to git and because the removal must be decided against a fresh
-    // listing rather than against whatever the client last saw.
+    // listing rather than against whatever the client last saw. Both halves are
+    // core's, shared with the TUI's worktree manager; the route only maps the
+    // three answers onto statuses.
     let result = tokio::task::spawn_blocking(move || {
-        let entries = dux_core::git::list_worktrees(Path::new(&project.path))
-            .map_err(|e| format!("{e:#}"))?;
-        let classified = dux_core::project_browser::classify_project_worktrees(
-            &project, &paths, &sessions, entries,
-        );
-        // Compare canonically: the client echoes back the path this route's own
-        // listing published, which is already canonical, but a symlinked temp
-        // root or a hand-written request need not be.
-        let wanted =
-            std::fs::canonicalize(&requested).unwrap_or_else(|_| PathBuf::from(&requested));
-        let found = classified.into_iter().find(|entry| {
-            entry.is_managed_by_dux && !entry.is_project_checkout && entry.path == wanted
-        });
-        let resolution = match found {
-            None => DeleteResolution::NotManaged,
-            Some(entry) if entry.existing_session_id.is_some() => DeleteResolution::Attached,
-            Some(entry) => DeleteResolution::Removable(entry.path, entry.branch),
-        };
-        let mut branch_outcome: Option<BranchOutcomeReply> = None;
-        if let DeleteResolution::Removable(path, branch) = &resolution {
-            match (delete_branch, branch) {
-                // The user asked for the branch too. `remove_worktree` deletes
-                // the branch the worktree is on; there is no second, drifted
-                // branch here, because a worktree with no agent has no record of
-                // what it was born on.
-                (true, Some(branch)) => {
-                    let removed = dux_core::git::remove_worktree(&repo_path, path, branch, None)
-                        .map_err(|e| format!("{e:#}"))?;
-                    branch_outcome = Some(BranchOutcomeReply::from_core(
-                        branch.clone(),
-                        &removed.branch,
-                    ));
-                }
-                // Either the request did not ask, or the worktree is detached
-                // and there is no branch to delete. Worktree only.
-                _ => {
-                    dux_core::git::remove_worktree_keep_branch(&repo_path, path)
-                        .map_err(|e| format!("{e:#}"))?;
-                }
-            }
-        }
-        Ok::<_, String>((resolution, branch_outcome))
+        dux_core::worktree_manager::remove_managed_worktree(
+            &project,
+            &paths,
+            &sessions,
+            &requested,
+            delete_branch,
+        )
     })
     .await;
 
     match result {
-        Ok(Ok((DeleteResolution::NotManaged, _))) => (
+        // 404: dux will not remove a directory it was not asked about, and an
+        // external worktree or the source checkout is not the manager's to
+        // touch.
+        Ok(Ok(dux_core::worktree_manager::RemovalOutcome::NotManaged)) => (
             StatusCode::NOT_FOUND,
             "that is not a managed worktree of this project",
         )
             .into_response(),
-        Ok(Ok((DeleteResolution::Attached, _))) => (
+        // 409, and this is defence in depth rather than a restatement of the UI
+        // rule: removing a worktree from under a live agent leaves a broken
+        // session, and deleting the agent is the supported route.
+        Ok(Ok(dux_core::worktree_manager::RemovalOutcome::Attached)) => (
             StatusCode::CONFLICT,
             "an agent is attached to that worktree; delete the agent instead",
         )
@@ -383,8 +332,12 @@ async fn delete_worktree(
         // 200 with a body rather than the old bare 204: the client has to be
         // told what happened to the branch, because it cannot infer it from the
         // checkbox it sent.
-        Ok(Ok((DeleteResolution::Removable(..), branch))) => {
-            Json(DeleteWorktreeReply { branch }).into_response()
+        Ok(Ok(dux_core::worktree_manager::RemovalOutcome::Removed { branch, .. })) => {
+            Json(DeleteWorktreeReply {
+                branch: branch
+                    .map(|branch| BranchOutcomeReply::from_core(branch.name, &branch.deletion)),
+            })
+            .into_response()
         }
         Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
         Err(e) => (
