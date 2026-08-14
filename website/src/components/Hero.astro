@@ -1,5 +1,6 @@
 ---
 import InstallTabs from "./InstallTabs.astro";
+import PondRipples from "./PondRipples.astro";
 import Stats from "./Stats.astro";
 import WhatsNewBadge from "./WhatsNewBadge.astro";
 import { getLatestVersion } from "../lib/version";
@@ -13,6 +14,10 @@ const version = await getLatestVersion("patrickdappollonio/dux");
 
 <section class="relative overflow-hidden pt-12 pb-20 sm:pt-20 sm:pb-28">
   <div class="absolute inset-0 grid-bg pointer-events-none opacity-60"></div>
+
+  {/* Sits directly on top of the grid and below the content, so the ripples
+      light the grid's intersections rather than the copy. */}
+  <PondRipples />
 
   <div class="container-app relative">
     <div class="grid items-center gap-10 lg:grid-cols-[1.05fr_0.95fr] lg:gap-14">

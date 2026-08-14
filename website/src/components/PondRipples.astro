@@ -1,0 +1,173 @@
+---
+// Pond ripples: the hero's grid is a pond, the cursor is the duck, and every
+// glide leaves rings that light the intersections they cross. A click or tap
+// drops a bigger splash.
+//
+// Hand-rolled on a canvas, deliberately: the whole effect is a few dozen lines
+// of arithmetic over the 44px grid the page already draws, and pulling in a
+// WebGL library to do it would cost the site more bytes than the rest of the
+// homepage put together.
+//
+// The canvas wears the SAME mask as `.grid-bg` so the painted light dies out
+// exactly where the grid it is lighting does. If that mask ever changes in
+// `global.css`, change it here too.
+---
+
+<canvas data-pond aria-hidden="true"></canvas>
+
+<style>
+  canvas[data-pond] {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    /* Never a click target and never a layout participant: the hero's content
+       sits above this in the same stacking context and must stay clickable. */
+    pointer-events: none;
+    /* Kept in lockstep with `.grid-bg` in src/styles/global.css. */
+    -webkit-mask-image: radial-gradient(ellipse at top, black 30%, transparent 75%);
+    mask-image: radial-gradient(ellipse at top, black 30%, transparent 75%);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    canvas[data-pond] {
+      display: none;
+    }
+  }
+</style>
+
+<script>
+  import {
+    CELL,
+    DRIP_AMP,
+    DRIP_MS,
+    GRID_OFFSET,
+    MIN_GLOW,
+    SPLASH_AMP,
+    corePaint,
+    haloPaint,
+    isAlive,
+    pointGlow,
+    type Ring,
+  } from "../lib/pond";
+
+  const canvas = document.querySelector<HTMLCanvasElement>("canvas[data-pond]");
+  const host = canvas?.parentElement;
+  const ctx = canvas?.getContext("2d");
+
+  // Reduced motion switches the whole thing off: no listeners, no canvas, no
+  // frames. The CSS above hides the element; this makes sure nothing runs.
+  const still = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  // The glide drip only makes sense with a real hovering cursor. A finger has
+  // no "moving over the page" state to trail rings from, and forwarding touch
+  // drags here would fight the page's own scrolling. Taps still splash, which
+  // is exactly the right gesture for a pond.
+  const glides = window.matchMedia("(hover: hover)").matches;
+
+  if (canvas && host && ctx && !still) {
+    const rings: Ring[] = [];
+    let width = 0;
+    let height = 0;
+    let running = false;
+    let lastDrip = 0;
+
+    const measure = () => {
+      const dpr = Math.min(2, window.devicePixelRatio || 1);
+      const rect = host.getBoundingClientRect();
+      width = rect.width;
+      height = rect.height;
+      canvas.width = Math.max(1, Math.round(width * dpr));
+      canvas.height = Math.max(1, Math.round(height * dpr));
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      // Resizing the backing store wipes the context state, so the pond's one
+      // colour is (re)stated here rather than once at startup.
+      ctx.fillStyle = "#00d4ff";
+    };
+
+    const frame = () => {
+      const now = performance.now() / 1000;
+      for (let i = rings.length - 1; i >= 0; i--) {
+        if (!isAlive(rings[i], now)) rings.splice(i, 1);
+      }
+
+      ctx.clearRect(0, 0, width, height);
+
+      // The pond is only ever lit at the grid's intersections, which is what
+      // ties the effect to the page instead of floating over it.
+      for (let y = GRID_OFFSET; y < height + CELL; y += CELL) {
+        for (let x = GRID_OFFSET; x < width + CELL; x += CELL) {
+          const glow = pointGlow(rings, x, y, now);
+          if (glow < MIN_GLOW) continue;
+
+          const halo = haloPaint(glow);
+          ctx.globalAlpha = halo.alpha;
+          ctx.beginPath();
+          ctx.arc(x, y, halo.radius, 0, Math.PI * 2);
+          ctx.fill();
+
+          const core = corePaint(glow);
+          ctx.globalAlpha = core.alpha;
+          ctx.beginPath();
+          ctx.arc(x, y, core.radius, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+      ctx.globalAlpha = 1;
+
+      // Park when the water is still. An idle hero costs nothing at all.
+      if (rings.length === 0 || document.hidden) {
+        running = false;
+        return;
+      }
+      requestAnimationFrame(frame);
+    };
+
+    const wake = () => {
+      if (running || document.hidden) return;
+      running = true;
+      requestAnimationFrame(frame);
+    };
+
+    const drop = (event: PointerEvent, amp: number) => {
+      const rect = canvas.getBoundingClientRect();
+      rings.push({
+        x: event.clientX - rect.left,
+        y: event.clientY - rect.top,
+        t: performance.now() / 1000,
+        amp,
+      });
+      wake();
+    };
+
+    measure();
+
+    if (glides) {
+      host.addEventListener(
+        "pointermove",
+        (event) => {
+          const now = performance.now();
+          if (now - lastDrip < DRIP_MS) return;
+          lastDrip = now;
+          drop(event, DRIP_AMP);
+        },
+        { passive: true },
+      );
+    }
+
+    host.addEventListener("pointerdown", (event) => drop(event, SPLASH_AMP), { passive: true });
+
+    window.addEventListener(
+      "resize",
+      () => {
+        measure();
+        wake();
+      },
+      { passive: true },
+    );
+
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) wake();
+    });
+  }
+</script>
