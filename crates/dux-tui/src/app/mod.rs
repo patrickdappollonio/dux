@@ -5714,6 +5714,7 @@ mod tests {
             source_branch: "main".to_string(),
             branch_name: id.to_string(),
             initial_branch: id.to_string(),
+            branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
             worktree_path: format!("/tmp/worktrees/{id}"),
             title: None,
             started_providers: Vec::new(),

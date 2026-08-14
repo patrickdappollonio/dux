@@ -12,6 +12,11 @@
 //!   `projects` too for a database from the very first release);
 //! - columns added since arrive at their documented default, and the one-time
 //!   backfills (`title`, `initial_branch`, `sort_order`) run;
+//! - a column whose default encodes a SAFETY decision arrives at that default:
+//!   `branch_provenance` is `'created'` for every pre-existing row, which keeps
+//!   the branch cleanup those agents have always had (their true provenance is
+//!   unknowable, and defaulting the other way would silently strand a branch
+//!   per deleted agent);
 //! - none of it is destructive on the second open, because `open` is what every
 //!   startup AND every background project-persistence does.
 //!
@@ -241,6 +246,14 @@ fn a_first_release_database_with_no_projects_table_at_all_opens_and_keeps_its_se
     // Both one-time backfills still run against a table this old.
     for s in &sessions {
         assert_eq!(s.initial_branch, s.branch_name, "{}", s.id);
+        // Rows written before provenance existed behave exactly as they always
+        // did: dux still cleans their branches up on delete.
+        assert_eq!(
+            s.branch_provenance,
+            dux_core::model::BranchProvenance::CreatedByDux,
+            "{}",
+            s.id
+        );
     }
     assert_eq!(
         session(&sessions, "sess-1").title.as_deref(),
@@ -366,6 +379,14 @@ fn the_one_time_backfills_run_on_the_first_open_after_the_upgrade() {
         // to the old schema, so the current branch is the best available answer,
         // and it must not be left empty.
         assert_eq!(s.initial_branch, s.branch_name, "{}", s.id);
+        // `branch_provenance` has no backfill at all: its column default is the
+        // whole migration, and it must land on 'created'.
+        assert_eq!(
+            s.branch_provenance,
+            dux_core::model::BranchProvenance::CreatedByDux,
+            "{}",
+            s.id
+        );
     }
 
     // The title freeze fills in the auto-named agents (`title IS NULL`) so their
@@ -617,6 +638,7 @@ fn a_migrated_title_is_not_re_frozen_when_a_later_agent_leaves_it_null() {
             source_branch: "main".to_string(),
             branch_name: "dux/post-upgrade".to_string(),
             initial_branch: "dux/post-upgrade".to_string(),
+            branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
             worktree_path: "/tmp/post-upgrade".to_string(),
             title: None,
             started_providers: Vec::new(),
@@ -775,6 +797,7 @@ fn opening_a_database_this_build_created_is_a_no_op_the_second_time() {
                 source_branch: "main".to_string(),
                 branch_name: "dux/fresh".to_string(),
                 initial_branch: "dux/fresh".to_string(),
+                branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
                 worktree_path: "/tmp/fresh".to_string(),
                 title: Some("fresh".to_string()),
                 started_providers: vec!["codex".to_string()],

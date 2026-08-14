@@ -44,6 +44,7 @@ fn sample_session(id: &str, worktree: &str) -> dux_core::model::AgentSession {
         source_branch: "main".to_string(),
         branch_name: "held".to_string(),
         initial_branch: "held".to_string(),
+        branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
         worktree_path: worktree.to_string(),
         title: Some("held-agent".to_string()),
         started_providers: Vec::new(),

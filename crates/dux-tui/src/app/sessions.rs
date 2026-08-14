@@ -4250,6 +4250,7 @@ mod tests {
             source_branch: "main".to_string(),
             branch_name: format!("branch-{id}"),
             initial_branch: format!("branch-{id}"),
+            branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
             worktree_path: worktree.to_string(),
             title: None,
             started_providers: Vec::new(),

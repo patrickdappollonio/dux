@@ -10,7 +10,7 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use crate::config::{Config, DuxPaths, check_provider_available, provider_config};
-use crate::model::{AgentSession, SessionStatus};
+use crate::model::{AgentSession, BranchProvenance, SessionStatus};
 use crate::startup::{StartupCommandRun, run_startup_command};
 use crate::worker::{
     AgentLaunchFailedData, AgentLaunchKind, AgentLaunchReadyData, AgentLaunchRequest,
@@ -70,6 +70,10 @@ pub fn run_create_agent_job(
         title,
         launch_with_resume,
         pending_copy,
+        // Where the branch came from, decided here per request arm and carried
+        // to the session row (and to this job's rollbacks, which must not
+        // force-delete a branch dux did not create).
+        branch_provenance,
     ) = match request {
         CreateAgentRequest::NewProject {
             project,
@@ -287,6 +291,14 @@ pub fn run_create_agent_job(
                 title,
                 false,
                 pending_copy,
+                // The branch is dux's only when dux minted it. Attaching means
+                // the user's branch existed first, so deleting this agent must
+                // never delete it.
+                if attach_existing {
+                    BranchProvenance::AttachedExisting
+                } else {
+                    BranchProvenance::CreatedByDux
+                },
             )
         }
         CreateAgentRequest::PullRequest {
@@ -388,6 +400,15 @@ pub fn run_create_agent_job(
                 agent_title,
                 false,
                 None,
+                // Fetching the PR head MINTS `refs/heads/<name>` here, so that
+                // branch is dux's to clean up (and leaving it behind is what
+                // makes recreating the agent collide). Attaching means the
+                // branch was already there and stays.
+                if attach_existing {
+                    BranchProvenance::AttachedExisting
+                } else {
+                    BranchProvenance::CreatedByDux
+                },
             )
         }
         CreateAgentRequest::ForkSession {
@@ -468,6 +489,8 @@ pub fn run_create_agent_job(
                 Some(custom_name),
                 false,
                 pending_copy,
+                // A fork always creates a new branch off the source's HEAD.
+                BranchProvenance::CreatedByDux,
             )
         }
         CreateAgentRequest::ExistingManagedWorktree {
@@ -502,6 +525,9 @@ pub fn run_create_agent_job(
                 custom_name,
                 true,
                 None,
+                // Adopting an existing worktree adopts its branch too: it
+                // predates the agent and is not dux's to delete.
+                BranchProvenance::Adopted,
             )
         }
         CreateAgentRequest::ForkExternalWorktree {
@@ -580,6 +606,9 @@ pub fn run_create_agent_job(
                 custom_name,
                 false,
                 pending_copy,
+                // The managed worktree is created here on a new branch; the
+                // external worktree it was seeded from is untouched.
+                BranchProvenance::CreatedByDux,
             )
         }
     };
@@ -612,6 +641,7 @@ pub fn run_create_agent_job(
         // original branch. The branch-sync poller and intentional renames update
         // `branch_name` later but must never touch `initial_branch`.
         initial_branch: branch_name.clone(),
+        branch_provenance,
         branch_name,
         worktree_path: worktree_path.to_string_lossy().to_string(),
         title,
@@ -1109,6 +1139,7 @@ mod tests {
             source_branch: "main".to_string(),
             branch_name: "src-branch".to_string(),
             initial_branch: "src-branch".to_string(),
+            branch_provenance: crate::model::BranchProvenance::CreatedByDux,
             worktree_path: worktree.to_string_lossy().to_string(),
             title: None,
             started_providers: Vec::new(),
@@ -1214,6 +1245,189 @@ mod tests {
         assert_eq!(session.title, None);
         assert_eq!(session.initial_branch, session.branch_name);
         assert!(!session.branch_name.is_empty());
+    }
+
+    // ── branch provenance ────────────────────────────────────────
+    //
+    // Every create arm decides, once, whether the agent's branch is dux's to
+    // delete later. Getting this wrong destroys a user's branch on delete, so
+    // all of the reachable outcomes are pinned here.
+
+    #[test]
+    fn a_fresh_agent_owns_the_branch_dux_minted_for_it() {
+        let session = create_session_for(Some("fresh".to_string()));
+        assert_eq!(
+            session.branch_provenance,
+            crate::model::BranchProvenance::CreatedByDux
+        );
+    }
+
+    #[test]
+    fn attaching_to_an_existing_branch_records_it_as_pre_existing() {
+        let repo = init_test_repo();
+        create_branch(repo.path(), "develop");
+        let request = CreateAgentRequest::NewProject {
+            project: test_project(repo.path()),
+            custom_name: Some("develop".to_string()),
+            use_existing_branch: true,
+            pull_before_create: false,
+            copy_uncommitted_changes: false,
+        };
+        let session = drive_create_job(repo.path(), request);
+        assert_eq!(
+            session.branch_provenance,
+            crate::model::BranchProvenance::AttachedExisting,
+            "the user's branch existed first, so deleting the agent must keep it"
+        );
+    }
+
+    #[test]
+    fn an_auto_named_agent_that_collides_with_an_existing_branch_attaches() {
+        // The last-mile `branch_exists` check turns a pet name that happens to
+        // match a real branch into an attach; the provenance must follow it,
+        // because the user never asked to hand that branch to dux.
+        let repo = init_test_repo();
+        create_branch(repo.path(), "already-here");
+        let request = CreateAgentRequest::NewProject {
+            project: test_project(repo.path()),
+            custom_name: Some("already-here".to_string()),
+            // NOT confirmed by the dialog: the arm discovers the branch itself.
+            use_existing_branch: false,
+            pull_before_create: false,
+            copy_uncommitted_changes: false,
+        };
+        let session = drive_create_job(repo.path(), request);
+        assert_eq!(
+            session.branch_provenance,
+            crate::model::BranchProvenance::AttachedExisting
+        );
+    }
+
+    #[test]
+    fn a_pull_request_agent_attached_to_an_existing_branch_keeps_it() {
+        let repo = init_test_repo();
+        create_branch(repo.path(), "pr-agent");
+        let request = CreateAgentRequest::PullRequest {
+            project: test_project(repo.path()),
+            host: "github.com".to_string(),
+            owner_repo: "owner/repo".to_string(),
+            number: 42,
+            title: "Fix the bug".to_string(),
+            state: "OPEN".to_string(),
+            head_branch: "pr-head".to_string(),
+            custom_name: Some("pr-agent".to_string()),
+            use_existing_branch: true,
+        };
+        let session = drive_create_job(repo.path(), request);
+        assert_eq!(
+            session.branch_provenance,
+            crate::model::BranchProvenance::AttachedExisting
+        );
+    }
+
+    #[test]
+    fn a_pull_request_agent_owns_a_branch_it_fetched() {
+        // The fetch arm mints `refs/heads/<name>` itself, so that ref is dux's
+        // to clean up (and leaving it behind is what makes recreating the agent
+        // collide). Simulated with a local "remote" so no network is needed.
+        let origin = init_test_repo();
+        crate::git::test_support::git_command()
+            .args(["checkout", "-b", "pr-head"])
+            .current_dir(origin.path())
+            .output()
+            .unwrap();
+        crate::git::test_support::git_command()
+            .args(["commit", "--allow-empty", "-m", "pr work"])
+            .current_dir(origin.path())
+            .output()
+            .unwrap();
+
+        let repo = init_test_repo();
+        git_in(
+            repo.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                origin.path().to_string_lossy().as_ref(),
+            ],
+        );
+        // `fetch_pull_request_head` fetches `pull/<n>/head`; give the fake
+        // origin that ref so the fetch resolves locally.
+        git_in(
+            origin.path(),
+            &["update-ref", "refs/pull/42/head", "refs/heads/pr-head"],
+        );
+
+        let request = CreateAgentRequest::PullRequest {
+            project: test_project(repo.path()),
+            host: "github.com".to_string(),
+            owner_repo: "owner/repo".to_string(),
+            number: 42,
+            title: "Fix the bug".to_string(),
+            state: "OPEN".to_string(),
+            head_branch: "pr-head".to_string(),
+            custom_name: None,
+            use_existing_branch: false,
+        };
+        let session = drive_create_job(repo.path(), request);
+        assert_eq!(session.branch_name, "pr-head");
+        assert_eq!(
+            session.branch_provenance,
+            crate::model::BranchProvenance::CreatedByDux,
+            "dux minted this local branch from the PR head"
+        );
+    }
+
+    #[test]
+    fn a_forked_agent_owns_its_new_branch() {
+        let repo = init_test_repo();
+        let source = fork_source_session(repo.path());
+        let request = CreateAgentRequest::ForkSession {
+            project: test_project(repo.path()),
+            source_session: Box::new(source),
+            source_label: "src agent".to_string(),
+            custom_name: Some("forked-agent".to_string()),
+        };
+        let session = drive_create_job(repo.path(), request);
+        assert_eq!(
+            session.branch_provenance,
+            crate::model::BranchProvenance::CreatedByDux
+        );
+    }
+
+    #[test]
+    fn forking_an_external_worktree_owns_the_managed_branch_it_creates() {
+        let repo = init_test_repo();
+        let request = CreateAgentRequest::ForkExternalWorktree {
+            project: test_project(repo.path()),
+            source_worktree_path: repo.path().to_path_buf(),
+            source_label: "ext worktree".to_string(),
+            source_branch: "main".to_string(),
+            custom_name: Some("external-agent".to_string()),
+        };
+        let session = drive_create_job(repo.path(), request);
+        assert_eq!(
+            session.branch_provenance,
+            crate::model::BranchProvenance::CreatedByDux
+        );
+    }
+
+    #[test]
+    fn adopting_an_existing_worktree_adopts_its_branch_too() {
+        let repo = init_test_repo();
+        let request = CreateAgentRequest::ExistingManagedWorktree {
+            project: test_project(repo.path()),
+            worktree_path: repo.path().to_path_buf(),
+            branch_name: "main".to_string(),
+            custom_name: None,
+        };
+        let session = drive_create_job(repo.path(), request);
+        assert_eq!(
+            session.branch_provenance,
+            crate::model::BranchProvenance::Adopted,
+            "the adopted worktree's branch predates the agent"
+        );
     }
 
     // ── uncommitted-changes copy and best-effort pull ────────────

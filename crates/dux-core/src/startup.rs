@@ -422,6 +422,7 @@ mod tests {
             source_branch: "main".to_string(),
             branch_name: "feature/setup".to_string(),
             initial_branch: "feature/setup".to_string(),
+            branch_provenance: crate::model::BranchProvenance::CreatedByDux,
             worktree_path: worktree.to_string_lossy().to_string(),
             title: None,
             started_providers: Vec::new(),

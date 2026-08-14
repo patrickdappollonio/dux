@@ -11209,6 +11209,7 @@ not_a_real_action = ["x"]
             source_branch: "main".to_string(),
             branch_name: "beta-agent".to_string(),
             initial_branch: "beta-agent".to_string(),
+            branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
             worktree_path: app
                 .engine
                 .paths
@@ -11275,6 +11276,7 @@ not_a_real_action = ["x"]
                 source_branch: "main".to_string(),
                 branch_name: name.to_string(),
                 initial_branch: name.to_string(),
+                branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
                 worktree_path: app
                     .engine
                     .paths
@@ -11337,6 +11339,7 @@ not_a_real_action = ["x"]
             source_branch: "main".to_string(),
             branch_name: branch.to_string(),
             initial_branch: branch.to_string(),
+            branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
             worktree_path: format!("/tmp/does-not-exist/{id}"),
             title: None,
             started_providers: Vec::new(),
@@ -11643,6 +11646,7 @@ not_a_real_action = ["x"]
                 source_branch: "main".to_string(),
                 branch_name: name.to_string(),
                 initial_branch: name.to_string(),
+                branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
                 worktree_path: app
                     .engine
                     .paths
@@ -12624,6 +12628,7 @@ not_a_real_action = ["x"]
                 source_branch: "main".to_string(),
                 branch_name: name.to_string(),
                 initial_branch: name.to_string(),
+                branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
                 worktree_path: app
                     .engine
                     .paths
@@ -12813,6 +12818,7 @@ not_a_real_action = ["x"]
             source_branch: "main".to_string(),
             branch_name: "main".to_string(),
             initial_branch: "main".to_string(),
+            branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
             worktree_path: worktree.to_string_lossy().to_string(),
             title: Some("imported".to_string()),
             started_providers: vec!["codex".to_string()],
@@ -15929,6 +15935,7 @@ not_a_real_action = ["x"]
             source_branch: "main".to_string(),
             branch_name: "agent-branch-2".to_string(),
             initial_branch: "agent-branch-2".to_string(),
+            branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
             worktree_path: app
                 .engine
                 .paths

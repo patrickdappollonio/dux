@@ -1041,6 +1041,7 @@ mod tests {
                 source_branch: "main".to_string(),
                 branch_name: "feat".to_string(),
                 initial_branch: "feat".to_string(),
+                branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
                 worktree_path: worktree.to_string(),
                 title: None,
                 started_providers: Vec::new(),

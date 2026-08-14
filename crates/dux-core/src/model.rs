@@ -114,6 +114,114 @@ impl SessionStatus {
     }
 }
 
+/// Where an agent's branch came from, and therefore whether deleting the agent
+/// may delete the branch.
+///
+/// Deleting an agent with "also delete the worktree" ticked force-deletes the
+/// branches involved. That is right for a branch dux minted for the agent and
+/// wrong for one that existed before it: an agent attached to `develop`, or
+/// adopted from a worktree the user already had, must never take `develop` with
+/// it. Recorded once at creation and never mutated (see the storage layer's
+/// INSERT-but-not-UPDATE handling).
+///
+/// Three variants rather than a bool because the delete copy wants the
+/// distinction: "existed before this agent" and "came with the worktree this
+/// agent adopted" are different sentences. Local-vs-remote attach is
+/// deliberately NOT distinguished: the delete semantics are identical and the
+/// preflight's branch location never reaches the create job.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum BranchProvenance {
+    /// dux created the branch for this agent (a fresh create, a fork, or a PR
+    /// arm that fetched the head into a new local branch). Deleting the agent
+    /// may delete the branch: nothing existed before dux made it.
+    #[default]
+    CreatedByDux,
+    /// The agent was attached to a branch that already existed. The branch is
+    /// the user's; deleting the agent keeps it.
+    AttachedExisting,
+    /// The agent was adopted from a worktree that already existed, branch and
+    /// all. The branch is the user's; deleting the agent keeps it.
+    Adopted,
+}
+
+impl BranchProvenance {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::CreatedByDux => "created",
+            Self::AttachedExisting => "attached",
+            Self::Adopted => "adopted",
+        }
+    }
+
+    /// Parse the stored text. **An unrecognized value is NOT treated as
+    /// created**: a future binary may write a variant this one has never heard
+    /// of, and guessing "dux made it" would force-delete a branch on that
+    /// guess. Losing a cleanup is recoverable; losing a branch is not. This is
+    /// distinct from the MIGRATION default (`'created'`, which preserves
+    /// today's behavior for rows written before the column existed and whose
+    /// true provenance is unknowable).
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(value: &str) -> Self {
+        match value {
+            "created" => Self::CreatedByDux,
+            "adopted" => Self::Adopted,
+            _ => Self::AttachedExisting,
+        }
+    }
+
+    /// Whether deleting this agent may delete its branches.
+    pub fn dux_may_delete_branch(&self) -> bool {
+        matches!(self, Self::CreatedByDux)
+    }
+
+    /// Why this agent's pre-existing branch is not dux's to delete, as a
+    /// sentence fragment following the branch name.
+    fn kept_reason(&self) -> &'static str {
+        match self {
+            // Never rendered: a created-by-dux agent's branches are deleted, so
+            // no keep sentence is written for it. Answered anyway so the match
+            // stays exhaustive and a future caller cannot get a panic.
+            Self::CreatedByDux => "was created by dux",
+            Self::AttachedExisting => "existed before this agent",
+            Self::Adopted => "came with the worktree this agent adopted",
+        }
+    }
+
+    /// The sentence(s) naming every branch a worktree-removing delete
+    /// deliberately KEPT, with a per-branch reason.
+    ///
+    /// Drift matters here: when the agent moved off the branch it was born on,
+    /// two branches survive and only one of them predates the agent, so saying
+    /// "existed before this agent" of both would be false. The birth branch
+    /// carries the provenance reason; a distinct current branch is named as
+    /// what it is, a branch created inside the agent's worktree.
+    ///
+    /// Names `git branch -D` because the branch outlives the worktree and the
+    /// only surface that could delete it (a worktree manager) can no longer
+    /// reach it once the worktree is gone.
+    ///
+    /// Shared by the TUI status line and the web toast so both say the same
+    /// thing.
+    pub fn kept_branches_note(&self, branch_name: &str, initial_branch: &str) -> String {
+        let drifted = !initial_branch.is_empty() && initial_branch != branch_name;
+        if drifted {
+            format!(
+                "Its branch \"{branch_name}\" was created inside this agent's worktree and was kept, \
+                 and its branch \"{initial_branch}\" {} and was kept. \
+                 Delete either yourself with git branch -D \"{branch_name}\" or \
+                 git branch -D \"{initial_branch}\" if you no longer need them.",
+                self.kept_reason()
+            )
+        } else {
+            format!(
+                "Its branch \"{branch_name}\" {} and was kept. \
+                 Delete it yourself with git branch -D \"{branch_name}\" if you no longer need it.",
+                self.kept_reason()
+            )
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CompanionTerminalStatus {
     NotLaunched,
@@ -147,6 +255,10 @@ pub struct AgentSession {
     /// set once at creation and never mutated afterward. Surfaced so the UI can
     /// show branch lineage and flag drift when `branch_name != initial_branch`.
     pub initial_branch: String,
+    /// Where this agent's branch came from, and therefore whether deleting the
+    /// agent may delete the branch. Set once at creation and never mutated (the
+    /// storage layer writes it on INSERT only). See [`BranchProvenance`].
+    pub branch_provenance: BranchProvenance,
     pub worktree_path: String,
     pub title: Option<String>,
     pub started_providers: Vec<String>,
@@ -465,6 +577,7 @@ mod tests {
             source_branch: "main".to_string(),
             branch_name: "s1".to_string(),
             initial_branch: "s1".to_string(),
+            branch_provenance: crate::model::BranchProvenance::CreatedByDux,
             worktree_path: "/tmp/s1".to_string(),
             title: None,
             started_providers: Vec::new(),

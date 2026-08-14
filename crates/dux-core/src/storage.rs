@@ -83,6 +83,7 @@ impl SessionStore {
                 source_branch text not null,
                 branch_name text not null,
                 initial_branch text not null default '',
+                branch_provenance text not null default 'created',
                 worktree_path text not null,
                 title text,
                 project_path text,
@@ -149,6 +150,23 @@ impl SessionStore {
             "agent_sessions",
             "initial_branch",
             "text not null default ''",
+        )?;
+        // Where the agent's branch came from, deciding whether a delete may
+        // force-delete it. Additive column, same autocommit ALTER rationale as
+        // `initial_branch` above.
+        //
+        // The default is 'created' for existing rows on purpose: it preserves
+        // exactly today's behavior for every agent that predates the column.
+        // Defaulting to a kept variant instead would silently stop branch
+        // cleanup for every existing agent, resurrecting the "create foo,
+        // delete foo, recreate foo -> branch already exists" leak, and the true
+        // provenance of an old row is unknowable anyway. No backfill beyond the
+        // default is needed or possible.
+        ensure_column(
+            &self.conn,
+            "agent_sessions",
+            "branch_provenance",
+            "text not null default 'created'",
         )?;
         // Only the backfill UPDATEs run in a transaction so a crash mid-backfill
         // rolls them back and the step is retried cleanly on the next boot (the
@@ -929,6 +947,14 @@ impl SessionStore {
         // min(sort_order) placement query below. The SET list deliberately
         // omits `sort_order` so re-upserting an existing session never
         // disturbs the user's chosen order.
+        //
+        // It omits `branch_provenance` for a stronger reason: provenance is
+        // decided once, at creation, and an UPDATE that could rewrite it is an
+        // UPDATE that could turn a user's pre-existing `develop` into a branch
+        // dux believes it owns and force-deletes. INSERT-but-not-SET, following
+        // `sort_order`. Do NOT copy `initial_branch`'s treatment below: that
+        // one IS in the SET list (its immutability is engine discipline), and
+        // adding `branch_provenance` beside it would break this guarantee.
         let updated = self.conn.execute(
             r#"
             update agent_sessions set
@@ -977,9 +1003,9 @@ impl SessionStore {
         self.conn.execute(
             r#"
             insert into agent_sessions
-                (id, project_id, project_path, provider, source_branch, branch_name, worktree_path, title, started_providers, desired_running, auto_reopen_enabled, status, sort_order, created_at, updated_at, initial_branch)
+                (id, project_id, project_path, provider, source_branch, branch_name, worktree_path, title, started_providers, desired_running, auto_reopen_enabled, status, sort_order, created_at, updated_at, initial_branch, branch_provenance)
             values
-                (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+                (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
             "#,
             params![
                 session.id,
@@ -998,6 +1024,7 @@ impl SessionStore {
                 session.created_at.to_rfc3339(),
                 session.updated_at.to_rfc3339(),
                 session.initial_branch,
+                session.branch_provenance.as_str(),
             ],
         )?;
         Ok(())
@@ -1135,7 +1162,7 @@ impl SessionStore {
     pub fn load_sessions(&self) -> Result<Vec<AgentSession>> {
         let mut stmt = self.conn.prepare(
             r#"
-            select id, project_id, provider, source_branch, branch_name, worktree_path, title, project_path, started_providers, desired_running, auto_reopen_enabled, status, created_at, updated_at, initial_branch, last_focused_tab
+            select id, project_id, provider, source_branch, branch_name, worktree_path, title, project_path, started_providers, desired_running, auto_reopen_enabled, status, created_at, updated_at, initial_branch, last_focused_tab, branch_provenance
             from agent_sessions
             order by sort_order asc, updated_at desc
             "#,
@@ -1161,6 +1188,9 @@ impl SessionStore {
                 updated_at: parse_time(&updated_at).unwrap_or_else(Utc::now),
                 initial_branch: row.get(14)?,
                 last_focused_tab: row.get(15)?,
+                branch_provenance: crate::model::BranchProvenance::from_str(
+                    row.get::<_, String>(16)?.as_str(),
+                ),
             })
         })?;
 
@@ -1296,6 +1326,7 @@ fn test_session(
         source_branch: "main".to_string(),
         branch_name: format!("branch-{id}"),
         initial_branch: format!("branch-{id}"),
+        branch_provenance: crate::model::BranchProvenance::CreatedByDux,
         worktree_path: format!("/tmp/{id}"),
         title: None,
         started_providers: Vec::new(),
@@ -2019,6 +2050,113 @@ mod tests {
         let got = loaded.iter().find(|s| s.id == "id1").expect("stored id1");
         assert_eq!(got.initial_branch, "born-on");
         assert_eq!(got.branch_name, "renamed");
+    }
+
+    #[test]
+    fn branch_provenance_round_trips_through_storage() {
+        let store = test_store();
+        let now = Utc::now();
+        let cases = [
+            ("created", crate::model::BranchProvenance::CreatedByDux),
+            ("attached", crate::model::BranchProvenance::AttachedExisting),
+            ("adopted", crate::model::BranchProvenance::Adopted),
+        ];
+        for (id, provenance) in cases {
+            let mut s = test_session(id, now, now);
+            s.branch_provenance = provenance;
+            store.upsert_session(&s).unwrap();
+        }
+
+        let loaded = store.load_sessions().unwrap();
+        for (id, provenance) in cases {
+            let got = loaded.iter().find(|s| s.id == id).expect("stored row");
+            assert_eq!(got.branch_provenance, provenance);
+        }
+    }
+
+    #[test]
+    fn branch_provenance_survives_a_re_upsert_of_an_existing_session() {
+        // Provenance is decided once, at creation. An UPDATE that could rewrite
+        // it is an UPDATE that could turn the user's pre-existing branch into
+        // one dux believes it owns and force-deletes on the next delete, so the
+        // column is deliberately absent from `upsert_session`'s SET list.
+        let store = test_store();
+        let now = Utc::now();
+        let mut s = test_session("id1", now, now);
+        s.branch_provenance = crate::model::BranchProvenance::AttachedExisting;
+        store.upsert_session(&s).unwrap();
+
+        // A later status-churn upsert claiming the branch is dux's must not stick.
+        s.branch_provenance = crate::model::BranchProvenance::CreatedByDux;
+        s.status = SessionStatus::Detached;
+        store.upsert_session(&s).unwrap();
+
+        let loaded = store.load_sessions().unwrap();
+        let got = loaded.iter().find(|s| s.id == "id1").expect("stored id1");
+        assert_eq!(
+            got.branch_provenance,
+            crate::model::BranchProvenance::AttachedExisting,
+            "re-upserting a session must never rewrite its recorded provenance"
+        );
+        assert_eq!(
+            got.status,
+            SessionStatus::Detached,
+            "the rest still updates"
+        );
+    }
+
+    #[test]
+    fn legacy_rows_arrive_as_created_by_dux() {
+        // The migration default preserves exactly today's behavior for agents
+        // that predate the column: their branches are still cleaned up.
+        let store = legacy_store_with_sessions(&[("feat-x", "p1", "2026-01-01T00:00:00Z")]);
+        let loaded = store.load_sessions().unwrap();
+        let s = loaded.iter().find(|s| s.id == "feat-x").expect("row");
+        assert_eq!(
+            s.branch_provenance,
+            crate::model::BranchProvenance::CreatedByDux
+        );
+    }
+
+    #[test]
+    fn adding_the_branch_provenance_column_twice_is_a_no_op() {
+        let store = test_store();
+        // `migrate()` runs on every open(); the second ALTER must be tolerated.
+        store.migrate().unwrap();
+        assert!(
+            !ensure_column(
+                &store.conn,
+                "agent_sessions",
+                "branch_provenance",
+                "text not null default 'created'"
+            )
+            .unwrap(),
+            "the column already exists, so ensure_column must report no change"
+        );
+    }
+
+    #[test]
+    fn an_unknown_provenance_value_is_not_treated_as_created() {
+        // A future binary may write a variant this one has never heard of.
+        // Guessing "dux made it" would force-delete a branch on that guess.
+        let store = test_store();
+        let now = Utc::now();
+        store
+            .upsert_session(&test_session("id1", now, now))
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "update agent_sessions set branch_provenance = 'borrowed-from-the-future'",
+                [],
+            )
+            .unwrap();
+
+        let loaded = store.load_sessions().unwrap();
+        assert!(
+            !loaded[0].branch_provenance.dux_may_delete_branch(),
+            "an unrecognized provenance must keep the branch"
+        );
     }
 
     #[test]
