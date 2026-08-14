@@ -6628,7 +6628,12 @@ impl App {
 
     /// Land the manager's cursor on a clicked row, ignoring headers, empty
     /// rows, and rows an agent holds (the cursor never rests on one).
-    fn set_manage_worktree_selection_from_visual_row(&mut self, visual_index: usize) {
+    ///
+    /// Returns whether the click actually landed on a selectable row, because
+    /// the double-click path needs to know: a second click on a row this
+    /// refuses must do nothing at all, not confirm whatever was selected
+    /// before it.
+    fn set_manage_worktree_selection_from_visual_row(&mut self, visual_index: usize) -> bool {
         let entry_index = match &self.prompt {
             PromptState::ManageWorktrees(prompt) => {
                 let rows = manage_worktree_visual_rows(
@@ -6651,11 +6656,12 @@ impl App {
             _ => None,
         };
         let Some(entry_index) = entry_index else {
-            return;
+            return false;
         };
         if let PromptState::ManageWorktrees(prompt) = &mut self.prompt {
             prompt.selected = Some(entry_index);
         }
+        true
     }
 
     fn set_project_worktree_selection_from_visual_row(&mut self, visual_index: usize) {
@@ -7742,8 +7748,15 @@ impl App {
             PromptMouseTarget::ManageWorktreeItem(index) => {
                 let double_click =
                     self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
-                self.set_manage_worktree_selection_from_visual_row(index);
-                if double_click && let Err(err) = self.confirm_delete_selected_worktree() {
+                // A row the click half refuses (a header, a spacer, a worktree
+                // an agent holds) leaves the selection where it was, so
+                // confirming here would open a destructive dialog for a
+                // different worktree than the one under the pointer.
+                let landed = self.set_manage_worktree_selection_from_visual_row(index);
+                if landed
+                    && double_click
+                    && let Err(err) = self.confirm_delete_selected_worktree()
+                {
                     self.set_error(format!("{err:#}"));
                 }
             }
@@ -18015,6 +18028,55 @@ cyan = "#00ffff"
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 20, 8));
         assert!(matches!(app.prompt, PromptState::None));
         assert!(app.status.text().contains("Opened agent"));
+    }
+
+    /// A double-click is a click plus a confirm, and the click half already
+    /// refuses a row an agent holds. The confirm half has to refuse it too:
+    /// otherwise the second click opens a destructive confirmation for
+    /// whatever was selected BEFORE, which is a different worktree entirely
+    /// and one the user never pointed at.
+    #[test]
+    fn mouse_double_click_on_a_held_worktree_row_confirms_nothing() {
+        let mut app = test_app(default_bindings());
+        let project = app.engine.projects[0].clone();
+        let entry = |name: &str, agent: Option<&str>| dux_core::worktree_manager::ManagedWorktree {
+            path: PathBuf::from(format!("/tmp/worktrees/demo/{name}")),
+            label: name.to_string(),
+            branch: Some(name.to_string()),
+            dirty: false,
+            attached_session_id: agent.map(str::to_string),
+        };
+        let entries = vec![entry("free", None), entry("held", Some("session-1"))];
+        let rows = crate::app::manage_worktree_visual_rows(&entries, false, None);
+        let held_row = rows
+            .iter()
+            .position(|r| matches!(r, crate::app::ManageWorktreeVisualRow::Entry(1)))
+            .expect("a held worktree is listed, not hidden");
+        app.prompt = PromptState::ManageWorktrees(crate::app::ManageWorktreesPrompt {
+            project,
+            entries,
+            loading: false,
+            selected: Some(0),
+            error: None,
+        });
+        app.overlay_layout.active = OverlayMouseLayout::ManageWorktrees {
+            list: Rect::new(10, 5, 60, 12),
+            items: rows.len(),
+            offset: 0,
+        };
+
+        let y = 5 + held_row as u16;
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 20, y));
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 20, y));
+
+        match &app.prompt {
+            PromptState::ManageWorktrees(prompt) => assert_eq!(
+                prompt.selected,
+                Some(0),
+                "the free row stays selected and nothing was confirmed"
+            ),
+            other => panic!("no confirmation may open from a held row, got {other:?}"),
+        }
     }
 
     #[test]

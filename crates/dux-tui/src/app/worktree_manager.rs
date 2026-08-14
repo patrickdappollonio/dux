@@ -91,6 +91,7 @@ impl App {
             previous: prompt.clone(),
             project: prompt.project.clone(),
             path: entry.path.clone(),
+            label: entry.label.clone(),
             branch: entry.branch.clone(),
             dirty: entry.dirty,
             // Default ON, matching the web dialog's checkbox: this surface
@@ -104,7 +105,19 @@ impl App {
     }
 
     /// Resolve the removal confirmation. Cancelling returns to the manager
-    /// (nothing was touched); confirming dispatches the removal.
+    /// (nothing was touched); confirming closes every overlay and dispatches
+    /// the removal.
+    ///
+    /// Confirming deliberately does NOT put the manager back, even though the
+    /// user may well want to remove a second worktree, and the web's dialog
+    /// (which closes onto a list that is still there) is not the same shape.
+    /// The reason is the status line. The removal opens a keyed Busy and
+    /// finishes with a verbose final saying what actually happened to the
+    /// branch, and that report is the whole point of the operation; relisting
+    /// would immediately open a SECOND keyed Busy for the fresh listing, and
+    /// on a single most-recent-wins status line the listing's chatter would
+    /// bury the removal's answer. The user reopens the manager when they want
+    /// another one, and it lists what is actually there now.
     pub(super) fn resolve_confirm_delete_worktree(&mut self, confirm: bool) -> bool {
         let PromptState::ConfirmDeleteWorktree(prompt) = &self.prompt else {
             return false;
@@ -350,6 +363,23 @@ mod tests {
             app.status.message().contains("unchanged"),
             "got {:?}",
             app.status.message()
+        );
+    }
+
+    /// Confirming closes every overlay rather than putting the manager back,
+    /// and that is a decision. See `resolve_confirm_delete_worktree`.
+    #[test]
+    fn confirming_the_removal_closes_the_overlay_rather_than_relisting() {
+        let mut app = test_app(default_bindings());
+        open_manager(&mut app, vec![row("free", Some("free"), None, false)]);
+        app.confirm_delete_selected_worktree().unwrap();
+        app.handle_key(key(KeyCode::Right)).unwrap();
+        app.handle_key(key(KeyCode::Enter)).unwrap();
+        assert!(
+            matches!(app.prompt, PromptState::None),
+            "the removal's own status is the report, and a fresh listing's Busy \
+             would fight it on the one status line, got {:?}",
+            app.prompt
         );
     }
 

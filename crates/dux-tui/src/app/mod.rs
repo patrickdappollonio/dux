@@ -1411,6 +1411,11 @@ pub(crate) struct ConfirmDeleteWorktreePrompt {
     pub(crate) previous: ManageWorktreesPrompt,
     pub(crate) project: Project,
     pub(crate) path: PathBuf,
+    /// The row LABEL: the branch when there is one, a "detached <sha>"
+    /// stand-in when there is not. What the question names, so the sentence
+    /// reads for a detached worktree too. Good for display and useless for
+    /// deciding anything; see `branch` for the decision.
+    pub(crate) label: String,
     /// The branch the worktree is on, `None` when detached. Decides whether the
     /// checkbox exists at all: there is no branch to keep or delete.
     pub(crate) branch: Option<String>,

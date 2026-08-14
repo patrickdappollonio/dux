@@ -178,6 +178,63 @@ describe("WorktreesDialog", () => {
     expect(confirm.textContent).toContain("uncommitted changes")
   })
 
+  // The words, pinned.
+  //
+  // The TUI's worktree manager says the same sentences and pins them in its own
+  // suite (`the_worktree_removal_copy_is_the_web_dialogs_copy` in render.rs).
+  // The two dialogs are parallel implementations of one piece of copy, and
+  // nothing but a test on each side keeps them in step: the TUI's drifted away
+  // from this one immediately, silently, in the change that introduced it.
+  it("says the sentences the TUI's worktree manager says", () => {
+    const target = entry({
+      worktree_path: "/wt/messy",
+      branch_name: "messy",
+      branch: "messy",
+      dirty: true,
+    })
+    seed([target], {
+      deleteWorktreeTarget: { projectId: "p1", entry: target },
+    } as unknown as Partial<DuxState>)
+    render(<WorktreesDialog />)
+
+    expect(
+      screen.getByRole("heading", {
+        name: "Delete the worktree for messy?",
+        hidden: true,
+      }),
+    ).toBeInstanceOf(HTMLElement)
+    const confirm = screen.getByTestId("delete-worktree-confirm")
+    expect(confirm.textContent).toContain(
+      "will be removed from disk. This action cannot be undone: dux has no trash and removes the directory forcibly.",
+    )
+    expect(confirm.textContent).toContain(
+      "This worktree has uncommitted changes, and they go with it. Nothing in there that is not committed exists anywhere else.",
+    )
+    expect(confirm.textContent).toContain(
+      "will be deleted with it, forcibly. Any commits on it that are not merged anywhere else go too.",
+    )
+    expect(
+      screen.getByRole("button", { name: "Delete worktree", hidden: true }),
+    ).toBeInstanceOf(HTMLElement)
+  })
+
+  it("says there is no choice to make for a detached worktree", () => {
+    const target = entry({
+      worktree_path: "/wt/loose",
+      branch_name: "detached 1a2b3c4",
+      branch: null,
+    })
+    seed([target], {
+      deleteWorktreeTarget: { projectId: "p1", entry: target },
+    } as unknown as Partial<DuxState>)
+    render(<WorktreesDialog />)
+    expect(
+      screen.getByTestId("delete-worktree-confirm").textContent,
+    ).toContain(
+      "This worktree is not on a branch, so there is no branch to keep or delete. Only the working directory is removed.",
+    )
+  })
+
   it("does not claim uncommitted work when the worktree is clean", () => {
     seed([entry({ worktree_path: "/wt/clean", branch_name: "clean" })], {
       deleteWorktreeTarget: {

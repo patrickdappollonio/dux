@@ -977,6 +977,7 @@ mod tests {
                     previous: manage_worktrees_prompt(&project),
                     project: project.clone(),
                     path: PathBuf::from("/tmp/worktrees/demo/free"),
+                    label: "free".to_string(),
                     branch: Some("free".to_string()),
                     dirty: false,
                     delete_branch: true,

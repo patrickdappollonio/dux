@@ -641,6 +641,48 @@ pub(super) fn delete_worktree_checkbox_label(branch: Option<&str>) -> String {
     }
 }
 
+// The worktree-removal confirmation's copy, sentence for sentence the web
+// dialog's (`WorktreesDialog.tsx`).
+//
+// Written out as named constants rather than inline in the render, because
+// that is the only thing that makes the parity checkable: the two dialogs are
+// parallel implementations of one piece of copy, each pinned by a test in its
+// own suite. The first version of this dialog claimed the parity in a comment
+// and quietly dropped three sentences, which is exactly what a comment cannot
+// catch and a test can.
+
+/// The question, naming the worktree by its ROW LABEL (the branch when there
+/// is one, the "detached <sha>" stand-in when there is not), so the sentence
+/// reads for a detached worktree too.
+pub(super) fn delete_worktree_title(label: &str) -> String {
+    format!("Delete the worktree for {label}?")
+}
+
+pub(super) const DELETE_WORKTREE_FORCED: &str =
+    "This action cannot be undone: dux has no trash and removes the directory forcibly.";
+
+/// The follow-up sentence matters as much as the first half: "they go with it"
+/// alone reads like work that is committed somewhere and merely inconvenient
+/// to get back.
+pub(super) const DELETE_WORKTREE_DIRTY: &str = "This worktree has uncommitted changes, and they go with it. Nothing in there that \
+     is not committed exists anywhere else.";
+
+/// Detached: say there is no CHOICE here, not merely what happens. The absent
+/// checkbox is otherwise unexplained.
+pub(super) const DELETE_WORKTREE_DETACHED: &str = "This worktree is not on a branch, so there is no branch to keep or delete. Only \
+     the working directory is removed.";
+
+pub(super) fn delete_worktree_branch_line(branch: &str, delete_branch: bool) -> String {
+    if delete_branch {
+        format!(
+            "The branch \"{branch}\" will be deleted with it, forcibly. Any commits on it that \
+             are not merged anywhere else go too."
+        )
+    } else {
+        format!("The branch \"{branch}\" is kept. Only the working directory is removed.")
+    }
+}
+
 fn wrapped_line_count(lines: &[Line<'_>], width: u16, trim: bool) -> u16 {
     if width == 0 {
         return 0;
@@ -5542,45 +5584,46 @@ impl App {
                     0
                 };
 
-                // The copy matches the web dialog's, sentence for sentence: the
-                // forcible removal, the uncommitted-work warning when dirty,
-                // and what happens to the branch.
+                // The copy is the web dialog's, sentence for sentence, and both
+                // sides pin it (see `delete_worktree_title` and the constants
+                // beside it).
                 let mut body_lines = vec![
                     Line::from(""),
+                    Line::from(Span::styled(
+                        format!(" {}", delete_worktree_title(&prompt.label)),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    )),
+                    Line::from(""),
                     Line::from(vec![
-                        Span::raw(" Remove "),
+                        Span::raw(" "),
                         Span::styled(
                             prompt.path.display().to_string(),
                             Style::default().add_modifier(Modifier::BOLD),
                         ),
-                        Span::raw("?"),
+                        Span::styled(
+                            format!(" will be removed from disk. {DELETE_WORKTREE_FORCED}"),
+                            Style::default().fg(self.theme.warning_fg),
+                        ),
                     ]),
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        " It is removed from disk forcibly. dux has no trash, so this cannot be undone.",
-                        Style::default().fg(self.theme.warning_fg),
-                    )),
                 ];
                 if prompt.dirty {
                     body_lines.push(Line::from(Span::styled(
-                        " This worktree has uncommitted changes, and they go with it.",
+                        format!(" {DELETE_WORKTREE_DIRTY}"),
                         Style::default().fg(self.theme.warning_fg),
                     )));
                 }
                 match (prompt.branch.as_deref(), prompt.delete_branch) {
                     (None, _) => body_lines.push(Line::from(Span::styled(
-                        " This worktree is not on a branch, so only the working directory is removed.",
+                        format!(" {DELETE_WORKTREE_DETACHED}"),
                         Style::default().fg(self.theme.hint_desc_fg),
                     ))),
-                    (Some(branch), true) => body_lines.push(Line::from(Span::styled(
-                        format!(
-                            " The branch \"{branch}\" is deleted with it, forcibly. Any commits on it that are not merged anywhere else go too."
-                        ),
-                        Style::default().fg(self.theme.warning_fg),
-                    ))),
-                    (Some(branch), false) => body_lines.push(Line::from(Span::styled(
-                        format!(" The branch \"{branch}\" is kept. Only the working directory is removed."),
-                        Style::default().fg(self.theme.hint_desc_fg),
+                    (Some(branch), delete_branch) => body_lines.push(Line::from(Span::styled(
+                        format!(" {}", delete_worktree_branch_line(branch, delete_branch)),
+                        Style::default().fg(if delete_branch {
+                            self.theme.warning_fg
+                        } else {
+                            self.theme.hint_desc_fg
+                        }),
                     ))),
                 }
                 let body_height = wrapped_line_count(&body_lines, inner_width, false);
@@ -5591,7 +5634,7 @@ impl App {
                     frame.area(),
                 );
                 self.clear_overlay_area(frame, area);
-                let outer = self.themed_overlay_block("Remove Worktree");
+                let outer = self.themed_overlay_block("Delete Worktree");
                 let inner = outer.inner(area);
                 outer.render(area, frame.buffer_mut());
 
@@ -5661,7 +5704,7 @@ impl App {
                     ))
                     .render(frame, cancel_area, &self.theme);
 
-                Button::new("Remove")
+                Button::new("Delete worktree")
                     .kind(ButtonKind::Danger)
                     .state(button_state_for(
                         ButtonPressedTarget::ConfirmDeleteWorktreeConfirm,
@@ -16816,6 +16859,7 @@ mod tests {
                 },
                 project,
                 path: std::path::PathBuf::from("/tmp/worktrees/demo/free"),
+                label: branch.unwrap_or("detached 1a2b3c4").to_string(),
                 branch: branch.map(str::to_string),
                 dirty,
                 delete_branch,
@@ -16826,6 +16870,14 @@ mod tests {
         let mut app = test_app(default_bindings());
         app.prompt = confirm(&app, Some("free"), false, true);
         let screen = rendered_screen(&mut app);
+        assert!(
+            screen.contains("Delete the worktree for free?"),
+            "the dialog asks the web dialog's question:\n{screen}"
+        );
+        assert!(
+            screen.contains("Delete worktree"),
+            "and offers the web dialog's button:\n{screen}"
+        );
         assert!(
             screen.contains("forcibly") && screen.contains("no trash"),
             "the removal is forced and cannot be undone:\n{screen}"
@@ -16846,6 +16898,10 @@ mod tests {
             "a dirty worktree says its work goes with it:\n{screen}"
         );
         assert!(
+            screen.contains("is not committed exists"),
+            "and that nothing uncommitted in there exists anywhere else:\n{screen}"
+        );
+        assert!(
             screen.contains("is kept"),
             "with the checkbox off the branch survives, and the copy says so:\n{screen}"
         );
@@ -16853,12 +16909,58 @@ mod tests {
         app.prompt = confirm(&app, None, false, true);
         let screen = rendered_screen(&mut app);
         assert!(
+            screen.contains("Delete the worktree for detached 1a2b3c4?"),
+            "a detached worktree is named by its row label:\n{screen}"
+        );
+        assert!(
             !screen.contains("Also delete the branch"),
             "a detached worktree offers no branch checkbox:\n{screen}"
         );
         assert!(
             screen.contains("not on a branch"),
             "and says why:\n{screen}"
+        );
+        assert!(
+            screen.contains("so there is no branch"),
+            "spelling out that there is no choice to make (the sentence wraps):\n{screen}"
+        );
+    }
+
+    /// The removal confirmation's words, pinned.
+    ///
+    /// The web's `WorktreesDialog` says the same sentences and pins them in its
+    /// own suite. The two dialogs are parallel implementations of one piece of
+    /// copy, and nothing but a test on each side keeps them in step: the TUI's
+    /// drifted away from the web's once already, silently, in the change that
+    /// introduced it.
+    #[test]
+    fn the_worktree_removal_copy_is_the_web_dialogs_copy() {
+        assert_eq!(
+            super::delete_worktree_title("free"),
+            "Delete the worktree for free?"
+        );
+        assert_eq!(
+            super::DELETE_WORKTREE_FORCED,
+            "This action cannot be undone: dux has no trash and removes the directory forcibly."
+        );
+        assert_eq!(
+            super::DELETE_WORKTREE_DIRTY,
+            "This worktree has uncommitted changes, and they go with it. Nothing in there that \
+             is not committed exists anywhere else."
+        );
+        assert_eq!(
+            super::DELETE_WORKTREE_DETACHED,
+            "This worktree is not on a branch, so there is no branch to keep or delete. Only \
+             the working directory is removed."
+        );
+        assert_eq!(
+            super::delete_worktree_branch_line("free", true),
+            "The branch \"free\" will be deleted with it, forcibly. Any commits on it that are \
+             not merged anywhere else go too."
+        );
+        assert_eq!(
+            super::delete_worktree_branch_line("free", false),
+            "The branch \"free\" is kept. Only the working directory is removed."
         );
     }
 
