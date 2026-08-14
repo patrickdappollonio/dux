@@ -139,6 +139,9 @@ enum PromptMouseTarget {
     BrowseProjectItem(usize),
     PickEditorItem(usize),
     PickProjectWorktreeItem(usize),
+    ManageWorktreeItem(usize),
+    ConfirmDeleteWorktreeCancel,
+    ConfirmDeleteWorktreeConfirm,
     PickProjectItem(usize),
     ChangeThemeItem(usize),
     ChangeAgentProviderItem(usize),
@@ -222,6 +225,12 @@ impl ButtonPressedTarget {
             PromptMouseTarget::ConfirmDeleteConfirm => {
                 Some(ButtonPressedTarget::ConfirmDeleteConfirm)
             }
+            PromptMouseTarget::ConfirmDeleteWorktreeCancel => {
+                Some(ButtonPressedTarget::ConfirmDeleteWorktreeCancel)
+            }
+            PromptMouseTarget::ConfirmDeleteWorktreeConfirm => {
+                Some(ButtonPressedTarget::ConfirmDeleteWorktreeConfirm)
+            }
             PromptMouseTarget::ConfirmDeleteTerminalCancel => {
                 Some(ButtonPressedTarget::ConfirmDeleteTerminalCancel)
             }
@@ -299,6 +308,7 @@ impl ButtonPressedTarget {
             | PromptMouseTarget::BrowseProjectItem(_)
             | PromptMouseTarget::PickEditorItem(_)
             | PromptMouseTarget::PickProjectWorktreeItem(_)
+            | PromptMouseTarget::ManageWorktreeItem(_)
             | PromptMouseTarget::PickProjectItem(_)
             | PromptMouseTarget::StartupCommandLogItem(_)
             | PromptMouseTarget::StartupCommandInput
@@ -1571,6 +1581,8 @@ impl App {
             | PromptState::ConfirmKillRunning(_)
             | PromptState::PickEditor { .. }
             | PromptState::PickProjectWorktree(_)
+            | PromptState::ManageWorktrees(_)
+            | PromptState::ConfirmDeleteWorktree(_)
             | PromptState::ChangeTheme(_)
             | PromptState::ChangeAgentProvider(_)
             | PromptState::ChangeDefaultProvider(_)
@@ -3615,6 +3627,91 @@ impl App {
             return Ok(false);
         }
 
+        if let PromptState::ManageWorktrees(prompt) = &mut self.prompt {
+            // A Picker: the vertical keys move the SELECTION over removable
+            // rows only, and the confirm key acts on it by opening the removal
+            // confirmation.
+            match self.bindings.lookup(&key, BindingScope::Palette) {
+                Some(Action::CloseOverlay) => self.prompt = PromptState::None,
+                Some(Action::MoveDown) => {
+                    let removable = removable_worktree_indices(&prompt.entries);
+                    if let Some(current) = prompt.selected
+                        && let Some(position) = removable.iter().position(|idx| *idx == current)
+                        && let Some(next) = removable.get(position + 1)
+                    {
+                        prompt.selected = Some(*next);
+                    } else if prompt.selected.is_none() {
+                        prompt.selected = removable.into_iter().next();
+                    }
+                }
+                Some(Action::MoveUp) => {
+                    let removable = removable_worktree_indices(&prompt.entries);
+                    if let Some(current) = prompt.selected
+                        && let Some(position) = removable.iter().position(|idx| *idx == current)
+                        && position > 0
+                    {
+                        prompt.selected = Some(removable[position - 1]);
+                    } else if prompt.selected.is_none() {
+                        prompt.selected = removable.into_iter().next();
+                    }
+                }
+                Some(Action::Confirm) => {
+                    if let Err(err) = self.confirm_delete_selected_worktree() {
+                        self.set_error(format!("{err:#}"));
+                    }
+                }
+                _ => {}
+            }
+            return Ok(false);
+        }
+
+        if let PromptState::ConfirmDeleteWorktree(prompt) = &mut self.prompt {
+            // The checkbox is a CONDITIONAL stop: a detached worktree has no
+            // branch to keep or delete, so the ring is Cancel <-> Delete.
+            let ring = [
+                (DeleteWorktreeFocus::Cancel, true),
+                (DeleteWorktreeFocus::Delete, true),
+                (DeleteWorktreeFocus::Checkbox, prompt.has_branch_checkbox()),
+            ];
+            match self.bindings.lookup(&key, BindingScope::Dialog) {
+                Some(Action::CloseOverlay) => {
+                    // Esc abandons the removal, and puts back the list it came
+                    // from rather than closing the manager outright.
+                    let previous = prompt.previous.clone();
+                    self.prompt = PromptState::ManageWorktrees(previous);
+                }
+                Some(Action::ToggleSelection) => {
+                    prompt.focus = next_focus(&ring, prompt.focus, !focus_move_is_reverse(key));
+                }
+                Some(Action::Confirm) => match prompt.focus {
+                    DeleteWorktreeFocus::Checkbox => {
+                        prompt.delete_branch = !prompt.delete_branch;
+                    }
+                    DeleteWorktreeFocus::Cancel => {
+                        return Ok(self.resolve_confirm_delete_worktree(false));
+                    }
+                    DeleteWorktreeFocus::Delete => {
+                        return Ok(self.resolve_confirm_delete_worktree(true));
+                    }
+                },
+                // Space activates the focused element, the universal
+                // convention.
+                _ if key.code == KeyCode::Char(' ') => match prompt.focus {
+                    DeleteWorktreeFocus::Checkbox => {
+                        prompt.delete_branch = !prompt.delete_branch;
+                    }
+                    DeleteWorktreeFocus::Cancel => {
+                        return Ok(self.resolve_confirm_delete_worktree(false));
+                    }
+                    DeleteWorktreeFocus::Delete => {
+                        return Ok(self.resolve_confirm_delete_worktree(true));
+                    }
+                },
+                _ => {}
+            }
+            return Ok(false);
+        }
+
         if let PromptState::PickProjectWorktree(prompt) = &mut self.prompt {
             match self.bindings.lookup(&key, BindingScope::Palette) {
                 Some(Action::CloseOverlay) => self.prompt = PromptState::None,
@@ -5445,6 +5542,28 @@ impl App {
                 ..
             } => Self::overlay_row_at(list, offset, items, column, row)
                 .map(PromptMouseTarget::PickProjectWorktreeItem),
+            OverlayMouseLayout::ManageWorktrees {
+                list,
+                items,
+                offset,
+                ..
+            } => Self::overlay_row_at(list, offset, items, column, row)
+                .map(PromptMouseTarget::ManageWorktreeItem),
+            OverlayMouseLayout::ConfirmDeleteWorktree {
+                cancel_button,
+                delete_button,
+                checkbox,
+            } => {
+                if checkbox.is_some_and(|checkbox| contains_point(checkbox.rect, column, row)) {
+                    checkbox.map(|checkbox| PromptMouseTarget::Checkbox(checkbox.id))
+                } else if contains_point(cancel_button, column, row) {
+                    Some(PromptMouseTarget::ConfirmDeleteWorktreeCancel)
+                } else if contains_point(delete_button, column, row) {
+                    Some(PromptMouseTarget::ConfirmDeleteWorktreeConfirm)
+                } else {
+                    None
+                }
+            }
             OverlayMouseLayout::PickProject {
                 input,
                 list,
@@ -6507,6 +6626,38 @@ impl App {
         }
     }
 
+    /// Land the manager's cursor on a clicked row, ignoring headers, empty
+    /// rows, and rows an agent holds (the cursor never rests on one).
+    fn set_manage_worktree_selection_from_visual_row(&mut self, visual_index: usize) {
+        let entry_index = match &self.prompt {
+            PromptState::ManageWorktrees(prompt) => {
+                let rows = manage_worktree_visual_rows(
+                    &prompt.entries,
+                    prompt.loading,
+                    prompt.error.as_deref(),
+                );
+                rows.get(visual_index).and_then(|row| match row {
+                    ManageWorktreeVisualRow::Entry(index)
+                        if prompt
+                            .entries
+                            .get(*index)
+                            .is_some_and(|entry| entry.is_removable()) =>
+                    {
+                        Some(*index)
+                    }
+                    _ => None,
+                })
+            }
+            _ => None,
+        };
+        let Some(entry_index) = entry_index else {
+            return;
+        };
+        if let PromptState::ManageWorktrees(prompt) = &mut self.prompt {
+            prompt.selected = Some(entry_index);
+        }
+    }
+
     fn set_project_worktree_selection_from_visual_row(&mut self, visual_index: usize) {
         let entry_index = match &self.prompt {
             PromptState::PickProjectWorktree(prompt) => {
@@ -7262,6 +7413,14 @@ impl App {
                     *focus = DeleteAgentFocus::Checkbox;
                 }
             }
+            OverlayCheckboxId::DeleteWorktreeBranch => {
+                if let PromptState::ConfirmDeleteWorktree(prompt) = &mut self.prompt
+                    && prompt.has_branch_checkbox()
+                {
+                    prompt.delete_branch = !prompt.delete_branch;
+                    prompt.focus = DeleteWorktreeFocus::Checkbox;
+                }
+            }
             OverlayCheckboxId::RenameSessionBranch => {
                 self.toggle_rename_session_branch();
             }
@@ -7580,6 +7739,14 @@ impl App {
                     self.set_error(format!("{err:#}"));
                 }
             }
+            PromptMouseTarget::ManageWorktreeItem(index) => {
+                let double_click =
+                    self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
+                self.set_manage_worktree_selection_from_visual_row(index);
+                if double_click && let Err(err) = self.confirm_delete_selected_worktree() {
+                    self.set_error(format!("{err:#}"));
+                }
+            }
             PromptMouseTarget::PickProjectItem(index) => {
                 let double_click =
                     self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
@@ -7745,6 +7912,8 @@ impl App {
             | PromptMouseTarget::ConfirmKillConfirm
             | PromptMouseTarget::ConfirmDeleteCancel
             | PromptMouseTarget::ConfirmDeleteConfirm
+            | PromptMouseTarget::ConfirmDeleteWorktreeCancel
+            | PromptMouseTarget::ConfirmDeleteWorktreeConfirm
             | PromptMouseTarget::ConfirmDeleteTerminalCancel
             | PromptMouseTarget::ConfirmDeleteTerminalConfirm
             | PromptMouseTarget::ConfirmCloseTabCancel
@@ -7833,6 +8002,12 @@ impl App {
             ButtonPressedTarget::ConfirmKillConfirm => self.resolve_confirm_kill_running(true),
             ButtonPressedTarget::ConfirmDeleteCancel => self.resolve_confirm_delete_agent(false),
             ButtonPressedTarget::ConfirmDeleteConfirm => self.resolve_confirm_delete_agent(true),
+            ButtonPressedTarget::ConfirmDeleteWorktreeCancel => {
+                self.resolve_confirm_delete_worktree(false)
+            }
+            ButtonPressedTarget::ConfirmDeleteWorktreeConfirm => {
+                self.resolve_confirm_delete_worktree(true)
+            }
             ButtonPressedTarget::ConfirmDeleteTerminalCancel => {
                 self.resolve_confirm_delete_terminal(false)
             }

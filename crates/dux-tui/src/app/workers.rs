@@ -491,6 +491,44 @@ impl App {
                 }
             }
 
+            EventReaction::ManageableWorktreesArrived {
+                project_id,
+                result,
+                status_op_id,
+            } => {
+                // Same three-way shape as the adopt picker's listing: the final
+                // depends on whether the manager is still open and matching,
+                // which the worker cannot see, so it is resolved here.
+                let mut outcome: Option<WorktreesFinalOutcome> = None;
+                if let PromptState::ManageWorktrees(prompt) = &mut self.prompt
+                    && prompt.project.id == project_id
+                {
+                    prompt.loading = false;
+                    match result {
+                        Ok(entries) => {
+                            prompt.selected =
+                                removable_worktree_indices(&entries).into_iter().next();
+                            prompt.entries = entries;
+                            prompt.error = None;
+                            outcome = Some(WorktreesFinalOutcome::Loaded);
+                        }
+                        Err(error) => {
+                            prompt.entries.clear();
+                            prompt.selected = None;
+                            prompt.error = Some(error.clone());
+                            outcome = Some(WorktreesFinalOutcome::Failed(error));
+                        }
+                    }
+                }
+                let outcome = outcome.unwrap_or(WorktreesFinalOutcome::Dismissed);
+                if let Some(id) = status_op_id
+                    && let Some(op) = self.pending_worktree_ops.remove(&id)
+                {
+                    let resolved = op.resolve(&outcome);
+                    self.apply_reaction(resolved.into_reaction());
+                }
+            }
+
             EventReaction::OpenNewAgentPromptForPr {
                 pr,
                 status_op_id: _,

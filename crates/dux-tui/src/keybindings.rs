@@ -207,6 +207,15 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         hint_contexts: &[],
     },
     BindingDef {
+        // Palette-only: opens the project chooser, then the worktree manager
+        // for the picked project. No default key.
+        action: Action::ManageWorktrees,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+    },
+    BindingDef {
         // Enters filter mode over the whole sidebar: the flat agent list and the
         // terminal list below it. `/` is free in the Left scope (it is only bound
         // in Files/Browser today, and scopes are independent). In filter mode
@@ -2668,6 +2677,7 @@ mod tests {
             "input-debugging",
             "kill-running",
             "manage-projects",
+            "manage-worktrees",
             "move-agent-bottom",
             "move-agent-down",
             "move-agent-top",

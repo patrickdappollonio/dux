@@ -2119,6 +2119,46 @@ impl Engine {
         );
     }
 
+    /// List the worktrees the MANAGER may act on for a project (managed, not
+    /// the project checkout, dirtiness included).
+    ///
+    /// Separate from [`Self::spawn_project_worktrees_worker`], which feeds the
+    /// adopt picker: that one wants the whole classification (external
+    /// worktrees and the project checkout included) and does not pay for a
+    /// `git status` per worktree.
+    pub fn spawn_manageable_worktrees_worker(
+        &mut self,
+        project: Project,
+        status_op_id: Option<String>,
+    ) {
+        let paths = self.paths.clone();
+        let sessions = self.sessions.clone();
+        let project_id_for_panic = project.id.clone();
+        let status_op_id_for_panic = status_op_id.clone();
+        self.spawn_background_worker(
+            BackgroundWorkerSpec {
+                label: format!("manageable-worktrees:{}", project.id),
+                in_flight_key: None,
+                panic_event: Some(Box::new(move |reason| {
+                    WorkerEvent::ManageableWorktreesReady {
+                        project_id: project_id_for_panic,
+                        result: Err(format!("Worktree-manager worker panicked: {reason}")),
+                        status_op_id: status_op_id_for_panic,
+                    }
+                })),
+            },
+            move |tx| {
+                let result =
+                    crate::worktree_manager::list_manageable_worktrees(&project, &paths, &sessions);
+                let _ = tx.send(WorkerEvent::ManageableWorktreesReady {
+                    project_id: project.id,
+                    result,
+                    status_op_id,
+                });
+            },
+        );
+    }
+
     pub fn spawn_project_branch_status_checks(&mut self) {
         // Not guarded against re-spawn: each project's check is a one-shot
         // background job (post per-branch events, exit). Re-running on a

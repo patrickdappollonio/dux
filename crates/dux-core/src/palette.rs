@@ -87,6 +87,16 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         // there is no equivalent app-menu entry.
     },
     PaletteCommand {
+        action: Action::ManageWorktrees,
+        name: "manage-worktrees",
+        description: "Remove a worktree dux manages for a project, and optionally its branch",
+        // Per-project: the web has this surface already, as the Worktrees
+        // dialog reached from a project row. Both are the MANUAL OVERRIDE for
+        // deleting a branch that deleting an agent will not touch, and both
+        // drive `dux_core::worktree_manager`. No app-menu entry: the command
+        // acts on one chosen project, not on the workspace.
+    },
+    PaletteCommand {
         action: Action::FilterAgents,
         name: "filter-agents",
         description: "Filter the agent list by name, branch, project, or provider",

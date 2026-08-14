@@ -430,6 +430,17 @@ pub enum WorkerEvent {
         /// don't drive a handler-resolved status.
         status_op_id: Option<String>,
     },
+    /// The worktree MANAGER's listing (managed worktrees plus dirtiness),
+    /// distinct from `ProjectWorktreesReady`, which feeds the adopt picker and
+    /// carries the whole classification without dirtiness.
+    ManageableWorktreesReady {
+        project_id: String,
+        result: Result<Vec<crate::worktree_manager::ManagedWorktree>, String>,
+        /// Correlation id for a TUI `HandlerStatusOp` whose final is resolved in
+        /// the completion handler (it depends on whether the manager is still
+        /// open, which the worker can't see).
+        status_op_id: Option<String>,
+    },
     ClipboardCopyCompleted {
         /// Human-readable success message shown in the status bar.
         label: String,

@@ -319,6 +319,9 @@ impl App {
                 }
             }
             ProjectChooserIntent::FromWorktree => self.begin_worktree_agent_for_project(project),
+            ProjectChooserIntent::ManageWorktrees => {
+                self.begin_manage_worktrees_for_project(project)
+            }
             ProjectChooserIntent::Manage => {
                 self.project_chooser_context = Some(project.id.clone());
                 self.prompt = PromptState::None;

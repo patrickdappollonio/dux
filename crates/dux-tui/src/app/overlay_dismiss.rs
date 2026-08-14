@@ -99,6 +99,7 @@ pub(super) fn outside_click_policy(prompt: &PromptState) -> OutsideClickPolicy {
         | PromptState::StartupCommandLogs(_)
         | PromptState::PickEditor { .. }
         | PromptState::PickProjectWorktree(_)
+        | PromptState::ManageWorktrees(_)
         | PromptState::PickProject { .. }
         | PromptState::ChangeAgentProvider(_)
         | PromptState::ChangeDefaultProvider(_)
@@ -120,7 +121,10 @@ pub(super) fn outside_click_policy(prompt: &PromptState) -> OutsideClickPolicy {
         | PromptState::ConfirmInitRepo { .. }
         | PromptState::ConfirmCreateInitialCommit { .. }
         | PromptState::ConfirmNonDefaultBranch { .. }
-        | PromptState::ConfirmUseExistingBranch { .. } => Cancel,
+        | PromptState::ConfirmUseExistingBranch { .. }
+        // The worktree-removal confirm cancels back to the manager it was
+        // raised from, exactly as its Esc arm does.
+        | PromptState::ConfirmDeleteWorktree(_) => Cancel,
 
         // `EditMacros` is three modals in one variant, so it answers three
         // ways. Its nested delete-confirm is a confirmation like any other and
@@ -226,6 +230,7 @@ impl App {
             | PromptState::DebugInput { .. }
             | PromptState::PickEditor { .. }
             | PromptState::PickProjectWorktree(_)
+            | PromptState::ManageWorktrees(_)
             | PromptState::PickProject { .. }
             | PromptState::ChangeAgentProvider(_)
             | PromptState::ChangeDefaultProvider(_)
@@ -285,6 +290,11 @@ impl App {
             // `false` return preserves.
             PromptState::ConfirmDeleteAgent { .. } => {
                 self.resolve_confirm_delete_agent(false);
+            }
+            // Steps back to the manager's list rather than closing the stack,
+            // the kill-running idiom.
+            PromptState::ConfirmDeleteWorktree(_) => {
+                self.resolve_confirm_delete_worktree(false);
             }
             PromptState::ConfirmDeleteTerminal { .. } => {
                 self.resolve_confirm_delete_terminal(false);

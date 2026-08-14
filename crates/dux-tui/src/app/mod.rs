@@ -1191,6 +1191,16 @@ pub(crate) struct StartupLogViewer {
     pub(crate) return_to: Option<Box<StartupCommandLogPrompt>>,
 }
 
+/// One rendered row of the worktree MANAGER's list. Same shape as the adopt
+/// picker's rows and deliberately a separate type: the two lists group by
+/// different questions (adoptable vs removable) and share no entries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ManageWorktreeVisualRow {
+    Header(&'static str),
+    Empty(String),
+    Entry(usize),
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum ProjectWorktreeVisualRow {
     Header(&'static str),
@@ -1220,6 +1230,8 @@ pub(crate) enum ProjectChooserIntent {
     FromWorktree,
     /// Make the chosen project the target for project-scoped palette commands.
     Manage,
+    /// Open the worktree manager for the chosen project.
+    ManageWorktrees,
     /// Spawn a project-owned terminal at the chosen project's repo root.
     ProjectTerminal,
 }
@@ -1233,6 +1245,7 @@ impl ProjectChooserIntent {
             ProjectChooserIntent::FromPrReference => "Which project is this PR in?",
             ProjectChooserIntent::FromWorktree => "New agent from worktree",
             ProjectChooserIntent::Manage => "Manage project",
+            ProjectChooserIntent::ManageWorktrees => "Manage worktrees in project",
             ProjectChooserIntent::ProjectTerminal => "New terminal in project",
         }
     }
@@ -1374,6 +1387,53 @@ pub(crate) struct PickProjectWorktreePrompt {
     pub(crate) loading: bool,
     pub(crate) selected: Option<usize>,
     pub(crate) error: Option<String>,
+}
+
+/// The worktree manager's list state.
+#[derive(Clone, Debug)]
+pub(crate) struct ManageWorktreesPrompt {
+    pub(crate) project: Project,
+    pub(crate) entries: Vec<dux_core::worktree_manager::ManagedWorktree>,
+    pub(crate) loading: bool,
+    /// Index into `entries`, restricted to removable rows. `None` while
+    /// loading, on failure, or when every listed worktree is held by an agent.
+    pub(crate) selected: Option<usize>,
+    pub(crate) error: Option<String>,
+}
+
+/// The manager's removal confirmation.
+///
+/// Carries the list it came from so Cancel and Esc put it back: abandoning a
+/// removal should not cost the user the listing they just waited for (the
+/// kill-running confirmation's idiom).
+#[derive(Clone, Debug)]
+pub(crate) struct ConfirmDeleteWorktreePrompt {
+    pub(crate) previous: ManageWorktreesPrompt,
+    pub(crate) project: Project,
+    pub(crate) path: PathBuf,
+    /// The branch the worktree is on, `None` when detached. Decides whether the
+    /// checkbox exists at all: there is no branch to keep or delete.
+    pub(crate) branch: Option<String>,
+    pub(crate) dirty: bool,
+    pub(crate) delete_branch: bool,
+    pub(crate) focus: DeleteWorktreeFocus,
+}
+
+impl ConfirmDeleteWorktreePrompt {
+    /// Whether the branch checkbox is rendered, which is also whether the focus
+    /// ring has three stops or two.
+    pub(crate) fn has_branch_checkbox(&self) -> bool {
+        self.branch.is_some()
+    }
+}
+
+/// Which control has focus in the worktree-removal confirmation. Mirrors
+/// [`DeleteAgentFocus`], including the conditional checkbox stop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DeleteWorktreeFocus {
+    Cancel,
+    Delete,
+    Checkbox,
 }
 
 #[derive(Clone, Debug)]
@@ -1557,6 +1617,12 @@ pub(crate) enum PromptState {
         list: SearchableList,
     },
     PickProjectWorktree(PickProjectWorktreePrompt),
+    /// The worktree manager: the manual override for removing a worktree, and
+    /// the branch with it. See [`super::worktree_manager`].
+    ManageWorktrees(ManageWorktreesPrompt),
+    /// The manager's removal confirmation. Boxed because it carries the list it
+    /// came from, and a big variant would inflate every `PromptState`.
+    ConfirmDeleteWorktree(Box<ConfirmDeleteWorktreePrompt>),
     KillRunning(KillRunningPrompt),
     ConfirmKillRunning(ConfirmKillRunningPrompt),
     ConfigReloadFailed {
@@ -1811,6 +1877,64 @@ pub(crate) fn project_worktree_visual_rows(
         );
     }
     rows
+}
+
+/// The manager's rows: removable worktrees first, then the ones an agent
+/// holds. Attached rows are LISTED rather than hidden, because a user looking
+/// for a directory they can see on disk must be told why it is not offered;
+/// they are not selectable, so the cursor cannot land on one.
+pub(crate) fn manage_worktree_visual_rows(
+    entries: &[dux_core::worktree_manager::ManagedWorktree],
+    loading: bool,
+    error: Option<&str>,
+) -> Vec<ManageWorktreeVisualRow> {
+    if loading {
+        return vec![ManageWorktreeVisualRow::Empty(
+            "Listing the worktrees dux manages...".to_string(),
+        )];
+    }
+    if let Some(error) = error {
+        return vec![ManageWorktreeVisualRow::Empty(format!(
+            "Could not list worktrees: {error}"
+        ))];
+    }
+    let removable = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| entry.is_removable())
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let held = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| !entry.is_removable())
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+
+    let mut rows = vec![ManageWorktreeVisualRow::Header("Removable Worktrees")];
+    if removable.is_empty() {
+        rows.push(ManageWorktreeVisualRow::Empty(
+            "No removable worktrees. dux manages nothing here that an agent is not holding."
+                .to_string(),
+        ));
+    } else {
+        rows.extend(removable.into_iter().map(ManageWorktreeVisualRow::Entry));
+    }
+    if !held.is_empty() {
+        rows.push(ManageWorktreeVisualRow::Header("Held By An Agent"));
+        rows.extend(held.into_iter().map(ManageWorktreeVisualRow::Entry));
+    }
+    rows
+}
+
+pub(crate) fn removable_worktree_indices(
+    entries: &[dux_core::worktree_manager::ManagedWorktree],
+) -> Vec<usize> {
+    entries
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| entry.is_removable().then_some(index))
+        .collect()
 }
 
 pub(crate) fn selectable_project_worktree_indices(entries: &[ProjectWorktreeEntry]) -> Vec<usize> {
@@ -2242,6 +2366,7 @@ impl OverlayMouseLayoutState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum OverlayCheckboxId {
     DeleteAgentWorktree,
+    DeleteWorktreeBranch,
     RenameSessionBranch,
     NonDefaultBranchCheckoutDefault,
     NameNewAgentRandomizedPetName,
@@ -2307,6 +2432,16 @@ pub(crate) enum OverlayMouseLayout {
         list: Rect,
         items: usize,
         offset: usize,
+    },
+    ManageWorktrees {
+        list: Rect,
+        items: usize,
+        offset: usize,
+    },
+    ConfirmDeleteWorktree {
+        cancel_button: Rect,
+        delete_button: Rect,
+        checkbox: Option<OverlayCheckbox>,
     },
     PickProject {
         /// The `/`-search field, published only while it is drawn, so a click
@@ -2668,6 +2803,7 @@ mod sessions;
 mod test_support;
 pub(crate) mod text_input;
 mod workers;
+mod worktree_manager;
 
 // Re-export the welcome wordmark so the server status screen
 // (`crate::server_screen`) can reuse it without making `render` public.
@@ -3798,6 +3934,7 @@ impl App {
             "new-agent-from-pr" => self.open_new_agent_from_pr_prompt(),
             "new-agent-from-worktree" => self.create_agent_from_existing_worktree(),
             "manage-projects" => self.open_project_chooser(ProjectChooserIntent::Manage),
+            "manage-worktrees" => self.manage_project_worktrees(),
             "fork-agent" => self.fork_selected_session(),
             "change-agent-provider" => self.open_change_agent_provider_prompt(),
             "new-agent-tab" => self.open_new_tab_provider_prompt(),

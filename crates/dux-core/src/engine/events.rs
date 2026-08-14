@@ -207,6 +207,14 @@ pub enum EventReaction {
         status_op_id: Option<String>,
     },
 
+    /// The worktree manager's listing arrived (TUI only; the web reads the
+    /// same core function through its REST route).
+    ManageableWorktreesArrived {
+        project_id: String,
+        result: Result<Vec<crate::worktree_manager::ManagedWorktree>, String>,
+        status_op_id: Option<String>,
+    },
+
     // -- PR / refs follow-ups. --
     OpenNewAgentPromptForPr {
         pr: Box<ResolvedPullRequest>,
@@ -2507,6 +2515,15 @@ impl Engine {
                 result,
                 status_op_id,
             },
+            WorkerEvent::ManageableWorktreesReady {
+                project_id,
+                result,
+                status_op_id,
+            } => EventReaction::ManageableWorktreesArrived {
+                project_id,
+                result,
+                status_op_id,
+            },
             WorkerEvent::WorktreeRemoveCompleted { session_id, result } => {
                 // Always clear the in-flight guard so the session is
                 // interactive again — whether we're about to remove it
@@ -3491,6 +3508,7 @@ mod tests {
             EventReaction::AgentLaunchFailedView(_) => "AgentLaunchFailedView",
             EventReaction::BrowserEntriesArrived { .. } => "BrowserEntriesArrived",
             EventReaction::ProjectWorktreesArrived { .. } => "ProjectWorktreesArrived",
+            EventReaction::ManageableWorktreesArrived { .. } => "ManageableWorktreesArrived",
             EventReaction::OpenNewAgentPromptForPr { .. } => "OpenNewAgentPromptForPr",
             EventReaction::WorktreeRemoveSucceeded { .. } => "WorktreeRemoveSucceeded",
             EventReaction::WorktreeRemoveFailed { .. } => "WorktreeRemoveFailed",

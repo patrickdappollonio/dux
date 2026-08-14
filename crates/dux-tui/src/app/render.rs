@@ -627,6 +627,20 @@ pub(super) fn delete_agent_checkbox_label(
     }
 }
 
+/// The worktree-manager checkbox label, naming the branch it would delete.
+///
+/// ONE function for the same reason [`delete_agent_checkbox_label`] is one: the
+/// label is rendered twice, once in the measurement pass that sizes the dialog
+/// and once in the render pass, and two copies would drift the dialog's height
+/// away from its contents. `None` means a detached worktree, which has no
+/// branch and therefore no checkbox; the caller must not render one.
+pub(super) fn delete_worktree_checkbox_label(branch: Option<&str>) -> String {
+    match branch {
+        Some(branch) => format!("Also delete the branch {branch}"),
+        None => String::new(),
+    }
+}
+
 fn wrapped_line_count(lines: &[Line<'_>], width: u16, trim: bool) -> u16 {
     if width == 0 {
         return 0;
@@ -5324,6 +5338,343 @@ impl App {
                     list: list_inner,
                     items: editors.len(),
                     offset: state.offset(),
+                };
+            }
+            PromptState::ManageWorktrees(prompt) => {
+                self.render_dim_overlay(frame);
+                let area = centered_rect(78, 58, frame.area());
+                self.clear_overlay_area(frame, area);
+
+                let confirm_key = self.bindings.label_for(Action::Confirm);
+                let close_key = self.bindings.label_for(Action::CloseOverlay);
+                let move_down = self.bindings.label_for(Action::MoveDown);
+                let move_up = self.bindings.label_for(Action::MoveUp);
+                let mut bottom_spans = vec![Span::raw(" ")];
+                bottom_spans.extend(self.theme.key_badge_default(&move_down));
+                bottom_spans.push(Span::styled(
+                    " down  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                bottom_spans.extend(self.theme.key_badge_default(&move_up));
+                bottom_spans.push(Span::styled(
+                    " up  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                bottom_spans.extend(self.theme.key_badge_default(&confirm_key));
+                bottom_spans.push(Span::styled(
+                    " remove  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                bottom_spans.extend(self.theme.key_badge_default(&close_key));
+                bottom_spans.push(Span::styled(
+                    " cancel",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+
+                let [details_area, list_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Length(4), Constraint::Min(6)])
+                    .areas(area);
+
+                let detail_lines = vec![
+                    Line::from(vec![
+                        Span::styled(" Project: ", Style::default().fg(self.theme.hint_desc_fg)),
+                        Span::styled(
+                            prompt.project.name.as_str(),
+                            Style::default()
+                                .fg(self.theme.text_fg)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]),
+                    Line::from(vec![
+                        Span::styled(" Repo: ", Style::default().fg(self.theme.hint_desc_fg)),
+                        Span::styled(
+                            prompt.project.path.as_str(),
+                            Style::default().fg(self.theme.text_fg),
+                        ),
+                    ]),
+                ];
+                Paragraph::new(detail_lines)
+                    .block(
+                        self.themed_overlay_block("Manage Worktrees")
+                            .title_bottom(Line::from(bottom_spans)),
+                    )
+                    .render(details_area, frame.buffer_mut());
+
+                let rows = manage_worktree_visual_rows(
+                    &prompt.entries,
+                    prompt.loading,
+                    prompt.error.as_deref(),
+                );
+                let path_col = prompt
+                    .entries
+                    .iter()
+                    .map(|entry| {
+                        entry
+                            .path
+                            .file_name()
+                            .map_or(0, |name| name.to_string_lossy().chars().count())
+                    })
+                    .max()
+                    .unwrap_or(8)
+                    .clamp(8, 24);
+                let items = rows
+                    .iter()
+                    .map(|row| match row {
+                        ManageWorktreeVisualRow::Header(label) => {
+                            ListItem::new(Line::from(Span::styled(
+                                format!(" {label}"),
+                                Style::default()
+                                    .fg(self.theme.help_section_header_fg)
+                                    .add_modifier(Modifier::BOLD),
+                            )))
+                        }
+                        ManageWorktreeVisualRow::Empty(message) => {
+                            ListItem::new(Line::from(Span::styled(
+                                format!("  {message}"),
+                                Style::default().fg(self.theme.hint_dim_desc_fg),
+                            )))
+                        }
+                        ManageWorktreeVisualRow::Entry(index) => {
+                            let entry = &prompt.entries[*index];
+                            let removable = entry.is_removable();
+                            let name_style = if removable {
+                                Style::default().fg(self.theme.text_fg)
+                            } else {
+                                Style::default().fg(self.theme.hint_dim_desc_fg)
+                            };
+                            let branch_label_style = Style::default().fg(if removable {
+                                self.theme.branch_fg
+                            } else {
+                                self.theme.hint_dim_desc_fg
+                            });
+                            let branch_value_style = Style::default().fg(if removable {
+                                self.theme.hint_desc_fg
+                            } else {
+                                self.theme.hint_dim_desc_fg
+                            });
+                            // Dirtiness and the holding agent are the two facts
+                            // the web's list carries too, so the two managers
+                            // show the same thing.
+                            let mut suffix_spans = Vec::new();
+                            if entry.dirty {
+                                suffix_spans.push(Span::styled(
+                                    "  uncommitted changes",
+                                    Style::default().fg(self.theme.warning_fg),
+                                ));
+                            }
+                            if !removable {
+                                suffix_spans.push(Span::styled(
+                                    "  held by an agent",
+                                    Style::default().fg(self.theme.hint_dim_desc_fg),
+                                ));
+                            }
+                            let name = git::ellipsize_middle(
+                                entry
+                                    .path
+                                    .file_name()
+                                    .map(|name| name.to_string_lossy().to_string())
+                                    .unwrap_or_else(|| entry.path.display().to_string())
+                                    .as_str(),
+                                path_col,
+                            );
+                            let mut spans = vec![
+                                Span::styled(
+                                    format!("  {:path_col$}", name),
+                                    name_style.add_modifier(Modifier::BOLD),
+                                ),
+                                Span::styled("  branch: ", branch_label_style),
+                                Span::styled(entry.label.as_str(), branch_value_style),
+                            ];
+                            spans.extend(suffix_spans);
+                            ListItem::new(Line::from(spans))
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let selected_visual = prompt.selected.and_then(|selected| {
+                    rows.iter().position(|row| {
+                        matches!(row, ManageWorktreeVisualRow::Entry(index) if *index == selected)
+                    })
+                });
+                let mut state = ListState::default().with_selected(selected_visual);
+                let list_block = Block::default()
+                    .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+                    .border_style(Style::default().fg(self.theme.overlay_border))
+                    .style(Style::default().bg(self.theme.overlay_bg));
+                let list_inner = list_block.inner(list_area);
+                StatefulWidget::render(
+                    List::new(items)
+                        .block(list_block)
+                        .highlight_style(self.theme.selection_style()),
+                    list_area,
+                    frame.buffer_mut(),
+                    &mut state,
+                );
+                self.overlay_layout.active = OverlayMouseLayout::ManageWorktrees {
+                    list: list_inner,
+                    items: rows.len(),
+                    offset: state.offset(),
+                };
+            }
+            PromptState::ConfirmDeleteWorktree(prompt) => {
+                self.render_dim_overlay(frame);
+                let dialog_width = 60.min(frame.area().width.max(1));
+                let inner_width = dialog_width.saturating_sub(2);
+                let has_checkbox = prompt.has_branch_checkbox();
+                let checkbox_label = delete_worktree_checkbox_label(prompt.branch.as_deref());
+                let checkbox_height = if has_checkbox {
+                    let state = if prompt.focus == DeleteWorktreeFocus::Checkbox {
+                        CheckboxState::Focused
+                    } else {
+                        CheckboxState::Normal
+                    };
+                    let checkbox = Checkbox::new(checkbox_label.as_str())
+                        .checked(prompt.delete_branch)
+                        .state(state);
+                    checkbox
+                        .layout(
+                            inner_width,
+                            checkbox.marker_style(Style::default()),
+                            checkbox.label_style(Style::default()),
+                        )
+                        .height
+                } else {
+                    0
+                };
+
+                // The copy matches the web dialog's, sentence for sentence: the
+                // forcible removal, the uncommitted-work warning when dirty,
+                // and what happens to the branch.
+                let mut body_lines = vec![
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::raw(" Remove "),
+                        Span::styled(
+                            prompt.path.display().to_string(),
+                            Style::default().add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw("?"),
+                    ]),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        " It is removed from disk forcibly. dux has no trash, so this cannot be undone.",
+                        Style::default().fg(self.theme.warning_fg),
+                    )),
+                ];
+                if prompt.dirty {
+                    body_lines.push(Line::from(Span::styled(
+                        " This worktree has uncommitted changes, and they go with it.",
+                        Style::default().fg(self.theme.warning_fg),
+                    )));
+                }
+                match (prompt.branch.as_deref(), prompt.delete_branch) {
+                    (None, _) => body_lines.push(Line::from(Span::styled(
+                        " This worktree is not on a branch, so only the working directory is removed.",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    ))),
+                    (Some(branch), true) => body_lines.push(Line::from(Span::styled(
+                        format!(
+                            " The branch \"{branch}\" is deleted with it, forcibly. Any commits on it that are not merged anywhere else go too."
+                        ),
+                        Style::default().fg(self.theme.warning_fg),
+                    ))),
+                    (Some(branch), false) => body_lines.push(Line::from(Span::styled(
+                        format!(" The branch \"{branch}\" is kept. Only the working directory is removed."),
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    ))),
+                }
+                let body_height = wrapped_line_count(&body_lines, inner_width, false);
+                let checkbox_spacing = u16::from(has_checkbox);
+                let area = centered_rect_exact(
+                    dialog_width,
+                    2 + body_height + checkbox_spacing + checkbox_height + 1 + 3,
+                    frame.area(),
+                );
+                self.clear_overlay_area(frame, area);
+                let outer = self.themed_overlay_block("Remove Worktree");
+                let inner = outer.inner(area);
+                outer.render(area, frame.buffer_mut());
+
+                let [body_area, _, checkbox_area, _, buttons_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(body_height),
+                        Constraint::Length(checkbox_spacing),
+                        Constraint::Length(checkbox_height),
+                        // Misclick-safe spacing: the checkbox never sits flush
+                        // against the destructive button.
+                        Constraint::Length(1),
+                        Constraint::Length(3),
+                    ])
+                    .areas(inner);
+
+                Paragraph::new(body_lines)
+                    .wrap(Wrap { trim: false })
+                    .render(body_area, frame.buffer_mut());
+
+                let checkbox_rect = if has_checkbox {
+                    let checkbox_state = if prompt.focus == DeleteWorktreeFocus::Checkbox {
+                        CheckboxState::Focused
+                    } else {
+                        CheckboxState::Normal
+                    };
+                    let (rect, _) = self.render_overlay_checkbox(
+                        frame,
+                        checkbox_area,
+                        checkbox_label.as_str(),
+                        prompt.delete_branch,
+                        checkbox_state,
+                        None,
+                    );
+                    Some(OverlayCheckbox {
+                        id: OverlayCheckboxId::DeleteWorktreeBranch,
+                        rect,
+                    })
+                } else {
+                    None
+                };
+
+                let btn_width = 18u16;
+                let gap = 2u16;
+                let total = btn_width * 2 + gap;
+                let left_offset = buttons_area.width.saturating_sub(total) / 2;
+                let cancel_area = Rect {
+                    x: buttons_area.x + left_offset,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+                let delete_area = Rect {
+                    x: cancel_area.x + btn_width + gap,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+
+                Button::new("Cancel")
+                    .kind(ButtonKind::Confirm)
+                    .state(button_state_for(
+                        ButtonPressedTarget::ConfirmDeleteWorktreeCancel,
+                        self.pressed_button,
+                        prompt.focus == DeleteWorktreeFocus::Cancel,
+                        true,
+                    ))
+                    .render(frame, cancel_area, &self.theme);
+
+                Button::new("Remove")
+                    .kind(ButtonKind::Danger)
+                    .state(button_state_for(
+                        ButtonPressedTarget::ConfirmDeleteWorktreeConfirm,
+                        self.pressed_button,
+                        prompt.focus == DeleteWorktreeFocus::Delete,
+                        true,
+                    ))
+                    .render(frame, delete_area, &self.theme);
+
+                self.overlay_layout.active = OverlayMouseLayout::ConfirmDeleteWorktree {
+                    cancel_button: cancel_area,
+                    delete_button: delete_area,
+                    checkbox: checkbox_rect,
                 };
             }
             PromptState::PickProjectWorktree(prompt) => {
@@ -16440,6 +16791,74 @@ mod tests {
             screen.contains("Branch \"main\" came with this worktree and is")
                 && screen.contains("kept."),
             "an adopted branch came with the worktree:\n{screen}"
+        );
+    }
+
+    /// The worktree manager's removal confirmation says what the web dialog
+    /// says: forcible removal, the uncommitted-work sentence when dirty, and
+    /// what happens to the branch, with the checkbox naming it.
+    #[test]
+    fn the_worktree_removal_dialog_warns_and_names_the_branch() {
+        fn confirm(
+            app: &App,
+            branch: Option<&str>,
+            dirty: bool,
+            delete_branch: bool,
+        ) -> PromptState {
+            let project = app.engine.projects[0].clone();
+            PromptState::ConfirmDeleteWorktree(Box::new(super::ConfirmDeleteWorktreePrompt {
+                previous: super::ManageWorktreesPrompt {
+                    project: project.clone(),
+                    entries: Vec::new(),
+                    loading: false,
+                    selected: None,
+                    error: None,
+                },
+                project,
+                path: std::path::PathBuf::from("/tmp/worktrees/demo/free"),
+                branch: branch.map(str::to_string),
+                dirty,
+                delete_branch,
+                focus: super::DeleteWorktreeFocus::Cancel,
+            }))
+        }
+
+        let mut app = test_app(default_bindings());
+        app.prompt = confirm(&app, Some("free"), false, true);
+        let screen = rendered_screen(&mut app);
+        assert!(
+            screen.contains("forcibly") && screen.contains("no trash"),
+            "the removal is forced and cannot be undone:\n{screen}"
+        );
+        assert!(
+            screen.contains("Also delete the branch free"),
+            "the checkbox names the branch:\n{screen}"
+        );
+        assert!(
+            !screen.contains("uncommitted changes"),
+            "a clean worktree gets no dirty sentence:\n{screen}"
+        );
+
+        app.prompt = confirm(&app, Some("free"), true, false);
+        let screen = rendered_screen(&mut app);
+        assert!(
+            screen.contains("uncommitted changes"),
+            "a dirty worktree says its work goes with it:\n{screen}"
+        );
+        assert!(
+            screen.contains("is kept"),
+            "with the checkbox off the branch survives, and the copy says so:\n{screen}"
+        );
+
+        app.prompt = confirm(&app, None, false, true);
+        let screen = rendered_screen(&mut app);
+        assert!(
+            !screen.contains("Also delete the branch"),
+            "a detached worktree offers no branch checkbox:\n{screen}"
+        );
+        assert!(
+            screen.contains("not on a branch"),
+            "and says why:\n{screen}"
         );
     }
 

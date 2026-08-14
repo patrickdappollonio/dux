@@ -244,6 +244,9 @@ pub(crate) fn modal_spec(prompt: &PromptState) -> Option<ModalSpec> {
         | PromptState::ConfirmCreateInitialCommit { .. }
         | PromptState::ConfirmNonDefaultBranch { .. }
         | PromptState::ConfirmUseExistingBranch { .. }
+        // Prose, a conditional checkbox and a Cancel/Delete pair; horizontal
+        // keys move focus and Space acts on what has it.
+        | PromptState::ConfirmDeleteWorktree(_)
         | PromptState::ConfigReloadFailed { .. } => ModalSpec::new(Confirm, false, true),
 
         // ── Picker ──────────────────────────────────────────────────────
@@ -265,6 +268,10 @@ pub(crate) fn modal_spec(prompt: &PromptState) -> Option<ModalSpec> {
         | PromptState::PickEditor { .. }
         | PromptState::PickProject { .. }
         | PromptState::PickProjectWorktree(_)
+        // The worktree manager: rows with a selection cursor over the
+        // REMOVABLE worktrees, and a confirm key that acts on the selection by
+        // raising the removal confirmation. No buttons, so no confirm button.
+        | PromptState::ManageWorktrees(_)
         | PromptState::ChangeTheme(_)
         | PromptState::ChangeAgentProvider(_)
         | PromptState::ChangeDefaultProvider(_)
@@ -345,6 +352,8 @@ pub(crate) fn prompt_text_inputs(prompt: &PromptState) -> Vec<&TextInput> {
         | PromptState::ConfirmUseExistingBranch { .. }
         | PromptState::PickEditor { .. }
         | PromptState::PickProjectWorktree(_)
+        | PromptState::ManageWorktrees(_)
+        | PromptState::ConfirmDeleteWorktree(_)
         | PromptState::ChangeTheme(_)
         | PromptState::ChangeAgentProvider(_)
         | PromptState::ChangeDefaultProvider(_)
@@ -404,6 +413,7 @@ pub(crate) fn layout_publishes_confirm_button(layout: &OverlayMouseLayout) -> bo
         | OverlayMouseLayout::FirstLoad { .. }
         | OverlayMouseLayout::PickEditor { .. }
         | OverlayMouseLayout::PickProjectWorktree { .. }
+        | OverlayMouseLayout::ManageWorktrees { .. }
         | OverlayMouseLayout::PickProject { .. }
         | OverlayMouseLayout::ChangeTheme { .. }
         | OverlayMouseLayout::EditMacroList { .. }
@@ -423,6 +433,7 @@ pub(crate) fn layout_publishes_confirm_button(layout: &OverlayMouseLayout) -> bo
         OverlayMouseLayout::KillRunning { .. }
         | OverlayMouseLayout::ConfirmKillRunning { .. }
         | OverlayMouseLayout::ConfirmDeleteAgent { .. }
+        | OverlayMouseLayout::ConfirmDeleteWorktree { .. }
         | OverlayMouseLayout::ConfirmDeleteTerminal { .. }
         | OverlayMouseLayout::ConfirmCloseTab { .. }
         | OverlayMouseLayout::ConfirmDeleteMacro { .. }
@@ -727,11 +738,12 @@ mod tests {
         AgentInfoPrompt, AgentInfoTone, ChangeAgentProviderMode, ChangeAgentProviderOption,
         ChangeAgentProviderPrompt, ChangeDefaultProviderOption, ChangeDefaultProviderPrompt,
         ChangeProjectDefaultProviderOption, ChangeProjectDefaultProviderPrompt, ChangeThemePrompt,
-        ConfigReloadFailedFocus, ConfigureFieldFocus, ConfirmFocus, ConfirmKillRunningPrompt,
-        ConfirmNonDefaultBranchFocus, DeleteAgentFocus, KillRunningAction, KillRunningFocus,
-        KillRunningPrompt, MacroEditFocus, MacroEditState, NameNewAgentFocus, PendingMacroDelete,
-        PickProjectWorktreePrompt, ProjectChooserIntent, RenameSessionFocus, SearchableList,
-        StartupCommandLogFocus, StartupCommandLogPrompt,
+        ConfigReloadFailedFocus, ConfigureFieldFocus, ConfirmDeleteWorktreePrompt, ConfirmFocus,
+        ConfirmKillRunningPrompt, ConfirmNonDefaultBranchFocus, DeleteAgentFocus,
+        DeleteWorktreeFocus, KillRunningAction, KillRunningFocus, KillRunningPrompt,
+        MacroEditFocus, MacroEditState, ManageWorktreesPrompt, NameNewAgentFocus,
+        PendingMacroDelete, PickProjectWorktreePrompt, ProjectChooserIntent, RenameSessionFocus,
+        SearchableList, StartupCommandLogFocus, StartupCommandLogPrompt,
     };
     use crate::model::ProviderKind;
     use dux_core::worker::{BranchWarningKind, CreateAgentRequest, NonDefaultBranchAction};
@@ -777,6 +789,16 @@ mod tests {
     ///
     /// `EditMacros` appears THREE times, once per state, because it is one
     /// variant serving three modals - see the note on `modal_spec`.
+    fn manage_worktrees_prompt(project: &crate::model::Project) -> ManageWorktreesPrompt {
+        ManageWorktreesPrompt {
+            project: project.clone(),
+            entries: Vec::new(),
+            loading: false,
+            selected: None,
+            error: None,
+        }
+    }
+
     fn every_prompt(app: &App) -> Vec<(&'static str, PromptState)> {
         let project = app.engine.projects[0].clone();
         vec![
@@ -944,6 +966,22 @@ mod tests {
                     selected: None,
                     error: None,
                 }),
+            ),
+            (
+                "ManageWorktrees",
+                PromptState::ManageWorktrees(manage_worktrees_prompt(&project)),
+            ),
+            (
+                "ConfirmDeleteWorktree",
+                PromptState::ConfirmDeleteWorktree(Box::new(ConfirmDeleteWorktreePrompt {
+                    previous: manage_worktrees_prompt(&project),
+                    project: project.clone(),
+                    path: PathBuf::from("/tmp/worktrees/demo/free"),
+                    branch: Some("free".to_string()),
+                    dirty: false,
+                    delete_branch: true,
+                    focus: DeleteWorktreeFocus::Cancel,
+                })),
             ),
             (
                 "KillRunning",

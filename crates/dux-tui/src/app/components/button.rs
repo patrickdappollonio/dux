@@ -78,6 +78,10 @@ pub(crate) enum ButtonPressedTarget {
     ConfirmKillConfirm,
     ConfirmDeleteCancel,
     ConfirmDeleteConfirm,
+    /// The worktree MANAGER's removal confirmation (distinct from the agent
+    /// delete above: it removes a worktree nobody holds).
+    ConfirmDeleteWorktreeCancel,
+    ConfirmDeleteWorktreeConfirm,
     ConfirmDeleteTerminalCancel,
     ConfirmDeleteTerminalConfirm,
     ConfirmCloseTabCancel,

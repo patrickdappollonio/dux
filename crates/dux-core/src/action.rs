@@ -19,6 +19,7 @@ pub enum Action {
     NewAgentFromPr,
     NewAgentFromWorktree,
     ManageProjects,
+    ManageWorktrees,
     FilterAgents,
     ForkAgent,
     ChangeAgentProvider,
@@ -198,6 +199,7 @@ impl Action {
             Action::NewAgentFromPr => "new_agent_from_pr",
             Action::NewAgentFromWorktree => "new_agent_from_worktree",
             Action::ManageProjects => "manage_projects",
+            Action::ManageWorktrees => "manage_worktrees",
             Action::FilterAgents => "filter_agents",
             Action::ForkAgent => "fork_agent",
             Action::ChangeAgentProvider => "change_agent_provider",
@@ -332,6 +334,9 @@ impl Action {
             Action::NewAgentFromWorktree => "Create a new agent from an existing git worktree.",
             Action::ManageProjects => {
                 "Choose a project to target for project-scoped palette actions."
+            }
+            Action::ManageWorktrees => {
+                "Remove a worktree dux manages for a project, and optionally its branch."
             }
             Action::FilterAgents => "Filter the agent list by name, branch, project, or provider.",
             Action::ForkAgent => "Fork the selected agent into a fresh worktree and session.",
@@ -568,7 +573,7 @@ impl Action {
             | Action::ReconnectAgent
             | Action::DeleteSession
             | Action::DeleteTerminal => Some("Projects pane"),
-            Action::NewAgentFromPr | Action::ManageProjects => None,
+            Action::NewAgentFromPr | Action::ManageProjects | Action::ManageWorktrees => None,
             Action::ExitInteractive
             | Action::OpenMacroBar
             | Action::OpenCurrentPullRequest
