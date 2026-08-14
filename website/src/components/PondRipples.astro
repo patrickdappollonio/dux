@@ -157,14 +157,16 @@
 
     host.addEventListener("pointerdown", (event) => drop(event, SPLASH_AMP), { passive: true });
 
-    window.addEventListener(
-      "resize",
-      () => {
-        measure();
-        wake();
-      },
-      { passive: true },
-    );
+    // A ResizeObserver on the canvas rather than a window resize listener:
+    // the hero's height also changes without any window resize (the web font
+    // loading and reflowing the headline is the realistic case), and a stale
+    // backing store would skew where the glows land against the grid. The
+    // observer covers window resizes too, so it replaces the listener rather
+    // than joining it.
+    new ResizeObserver(() => {
+      measure();
+      wake();
+    }).observe(canvas);
 
     document.addEventListener("visibilitychange", () => {
       if (!document.hidden) wake();
