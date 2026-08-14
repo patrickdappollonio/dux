@@ -3305,22 +3305,24 @@ impl Engine {
                         let pending = WireStatus::from_update(&op.pending_status());
                         self.pending_delete_ops_web
                             .insert(view.session_id.clone(), op);
-                        // Vanish the session now — its PTY + terminals are already
-                        // SIGTERMed and held for a background reap. update_status
-                        // is false so the busy op above stays the only status
-                        // until the deferred worktree removal completes.
-                        let _ = self.apply(Command::FinishDeleteSession {
-                            session_id: view.session_id.clone(),
-                            removal: WorktreeRemoval::Performed {
-                                // Placeholder: the session is vanished NOW and the
-                                // real branch report arrives with the deferred
-                                // removal, which authors the final message.
-                                branches: crate::engine::RemovedBranches::Deleted(
-                                    crate::git::RemoveResult::default(),
-                                ),
-                            },
-                            update_status: false,
-                        });
+                        // Vanish the session now: its PTY and terminals are
+                        // already SIGTERMed and held for a background reap.
+                        //
+                        // The engine method, not `Command::FinishDeleteSession`,
+                        // because this path has no removal to report. The
+                        // command carries a `WorktreeRemoval` describing what
+                        // happened to the branches, and here nothing has
+                        // happened to them yet: the real report arrives with
+                        // the deferred removal, which authors the final
+                        // message. Going through the command meant
+                        // manufacturing a `Deleted(RemoveResult::default())`
+                        // that says "the branch was deleted, and no branches
+                        // were deleted", relying on the whole reaction being
+                        // dropped for that never to be read. The command adds
+                        // nothing else here (it wraps this exact call into a
+                        // view for the surfaces), so the honest thing is to
+                        // call it.
+                        let _ = self.finish_delete_session(&view.session_id);
                         vec![pending]
                     }
                     BeginDeleteSessionOutcome::Inline { removal } => {

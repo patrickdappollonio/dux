@@ -297,9 +297,12 @@ an agent is holding are listed there too, marked and unselectable, because
 removing one from under a live agent leaves a broken session; delete the agent
 instead.
 
-Either manager is the manual override for deleting any branch: deleting an
-agent only ever deletes branches dux created, so when you want a branch gone
-that dux is deliberately keeping, this is where you say so. The
+Either manager is the manual override for deleting a branch dux is keeping,
+for as long as its worktree is still there: deleting an agent only ever
+deletes branches dux created, so when you want a branch gone that dux is
+deliberately keeping, this is where you say so. Once the worktree itself is
+gone the manager can no longer reach the branch, and `git branch -D` is the
+way. The
 project picker in front of it labels each project with how many worktrees it
 has, so an empty project is a choice rather than a surprise, and the dialog
 offers **Back** to return to that list.

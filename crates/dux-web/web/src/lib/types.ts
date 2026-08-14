@@ -165,7 +165,10 @@ export interface SessionView {
    * server omits it, and an older server is one that deletes the branch either
    * way, so a missing value reads as "created": the copy must describe what the
    * server it is talking to will actually do. */
-  branch_provenance?: "created" | "attached" | "adopted"
+  // "unknown" is what a server sends for a provenance IT could not recognize
+  // either (a value written by a newer dux). Absent means a server too old to
+  // have the field at all, which is a server that deletes the branch.
+  branch_provenance?: "created" | "attached" | "adopted" | "unknown"
   /** The branch this agent was forked from (the leading branch at creation). */
   source_branch: string
   worktree_path: string

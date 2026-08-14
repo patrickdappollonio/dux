@@ -68,9 +68,12 @@ export function DeleteSessionDialog() {
             onCheckedChange={setDeleteWorktree}
           />
           <label htmlFor="delete-worktree" className="text-sm">
-            {/* The branch is named because this path deletes it: the agent's
-               current branch and, when it drifted, the one it was born on. The
-               TUI's checkbox has always said so. */}
+            {/* Two labels, because the checkbox means two different things.
+               When dux created the branch it goes with the worktree, and the
+               label says so; when the branch is the user's, dux keeps it and
+               the label must not promise a deletion that will not happen. The
+               TUI's checkbox makes the same distinction, from the same
+               provenance. */}
             {branchIsKept
               ? "Also delete the git worktree, keeping its branch (irreversible)"
               : "Also delete the git worktree and its branch (irreversible)"}
@@ -80,9 +83,15 @@ export function DeleteSessionDialog() {
           <p className="text-sm text-muted-foreground">
             The branch &ldquo;{session?.initial_branch || session?.branch_name}
             &rdquo;{" "}
+            {/* One clause per provenance, and the unrecognized one gets its
+               own rather than borrowing "existed before this agent": that is
+               a claim about a branch nothing here can make. Mirrors
+               `BranchProvenance::kept_reason`. */}
             {provenance === "adopted"
               ? "came with the worktree this agent adopted"
-              : "existed before this agent"}
+              : provenance === "unknown"
+                ? "is not a branch dux created"
+                : "existed before this agent"}
             , so dux keeps it.
           </p>
         )}

@@ -120,6 +120,31 @@ describe("DeleteSessionDialog", () => {
     ).toBeTruthy()
   })
 
+  // A provenance a NEWER server writes and this page has never heard of. The
+  // branch survives, so the dialog must say so, but it must not borrow one of
+  // the sentences it does know and assert something nobody here can know.
+  it("says only what is known about an unrecognized provenance", () => {
+    seed("s5", [
+      {
+        id: "s5",
+        title: "from the future",
+        branch_name: "mystery",
+        initial_branch: "mystery",
+        branch_provenance: "unknown",
+      },
+    ])
+    render(<DeleteSessionDialog />)
+    expect(
+      screen.getByRole("checkbox", {
+        name: "Also delete the git worktree, keeping its branch (irreversible)",
+      }),
+    ).toBeTruthy()
+    expect(
+      screen.getByText(/is not a branch dux created, so dux keeps it/),
+    ).toBeTruthy()
+    expect(screen.queryByText(/existed before this agent/)).toBeNull()
+  })
+
   it("keeps the branch-deleting copy for a server too old to say", () => {
     // An older server omits the field and deletes the branch either way, so the
     // absent case must not quietly promise the safer behavior.

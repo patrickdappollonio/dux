@@ -6831,10 +6831,13 @@ impl App {
                         } else {
                             initial_branch.as_str()
                         };
-                        let reason = match branch_provenance {
-                            dux_core::model::BranchProvenance::Adopted => "came with this worktree",
-                            _ => "existed before this agent",
-                        };
+                        // The shared reason, never a second wording of it:
+                        // this dialog had its own shorter copy, which drifted
+                        // from the status line's on the adopted case and would
+                        // have claimed "existed before this agent" of a
+                        // provenance a future dux writes and this one cannot
+                        // read.
+                        let reason = branch_provenance.kept_reason();
                         body_lines.push(Line::from(Span::styled(
                             format!(" Branch \"{kept}\" {reason} and is kept."),
                             Style::default().fg(self.theme.hint_desc_fg),
@@ -16831,7 +16834,7 @@ mod tests {
         );
         let screen = rendered_screen(&mut app);
         assert!(
-            screen.contains("Branch \"main\" came with this worktree and is")
+            screen.contains("Branch \"main\" came with the worktree this")
                 && screen.contains("kept."),
             "an adopted branch came with the worktree:\n{screen}"
         );

@@ -124,17 +124,21 @@ impl SessionStatus {
 /// it. Recorded once at creation and never mutated (see the storage layer's
 /// INSERT-but-not-UPDATE handling).
 ///
-/// Three variants rather than a bool because the delete copy wants the
+/// Separate variants rather than a bool because the delete copy wants the
 /// distinction: "existed before this agent" and "came with the worktree this
 /// agent adopted" are different sentences. Local-vs-remote attach is
 /// deliberately NOT distinguished: the delete semantics are identical and the
 /// preflight's branch location never reaches the create job.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+///
+/// There is deliberately no `Default`. The only sensible default would be
+/// `CreatedByDux`, and a struct-update literal that silently filled it in
+/// would be a force-delete of a user's branch decided by nobody. Every
+/// construction site says which one it means.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BranchProvenance {
     /// dux created the branch for this agent (a fresh create, a fork, or a PR
     /// arm that fetched the head into a new local branch). Deleting the agent
     /// may delete the branch: nothing existed before dux made it.
-    #[default]
     CreatedByDux,
     /// The agent was attached to a branch that already existed. The branch is
     /// the user's; deleting the agent keeps it.
@@ -142,6 +146,13 @@ pub enum BranchProvenance {
     /// The agent was adopted from a worktree that already existed, branch and
     /// all. The branch is the user's; deleting the agent keeps it.
     Adopted,
+    /// The stored value is one this binary has never heard of, written by a
+    /// newer dux. Treated exactly like a user's branch for every DECISION
+    /// (nothing is deleted on a guess), and given its own copy, because
+    /// folding it into `AttachedExisting` made the delete dialog assert
+    /// "existed before this agent" about a branch nobody here can say
+    /// anything about.
+    Unknown,
 }
 
 impl BranchProvenance {
@@ -150,6 +161,11 @@ impl BranchProvenance {
             Self::CreatedByDux => "created",
             Self::AttachedExisting => "attached",
             Self::Adopted => "adopted",
+            // Round-tripping this would rewrite a newer dux's value with a
+            // word it does not know either. It never happens: provenance is
+            // written on INSERT only, and an INSERT is a session this binary
+            // just created, which always has a real variant.
+            Self::Unknown => "unknown",
         }
     }
 
@@ -165,7 +181,8 @@ impl BranchProvenance {
         match value {
             "created" => Self::CreatedByDux,
             "adopted" => Self::Adopted,
-            _ => Self::AttachedExisting,
+            "attached" => Self::AttachedExisting,
+            _ => Self::Unknown,
         }
     }
 
@@ -176,7 +193,11 @@ impl BranchProvenance {
 
     /// Why this agent's pre-existing branch is not dux's to delete, as a
     /// sentence fragment following the branch name.
-    fn kept_reason(&self) -> &'static str {
+    ///
+    /// Public because every surface that has to write that sentence must write
+    /// THIS one: the TUI's delete-agent dialog hand-rolled a second, shorter
+    /// wording of it and drifted on the adopted case.
+    pub fn kept_reason(&self) -> &'static str {
         match self {
             // Never rendered: a created-by-dux agent's branches are deleted, so
             // no keep sentence is written for it. Answered anyway so the match
@@ -184,6 +205,10 @@ impl BranchProvenance {
             Self::CreatedByDux => "was created by dux",
             Self::AttachedExisting => "existed before this agent",
             Self::Adopted => "came with the worktree this agent adopted",
+            // The only true thing this binary can say about a value it does
+            // not recognize. It is enough to justify the branch surviving,
+            // which is the whole job of this sentence.
+            Self::Unknown => "is not a branch dux created",
         }
     }
 
@@ -588,6 +613,30 @@ mod tests {
             updated_at: now,
             last_focused_tab: last_focused_tab.map(|s| s.to_string()),
         }
+    }
+
+    /// An unrecognized stored value is a variant this binary has never heard
+    /// of, written by a newer one. It must not be told to the user as one of
+    /// the variants this binary DOES know: folding it into "attached" made the
+    /// delete dialog assert "existed before this agent" about a branch nobody
+    /// here can say anything about.
+    #[test]
+    fn an_unknown_provenance_says_only_what_is_known() {
+        let unknown = BranchProvenance::from_str("something-a-newer-dux-writes");
+        assert_eq!(unknown, BranchProvenance::Unknown);
+        assert!(
+            !unknown.dux_may_delete_branch(),
+            "the safe direction is losing a cleanup, never losing a branch"
+        );
+        let note = unknown.kept_branches_note("feature", "feature");
+        assert!(
+            note.contains("is not a branch dux created"),
+            "the one true thing about it, got {note:?}"
+        );
+        assert!(
+            !note.contains("existed before this agent"),
+            "and nothing this binary cannot know, got {note:?}"
+        );
     }
 
     #[test]

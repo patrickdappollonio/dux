@@ -92,7 +92,9 @@ scoped to that project and a bare `123` is perfectly meaningful.
   the agent instead. This checkbox is also the manual override for a branch dux
   will not delete on its own: deleting an agent only ever removes branches dux
   created, so a branch that came from you outlives its agent and this dialog is
-  where you can still remove it. The terminal UI has the same manager, as the
+  where you can still remove it, for as long as its worktree is still listed
+  here. Once the worktree is gone the branch is out of this dialog's reach and
+  `git branch -D` is the way. The terminal UI has the same manager, as the
   `manage-worktrees` palette command, and both drive the same rules.
 
 **Forking** is different: it starts from an *existing agent*, not the project.

@@ -248,10 +248,17 @@ pub struct RemovalReport {
 /// origin, the user simply did not ask for it. Do not reuse that helper on this
 /// path; it would attribute a reason dux does not have.
 ///
-/// The web composes the same ladder client-side (`lib/worktreeDelete.ts`),
-/// because its reply carries the branch outcome as JSON and the toast is built
-/// in the browser. The two are parallel implementations of one ladder and each
-/// pins its strings in its own tests.
+/// The web composes its own version of this ladder client-side
+/// (`lib/worktreeDelete.ts`), because its reply carries the branch outcome as
+/// JSON and the toast is built in the browser. Same rungs, and the same
+/// answers on the three that describe a branch, but NOT the same strings
+/// throughout: the no-branch rung differs deliberately. This one says the
+/// branch, if there was one, was kept because the caller did not ask for it,
+/// which is the whole truth for a request that may or may not have named a
+/// branch; the web's dialog knows whether the worktree had a branch before it
+/// sent anything, so its toast simply says the branch is still there. Each
+/// side pins its own strings in its own tests; treat neither as a copy of the
+/// other.
 pub fn removal_report(worktree_path: &str, branch: Option<&BranchOutcome>) -> RemovalReport {
     let Some(branch) = branch else {
         return RemovalReport {
