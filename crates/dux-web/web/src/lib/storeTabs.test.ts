@@ -56,7 +56,7 @@ const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
       headers: { get: () => null },
     } as unknown as Response
   }
-  if (u.includes("/api/v1/spine")) {
+  if (u.includes("/api/v1/workspace")) {
     return {
       ok: true,
       status: 200,
@@ -132,7 +132,7 @@ class FakeWebSocket {
 }
 
 // Deliver a `sessions.changed` events-socket frame, which makes the store
-// re-fetch the current `spineBody` and re-run applySpine.
+// re-fetch the current `spineBody` and re-run applyWorkspace.
 function fireSessionsChanged() {
   sockets.at(-1)?.onmessage?.({
     data: JSON.stringify({ event: "sessions.changed" }),
@@ -408,7 +408,7 @@ describe("store agent-tab lifecycle", () => {
     // status (same key prefix as the failure, so it isn't clobbered). This must NOT
     // strip the latch — otherwise the tab would re-mark dormant before the spine's
     // `has_live_process` catches up, unmounting the just-launched pane. The latch is
-    // instead cleared by `applySpine` once the spine reports the live process.
+    // instead cleared by `applyWorkspace` once the spine reports the live process.
     sockets.at(-1)?.onmessage?.({
       data: JSON.stringify({
         event: "status",

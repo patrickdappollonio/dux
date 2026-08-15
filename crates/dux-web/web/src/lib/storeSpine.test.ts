@@ -1,17 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import type { Spine } from "./spineApi"
+import type { Spine } from "./workspaceApi"
 import { partitionProjects } from "./projects"
 
 // Exercises the spine slice end to end: the boot fetch populating the slice, a
 // `projects.changed`/`sessions.changed` event triggering a refetch, the
 // prune-on-gone and order-reconciliation behaviours that moved off the broadcast
 // ViewModel onto the spine apply path, and a representative consumer
-// (partitionProjects) reading from the slice. The `spineApi` wire behaviour (GET
-// shape, error mapping) lives in `spineApi.test.ts`; here we drive the store's
+// (partitionProjects) reading from the slice. The `workspaceApi` wire behaviour (GET
+// shape, error mapping) lives in `workspaceApi.test.ts`; here we drive the store's
 // integration via a controllable fetch double.
 //
-// The store fires a `GET /api/v1/spine` at import. We serve the spine body from
+// The store fires a `GET /api/v1/workspace` at import. We serve the spine body from
 // `spineBody`, which the fetch double reads at call time so a test can mutate it
 // before a refetch.
 
@@ -55,7 +55,7 @@ let spineShouldFail = false
 
 const fetchMock = vi.fn(async (url: string) => {
   const u = String(url)
-  if (u.includes("/api/v1/spine")) {
+  if (u.includes("/api/v1/workspace")) {
     spineFetches++
     if (spineShouldFail) throw new Error("network down")
     return {

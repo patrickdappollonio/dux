@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import type { Bootstrap } from "./bootstrapApi"
-import type { Spine } from "./spineApi"
+import type { Spine } from "./workspaceApi"
 
 // Drives the real store's spine-apply path under jsdom and asserts the browser-tab
 // "needs attention" chrome: a `(N) ` count prefix on the document title. The pure
@@ -65,7 +65,7 @@ const fetchMock = vi.fn(async (url: string) => {
       headers: { get: () => null },
     } as unknown as Response
   }
-  if (u.includes("/api/v1/spine")) {
+  if (u.includes("/api/v1/workspace")) {
     return {
       ok: true,
       status: 200,

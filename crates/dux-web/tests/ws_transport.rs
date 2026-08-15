@@ -369,11 +369,11 @@ async fn boot_for_create_agent() -> (SocketAddr, tempfile::TempDir) {
     (addr, tmp)
 }
 
-/// Poll `GET /api/v1/spine` until `pred` holds or the deadline lapses. The
+/// Poll `GET /api/v1/workspace` until `pred` holds or the deadline lapses. The
 /// projects/sessions/sidebar spine is a REST read (the matching
 /// `projects.changed` / `sessions.changed` event rides `/ws/events`). `true` if
 /// `pred` ever held.
-async fn wait_for_spine<F>(addr: SocketAddr, pred: F) -> bool
+async fn wait_for_workspace<F>(addr: SocketAddr, pred: F) -> bool
 where
     F: Fn(&serde_json::Value) -> bool,
 {
@@ -381,7 +381,7 @@ where
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     while tokio::time::Instant::now() < deadline {
         if let Ok(resp) = client
-            .get(format!("http://{addr}/api/v1/spine"))
+            .get(format!("http://{addr}/api/v1/workspace"))
             .send()
             .await
             && let Ok(v) = resp.json::<serde_json::Value>().await
@@ -1432,7 +1432,7 @@ async fn terminal_rest_create_and_delete() {
 
     let terminal_id = create_terminal_via_rest(addr, "s1").await;
     assert!(
-        wait_for_spine(addr, |spine| spine_has_terminal(spine, &terminal_id)).await,
+        wait_for_workspace(addr, |spine| spine_has_terminal(spine, &terminal_id)).await,
         "spine never contained the REST-created terminal {terminal_id}"
     );
 
@@ -1470,7 +1470,7 @@ async fn terminal_rest_create_and_delete() {
         .unwrap();
     assert_eq!(deleted.status().as_u16(), 204, "delete → 204");
     assert!(
-        wait_for_spine(addr, |spine| !spine_has_terminal(spine, &terminal_id)).await,
+        wait_for_workspace(addr, |spine| !spine_has_terminal(spine, &terminal_id)).await,
         "spine still contained terminal {terminal_id} after delete"
     );
 
@@ -1523,7 +1523,7 @@ async fn project_terminal_rest_create_and_delete() {
 
     let terminal_id = create_project_terminal_via_rest(addr, "p1").await;
     assert!(
-        wait_for_spine(addr, |spine| spine_has_project_terminal(
+        wait_for_workspace(addr, |spine| spine_has_project_terminal(
             spine,
             &terminal_id
         ))
@@ -1532,7 +1532,7 @@ async fn project_terminal_rest_create_and_delete() {
     );
     // The owner filter must not leak it onto a session.
     let spine: serde_json::Value = client
-        .get(format!("http://{addr}/api/v1/spine"))
+        .get(format!("http://{addr}/api/v1/workspace"))
         .send()
         .await
         .unwrap()
@@ -1578,7 +1578,7 @@ async fn project_terminal_rest_create_and_delete() {
         .unwrap();
     assert_eq!(deleted.status().as_u16(), 204, "delete → 204");
     assert!(
-        wait_for_spine(addr, |spine| !spine_has_project_terminal(
+        wait_for_workspace(addr, |spine| !spine_has_project_terminal(
             spine,
             &terminal_id
         ))
@@ -1644,7 +1644,7 @@ async fn a_standalone_terminal_opens_streams_and_closes_at_un_nested_addresses()
     // It arrives in the ONE flat collection, tagged as owned by nothing, and
     // carrying the `~`-shortened directory its row names it by.
     assert!(
-        wait_for_spine(addr, |spine| {
+        wait_for_workspace(addr, |spine| {
             spine_has_standalone_terminal(spine, &tid)
                 && spine["terminals"]
                     .as_array()
@@ -1704,7 +1704,7 @@ async fn a_standalone_terminal_opens_streams_and_closes_at_un_nested_addresses()
         "standalone delete should be 204"
     );
     assert!(
-        wait_for_spine(addr, |spine| !spine_has_standalone_terminal(spine, &tid)).await,
+        wait_for_workspace(addr, |spine| !spine_has_standalone_terminal(spine, &tid)).await,
         "the deleted standalone terminal must leave the spine"
     );
 }
@@ -1777,7 +1777,7 @@ async fn the_un_nested_terminal_address_refuses_owned_terminals_and_vice_versa()
 
     // Nothing was deleted by any of those refusals.
     assert!(
-        wait_for_spine(addr, |spine| {
+        wait_for_workspace(addr, |spine| {
             spine_has_terminal(spine, &session_tid)
                 && spine_has_project_terminal(spine, &project_tid)
                 && spine_has_standalone_terminal(spine, &standalone_tid)
@@ -1829,7 +1829,7 @@ async fn terminal_delete_routes_404_across_owner_kinds() {
 
     // Both terminals still exist (the cross-owner 404s deleted nothing).
     assert!(
-        wait_for_spine(addr, |spine| {
+        wait_for_workspace(addr, |spine| {
             spine_has_terminal(spine, &session_tid)
                 && spine_has_project_terminal(spine, &project_tid)
         })
@@ -2036,7 +2036,7 @@ async fn rest_nested_git_and_file_routes_resolve() {
 /// `/api/v1/projects`) keep nesting each owner's terminals.
 ///
 /// The flat, owner-tagged collection is a change to what the BROWSER receives on
-/// `/api/v1/spine`. These three endpoints are documented separately, as the
+/// `/api/v1/workspace`. These three endpoints are documented separately, as the
 /// shapes a script or an integration reads, and they carried a `terminals` array
 /// on the owner. Dropping it would take information away from every such
 /// consumer with no way to get it back short of moving to the spine endpoint,

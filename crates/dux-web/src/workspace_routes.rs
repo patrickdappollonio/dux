@@ -2,7 +2,7 @@
 //! inside every per-tick `ViewModel` broadcast (Phase 3 of the REST-first
 //! migration).
 //!
-//! - `GET /api/v1/spine`, the whole spine `{ projects, sessions, terminals,
+//! - `GET /api/v1/workspace`, the whole spine `{ projects, sessions, terminals,
 //!   sidebar }`. Terminals ride here as ONE flat collection, each tagged with its
 //!   owner; this is the document the browser reads. Invalidated by the coarse
 //!   `projects.changed` / `sessions.changed` events.
@@ -130,7 +130,7 @@ fn nest_terminals_by_owner(
             // nothing and is dropped from these two re-nested reads. That is not
             // an omission: these endpoints answer "what does this session/project
             // have", and the answer for a terminal that belongs to neither is
-            // "not yours". `GET /api/v1/spine` is where every terminal of every
+            // "not yours". `GET /api/v1/workspace` is where every terminal of every
             // kind is listed, flat and owner-tagged, and it is the only read that
             // claims to be complete.
             TerminalOwnerView::Standalone { .. } => {}
@@ -157,13 +157,13 @@ fn engine_unavailable() -> Response {
 /// parameterized `:id` route regardless of framework ordering guarantees.
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/api/v1/spine", get(get_spine))
+        .route("/api/v1/workspace", get(get_workspace))
         .route("/api/v1/projects", get(get_projects))
         .route("/api/v1/sessions", get(get_sessions))
         .route("/api/v1/sessions/{id}", get(get_session))
 }
 
-async fn get_spine(State(state): State<AppState>) -> Response {
+async fn get_workspace(State(state): State<AppState>) -> Response {
     // Served from the engine loop's cached serialization (rebuilt only when the
     // spine changes), not re-projected per request. The cache is already a JSON
     // string, so return it raw with the JSON content-type rather than

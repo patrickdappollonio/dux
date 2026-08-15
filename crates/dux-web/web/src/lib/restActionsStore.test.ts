@@ -36,7 +36,7 @@ let bootstrapExtra: Record<string, unknown> = {}
 
 function isBootRead(u: string): boolean {
   return (
-    u.includes("/api/v1/spine") ||
+    u.includes("/api/v1/workspace") ||
     u.includes("/api/v1/bootstrap") ||
     u.includes("/changes")
   )
@@ -45,7 +45,7 @@ function isBootRead(u: string): boolean {
 const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
   const u = String(url)
   if (isBootRead(u)) {
-    if (u.includes("/api/v1/spine")) {
+    if (u.includes("/api/v1/workspace")) {
       return {
         ok: true,
         status: 200,

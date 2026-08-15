@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import { SpineFetchError, fetchSpine } from "./spineApi"
+import { WorkspaceFetchError, fetchWorkspace } from "./workspaceApi"
 
 // The spine client is a thin GET wrapper (mirrors bootstrapApi/changesApi): on
 // 2xx it returns the parsed JSON (coercing each session's `tabs` to an array so
 // an older server that omits the field degrades safely); on a non-2xx it throws a
-// `SpineFetchError` carrying the HTTP status; on a transport failure it throws 0.
+// `WorkspaceFetchError` carrying the HTTP status; on a transport failure it throws 0.
 
 beforeEach(() => {
   vi.restoreAllMocks()
@@ -15,7 +15,7 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-describe("fetchSpine", () => {
+describe("fetchWorkspace", () => {
   it("issues a same-origin GET and returns the parsed body on 200", async () => {
     const body = {
       projects: [{ id: "p1" }],
@@ -31,7 +31,7 @@ describe("fetchSpine", () => {
     })) as unknown as typeof fetch
     vi.stubGlobal("fetch", fetchMock)
 
-    const result = await fetchSpine()
+    const result = await fetchWorkspace()
     // A session that omits `tabs`/`initial_branch`/`source_branch`/
     // `needs_attention`/`last_focused_tab` (an older server) is coerced to
     // `tabs: []`, empty-string branch fields, `needs_attention: false`, and
@@ -57,7 +57,7 @@ describe("fetchSpine", () => {
         },
       ],
     })
-    expect(fetchMock).toHaveBeenCalledWith("/api/v1/spine", {
+    expect(fetchMock).toHaveBeenCalledWith("/api/v1/workspace", {
       credentials: "same-origin",
     })
   })
@@ -101,7 +101,7 @@ describe("fetchSpine", () => {
       })) as unknown as typeof fetch,
     )
 
-    const result = await fetchSpine()
+    const result = await fetchWorkspace()
     // Flat, in the `sort_order` order the new shape promises, each carrying the
     // owner it was nested under.
     expect(result.terminals.map((t) => [t.id, t.owner])).toEqual([
@@ -151,7 +151,7 @@ describe("fetchSpine", () => {
       })) as unknown as typeof fetch,
     )
 
-    const result = await fetchSpine()
+    const result = await fetchWorkspace()
     expect(result.terminals.map((t) => t.id)).toEqual(["t-1"])
   })
 
@@ -172,7 +172,7 @@ describe("fetchSpine", () => {
       })) as unknown as typeof fetch,
     )
 
-    const result = await fetchSpine()
+    const result = await fetchWorkspace()
     expect(result.sessions[0].last_focused_tab).toBe("tab-1")
   })
 
@@ -194,7 +194,7 @@ describe("fetchSpine", () => {
       })) as unknown as typeof fetch,
     )
 
-    const result = await fetchSpine()
+    const result = await fetchWorkspace()
     expect(result.sessions[0]).toMatchObject({
       id: "s1",
       project_id: "p1",
@@ -204,7 +204,7 @@ describe("fetchSpine", () => {
     })
   })
 
-  it("throws a SpineFetchError carrying the HTTP status on a non-2xx", async () => {
+  it("throws a WorkspaceFetchError carrying the HTTP status on a non-2xx", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => ({
@@ -215,8 +215,8 @@ describe("fetchSpine", () => {
         headers: { get: () => null },
       })) as unknown as typeof fetch,
     )
-    await expect(fetchSpine()).rejects.toMatchObject({
-      name: "SpineFetchError",
+    await expect(fetchWorkspace()).rejects.toMatchObject({
+      name: "WorkspaceFetchError",
       status: 503,
       message: "server starting",
     })
@@ -229,8 +229,8 @@ describe("fetchSpine", () => {
         throw new Error("offline")
       }) as unknown as typeof fetch,
     )
-    const err = await fetchSpine().catch((e) => e)
-    expect(err).toBeInstanceOf(SpineFetchError)
+    const err = await fetchWorkspace().catch((e) => e)
+    expect(err).toBeInstanceOf(WorkspaceFetchError)
     expect(err.status).toBe(0)
   })
 })

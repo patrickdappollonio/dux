@@ -33,7 +33,7 @@ pub type PtySubscription = (PtyViewerGuard, Vec<u8>, std::sync::mpsc::Receiver<V
 /// Which half of the projects/sessions spine changed since the last tick. The
 /// engine loop fingerprints the projected spine each tick and fires the matching
 /// variant; the web layer's forwarder turns it into a coarse `projects.changed` /
-/// `sessions.changed` event so subscribed clients refetch `/api/v1/spine` (or the
+/// `sessions.changed` event so subscribed clients refetch `/api/v1/workspace` (or the
 /// thin per-resource read).
 ///
 /// A single coarse signal per side is intentional for Phase 3: the sessions side
@@ -166,10 +166,10 @@ pub enum EngineRequest {
     /// Snapshot the projects/sessions/sidebar spine served by the thin
     /// per-resource reads (`/api/v1/projects`, `/api/v1/sessions`). Instant clone
     /// off engine state; refetched by the client on a `projects.changed` /
-    /// `sessions.changed` event. The hot whole-spine read (`GET /api/v1/spine`)
+    /// `sessions.changed` event. The hot whole-spine read (`GET /api/v1/workspace`)
     /// instead uses [`EngineRequest::SpineJson`] (the loop's cached serialization).
     Spine(oneshot::Sender<dux_core::viewmodel::SpineView>),
-    /// The pre-serialized whole-spine JSON for `GET /api/v1/spine`, served from the
+    /// The pre-serialized whole-spine JSON for `GET /api/v1/workspace`, served from the
     /// loop's cache (rebuilt only when the spine actually changes) instead of
     /// re-projecting + re-serializing on every client request. Handled inline in
     /// the loop because the cache is loop-local state.
@@ -177,7 +177,7 @@ pub enum EngineRequest {
     /// Project ONLY the requested session for `GET /api/v1/sessions/:id` instead of
     /// building the whole spine to find one session, together with THAT session's
     /// terminals: the thin read still nests them (see
-    /// [`crate::spine_routes::SessionWithTerminals`]), and fetching them here
+    /// [`crate::workspace_routes::SessionWithTerminals`]), and fetching them here
     /// keeps it to one round trip and one consistent snapshot. `None` when the id
     /// is unknown (the handler returns 404).
     Session(
@@ -364,7 +364,7 @@ pub(crate) struct ActorLoopEnds {
     /// Fires a [`SpineChange`] whenever the projected projects-portion or
     /// sessions+sidebar-portion of the spine changes, so the web layer emits a
     /// coarse `projects.changed` / `sessions.changed` event (clients then refetch
-    /// `/api/v1/spine`). Broadcast — the web forwarder is the only listener, but a
+    /// `/api/v1/workspace`). Broadcast — the web forwarder is the only listener, but a
     /// broadcast keeps the send a cheap fire-and-forget with no receiver.
     spine_change_tx: broadcast::Sender<SpineChange>,
     /// Shared with the caller-facing [`EngineHandle`] and every PTY forwarder.
@@ -537,7 +537,7 @@ pub struct EngineHandle {
     /// Notifies on each projects/sessions spine change (see [`ActorLoopEnds`]). The
     /// web layer subscribes via [`EngineHandle::subscribe_spine_changes`] and
     /// re-emits a coarse `projects.changed` / `sessions.changed` event so clients
-    /// refetch `/api/v1/spine`.
+    /// refetch `/api/v1/workspace`.
     spine_change_tx: broadcast::Sender<SpineChange>,
     /// Tripped when the server is tearing down (ReturnToTui, QuitProcess, or a
     /// `Shutdown` request). PTY forwarders poll it so their blocking
@@ -995,7 +995,7 @@ impl EngineHandle {
         rx.await.ok()
     }
 
-    /// Snapshot the projects/sessions/sidebar spine for `GET /api/v1/spine` and the
+    /// Snapshot the projects/sessions/sidebar spine for `GET /api/v1/workspace` and the
     /// thin per-resource reads. `None` if the engine is gone (the handler then
     /// returns 503), distinguishing a dead engine from a real empty payload.
     pub async fn spine(&self) -> Option<dux_core::viewmodel::SpineView> {
@@ -1006,7 +1006,7 @@ impl EngineHandle {
         rx.await.ok()
     }
 
-    /// The pre-serialized whole-spine JSON for `GET /api/v1/spine`, served from the
+    /// The pre-serialized whole-spine JSON for `GET /api/v1/workspace`, served from the
     /// loop's cache. `None` if the engine is gone (the handler then returns 503),
     /// distinguishing a dead engine from a real payload.
     pub async fn spine_json(&self) -> Option<String> {
@@ -1090,7 +1090,7 @@ impl EngineHandle {
 
     /// Subscribe to projects/sessions spine-change notifications. The web layer
     /// forwards each into a coarse `projects.changed` / `sessions.changed` event on
-    /// its event bus so subscribed clients refetch `/api/v1/spine`.
+    /// its event bus so subscribed clients refetch `/api/v1/workspace`.
     pub fn subscribe_spine_changes(&self) -> broadcast::Receiver<SpineChange> {
         self.spine_change_tx.subscribe()
     }
@@ -2223,7 +2223,7 @@ fn overlay_session_input_owners(
 
 /// Loop-local state for the change-gated spine check and its self-healing
 /// backstop. Holds the last-seen fingerprints of the two spine halves, the cached
-/// whole-spine JSON for `GET /api/v1/spine`, the version values last compared
+/// whole-spine JSON for `GET /api/v1/workspace`, the version values last compared
 /// against, and the backstop tick accumulator.
 ///
 /// The gate's job is to skip the (relatively expensive) project + serialize on
@@ -2235,7 +2235,7 @@ fn overlay_session_input_owners(
 struct SpineCheck {
     prev_projects_fp: String,
     prev_sessions_fp: String,
-    /// Cached `GET /api/v1/spine` body, rebuilt only when a half actually changes.
+    /// Cached `GET /api/v1/workspace` body, rebuilt only when a half actually changes.
     spine_json_cache: String,
     /// The `mutation_version` value at the last fingerprint compare.
     last_checked_mutation: u64,
@@ -2337,7 +2337,7 @@ impl SpineCheck {
             let _ = spine_change_tx.send(SpineChange::Sessions);
             spine_changed = true;
         }
-        // Refresh the cached `GET /api/v1/spine` JSON only when a half actually
+        // Refresh the cached `GET /api/v1/workspace` JSON only when a half actually
         // changed, so the common case (no change) skips the full serialization.
         if spine_changed {
             self.spine_json_cache =

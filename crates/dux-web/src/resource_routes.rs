@@ -233,7 +233,7 @@ pub fn routes() -> Router<AppState> {
 async fn get_resources(State(state): State<AppState>) -> Response {
     match state.resources.get().await {
         Some(rows) => Json(ResourcesResponseBody { rows }).into_response(),
-        // Mirrors `spine_routes::engine_unavailable`.
+        // Mirrors `workspace_routes::engine_unavailable`.
         None => (
             StatusCode::SERVICE_UNAVAILABLE,
             "the engine is unavailable; retry shortly",

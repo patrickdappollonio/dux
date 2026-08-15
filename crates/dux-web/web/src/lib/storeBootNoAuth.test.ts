@@ -78,7 +78,7 @@ describe("no-auth boot", () => {
     await import("./store")
     await vi.waitFor(() => {
       expect(requestedUrls.some((u) => u.includes("/api/v1/bootstrap"))).toBe(true)
-      expect(requestedUrls.some((u) => u.includes("/api/v1/spine"))).toBe(true)
+      expect(requestedUrls.some((u) => u.includes("/api/v1/workspace"))).toBe(true)
     })
   })
 })

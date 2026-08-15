@@ -33,7 +33,7 @@ const fetchMock = vi.fn(async (url: string) => {
       headers: { get: () => null },
     } as unknown as Response
   }
-  if (u.includes("/api/v1/spine")) {
+  if (u.includes("/api/v1/workspace")) {
     return {
       ok: true,
       status: 200,

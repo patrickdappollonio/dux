@@ -10,7 +10,7 @@
 // No real company, product or person is named.
 
 import type { Bootstrap } from "@/lib/bootstrapApi"
-import type { Spine } from "@/lib/spineApi"
+import type { Spine } from "@/lib/workspaceApi"
 import type {
   AgentTabView,
   ChangedFileView,

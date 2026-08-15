@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import type { Spine } from "./spineApi"
+import type { Spine } from "./workspaceApi"
 
 // The reference-first from-PR flow, driven through the store the way the dialog
 // drives it. The server's resolution is stubbed at `fetch` (it is the thing
@@ -63,7 +63,7 @@ const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
       headers: { get: () => "application/json" },
     } as unknown as Response
   }
-  if (u.includes("/api/v1/spine")) {
+  if (u.includes("/api/v1/workspace")) {
     return {
       ok: true,
       status: 200,

@@ -1,12 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import type { Spine } from "./spineApi"
+import type { Spine } from "./workspaceApi"
 
-// Exercises the `loadSpine` in-flight guard: two rapid
-// `sessions.changed`/`projects.changed` events fire concurrent `fetchSpine()`s,
+// Exercises the `loadWorkspace` in-flight guard: two rapid
+// `sessions.changed`/`projects.changed` events fire concurrent `fetchWorkspace()`s,
 // and the OLDER one resolving LAST must be dropped so it can't overwrite the
 // newer spine. We control resolution order with a deferred fetch double: each
-// `/api/v1/spine` call parks on a promise we resolve by hand, so the test can
+// `/api/v1/workspace` call parks on a promise we resolve by hand, so the test can
 // land the second (newer) fetch before the first (older) one.
 
 function makeSpine(overrides: Partial<Spine> = {}): Spine {
@@ -22,12 +22,12 @@ function session(id: string, projectId: string): Spine["sessions"][number] {
   return { id, project_id: projectId, terminals: [] } as unknown as Spine["sessions"][number]
 }
 
-// Pending resolvers for each in-flight `/api/v1/spine` fetch, in call order.
+// Pending resolvers for each in-flight `/api/v1/workspace` fetch, in call order.
 let spineResolvers: ((body: Spine) => void)[] = []
 
 const fetchMock = vi.fn(async (url: string) => {
   const u = String(url)
-  if (u.includes("/api/v1/spine")) {
+  if (u.includes("/api/v1/workspace")) {
     // Park until the test resolves this specific call with a body.
     const body = await new Promise<Spine>((resolve) => {
       spineResolvers.push(resolve)
@@ -87,11 +87,11 @@ async function waitForResolvers(count: number): Promise<void> {
   })
 }
 
-describe("loadSpine in-flight guard", () => {
+describe("loadWorkspace in-flight guard", () => {
   it("drops an older spine response that resolves after a newer one", async () => {
     const mod = await import("./store")
 
-    // Boot fires one `/api/v1/spine` fetch; resolve it so the store settles.
+    // Boot fires one `/api/v1/workspace` fetch; resolve it so the store settles.
     await waitForResolvers(1)
     spineResolvers[0](makeSpine({ sessions: [session("boot", "p1")] }))
     await vi.waitFor(() => {

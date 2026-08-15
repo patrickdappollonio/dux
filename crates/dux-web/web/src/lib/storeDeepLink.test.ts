@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import type { Spine } from "./spineApi"
+import type { Spine } from "./workspaceApi"
 
 // Deep-linking: a tiny hash router mirrors the selected target into
 // `location.hash` (#/agent/<id> | #/agent/<id>/terminal/<tid>). On load the hash
@@ -65,7 +65,7 @@ let loc: {
 
 const fetchMock = vi.fn(async (url: string) => {
   const u = String(url)
-  if (u.includes("/api/v1/spine")) {
+  if (u.includes("/api/v1/workspace")) {
     return {
       ok: true,
       status: 200,

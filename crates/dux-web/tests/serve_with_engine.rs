@@ -163,7 +163,7 @@ async fn serve_with_engine_returns_to_tui_and_closes_the_port() {
 
     // Connect a ws client to `/ws/events` and confirm the `connected` handshake
     // frame arrives — proof the socket is live. All data (the session spine, its
-    // `s1` id) now rides the REST `/api/v1/spine` read.
+    // `s1` id) now rides the REST `/api/v1/workspace` read.
     let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/events"))
         .await
         .expect("connect");

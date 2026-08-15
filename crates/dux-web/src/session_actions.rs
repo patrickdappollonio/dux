@@ -36,13 +36,13 @@
 //!   The client then posts the create with the project it settled on.
 //!
 //! The idempotent `200` replay always serves
-//! [`crate::spine_routes::SessionWithTerminals`], the same nested shape as
+//! [`crate::workspace_routes::SessionWithTerminals`], the same nested shape as
 //! `GET /api/v1/sessions/:id`, so a replay and a later read of that session agree
 //! field for field. The create's `201` serves that shape too WHENEVER THE VIEW IS
 //! AVAILABLE, and falls back to a minimal id-only body when it is not, so the
 //! agreement holds on that branch and not unconditionally. A nested terminal
 //! entry carries a tagged `owner` field, which
-//! is additive and documented in `spine_routes`'s module docs; the exact key set
+//! is additive and documented in `workspace_routes`'s module docs; the exact key set
 //! of the replay body, and of the create body on its full branch, is pinned by
 //! `session_create_and_its_replay_pin_the_same_terminal_key_set` in
 //! `tests/ws_transport.rs`.
@@ -68,7 +68,7 @@ use crate::server::AppState;
 /// The session-action routes. The literal `/reorder` segment is registered
 /// alongside the parameterized `:id` routes; axum's matcher prefers static
 /// segments over `:id`, so `POST /api/v1/sessions/reorder` never resolves to the
-/// `:id` handlers. (The `GET /api/v1/sessions/:id` read lives in `spine_routes`;
+/// `:id` handlers. (The `GET /api/v1/sessions/:id` read lives in `workspace_routes`;
 /// axum merges the per-path method routers, so the verbs here coexist with it.)
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -200,7 +200,7 @@ async fn create_session(
         // later GET of the same session agree field for field.
         return (
             StatusCode::OK,
-            Json(crate::spine_routes::SessionWithTerminals::new(
+            Json(crate::workspace_routes::SessionWithTerminals::new(
                 session, terminals,
             )),
         )
@@ -328,9 +328,9 @@ async fn created_response(state: &AppState, id: String, key: Option<String>) -> 
     }
     let location = format!("/api/v1/sessions/{id}");
     let body = match state.engine.session(id.clone()).await {
-        Some(Some((session, terminals))) => Json(crate::spine_routes::SessionWithTerminals::new(
-            session, terminals,
-        ))
+        Some(Some((session, terminals))) => Json(
+            crate::workspace_routes::SessionWithTerminals::new(session, terminals),
+        )
         .into_response(),
         _ => Json(CreatedRef { id }).into_response(),
     };

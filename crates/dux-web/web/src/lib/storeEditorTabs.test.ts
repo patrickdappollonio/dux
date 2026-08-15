@@ -52,7 +52,7 @@ const fetchMock = vi.fn(async (url: string) => {
       headers: { get: () => null },
     } as unknown as Response
   }
-  if (u.includes("/api/v1/spine")) {
+  if (u.includes("/api/v1/workspace")) {
     return {
       ok: true,
       status: 200,
@@ -90,7 +90,7 @@ class FakeWebSocket {
 }
 
 // Deliver a `sessions.changed` events-socket frame, which makes the store
-// re-fetch the current `spineBody` and re-run `applySpine` (mirrors
+// re-fetch the current `spineBody` and re-run `applyWorkspace` (mirrors
 // storeTabs.test.ts's helper of the same name).
 function fireSessionsChanged() {
   sockets.at(-1)?.onmessage?.({

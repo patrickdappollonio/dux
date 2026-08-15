@@ -10,7 +10,7 @@ import {
   shouldShowTabStrip,
   tabLabels,
 } from "./agentTabs"
-import type { Spine } from "./spineApi"
+import type { Spine } from "./workspaceApi"
 import type { SelectedTarget } from "./store"
 import type { AgentTabView, SessionView } from "./types"
 

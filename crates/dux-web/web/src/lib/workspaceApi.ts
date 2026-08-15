@@ -9,8 +9,14 @@
 // workspace state but are now read on demand over REST rather than re-broadcast
 // to every client on every change. The server is authoritative: it projects the
 // live projects/sessions plus the core sidebar model into this single document.
-// A non-2xx is thrown as a `SpineFetchError` carrying the HTTP status so the
+// A non-2xx is thrown as a `WorkspaceFetchError` carrying the HTTP status so the
 // caller can branch.
+//
+// The URL, this module, and the fetch are named for the workspace; the in-code
+// TYPE is still `Spine`, matching the server's `SpineView`. The wire and the
+// route are the user-facing halves and they were renamed; renaming the internal
+// types on both sides would be churn without user value, so the two languages
+// keep the same internal word deliberately rather than by omission.
 
 import type {
   AgentTabView,
@@ -31,7 +37,7 @@ export interface Spine {
    * the manual `sort_order`. Each entry carries its own tagged `owner`, so the
    * client no longer rebuilds this list by walking two nested collections and
    * inferring ownership from which one it was in. An older server that predates
-   * the flat shape nests its terminals instead; `fetchSpine` flattens those and
+   * the flat shape nests its terminals instead; `fetchWorkspace` flattens those and
    * tags each with the owner it was nested under (see `ingestTerminals`). */
   terminals: TerminalView[]
   /** Core-computed sidebar grouping (projects + sessions, orphans surfaced) so
@@ -43,27 +49,27 @@ export interface Spine {
 // failure with no response). The boot path swallows this and keeps the
 // last-known spine (null on first boot); a later `projects.changed` /
 // `sessions.changed` event or a reconnect retries.
-export class SpineFetchError extends Error {
+export class WorkspaceFetchError extends Error {
   readonly status: number
 
   constructor(message: string, status: number) {
     super(message)
-    this.name = "SpineFetchError"
+    this.name = "WorkspaceFetchError"
     this.status = status
   }
 }
 
-export async function fetchSpine(): Promise<Spine> {
+export async function fetchWorkspace(): Promise<Spine> {
   let resp: Response
   try {
-    resp = await fetch("/api/v1/spine", { credentials: "same-origin" })
+    resp = await fetch("/api/v1/workspace", { credentials: "same-origin" })
   } catch {
     // The request never reached the server (offline, DNS, CORS).
-    throw new SpineFetchError("Could not reach the server.", 0)
+    throw new WorkspaceFetchError("Could not reach the server.", 0)
   }
   if (!resp.ok) {
     const detail = (await resp.text().catch(() => "")).trim()
-    throw new SpineFetchError(
+    throw new WorkspaceFetchError(
       detail || `request failed (${resp.status})`,
       resp.status,
     )

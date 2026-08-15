@@ -45,7 +45,7 @@ use crate::session_actions::outcome_is_error;
 
 /// The project-action routes. The literal `/reorder` segment is registered
 /// alongside `:id`; axum's matcher prefers static segments over `:id`. (The
-/// `GET /api/v1/projects` read lives in `spine_routes`; axum merges the per-path
+/// `GET /api/v1/projects` read lives in `workspace_routes`; axum merges the per-path
 /// method routers, so `POST` here coexists with it.)
 pub fn routes() -> Router<AppState> {
     Router::new()

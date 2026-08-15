@@ -49,7 +49,7 @@ import { attentionCountForSurface, formatTabTitle } from "./attention"
 import { applyAttentionFavicon } from "./favicon"
 import { statusToastAllowed } from "./statusRouting"
 import { pageTitle, resolveInstanceTitle } from "./instanceTitle"
-import { type Spine, fetchSpine } from "./spineApi"
+import { type Spine, fetchWorkspace } from "./workspaceApi"
 import { resolveFocusedTab, shouldRefireFocusPut } from "./agentTabs"
 import {
   activateTab as editorActivateTabPure,
@@ -231,7 +231,7 @@ export interface ChangesSlice {
 // (`lib/ptySocket.ts`).
 
 export interface DuxState {
-  // The workspace "spine" from `GET /api/v1/spine`: projects, sessions, and the
+  // The workspace "spine" from `GET /api/v1/workspace`: projects, sessions, and the
   // core-computed sidebar grouping. These three fields used to ride the broadcast
   // `ViewModel`; they now live here, fetched once after auth resolves (alongside
   // the bootstrap document) and re-fetched on a `projects.changed` /
@@ -973,7 +973,7 @@ eventsSocket.onEvent = (ev: EventsServerMessage) => {
     // tab's "explicitly started" latch — so `isExtraTabDormant` goes true again,
     // the dormant retry card returns, and the pane stops auto-reconnecting the
     // failing launch. The SUCCESS path must NOT touch the latch here: the latch is
-    // cleared race-free by `applySpine` in the same tick it flips `has_live_process`
+    // cleared race-free by `applyWorkspace` in the same tick it flips `has_live_process`
     // true, and stripping it early (before the spine refetch lands) would briefly
     // re-mark the tab dormant, unmounting the just-launched pane and flashing the
     // "Start session" card back until the spine catches up.
@@ -1014,9 +1014,9 @@ eventsSocket.onEvent = (ev: EventsServerMessage) => {
   // status, etc.). Re-GET it so the sidebar, session lists, and selection logic
   // reflect the new state. The `projects`/`sessions` coarse topics are subscribed
   // at module load, so this fires for every client. The applied spine drives the
-  // focus/prune/reorder reconciliation (see `applySpine`).
+  // focus/prune/reorder reconciliation (see `applyWorkspace`).
   if (ev.event === "projects.changed" || ev.event === "sessions.changed") {
-    loadSpine()
+    loadWorkspace()
     return
   }
   // A `pty.owner` event means a connection claimed (took over, or first-claimed an
@@ -1103,7 +1103,7 @@ eventsSocket.onOpen = () => {
     // recovers. Concurrent loads are safe: both the spine and the bootstrap load
     // are seq-guarded, so an older reply cannot overwrite a newer one.
     //
-    // Capture the deep-linked route BEFORE `loadSpine` so a transient exit-eject
+    // Capture the deep-linked route BEFORE `loadWorkspace` so a transient exit-eject
     // during the reconnect (the center pane resets to home while the agent is
     // momentarily `detached`) can be re-restored once the agent resumes. Reading
     // the hash here — before any spine apply runs — beats that eject wiping it.
@@ -1114,7 +1114,7 @@ eventsSocket.onOpen = () => {
     void reloadIfServerChanged()
     armReconnectDeepLink()
     loadBootstrap()
-    loadSpine()
+    loadWorkspace()
     // The server's ownership epoch counter restarts at zero if the server itself
     // restarted during the outage; clear our per-pty high-water marks so a fresh
     // post-restart `pty.owner` is not wrongly ignored as stale. A reconnect is the
@@ -1256,7 +1256,7 @@ export async function forceRefreshChanges(): Promise<void> {
   )
 }
 
-// Monotonic sequence for bootstrap loads, mirroring `loadSpineSeq` exactly. Two
+// Monotonic sequence for bootstrap loads, mirroring `loadWorkspaceSeq` exactly. Two
 // `config.changed` events in quick succession (a config edit followed by another,
 // or an edit landing during a reconnect refetch) fire concurrent
 // `fetchBootstrap()`s, and nothing orders the replies. Without this an older
@@ -1277,7 +1277,7 @@ function loadBootstrap(): void {
   fetchBootstrap()
     .then((b) => {
       // Discard this (now-stale) result once a newer load has started. Same rule
-      // as `applySpine`: the newest request wins, whatever order the replies
+      // as `applyWorkspace`: the newest request wins, whatever order the replies
       // arrive in.
       if (seq < loadBootstrapSeq) return
       applyBootstrap(b)
@@ -1367,22 +1367,22 @@ function refreshAttentionChrome(): void {
 }
 
 // Monotonic sequence for spine loads. Two rapid `sessions.changed`/
-// `projects.changed` events fire concurrent `fetchSpine()`s; without a guard an
+// `projects.changed` events fire concurrent `fetchWorkspace()`s; without a guard an
 // older response resolving last would overwrite a newer spine (observable as a
-// focus-then-prune-clear flicker on agent create). Each `loadSpine` captures the
-// seq it bumped to; `applySpine` discards a result once a newer load has started.
+// focus-then-prune-clear flicker on agent create). Each `loadWorkspace` captures the
+// seq it bumped to; `applyWorkspace` discards a result once a newer load has started.
 // Mirrors the `applyChangesResponse` rev-guard, but with a client-side counter
 // (the spine read has no server rev).
-let loadSpineSeq = 0
+let loadWorkspaceSeq = 0
 
 // Fetch the workspace spine and fold it into state. Errors are swallowed: on
 // first boot the slice stays `null` (consumers fall back to empty lists) and a
 // later `projects.changed`/`sessions.changed` event or a reconnect retries; on a
 // refetch the last good spine is kept rather than blanking the sidebar. Never
 // surfaces as an unhandled rejection.
-function loadSpine(): void {
-  const seq = ++loadSpineSeq
-  fetchSpine().then(
+function loadWorkspace(): void {
+  const seq = ++loadWorkspaceSeq
+  fetchWorkspace().then(
     (s) => {
       // Applying is not fetching, and the two failures need different names:
       // folding a throw from the apply into the rejection handler below would
@@ -1392,7 +1392,7 @@ function loadSpine(): void {
       // the write itself (`syncUrl`), because the apply is only one of many
       // paths that write the URL and the rest are user clicks.
       try {
-        applySpine(s, seq)
+        applyWorkspace(s, seq)
       } catch (err) {
         console.warn("[dux] spine apply failed", err)
       }
@@ -1416,13 +1416,13 @@ function loadSpine(): void {
 // first, then focus (which only ever selects a session present in the spine, so
 // the prune below leaves it alone), then prune.
 //
-// `seq` is the `loadSpineSeq` value the originating `loadSpine` captured; discard
+// `seq` is the `loadWorkspaceSeq` value the originating `loadWorkspace` captured; discard
 // this (now-stale) result if a newer load has since started, so a slow older
 // response can never overwrite a fresher spine (and re-run focus/prune against
 // outdated data).
-function applySpine(rawSpine: Spine, seq: number): void {
-  if (seq < loadSpineSeq) return
-  // `tabs` is normalized to an array at the fetch boundary (`fetchSpine`), so an
+function applyWorkspace(rawSpine: Spine, seq: number): void {
+  if (seq < loadWorkspaceSeq) return
+  // `tabs` is normalized to an array at the fetch boundary (`fetchWorkspace`), so an
   // older server that omits the field degrades to an empty strip rather than
   // throwing on the `session.tabs` derefs downstream.
   const spine = rawSpine
@@ -1484,7 +1484,7 @@ function pruneEditorStateIfGone(spine: Spine): void {
     state.editorTarget?.sessionId ?? state.editorRoute?.sessionId ?? null
   if (editorSession !== null && !liveSessionIds.has(editorSession)) {
     // State only, NO URL write: `pruneSelectionIfGone` (which runs before
-    // this in the same `applySpine` pass) is the single URL writer for a
+    // this in the same `applyWorkspace` pass) is the single URL writer for a
     // vanished session — its navigation already serializes without the
     // editor suffix, because `currentRoute` drops an editor arm whose
     // session no longer matches the focused target. A second writer here
@@ -1499,11 +1499,11 @@ function pruneEditorStateIfGone(spine: Spine): void {
 // to this client.
 
 // The broadcast ViewModel now carries ONLY `changed_files` (a residual frame);
-// projects/sessions/sidebar moved to `GET /api/v1/spine` and the changed-files
+// projects/sessions/sidebar moved to `GET /api/v1/workspace` and the changed-files
 // data is owned by the `changes` slice over REST. Nothing reads the residual
 // frame anymore, so we deliberately do NOT install an `onViewModel` handler:
 // storing it on every frame only triggered spurious re-renders. The
-// focus/prune/reorder reconciliation runs on the spine apply path (`applySpine`),
+// focus/prune/reorder reconciliation runs on the spine apply path (`applyWorkspace`),
 // and changed files flow through the `changes` slice. The frame is removed at
 // cutover (Phase 6); until then it is simply ignored (the socket default no-op).
 
@@ -1816,7 +1816,7 @@ function boot(): void {
   skipNextEventsOnOpenLoad = true
   eventsSocket.connect()
   loadBootstrap()
-  loadSpine()
+  loadWorkspace()
   // Remember which server served this tab, so a later reconnect can tell whether
   // it is still talking to it.
   void loadServerIdentityBaseline()
@@ -2495,7 +2495,7 @@ function setRouteNotFound(sessionId: string): void {
 
 // The route parsed from the URL at module load, restored once the first spine
 // lands (a target can't be resolved until the session list exists). One-shot:
-// consumed (and cleared) on the first `applySpine` so later spine refetches don't
+// consumed (and cleared) on the first `applyWorkspace` so later spine refetches don't
 // re-yank a user who has since navigated away.
 const bootRoute: Route =
   typeof location !== "undefined"
@@ -2674,7 +2674,7 @@ const RECONNECT_DEEPLINK_TTL_MS = 60_000
 let lastClearWasReconnectEject = false
 
 // Capture the current route as the reconnect deep-link intent. Called from the
-// events socket's reconnect `onOpen` BEFORE `loadSpine`, so the hash is read
+// events socket's reconnect `onOpen` BEFORE `loadWorkspace`, so the hash is read
 // while it still names the agent (the transient eject happens later, during the
 // spine apply).
 function armReconnectDeepLink(): void {
@@ -3176,7 +3176,7 @@ export function findTerminalOwner(
 // sessions and projects (a session-only scan silently made project terminals
 // undeletable); a terminal that already vanished (no owner) is a no-op. The
 // terminal is removed from the workspace spine, and if it was the focused target
-// the selection clears via the spine prune in `applySpine` (driven by the
+// the selection clears via the spine prune in `applyWorkspace` (driven by the
 // `sessions.changed` refetch). A failure surfaces as a toast.
 // The DELETE endpoint for a terminal is nested under its owner, so which URL to
 // call is an owner decision and gets an exhaustive switch of its own.
@@ -3332,7 +3332,7 @@ export function startDormantTab(sessionId: string, tabId: string): void {
 // spine) that this tab no longer exists — another client closed it while this
 // one was retrying the socket. The route will keep 404ing, so there is nothing
 // left to reconnect to: clear the started-dormant latch (it would otherwise
-// linger forever, since the tab is gone and `applySpine` only clears the latch
+// linger forever, since the tab is gone and `applyWorkspace` only clears the latch
 // once a tab goes LIVE, which this one now never will) and toast so the user
 // knows why the pane stopped retrying instead of it just going quiet.
 export function handleTabGone(tabId: string): void {
@@ -3580,7 +3580,7 @@ export function editorCloseTabsUnderPath(sessionId: string, path: string): void 
 }
 
 // Drop all of a session's editor tabs (session deleted from the spine). See
-// the `editorTabs` prune in `applySpine`, which calls this for any session
+// the `editorTabs` prune in `applyWorkspace`, which calls this for any session
 // key no longer present in the live spine.
 export function editorClearSession(sessionId: string): void {
   clearSessionDrafts(sessionId)

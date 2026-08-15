@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import type { Spine } from "./spineApi"
+import type { Spine } from "./workspaceApi"
 import { ownerKey } from "./terminalOwner"
 
 // Routing: the URL is the source of truth for where the app is. The screen is
@@ -161,7 +161,7 @@ function holdSpine(): void {
 
 const fetchMock = vi.fn(async (url: string) => {
   const u = String(url)
-  if (u.includes("/api/v1/spine")) {
+  if (u.includes("/api/v1/workspace")) {
     if (spineGate) await spineGate
     return {
       ok: true,

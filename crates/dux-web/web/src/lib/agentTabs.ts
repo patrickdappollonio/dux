@@ -2,7 +2,7 @@
 // unit-testable without mounting React. Mirrors the TUI's `tab_labels` /
 // strip-visibility logic (a shared fixture keeps the two in parity).
 
-import type { Spine } from "./spineApi"
+import type { Spine } from "./workspaceApi"
 import type { AgentTabView, SessionView } from "./types"
 import type { SelectedTarget } from "./store"
 

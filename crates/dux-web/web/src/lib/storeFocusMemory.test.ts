@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import type { Spine } from "./spineApi"
+import type { Spine } from "./workspaceApi"
 
 // Per-agent "remember last-focused tab": `selectSession` restores an agent's
 // remembered tab (SessionView.last_focused_tab) by routing through `selectTab`
@@ -38,7 +38,7 @@ let replaceStateMock: ReturnType<typeof vi.fn>
 
 const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
   const u = String(url)
-  if (u.includes("/api/v1/spine")) {
+  if (u.includes("/api/v1/workspace")) {
     return {
       ok: true,
       status: 200,

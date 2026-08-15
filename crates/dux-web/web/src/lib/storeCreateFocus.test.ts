@@ -1,13 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import type { Spine } from "./spineApi"
+import type { Spine } from "./workspaceApi"
 
 // `store` reads `location`/`localStorage`, registers a `popstate` listener, and
 // at module load constructs an `EventsSocket` and fetches bootstrap + spine. Stub
 // the minimum so the import succeeds.
 //
 // The create-focus logic moved off the broadcast ViewModel onto the spine apply
-// path (`GET /api/v1/spine`, refetched on `projects.changed`/`sessions.changed`).
+// path (`GET /api/v1/workspace`, refetched on `projects.changed`/`sessions.changed`).
 // So these tests drive it by mutating `spineBody` and dispatching a
 // `sessions.changed` event, then awaiting the refetch landing in state.
 
@@ -23,7 +23,7 @@ let spineBody: Spine = makeSpine([])
 
 const fetchMock = vi.fn(async (url: string) => {
   const u = String(url)
-  if (u.includes("/api/v1/spine")) {
+  if (u.includes("/api/v1/workspace")) {
     return {
       ok: true,
       status: 200,
@@ -83,7 +83,7 @@ async function loadStore() {
 // Push a new spine to the store the way the server would: set the body, fire the
 // invalidation event, and wait for the refetch to land (the spine reference
 // always changes on apply, so this detects application even for unchanged
-// content). Returns once `applySpine` (and its focus/prune reconciliation) ran.
+// content). Returns once `applyWorkspace` (and its focus/prune reconciliation) ran.
 async function pushSpine(
   mod: Awaited<ReturnType<typeof loadStore>>,
   sessions: { id: string; project_id: string }[],

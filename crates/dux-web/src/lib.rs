@@ -46,11 +46,11 @@ pub mod resource_routes;
 pub mod rest_common;
 pub mod server;
 pub mod session_actions;
-pub mod spine_routes;
 pub mod startup_logs;
 pub mod tab_actions;
 pub mod terminal_actions;
 pub mod web_assets;
+pub mod workspace_routes;
 
 /// Crate-wide test helpers shared by the per-module route test suites (a single
 /// headless engine handle + a plain router builder), so each REST route module

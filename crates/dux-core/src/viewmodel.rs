@@ -11,7 +11,7 @@ use crate::engine::Engine;
 use crate::model::{AgentSession, PrInfo, PrState, Project, ProjectBranchStatus, ProviderKind};
 use crate::worker::{ResourceKind, ResourceStats};
 
-/// The projects/sessions/sidebar "spine" a web client reads via `GET /api/v1/spine`
+/// The projects/sessions/sidebar "spine" a web client reads via `GET /api/v1/workspace`
 /// (and the thin per-resource reads `GET /api/v1/projects`, `GET /api/v1/sessions`,
 /// `GET /api/v1/sessions/:id`). Refetched when a coarse `projects.changed` or
 /// `sessions.changed` event fires. Changed files are served separately via
@@ -910,7 +910,7 @@ impl MacroView {
 }
 
 impl Engine {
-    /// Project the projects/sessions/sidebar spine served via `GET /api/v1/spine`
+    /// Project the projects/sessions/sidebar spine served via `GET /api/v1/workspace`
     /// (and the thin per-resource reads). This is the exact projection logic the
     /// [`Engine::view_model`] used to inline for those three fields; it was factored
     /// out so the REST read and the change-detection that emits

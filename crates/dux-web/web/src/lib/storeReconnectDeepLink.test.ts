@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import type { Spine } from "./spineApi"
+import type { Spine } from "./workspaceApi"
 
 // Regression coverage for the reconnect deep-link loss: when the connection
 // drops while the user is deep-linked to a running agent, clicking "Reconnect
@@ -67,7 +67,7 @@ let pushedUrls: string[] = []
 
 const fetchMock = vi.fn(async (url: string) => {
   const u = String(url)
-  if (u.includes("/api/v1/spine")) {
+  if (u.includes("/api/v1/workspace")) {
     return {
       ok: true,
       status: 200,
@@ -160,7 +160,7 @@ async function loadStore(
   return mod
 }
 
-// Advance past the microtask queue so an async `loadSpine` fetch applies.
+// Advance past the microtask queue so an async `loadWorkspace` fetch applies.
 async function settle() {
   await new Promise((r) => setTimeout(r, 0))
 }

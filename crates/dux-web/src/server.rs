@@ -515,7 +515,7 @@ pub fn build_app(
     // Spine-change -> `projects.changed` / `sessions.changed` forwarder. The engine
     // loop fires a `SpineChange` whenever the projected projects- or
     // sessions+sidebar-portion changes; we turn each into the matching coarse event
-    // so clients on the `projects` / `sessions` topics refetch `/api/v1/spine`.
+    // so clients on the `projects` / `sessions` topics refetch `/api/v1/workspace`.
     // Same lifetime/teardown story as the config forwarder above.
     spawn_spine_changed_forwarder(engine.subscribe_spine_changes(), Arc::clone(&event_bus));
     // Run the first-load gate ONCE for this launch, off every request path. The
@@ -619,7 +619,7 @@ pub fn build_app(
         .merge(crate::resource_routes::routes())
         .merge(crate::bootstrap_routes::routes())
         .merge(crate::build_routes::routes())
-        .merge(crate::spine_routes::routes())
+        .merge(crate::workspace_routes::routes())
         .merge(crate::session_actions::routes())
         .merge(crate::project_actions::routes())
         .merge(crate::project_reads::routes())
@@ -1654,7 +1654,7 @@ fn spawn_config_changed_forwarder(
 }
 
 /// A coarse `projects.changed` signal: no `id`/`rev`, just "refetch the projects
-/// read" (`/api/v1/projects` or `/api/v1/spine`), delivered on the `projects` topic.
+/// read" (`/api/v1/projects` or `/api/v1/workspace`), delivered on the `projects` topic.
 fn projects_changed_event() -> Event {
     Event::Resource {
         event: "projects.changed".to_string(),
@@ -1667,7 +1667,7 @@ fn projects_changed_event() -> Event {
 }
 
 /// A coarse `sessions.changed` signal: no `id`/`rev`, just "refetch the sessions
-/// read" (`/api/v1/sessions` or `/api/v1/spine`), delivered on the `sessions` topic.
+/// read" (`/api/v1/sessions` or `/api/v1/workspace`), delivered on the `sessions` topic.
 /// Covers session lifecycle/status, the `working` flag, and the terminal list in
 /// Phase 3 (they all live in the sessions/sidebar projection).
 fn sessions_changed_event() -> Event {
@@ -1684,7 +1684,7 @@ fn sessions_changed_event() -> Event {
 /// Bridge engine spine changes onto the event bus as coarse `projects.changed` /
 /// `sessions.changed` events. The engine loop fires a [`SpineChange`] per changed
 /// side; this task re-emits the matching event so subscribed clients refetch
-/// `/api/v1/spine`. On `Lagged` it re-emits BOTH coarse signals once (the signals
+/// `/api/v1/workspace`. On `Lagged` it re-emits BOTH coarse signals once (the signals
 /// are value-less and idempotent, so a missed run coalesces into a single refetch
 /// of each side). Exits when the engine — and thus the broadcast — is gone. Returns
 /// the task handle (used by tests; the production caller fire-and-forgets it).
@@ -2000,7 +2000,7 @@ async fn handle_events_socket(
                         }
                         ("config.changed", _) => interest.subscribed.contains("config"),
                         // Coarse spine signals ride their own coarse topics (no
-                        // id/rev — a plain refetch of `/api/v1/spine`).
+                        // id/rev — a plain refetch of `/api/v1/workspace`).
                         ("projects.changed", _) => interest.subscribed.contains("projects"),
                         ("sessions.changed", _) => interest.subscribed.contains("sessions"),
                         // A PTY ownership handover rides the coarse `sessions` topic
@@ -2898,7 +2898,7 @@ mod tests {
         handle
     }
 
-    /// `GET /api/v1/spine` returns the projects, sessions, and sidebar projection
+    /// `GET /api/v1/workspace` returns the projects, sessions, and sidebar projection
     /// (auth off → the gate passes). Proves the spine read serves the same spine
     /// the ViewModel used to carry.
     #[tokio::test]
@@ -2910,7 +2910,7 @@ mod tests {
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
-                    .uri("/api/v1/spine")
+                    .uri("/api/v1/workspace")
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
