@@ -1456,7 +1456,12 @@ fn stat_process_group(stat: &[u8]) -> Option<u32> {
 
 /// The state letter out of a `/proc/<pid>/stat` line: the first field after the
 /// executable name, so `Z` for an exited-but-unreaped process.
-#[cfg(any(target_os = "linux", test))]
+///
+/// Linux only, unlike its two neighbours here. They stay reachable under `test`
+/// on every platform because `group_scan_step`'s parsing test is not gated and
+/// calls into them; nothing outside Linux reaches this one, so on macOS it was
+/// a dead item in the test build and clippy said so.
+#[cfg(target_os = "linux")]
 fn stat_process_state(stat: &[u8]) -> Option<u8> {
     stat_fields_after_comm(stat)?.next()?.first().copied()
 }

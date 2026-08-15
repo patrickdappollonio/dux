@@ -514,6 +514,11 @@ mod tests {
     /// Re-sample every tracked process's memory figure, with no CPU work and
     /// no baseline sleep, so retry loops that only care about RSS can
     /// re-check the ground truth cheaply and quickly.
+    ///
+    /// Linux only, because its one caller is. The `/proc`-versus-sysinfo
+    /// comparisons are the only tests that re-read RSS in a loop, and they
+    /// cannot run anywhere without `/proc`.
+    #[cfg(target_os = "linux")]
     fn resample_memory(sys: &mut sysinfo::System) {
         sys.refresh_processes_specifics(
             sysinfo::ProcessesToUpdate::All,
@@ -529,7 +534,12 @@ mod tests {
     /// against a moving target even though neither side is wrong. Retrying a
     /// bounded number of times, resampling both sides together each time,
     /// waits out that benign race instead of loosening the equality itself.
+    ///
+    /// Linux only, alongside the two `/proc`-versus-sysinfo tests that are the
+    /// only readers of both.
+    #[cfg(target_os = "linux")]
     const RSS_RACE_RETRY_ATTEMPTS: usize = 25;
+    #[cfg(target_os = "linux")]
     const RSS_RACE_RETRY_DELAY: Duration = Duration::from_millis(20);
 
     /// Threads share their process's address space, so on Linux `sysinfo`
