@@ -284,7 +284,13 @@ describe("Changes-pane width", () => {
       pointerDown: boolean,
       armed: boolean,
     ) =>
-      mod.changesPaneCollapseStep({ percent, prevPercent, pointerDown, armed })
+      mod.changesPaneCollapseStep({
+        percent,
+        prevPercent,
+        pointerDown,
+        armed,
+        reshowPending: false,
+      })
 
     // Mid-drag the write waits: flipping the preference here unmounts the panel
     // under the library while the pointer is still down.
@@ -302,6 +308,36 @@ describe("Changes-pane width", () => {
     expect(step(18, 26, true, false)).toBe("none")
     // A panel's first report has no previous size; it is not a collapse.
     expect(step(0, undefined, true, false)).toBe("none")
+  })
+
+  // A pane coming back from hidden re-mounts into whatever layout the library
+  // cached for the two-panel group, and for a pane that LEFT at zero that is a
+  // zero. The panel reports that mount width like any other resize, with no
+  // pointer down, which is the exact shape of a keyboard collapse. Believing it
+  // would hide the pane during the act of showing it, so the user's click on
+  // "Show Changes pane" would look like it did nothing.
+  it("changesPaneCollapseStep believes nothing a re-showing pane reports", async () => {
+    const mod = await loadStore()
+    const step = (
+      percent: number,
+      prevPercent: number | undefined,
+      pointerDown: boolean,
+      armed: boolean,
+    ) =>
+      mod.changesPaneCollapseStep({
+        percent,
+        prevPercent,
+        pointerDown,
+        armed,
+        reshowPending: true,
+      })
+
+    // The dangerous one: it would commit immediately without this window.
+    expect(step(0, 26, false, false)).toBe("none")
+    // And nothing else in the window is acted on either, in either direction.
+    expect(step(0, 26, true, false)).toBe("none")
+    expect(step(20, 0, true, true)).toBe("none")
+    expect(step(26, undefined, false, false)).toBe("none")
   })
 
   it("changesPaneEffectivelyHidden: off by preference, or on but dragged to nothing", async () => {

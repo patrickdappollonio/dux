@@ -97,7 +97,7 @@ function installBootStubs() {
   )
 }
 installBootStubs()
-const { DesktopShell } = await import("./App")
+const { DesktopShell, CHANGES_PANE_HEAL_FRAMES } = await import("./App")
 const { CHANGES_PANE_DEFAULT_PERCENT } = await import("@/lib/store")
 
 function stateWith(showChanges: boolean, percent = 26): DuxState {
@@ -138,6 +138,44 @@ function fakeHandle(asPercentage: number): FakeHandle {
   }
 }
 
+// The real handle does not report a missing panel, it THROWS: every method
+// resolves the panel through the library's registry and raises `Layout not
+// found for Panel <id>` when the entry is not there. A re-mounting panel has no
+// entry until the group re-registers, which is a frame away, so this is what
+// the shell actually meets on the way back in.
+function throwingHandle(
+  throwsFor: number,
+  thenPercentage: number,
+): FakeHandle {
+  const resized: Array<number | string> = []
+  let calls = 0
+  return {
+    collapse: () => {},
+    expand: () => {},
+    getSize: () => {
+      calls += 1
+      if (calls <= throwsFor) {
+        throw new Error("Layout not found for Panel changes-pane")
+      }
+      return { asPercentage: thenPercentage, inPixels: thenPercentage * 10 }
+    },
+    isCollapsed: () => thenPercentage < 1,
+    resize: (size: number | string) => void resized.push(size),
+    resized,
+  }
+}
+
+// The heal runs off animation frames, and the drag-collapse write off a
+// timeout, so the tests have to let both run. Real timers with a real rAF would
+// make every one of these tests wait on the browser's frame cadence.
+function flushFrames(count: number): void {
+  for (let i = 0; i < count; i += 1) {
+    act(() => {
+      vi.advanceTimersByTime(17)
+    })
+  }
+}
+
 beforeEach(() => {
   recordedPanelProps.length = 0
   lastGroupProps = {}
@@ -145,12 +183,22 @@ beforeEach(() => {
   collapseFromDrag.mockClear()
   setPercent.mockClear()
   installBootStubs()
+  vi.useFakeTimers()
 })
 
 afterEach(() => {
   cleanup()
+  vi.useRealTimers()
   vi.unstubAllGlobals()
 })
+
+// Run everything the shell has scheduled: the collapse write's timeout and the
+// re-show heal's frames.
+function flushScheduled(): void {
+  act(() => {
+    vi.runAllTimers()
+  })
+}
 
 describe("DesktopShell panel units", () => {
   it("spells the unit out on every size it hands the panel library", () => {
@@ -196,6 +244,11 @@ describe("DesktopShell drag-collapse", () => {
         { asPercentage: 26, inPixels: 400 },
       )
     })
+    // Never from inside the event that produced the report: the write unmounts
+    // the panel, and the library is not done with it until its own listeners
+    // have run. One task later is soon enough and is the whole guarantee.
+    expect(collapseFromDrag).not.toHaveBeenCalled()
+    flushScheduled()
     // Hidden-by-drag and hidden-by-menu are now ONE state, so the header's
     // reopen button appears. Without this the pane was unreachable.
     expect(collapseFromDrag).toHaveBeenCalledTimes(1)
@@ -220,7 +273,20 @@ describe("DesktopShell drag-collapse", () => {
     // registry entry per collapse.
     expect(collapseFromDrag).not.toHaveBeenCalled()
 
+    // And not synchronously on the release either. This shell listens on the
+    // WINDOW in the capture phase; the library listens on the DOCUMENT in the
+    // capture phase, which is strictly later in the same dispatch, so writing
+    // here still unmounted the panel while the library was mid-drag. Ending the
+    // drag then re-adds the group object it captured at pointerdown to the
+    // registry, resurrecting the registration that just died, and every lookup
+    // scans by id and takes the first match. Measured after that happened: the
+    // reopened pane was an eleven-pixel sliver, its layout never reappeared,
+    // and the library threw `Invalid 2 panel layout: 100%` from its own
+    // ResizeObserver. A macrotask lands after the whole dispatch; a microtask
+    // would not, because microtask checkpoints run between listeners.
     act(() => pointer("pointerup"))
+    expect(collapseFromDrag).not.toHaveBeenCalled()
+    flushScheduled()
     expect(collapseFromDrag).toHaveBeenCalledTimes(1)
   })
 
@@ -241,6 +307,7 @@ describe("DesktopShell drag-collapse", () => {
       })
     })
     act(() => pointer("pointerup"))
+    flushScheduled()
     // Dragging past the snap and back out before letting go is the escape from
     // an accidental collapse; committing at the snap took it away.
     expect(collapseFromDrag).not.toHaveBeenCalled()
@@ -261,6 +328,7 @@ describe("DesktopShell drag-collapse", () => {
       // as a collapse would hide the pane during its own mount.
       onResize({ asPercentage: 0, inPixels: 0 }, "changes-pane", undefined)
     })
+    flushScheduled()
     expect(collapseFromDrag).not.toHaveBeenCalled()
   })
 
@@ -291,6 +359,7 @@ describe("DesktopShell re-show", () => {
     act(() => {
       rerender(<DesktopShell />)
     })
+    flushFrames(1)
 
     expect(handle.resized).toEqual([`${CHANGES_PANE_DEFAULT_PERCENT}%`])
     // The header's spacer mirrors the store's number, so it has to move too.
@@ -306,6 +375,7 @@ describe("DesktopShell re-show", () => {
     act(() => {
       rerender(<DesktopShell />)
     })
+    flushFrames(CHANGES_PANE_HEAL_FRAMES + 1)
 
     expect(handle.resized).toEqual([])
   })
@@ -319,6 +389,96 @@ describe("DesktopShell re-show", () => {
     act(() => {
       render(<DesktopShell />)
     })
+    flushFrames(CHANGES_PANE_HEAL_FRAMES + 1)
     expect(handle.resized).toEqual([])
+  })
+
+  // THE BLACK SCREEN. The handle's methods throw rather than no-op while the
+  // re-mounting panel has no registry entry, and the shell used to call
+  // `getSize()` straight from its own effect, one beat too early. The throw
+  // unwound React with no boundary over it and the whole screen went black on
+  // the first click of "Show Changes pane".
+  it("survives a panel that has no layout yet, and heals once it does", () => {
+    mockState = stateWith(false)
+    const { rerender } = render(<DesktopShell />)
+    const handle = throwingHandle(1, 0)
+    nextChangesHandle = handle
+    mockState = stateWith(true)
+    expect(() => {
+      act(() => {
+        rerender(<DesktopShell />)
+      })
+    }).not.toThrow()
+    // Nothing yet: the first look still throws.
+    flushFrames(1)
+    expect(handle.resized).toEqual([])
+    // The layout lands, and the pane is healed to its default width.
+    flushFrames(1)
+    expect(handle.resized).toEqual([`${CHANGES_PANE_DEFAULT_PERCENT}%`])
+  })
+
+  it("gives up with a breadcrumb, not a crash, when the layout never lands", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    mockState = stateWith(false)
+    const { rerender } = render(<DesktopShell />)
+    // Throws for longer than the shell is willing to wait.
+    const handle = throwingHandle(CHANGES_PANE_HEAL_FRAMES + 5, 0)
+    nextChangesHandle = handle
+    mockState = stateWith(true)
+    act(() => {
+      rerender(<DesktopShell />)
+    })
+    expect(() => flushFrames(CHANGES_PANE_HEAL_FRAMES + 3)).not.toThrow()
+    expect(handle.resized).toEqual([])
+    expect(warn).toHaveBeenCalledTimes(1)
+    warn.mockRestore()
+  })
+
+  it("does not crash, or leave the pane hidden, when the resize itself throws", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    mockState = stateWith(false)
+    const { rerender } = render(<DesktopShell />)
+    const handle = fakeHandle(0)
+    handle.resize = () => {
+      throw new Error("Layout not found for Panel changes-pane")
+    }
+    nextChangesHandle = handle
+    mockState = stateWith(true)
+    act(() => {
+      rerender(<DesktopShell />)
+    })
+    expect(() => flushFrames(2)).not.toThrow()
+    // The spacer must NOT move to a width the panel refused to take.
+    expect(setPercent).not.toHaveBeenCalledWith(CHANGES_PANE_DEFAULT_PERCENT)
+    expect(warn).toHaveBeenCalledTimes(1)
+    warn.mockRestore()
+  })
+
+  // A pane coming back from hidden re-mounts into the library's cached layout
+  // and reports that width like any other resize. Reading a cached zero as a
+  // drag-collapse would hide the pane during the act of showing it, so the
+  // user's click would look like it did nothing at all.
+  it("does not read the mount width of a re-shown pane as a collapse", () => {
+    mockState = stateWith(false)
+    const { rerender } = render(<DesktopShell />)
+    // Still no layout, so the heal window stays open across these reports.
+    const handle = throwingHandle(2, 0)
+    nextChangesHandle = handle
+    mockState = stateWith(true)
+    act(() => {
+      rerender(<DesktopShell />)
+    })
+    const onResize = panel("changes-pane")!.onResize!
+    act(() => {
+      // The mount settling: a real width, then the cached zero. Off a re-show
+      // that pair is not a gesture, and there is no pointer down to wait for.
+      onResize({ asPercentage: 26, inPixels: 400 }, "changes-pane", undefined)
+      onResize({ asPercentage: 0, inPixels: 0 }, "changes-pane", {
+        asPercentage: 26,
+        inPixels: 400,
+      })
+    })
+    flushScheduled()
+    expect(collapseFromDrag).not.toHaveBeenCalled()
   })
 })

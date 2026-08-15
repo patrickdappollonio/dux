@@ -5304,15 +5304,24 @@ export type ChangesPaneCollapseStep = "none" | "arm" | "commit" | "disarm"
 // collapsed state.
 //
 // `pointerDown` is what tells a drag apart from the paths that have no gesture
-// to wait for (the separator's arrow-key resize, or anything that resizes the
-// panel programmatically); those commit immediately, because there is no
-// pointerup coming to commit them later.
+// to wait for (the separator's arrow-key resize); those commit without waiting
+// for a pointerup that is never coming.
+//
+// `reshowPending` is the one report that must never be believed. A pane coming
+// back from hidden re-mounts into whatever layout the library cached for the
+// two-panel group, which for a pane that LEFT at zero is a zero, and the panel
+// reports that mount width like any other resize. Reading it as a collapse
+// would hide the pane during the very act of showing it, and the user's click
+// would look like it did nothing. The re-show heal owns that window (it is the
+// thing that resizes the pane back to a real width); the latch stays out of it.
 export function changesPaneCollapseStep(args: {
   percent: number
   prevPercent: number | undefined
   pointerDown: boolean
   armed: boolean
+  reshowPending: boolean
 }): ChangesPaneCollapseStep {
+  if (args.reshowPending) return "none"
   if (isChangesPaneDragCollapse(args.percent, args.prevPercent)) {
     return args.pointerDown ? "arm" : "commit"
   }
