@@ -367,6 +367,15 @@ pub(crate) struct ActorLoopEnds {
     /// `/api/v1/workspace`). Broadcast — the web forwarder is the only listener, but a
     /// broadcast keeps the send a cheap fire-and-forget with no receiver.
     spine_change_tx: broadcast::Sender<SpineChange>,
+    /// Publishes the whole workspace document each time the loop rebuilds its
+    /// cached serialization, so `/ws/events` connections can be PUSHED the new
+    /// document instead of each refetching it. A `watch` rather than a
+    /// broadcast: it coalesces by construction (a slow connection sees only the
+    /// latest document, never a queue of superseded ones), it has no `Lagged`
+    /// variant to recover from, and its current value IS the replay a
+    /// newly-subscribing connection needs. `None` only before the loop has
+    /// built its first document; a replay never sends that.
+    workspace_tx: watch::Sender<Option<Arc<WorkspaceDoc>>>,
     /// Shared with the caller-facing [`EngineHandle`] and every PTY forwarder.
     /// The inline `Shutdown` request trips this so forwarders exit promptly even
     /// before the engine drop disconnects their channels.
@@ -464,6 +473,11 @@ pub(crate) fn build_actor_channels(engine: &Engine) -> (EngineHandle, ActorLoopE
     // forwarder drains promptly and a `Lagged` recovery just re-emits both coarse
     // signals (idempotent refetches).
     let (spine_change_tx, _spine_change_rx) = broadcast::channel::<SpineChange>(64);
+    // Workspace-document publication: the loop replaces this value each time it
+    // rebuilds the cached serialization, and every `/ws/events` connection
+    // subscribed to a coarse topic is handed the new document. `None` is the
+    // pre-first-build value; the loop replaces it before it serves anything.
+    let (workspace_tx, workspace_rx) = watch::channel::<Option<Arc<WorkspaceDoc>>>(None);
     let shutdown_flag = Arc::new(AtomicBool::new(false));
     // The input-ownership registry is built alongside the channels because it,
     // too, is a bridge between the loop and the web layer: the PTY socket
@@ -478,6 +492,7 @@ pub(crate) fn build_actor_channels(engine: &Engine) -> (EngineHandle, ActorLoopE
             status_snapshot_rx,
             config_reload_tx: config_reload_tx.clone(),
             spine_change_tx: spine_change_tx.clone(),
+            workspace_rx,
             shutdown_flag: Arc::clone(&shutdown_flag),
             has_active_processes: Arc::clone(&engine.has_active_processes),
             pty_input_owners: Arc::clone(&pty_input_owners),
@@ -491,6 +506,7 @@ pub(crate) fn build_actor_channels(engine: &Engine) -> (EngineHandle, ActorLoopE
             status_snapshot_tx,
             config_reload_tx,
             spine_change_tx,
+            workspace_tx,
             shutdown_flag,
             pty_input_owners,
         },
@@ -539,6 +555,11 @@ pub struct EngineHandle {
     /// re-emits a coarse `projects.changed` / `sessions.changed` event so clients
     /// refetch `/api/v1/workspace`.
     spine_change_tx: broadcast::Sender<SpineChange>,
+    /// The receiving end of the workspace-document publication (see
+    /// [`ActorLoopEnds::workspace_tx`]). Held here for the whole life of the
+    /// handle, mirroring `status_snapshot_rx`: a `watch` channel with no live
+    /// receiver would make every publish a no-op, and connections come and go.
+    workspace_rx: watch::Receiver<Option<Arc<WorkspaceDoc>>>,
     /// Tripped when the server is tearing down (ReturnToTui, QuitProcess, or a
     /// `Shutdown` request). PTY forwarders poll it so their blocking
     /// `recv_timeout` loop exits promptly even when the engine — and therefore
@@ -605,6 +626,15 @@ impl EngineHandle {
     /// line until the next live update. An empty `Vec` means nothing is showing.
     pub fn status_snapshot(&self) -> Vec<KeyedWireStatus> {
         self.status_snapshot_rx.borrow().clone()
+    }
+
+    /// A receiver for the pushed workspace document. Each `/ws/events`
+    /// connection clones one and forwards every new document to the client that
+    /// asked for the coarse topics, which is what removes the N-clients-pull-
+    /// the-same-document traffic the coarse ping used to cause. The current
+    /// value doubles as the replay a newly-subscribed connection is handed.
+    pub(crate) fn workspace_docs(&self) -> watch::Receiver<Option<Arc<WorkspaceDoc>>> {
+        self.workspace_rx.clone()
     }
 
     /// Like [`emit_status`] but attaches a correlation key so a later success,
@@ -1555,6 +1585,7 @@ pub(crate) fn run_engine_loop(
         status_snapshot_tx,
         config_reload_tx,
         spine_change_tx,
+        workspace_tx,
         shutdown_flag,
         pty_input_owners,
     } = ends;
@@ -1584,7 +1615,7 @@ pub(crate) fn run_engine_loop(
     // accumulator). Seeded from the current state so the first tick does not emit
     // a spurious change for an unchanged spine and a `/spine` read before the
     // first change still serves a valid body.
-    let mut spine_check = SpineCheck::new(&engine, &pty_input_owners);
+    let mut spine_check = SpineCheck::new(&engine, &pty_input_owners, &workspace_tx);
     // In-memory spine mutation version: bumped after each loop-level spine mutator
     // (apply_wire / a CreateTerminal request, worker-event drain, a changed
     // terminal-foreground refresh, a non-empty PTY prune). The spine check runs
@@ -1916,6 +1947,7 @@ pub(crate) fn run_engine_loop(
                 streaming_version,
                 &pty_input_owners,
                 &spine_change_tx,
+                &workspace_tx,
             );
         }
 
@@ -1949,7 +1981,7 @@ pub(crate) fn run_engine_loop(
                 EngineRequest::SpineJson(reply) => {
                     // Serve the loop-local cache (handled here, not in
                     // `handle_request`, which has no access to it).
-                    let _ = reply.send(spine_check.spine_json_cache.clone());
+                    let _ = reply.send(spine_check.doc.json.to_string());
                 }
                 EngineRequest::Shutdown(reply) => {
                     // Trip the teardown flag first so any PTY forwarders exit
@@ -2221,6 +2253,51 @@ fn overlay_session_input_owners(
     }
 }
 
+/// The workspace document as BOTH of its consumers read it: one cached
+/// serialization with its revision already inside the JSON, plus that revision
+/// broken out so the push frame can carry it without parsing the body.
+///
+/// The revision is minted at the single place that rewrites the cache
+/// ([`SpineCheck::maybe_check`]), which is also the only place in the process
+/// that knows the document actually changed. Embedding it at serialization time
+/// rather than splicing it per consumer is what makes a fetched body and a
+/// pushed frame orderable against each other: they are the same bytes, carrying
+/// the same number, however the client came by them.
+/// The revision of the seed document built at loop start. Starts at 1 so 0 is
+/// free to mean "no document has been published yet".
+const FIRST_WORKSPACE_REV: u64 = 1;
+
+pub struct WorkspaceDoc {
+    /// Monotonic within one run of the server, starting at 1. It says nothing
+    /// across restarts, which is exactly why the client resets what it has
+    /// applied whenever its events socket reopens.
+    pub rev: u64,
+    /// The serialized document, `rev` field included. `Arc<str>` because every
+    /// connected client is handed the same bytes on every change; re-serializing
+    /// per connection is the cost this whole change exists to remove.
+    pub json: Arc<str>,
+}
+
+/// Serialize one workspace document with `rev` as a top-level field alongside
+/// the spine's own fields. Flattening keeps every existing field exactly where
+/// it was, so `rev` is purely additive to the REST body.
+///
+/// A serialization failure cannot happen for this type, but if it ever did, the
+/// fallback still carries the rev: a client that applies an empty document is
+/// merely stale, while a client that applies a document whose rev it cannot
+/// order would be wrong.
+fn serialize_workspace(rev: u64, spine: &dux_core::viewmodel::SpineView) -> Arc<str> {
+    #[derive(serde::Serialize)]
+    struct Revisioned<'a> {
+        rev: u64,
+        #[serde(flatten)]
+        spine: &'a dux_core::viewmodel::SpineView,
+    }
+    serde_json::to_string(&Revisioned { rev, spine })
+        .unwrap_or_else(|_| format!("{{\"rev\":{rev}}}"))
+        .into()
+}
+
 /// Loop-local state for the change-gated spine check and its self-healing
 /// backstop. Holds the last-seen fingerprints of the two spine halves, the cached
 /// whole-spine JSON for `GET /api/v1/workspace`, the version values last compared
@@ -2235,8 +2312,10 @@ fn overlay_session_input_owners(
 struct SpineCheck {
     prev_projects_fp: String,
     prev_sessions_fp: String,
-    /// Cached `GET /api/v1/workspace` body, rebuilt only when a half actually changes.
-    spine_json_cache: String,
+    /// The cached workspace document: the `GET /api/v1/workspace` body and the
+    /// pushed frame's payload, one serialization, rebuilt only when a half
+    /// actually changes.
+    doc: Arc<WorkspaceDoc>,
     /// The `mutation_version` value at the last fingerprint compare.
     last_checked_mutation: u64,
     /// The `streaming_version` value at the last fingerprint compare.
@@ -2262,7 +2341,15 @@ struct SpineCheck {
 }
 
 impl SpineCheck {
-    fn new(engine: &Engine, owners: &PtySizeOwners) -> Self {
+    /// Build the seed state and publish the seed document. Publishing here (not
+    /// on the first change) is what lets a client that connects before anything
+    /// has happened be handed a real document instead of waiting for the first
+    /// mutation.
+    fn new(
+        engine: &Engine,
+        owners: &PtySizeOwners,
+        workspace_tx: &watch::Sender<Option<Arc<WorkspaceDoc>>>,
+    ) -> Self {
         // Read the generation BEFORE building the spine: a claim landing in
         // between then reads as newer than what was fingerprinted, so the next
         // check re-runs rather than missing it until the backstop.
@@ -2270,11 +2357,18 @@ impl SpineCheck {
         // ONE build feeds both the fingerprints and the cache (see `owned_spine`).
         let spine = owned_spine(engine, owners);
         let (prev_projects_fp, prev_sessions_fp) = fingerprint_halves(&spine);
-        let spine_json_cache = serde_json::to_string(&spine).unwrap_or_else(|_| "{}".to_string());
+        let doc = Arc::new(WorkspaceDoc {
+            rev: FIRST_WORKSPACE_REV,
+            json: serialize_workspace(FIRST_WORKSPACE_REV, &spine),
+        });
+        // `send_replace`, not `send`: `watch::Sender::send` fails and DROPS the
+        // value when no receiver is alive, and the only long-lived receiver is
+        // the one the handle holds, which may not exist yet in a test.
+        workspace_tx.send_replace(Some(Arc::clone(&doc)));
         Self {
             prev_projects_fp,
             prev_sessions_fp,
-            spine_json_cache,
+            doc,
             last_checked_mutation: 0,
             last_checked_streaming: 0,
             last_checked_ownership,
@@ -2296,6 +2390,7 @@ impl SpineCheck {
         streaming_version: u64,
         owners: &PtySizeOwners,
         spine_change_tx: &broadcast::Sender<SpineChange>,
+        workspace_tx: &watch::Sender<Option<Arc<WorkspaceDoc>>>,
     ) {
         self.ticks_since_backstop = self
             .ticks_since_backstop
@@ -2337,11 +2432,19 @@ impl SpineCheck {
             let _ = spine_change_tx.send(SpineChange::Sessions);
             spine_changed = true;
         }
-        // Refresh the cached `GET /api/v1/workspace` JSON only when a half actually
+        // Rebuild the cached workspace document only when a half actually
         // changed, so the common case (no change) skips the full serialization.
+        // This is the one chokepoint that rewrites the cache, so it is also
+        // where the revision is minted and where the document is published to
+        // every connected client. An idle interval publishes nothing at all: a
+        // client's applied revision only ever moves because the document did.
         if spine_changed {
-            self.spine_json_cache =
-                serde_json::to_string(&spine).unwrap_or_else(|_| "{}".to_string());
+            let rev = self.doc.rev.saturating_add(1);
+            self.doc = Arc::new(WorkspaceDoc {
+                rev,
+                json: serialize_workspace(rev, &spine),
+            });
+            workspace_tx.send_replace(Some(Arc::clone(&self.doc)));
         }
     }
 }
@@ -3962,13 +4065,14 @@ mod tests {
         let engine = bootstrap_engine(&paths).expect("bootstrap");
         let (tx, _rx) = broadcast::channel::<SpineChange>(64);
         let owners = crate::pty_owners::PtySizeOwners::default();
-        let mut check = SpineCheck::new(&engine, &owners);
+        let (workspace_tx, _workspace_rx) = watch::channel(None);
+        let mut check = SpineCheck::new(&engine, &owners, &workspace_tx);
 
         // Run every spine-check interval that fits before the backstop would fire.
         let intervals_before_backstop =
             (SPINE_BACKSTOP_TICK_INTERVAL / SPINE_CHECK_TICK_INTERVAL as u32) - 1;
         for _ in 0..intervals_before_backstop {
-            check.maybe_check(&engine, 0, 0, &owners, &tx);
+            check.maybe_check(&engine, 0, 0, &owners, &tx, &workspace_tx);
         }
         assert_eq!(
             check.fp_call_count, 0,
@@ -3986,7 +4090,8 @@ mod tests {
         let mut engine = bootstrap_engine(&paths).expect("bootstrap");
         let (tx, mut rx) = broadcast::channel::<SpineChange>(64);
         let owners = crate::pty_owners::PtySizeOwners::default();
-        let mut check = SpineCheck::new(&engine, &owners);
+        let (workspace_tx, _workspace_rx) = watch::channel(None);
+        let mut check = SpineCheck::new(&engine, &owners, &workspace_tx);
 
         // Mutate the sessions spine WITHOUT touching the version counters.
         for s in engine.sessions.iter_mut() {
@@ -3999,7 +4104,7 @@ mod tests {
         // so the only thing that can run the compare is the backstop.
         let intervals_to_backstop = SPINE_BACKSTOP_TICK_INTERVAL / SPINE_CHECK_TICK_INTERVAL as u32;
         for _ in 0..intervals_to_backstop {
-            check.maybe_check(&engine, 0, 0, &owners, &tx);
+            check.maybe_check(&engine, 0, 0, &owners, &tx, &workspace_tx);
         }
         assert!(
             check.fp_call_count >= 1,
@@ -4033,31 +4138,32 @@ mod tests {
         let engine = bootstrap_engine(&paths).expect("bootstrap");
         let owners = crate::pty_owners::PtySizeOwners::default();
         let (tx, mut rx) = broadcast::channel::<SpineChange>(64);
-        let mut check = SpineCheck::new(&engine, &owners);
+        let (workspace_tx, _workspace_rx) = watch::channel(None);
+        let mut check = SpineCheck::new(&engine, &owners, &workspace_tx);
         assert!(
-            !check.spine_json_cache.contains("input_owner"),
+            !check.doc.json.contains("input_owner"),
             "an unowned PTY must publish no owner at all (absent, not null)"
         );
 
         // Take-over: a connection claims the session-slot tab's PTY.
         owners.claim("s1", 42);
-        check.maybe_check(&engine, 0, 0, &owners, &tx);
+        check.maybe_check(&engine, 0, 0, &owners, &tx, &workspace_tx);
         assert_eq!(
             rx.try_recv(),
             Ok(SpineChange::Sessions),
             "an ownership claim must fire sessions.changed with no engine version bump"
         );
         assert!(
-            check.spine_json_cache.contains(r#""input_owner":"42""#),
+            check.doc.json.contains(r#""input_owner":"42""#),
             "the served spine must carry the owning connection id: {}",
-            check.spine_json_cache
+            check.doc.json
         );
 
         // Steady state: the owner typing away bumps nothing, so further checks
         // must not churn (no event, no re-serialize).
         let serializes_after_claim = check.fp_call_count;
         assert!(owners.may_write("s1", 42).allowed);
-        check.maybe_check(&engine, 0, 0, &owners, &tx);
+        check.maybe_check(&engine, 0, 0, &owners, &tx, &workspace_tx);
         assert_eq!(
             check.fp_call_count, serializes_after_claim,
             "unchanged ownership must not even re-run the fingerprint compare"
@@ -4067,16 +4173,97 @@ mod tests {
         // The owner disconnects: the release must clear the published field so
         // a crashed device never leaves the agent permanently owned.
         owners.release("s1", 42);
-        check.maybe_check(&engine, 0, 0, &owners, &tx);
+        check.maybe_check(&engine, 0, 0, &owners, &tx, &workspace_tx);
         assert_eq!(
             rx.try_recv(),
             Ok(SpineChange::Sessions),
             "a disconnect release must fire sessions.changed"
         );
         assert!(
-            !check.spine_json_cache.contains("input_owner"),
+            !check.doc.json.contains("input_owner"),
             "and the served spine must drop the owner field"
         );
+    }
+
+    /// The revision moves when the document does, and only then. A client
+    /// discards a pushed document whose revision it has already applied, so a
+    /// revision that failed to move on a real change would strand every tab on
+    /// stale data, and one that moved without a change would make the dedup
+    /// worthless.
+    #[test]
+    fn the_workspace_revision_moves_once_per_real_change() {
+        let (_tmp, paths) = temp_paths();
+        seed_session(&paths, "s1");
+        let engine = bootstrap_engine(&paths).expect("bootstrap");
+        let owners = crate::pty_owners::PtySizeOwners::default();
+        let (tx, _rx) = broadcast::channel::<SpineChange>(64);
+        let (workspace_tx, mut workspace_rx) = watch::channel(None);
+        let mut check = SpineCheck::new(&engine, &owners, &workspace_tx);
+
+        let seed = workspace_rx
+            .borrow_and_update()
+            .clone()
+            .expect("the seed document must be published at construction");
+        assert_eq!(seed.rev, 1, "revisions start at 1, leaving 0 for `unset`");
+        assert!(
+            seed.json.contains(r#""rev":1"#),
+            "the revision must be embedded in the serialization itself: {}",
+            seed.json
+        );
+
+        // A real change: an input-ownership claim moves the sessions half.
+        owners.claim("s1", 42);
+        check.maybe_check(&engine, 0, 0, &owners, &tx, &workspace_tx);
+        assert!(
+            workspace_rx.has_changed().unwrap(),
+            "a changed document must be published"
+        );
+        let next = workspace_rx.borrow_and_update().clone().unwrap();
+        assert_eq!(next.rev, seed.rev + 1, "one change, one revision");
+        assert!(
+            next.json.contains(r#""rev":2"#),
+            "and the body agrees with the frame: {}",
+            next.json
+        );
+
+        // Nothing changed since: the gate does not even re-run, so there is
+        // nothing to publish and the revision must stand still.
+        check.maybe_check(&engine, 0, 0, &owners, &tx, &workspace_tx);
+        assert!(
+            !workspace_rx.has_changed().unwrap(),
+            "an unchanged document must not be republished"
+        );
+        assert_eq!(check.doc.rev, next.rev);
+    }
+
+    /// The self-healing backstop runs the compare on a schedule, whether or not
+    /// anything changed. When it finds nothing, it must publish nothing: every
+    /// connected client would otherwise be handed the whole document twice a
+    /// minute for no reason, which is the traffic the push exists to remove.
+    #[test]
+    fn an_unchanged_backstop_pass_publishes_nothing() {
+        let (_tmp, paths) = temp_paths();
+        seed_session(&paths, "s1");
+        let engine = bootstrap_engine(&paths).expect("bootstrap");
+        let owners = crate::pty_owners::PtySizeOwners::default();
+        let (tx, _rx) = broadcast::channel::<SpineChange>(64);
+        let (workspace_tx, mut workspace_rx) = watch::channel(None);
+        let mut check = SpineCheck::new(&engine, &owners, &workspace_tx);
+        let seed_rev = workspace_rx.borrow_and_update().clone().unwrap().rev;
+
+        let intervals_to_backstop = SPINE_BACKSTOP_TICK_INTERVAL / SPINE_CHECK_TICK_INTERVAL as u32;
+        for _ in 0..intervals_to_backstop {
+            check.maybe_check(&engine, 0, 0, &owners, &tx, &workspace_tx);
+        }
+        assert!(
+            check.fp_call_count >= 1,
+            "the backstop must have run the compare, or this proves nothing"
+        );
+        assert!(
+            !workspace_rx.has_changed().unwrap(),
+            "a backstop pass that found no change must publish nothing"
+        );
+        assert_eq!(check.doc.rev, seed_rev, "and must not move the revision");
     }
 
     /// Ownership of a pty id that is not an agent tab (a companion terminal's,
@@ -4090,15 +4277,16 @@ mod tests {
         let engine = bootstrap_engine(&paths).expect("bootstrap");
         let owners = crate::pty_owners::PtySizeOwners::default();
         let (tx, mut rx) = broadcast::channel::<SpineChange>(64);
-        let mut check = SpineCheck::new(&engine, &owners);
+        let (workspace_tx, _workspace_rx) = watch::channel(None);
+        let mut check = SpineCheck::new(&engine, &owners, &workspace_tx);
 
         owners.claim("term-9", 7);
-        check.maybe_check(&engine, 0, 0, &owners, &tx);
+        check.maybe_check(&engine, 0, 0, &owners, &tx, &workspace_tx);
         assert!(
             rx.try_recv().is_err(),
             "a claim on a non-tab pty must not fire any coarse event"
         );
-        assert!(!check.spine_json_cache.contains("input_owner"));
+        assert!(!check.doc.json.contains("input_owner"));
     }
 
     /// The overlay must iterate EVERY session's tabs, not merely find a first
@@ -4193,8 +4381,9 @@ mod tests {
         // interval run the fingerprint compare.
         let (tx, _rx) = broadcast::channel::<SpineChange>(64);
         let owners = crate::pty_owners::PtySizeOwners::default();
-        let mut check = SpineCheck::new(&engine, &owners);
-        check.maybe_check(&engine, 0, streaming_version, &owners, &tx);
+        let (workspace_tx, _workspace_rx) = watch::channel(None);
+        let mut check = SpineCheck::new(&engine, &owners, &workspace_tx);
+        check.maybe_check(&engine, 0, streaming_version, &owners, &tx, &workspace_tx);
         assert_eq!(
             check.fp_call_count, 1,
             "a streaming_version change must open the gate"
@@ -4299,7 +4488,8 @@ mod tests {
         // Seed the fingerprint WHILE the terminal is present so its removal is a
         // real diff.
         let owners = crate::pty_owners::PtySizeOwners::default();
-        let mut check = SpineCheck::new(&engine, &owners);
+        let (workspace_tx, _workspace_rx) = watch::channel(None);
+        let mut check = SpineCheck::new(&engine, &owners, &workspace_tx);
 
         // Wait for the child to exit, then prune (the loop's #4 mutator).
         let mut mutation_version = 0u64;
@@ -4317,7 +4507,7 @@ mod tests {
         // A SINGLE spine-check interval later (one maybe_check), the bump opens
         // the gate. The backstop needs many more intervals, so this proves the
         // bump path, not the backstop.
-        check.maybe_check(&engine, mutation_version, 0, &owners, &tx);
+        check.maybe_check(&engine, mutation_version, 0, &owners, &tx, &workspace_tx);
         assert_eq!(
             check.fp_call_count, 1,
             "the prune bump must open the gate on the next interval"

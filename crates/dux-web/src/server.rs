@@ -30,7 +30,7 @@ use dux_core::statusline::{KeyedWireStatus, StatusScope};
 
 use crate::changes::ChangesService;
 use crate::console::Console;
-use crate::engine_actor::{EngineHandle, SpineChange};
+use crate::engine_actor::{EngineHandle, SpineChange, WorkspaceDoc};
 use crate::event_bus::{self, Event, EventBus};
 use crate::pty_owners::PtySizeOwners;
 
@@ -1681,6 +1681,31 @@ fn sessions_changed_event() -> Event {
     }
 }
 
+/// The pushed workspace-document frame:
+/// `{"event":"workspace","rev":N,"workspace":{…}}`.
+///
+/// Built by splicing the cached serialization into a string rather than by
+/// serializing a struct. The document is already JSON in the engine's cache and
+/// every subscribed connection is sent the same bytes; re-serializing it per
+/// connection is exactly the cost this frame exists to remove. The revision
+/// appears twice on purpose: once at the top level, where a client reads it
+/// without touching the body, and once inside the document, where a client that
+/// FETCHED the same bytes over REST finds it.
+fn workspace_frame_text(doc: &WorkspaceDoc) -> String {
+    format!(
+        r#"{{"event":"workspace","rev":{},"workspace":{}}}"#,
+        doc.rev, doc.json
+    )
+}
+
+/// Whether this connection asked for the workspace document. It rides the two
+/// coarse topics that used to carry the value-less `projects.changed` /
+/// `sessions.changed` pings, because it is the document those pings told the
+/// client to refetch. Either topic is enough: the document is not split in half.
+fn holds_workspace_topic(subscribed: &std::collections::HashSet<String>) -> bool {
+    subscribed.contains("sessions") || subscribed.contains("projects")
+}
+
 /// Bridge engine spine changes onto the event bus as coarse `projects.changed` /
 /// `sessions.changed` events. The engine loop fires a [`SpineChange`] per changed
 /// side; this task re-emits the matching event so subscribed clients refetch
@@ -1946,6 +1971,15 @@ async fn handle_events_socket(
     let mut status_rx = engine.subscribe_status();
     let mut status_clear_rx = engine.subscribe_status_clears();
 
+    // The pushed workspace document. Taking the receiver here (before this
+    // connection can subscribe to anything) means the first `changed()` it sees
+    // is a genuinely new document, not the one it was already handed on
+    // subscribe. `workspace_alive` retires the arm if the engine goes away: a
+    // `watch` whose sender is dropped returns `Err` from `changed()` forever,
+    // which would spin this select loop.
+    let mut workspace_rx = engine.workspace_docs();
+    let mut workspace_alive = true;
+
     // Initial statuses: a client connecting mid-operation sees ALL active toasts
     // (keyed and anonymous) immediately, scoped to itself. An empty/fully-filtered
     // snapshot sends nothing.
@@ -1980,6 +2014,28 @@ async fn handle_events_socket(
                     break;
                 }
             }
+            // The workspace document changed: push it to this connection if it
+            // asked for the coarse topics. Every events socket wakes once per
+            // change and then filters, which is bounded by the connection cap
+            // and far cheaper than the N full GETs it replaces.
+            changed = workspace_rx.changed(), if workspace_alive => match changed {
+                Ok(()) => {
+                    // `borrow_and_update`, not `borrow`: `borrow` leaves this
+                    // receiver marked as unseen, so `changed()` would return
+                    // immediately forever and hot-loop a connection that holds
+                    // neither coarse topic.
+                    let doc = workspace_rx.borrow_and_update().clone();
+                    if let Some(doc) = doc
+                        && holds_workspace_topic(&interest.subscribed)
+                        && send_text(&sink, workspace_frame_text(&doc)).await.is_err()
+                    {
+                        break;
+                    }
+                }
+                // The engine is gone. The status broadcasts will close too and
+                // break this loop; retire the arm so it cannot spin first.
+                Err(_) => workspace_alive = false,
+            },
             ev = bus_rx.recv() => match ev {
                 Ok(Event::Resource {
                     event,
@@ -2029,73 +2085,22 @@ async fn handle_events_socket(
                          dropped {n} event(s); synthesizing catch-up"
                     ));
                     // Write a synthetic catch-up DIRECTLY to this connection's sink
-                    // for each held fine topic (never back onto the broadcast bus).
+                    // (never back onto the broadcast bus). The whole set is built by
+                    // one shared, tested function; the current workspace document is
+                    // read here because a `watch` borrow must not be held across the
+                    // sends below.
+                    let doc = workspace_rx.borrow_and_update().clone();
                     let mut sink_dead = false;
-                    for topic in interest.subscribed.iter() {
-                        if let Some(sid) = event_bus::session_id_from_changes_topic(topic) {
-                            let frame = WireEvent {
-                                event: "session.changes".to_string(),
-                                id: Some(sid.to_string()),
-                                rev: changes.peek_rev(sid),
-                                owner: None,
-                                epoch: None,
-                                device: None,
-                            };
-                            if send_event(&sink, &frame).await.is_err() {
-                                sink_dead = true;
-                                break;
-                            }
+                    for text in
+                        lagged_catchup_texts(&interest.subscribed, &changes, doc.as_deref())
+                    {
+                        if send_text(&sink, text).await.is_err() {
+                            sink_dead = true;
+                            break;
                         }
                     }
                     if sink_dead {
                         break;
-                    }
-                    // The coarse `config` topic carries no per-resource rev, so the
-                    // fine-topic loop above never covers it. A lagged client holding
-                    // `config` would keep stale bootstrap unless we explicitly tell it
-                    // to refetch; emit one `config.changed` directly to this sink
-                    // (mirroring how `spawn_config_changed_forwarder` recovers).
-                    if interest.subscribed.contains("config") {
-                        let frame = WireEvent {
-                            event: "config.changed".to_string(),
-                            id: None,
-                            rev: None,
-                            owner: None,
-                            epoch: None,
-                            device: None,
-                        };
-                        if send_event(&sink, &frame).await.is_err() {
-                            break;
-                        }
-                    }
-                    // The coarse `projects`/`sessions` topics likewise carry no
-                    // per-resource rev, so a lagged client holding them needs an
-                    // explicit refetch nudge to recover from stale spine data.
-                    if interest.subscribed.contains("projects") {
-                        let frame = WireEvent {
-                            event: "projects.changed".to_string(),
-                            id: None,
-                            rev: None,
-                            owner: None,
-                            epoch: None,
-                            device: None,
-                        };
-                        if send_event(&sink, &frame).await.is_err() {
-                            break;
-                        }
-                    }
-                    if interest.subscribed.contains("sessions") {
-                        let frame = WireEvent {
-                            event: "sessions.changed".to_string(),
-                            id: None,
-                            rev: None,
-                            owner: None,
-                            epoch: None,
-                            device: None,
-                        };
-                        if send_event(&sink, &frame).await.is_err() {
-                            break;
-                        }
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -2179,9 +2184,24 @@ async fn handle_events_socket(
             next = stream.next() => match next {
                 Some(Ok(Message::Text(text))) => {
                     if let Ok(frame) = serde_json::from_str::<EventsClientFrame>(text.as_str()) {
-                        let new_fine =
+                        let new_topics =
                             apply_events_frame(&frame, &mut interest.subscribed, &engine, &bus)
                                 .await;
+                        // Replay the current workspace document to a connection
+                        // that JUST asked for it, so it starts from the truth
+                        // instead of from whatever its boot fetch returned. Skip
+                        // it before the engine has published anything (the
+                        // pre-first-build `None`): there is nothing truthful to
+                        // send, and the client's boot fetch covers that window.
+                        if new_topics.workspace {
+                            let doc = workspace_rx.borrow_and_update().clone();
+                            if let Some(doc) = doc
+                                && send_text(&sink, workspace_frame_text(&doc)).await.is_err()
+                            {
+                                break;
+                            }
+                        }
+                        let new_fine = new_topics.fine;
                         // Per-subscribe catch-up: for each newly-registered fine
                         // topic, send a `session.changes` frame immediately so the
                         // client does not miss an event that landed between its REST
@@ -2240,18 +2260,18 @@ impl Drop for InterestGuard {
 /// subscription against a live session before registering interest, and enforces
 /// the per-frame and per-connection topic caps.
 ///
-/// Returns the set of `session:<id>:changes` fine topics that were **newly
-/// inserted** by this frame. Coarse topics (sessions/projects/config) are not
-/// returned — they are intentionally left to the client's existing `onOpen`
-/// refetch. The caller uses the returned set to send one `session.changes`
-/// catch-up frame per newly-subscribed session, closing the race window between
-/// a client's REST refetch and its subscription registering.
+/// Returns what this frame newly registered (see [`NewSubscriptions`]): the
+/// fine `session:<id>:changes` topics, so the caller can send one
+/// `session.changes` catch-up frame per newly-subscribed session, and whether a
+/// coarse workspace topic was newly registered, so the caller can replay the
+/// current workspace document. Both close the same race window: the gap between
+/// a client's REST read and its subscription registering.
 async fn apply_events_frame(
     frame: &EventsClientFrame,
     subscribed: &mut std::collections::HashSet<String>,
     engine: &EngineHandle,
     bus: &EventBus,
-) -> Vec<String> {
+) -> NewSubscriptions {
     // Process unsubscribes FIRST — they only ever shrink state, so they are always
     // safe to honor (even on an otherwise-rejected oversized frame) and a frame
     // carrying both makes room under the cap before the subscribes run.
@@ -2267,10 +2287,10 @@ async fn apply_events_frame(
             "/ws/events subscribe frame rejected: {} topics exceeds the {MAX_EVENT_TOPICS_PER_FRAME} cap",
             frame.subscribe.len()
         ));
-        return Vec::new();
+        return NewSubscriptions::default();
     }
 
-    let mut new_fine_topics = Vec::new();
+    let mut new = NewSubscriptions::default();
 
     for topic in &frame.subscribe {
         if subscribed.len() >= MAX_EVENT_TOPICS_PER_CONN {
@@ -2310,18 +2330,34 @@ async fn apply_events_frame(
                     // Collect for the per-subscribe catch-up emitted at the
                     // caller, closing the race window between a REST refetch
                     // and the subscription registering.
-                    new_fine_topics.push(topic.clone());
+                    new.fine.push(topic.clone());
                 }
             }
             // A coarse topic (sessions/projects/config): tracked for forwarding,
             // but it carries no poll interest in Phase 1.
             None => {
-                subscribed.insert(topic.clone());
+                if subscribed.insert(topic.clone()) && (topic == "sessions" || topic == "projects")
+                {
+                    new.workspace = true;
+                }
             }
         }
     }
 
-    new_fine_topics
+    new
+}
+
+/// What one subscribe frame newly registered, and therefore what the connection
+/// must be caught up on before it can trust what it holds.
+#[derive(Default)]
+struct NewSubscriptions {
+    /// Newly inserted `session:<id>:changes` fine topics.
+    fine: Vec<String>,
+    /// Whether a coarse workspace topic (`sessions`/`projects`) was newly
+    /// inserted, so the current workspace document should be replayed. A
+    /// re-subscribe to a topic already held is deliberately not a replay: the
+    /// connection is already being pushed every change to it.
+    workspace: bool,
 }
 
 /// Build the set of per-subscribe catch-up frames for `new_fine`: for each newly
@@ -2347,6 +2383,79 @@ fn catchup_frames(new_fine: &[String], changes: &ChangesService) -> Vec<WireEven
             })
         })
         .collect()
+}
+
+/// Every catch-up frame a connection that lagged the event bus needs, in send
+/// order, already serialized.
+///
+/// A lagged connection missed an unknown number of events, so recovery is "here
+/// is where everything stands": one `session.changes` per held fine topic
+/// (carrying the current rev), one refetch nudge per held coarse topic, and the
+/// current workspace document itself.
+///
+/// The document is sent ALONGSIDE the `projects.changed`/`sessions.changed`
+/// nudges rather than instead of them. A client that does not understand the
+/// pushed document still needs its nudge, and one that does simply discards the
+/// second copy: its revision is not newer than the one it just applied. Paying
+/// for one redundant frame on a rare lag is much cheaper than deciding, per
+/// connection, which kind of client is on the other end.
+///
+/// This is the SHARED production+test path, like [`catchup_frames`], so the
+/// tests exercise the real assembly rather than a re-description of it.
+fn lagged_catchup_texts(
+    subscribed: &std::collections::HashSet<String>,
+    changes: &ChangesService,
+    workspace: Option<&WorkspaceDoc>,
+) -> Vec<String> {
+    let mut events: Vec<WireEvent> = Vec::new();
+    for topic in subscribed {
+        if let Some(sid) = event_bus::session_id_from_changes_topic(topic) {
+            events.push(WireEvent {
+                event: "session.changes".to_string(),
+                id: Some(sid.to_string()),
+                rev: changes.peek_rev(sid),
+                owner: None,
+                epoch: None,
+                device: None,
+            });
+        }
+    }
+    // The coarse topics carry no per-resource rev, so the fine-topic loop above
+    // never covers them. A lagged client holding `config` would keep a stale
+    // bootstrap, and one holding `projects`/`sessions` a stale workspace, unless
+    // told explicitly to refetch (mirroring how the forwarders recover).
+    for (topic, event) in [
+        ("config", "config.changed"),
+        ("projects", "projects.changed"),
+        ("sessions", "sessions.changed"),
+    ] {
+        if subscribed.contains(topic) {
+            events.push(WireEvent {
+                event: event.to_string(),
+                id: None,
+                rev: None,
+                owner: None,
+                epoch: None,
+                device: None,
+            });
+        }
+    }
+    let mut texts: Vec<String> = events
+        .iter()
+        .filter_map(|ev| serde_json::to_string(ev).ok())
+        .collect();
+    if let Some(doc) = workspace
+        && holds_workspace_topic(subscribed)
+    {
+        texts.push(workspace_frame_text(doc));
+    }
+    texts
+}
+
+/// Send one already-serialized `/ws/events` text frame.
+async fn send_text(sink: &SharedSink, text: String) -> Result<(), ()> {
+    let mut guard = sink.lock().await;
+    guard.send(Message::Text(text.into())).await.map_err(|_| ())
 }
 
 /// Serialize and send one `/ws/events` resource frame as a text message.
@@ -4351,7 +4460,9 @@ mod tests {
             subscribe: vec![event_bus::changes_topic("s1")],
             unsubscribe: vec![],
         };
-        let new_fine = apply_events_frame(&sub_frame, &mut subscribed, &handle, &bus).await;
+        let new_fine = apply_events_frame(&sub_frame, &mut subscribed, &handle, &bus)
+            .await
+            .fine;
 
         // The topic was newly inserted and returned for catch-up.
         assert_eq!(
@@ -4371,6 +4482,96 @@ mod tests {
             serde_json::to_string(&frames[0]).unwrap(),
             r#"{"event":"session.changes","id":"s1","rev":42}"#,
             "warm-cache catch-up must carry the current rev"
+        );
+    }
+
+    /// A connection that lagged the event bus is caught up with the CURRENT
+    /// workspace document, alongside the coarse nudges it already got. Lag is
+    /// the one path where a client can miss a push outright, so the recovery
+    /// has to carry the value, not just another "go and ask".
+    #[tokio::test]
+    async fn a_lagged_connection_is_caught_up_with_the_workspace_document() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = seeded_engine_handle(tmp.path());
+        let bus = Arc::new(EventBus::new());
+        let changes = ChangesService::new(handle.clone(), Arc::clone(&bus));
+        let doc = WorkspaceDoc {
+            rev: 7,
+            json: r#"{"rev":7,"sessions":[]}"#.into(),
+        };
+
+        let subscribed: std::collections::HashSet<String> =
+            ["sessions".to_string()].into_iter().collect();
+        let texts = lagged_catchup_texts(&subscribed, &changes, Some(&doc));
+        assert!(
+            texts.iter().any(|t| t == r#"{"event":"sessions.changed"}"#),
+            "the coarse nudge stays, for a client that does not read the document: {texts:?}"
+        );
+        assert!(
+            texts.iter().any(
+                |t| t == r#"{"event":"workspace","rev":7,"workspace":{"rev":7,"sessions":[]}}"#
+            ),
+            "and the document itself rides along: {texts:?}"
+        );
+
+        // A connection holding neither coarse topic is caught up with neither.
+        let other: std::collections::HashSet<String> = ["config".to_string()].into_iter().collect();
+        let texts = lagged_catchup_texts(&other, &changes, Some(&doc));
+        assert_eq!(
+            texts,
+            vec![r#"{"event":"config.changed"}"#.to_string()],
+            "a lagged connection is only caught up on what it holds"
+        );
+
+        // Before the engine has published anything there is nothing truthful to
+        // send, and the client's boot fetch covers that window.
+        let texts = lagged_catchup_texts(&subscribed, &changes, None);
+        assert_eq!(
+            texts,
+            vec![r#"{"event":"sessions.changed"}"#.to_string()],
+            "no document published yet means no document frame"
+        );
+    }
+
+    /// Subscribing to a coarse workspace topic asks for a replay of the current
+    /// document; re-subscribing to one already held does not. A connection that
+    /// already holds the topic is already being pushed every change to it, so a
+    /// repeat subscribe frame must not cost a whole document.
+    #[tokio::test]
+    async fn only_a_newly_held_coarse_topic_asks_for_a_workspace_replay() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = seeded_engine_handle(tmp.path());
+        let bus = Arc::new(EventBus::new());
+        let mut subscribed = std::collections::HashSet::new();
+
+        let frame = EventsClientFrame {
+            subscribe: vec!["sessions".to_string()],
+            unsubscribe: vec![],
+        };
+        assert!(
+            apply_events_frame(&frame, &mut subscribed, &handle, &bus)
+                .await
+                .workspace,
+            "a newly-registered coarse topic must ask for the replay"
+        );
+        assert!(
+            !apply_events_frame(&frame, &mut subscribed, &handle, &bus)
+                .await
+                .workspace,
+            "a repeat subscribe to a held topic must not"
+        );
+
+        // `config` is a coarse topic too, but it is not the workspace's.
+        let mut subscribed = std::collections::HashSet::new();
+        let frame = EventsClientFrame {
+            subscribe: vec!["config".to_string()],
+            unsubscribe: vec![],
+        };
+        assert!(
+            !apply_events_frame(&frame, &mut subscribed, &handle, &bus)
+                .await
+                .workspace,
+            "the config topic must not drag the workspace document along"
         );
     }
 
@@ -4397,7 +4598,9 @@ mod tests {
             subscribe: vec![event_bus::changes_topic("s1")],
             unsubscribe: vec![],
         };
-        let new_fine = apply_events_frame(&sub_frame, &mut subscribed, &handle, &bus).await;
+        let new_fine = apply_events_frame(&sub_frame, &mut subscribed, &handle, &bus)
+            .await
+            .fine;
 
         assert_eq!(
             new_fine,
@@ -4502,7 +4705,9 @@ mod tests {
             ],
             unsubscribe: vec![],
         };
-        let new_fine = apply_events_frame(&sub_frame, &mut subscribed, &handle, &bus).await;
+        let new_fine = apply_events_frame(&sub_frame, &mut subscribed, &handle, &bus)
+            .await
+            .fine;
 
         assert_eq!(
             new_fine.len(),
