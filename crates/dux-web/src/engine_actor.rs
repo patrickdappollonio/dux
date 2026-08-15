@@ -33,8 +33,9 @@ pub type PtySubscription = (PtyViewerGuard, Vec<u8>, std::sync::mpsc::Receiver<V
 /// Which half of the projects/sessions spine changed since the last tick. The
 /// engine loop fingerprints the projected spine each tick and fires the matching
 /// variant; the web layer's forwarder turns it into a coarse `projects.changed` /
-/// `sessions.changed` event so subscribed clients refetch `/api/v1/workspace` (or the
-/// thin per-resource read).
+/// `sessions.changed` event. Since the whole document is also pushed on the same
+/// socket (see [`WorkspaceDoc`]), that event is a nudge for a client too old to
+/// read the push, and a pointer at the thin per-resource reads.
 ///
 /// A single coarse signal per side is intentional for Phase 3: the sessions side
 /// also covers session lifecycle/status, the `working` hysteresis flag, and the
@@ -169,10 +170,12 @@ pub enum EngineRequest {
     /// `sessions.changed` event. The hot whole-spine read (`GET /api/v1/workspace`)
     /// instead uses [`EngineRequest::SpineJson`] (the loop's cached serialization).
     Spine(oneshot::Sender<dux_core::viewmodel::SpineView>),
-    /// The pre-serialized whole-spine JSON for `GET /api/v1/workspace`, served from the
-    /// loop's cache (rebuilt only when the spine actually changes) instead of
-    /// re-projecting + re-serializing on every client request. Handled inline in
-    /// the loop because the cache is loop-local state.
+    /// The pre-serialized whole-spine JSON for `GET /api/v1/workspace`, served
+    /// from the loop's cache (rebuilt only when the spine actually changes)
+    /// instead of re-projecting + re-serializing on every client request. It
+    /// carries the document's `rev`, because the cache is serialized WITH it (see
+    /// [`WorkspaceDoc`]), so a fetched body and a pushed frame are the same bytes.
+    /// Handled inline in the loop because the cache is loop-local state.
     SpineJson(oneshot::Sender<String>),
     /// Project ONLY the requested session for `GET /api/v1/sessions/:id` instead of
     /// building the whole spine to find one session, together with THAT session's
@@ -363,9 +366,10 @@ pub(crate) struct ActorLoopEnds {
     config_reload_tx: broadcast::Sender<()>,
     /// Fires a [`SpineChange`] whenever the projected projects-portion or
     /// sessions+sidebar-portion of the spine changes, so the web layer emits a
-    /// coarse `projects.changed` / `sessions.changed` event (clients then refetch
-    /// `/api/v1/workspace`). Broadcast — the web forwarder is the only listener, but a
-    /// broadcast keeps the send a cheap fire-and-forget with no receiver.
+    /// coarse `projects.changed` / `sessions.changed` event. The document itself
+    /// travels on `workspace_tx` below; this stays a value-less signal.
+    /// Broadcast — the web forwarder is the only listener, but a broadcast keeps
+    /// the send a cheap fire-and-forget with no receiver.
     spine_change_tx: broadcast::Sender<SpineChange>,
     /// Publishes the whole workspace document each time the loop rebuilds its
     /// cached serialization, so `/ws/events` connections can be PUSHED the new
@@ -552,8 +556,9 @@ pub struct EngineHandle {
     config_reload_tx: broadcast::Sender<()>,
     /// Notifies on each projects/sessions spine change (see [`ActorLoopEnds`]). The
     /// web layer subscribes via [`EngineHandle::subscribe_spine_changes`] and
-    /// re-emits a coarse `projects.changed` / `sessions.changed` event so clients
-    /// refetch `/api/v1/workspace`.
+    /// re-emits a coarse `projects.changed` / `sessions.changed` event. A client
+    /// that reads the pushed document ignores it; an older one refetches
+    /// `/api/v1/workspace` on it.
     spine_change_tx: broadcast::Sender<SpineChange>,
     /// The receiving end of the workspace-document publication (see
     /// [`ActorLoopEnds::workspace_tx`]). Held here for the whole life of the
@@ -1025,8 +1030,8 @@ impl EngineHandle {
         rx.await.ok()
     }
 
-    /// Snapshot the projects/sessions/sidebar spine for `GET /api/v1/workspace` and the
-    /// thin per-resource reads. `None` if the engine is gone (the handler then
+    /// Snapshot the projects/sessions/sidebar spine for the thin per-resource
+    /// reads (`/api/v1/projects`, `/api/v1/sessions`). `None` if the engine is gone (the handler then
     /// returns 503), distinguishing a dead engine from a real empty payload.
     pub async fn spine(&self) -> Option<dux_core::viewmodel::SpineView> {
         let (tx, rx) = oneshot::channel();
@@ -1036,9 +1041,10 @@ impl EngineHandle {
         rx.await.ok()
     }
 
-    /// The pre-serialized whole-spine JSON for `GET /api/v1/workspace`, served from the
-    /// loop's cache. `None` if the engine is gone (the handler then returns 503),
-    /// distinguishing a dead engine from a real payload.
+    /// The pre-serialized workspace document for `GET /api/v1/workspace`, served
+    /// from the loop's cache with its `rev` already inside it. The same bytes the
+    /// push frame carries. `None` if the engine is gone (the handler then returns
+    /// 503), distinguishing a dead engine from a real payload.
     pub async fn spine_json(&self) -> Option<String> {
         let (tx, rx) = oneshot::channel();
         if self
@@ -1119,8 +1125,10 @@ impl EngineHandle {
     }
 
     /// Subscribe to projects/sessions spine-change notifications. The web layer
-    /// forwards each into a coarse `projects.changed` / `sessions.changed` event on
-    /// its event bus so subscribed clients refetch `/api/v1/workspace`.
+    /// forwards each into a coarse `projects.changed` / `sessions.changed` event
+    /// on its event bus. The document those events describe is pushed separately
+    /// (see [`EngineHandle::workspace_docs`]); a client that cannot read the push
+    /// refetches `/api/v1/workspace` on the event instead.
     pub fn subscribe_spine_changes(&self) -> broadcast::Receiver<SpineChange> {
         self.spine_change_tx.subscribe()
     }
@@ -2166,8 +2174,9 @@ impl StatusEmitter {
 /// the projects fingerprint, and a session `project_id`/order/orphan transition
 /// moves the sessions fingerprint. Folding the sidebar (which embeds project
 /// fields) into the sessions half instead made a PROJECT-only change spuriously
-/// fire `sessions.changed`. Since the client refetches the whole `/spine` on
-/// either event, the sidebar still re-fetches correctly on whichever side fired.
+/// fire `sessions.changed`. Since either event means the whole document was
+/// rebuilt and republished, the sidebar still reaches the client on whichever
+/// side fired.
 ///
 /// Terminals ARE included, folded into the half that matches their owner. They
 /// used to ride inside the nested `projects[].terminals` / `sessions[].terminals`
@@ -2180,8 +2189,8 @@ impl StatusEmitter {
 ///
 /// A STANDALONE terminal never rode in either container, so there is no event to
 /// preserve and one has to be chosen. It moves the SESSIONS half, because that
-/// is the event the flat sidebar list's churn already fires on and because the
-/// client refetches the whole `/spine` on either event regardless. What matters
+/// is the event the flat sidebar list's churn already fires on and because
+/// either event carries the whole document regardless. What matters
 /// is that it fires on ONE of them: firing on neither is the silent-omission bug
 /// this whole partition exists to prevent.
 ///

@@ -2,10 +2,17 @@
 //! inside every per-tick `ViewModel` broadcast (Phase 3 of the REST-first
 //! migration).
 //!
-//! - `GET /api/v1/workspace`, the whole spine `{ projects, sessions, terminals,
-//!   sidebar }`. Terminals ride here as ONE flat collection, each tagged with its
-//!   owner; this is the document the browser reads. Invalidated by the coarse
-//!   `projects.changed` / `sessions.changed` events.
+//! - `GET /api/v1/workspace`, the whole document `{ rev, projects, sessions,
+//!   terminals, sidebar }`. Terminals ride here as ONE flat collection, each
+//!   tagged with its owner; this is the document the browser reads.
+//!
+//!   The browser normally reads it ONCE, at boot. After that the server pushes
+//!   the same bytes over `/ws/events` as a `workspace` frame on every change
+//!   (see `engine_actor::WorkspaceDoc`), so N open tabs no longer answer one
+//!   change with N identical GETs. This route remains the boot read, the
+//!   recovery read, and the programmable one; `rev` is the same revision the
+//!   push carries, so a client can order what it fetched against what it was
+//!   pushed.
 //! - `GET /api/v1/projects` — just the `ProjectView[]` (for programmability).
 //! - `GET /api/v1/sessions` — just the `SessionView[]`.
 //! - `GET /api/v1/sessions/:id` — one `SessionView`, 404 if unknown.
@@ -153,7 +160,7 @@ fn engine_unavailable() -> Response {
         .into_response()
 }
 
-/// The spine read routes. Literal segments are registered before the
+/// The workspace read routes. Literal segments are registered before the
 /// parameterized `:id` route regardless of framework ordering guarantees.
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -165,9 +172,11 @@ pub fn routes() -> Router<AppState> {
 
 async fn get_workspace(State(state): State<AppState>) -> Response {
     // Served from the engine loop's cached serialization (rebuilt only when the
-    // spine changes), not re-projected per request. The cache is already a JSON
-    // string, so return it raw with the JSON content-type rather than
-    // deserializing just to re-`Json`-serialize it.
+    // document changes), not re-projected per request. The cache is already a
+    // JSON string with its `rev` embedded, so return it raw with the JSON
+    // content-type rather than deserializing just to re-`Json`-serialize it.
+    // These are the exact bytes the push frame carries, which is what makes the
+    // two orderable against each other.
     match state.engine.spine_json().await {
         Some(json) => ([(header::CONTENT_TYPE, "application/json")], json).into_response(),
         None => engine_unavailable(),

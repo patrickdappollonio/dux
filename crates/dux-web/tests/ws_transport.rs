@@ -370,9 +370,10 @@ async fn boot_for_create_agent() -> (SocketAddr, tempfile::TempDir) {
 }
 
 /// Poll `GET /api/v1/workspace` until `pred` holds or the deadline lapses. The
-/// projects/sessions/sidebar spine is a REST read (the matching
-/// `projects.changed` / `sessions.changed` event rides `/ws/events`). `true` if
-/// `pred` ever held.
+/// document is also pushed over `/ws/events`, but polling the REST read is the
+/// simpler synchronization here: these tests care that the server's state
+/// settled, not how a client learns it (the push has its own tests in
+/// `tests/workspace_push.rs`). `true` if `pred` ever held.
 async fn wait_for_workspace<F>(addr: SocketAddr, pred: F) -> bool
 where
     F: Fn(&serde_json::Value) -> bool,

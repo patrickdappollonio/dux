@@ -26,7 +26,8 @@
 //!   segment, registered so it does not collide with `:id`).
 //! - `PUT    /api/v1/sessions/:id/pull-request`, manually attach (pin) a
 //!   PR from a raw typed reference; `202` + `{op_id}` (deferred, the outcome
-//!   rides the toast stream and `sessions.changed`).
+//!   rides the toast stream and the pushed workspace document, announced by
+//!   `sessions.changed`).
 //! - `DELETE /api/v1/sessions/:id/pull-request`, detach the manual pin so
 //!   autodetection resumes (synchronous, `200`).
 //! - `POST   /api/v1/pull-requests/resolve`, read a typed pull-request
@@ -645,7 +646,8 @@ struct AttachPullRequestAccepted {
 /// Manually attach (pin) a pull request to a session. Dispatch only: the
 /// engine mints the keyed busy (broadcast by the actor arm) and spawns the gh
 /// lookup worker; the final (attached, or the failure) rides the status toast
-/// stream, and the pinned badge lands via `sessions.changed`.
+/// stream, and the pinned badge lands with the next pushed workspace document
+/// (announced, for a client that does not read the push, by `sessions.changed`).
 async fn attach_pull_request(
     State(state): State<AppState>,
     Path(id): Path<String>,

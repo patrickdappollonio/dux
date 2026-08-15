@@ -515,7 +515,9 @@ pub fn build_app(
     // Spine-change -> `projects.changed` / `sessions.changed` forwarder. The engine
     // loop fires a `SpineChange` whenever the projected projects- or
     // sessions+sidebar-portion changes; we turn each into the matching coarse event
-    // so clients on the `projects` / `sessions` topics refetch `/api/v1/workspace`.
+    // so clients on the `projects` / `sessions` topics know the document moved.
+    // Those clients are also PUSHED the new document itself, on a separate watch
+    // channel read by the socket; this signal is what an older page refetches on.
     // Same lifetime/teardown story as the config forwarder above.
     spawn_spine_changed_forwarder(engine.subscribe_spine_changes(), Arc::clone(&event_bus));
     // Run the first-load gate ONCE for this launch, off every request path. The
@@ -1654,7 +1656,14 @@ fn spawn_config_changed_forwarder(
 }
 
 /// A coarse `projects.changed` signal: no `id`/`rev`, just "refetch the projects
-/// read" (`/api/v1/projects` or `/api/v1/workspace`), delivered on the `projects` topic.
+/// read" (`/api/v1/projects` or `/api/v1/workspace`), delivered on the `projects`
+/// topic.
+///
+/// The workspace document itself is PUSHED alongside this signal (see
+/// [`workspace_frame_text`]), so a client that understands the pushed frame stops
+/// refetching on this one. It keeps firing regardless: it is what a page from an
+/// older build still needs, it costs nothing, and removing it is a separate
+/// cleanup with its own compatibility argument to make.
 fn projects_changed_event() -> Event {
     Event::Resource {
         event: "projects.changed".to_string(),
@@ -1667,9 +1676,11 @@ fn projects_changed_event() -> Event {
 }
 
 /// A coarse `sessions.changed` signal: no `id`/`rev`, just "refetch the sessions
-/// read" (`/api/v1/sessions` or `/api/v1/workspace`), delivered on the `sessions` topic.
-/// Covers session lifecycle/status, the `working` flag, and the terminal list in
-/// Phase 3 (they all live in the sessions/sidebar projection).
+/// read" (`/api/v1/sessions` or `/api/v1/workspace`), delivered on the `sessions`
+/// topic. Covers session lifecycle/status, the `working` flag, and the terminal
+/// list in Phase 3 (they all live in the sessions/sidebar projection). Like
+/// `projects.changed`, it now travels alongside the pushed document rather than
+/// being the only way a client learns of the change.
 fn sessions_changed_event() -> Event {
     Event::Resource {
         event: "sessions.changed".to_string(),
@@ -1709,7 +1720,8 @@ fn holds_workspace_topic(subscribed: &std::collections::HashSet<String>) -> bool
 /// Bridge engine spine changes onto the event bus as coarse `projects.changed` /
 /// `sessions.changed` events. The engine loop fires a [`SpineChange`] per changed
 /// side; this task re-emits the matching event so subscribed clients refetch
-/// `/api/v1/workspace`. On `Lagged` it re-emits BOTH coarse signals once (the signals
+/// `/api/v1/workspace` (a page too old to read the pushed document). On `Lagged`
+/// it re-emits BOTH coarse signals once (the signals
 /// are value-less and idempotent, so a missed run coalesces into a single refetch
 /// of each side). Exits when the engine — and thus the broadcast — is gone. Returns
 /// the task handle (used by tests; the production caller fire-and-forgets it).
@@ -2055,8 +2067,10 @@ async fn handle_events_socket(
                             interest.subscribed.contains(&event_bus::changes_topic(sid))
                         }
                         ("config.changed", _) => interest.subscribed.contains("config"),
-                        // Coarse spine signals ride their own coarse topics (no
-                        // id/rev — a plain refetch of `/api/v1/workspace`).
+                        // Coarse workspace signals ride their own coarse topics
+                        // (no id/rev). The document they announce is pushed on
+                        // the watch arm above; these remain for a page too old
+                        // to read that, which refetches `/api/v1/workspace`.
                         ("projects.changed", _) => interest.subscribed.contains("projects"),
                         ("sessions.changed", _) => interest.subscribed.contains("sessions"),
                         // A PTY ownership handover rides the coarse `sessions` topic

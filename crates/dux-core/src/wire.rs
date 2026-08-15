@@ -1912,8 +1912,8 @@ impl Engine {
     /// worktree. Mirrors the force-reconnect teardown block (drop the provider →
     /// SIGKILL on Drop, clear resume state) but stops short of relaunching, and
     /// marks the session Detached so it can be reconnected later. The per-tick
-    /// spine diff notices the status change and fires `sessions.changed`, so
-    /// connected clients refetch and the agent shows as detached. Unknown session
+    /// spine diff notices the status change, rebuilds the workspace document and
+    /// pushes it, so connected clients show the agent as detached. Unknown session
     /// is an `Err` (the REST handler, `delete_tab`'s session-slot branch, maps
     /// this method's `Err` to 400 — an unknown session is already caught earlier
     /// by `resolve_worktree`'s 404); an agent that is not running is an

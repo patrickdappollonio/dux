@@ -14,6 +14,15 @@
 //! response. Status/toast events are delivered on the SAME `/ws/events` socket
 //! (scope-filtered), but ride the engine's status broadcast rather than this bus.
 //!
+//! One value IS pushed to clients on that socket: the whole workspace document.
+//! It does not ride this bus. It rides a dedicated `tokio::sync::watch` channel
+//! from the engine loop (`engine_actor::WorkspaceDoc`), which the events socket
+//! selects on directly. That keeps the promise above literally true, and a watch
+//! is the right carrier for a value anyway: it coalesces by construction, so a
+//! slow connection is handed the latest document rather than a queue of
+//! superseded ones, and it cannot lag. The bus keeps carrying the value-less
+//! `projects.changed` / `sessions.changed` signals alongside it.
+//!
 //! There is deliberately NO bus variant for lag recovery: a lagged `/ws/events`
 //! connection synthesizes its own catch-up frames directly to its sink (see the
 //! `RecvError::Lagged` arm in `server.rs`). Putting a "resync" on the broadcast

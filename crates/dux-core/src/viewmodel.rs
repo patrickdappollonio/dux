@@ -11,11 +11,18 @@ use crate::engine::Engine;
 use crate::model::{AgentSession, PrInfo, PrState, Project, ProjectBranchStatus, ProviderKind};
 use crate::worker::{ResourceKind, ResourceStats};
 
-/// The projects/sessions/sidebar "spine" a web client reads via `GET /api/v1/workspace`
-/// (and the thin per-resource reads `GET /api/v1/projects`, `GET /api/v1/sessions`,
-/// `GET /api/v1/sessions/:id`). Refetched when a coarse `projects.changed` or
-/// `sessions.changed` event fires. Changed files are served separately via
-/// `GET /api/v1/sessions/:id/changes` (signaled by `session.changes`).
+/// The projects/sessions/sidebar "spine" a web client reads via
+/// `GET /api/v1/workspace` (and the thin per-resource reads
+/// `GET /api/v1/projects`, `GET /api/v1/sessions`, `GET /api/v1/sessions/:id`).
+///
+/// The whole-document read is normally made ONCE, at boot: the web layer serves
+/// it from a cached serialization that it also PUSHES to every connected client
+/// over `/ws/events` whenever it is rebuilt, carrying a revision so a client can
+/// order what it fetched against what it was pushed. The coarse
+/// `projects.changed` / `sessions.changed` events still fire alongside, and are
+/// what a page too old to read the push refetches on. Changed files are served
+/// separately via `GET /api/v1/sessions/:id/changes` (signaled by
+/// `session.changes`).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SpineView {
     pub projects: Vec<ProjectView>,
@@ -910,8 +917,9 @@ impl MacroView {
 }
 
 impl Engine {
-    /// Project the projects/sessions/sidebar spine served via `GET /api/v1/workspace`
-    /// (and the thin per-resource reads). This is the exact projection logic the
+    /// Project the projects/sessions/sidebar spine served via
+    /// `GET /api/v1/workspace`, pushed on `/ws/events`, and read by the thin
+    /// per-resource endpoints. This is the exact projection logic the
     /// [`Engine::view_model`] used to inline for those three fields; it was factored
     /// out so the REST read and the change-detection that emits
     /// `projects.changed`/`sessions.changed` share one source of truth.

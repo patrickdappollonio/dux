@@ -75,7 +75,7 @@ export interface AgentTabView {
   working: boolean
   /** This specific tab is streaming keystroke-level input (the provider is
    * "typing"), a finer-grained cue than `working`. Rolled up any-tab into
-   * `SessionView.typing`. An older server omits it; `applyWorkspace` normalizes a
+   * `SessionView.typing`. An older server omits it; `normalizeWorkspace` normalizes a
    * missing value to `false`. */
   typing: boolean
   /** This specific tab needs attention (a permission prompt, a finished turn)
@@ -119,12 +119,12 @@ export interface TerminalView {
   has_output: boolean
   /** The terminal emitted PTY output within the last second (hysteresis boolean,
    * mirroring `SessionView.working`). Drives the terminal row's "Working" state
-   * word and its working cue. An older server omits it; `applyWorkspace` normalizes
+   * word and its working cue. An older server omits it; `normalizeWorkspace` normalizes
    * a missing value to `false`. */
   working: boolean
   /** The terminal is streaming keystroke-level input ("typing"), a finer cue than
    * `working`. Drives the terminal row's "Typing" state word and typing caret. An
-   * older server omits it; `applyWorkspace` normalizes a missing value to `false`. */
+   * older server omits it; `normalizeWorkspace` normalizes a missing value to `false`. */
   typing: boolean
   /** The command running in the terminal's foreground, or null when the shell
    * itself is idle. Refreshed by the engine at most every ~2s. The displayed
@@ -135,16 +135,16 @@ export interface TerminalView {
    * section, ascending. Stamped at spawn from a monotonic counter so the default
    * equals creation order, and rewritten only by a reorder. RUNTIME ONLY: it is
    * never persisted and resets to creation order on restart. An older server omits
-   * it; `applyWorkspace` normalizes a missing value to `0`. */
+   * it; `normalizeWorkspace` normalizes a missing value to `0`. */
   sort_order: number
   /** RFC 3339 spawn time, immutable after spawn. Same representation as
    * `SessionView`'s timestamps so the terminal sort can compute the same
    * "recently created" order as the agent sort. An older server omits it;
-   * `applyWorkspace` normalizes a missing value to "". */
+   * `normalizeWorkspace` normalizes a missing value to "". */
   created_at: string
   /** RFC 3339 timestamp of the terminal's last PTY activity (falling back to the
    * spawn time when there has been none). Drives the "recently updated" sort. An
-   * older server omits it; `applyWorkspace` normalizes a missing value to "". */
+   * older server omits it; `normalizeWorkspace` normalizes a missing value to "". */
   updated_at: string
 }
 
@@ -178,8 +178,8 @@ export interface SessionView {
   /** The agent's provider tabs in creation order (`tabs[0].id === id`). A session
    * always has at least one tab; the tab strip renders only when there are two or
    * more. See `AgentTabView`. An older server that predates tabs (e.g. after a
-   * binary downgrade, seen by an already-open client) omits the field; `applyWorkspace`
-   * normalizes a missing value to `[]` at ingestion. */
+   * binary downgrade, seen by an already-open client) omits the field;
+   * `normalizeWorkspace` coerces a missing value to `[]` at ingestion. */
   tabs: AgentTabView[]
   has_output: boolean
   /** Hysteresis boolean: the agent emitted PTY output within the last second.
@@ -187,13 +187,13 @@ export interface SessionView {
   working: boolean
   /** Any of the agent's tabs is streaming keystroke-level input ("typing"), a
    * finer-grained cue than `working`, rolled up any-tab. Drives the row's
-   * "Typing" state word and typing caret. An older server omits it; `applyWorkspace`
-   * normalizes a missing value to `false`. */
+   * "Typing" state word and typing caret. An older server omits it;
+   * `normalizeWorkspace` coerces a missing value to `false`. */
   typing: boolean
   /** Any of the agent's tabs needs attention (a permission prompt, a finished
    * turn) the user has not yet looked at. Rolled up any-tab, mirroring `working`.
    * Drives the sidebar dot, the browser-tab count, and the favicon dot. An older
-   * server omits it; `applyWorkspace` normalizes a missing value to `false`. */
+   * server omits it; `normalizeWorkspace` normalizes a missing value to `false`. */
   needs_attention: boolean
   /** RFC 3339 / ISO 8601 creation time. Backs the client-side sort-by commands
    * (sort agents by creation time) that mirror the TUI's palette parity. */
@@ -205,7 +205,7 @@ export interface SessionView {
    * `null`/undefined (or a value naming a tab no longer in `tabs`) means "no
    * memory": resolve to the session-slot tab (`id`). See `resolveFocusedTab` in
    * `lib/agentTabs.ts`. An older server that predates this field omits it;
-   * `applyWorkspace` normalizes a missing value to `null`. An explicit deep link
+   * `normalizeWorkspace` normalizes a missing value to `null`. An explicit deep link
    * (`#/agent/:id/tab/:t`) always wins over this — see `restoreDeepLink`. */
   last_focused_tab?: string | null
 }
@@ -328,8 +328,8 @@ export interface SidebarModel {
 // changes-pane default, global env) moved to
 // `GET /api/v1/bootstrap` (`bootstrapApi.ts`, invalidated by `config.changed`),
 // and the projects/sessions/sidebar fields moved to `GET /api/v1/workspace`
-// (`workspaceApi.ts`, invalidated by `projects.changed`/`sessions.changed`) — neither
-// belonged on a per-change broadcast. The changed-files data itself is owned by
+// (`workspaceApi.ts`, read at boot and then PUSHED as a `workspace` event on
+// every change) — neither belonged on a per-change broadcast. The changed-files data itself is owned by
 // the store's `changes` slice (`GET /api/v1/sessions/:id/changes`); this field
 // remains on the type only to mirror the residual wire frame.
 export interface ViewModel {
@@ -362,6 +362,12 @@ export interface ResourceEvent {
 //     `sessions.changed`, `config.changed`
 //     (terminal add/remove/relabel folds into `sessions.changed`; there is no
 //     separate `terminals.changed` frame);
+//   - the one resource event that CARRIES its value: `workspace` (rev + the
+//     whole workspace document). The server holds that document pre-serialized
+//     and every tab needs the same bytes, so it is pushed once per change
+//     instead of each tab answering `projects.changed`/`sessions.changed` with
+//     its own full GET. Those two keep firing for a page too old to read the
+//     push;
 //   - control frames migrated off the retired `/ws`: `connected` (id = the
 //     per-connection id echoed via `X-Connection-Id`), `status`
 //     (key?/tone/message, plus a `scope` the standalone editor tab reads to

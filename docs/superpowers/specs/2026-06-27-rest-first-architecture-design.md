@@ -192,7 +192,12 @@ GET for an ephemeral toast):
 ```
 
 Rules: a resource event names what changed and carries `rev` where the client
-needs ordering/dedup. It never carries the changed value. The client/server
+needs ordering/dedup. It never carries the changed value, with ONE later,
+deliberate exception (amended 2026-08): the whole workspace document is pushed as
+a `workspace` event, because the server already holds it pre-serialized and every
+connected tab was answering the coarse pings with an identical GET of it. The
+document does not ride the event bus; it rides a dedicated watch channel the
+events socket selects on, so the bus itself stays signal-only. The client/server
 share a single `topic_for_event(&Event) -> Option<String>` mapping (a Rust enum +
 a matching TypeScript constant), so the two never drift.
 
@@ -216,6 +221,7 @@ lower value, the client never needs to special-case restart.
 
 | Event | Topic it is delivered on | Client reaction |
 |---|---|---|
+| `workspace` `{rev, workspace}` (amended 2026-08) | `sessions` or `projects` | apply the carried document if its `rev` is newer than the applied one |
 | `projects.changed` | `projects` | re-GET `/projects` |
 | `sessions.changed` | `sessions` | re-GET `/sessions` |
 | `session.status` `{id}` (lifecycle: status/title/PR; low-frequency) | `sessions` | re-GET `/sessions/:id` |

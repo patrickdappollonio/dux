@@ -10,6 +10,13 @@
 //! client whether or not anyone is looking. REST gives natural backpressure: no
 //! Task Manager open, no cost.
 //!
+//! The workspace document is pushed over that socket and is not a
+//! counter-example. It changes when the workspace changes, which is rarely and
+//! never faster than the engine's own change gate; every client holds it all the
+//! time, open dialog or not; and pushing it REPLACED N clients each fetching the
+//! same bytes. Resource stats have the opposite shape on all three counts:
+//! unbounded rate, one dialog's audience, and nothing to coalesce.
+//!
 //! ## Why not `Engine::spawn_resource_stats_worker`
 //!
 //! That worker is shaped for the TUI event loop: fire-and-forget into a

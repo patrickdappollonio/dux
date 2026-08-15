@@ -38,7 +38,8 @@ const height = +(h || (mobile ? 844 : 900))
     hasTouch: mobile,
   })
   await page.goto(url, { waitUntil: "networkidle0", timeout: 30000 })
-  // Let the WebSocket spine land + one animation frame settle.
+  // Let the boot read and the pushed workspace document land, plus one
+  // animation frame to settle.
   await new Promise((r) => setTimeout(r, 800))
   await page.screenshot({ path: out })
   await browser.close()

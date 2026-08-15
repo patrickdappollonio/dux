@@ -236,13 +236,15 @@ export interface ChangesSlice {
 // (`lib/ptySocket.ts`).
 
 export interface DuxState {
-  // The workspace "spine" from `GET /api/v1/workspace`: projects, sessions, and the
-  // core-computed sidebar grouping. These three fields used to ride the broadcast
-  // `ViewModel`; they now live here, fetched once after auth resolves (alongside
-  // the bootstrap document) and re-fetched on a `projects.changed` /
-  // `sessions.changed` event or an events-socket reconnect. `null` until the
-  // first fetch lands — every consumer falls back to empty lists so nothing
-  // crashes in that pre-load window.
+  // The workspace "spine" from `GET /api/v1/workspace`: projects, sessions, and
+  // the core-computed sidebar grouping. These three fields used to ride the
+  // broadcast `ViewModel`; they now live here, fetched once after auth resolves
+  // (alongside the bootstrap document) and thereafter PUSHED by the server as a
+  // `workspace` event on every change. A server that does not push, or a frame
+  // this client cannot read, falls back to re-fetching on the coarse
+  // `projects.changed` / `sessions.changed` events; a reconnect re-fetches
+  // either way. `null` until the first document lands — every consumer falls
+  // back to empty lists so nothing crashes in that pre-load window.
   spine: Spine | null
   // The build-static / config-derived document from `GET /api/v1/bootstrap`
   // (providers, macros, palette commands, welcome tips, version, UI flags,
