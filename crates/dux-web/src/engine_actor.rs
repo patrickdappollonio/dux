@@ -368,7 +368,7 @@ pub(crate) struct ActorLoopEnds {
     /// sessions+sidebar-portion of the spine changes, so the web layer emits a
     /// coarse `projects.changed` / `sessions.changed` event. The document itself
     /// travels on `workspace_tx` below; this stays a value-less signal.
-    /// Broadcast — the web forwarder is the only listener, but a broadcast keeps
+    /// Broadcast, though the web forwarder is the only listener: a broadcast keeps
     /// the send a cheap fire-and-forget with no receiver.
     spine_change_tx: broadcast::Sender<SpineChange>,
     /// Publishes the whole workspace document each time the loop rebuilds its
@@ -2262,6 +2262,10 @@ fn overlay_session_input_owners(
     }
 }
 
+/// The revision of the seed document built at loop start. The watch channel
+/// holds `None` until then, so no revision value is reserved as a sentinel.
+const FIRST_WORKSPACE_REV: u64 = 1;
+
 /// The workspace document as BOTH of its consumers read it: one cached
 /// serialization with its revision already inside the JSON, plus that revision
 /// broken out so the push frame can carry it without parsing the body.
@@ -2272,10 +2276,6 @@ fn overlay_session_input_owners(
 /// rather than splicing it per consumer is what makes a fetched body and a
 /// pushed frame orderable against each other: they are the same bytes, carrying
 /// the same number, however the client came by them.
-/// The revision of the seed document built at loop start. Starts at 1 so 0 is
-/// free to mean "no document has been published yet".
-const FIRST_WORKSPACE_REV: u64 = 1;
-
 pub struct WorkspaceDoc {
     /// Monotonic within one run of the server, starting at 1. It says nothing
     /// across restarts, which is exactly why the client resets what it has

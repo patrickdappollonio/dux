@@ -329,7 +329,7 @@ export interface SidebarModel {
 // `GET /api/v1/bootstrap` (`bootstrapApi.ts`, invalidated by `config.changed`),
 // and the projects/sessions/sidebar fields moved to `GET /api/v1/workspace`
 // (`workspaceApi.ts`, read at boot and then PUSHED as a `workspace` event on
-// every change) — neither belonged on a per-change broadcast. The changed-files data itself is owned by
+// every change): neither belonged on a per-change broadcast. The changed-files data itself is owned by
 // the store's `changes` slice (`GET /api/v1/sessions/:id/changes`); this field
 // remains on the type only to mirror the residual wire frame.
 export interface ViewModel {

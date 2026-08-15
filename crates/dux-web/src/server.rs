@@ -1983,10 +1983,12 @@ async fn handle_events_socket(
     let mut status_rx = engine.subscribe_status();
     let mut status_clear_rx = engine.subscribe_status_clears();
 
-    // The pushed workspace document. Taking the receiver here (before this
-    // connection can subscribe to anything) means the first `changed()` it sees
-    // is a genuinely new document, not the one it was already handed on
-    // subscribe. `workspace_alive` retires the arm if the engine goes away: a
+    // The pushed workspace document. A cloned `watch` receiver copies the
+    // SOURCE receiver's seen-version (the handle's long-lived receiver, which
+    // never reads), so the first `changed()` here fires immediately with the
+    // current document rather than waiting for a new one. That is harmless by
+    // construction: with no coarse topic held yet the frame is filtered, and
+    // once one is held the replay/dedup-by-rev absorbs the duplicate. `workspace_alive` retires the arm if the engine goes away: a
     // `watch` whose sender is dropped returns `Err` from `changed()` forever,
     // which would spin this select loop.
     let mut workspace_rx = engine.workspace_docs();

@@ -243,7 +243,7 @@ export interface DuxState {
   // `workspace` event on every change. A server that does not push, or a frame
   // this client cannot read, falls back to re-fetching on the coarse
   // `projects.changed` / `sessions.changed` events; a reconnect re-fetches
-  // either way. `null` until the first document lands — every consumer falls
+  // either way. `null` until the first document lands, and every consumer falls
   // back to empty lists so nothing crashes in that pre-load window.
   spine: Spine | null
   // The build-static / config-derived document from `GET /api/v1/bootstrap`
@@ -1497,7 +1497,10 @@ function applyWorkspace(rawSpine: Spine, seq: number): void {
   const rev = rawSpine.rev
   if (rev !== undefined) {
     if (appliedWorkspaceRev !== null && rev <= appliedWorkspaceRev) return
-    appliedWorkspaceRev = rev
+    // The high-water mark is recorded at the END of this function, not here:
+    // the reconciliation steps below can throw (the callers' try/catch says
+    // so), and a rev recorded before a failed apply would make the fallback
+    // refetch of this same document read as stale and be discarded.
   }
   // `tabs` is normalized to an array at the fetch boundary (`fetchWorkspace`), so an
   // older server that omits the field degrades to an empty strip rather than
@@ -1546,6 +1549,9 @@ function applyWorkspace(rawSpine: Spine, seq: number): void {
   // browser-tab count prefix and the favicon dot. Backgrounded tabs update too,
   // since spines arrive from server pushes without a visit.
   refreshAttentionChrome()
+  // Only now that every step above survived does this revision count as
+  // applied; see the comment at the staleness check.
+  if (rev !== undefined) appliedWorkspaceRev = rev
 }
 
 // Drop editor-tab state for any session that no longer exists in the spine
