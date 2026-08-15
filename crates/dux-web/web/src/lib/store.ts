@@ -49,7 +49,12 @@ import { attentionCountForSurface, formatTabTitle } from "./attention"
 import { applyAttentionFavicon } from "./favicon"
 import { statusToastAllowed } from "./statusRouting"
 import { pageTitle, resolveInstanceTitle } from "./instanceTitle"
-import { type Spine, fetchWorkspace } from "./workspaceApi"
+import {
+  type RawWorkspace,
+  type Spine,
+  fetchWorkspace,
+  normalizeWorkspace,
+} from "./workspaceApi"
 import { resolveFocusedTab, shouldRefireFocusPut } from "./agentTabs"
 import {
   activateTab as editorActivateTabPure,
@@ -1009,14 +1014,39 @@ eventsSocket.onEvent = (ev: EventsServerMessage) => {
     loadBootstrap()
     return
   }
-  // A `projects.changed` / `sessions.changed` event invalidates the workspace
-  // spine (a project/session was added, removed, reordered, renamed, changed
-  // status, etc.). Re-GET it so the sidebar, session lists, and selection logic
-  // reflect the new state. The `projects`/`sessions` coarse topics are subscribed
-  // at module load, so this fires for every client. The applied spine drives the
-  // focus/prune/reorder reconciliation (see `applyWorkspace`).
+  // A `workspace` event CARRIES the whole workspace document. The server holds
+  // it pre-serialized and every connected tab needs the same bytes, so it is
+  // pushed once per change instead of each tab answering a ping with its own
+  // full GET. It flows through the same normalization and the same apply as a
+  // fetched document, so nothing downstream can tell the two apart.
+  if (ev.event === "workspace") {
+    try {
+      applyWorkspace(
+        normalizeWorkspace(ev.workspace as RawWorkspace),
+        loadWorkspaceSeq,
+      )
+      // Only now: a frame dux could not process at all leaves the ping-refetch
+      // path armed, so one bad server build cannot freeze the sidebar behind a
+      // console warning. A frame that was understood and then DISCARDED as
+      // stale still counts, because it proves the server pushes.
+      serverPushesWorkspace = true
+    } catch (err) {
+      console.warn("[dux] pushed workspace document rejected", err)
+    }
+    return
+  }
+  // A `projects.changed` / `sessions.changed` event says the workspace document
+  // changed without saying how (a project/session was added, removed, reordered,
+  // renamed, changed status, etc.). Re-GET it so the sidebar, session lists, and
+  // selection logic reflect the new state. The `projects`/`sessions` coarse
+  // topics are subscribed at module load, so this fires for every client.
+  //
+  // Against a server that pushes the document, these pings are redundant: the
+  // change already arrived with its value. They keep firing (they are what an
+  // older page needs, and what lag recovery uses), so once a push has landed
+  // this client stops answering them, and the N-tabs-N-GETs traffic goes away.
   if (ev.event === "projects.changed" || ev.event === "sessions.changed") {
-    loadWorkspace()
+    if (!serverPushesWorkspace) loadWorkspace()
     return
   }
   // A `pty.owner` event means a connection claimed (took over, or first-claimed an
@@ -1122,6 +1152,12 @@ eventsSocket.onOpen = () => {
     // replay, so this can never drop a still-relevant in-flight handover.
     resetPtyOwnerEpochs()
   }
+  // Both branches: the socket that is about to deliver pushed documents may
+  // belong to a different run of the server than the last one did, and its
+  // revisions start again from 1. Forget what was applied so the first push of
+  // this generation lands. (On the boot open this only risks re-applying the
+  // document the boot fetch just applied, which is idempotent.)
+  resetAppliedWorkspaceRev()
   const id = state.selectedSessionId
   if (id === null) return
   setState({ changes: loadingChanges(id) })
@@ -1371,9 +1407,39 @@ function refreshAttentionChrome(): void {
 // older response resolving last would overwrite a newer spine (observable as a
 // focus-then-prune-clear flicker on agent create). Each `loadWorkspace` captures the
 // seq it bumped to; `applyWorkspace` discards a result once a newer load has started.
-// Mirrors the `applyChangesResponse` rev-guard, but with a client-side counter
-// (the spine read has no server rev).
+//
+// This counter orders FETCH against FETCH and nothing else. Fetch against push
+// is ordered by the server's `rev` below, because only the server knows which
+// of two documents describes the later state.
 let loadWorkspaceSeq = 0
+
+// Whether this server pushes the workspace document. Set by the first pushed
+// frame this client could actually process, never unset: until then (an older
+// server, or a server whose frames dux cannot read) the coarse pings keep
+// driving a refetch, which is the whole fallback.
+let serverPushesWorkspace = false
+
+// The highest workspace revision applied, or `null` for "none yet". A document
+// carrying a revision at or below this one describes a state already applied and
+// is discarded, whichever way it arrived.
+//
+// Revisions are scoped to ONE RUN of the server and to one socket generation:
+// dux restarting mints revisions from 1 again, and a client still holding a
+// high-water mark from the previous run would discard every push forever, which
+// is a permanently frozen sidebar. `eventsSocket.onOpen` therefore clears this,
+// exactly as it clears the PTY ownership epochs, for exactly the same reason.
+// The run-id reload is not the guard here: it answers a different question
+// (has the CODE changed), it runs alongside recovery rather than gating it, and
+// an unanswered identity probe never reloads.
+let appliedWorkspaceRev: number | null = null
+
+// Forget the applied revision. Called on every events-socket open, including
+// the first: the boot fetch may already have applied a revision, and re-applying
+// the same document is merely redundant, while discarding a fresh one would be
+// wrong.
+function resetAppliedWorkspaceRev(): void {
+  appliedWorkspaceRev = null
+}
 
 // Fetch the workspace spine and fold it into state. Errors are swallowed: on
 // first boot the slice stays `null` (consumers fall back to empty lists) and a
@@ -1422,6 +1488,15 @@ function loadWorkspace(): void {
 // outdated data).
 function applyWorkspace(rawSpine: Spine, seq: number): void {
   if (seq < loadWorkspaceSeq) return
+  // The server's ordering, applied to both delivery paths from one place. A
+  // document with no revision at all comes from a server that predates the
+  // push; it cannot be ordered, so it is applied and leaves the high-water mark
+  // alone rather than pinning it to a guess.
+  const rev = rawSpine.rev
+  if (rev !== undefined) {
+    if (appliedWorkspaceRev !== null && rev <= appliedWorkspaceRev) return
+    appliedWorkspaceRev = rev
+  }
   // `tabs` is normalized to an array at the fetch boundary (`fetchWorkspace`), so an
   // older server that omits the field degrades to an empty strip rather than
   // throwing on the `session.tabs` derefs downstream.

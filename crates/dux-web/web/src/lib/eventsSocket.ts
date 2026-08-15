@@ -66,7 +66,16 @@ export class EventsSocket extends ReconnectingSocket {
     let message: EventsServerMessage
     try {
       message = JSON.parse(raw) as EventsServerMessage
-    } catch {
+    } catch (err) {
+      // Say something. A dropped frame was completely silent before, and the
+      // frames here now include the whole workspace document, so the visible
+      // symptom of one being truncated or malformed is a sidebar that quietly
+      // stops updating. The length is the useful clue (size is the likely
+      // culprit); the frame body itself is not logged, since it may be large.
+      console.warn(
+        `[dux] events socket dropped an unparseable frame (${raw.length} chars)`,
+        err,
+      )
       return
     }
     // Every server frame carries an `event` discriminator — resource-change

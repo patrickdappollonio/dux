@@ -29,6 +29,15 @@ import type {
 // The spine document. Field names/types mirror the server's JSON and the values
 // the legacy ViewModel carried, so consumers move over without a shape change.
 export interface Spine {
+  /** The server's monotonic revision of this document, minted where the server
+   * rebuilds its cached serialization. It is embedded in the document itself,
+   * so a document that arrived over REST and one that arrived as a push frame
+   * are orderable against each other. Optional because a server that predates
+   * the push does not send it; an absent rev means "not orderable", and the
+   * client applies such a document rather than guessing. Meaningless across
+   * server restarts, which is why the client forgets what it applied whenever
+   * its events socket reopens. */
+  rev?: number
   /** Every known project, in display order. */
   projects: ProjectView[]
   /** Every agent session, in display order. */
@@ -74,38 +83,56 @@ export async function fetchWorkspace(): Promise<Spine> {
       resp.status,
     )
   }
-  // Coerce optional-on-the-wire session fields to their required shapes at the
-  // single ingestion boundary. An older server (e.g. after a binary downgrade,
-  // seen by an already-open client) omits `tabs`, `initial_branch`, and
-  // `source_branch`, but every downstream consumer treats them as required: `tabs`
-  // becomes `[]` and the two branch fields become `""` (falsy, so the
-  // "Unknown"/no-drift fallbacks in the info dialog and header still apply).
-  const raw = (await resp.json()) as Omit<
-    Spine,
-    "sessions" | "projects" | "terminals"
-  > & {
-    projects: Array<ProjectView & { terminals?: LegacyTerminal[] }>
-    terminals?: RawTerminal[]
-    sessions: Array<
-      Omit<
-        SessionView,
-        | "tabs"
-        | "initial_branch"
-        | "source_branch"
-        | "needs_attention"
-        | "typing"
-        | "last_focused_tab"
-      > & {
-        tabs?: RawTab[]
-        initial_branch?: string
-        source_branch?: string
-        needs_attention?: boolean
-        typing?: boolean
-        last_focused_tab?: string | null
-        terminals?: LegacyTerminal[]
-      }
-    >
-  }
+  return normalizeWorkspace((await resp.json()) as RawWorkspace)
+}
+
+/** The workspace document as it arrives on the wire, from any server version:
+ * optional-on-the-wire fields still optional, terminals possibly still nested
+ * inside their owners. Both delivery paths hand this to
+ * [`normalizeWorkspace`]. */
+export type RawWorkspace = Omit<
+  Spine,
+  "sessions" | "projects" | "terminals"
+> & {
+  projects: Array<ProjectView & { terminals?: LegacyTerminal[] }>
+  terminals?: RawTerminal[]
+  sessions: Array<
+    Omit<
+      SessionView,
+      | "tabs"
+      | "initial_branch"
+      | "source_branch"
+      | "needs_attention"
+      | "typing"
+      | "last_focused_tab"
+    > & {
+      tabs?: RawTab[]
+      initial_branch?: string
+      source_branch?: string
+      needs_attention?: boolean
+      typing?: boolean
+      last_focused_tab?: string | null
+      terminals?: LegacyTerminal[]
+    }
+  >
+}
+
+// Turn a wire document into the shape every consumer downstream assumes.
+//
+// This is the ONE ingestion boundary, and it is shared deliberately: the same
+// document reaches the client two ways (fetched at boot and on recovery, pushed
+// on every change), and two normalizers would drift the moment either wire
+// shape grew a field. Pure and total: it reads the raw document and returns the
+// normalized one, touching nothing else, so it can be called from the socket
+// handler as safely as from the fetch.
+//
+// Coerce optional-on-the-wire session fields to their required shapes here. An
+// older server (e.g. after a binary downgrade, seen by an already-open client)
+// omits `tabs`, `initial_branch`, and `source_branch`, but every downstream
+// consumer treats them as required: `tabs` becomes `[]` and the two branch
+// fields become `""` (falsy, so the "Unknown"/no-drift fallbacks in the info
+// dialog and header still apply).
+export function normalizeWorkspace(raw: RawWorkspace): Spine {
   return {
     ...raw,
     terminals: ingestTerminals(raw),

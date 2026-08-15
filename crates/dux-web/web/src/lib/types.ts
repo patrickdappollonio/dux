@@ -374,8 +374,16 @@ export interface EventsServerMessage {
   /** Resource id (`session.changes`)
    *  OR the per-connection id (`connected`). */
   id?: string
-  /** Monotonic per-session revision (`session.changes`). */
+  /** Monotonic per-session revision (`session.changes`), or the workspace
+   *  document's revision (`workspace`). */
   rev?: number
+  /** The whole workspace document (`workspace`): the same bytes
+   *  `GET /api/v1/workspace` returns, pushed on every change so N open tabs do
+   *  not each answer a ping with N identical GETs. Typed as `unknown` because
+   *  this envelope is the wire and the shape check belongs at the one ingestion
+   *  boundary (`normalizeWorkspace`), which has to cope with older servers'
+   *  documents anyway. */
+  workspace?: unknown
   /** The claiming connection's id on a `pty.owner` handover. A client viewing
    *  that PTY compares it against its own PTY-socket connection id to decide
    *  ownership definitively (own id = owner, foreign id = read-only placeholder). */

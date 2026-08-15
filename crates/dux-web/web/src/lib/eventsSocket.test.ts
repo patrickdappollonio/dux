@@ -181,6 +181,23 @@ describe("EventsSocket", () => {
     expect(events).toHaveLength(0)
   })
 
+  it("leaves a breadcrumb when a frame cannot be parsed", () => {
+    // A dropped frame used to be entirely silent, and the frames on this socket
+    // now include the whole workspace document: a truncated or malformed one
+    // would show up as a sidebar that quietly stops updating, with nothing
+    // anywhere to say why. The size is in the message because size is the most
+    // likely thing to have gone wrong.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    const sock = new EventsSocket("ws://x/ws/events")
+    sock.connect()
+    const ws = last()
+    ws.open()
+    ws.onmessage?.({ data: '{"event":"workspace","workspace":{' })
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(String(warn.mock.calls[0]?.[0])).toContain("34")
+    warn.mockRestore()
+  })
+
   it("does not reconnect after a user-initiated close", () => {
     vi.useFakeTimers()
     const sock = new EventsSocket("ws://x/ws/events")
