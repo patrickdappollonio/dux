@@ -533,6 +533,8 @@ describe("linkActivateAction", () => {
     detail: 1,
     ctrlKey: false,
     metaKey: false,
+    shiftKey: false,
+    altKey: false,
     ...over,
   })
   const ctx = (over: Partial<LinkActivateContext> = {}): LinkActivateContext => ({
@@ -624,6 +626,47 @@ describe("linkActivateAction", () => {
     expect(linkActivateAction(ev({ ctrlKey: true }), ctx())).toBe("open")
     expect(linkActivateAction(ev({ metaKey: true }), ctx({ isMac: true }))).toBe("open")
   })
+
+  // The force-local-selection modifier means "this gesture is me selecting
+  // text". The press is not swallowed (xterm forwards nothing under it either),
+  // so xterm's Linkifier still activates the link on mouseup and dux would open
+  // a tab out of a gesture that was a selection.
+  it("refuses the force-selection modifier while the app is tracking the mouse", () => {
+    expect(
+      linkActivateAction(ev({ shiftKey: true }), ctx({ mouseTracking: true })),
+    ).toBe("ignore")
+    expect(
+      linkActivateAction(
+        ev({ altKey: true }),
+        ctx({ mouseTracking: true, isMac: true }),
+      ),
+    ).toBe("ignore")
+  })
+
+  // Mirrors xterm's own `shouldForceSelection`, which reads Option on a Mac and
+  // Shift everywhere else. The other platform's modifier is an ordinary click,
+  // and refusing it would silently swallow opens.
+  it("reads the force-selection modifier per platform", () => {
+    expect(
+      linkActivateAction(
+        ev({ altKey: true }),
+        ctx({ mouseTracking: true, isMac: false }),
+      ),
+    ).toBe("open")
+    expect(
+      linkActivateAction(
+        ev({ shiftKey: true }),
+        ctx({ mouseTracking: true, isMac: true }),
+      ),
+    ).toBe("open")
+  })
+
+  // Tracking OFF is deliberately untouched: xterm's selection is enabled
+  // anyway, and a plain browser Shift-click nuance is out of scope here.
+  it("keeps a force-selection-modifier click opening when nothing is tracking", () => {
+    expect(linkActivateAction(ev({ shiftKey: true }), ctx())).toBe("open")
+    expect(linkActivateAction(ev({ altKey: true }), ctx({ isMac: true }))).toBe("open")
+  })
 })
 
 describe("linkPressAction", () => {
@@ -632,6 +675,8 @@ describe("linkPressAction", () => {
     detail: 1,
     ctrlKey: false,
     metaKey: false,
+    shiftKey: false,
+    altKey: false,
     ...over,
   })
   const ctx = (over: Partial<LinkPressContext> = {}): LinkPressContext => ({
@@ -688,6 +733,35 @@ describe("linkPressAction", () => {
     })
     expect(
       linkPressAction(ev({ ctrlKey: true }), ctx({ isMac: true })),
+    ).toEqual({ suppress: true, open: true })
+  })
+
+  // The force-local-selection modifier is the documented way to select and copy
+  // text out of a mouse-tracking app, and a URL is the text people select most.
+  // xterm's own `mousedown` returns before it sends anything under this
+  // modifier, so passing the press through forwards ZERO bytes and lets xterm
+  // start the local selection; swallowing it would make the link the one place
+  // in the terminal where the escape hatch does not work.
+  it("leaves a press alone under the force-selection modifier", () => {
+    expect(linkPressAction(ev({ shiftKey: true }), ctx())).toEqual({
+      suppress: false,
+      open: false,
+    })
+    expect(
+      linkPressAction(ev({ altKey: true }), ctx({ isMac: true })),
+    ).toEqual({ suppress: false, open: false })
+  })
+
+  // Per platform, mirroring xterm's `shouldForceSelection`: Option on a Mac,
+  // Shift elsewhere. The other platform's modifier forces no selection, so
+  // xterm WOULD forward that press and it must still be swallowed.
+  it("reads the force-selection modifier per platform", () => {
+    expect(linkPressAction(ev({ altKey: true }), ctx())).toEqual({
+      suppress: true,
+      open: true,
+    })
+    expect(
+      linkPressAction(ev({ shiftKey: true }), ctx({ isMac: true })),
     ).toEqual({ suppress: true, open: true })
   })
 

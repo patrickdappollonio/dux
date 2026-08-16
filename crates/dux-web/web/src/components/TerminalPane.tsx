@@ -71,6 +71,7 @@ import {
   forcesTextPaste,
   LF,
   linkActivateAction,
+  type LinkActivateEvent,
   linkPressAction,
   linkReleaseOpens,
   pageKeySeq,
@@ -929,7 +930,7 @@ export function TerminalPane(props: TerminalPaneProps) {
     // `noopener,noreferrer` window, and the same activation counter the touch
     // probe reads to learn whether a tap hit a link.
     const openTerminalLink = (
-      ev: { button: number; detail: number; ctrlKey: boolean; metaKey: boolean },
+      ev: LinkActivateEvent,
       uri: string,
     ): boolean => {
       const action = linkActivateAction(ev, {
@@ -1332,6 +1333,9 @@ export function TerminalPane(props: TerminalPaneProps) {
     const armOutsideRelease = () => {
       disarmOutsideRelease()
       const watch = (e: MouseEvent) => {
+        // The PRIMARY release ends the gesture; a chorded right release while
+        // the left button is still down is somebody else's event.
+        if (e.button !== 0) return
         disarmOutsideRelease()
         // A release INSIDE the pane belongs to the capture handler below. This
         // one runs first (the document is the outermost node of the capture
@@ -1344,11 +1348,16 @@ export function TerminalPane(props: TerminalPaneProps) {
     }
     const onLinkPressCapture = (e: MouseEvent) => {
       if (isDuxReplay(e)) return
-      // A new press ends the previous gesture whatever happened to it, so a
-      // release the window never delivered cannot wedge the next click.
+      // NON-PRIMARY BUTTONS MUST NOT TOUCH THE IN-FLIGHT RECORD, which is why
+      // this gate comes before the reset below. A right press while the left
+      // button is still down (chording a paste mid-gesture) would otherwise wipe
+      // a swallowed press, and its left release would then be forwarded alone:
+      // a release report for a gesture the app never saw begin.
+      if (e.button !== 0) return
+      // A new PRIMARY press ends the previous gesture whatever happened to it,
+      // so a release the window never delivered cannot wedge the next click.
       linkPress = null
       disarmOutsideRelease()
-      if (e.button !== 0) return
       if (term.modes.mouseTrackingMode === "none") return
       // Resolve the link under the press SYNCHRONOUSLY through xterm's own
       // Linkifier rather than trusting whatever hover last wrote; see
@@ -1362,6 +1371,8 @@ export function TerminalPane(props: TerminalPaneProps) {
           detail: e.detail,
           ctrlKey: e.ctrlKey,
           metaKey: e.metaKey,
+          shiftKey: e.shiftKey,
+          altKey: e.altKey,
         },
         {
           hoveredUri: uri,
@@ -1388,7 +1399,12 @@ export function TerminalPane(props: TerminalPaneProps) {
       // runs for a swallowed press, so do its job explicitly: a click into the
       // pane must still leave the keyboard pointed at the terminal.
       term.focus()
-      if (!linkForwardHintShown) {
+      // Only when something is actually about to OPEN. The sentence says dux
+      // opened the link in your browser, and a press dux swallows without
+      // opening (the preference turned off under a link already on screen) would
+      // make that a lie. The hint teaches the hatch, and the hatch only matters
+      // where opens happen.
+      if (decision.open && !linkForwardHintShown) {
         linkForwardHintShown = true
         notifyInfo(
           `dux opened that link in your browser. Hold ${
@@ -1399,6 +1415,11 @@ export function TerminalPane(props: TerminalPaneProps) {
     }
     const onLinkReleaseCapture = (e: MouseEvent) => {
       if (isDuxReplay(e)) return
+      // Only the PRIMARY release closes a swallowed press. Without this gate a
+      // right release chorded on top of one consumed the record and got stopped
+      // itself, which both unbalanced the right button's own report pair and
+      // left the real left release to leak through as a release with no press.
+      if (e.button !== 0) return
       const press = linkPress
       if (!press) return
       linkPress = null
@@ -1431,6 +1452,8 @@ export function TerminalPane(props: TerminalPaneProps) {
           detail: e.detail,
           ctrlKey: e.ctrlKey,
           metaKey: e.metaKey,
+          shiftKey: e.shiftKey,
+          altKey: e.altKey,
         },
         press.uri,
       )

@@ -4,6 +4,8 @@ import { act, cleanup, render } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
 import type { ConnState } from "@/lib/types"
+import type { Terminal as XTerm } from "@xterm/xterm"
+
 import { activateLinkAtPoint } from "@/lib/termlink"
 
 // Unlike TerminalPane.test.tsx, this file mounts the pane against the REAL
@@ -48,6 +50,20 @@ class FakePtySocket {
 }
 
 vi.mock("@xterm/addon-fit", () => ({ FitAddon: FitStub }))
+// The REAL xterm, with every constructed terminal recorded: the force-selection
+// test has to ask xterm itself what it selected, and its selection model is not
+// reachable from the DOM.
+const terminals: XTerm[] = []
+vi.mock("@xterm/xterm", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@xterm/xterm")>()
+  class RecordingTerminal extends actual.Terminal {
+    constructor(options?: ConstructorParameters<typeof actual.Terminal>[0]) {
+      super(options)
+      terminals.push(this)
+    }
+  }
+  return { ...actual, Terminal: RecordingTerminal }
+})
 const notifyInfoMock = vi.fn()
 vi.mock("@/lib/notify", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/notify")>()
@@ -197,7 +213,7 @@ function forceLayout() {
 }
 
 const LINK_URL = "https://example.com"
-const OSC8_LINK = `\x1b]8;;${LINK_URL}\x07link\x1b]8;;\x07`
+const osc8 = (url: string) => `\x1b]8;;${url}\x07link\x1b]8;;\x07`
 // VT200 mouse tracking plus SGR encoding: what every measured agent CLI asks
 // for (see the table in `lib/termmouse.ts`).
 const MOUSE_TRACKING_ON = "\x1b[?1000h\x1b[?1006h"
@@ -206,6 +222,7 @@ let openSpy: ReturnType<typeof vi.fn>
 
 beforeEach(() => {
   FakePtySocket.instances = []
+  terminals.length = 0
   mockState = makeState(true)
   installStubs()
   forceLayout()
@@ -233,15 +250,24 @@ async function mountWithLink(): Promise<HTMLElement> {
  */
 async function mountLinkPane({
   mouseTracking,
+  url = LINK_URL,
 }: {
   mouseTracking: boolean
-}): Promise<{ screen: HTMLElement; sock: FakePtySocket }> {
-  const { container } = render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+  url?: string
+}): Promise<{
+  screen: HTMLElement
+  sock: FakePtySocket
+  term: XTerm
+  rerender: () => Promise<void>
+}> {
+  const { container, rerender } = render(
+    <TerminalPane kind="agent" id="s1" sessionId="s1" />,
+  )
   const sock = FakePtySocket.instances.at(-1)
   if (!sock) throw new Error("no PtySocket constructed")
   await act(async () => {
     sock.bytesCb?.(
-      new TextEncoder().encode((mouseTracking ? MOUSE_TRACKING_ON : "") + OSC8_LINK),
+      new TextEncoder().encode((mouseTracking ? MOUSE_TRACKING_ON : "") + osc8(url)),
     )
     await new Promise((r) => setTimeout(r, 20))
   })
@@ -249,7 +275,20 @@ async function mountLinkPane({
   if (!screenEl) throw new Error("xterm did not render a screen element")
   // Everything written before this point is setup, not a mouse report.
   sock.sendInput.mockClear()
-  return { screen: screenEl as HTMLElement, sock }
+  const term = terminals.at(-1)
+  if (!term) throw new Error("no Terminal constructed")
+  return {
+    screen: screenEl as HTMLElement,
+    sock,
+    term,
+    // Re-renders against whatever `mockState` now says, which is how a test
+    // flips a preference on a pane that is already mounted.
+    rerender: async () => {
+      await act(async () => {
+        rerender(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+      })
+    },
+  }
 }
 
 /** Everything the pane sent to the PTY, as one string. */
@@ -394,6 +433,25 @@ describe("a link click under a mouse-tracking app", () => {
     expect(openSpy).not.toHaveBeenCalled()
   })
 
+  // The hint says "dux opened that link in your browser", so it must not fire
+  // for a press dux swallowed and then opened NOTHING from. This test has to
+  // come before the hint test below: the latch is module scope, so the first
+  // raise in this file is the only one.
+  it("stays quiet when a suppressed click opens nothing", async () => {
+    // The preference turned off under a link ALREADY on screen: xterm keeps the
+    // link (the parser gate only affects cells written after the flip), so the
+    // press is still swallowed, and dux opens nothing.
+    const { screen, sock, rerender } = await mountLinkPane({ mouseTracking: true })
+    mockState = makeState(false)
+    await rerender()
+    await clickAt(screen, ...ON_LINK)
+    // Still swallowed: forwarding it would hand the app the click and bring the
+    // server-side open back.
+    expect(sentBytes(sock)).toBe("")
+    expect(openSpy).not.toHaveBeenCalled()
+    expect(notifyInfoMock).not.toHaveBeenCalled()
+  })
+
   // The hint tells the visitor the hatch exists, the first time dux takes a
   // click away from the app, and never again in this page session. The latch is
   // module scope, so this has to be the FIRST suppressing test in the file and
@@ -534,6 +592,76 @@ describe("a link click under a mouse-tracking app", () => {
     await pressReleaseNoMove(screen, ...ON_LINK)
     expect(openSpy).toHaveBeenCalledTimes(1)
     expect(sentBytes(sock)).toBe("")
+  })
+
+  // THE FORCE-LOCAL-SELECTION GESTURE STAYS A SELECTION. Shift (Option on a
+  // Mac) is the documented way to select and copy text out of a mouse-tracking
+  // app, and a URL is exactly the text people select. xterm's own `mousedown`
+  // returns before it sends anything under that modifier, so letting the press
+  // through forwards nothing AND lets xterm start the selection; dux must open
+  // no tab out of it either.
+  it("selects the link locally under the force-selection modifier", async () => {
+    const { screen, sock, term } = await mountLinkPane({ mouseTracking: true })
+    const at = (type: string, x: number, over: Record<string, unknown> = {}) =>
+      new MouseEvent(type, {
+        bubbles: true,
+        clientX: x,
+        clientY: 5,
+        button: 0,
+        detail: 1,
+        shiftKey: true,
+        ...over,
+      })
+    await act(async () => {
+      screen.dispatchEvent(at("mousemove", 1, { detail: 0 }))
+      screen.dispatchEvent(at("mousedown", 1))
+      screen.dispatchEvent(at("mousemove", 45, { detail: 0, buttons: 1 }))
+      screen.dispatchEvent(at("mouseup", 45))
+    })
+    expect(term.getSelection()).toBe("link")
+    expect(openSpy).not.toHaveBeenCalled()
+    expect(sentBytes(sock)).toBe("")
+    // CONTROL, so none of the three above can pass for want of a link under the
+    // press: the SAME point without the modifier is the swallowed link click.
+    await clickAt(screen, 1, 5)
+    expect(openSpy.mock.calls).toEqual([[LINK_URL, "_blank", "noopener,noreferrer"]])
+    expect(sentBytes(sock)).toBe("")
+  })
+
+  // A right press MID-GESTURE (the visitor chords a paste while the left button
+  // is still down on a swallowed link press) must not wipe the in-flight record:
+  // the left release would then be forwarded on its own, and a release with no
+  // press is a report for a gesture the app never saw begin.
+  it("keeps a swallowed press paired when a right press chords into it", async () => {
+    const { screen, sock } = await mountLinkPane({ mouseTracking: true })
+    const at = (type: string, over: Record<string, unknown> = {}) =>
+      new MouseEvent(type, {
+        bubbles: true,
+        clientX: 5,
+        clientY: 5,
+        button: 0,
+        detail: 1,
+        ...over,
+      })
+    await act(async () => {
+      screen.dispatchEvent(at("mousemove", { detail: 0 }))
+      screen.dispatchEvent(at("mousedown"))
+      screen.dispatchEvent(at("mousedown", { button: 2, buttons: 3 }))
+      screen.dispatchEvent(at("mouseup", { button: 2, buttons: 1 }))
+      screen.dispatchEvent(at("mouseup"))
+    })
+    // The right button is untouched and reaches the app (the positive control
+    // for this test: the bytes below are missing, not absent for want of a
+    // working harness).
+    /* eslint-disable-next-line no-control-regex */
+    expect(sentBytes(sock)).toMatch(new RegExp("\\x1b\\[<2;\\d+;\\d+M"))
+    // ...and the left pair stayed swallowed, both halves.
+    expect(sentBytes(sock)).not.toMatch(SGR_PRESS)
+    expect(sentBytes(sock)).not.toMatch(SGR_RELEASE)
+    // Not wedged either: the next ordinary click reports as usual.
+    sock.sendInput.mockClear()
+    await clickAt(screen, ...OFF_LINK)
+    expect(sentBytes(sock)).toMatch(SGR_PRESS)
   })
 
   // dux's own replays travel the capture phase too (a `bubbles: false` event

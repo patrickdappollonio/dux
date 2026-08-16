@@ -440,6 +440,10 @@ export interface LinkActivateEvent {
   ctrlKey: boolean
   /** `MouseEvent.metaKey`: the force-forward hatch chord on an Apple platform. */
   metaKey: boolean
+  /** `MouseEvent.shiftKey`: xterm's force-local-selection modifier off a Mac. */
+  shiftKey: boolean
+  /** `MouseEvent.altKey`: xterm's force-local-selection modifier on a Mac. */
+  altKey: boolean
 }
 
 /** The runtime context an activation is judged against. */
@@ -469,6 +473,27 @@ export interface LinkActivateContext {
  */
 export function linkHatchHeld(ev: LinkActivateEvent, isMac: boolean): boolean {
   return isMac ? ev.metaKey : ev.ctrlKey
+}
+
+/**
+ * Whether the force-LOCAL-SELECTION modifier is held.
+ *
+ * This mirrors xterm's own `SelectionService.shouldForceSelection`, MEASURED in
+ * the installed bundle: `isMac ? altKey && macOptionClickForcesSelection :
+ * shiftKey`, and the pane sets `macOptionClickForcesSelection`. Reading the
+ * platform the same way matters in both directions. Treating the other
+ * platform's modifier as force-selection would leave a press xterm WOULD have
+ * forwarded unsuppressed, which is the server-side double open coming back;
+ * ignoring this modifier altogether makes a link the one place in the terminal
+ * where the documented "select and copy to your own device" gesture does not
+ * work, because dux swallows the press and opens a tab out of it instead.
+ *
+ * Under this modifier xterm's `mousedown` starts a local selection and returns
+ * before it sends anything, so passing the press through forwards zero bytes:
+ * the app never sees the gesture either way.
+ */
+export function forceSelectionHeld(ev: LinkActivateEvent, isMac: boolean): boolean {
+  return isMac ? ev.altKey : ev.shiftKey
 }
 
 /** Only these two schemes are ever handed to the browser. */
@@ -508,6 +533,13 @@ export function linkActivateAction(
   if (ev.button !== 0) return "ignore"
   if (ev.detail > 1) return "ignore"
   if (ctx.mouseTracking && linkHatchHeld(ev, ctx.isMac)) return "ignore"
+  // ...and the same for the force-local-selection modifier, for the mirror
+  // reason: that gesture is the visitor selecting text, dux does not swallow
+  // the press, so xterm's Linkifier still activates the link on the mouseup at
+  // the end of the drag. Opening a tab out of a selection is a bug. Only while
+  // the app is TRACKING, deliberately: with tracking off xterm's selection is
+  // enabled anyway and the modifier keeps its ordinary browser meaning.
+  if (ctx.mouseTracking && forceSelectionHeld(ev, ctx.isMac)) return "ignore"
   if (!OPENABLE_SCHEME.test(ctx.uri)) return "ignore"
   return "open"
 }
@@ -583,6 +615,12 @@ export function linkPressAction(
   // The hatch: the visitor asked for the app to have this click, so forward it
   // AND (in `linkActivateAction`) refuse dux's own open.
   if (linkHatchHeld(ev, ctx.isMac)) return nothing
+  // The force-LOCAL-SELECTION modifier: the visitor is selecting text, not
+  // following a link. Passing the press through is what lets xterm start the
+  // selection, and it forwards nothing either way (see `forceSelectionHeld`),
+  // so this costs the app nothing and keeps the documented escape hatch working
+  // on the text people most want to copy.
+  if (forceSelectionHeld(ev, ctx.isMac)) return nothing
   // Swallowed but not opened is a real answer: forwarding a press dux will not
   // act on would hand the app a press with no release. It happens for the tail
   // of a multi-click, and for a link dux would refuse to open anyway (the

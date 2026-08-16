@@ -175,6 +175,11 @@ reaches the app exactly as before, so buttons and menus are unaffected. If you w
 the app to have a particular click on a link, hold `Cmd` (macOS) or `Ctrl`
 (everywhere else) while you click; dux then stays out of the way and opens nothing.
 
+Selecting a link's text still works the ordinary way: hold `Option` (macOS) or
+`Shift` (everywhere else) and drag, the same gesture that selects anywhere else
+while an app has the mouse. That is a selection, not a click, so dux opens nothing
+and the app is none the wiser.
+
 ## Pasting into the terminal UI
 
 Bracketed paste gets the same "honest middleman" treatment. When you paste into
