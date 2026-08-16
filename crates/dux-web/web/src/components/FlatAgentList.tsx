@@ -27,6 +27,7 @@ import {
   GitFork,
   GitPullRequest,
   Info,
+  Paperclip,
   Pencil,
   Play,
   Plus,
@@ -45,7 +46,7 @@ import type { CSSProperties } from "react"
 import { useState } from "react"
 
 import { AgentVitalsTooltip } from "@/components/AgentVitalsTooltip"
-import { MobileBarToggleItems } from "@/components/MobileBarToggleItems"
+import { InputMenuItems } from "@/components/InputMenuItems"
 import { ProjectMenuItems } from "@/components/ProjectMenuItems"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Button } from "@/components/ui/button"
@@ -68,6 +69,7 @@ import {
   EmptyMedia,
   EmptyTitle,
 } from "@/components/ui/empty"
+import { useIsMobile } from "@/hooks/use-mobile"
 import { agentRowVisual } from "@/lib/agentRow"
 import { defaultProviderForSession } from "@/lib/agentTabs"
 import {
@@ -130,6 +132,7 @@ import {
   toggleSessionAutoReopen,
   useDux,
 } from "@/lib/store"
+import { useAttachCapability } from "@/lib/attachRegistry"
 import { terminalForeground, terminalTitle } from "@/lib/terminals"
 import type { SelectedTarget, TerminalOwnerRef } from "@/lib/store"
 import type { SessionView, TerminalView } from "@/lib/types"
@@ -152,6 +155,10 @@ export interface FlatSelectHandlers {
 // render only in the terminal context, because they toggle chrome that only
 // the terminal screen shows: an unscoped gate would leak them into the hub's
 // row menus (and the desktop sidebar), where that chrome is not even visible.
+//
+// "Attach a file…" is not context-scoped: it is offered from any of this
+// agent's menus, and answers for itself by asking whether a pane of this agent
+// is mounted and owns its input (see `useAttachCapability`).
 export function AgentActionsMenu({
   session,
   context = "hub",
@@ -190,6 +197,14 @@ export function AgentActionsMenu({
   // pointer-events-none, so a hover tooltip could never fire, and touch has
   // no hover at all.
   const activeElsewhere = sessionActiveElsewhere(duxState, session)
+  const isMobile = useIsMobile()
+  // Every PTY this agent can have a mounted pane for: the session-slot tab's id
+  // IS the session id, and each extra tab has its own. Whichever pane is
+  // mounted and owns its input answers.
+  const attachToPane = useAttachCapability([
+    session.id,
+    ...session.tabs.map((t) => t.id),
+  ])
 
   return (
     <DropdownMenuGroup>
@@ -202,13 +217,47 @@ export function AgentActionsMenu({
           <DropdownMenuSeparator />
         </>
       ) : null}
-      {/* The shared mobile-bar quick toggles (labels, icons and store actions
-          live in MobileBarToggleItems, shared with the agentless terminal
-          screens' menu so the menus can never drift; the component self-gates
-          on the viewport). Deliberately NOT disabled while the agent is active
-          elsewhere: hiding this device's own bars is this device's view
-          preference, not a mutation of the agent. */}
-      {context === "terminal" ? <MobileBarToggleItems /> : null}
+      {/* The shared input-menu items (labels, icons and store writes live in
+          InputMenuItems, shared with the input `⋯` below the terminal and with
+          the agentless terminal screens' menu, so the three can never drift).
+          Visibility is computed HERE rather than inside the component: this
+          header menu is phone-shell chrome, so both toggles ride `isMobile`,
+          which is the behavior this menu has always had.
+
+          Deliberately NOT disabled while the agent is active elsewhere: hiding
+          this device's own bars is this device's view preference, not a
+          mutation of the agent. Attach is gated off in the shared items only
+          because this menu renders its own Attach entry just below: this menu
+          is the phone terminal screen's header menu and a keyboard-reachable
+          path, so it carries Attach itself. On a phone agent screen Attach
+          therefore appears both here and in the input `⋯` menu; both call the
+          one registered capability, so they cannot drift. */}
+      <InputMenuItems
+        gates={{
+          attach: false,
+          surfaceSwitch: false,
+          keysToggle: context === "terminal" && isMobile,
+          topBarToggle: context === "terminal" && isMobile,
+        }}
+        trailingSeparator
+      />
+      {attachToPane ? (
+        <>
+          {/* THE DESKTOP AND KEYBOARD PATH INTO THE UPLOAD JOURNEY. A drag
+              needs a desktop pointer and a paste needs the file already on the
+              clipboard; this needs neither. It is offered only while a pane
+              for this agent is MOUNTED AND OWNS its input, because the upload
+              still travels through that pane's own gated connection and sink
+              (never a side channel), and a file attached from a viewer would
+              strand as saved-but-not-sent. Hidden rather than disabled when no
+              such pane exists, per the row-menu convention. */}
+          <DropdownMenuItem onClick={attachToPane}>
+            <Paperclip />
+            Attach a file…
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
+        </>
+      ) : null}
       <DropdownMenuSub>
         <DropdownMenuSubTrigger disabled={atTabCap || addingTab || activeElsewhere}>
           <Plus />
@@ -702,6 +751,10 @@ function TerminalFlatRow({
   // distance keeps a plain click as a select; touch arms on a hold, see
   // lib/dragActivation.ts), and the wrapper carries the Y-locked transform so
   // a row never flies out of the column.
+  // A terminal is one PTY, so one id answers whether a mounted owning pane is
+  // there to attach through.
+  const attachToPane = useAttachCapability([terminal.id])
+
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
     useSortable({ id: terminal.id })
   const style: CSSProperties = {
@@ -786,12 +839,20 @@ function TerminalFlatRow({
             <Ellipsis />
           </DropdownMenuTrigger>
         </div>
-        {/* One real action only: closing. Opening the terminal is the row's own
-            click, and a menu duplicate of it ("Stream") was removed as
-            misleading; the menu stays (rather than an inline X) so the
+        {/* Closing is the one action on the terminal itself: opening it is the
+            row's own click, and a menu duplicate of that ("Stream") was removed
+            as misleading; the menu stays (rather than an inline X) so the
             destructive action keeps its confirm flow and misclick-safe
-            reveal-on-hover treatment. */}
+            reveal-on-hover treatment. "Attach a file…" is not an action on the
+            terminal but on its live pane, which is why it appears only while
+            that pane is mounted and owns its input. */}
         <DropdownMenuContent side="right" align="start">
+          {attachToPane ? (
+            <DropdownMenuItem onClick={attachToPane}>
+              <Paperclip />
+              Attach a file…
+            </DropdownMenuItem>
+          ) : null}
           <DropdownMenuItem onClick={() => openDeleteTerminal(terminal.id)}>
             <X />
             Close…

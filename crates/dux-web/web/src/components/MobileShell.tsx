@@ -22,7 +22,8 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import { MobileBarToggleItems } from "@/components/MobileBarToggleItems"
+import { InputMenuItems } from "@/components/InputMenuItems"
+import { useIsMobile } from "@/hooks/use-mobile"
 import { isExtraTabDormant, shouldShowTabStrip } from "@/lib/agentTabs"
 import { mobileHeaderLanes } from "@/lib/headerSubject"
 import { resolveInstanceTitle } from "@/lib/instanceTitle"
@@ -129,10 +130,11 @@ function AgentlessTerminalScreen({
   const terminal = ownedTerminals.find((t) => t.id === terminalId)
   // The same `ui.mobile_top_bar` gate as the agent terminal screen: both
   // preferences deliberately cover every mobile terminal surface. Hiding
-  // happens from this screen's own ⋯ menu (the shared quick toggles below),
-  // exactly as on the agent screen; restoring via the show-bars button below
-  // the terminal or Preferences.
+  // happens from this screen's own ⋯ menu (the shared items below), exactly as
+  // on the agent screen; restoring from the input ⋯ menu below the terminal,
+  // which is on screen in every bar state, or from Preferences.
   const topBarVisible = mobileTopBarVisible(duxState)
+  const isMobile = useIsMobile()
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
       {topBarVisible ? (
@@ -159,7 +161,7 @@ function AgentlessTerminalScreen({
               the agent screen's (a floating trigger over the PTY covered the
               text under it). Hiding the top bar hides it with the header —
               the same more-space trade the tab strip makes; restore is the
-              show-bars button or Preferences. */}
+              input ⋯ menu below the terminal, or Preferences. */}
           <MacroPopover
             variant="icon"
             target={{ kind: "terminal", terminalId, owner }}
@@ -178,12 +180,27 @@ function AgentlessTerminalScreen({
               <Ellipsis />
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
-              {/* The shared mobile-bar quick toggles, identical to the agent
-                  screen's menu, then the terminal's one real action from its
-                  sidebar row menu: Close…, neutral color per the destructive
-                  convention (the … plus ConfirmDeleteTerminalDialog are the
-                  danger signal), routed through the same confirm target. */}
-              <MobileBarToggleItems />
+              {/* The shared input-menu items, identical to the agent screen's
+                  menu (and to the input `⋯` below the terminal), then the
+                  terminal's one real action from its sidebar row menu: Close…,
+                  neutral color per the destructive convention (the … plus
+                  ConfirmDeleteTerminalDialog are the danger signal), routed
+                  through the same confirm target.
+
+                  Both toggles ride `isMobile`: this header is the phone
+                  shell's own chrome, which is the gate this menu has always
+                  had. Visibility is the caller's, so the input `⋯` can widen
+                  the keys item to a coarse-pointer tablet without widening it
+                  here. */}
+              <InputMenuItems
+                gates={{
+                  attach: false,
+                  surfaceSwitch: false,
+                  keysToggle: isMobile,
+                  topBarToggle: isMobile,
+                }}
+                trailingSeparator
+              />
               <DropdownMenuItem onClick={() => openDeleteTerminal(terminalId)}>
                 <X />
                 Close…
@@ -312,8 +329,9 @@ function TerminalScreen() {
   // The `ui.mobile_top_bar` render gate (resolved through the optimistic
   // override): hiding the top bar hides the header AND the tab strip (a
   // deliberate decision: hiding states an intent, more space; switching tabs
-  // while hidden is a two-step through restore). Restore lives on the compose
-  // bar's show-bars button and in Preferences.
+  // while hidden is a two-step through restore). Restore lives in the input ⋯
+  // menu below the terminal, which is on screen in every bar state, and in
+  // Preferences.
   const topBarVisible = mobileTopBarVisible(duxState)
   const session = spine?.sessions.find((s) => s.id === selectedSessionId)
   const changeCount =
@@ -489,8 +507,8 @@ function TerminalScreen() {
                 trigger sat over the PTY text on a phone and made the text
                 under it unreadable. When ui.mobile_top_bar is off it hides
                 with the whole header — the same deliberate more-space trade
-                the tab strip makes; restore is the show-bars button below the
-                terminal or Preferences. */}
+                the tab strip makes; restore is the input ⋯ menu below the
+                terminal, or Preferences. */}
             <MacroPopover variant="icon" target={selectedTarget} />
             <Button
               variant="outline"

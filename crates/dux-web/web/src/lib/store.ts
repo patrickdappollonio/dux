@@ -5520,42 +5520,11 @@ export function sessionActiveElsewhere(
   })
 }
 
-// The compose bar's restore button: one tap restores BOTH bars (a deliberate
-// decision, the button is the escape hatch, not a per-bar toggle), in a
-// single settings PATCH so the two writes cannot half-apply on the wire.
-export function restoreMobileBars(): Promise<boolean> {
-  const prevTop = state.mobileTopBarOverride
-  const prevAccessory = state.mobileAccessoryBarOverride
-  setState({ mobileTopBarOverride: true, mobileAccessoryBarOverride: true })
-  // `quiet: true` for the same reason as `setMobileBarVisibility`: the bars
-  // visibly returning is the feedback, so no success status is wanted.
-  return configApi
-    .patchSettings({
-      ui: { mobile_top_bar: true, mobile_accessory_bar: true },
-      quiet: true,
-    })
-    .then(() => true)
-    .catch((e) => {
-      // Per-field rollback with the same overtaken-write guard as
-      // `setMobileBarVisibility`: only a field still holding the `true` this
-      // restore wrote rolls back; one a newer toggle has since re-hidden is
-      // that newer write's to keep.
-      const rollback: Partial<DuxState> = {}
-      if (state.mobileTopBarOverride === true) {
-        rollback.mobileTopBarOverride = prevTop
-      }
-      if (state.mobileAccessoryBarOverride === true) {
-        rollback.mobileAccessoryBarOverride = prevAccessory
-      }
-      if (Object.keys(rollback).length) setState(rollback)
-      notifyError(
-        e instanceof Error ? e.message : "Could not restore the mobile bars.",
-      )
-      return false
-    })
-}
-
-
+// There is deliberately NO restore-both action here any more. The one-tap
+// "show hidden bars" button it served is gone: the input ⋯ menu below the
+// terminal is always on screen, and it carries a named Show item PER BAR, so a
+// user restores the one they are missing rather than being handed both. Each
+// item is an ordinary `setMobileBarVisibility` write.
 
 // The Task Manager (the app menu's "Task Manager…"). Open/close just flip the
 // gate; the dialog derives its rows from the spine and polls the stats itself

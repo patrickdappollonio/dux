@@ -1655,18 +1655,17 @@ describe("TerminalPane mobile accessory-bar preference", () => {
   })
 })
 
-// The compose bar's restore button: the escape hatch back from hidden bars.
-// It renders only while at least one bar is hidden, and one tap restores BOTH
-// preferences through the same settings PATCH the quick toggles use.
-describe("TerminalPane compose-bar restore button", () => {
+// THE INPUT ⋯ MENU AND ITS THREE ANCHORS. It replaced a button that existed
+// only while something was hidden, which is why the hidden-bars dead end kept
+// coming back: a way back is not the same as a way there. The menu renders in
+// EVERY bar state, at the leading edge of the bottom-most input row that
+// exists, and exactly one instance of it is ever on screen.
+describe("TerminalPane input menu anchors", () => {
   const desktopWidth = window.innerWidth
-  // `goMobile` now means "the phone SHELL is up AND touch is the primary
-  // pointer". Those are two different signals since the compose bar moved off
-  // the width breakpoint: width still drives the mobile layout, but the
-  // compose bar itself is gated on `pointer: coarse` (see
-  // `hooks/use-coarse-pointer.ts`). Real phones report both, so these suites
-  // set both; the tests that pull them APART live in the compose-bar gate
-  // suite at the end of this file.
+  // `goMobile` means "the phone SHELL is up AND touch is the primary pointer".
+  // Those are two different signals since the compose bar moved off the width
+  // breakpoint: width still drives the mobile layout, but the typing surfaces
+  // are gated on `pointer: coarse`. Real phones report both.
   let pointerStub: MatchMediaStub | null = null
   const goMobile = () => {
     Object.defineProperty(window, "innerWidth", {
@@ -1675,105 +1674,53 @@ describe("TerminalPane compose-bar restore button", () => {
     })
     pointerStub = stubCoarsePointer()
   }
-  afterEach(() => {
+  afterEach(async () => {
     Object.defineProperty(window, "innerWidth", {
       value: desktopWidth,
       configurable: true,
     })
     pointerStub?.restore()
     pointerStub = null
+    // The surface switch writes a DEVICE-local choice that outlives the render,
+    // so hand the decision back to the pointer before the next case.
+    const mod = await import("@/lib/typingSurface")
+    mod.setTypingSurface(null)
   })
 
-  it("does not render while both bars are visible", () => {
-    goMobile()
-    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-    expect(
-      screen.queryByRole("button", { name: "Show hidden bars" }),
-    ).toBeNull()
-  })
+  const triggers = () => screen.queryAllByRole("button", { name: "Input options" })
+  const openMenu = () => fireEvent.click(triggers()[0]!)
 
-  it("renders when the accessory bar is hidden", () => {
+  it("renders in the compose row while both bars are visible", () => {
+    // The old restore button was ABSENT in this state, which is the whole bug:
+    // nothing on screen led to the hide/show controls from the terminal.
     goMobile()
-    const state = makeState()
-    ;(
-      state.bootstrap as unknown as { mobile_accessory_bar?: boolean }
-    ).mobile_accessory_bar = false
-    mockState = state
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(triggers()).toHaveLength(1)
+    // In the compose row, opposite Send, not in the key rows above it.
     expect(
-      screen.getByRole("button", { name: "Show hidden bars" }),
+      triggers()[0]!.closest("div")!.querySelector('[aria-label="Send"]'),
     ).toBeTruthy()
   })
 
-  it("renders when the top bar is hidden", () => {
+  it("renders in the accessory bar's key row when the message box is off", () => {
     goMobile()
     const state = makeState()
-    ;(
-      state.bootstrap as unknown as { mobile_top_bar?: boolean }
-    ).mobile_top_bar = false
+    ;(state.bootstrap as unknown as { compose_bar?: string }).compose_bar =
+      "never"
     mockState = state
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-    expect(
-      screen.getByRole("button", { name: "Show hidden bars" }),
-    ).toBeTruthy()
+    expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
+    expect(triggers()).toHaveLength(1)
+    // Beside the keys, in row one: Esc is its neighbour.
+    const row = triggers()[0]!.closest("div")!.parentElement!
+    expect(row.querySelector('[aria-label="Esc"]')).toBeTruthy()
   })
 
-  it("one tap restores BOTH preferences through the settings PATCH", () => {
-    goMobile()
-    const state = makeState()
-    ;(
-      state.bootstrap as unknown as { mobile_top_bar?: boolean }
-    ).mobile_top_bar = false
-    mockState = state
-    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-    fireEvent.click(screen.getByRole("button", { name: "Show hidden bars" }))
-    const fetchSpy = globalThis.fetch as unknown as ReturnType<typeof vi.fn>
-    expect(fetchSpy).toHaveBeenCalledWith(
-      "/api/v1/config/settings",
-      expect.objectContaining({
-        method: "PATCH",
-        // `quiet: true` asks the server to skip its "Settings updated."
-        // status: the bars visibly returning is the feedback.
-        body: JSON.stringify({
-          ui: { mobile_top_bar: true, mobile_accessory_bar: true },
-          quiet: true,
-        }),
-      }),
-    )
-  })
-})
-
-// The escape hatch when the compose bar itself is off: the terminal screen
-// must never be chrome-free (the PWA has no browser Back button), so with a
-// bar hidden and `ui.compose_bar` false the pane renders a minimal bottom row
-// carrying ONLY the same restore button.
-describe("TerminalPane restore row when the compose bar is off", () => {
-  const desktopWidth = window.innerWidth
-  // `goMobile` now means "the phone SHELL is up AND touch is the primary
-  // pointer". Those are two different signals since the compose bar moved off
-  // the width breakpoint: width still drives the mobile layout, but the
-  // compose bar itself is gated on `pointer: coarse` (see
-  // `hooks/use-coarse-pointer.ts`). Real phones report both, so these suites
-  // set both; the tests that pull them APART live in the compose-bar gate
-  // suite at the end of this file.
-  let pointerStub: MatchMediaStub | null = null
-  const goMobile = () => {
-    Object.defineProperty(window, "innerWidth", {
-      value: 500,
-      configurable: true,
-    })
-    pointerStub = stubCoarsePointer()
-  }
-  afterEach(() => {
-    Object.defineProperty(window, "innerWidth", {
-      value: desktopWidth,
-      configurable: true,
-    })
-    pointerStub?.restore()
-    pointerStub = null
-  })
-
-  it("renders the restore button in its own bottom row when a bar is hidden", () => {
+  // THE DUPLICATE STATE. The keys are up, the message box is off and the top
+  // bar is hidden. The old fallback row's condition ("compose off AND something
+  // hidden") was true here at the same time as the accessory anchor, so this
+  // exact state would have shipped TWO menus.
+  it("renders exactly one menu with the keys up, the box off and the top bar hidden", () => {
     goMobile()
     const state = makeState()
     ;(
@@ -1787,24 +1734,63 @@ describe("TerminalPane restore row when the compose bar is off", () => {
     ).mobile_top_bar = false
     mockState = state
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-    // No compose bar, but the restore escape hatch is still on screen.
-    expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
-    expect(
-      screen.getByRole("button", { name: "Show hidden bars" }),
-    ).toBeTruthy()
+    expect(triggers()).toHaveLength(1)
+    // And it is the accessory bar's, not a second minimal row's.
+    const row = triggers()[0]!.closest("div")!.parentElement!
+    expect(row.querySelector('[aria-label="Esc"]')).toBeTruthy()
   })
 
-  it("renders nothing extra while both bars are visible", () => {
+  it("renders its own row when neither bar is up", () => {
     goMobile()
     const state = makeState()
     ;(state.bootstrap as unknown as { compose_bar?: string }).compose_bar =
       "never"
+    ;(
+      state.bootstrap as unknown as { mobile_accessory_bar?: boolean }
+    ).mobile_accessory_bar = false
     mockState = state
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
-    expect(
-      screen.queryByRole("button", { name: "Show hidden bars" }),
-    ).toBeNull()
+    expect(screen.queryByRole("button", { name: "Esc" })).toBeNull()
+    expect(triggers()).toHaveLength(1)
+  })
+
+  it("carries the per-bar Show items, each writing only its own field", () => {
+    goMobile()
+    const state = makeState()
+    ;(
+      state.bootstrap as unknown as { mobile_accessory_bar?: boolean }
+    ).mobile_accessory_bar = false
+    mockState = state
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    openMenu()
+    // The individual toggles replaced the one-tap restore-both: the menu names
+    // what each one does, and each is its own preference.
+    expect(screen.getByText("Hide top bar")).toBeTruthy()
+    fireEvent.click(screen.getByText("Show terminal keys"))
+    const fetchSpy = globalThis.fetch as unknown as ReturnType<typeof vi.fn>
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "/api/v1/config/settings",
+      expect.objectContaining({
+        method: "PATCH",
+        // `quiet: true` asks the server to skip its "Settings updated."
+        // status: the keys visibly returning is the feedback.
+        body: JSON.stringify({
+          ui: { mobile_accessory_bar: true },
+          quiet: true,
+        }),
+      }),
+    )
+  })
+
+  it("offers the typing-surface switch as the action it performs", () => {
+    goMobile()
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    openMenu()
+    // The message box is up, so the switch is the way OUT of it. It writes
+    // through the same helper as the key row's Box/Direct cap.
+    fireEvent.click(screen.getByText("Type directly in the terminal"))
+    expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
   })
 })
 
@@ -2587,20 +2573,29 @@ describe("TerminalPane compose placeholder follows the surface", () => {
 
 // THE WAY BACK TRAVELS WITH THE KEYS. `ui.mobile_accessory_bar` is a
 // SERVER-SIDE preference, so hiding it from a phone hides the keys on the
-// tablet too; if the restore affordance stayed gated on the mobile LAYOUT, that
-// tablet got the desktop shell with no keys and no way to ask for them back.
-// The affordance therefore follows the same predicate that mounts the bars.
-describe("TerminalPane restore affordance follows the touch surfaces", () => {
+// tablet too; if the way back stayed gated on the mobile LAYOUT, that tablet
+// got the desktop shell with no keys and no way to ask for them back. The input
+// ⋯ therefore follows the same predicate that mounts the bars.
+describe("TerminalPane input menu follows the touch surfaces", () => {
   let pointerStub: MatchMediaStub | null = null
 
   const setWidth = (value: number) =>
     Object.defineProperty(window, "innerWidth", { value, configurable: true })
 
-  beforeEach(() => setWidth(1200))
-  afterEach(() => {
+  beforeEach(async () => {
+    setWidth(1200)
+    // A stored choice would offer the surface switch on its own (that is the
+    // point of the wider gate, and there is a case for it below); start every
+    // case here with the decision back in the pointer's hands.
+    const mod = await import("@/lib/typingSurface")
+    mod.setTypingSurface(null)
+  })
+  afterEach(async () => {
     setWidth(1200)
     pointerStub?.restore()
     pointerStub = null
+    const mod = await import("@/lib/typingSurface")
+    mod.setTypingSurface(null)
   })
 
   const hideAccessoryBar = () => {
@@ -2610,39 +2605,39 @@ describe("TerminalPane restore affordance follows the touch surfaces", () => {
     ).mobile_accessory_bar = false
     return state
   }
-  const restoreButton = () =>
-    screen.queryByRole("button", { name: "Show hidden bars" })
+  const trigger = () => screen.queryByRole("button", { name: "Input options" })
 
-  it("offers the restore button in the DESKTOP shell on a coarse pointer", () => {
+  it("offers the menu in the DESKTOP shell on a coarse pointer", () => {
     pointerStub = stubCoarsePointer(true)
     mockState = hideAccessoryBar()
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-    // The dead end: keys gone, desktop layout, and before this the button too.
+    // The dead end: keys gone, desktop layout, and before this no way back.
     expect(screen.queryByRole("button", { name: "Esc" })).toBeNull()
-    expect(restoreButton()).toBeTruthy()
+    expect(trigger()).toBeTruthy()
   })
 
-  it("one tap brings the keys back", () => {
+  it("brings the keys back from the menu, writing only that preference", () => {
     pointerStub = stubCoarsePointer(true)
     mockState = hideAccessoryBar()
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-    fireEvent.click(restoreButton()!)
+    fireEvent.click(trigger()!)
+    fireEvent.click(screen.getByText("Show terminal keys"))
     const fetchSpy = globalThis.fetch as unknown as ReturnType<typeof vi.fn>
     expect(fetchSpy).toHaveBeenCalledWith(
       "/api/v1/config/settings",
       expect.objectContaining({
         method: "PATCH",
         body: JSON.stringify({
-          ui: { mobile_top_bar: true, mobile_accessory_bar: true },
+          ui: { mobile_accessory_bar: true },
           quiet: true,
         }),
       }),
     )
   })
 
-  // With the compose bar off too there is no bar left to carry the button, so
-  // the pane's own minimal row must carry it in the desktop shell as well.
-  it("falls back to the minimal row when the compose bar is off too", () => {
+  // With the message box off too there is no bar left to anchor the menu, so
+  // it takes its own minimal row in the desktop shell as well.
+  it("falls back to its own row when the message box is off too", () => {
     pointerStub = stubCoarsePointer(true)
     const state = hideAccessoryBar()
     ;(state.bootstrap as unknown as { compose_bar?: string }).compose_bar =
@@ -2650,21 +2645,40 @@ describe("TerminalPane restore affordance follows the touch surfaces", () => {
     mockState = state
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
-    expect(restoreButton()).toBeTruthy()
+    expect(trigger()).toBeTruthy()
   })
 
-  // A fine-pointer desktop never had the keys in the first place, so there is
-  // nothing hidden from it and nothing to restore.
-  it("offers nothing on a fine pointer", () => {
+  // A fine-pointer desktop never had the keys, never has the box, and (with
+  // uploads switched off in this state) has nothing else to put in the menu.
+  // An ⋯ that opens an empty popup is worse than no ⋯, so it renders none, and
+  // no new row appears under a desktop terminal.
+  it("offers nothing on a fine pointer with an empty item list", () => {
     pointerStub = stubCoarsePointer(false)
     mockState = hideAccessoryBar()
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-    expect(restoreButton()).toBeNull()
+    expect(trigger()).toBeNull()
+  })
+
+  // THE TRAP THE WIDER GATE CLOSES. A stored `compose` choice puts the message
+  // box up on a FINE pointer (the choice replaces the capability answer), while
+  // the accessory bar, and with it the Box/Direct cap, never mounts. Before
+  // this the only control that could switch back was in the bar that is not
+  // there; now the compose row's own ⋯ carries it.
+  it("offers the surface switch on a fine pointer with a stored choice", async () => {
+    const mod = await import("@/lib/typingSurface")
+    mod.setTypingSurface("compose")
+    pointerStub = stubCoarsePointer(false)
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(screen.getByRole("textbox", { name: "Message" })).toBeTruthy()
+    expect(screen.queryByRole("button", { name: "Esc" })).toBeNull()
+    fireEvent.click(trigger()!)
+    fireEvent.click(screen.getByText("Type directly in the terminal"))
+    expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
   })
 
   // The TOP bar is the mobile shell's own chrome. The desktop shell never
   // renders it, so its preference being off hides nothing here and must not
-  // put an unexplained button under a desktop terminal.
+  // put an unexplained row under a desktop terminal.
   it("ignores the top-bar preference in the desktop shell", () => {
     pointerStub = stubCoarsePointer(true)
     const state = makeState()
@@ -2673,8 +2687,78 @@ describe("TerminalPane restore affordance follows the touch surfaces", () => {
     ).mobile_top_bar = false
     mockState = state
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    // The keys are up, so the menu is anchored in them; what must not happen
+    // is a second, minimal row appearing because of a bar this shell has not
+    // got. The top-bar item is likewise absent from the menu.
     expect(screen.getByRole("button", { name: "Esc" })).toBeTruthy()
-    expect(restoreButton()).toBeNull()
+    expect(
+      screen.queryAllByRole("button", { name: "Input options" }),
+    ).toHaveLength(1)
+    fireEvent.click(trigger()!)
+    expect(screen.queryByText("Show top bar")).toBeNull()
+  })
+})
+
+// THE VIEWER'S WAY BACK. Everything below the terminal used to be owner-gated,
+// so a non-owner on a phone who hid the top bar from the header menu had hidden
+// the only menu that could bring it back. The input ⋯ renders for them too,
+// carrying that one item: not the keys (a write with no visible effect on their
+// screen that would re-hide the owner's), and nothing about input.
+describe("TerminalPane input menu for a non-owner", () => {
+  const desktopWidth = window.innerWidth
+  let pointerStub: MatchMediaStub | null = null
+
+  beforeEach(() => {
+    Object.defineProperty(window, "innerWidth", {
+      value: 500,
+      configurable: true,
+    })
+    pointerStub = stubCoarsePointer()
+  })
+  afterEach(() => {
+    Object.defineProperty(window, "innerWidth", {
+      value: desktopWidth,
+      configurable: true,
+    })
+    pointerStub?.restore()
+    pointerStub = null
+    Object.defineProperty(document, "visibilityState", {
+      value: "visible",
+      configurable: true,
+    })
+  })
+
+  const renderViewer = (state: DuxState) => {
+    mockState = state
+    // A BACKGROUNDED tab attaches as a silent observer and never claims input,
+    // which is the pane's own non-owner state (`isForeground`, read at mount).
+    Object.defineProperty(document, "visibilityState", {
+      value: "hidden",
+      configurable: true,
+    })
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+  }
+
+  it("offers the top-bar item once the top bar is hidden", () => {
+    const state = makeState()
+    ;(
+      state.bootstrap as unknown as { mobile_top_bar?: boolean }
+    ).mobile_top_bar = false
+    renderViewer(state)
+    // No typing surfaces for a viewer, per the tenet.
+    expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
+    expect(screen.queryByRole("button", { name: "Esc" })).toBeNull()
+    fireEvent.click(screen.getByRole("button", { name: "Input options" }))
+    expect(screen.getByText("Show top bar")).toBeTruthy()
+    expect(screen.queryByText("Show terminal keys")).toBeNull()
+    expect(screen.queryByText("Attach a file…")).toBeNull()
+  })
+
+  it("stays out of the way while the top bar is on screen", () => {
+    renderViewer(makeState())
+    expect(
+      screen.queryByRole("button", { name: "Input options" }),
+    ).toBeNull()
   })
 })
 

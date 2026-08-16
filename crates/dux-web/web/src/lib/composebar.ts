@@ -196,21 +196,53 @@ export function composeBarShown(
 }
 
 /**
- * Should the toggle render?
+ * Should the IN-BAR toggle render?
  *
  * Only where it can do something: in `auto` (under always/never the setting has
  * already decided, and a control that changed nothing would be a lie) and on a
- * device that has the touch surfaces at all, since the toggle lives in the
- * accessory bar. It lives THERE rather than in the compose bar because the
- * accessory bar is present in BOTH states: a toggle inside the compose bar
- * would disappear the moment it turned the compose bar off, stranding the user
- * in direct typing with no way back.
+ * device that has the touch surfaces at all, since this toggle lives in the
+ * accessory bar's key row.
+ *
+ * The accessory bar is not the guaranteed surface any more: the input `⋯` menu
+ * is, and it renders in every bar state including bars-all-hidden. The quick
+ * toggle stays in the key row because that is where a thumb already is, and
+ * both it and the menu item write through the SAME `setTypingSurface` helper so
+ * the two can never disagree about what a switch means.
  */
 export function typingSurfaceToggleOffered(
   mode: ComposeBarMode,
   coarsePointer: boolean
 ): boolean {
   return mode === "auto" && touchSurfacesApply(mode, coarsePointer)
+}
+
+/**
+ * Should the INPUT MENU's typing-surface item render?
+ *
+ * Wider than the in-bar toggle by exactly one state, and that state is a trap
+ * this closes: `auto` on a FINE pointer with a stored `compose` choice puts the
+ * message box up (the choice replaces the capability answer, see
+ * `composeBarShown`) while the accessory bar, gated on `touchSurfacesApply`,
+ * does not mount at all. The only control that could switch back was in the bar
+ * that is not there. So the menu offers the switch whenever the mode is `auto`
+ * and either the touch surfaces apply or a choice is already stored.
+ *
+ * Still nothing under `always`/`never`: the setting has decided, and the toggle
+ * deliberately cannot defeat it.
+ *
+ * One accepted asymmetry: on a fine pointer with a stored `compose` choice,
+ * switching to Direct removes every anchor, so from the pane the switch is
+ * one-way there. Accepted because the resulting state is pixel-identical to
+ * the fine-pointer default, and the stored choice only arises on convertibles
+ * that can re-enter coarse-pointer mode, where the toggle returns.
+ */
+export function inputMenuSurfaceSwitchOffered(
+  mode: ComposeBarMode,
+  coarsePointer: boolean,
+  choice: TypingSurfaceChoice | null
+): boolean {
+  if (mode !== "auto") return false
+  return touchSurfacesApply(mode, coarsePointer) || choice !== null
 }
 
 /**

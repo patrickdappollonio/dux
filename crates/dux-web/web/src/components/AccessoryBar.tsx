@@ -39,16 +39,24 @@ interface AccessoryBarProps {
   alt: boolean
   onToggleCtrl: () => void
   onToggleAlt: () => void
-  // THE TYPING-SURFACE TOGGLE, and it lives HERE on purpose. A person with a
-  // keyboard case attached wants to type straight into the terminal; the same
-  // tablet without it wants the buffered message box, and the browser cannot
-  // tell the two apart (measured), so the user swaps it. The control belongs in
-  // THIS bar because this bar is on screen in BOTH states: put it inside the
-  // compose bar and it would vanish the instant it turned the compose bar off,
-  // leaving no way back. Absent (undefined) where the toggle would change
-  // nothing, which is every case except the `auto` setting on a touch device.
+  // THE TYPING-SURFACE QUICK TOGGLE. A person with a keyboard case attached
+  // wants to type straight into the terminal; the same tablet without it wants
+  // the buffered message box, and the browser cannot tell the two apart
+  // (measured), so the user swaps it. It sits in THIS row because this row is
+  // where the thumb already is in both states, and it is one tap rather than
+  // two. It is not the guaranteed way back any more: the input ⋯ menu is, and
+  // that menu renders in every bar state including bars-all-hidden. Both write
+  // through the same `setTypingSurface` helper, so they cannot drift. Absent
+  // (undefined) where the toggle would change nothing, which is every case
+  // except the `auto` setting on a touch device.
   composeSurface?: boolean
   onToggleSurface?: () => void
+  // The input ⋯ menu, when THIS bar is the bottom-most input row (the message
+  // box is off, so the compose row that normally carries it is not there).
+  // Presentational like everything else here: the parent owns the anchor
+  // matrix and simply hands over a node, absent whenever another row carries
+  // the menu or the menu would be empty.
+  inputMenu?: React.ReactNode
 }
 
 // CRITICAL: every bar button calls preventDefault() on pointerdown so the press
@@ -113,6 +121,7 @@ function KeyButton({
   pressed,
   onActivate,
   children,
+  className,
 }: {
   label?: string
   ariaLabel?: string
@@ -122,6 +131,9 @@ function KeyButton({
   // keyboard/AT activation (see `keyClick`).
   onActivate: () => void
   children?: React.ReactNode
+  // Extra classes merged last so a caller can loosen the min-w-0 floor (the
+  // surface toggle needs a wider one; see its call site).
+  className?: string
 }) {
   return (
     <Button
@@ -132,6 +144,7 @@ function KeyButton({
       onClick={keyClick(onActivate)}
       className={cn(
         "h-10 min-w-0 flex-1 font-mono",
+        className,
         // Latched modifiers get an accent fill so the active state is
         // unmistakable on a glance — accent tokens, never raw colors.
         pressed && "bg-primary text-primary-foreground hover:bg-primary/80",
@@ -154,6 +167,7 @@ export function AccessoryBar({
   onToggleAlt,
   composeSurface,
   onToggleSurface,
+  inputMenu,
 }: AccessoryBarProps) {
   // Two flex rows stacked: modifier/special keys on top, navigation (arrows +
   // page scroll) below; gap-1.5 between the rows so a fat-finger tap on the top
@@ -204,7 +218,35 @@ export function AccessoryBar({
                   : "Typing surface: direct. Switch to the message box."
               }
               onActivate={onToggleSurface}
+              // min-w-16: with the input ⋯ cell in the row, an even flex split
+              // at 390px gives every cell 47px, and the "Direct" label needs 54
+              // (measured in the preview container; it visibly clipped). The
+              // floor holds this cell at 64 and the five keys settle at 44,
+              // still above the 40px touch floor on both axes.
+              className="min-w-16"
             />
+
+          </>
+        ) : null}
+        {/* THE INPUT ⋯, when this row is the bottom-most input row. It sits
+            behind its own divider for the same misclick reason the surface
+            toggle does: opening a menu out from under a thumb aiming for ⇧↵
+            is a different kind of surprise from a mistyped key.
+
+            TOUCH FLOOR, per axis: the trigger keeps `size-10` on BOTH axes
+            (40px square), so nothing here is an exemption. WIDTH BUDGET: row
+            one is budgeted for 390px; MEASURED in the preview container at
+            that width with the "Direct" label up (the tightest state the row
+            has): the label clipped under an even flex split, so the surface
+            toggle carries a min-width floor (see it above) and every cell
+            stays at or above the 40px touch floor. */}
+        {inputMenu ? (
+          <>
+            <div
+              aria-hidden="true"
+              className="mx-1.5 w-px shrink-0 self-stretch bg-border"
+            />
+            {inputMenu}
           </>
         ) : null}
       </div>

@@ -11,6 +11,7 @@ import { fileApi } from "@/lib/fileApi"
 import { dragCarriesFiles } from "@/lib/fileDrop"
 import { classifyDroppedItems } from "@/lib/editorDrop"
 import type { DroppedItems } from "@/lib/editorDrop"
+import { useFilePicker } from "@/hooks/use-file-picker"
 import { targetDirForCreate } from "@/lib/fileTreeOps"
 import {
   ancestorDirs,
@@ -92,6 +93,21 @@ export function FileTree({
   fileDropEnabled = false,
   onFilesDropped,
 }: FileTreeProps) {
+  // The picker behind "Upload here…". It feeds the SAME `onFilesDropped` the
+  // drag does, with the same per-row destination resolution, so the two
+  // gestures cannot land in two places.
+  //
+  // `folders: []` always: a file picker cannot produce a directory (no
+  // `webkitdirectory` here, deliberately), so the folder-refusal rung of the
+  // tree's outcome ladder is unreachable from this gesture. It is passed
+  // rather than made optional so the one shared reporter keeps one shape.
+  const { input: pickerInput, open: openFilePicker } = useFilePicker()
+  const uploadInto = (dir: string) => {
+    void openFilePicker().then((files) => {
+      if (files.length > 0) onFilesDropped?.(dir, { files, folders: [] })
+    })
+  }
+
   // The lazy loaded-directory cache: dirPath ("" = root) → DirState.
   const [dirs, setDirs] = useState<Map<string, DirState>>(() => new Map())
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set())
@@ -410,6 +426,10 @@ export function FileTree({
         setViewportHeight(e.currentTarget.clientHeight)
       }}
     >
+      {/* The picker's hidden input, mounted with the tree so a menu item's
+          click reaches it synchronously (the browser's user activation is
+          spent by the time a promise resolves). */}
+      {pickerInput}
       <ContextMenu>
       <ContextMenuTrigger
         render={
@@ -527,6 +547,10 @@ export function FileTree({
                         targetDirForCreate({ kind: "dir", path: row.path }),
                       )
                     }
+                    canUpload={fileDropEnabled}
+                    onUpload={() =>
+                      uploadInto(targetDirForCreate({ kind: "dir", path: row.path }))
+                    }
                     onRename={() => onRename(row.path, true)}
                     onMove={() => onMove(row.path, true)}
                     onDelete={() => onDelete(row.path, true)}
@@ -615,6 +639,12 @@ export function FileTree({
                         targetDirForCreate({ kind: "file", path: row.path }),
                       )
                     }
+                    canUpload={fileDropEnabled}
+                    // A file is not a place to put a file, so this targets the
+                    // folder the file is IN: the same mapping the drop uses.
+                    onUpload={() =>
+                      uploadInto(targetDirForCreate({ kind: "file", path: row.path }))
+                    }
                     onRename={() => onRename(row.path, false)}
                     onMove={() => onMove(row.path, false)}
                     onDelete={() => onDelete(row.path, false)}
@@ -632,6 +662,8 @@ export function FileTree({
         variant="root"
         onNewFile={() => onNewFile(targetDirForCreate({ kind: "root" }))}
         onNewFolder={() => onNewFolder(targetDirForCreate({ kind: "root" }))}
+        canUpload={fileDropEnabled}
+        onUpload={() => uploadInto(targetDirForCreate({ kind: "root" }))}
         onRename={noop}
         onMove={noop}
         onDelete={noop}

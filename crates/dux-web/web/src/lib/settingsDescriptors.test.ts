@@ -339,11 +339,11 @@ describe("settingsDescriptors", () => {
   })
 
   // Escape-hatch truth: each mobile-bar description must name BOTH restore
-  // routes (the show-bars button that renders below the terminal — inside the
-  // compose bar when it is on, in its own minimal row when it is off — and
-  // this Preferences dialog) rather than leaving the user to rediscover them.
-  // Deliberately NOT "the compose bar's button": that wording was false with
-  // the compose bar disabled.
+  // routes (the input ⋯ menu below the terminal, which sits in the compose row
+  // when the message box is on, in the key row when it is not, and in its own
+  // minimal row when neither is, plus this Preferences dialog) rather than
+  // leaving the user to rediscover them. Deliberately NOT "the compose bar's
+  // button": that wording was false with the compose bar disabled.
   it("both mobile-bar descriptions name the restore routes", () => {
     for (const key of ["ui.mobile_top_bar", "ui.mobile_accessory_bar"]) {
       const d = allSettingDescriptors().find((x) => x.key === key)

@@ -541,3 +541,67 @@ describe("FlatAgentList editor menu entries", () => {
     expect(open).not.toHaveBeenCalled()
   })
 })
+
+// "ATTACH A FILE…" IN THE ROW MENUS: the desktop and keyboard-only path into
+// the upload journey, which before this had none (the only non-drag entry was
+// pasting an image). It is borrowed from the pane rather than owned by the row,
+// because the upload has to travel through the pane's own gated connection and
+// land in its own sink.
+describe("FlatAgentList attach-a-file entries", () => {
+  const item = () => screen.queryByText("Attach a file…")
+
+  async function openAgentMenu() {
+    render(<FlatAgentList handlers={handlers} />)
+    fireEvent.click(screen.getAllByLabelText("Session actions")[0])
+    await screen.findByRole("menu")
+  }
+
+  async function openTerminalMenu() {
+    render(<FlatAgentList handlers={handlers} />)
+    fireEvent.click(screen.getAllByLabelText("Terminal actions")[0])
+    await screen.findByRole("menu")
+  }
+
+  afterEach(async () => {
+    const mod = await import("@/lib/attachRegistry")
+    mod.resetAttachCapabilities()
+  })
+
+  // HIDDEN, not disabled, when no pane is mounted: the row-menu convention is
+  // that an inert item does not appear at all.
+  it("is absent from the agent menu while no pane of that agent is mounted", async () => {
+    await openAgentMenu()
+    expect(item()).toBeNull()
+  })
+
+  it("appears in the agent menu once one of its panes publishes it", async () => {
+    const attach = vi.fn()
+    const mod = await import("@/lib/attachRegistry")
+    // The first displayed agent is Alpha (name sort). Its session-slot tab's id
+    // IS the session id, which is what a mounted pane registers under.
+    mod.registerAttachCapability("alpha", attach)
+    await openAgentMenu()
+    fireEvent.click(item()!)
+    expect(attach).toHaveBeenCalledTimes(1)
+  })
+
+  it("does not borrow another agent's pane", async () => {
+    const mod = await import("@/lib/attachRegistry")
+    mod.registerAttachCapability("zeta", vi.fn())
+    await openAgentMenu()
+    expect(item()).toBeNull()
+  })
+
+  it("is absent from a terminal menu with no mounted pane, and present with one", async () => {
+    await openTerminalMenu()
+    expect(item()).toBeNull()
+    cleanup()
+    const attach = vi.fn()
+    const mod = await import("@/lib/attachRegistry")
+    // The first displayed terminal row in this fixture is "bash" (t-a).
+    mod.registerAttachCapability("t-a", attach)
+    await openTerminalMenu()
+    fireEvent.click(item()!)
+    expect(attach).toHaveBeenCalledTimes(1)
+  })
+})

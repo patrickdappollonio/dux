@@ -1287,3 +1287,112 @@ describe("the drop overlay", () => {
     expect(uploadDroppedFile).not.toHaveBeenCalled()
   })
 })
+
+// ATTACHING A FILE FROM THE PICKER: the same journey, entered by the gesture a
+// phone and a keyboard-only desktop can actually make. Everything after the
+// files arrive is the shared pipeline, which is the point of these cases: the
+// route, the destination, the path form and the toast are not re-tested here,
+// only that the gesture reaches them.
+describe("attaching a file from the picker", () => {
+  // The native dialog cannot be opened headlessly, so the hidden input is
+  // driven the way the browser drives it: files installed, `change` fired.
+  const pickerInput = () =>
+    screen.getByTestId("file-picker-input") as HTMLInputElement
+
+  async function pick(files: File[]) {
+    const input = pickerInput()
+    Object.defineProperty(input, "files", { value: files, configurable: true })
+    await act(async () => {
+      fireEvent.change(input)
+      for (let i = 0; i < 6; i++) await Promise.resolve()
+    })
+  }
+
+  async function cancel() {
+    await act(async () => {
+      pickerInput().dispatchEvent(new Event("cancel"))
+      for (let i = 0; i < 6; i++) await Promise.resolve()
+    })
+  }
+
+  // The pane's own attach entry point, published to the agent and terminal ROW
+  // menus while the pane is mounted and owns its input. Reaching it through the
+  // registry rather than the ⋯ menu keeps these cases about the upload; the
+  // menu's own anchors are pinned in TerminalPane.test.tsx.
+  const attach = async () => {
+    const { attachCapabilityFor } = await import("@/lib/attachRegistry")
+    return attachCapabilityFor("s1")
+  }
+
+  it("uploads what was picked and pastes the path, exactly as a drop does", async () => {
+    uploadDroppedFile.mockResolvedValue(saved("shot.png"))
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    ;(await attach())!()
+    await pick([file("shot.png")])
+    expect(uploadDroppedFile).toHaveBeenCalledTimes(1)
+    expect(sentToSocket()).toEqual(["/tmp/p1/shot.png "])
+    expect(vi.mocked(toast.success)).toHaveBeenCalled()
+  })
+
+  it("uploads several in the order they were picked", async () => {
+    uploadDroppedFile.mockImplementation(async (f: File) => saved(f.name))
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    ;(await attach())!()
+    await pick([file("a.png"), file("b.png")])
+    expect(sentToSocket()).toEqual(["/tmp/p1/a.png ", "/tmp/p1/b.png "])
+  })
+
+  it("does nothing at all when the picker is cancelled", async () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    ;(await attach())!()
+    await cancel()
+    expect(uploadDroppedFile).not.toHaveBeenCalled()
+    // A cancel is not a failure: nothing was attempted, so nothing is reported.
+    expect(vi.mocked(toast.error)).not.toHaveBeenCalled()
+    expect(vi.mocked(toast.warning)).not.toHaveBeenCalled()
+    expect(vi.mocked(toast.loading)).not.toHaveBeenCalled()
+  })
+
+  it("lands in the terminal's own directory when the pane is a terminal", async () => {
+    uploadDroppedFile.mockResolvedValue(saved("notes.txt"))
+    render(
+      <TerminalPane
+        kind="terminal"
+        id="t1"
+        owner={{ kind: "session", sessionId: "s1" }}
+      />,
+    )
+    const { attachCapabilityFor } = await import("@/lib/attachRegistry")
+    attachCapabilityFor("t1")!()
+    await pick([file("notes.txt")])
+    // A terminal is a shell, so its path is always quoted; the destination is
+    // resolved server-side from the live process, exactly as for a drop.
+    expect(uploadDroppedFile).toHaveBeenCalledTimes(1)
+    expect(sentToSocket()).toEqual(["'/tmp/p1/notes.txt' "])
+  })
+
+  it("is not offered at all when file drop is switched off", async () => {
+    mockState = makeState()
+    mockState.bootstrap!.file_drop_max_bytes = 0
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(await attach()).toBeNull()
+  })
+
+  it("is not offered by a viewer's pane, whose files could never be pasted", async () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(await attach()).not.toBeNull()
+    act(() => FakePtySocket.instances.at(-1)!.onConnected("42"))
+    act(() => notifyPtyOwner("s1", "someone-else", undefined, undefined))
+    // A viewer's pane mounts completely (it renders the take-over card over a
+    // live terminal), so ownership has to be part of the registration or every
+    // file attached from here would strand as saved-but-not-sent.
+    expect(await attach()).toBeNull()
+  })
+
+  it("retires the capability when the pane unmounts", async () => {
+    const view = render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(await attach()).not.toBeNull()
+    view.unmount()
+    expect(await attach()).toBeNull()
+  })
+})

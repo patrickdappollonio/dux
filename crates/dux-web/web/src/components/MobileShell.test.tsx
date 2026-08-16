@@ -631,7 +631,7 @@ describe("MobileShell terminal-screen macro trigger", () => {
 
   it("hides the macro trigger together with the hidden top bar", () => {
     // Hiding the top bar states an intent (more space), so the macro trigger
-    // goes with the header; restore is the show-bars button or Preferences.
+    // goes with the header; restore is the input ⋯ menu or Preferences.
     mockState = terminalState({ mobileTopBarOverride: false })
     render(<MobileShell />)
     expect(screen.queryByLabelText("Run a macro")).toBeNull()
@@ -749,9 +749,11 @@ describe("MobileShell quick toggles in the terminal-screen ⋯ menu", () => {
   })
 
   it("renders no toggles at desktop width even in the terminal context", () => {
-    // The gate is context AND isMobile: the chrome these toggles hide is
-    // mobile-only, so a desktop viewport must never see them even when a
-    // terminal-context menu renders.
+    // The gate is context AND isMobile, and it is now computed by THIS caller
+    // rather than inside the shared items component (the input ⋯ below the
+    // terminal passes a wider one, for the coarse-pointer tablet). The chrome
+    // these toggles hide is still phone-shell-only, so a desktop viewport must
+    // never see them even when a terminal-context menu renders.
     Object.defineProperty(window, "innerWidth", {
       value: desktopWidth,
       configurable: true,
@@ -784,7 +786,8 @@ describe("MobileShell quick toggles in the terminal-screen ⋯ menu", () => {
     // DropdownMenuItem carries min-h-11 (44px) on phones, undone on desktop
     // via md:min-h-0. The two DropdownMenuSubTrigger rows (New agent tab,
     // Project) must carry the exact same pair, or they render visibly shorter
-    // than every sibling item in the same open menu.
+    // than every sibling item in the same open menu. Measured against a bar
+    // toggle, which is a plain shared item and therefore the reference height.
     mockState = terminalState()
     render(<MobileShell />)
     fireEvent.click(screen.getByLabelText("Session actions"))
@@ -803,7 +806,8 @@ describe("MobileShell quick toggles in the terminal-screen ⋯ menu", () => {
 
   it("does not leak the toggles into the hub's row menus", () => {
     // The hub row's ⋯ menu shares AgentActionsMenu with the terminal screen;
-    // the toggles are terminal-context-only, so they must not appear here.
+    // the toggles are terminal-context-only, so the caller's gate must keep
+    // them out of here even on a phone.
     mockState = makeState({
       spine: makeSessionSpine(1),
       bootstrap: {

@@ -11,6 +11,7 @@ import {
   insertIntoComposeDraft,
   inactiveCursorStyle,
   touchSurfacesApply,
+  inputMenuSurfaceSwitchOffered,
   typingSurfaceToggleOffered,
 } from "./composebar"
 
@@ -276,6 +277,30 @@ describe("typingSurfaceToggleOffered", () => {
     expect(typingSurfaceToggleOffered("auto", false)).toBe(false)
     expect(typingSurfaceToggleOffered("always", true)).toBe(false)
     expect(typingSurfaceToggleOffered("never", true)).toBe(false)
+  })
+})
+
+describe("inputMenuSurfaceSwitchOffered", () => {
+  // Same rule as the in-bar toggle wherever the bar exists.
+  it("follows the touch surfaces while nothing is stored", () => {
+    expect(inputMenuSurfaceSwitchOffered("auto", true, null)).toBe(true)
+    expect(inputMenuSurfaceSwitchOffered("auto", false, null)).toBe(false)
+  })
+
+  // THE TRAP THIS CLOSES: `auto` + fine pointer + a stored `compose` choice
+  // puts the message box up while the accessory bar (and with it the only
+  // toggle) never mounts. The menu is then the one surface that can switch
+  // back, so it offers the item on the stored choice alone.
+  it("is offered on a fine pointer once a choice is stored", () => {
+    expect(inputMenuSurfaceSwitchOffered("auto", false, "compose")).toBe(true)
+    expect(inputMenuSurfaceSwitchOffered("auto", false, "direct")).toBe(true)
+  })
+
+  // The SETTING still wins: a stored choice cannot conjure a switch under
+  // always/never, where it would change nothing.
+  it("is never offered outside auto", () => {
+    expect(inputMenuSurfaceSwitchOffered("always", true, "direct")).toBe(false)
+    expect(inputMenuSurfaceSwitchOffered("never", true, "compose")).toBe(false)
   })
 })
 

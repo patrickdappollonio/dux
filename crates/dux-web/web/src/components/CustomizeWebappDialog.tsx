@@ -556,7 +556,7 @@ function CustomizeWebappForm({
   // special cases is OVERRIDE-AWARENESS, not writeTarget: any field the store
   // tracks an optimistic override for (something outside this dialog can flip
   // it live — the Changes menu, the mobile terminal screen's quick toggles,
-  // the compose bar's restore button) must read the store's override-aware
+  // the input ⋯ menu below the terminal) must read the store's override-aware
   // selector, not the raw bootstrap field. Reading the raw field would show a
   // stale value until the next bootstrap refetch reconciles it, and would
   // make `buildWrites` wrongly treat a toggle back to that stale value as a

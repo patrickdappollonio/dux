@@ -237,7 +237,7 @@ export const SETTING_GROUPS: SettingGroup[] = [
         // wide layout.
         label: "Mobile terminal top bar",
         description:
-          "On phones, shows the terminal screen's top bar: the back chevron, branch crumb and actions, plus the agent tab strip. Hide it to give those rows to the terminal; bring it back with the show-bars button below the terminal or from this Preferences dialog.",
+          "On phones, shows the terminal screen's top bar: the back chevron, branch crumb and actions, plus the agent tab strip. Hide it to give those rows to the terminal; bring it back from the input ⋯ menu below the terminal or from this Preferences dialog.",
         surface: "web",
         control: { kind: "bool" },
         default: true,
@@ -253,7 +253,7 @@ export const SETTING_GROUPS: SettingGroup[] = [
         // looking for a bar that was never the phone's alone.
         label: "Touch terminal keys",
         description:
-          "On a touch device, shows the terminal-keys bar (Esc, Tab, Ctrl, Alt and the arrows) above the compose box, in the wide layout as well as on a phone. Hide it to give those rows to the terminal; bring it back with the show-bars button below the terminal or from this Preferences dialog.",
+          "On a touch device, shows the terminal-keys bar (Esc, Tab, Ctrl, Alt and the arrows) above the compose box, in the wide layout as well as on a phone. Hide it to give those rows to the terminal; bring it back from the input ⋯ menu below the terminal or from this Preferences dialog.",
         surface: "web",
         control: { kind: "bool" },
         default: true,

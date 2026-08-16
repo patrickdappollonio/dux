@@ -200,6 +200,12 @@ the editor:
   it lands inside that folder; right-click the empty area below the tree and it
   lands at the worktree root. A brand-new file opens immediately, ready to type
   into.
+- **Upload here…** takes a file off the computer you are sitting at and puts it
+  in the folder you right-clicked, resolved exactly as a New File would resolve
+  it. It is the same thing as dragging the file onto that row, for when dragging
+  is awkward or impossible, and it pastes nothing into any terminal (see
+  [Dropping and pasting files](/docs/dropping-files)). It is absent when the
+  server has uploads switched off.
 - **Rename…** works on files and folders alike. If the file has unsaved changes,
   dux blocks the rename until you save or discard them first, rather than
   silently reloading your edits away.

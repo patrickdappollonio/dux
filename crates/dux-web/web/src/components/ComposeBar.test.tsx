@@ -243,29 +243,31 @@ describe("ComposeBar", () => {
   })
 })
 
-describe("ComposeBar restore-bars button", () => {
-  it("is absent unless the parent says a bar is hidden", () => {
+describe("ComposeBar leading slot", () => {
+  it("renders nothing there unless the parent supplies it", () => {
     render(<Harness />)
-    expect(
-      screen.queryByRole("button", { name: "Show hidden bars" }),
-    ).toBeNull()
+    expect(screen.queryByTestId("leading")).toBeNull()
   })
 
-  it("renders beside the textarea and fires onRestoreBars", () => {
-    const onRestoreBars = vi.fn()
+  // The bar is presentational: it does not know what the leading control IS
+  // (in production it is the input ⋯ menu, always present rather than
+  // conditional), only where it goes and that activating it must not send.
+  it("renders the parent's control opposite Send, and a tap on it does not send", () => {
+    const onLeading = vi.fn()
     render(
       <ComposeBar
         value=""
         onChange={() => {}}
         onSend={onSend}
-        showRestoreBars
-        onRestoreBars={onRestoreBars}
+        leading={
+          <button type="button" data-testid="leading" onClick={onLeading}>
+            menu
+          </button>
+        }
       />,
     )
-    const btn = screen.getByRole("button", { name: "Show hidden bars" })
-    fireEvent.click(btn)
-    expect(onRestoreBars).toHaveBeenCalledTimes(1)
-    // Restoring is not sending: the tap must not fire the buffer.
+    fireEvent.click(screen.getByTestId("leading"))
+    expect(onLeading).toHaveBeenCalledTimes(1)
     expect(onSend).not.toHaveBeenCalled()
   })
 })

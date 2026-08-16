@@ -181,28 +181,32 @@ describe("mobile bar visibility", () => {
     )
   })
 
-  it("restoreMobileBars restores BOTH bars in one PATCH", async () => {
+  // The one-tap restore-BOTH action is gone with the button that carried it.
+  // The input ⋯ menu names a Show item per bar instead, so restoring is the
+  // same per-field write as hiding, and a user gets back the bar they are
+  // missing rather than both.
+  it("restores each bar through its own per-field write", async () => {
     const mod = await loadStore()
     await mod.setMobileBarVisibility("top", false)
     await mod.setMobileBarVisibility("accessory", false)
-    const callsBefore = fetchMock.mock.calls.length
-    await expect(mod.restoreMobileBars()).resolves.toBe(true)
-    expect(mod.getSnapshot().mobileTopBarOverride).toBe(true)
-    expect(mod.getSnapshot().mobileAccessoryBarOverride).toBe(true)
-    expect(mod.mobileTopBarVisible(mod.getSnapshot())).toBe(true)
+    await expect(mod.setMobileBarVisibility("accessory", true)).resolves.toBe(
+      true,
+    )
+    // Only the bar that was asked for comes back.
     expect(mod.mobileAccessoryBarVisible(mod.getSnapshot())).toBe(true)
-    // One request carrying both fields, not two requests.
-    expect(fetchMock.mock.calls.length).toBe(callsBefore + 1)
+    expect(mod.mobileTopBarVisible(mod.getSnapshot())).toBe(false)
     expect(fetchMock).toHaveBeenLastCalledWith(
       "/api/v1/config/settings",
       expect.objectContaining({
         method: "PATCH",
         body: JSON.stringify({
-          ui: { mobile_top_bar: true, mobile_accessory_bar: true },
+          ui: { mobile_accessory_bar: true },
           quiet: true,
         }),
       }),
     )
+    await expect(mod.setMobileBarVisibility("top", true)).resolves.toBe(true)
+    expect(mod.mobileTopBarVisible(mod.getSnapshot())).toBe(true)
   })
 
   it("a config.changed refetch clears an override once the server confirms it", async () => {
@@ -237,7 +241,7 @@ describe("mobile bar visibility", () => {
     toastMock.info.mockClear()
     toastMock.custom.mockClear()
     await expect(mod.setMobileBarVisibility("top", false)).resolves.toBe(true)
-    await expect(mod.restoreMobileBars()).resolves.toBe(true)
+    await expect(mod.setMobileBarVisibility("top", true)).resolves.toBe(true)
     expect(toastMock).not.toHaveBeenCalled()
     expect(toastMock.error).not.toHaveBeenCalled()
     expect(toastMock.success).not.toHaveBeenCalled()
@@ -309,33 +313,7 @@ describe("mobile bar visibility", () => {
     expect(mod.getSnapshot().mobileTopBarOverride).toBe(true)
   })
 
-  it("a restore overtaken by a newer hide only rolls back what it still owns", async () => {
-    // Start with only the ACCESSORY bar hidden (top override null). A restore
-    // (slow, will fail) writes both overrides true; before it settles the
-    // user hides the top bar again (a newer, succeeding write of false). The
-    // restore's failure rollback must leave the top override with the newer
-    // false (rolling it back would reset it to the restore's captured null),
-    // while the accessory override, still holding the restore's own true,
-    // rolls back to its pre-restore false.
-    const mod = await loadStore()
-    await mod.setMobileBarVisibility("accessory", false)
-    let rejectRestore!: (e: Error) => void
-    fetchMock.mockImplementationOnce(
-      () =>
-        new Promise((_, reject) => {
-          rejectRestore = reject
-        }) as unknown as Promise<Response>,
-    )
-    const restore = mod.restoreMobileBars()
-    expect(mod.getSnapshot().mobileTopBarOverride).toBe(true)
-    await expect(mod.setMobileBarVisibility("top", false)).resolves.toBe(true)
-    rejectRestore(new Error("boom"))
-    await expect(restore).resolves.toBe(false)
-    expect(mod.getSnapshot().mobileTopBarOverride).toBe(false)
-    expect(mod.getSnapshot().mobileAccessoryBarOverride).toBe(false)
-  })
-
-  it("rolls BOTH overrides back when a restore fails", async () => {
+  it("rolls a failed restore back to hidden, leaving the other bar alone", async () => {
     const mod = await loadStore()
     await mod.setMobileBarVisibility("top", false)
     await mod.setMobileBarVisibility("accessory", false)
@@ -349,8 +327,10 @@ describe("mobile bar visibility", () => {
           headers: { get: () => null },
         }) as unknown as Response,
     )
-    await expect(mod.restoreMobileBars()).resolves.toBe(false)
-    expect(mod.getSnapshot().mobileTopBarOverride).toBe(false)
+    await expect(mod.setMobileBarVisibility("accessory", true)).resolves.toBe(
+      false,
+    )
     expect(mod.getSnapshot().mobileAccessoryBarOverride).toBe(false)
+    expect(mod.getSnapshot().mobileTopBarOverride).toBe(false)
   })
 })

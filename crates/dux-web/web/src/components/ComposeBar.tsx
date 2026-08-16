@@ -1,8 +1,7 @@
 import * as React from "react"
 import { useEffect, useRef } from "react"
-import { CornerDownLeft, PanelTopOpen } from "lucide-react"
+import { CornerDownLeft } from "lucide-react"
 
-import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Button } from "@/components/ui/button"
 
 // Typing straight into xterm's hidden textarea is hostile on a phone: the
@@ -50,15 +49,12 @@ interface ComposeBarProps {
   // it is, so it says; the default is the shell wording, which is what a bar
   // rendered without an opinion is sitting under.
   placeholder?: string
-  // Whether the restore-bars button renders: true while at least one of the
-  // two hideable mobile bars (the top bar, the accessory keys) is hidden. The
-  // compose bar is the one surface guaranteed to still be on screen then, so
-  // it carries the escape hatch.
-  showRestoreBars?: boolean
-  // One tap restores BOTH bars (the parent persists both preferences in a
-  // single settings PATCH). Presentational split as with onSend: the store
-  // action and its optimistic overrides live in the parent.
-  onRestoreBars?: () => void
+  // The control in the row's LEADING slot, opposite Send. In practice this is
+  // always the input ⋯ menu, but the bar takes it as a node rather than naming
+  // it: the compose bar is presentational and the anchor matrix (which of the
+  // three input rows carries the menu) is the parent's decision, not this
+  // component's. Absent where the menu would render empty.
+  leading?: React.ReactNode
 }
 
 // The textarea grows with its content from one line up to this many, then
@@ -127,8 +123,7 @@ export function ComposeBar({
   onSend,
   inputRef,
   placeholder = TERMINAL_PLACEHOLDER,
-  showRestoreBars = false,
-  onRestoreBars,
+  leading,
 }: ComposeBarProps) {
   // The textarea handle used for the autosize re-measure: the parent's ref
   // when provided (so the parent and this component share ONE handle rather
@@ -171,14 +166,13 @@ export function ComposeBar({
 
   return (
     <div className="flex shrink-0 items-end gap-1.5 border-t bg-background px-1 py-1">
-      {/* The restore-bars escape hatch, only while a bar is hidden: one tap
-          brings back BOTH the top bar and the terminal keys. Leading position
-          and `size-10 shrink-0 self-end` mirror Send's placement idiom on the
-          opposite edge (bottom-aligned beside a grown multi-row textarea),
-          and size-10 keeps the 40px touch-target floor. */}
-      {showRestoreBars ? (
-        <RestoreBarsButton onRestoreBars={() => onRestoreBars?.()} />
-      ) : null}
+      {/* The input ⋯ menu, in the leading slot: its placement idiom mirrors
+          Send's on the opposite edge (bottom-aligned beside a grown multi-row
+          textarea, `size-10 shrink-0 self-end`, which also keeps the 40px
+          touch-target floor). It is always here while this bar is up, not only
+          while something is hidden, which is what makes the hidden-bars dead
+          end unreachable. */}
+      {leading}
       <textarea
         ref={taRef}
         value={value}
@@ -218,34 +212,5 @@ export function ComposeBar({
         <CornerDownLeft />
       </Button>
     </div>
-  )
-}
-
-// THE restore-bars button, extracted so the two surfaces that show it cannot
-// drift: the compose bar's leading slot (above) and TerminalPane's minimal
-// bottom row when the compose bar itself is off (the terminal screen must
-// never be chrome-free — the PWA ships standalone, with no browser Back
-// button to fall back on). `size-10` keeps the 40px touch-target floor;
-// `self-end` bottom-aligns it beside a grown multi-row textarea exactly as
-// Send does (inert in the single-child fallback row).
-export function RestoreBarsButton({
-  onRestoreBars,
-}: {
-  onRestoreBars: () => void
-}) {
-  return (
-    <SimpleTooltip content="Show hidden bars">
-      <Button
-        variant="ghost"
-        aria-label="Show hidden bars"
-        onClick={onRestoreBars}
-        className="size-10 shrink-0 self-end"
-      >
-        {/* PanelTopOpen, not an eye: the action reopens hidden chrome, and
-            the icon stays in the panel/keyboard icon family the hide/show
-            menu items already use. */}
-        <PanelTopOpen />
-      </Button>
-    </SimpleTooltip>
   )
 }

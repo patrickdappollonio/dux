@@ -1,6 +1,6 @@
 ---
 title: Dropping and pasting files onto an agent
-description: Drag a screenshot from your desktop onto an agent, a terminal or the editor's file tree in the browser, or just press paste, and dux puts it where you meant it. Where files land, why an agent's uploads stay out of git, why an editor drop is an ordinary committable file, why nothing is ever overwritten, and why this is web-only.
+description: Drag a screenshot from your desktop onto an agent, a terminal or the editor's file tree in the browser, press paste, or pick it from a menu, and dux puts it where you meant it. Where files land, why an agent's uploads stay out of git, why an editor drop is an ordinary committable file, why nothing is ever overwritten, and why this is web-only.
 group: Web UI
 order: 67
 ---
@@ -11,6 +11,30 @@ agent used to mean copying it to the server by hand and typing out the path.
 
 Now you drag it onto the terminal and let go. dux saves the file on the server
 and pastes its path into the prompt, ready for you to finish the sentence.
+
+## Or pick it from a menu
+
+No drag, no clipboard, no pointer at all. **Attach a file…** opens your
+browser's ordinary file picker and sends whatever you choose down exactly the
+same road: saved on the server, path pasted into the prompt, one toast at the
+end. It is in three places, and each one keeps the meaning of the surface you
+opened it from:
+
+- The **input `⋯` menu** below the terminal (see
+  [The workspace in the browser](/docs/web-workspace)), the entry closest to
+  your thumb on a phone, since there is no drag gesture on a touch screen at
+  all.
+- The **agent and terminal row menus** in the sidebar, so a keyboard-only
+  desktop has one too. The entry appears while that session's terminal is open
+  in front of you and you are the one driving it, because the file still travels
+  through that terminal's own connection; close the terminal and the entry goes
+  with it.
+- The file tree's right-click menu in the editor, as **Upload here…**, which
+  puts the file in the folder you right-clicked exactly as dropping on it would,
+  and pastes nothing anywhere.
+
+You can pick several at once. A picker cannot hand over a folder, so the
+folder refusal below never comes up for this gesture.
 
 ## Or just paste it
 
@@ -497,9 +521,10 @@ drop rather than one per file.
 
 ## Who can drop, and who can paste
 
-This section is about the two **pane** drops. A drop on the editor's file tree
+This section is about the two **pane** drops, and about a file attached from the
+input or row menus, which is the same journey. A drop on the editor's file tree
 pastes nothing, so nothing below applies to it: it needs no input ownership and
-a watcher can do it.
+a watcher can do it, **Upload here…** included.
 
 Only the device that currently holds input. Terminals in dux are one-writer,
 many-watchers (see [The workspace in the browser](/docs/web-workspace)), and the
@@ -546,4 +571,5 @@ to add. This feature exists to close the gap that only a browser has.
 There is no drag gesture on a phone, so dropping is a desktop gesture. Pasting
 is not: on a phone the compose bar is your typing surface (see
 [The workspace in the browser](/docs/web-workspace)), and pasting an image into
-it puts the saved file's path into your draft.
+it puts the saved file's path into your draft. Neither is **Attach a file…**,
+which is the gesture that works everywhere, phone included.

@@ -357,11 +357,13 @@ separate: how much room there is decides which layout you see, and what is doing
 the typing decides which typing surface you get.
 
 Since a keyboard case is exactly what dux cannot see, the accessory bar carries a
-**typing-surface toggle** at the end of its key row. It says which state it is
+**typing-surface toggle** at the end of its key row, and the input `⋯` menu
+below carries the same switch worded as a sentence. It says which state it is
 in, **Box** while you are typing into the message box and **Direct** while your
-keystrokes go straight to the terminal, and one tap swaps them. It lives in the
-accessory bar because that bar is there in both states, so turning the box off
-never strands you without a way back. The toggle is not a setting: it is
+keystrokes go straight to the terminal, and one tap swaps them. It sits in the accessory bar
+because that is where your thumb already is, and it is in the menu as well
+because the menu is the surface that is there in every state, hidden bars
+included, so turning the box off never strands you without a way back. The toggle is not a setting: it is
 remembered on that device (so a reload does not snap you back) and it changes
 nothing in your config. It appears only under **Automatic**, since Always and
 Never have already answered the question.
@@ -370,18 +372,28 @@ Terminal rows are precious on a phone, so the chrome around the terminal is
 hideable. Every phone terminal screen's `⋯` menu (agent, project, and standalone
 terminals alike) has **Hide top bar** (which on the agent screen also takes
 the tab strip with it) and **Hide terminal keys**, each backed by its own
-preference, and the reclaimed rows go straight back to the terminal. While
-anything is hidden, a show-bars button appears below the terminal (next to
-the compose box, or on its own slim row if you keep the compose bar off): one
-tap brings both bars back. Both toggles live in Preferences too.
+preference, and the reclaimed rows go straight back to the terminal. Both
+toggles live in Preferences too.
+
+The way back is a `⋯` **input menu** that sits at the left edge of whatever
+input row you have: beside the message box, or in the key row when the box is
+off, or on its own slim row when you have hidden both. It is there whether or
+not anything is hidden, which is the point: a button that only turns up once you
+are stuck is a way back, never a way there. Inside it are **Attach a file…**
+(see [Dropping and pasting files](/docs/dropping-files)), the typing-surface
+switch, and a **Show** entry for each bar you have hidden, so you get back the
+one you are missing rather than both.
 
 Those preferences live on the server, so they follow you to every device. The
 top bar is the phone shell's own chrome and simply does not exist in the wide
 layout, but the terminal keys travel with your pointer, so hiding them from your
-phone also hides them on the tablet you pick up next. The show-bars button
-therefore appears wherever the keys themselves would, the wide touch layout
-included: turning the keys off from one device never leaves another without a
-way to ask for them back.
+phone also hides them on the tablet you pick up next. The input menu therefore
+appears wherever the keys themselves would, the wide touch layout included:
+turning the keys off from one device never leaves another without a way to ask
+for them back. Watching someone else's terminal rather than driving it? The
+menu appears exactly when you need it: hide the header on a phone and it shows
+up with the top-bar entry in it, so you can never end up with a screen you
+cannot get out of.
 
 ## Install it like an app
 

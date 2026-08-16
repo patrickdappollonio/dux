@@ -842,4 +842,109 @@ describe("FileTree", () => {
       expect(onFilesDropped).not.toHaveBeenCalled()
     })
   })
+
+  // "UPLOAD HERE…": the picker gesture into the tree's own drop intent. It
+  // reuses the drop's destination resolution and its reporter, so the two
+  // gestures cannot land in two different places.
+  describe("Upload here… in the context menu", () => {
+    async function tree(
+      onFilesDropped: (dir: string, dropped: DroppedItems) => void,
+      fileDropEnabled = true,
+    ) {
+      treeMock.mockImplementation((_sid, d) =>
+        Promise.resolve({
+          dir: d,
+          entries:
+            d === "" ? [dir("src"), file("README.md")] : [file("src/a.ts")],
+        }),
+      )
+      render(
+        <FileTree
+          sessionId="s1"
+          openPath={null}
+          changed={new Map()}
+          initialPath={null}
+          onOpen={() => {}}
+          fileDropEnabled={fileDropEnabled}
+          onFilesDropped={onFilesDropped}
+        />,
+      )
+      expect(await screen.findByText("README.md")).toBeTruthy()
+    }
+
+    // The native dialog cannot open headlessly, so the hidden input is driven
+    // the way the browser drives it.
+    async function pick(files: File[]) {
+      const input = screen.getByTestId("file-picker-input") as HTMLInputElement
+      Object.defineProperty(input, "files", { value: files, configurable: true })
+      await act(async () => {
+        fireEvent.change(input)
+        await Promise.resolve()
+      })
+    }
+
+    const picked = [new File(["x"], "logo.png")]
+
+    async function chooseUploadOn(label: string) {
+      fireEvent.contextMenu(screen.getByText(label))
+      fireEvent.click(await screen.findByText("Upload here…"))
+    }
+
+    it("targets the folder itself from a folder row", async () => {
+      const onFilesDropped = vi.fn()
+      await tree(onFilesDropped)
+      await chooseUploadOn("src")
+      await pick(picked)
+      // `folders: []` always: a picker cannot produce a directory, so the
+      // folder-refusal rung is unreachable from this gesture.
+      expect(onFilesDropped).toHaveBeenCalledWith("src", {
+        files: picked,
+        folders: [],
+      })
+    })
+
+    it("targets the PARENT folder from a file row", async () => {
+      const onFilesDropped = vi.fn()
+      await tree(onFilesDropped)
+      await chooseUploadOn("README.md")
+      await pick(picked)
+      expect(onFilesDropped).toHaveBeenCalledWith("", {
+        files: picked,
+        folders: [],
+      })
+    })
+
+    it("targets the worktree root from the empty-space menu", async () => {
+      const onFilesDropped = vi.fn()
+      await tree(onFilesDropped)
+      fireEvent.contextMenu(screen.getByTestId("file-tree-drop-surface"))
+      fireEvent.click(await screen.findByText("Upload here…"))
+      await pick(picked)
+      expect(onFilesDropped).toHaveBeenCalledWith("", {
+        files: picked,
+        folders: [],
+      })
+    })
+
+    it("reports nothing when the picker is cancelled", async () => {
+      const onFilesDropped = vi.fn()
+      await tree(onFilesDropped)
+      await chooseUploadOn("src")
+      await act(async () => {
+        screen
+          .getByTestId("file-picker-input")
+          .dispatchEvent(new Event("cancel"))
+        await Promise.resolve()
+      })
+      expect(onFilesDropped).not.toHaveBeenCalled()
+    })
+
+    it("is absent when file drop is switched off on the server", async () => {
+      const onFilesDropped = vi.fn()
+      await tree(onFilesDropped, false)
+      fireEvent.contextMenu(screen.getByText("src"))
+      expect(await screen.findByText("New Folder…")).toBeTruthy()
+      expect(screen.queryByText("Upload here…")).toBeNull()
+    })
+  })
 })

@@ -8,9 +8,9 @@ import type { ScrollDir } from "@/components/AccessoryBar"
 import {
   AGENT_PLACEHOLDER,
   ComposeBar,
-  RestoreBarsButton,
   TERMINAL_PLACEHOLDER,
 } from "@/components/ComposeBar"
+import { InputMenu } from "@/components/InputMenu"
 import {
   COMPOSE_SUBMIT_DELAY_MS,
   composeSendTooLarge,
@@ -18,6 +18,7 @@ import {
   composeBarMode,
   composeBarShown,
   inactiveCursorStyle,
+  inputMenuSurfaceSwitchOffered,
   insertIntoComposeDraft,
   touchSurfacesApply,
   typingSurfaceToggleOffered,
@@ -58,6 +59,9 @@ import {
 import { useIsMobile } from "@/hooks/use-mobile"
 import { useIsCoarsePointer } from "@/hooks/use-coarse-pointer"
 import { useTypingSurface } from "@/hooks/use-typing-surface"
+import { useFilePicker } from "@/hooks/use-file-picker"
+import { registerAttachCapability } from "@/lib/attachRegistry"
+import { inputMenuHasItems } from "@/lib/inputMenu"
 import { setTypingSurface } from "@/lib/typingSurface"
 import { dragScrollLines, dragWheelReport } from "@/lib/viewport"
 import { firstFrameResizePlan } from "@/lib/firstFrameResize"
@@ -109,7 +113,6 @@ import {
   mobileTopBarVisible,
   noteAgentPtyOwnership,
   noteOwnPtyConnection,
-  restoreMobileBars,
   useDux,
 } from "@/lib/store"
 import type { TerminalOwnerRef } from "@/lib/store"
@@ -272,6 +275,11 @@ export function TerminalPane(props: TerminalPaneProps) {
   // Which typing surface this device was last left on, or null while the
   // pointer capability answers. Transient, per-device, never configuration.
   const typingSurface = useTypingSurface()
+  // The hidden `<input type="file">` behind "Attach a file…", and the call that
+  // opens it. `pickerInput` is rendered with the bars at the bottom of this
+  // file; `openFilePicker` must be called straight from the activating click,
+  // or the browser's user activation is spent and no dialog appears.
+  const { input: pickerInput, open: openFilePicker } = useFilePicker()
 
   // Drag-and-drop of a file onto the pane. `dragDepth` counts enter/leave pairs
   // because dragging across a child element fires a `dragleave` for the parent;
@@ -399,28 +407,10 @@ export function TerminalPane(props: TerminalPaneProps) {
   // `ui.mobile_accessory_bar`), resolved through their optimistic overrides.
   // The accessory value gates the AccessoryBar render below (beside the
   // existing owner gate, for EVERY terminal kind, since all of them share
-  // this pane); the pair decides whether the compose bar shows its restore
-  // button, the escape hatch that brings BOTH bars back in one tap.
+  // this pane); the top-bar value only ever describes the mobile shell's own
+  // chrome, which this pane does not render.
   const accessoryBarVisible = mobileAccessoryBarVisible(duxState)
-  // IS SOMETHING THIS SHELL WOULD OTHERWISE SHOW CURRENTLY HIDDEN? That, and
-  // only that, is what puts the restore button on screen. The two bars answer
-  // it on DIFFERENT axes and it is the whole reason this is not one flag:
-  //
-  //   - The accessory keys are a TOUCH SURFACE, so they travel with
-  //     `touchSurfaces`, the very predicate that mounts them, desktop shell
-  //     included. Both preferences are stored SERVER-SIDE and shared across
-  //     devices, so hiding the keys from a phone hides them on a coarse-pointer
-  //     tablet too; while this was gated on the mobile LAYOUT that tablet got
-  //     the desktop shell with no keys, no toggle and no way back. A dead end.
-  //   - The top bar is the MOBILE SHELL's own chrome, rendered by MobileShell
-  //     and by nothing else, so its preference hides nothing in the desktop
-  //     shell and must not put an unexplained button under a desktop terminal.
-  //
-  // Restoring is still one tap for BOTH (`restoreMobileBars`): the button says
-  // "show hidden bars", not "show the one you are missing".
-  const restorableBarHidden =
-    (touchSurfaces && !accessoryBarVisible) ||
-    (isMobile && !mobileTopBarVisible(duxState))
+  const topBarVisible = mobileTopBarVisible(duxState)
   // Whether dropping a file onto this pane does anything at all. `[server]
   // file_drop_max_bytes = 0` switches the feature off, so the whole drag
   // surface goes with it (see `paneAcceptsFileDrag`). Read reactively rather than
@@ -718,22 +708,61 @@ export function TerminalPane(props: TerminalPaneProps) {
   // demoted us to the read-only placeholder. Parsed into a human label ("Chrome on
   // macOS") for the take-over modal, and cleared the moment we regain ownership.
   const [takeoverDevice, setTakeoverDevice] = useState<string | null>(null)
+  // WHICH INPUT ROWS EXIST. The accessory keys and the message box each answer
+  // for themselves; the menu's own row exists only when neither does.
+  const accessoryBarShown = isOwner && touchSurfaces && accessoryBarVisible
+  const composeBarShownHere = isOwner && composeBarEnabled
+
+  // THE INPUT ⋯ MENU'S CONTENTS, computed before anything renders, because an
+  // ⋯ that opens an empty popup is worse than no ⋯ and the empty state is
+  // reachable (a fine pointer whose stored choice put the message box up, with
+  // uploads switched off: every gate below is false).
+  //
+  // A NON-OWNER gets the view toggles only, and only the top-bar one. Attach
+  // and the typing surface are input, which a viewer does not have; the keys
+  // toggle would be a write with no visible effect on their own screen (their
+  // keys never render) that re-hides the OWNER's keys. What is left is the
+  // pre-existing dead end this closes: a viewer who hid the top bar from the
+  // header menu had hidden the menu with it.
+  const inputMenuGates = {
+    attach: isOwner && fileDropEnabled,
+    surfaceSwitch:
+      isOwner &&
+      inputMenuSurfaceSwitchOffered(composeMode, isCoarsePointer, typingSurface),
+    keysToggle: isOwner && touchSurfaces,
+    topBarToggle: isMobile,
+  }
+  const menuHasItems = inputMenuHasItems(inputMenuGates)
+
+  // THE MENU'S OWN ROW, the third anchor. It renders only when NEITHER bar did,
+  // so exactly one ⋯ is ever on screen (the state that used to produce two:
+  // keys up, message box off, top bar hidden).
+  //
+  // "Neither bar" is necessary but not sufficient. The menu belongs to the
+  // VIRTUAL INPUT, so its own row appears where that input lives: on the touch
+  // surfaces (phone or coarse-pointer tablet, desktop shell included, since
+  // both bar preferences are stored server-side and hiding the keys from a
+  // phone hides them on the tablet too), or on the phone whose top bar is
+  // hidden, which is the chrome-free screen the PWA has no browser Back button
+  // to escape from. A fine-pointer desktop grows no new row: its path to the
+  // same upload is the agent and terminal row menus.
+  const inputMenuRow =
+    !accessoryBarShown &&
+    !composeBarShownHere &&
+    menuHasItems &&
+    (isOwner ? touchSurfaces || (isMobile && !topBarVisible) : isMobile && !topBarVisible)
+
   // IS THIS PANE A COLUMN? True whenever something renders BELOW the terminal:
   // the mobile shell always is one, and any layout showing the touch bars
   // becomes one, desktop included. It decides the pane's own flex role, so the
   // terminal is the flexible row when it has company and simply fills its
-  // parent when it does not. The bars are owner-only, so a viewer's pane is
-  // never a column.
+  // parent when it does not.
   //
-  // The minimal restore row counts as company: with the compose bar off and
-  // the keys hidden it is the ONLY thing below the terminal, and leaving it
-  // out here made the desktop shell drop the row that carries the way back.
+  // The menu's own row counts as company: with both bars down it is the ONLY
+  // thing below the terminal, and leaving it out here made the desktop shell
+  // drop the row that carries the way back.
   const inColumn =
-    isMobile ||
-    (isOwner &&
-      ((touchSurfaces && accessoryBarVisible) ||
-        composeBarEnabled ||
-        restorableBarHidden))
+    isMobile || accessoryBarShown || composeBarShownHere || inputMenuRow
 
   // Mirror of `isOwner` for the stable mount-effect closures (onData, the resize
   // senders) to read synchronously. Kept in sync only at the mutation points
@@ -2853,6 +2882,45 @@ export function TerminalPane(props: TerminalPaneProps) {
     }
   }
 
+  /// THE PICKER GESTURE, the third way into the same journey.
+  ///
+  /// A drag needs a desktop pointer and a paste needs the file already on the
+  /// clipboard; this needs neither, which is why it is the only entry point a
+  /// phone or a keyboard-only desktop user has. Everything after the files
+  /// arrive is shared with the other two gestures: the route, the destination
+  /// (an agent's upload folder or a terminal's live directory), the naming, the
+  /// per-provider path form, the length cap and the one toast.
+  ///
+  /// The sink is resolved AFTER the picker settles, not before it opens: the
+  /// dialog can sit open for a while, and where a path should land is a
+  /// question about the moment it is delivered (`activeUploadSink` reads the
+  /// live compose state, and the sinks recheck ownership again per file).
+  ///
+  /// No `pastedTextChars`: that argument exists solely to word the long-text
+  /// paste toast, and passing it here would make the report describe a gesture
+  /// that did not happen.
+  function attachFromPicker(): void {
+    void openFilePicker().then((files) => {
+      if (files.length === 0) return
+      void runUpload(files, activeUploadSink())
+    })
+  }
+
+  // Published to the agent and terminal ROW menus while this pane is mounted
+  // and owns the input, so a desktop or keyboard-only user has a path into the
+  // upload journey at all. Ownership is part of the registration rather than
+  // something the menu checks: a viewer's pane mounts completely, and an
+  // attach from one would strand every file as saved-but-not-sent. Uploads
+  // being switched off retires it for the same reason the drag surface goes.
+  useEffect(() => {
+    if (!(isOwner && fileDropEnabled)) return
+    return registerAttachCapability(id, attachFromPicker)
+    // `attachFromPicker` is a component-body function reading only refs and
+    // props, so a fresh identity every render says nothing new; listing it
+    // would re-register on every keystroke.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, isOwner, fileDropEnabled])
+
   // An image on the clipboard, pasted. The same journey as a drop, entered by
   // the gesture people actually use: screenshot, paste, hand it to the agent.
   //
@@ -3397,6 +3465,13 @@ export function TerminalPane(props: TerminalPaneProps) {
           className="h-full w-full [-webkit-touch-callout:none]"
         />
       </div>
+      {/* The picker's hidden input. It lives INSIDE the pane rather than with
+          the bars because the bars are conditional and this must not be: the
+          row menus can attach through a pane that renders no input row at all
+          (a desktop with a mouse), and the click that opens the dialog has to
+          reach a mounted element synchronously. It renders nothing and is out
+          of the accessibility tree; see `useFilePicker`. */}
+      {pickerInput}
       {/* The desktop macro trigger used to float HERE, as an
           absolutely-positioned overlay over the PTY text. It now lives in the
           center pane's top bar (`InsetHeader`), parked on this pane's right
@@ -3521,6 +3596,18 @@ export function TerminalPane(props: TerminalPaneProps) {
   // when this column reflows, so the PTY learns its new size through the path
   // it already used. (The web UI has no fullscreen mode; see the CLAUDE.md web
   // tenet.)
+  // THE ONE INPUT ⋯, built once and placed by the anchor matrix below. It is
+  // the same element in every state, so the menu cannot drift between anchors,
+  // and building it here (rather than three times inline) is what makes
+  // "exactly one instance renders" readable at the call sites.
+  const inputMenu = (
+    <InputMenu
+      gates={inputMenuGates}
+      onAttach={attachFromPicker}
+      composeSurface={composeBarEnabled}
+    />
+  )
+
   return (
     <div className="flex h-full w-full flex-col bg-background">
       {pane}
@@ -3530,14 +3617,23 @@ export function TerminalPane(props: TerminalPaneProps) {
           removes any surface that could even stage input at a session this
           device does not drive. The per-write owner gates (`sendSeq`,
           `sendCompose`) stay behind this as defense in depth, and the bars
-          reappear the moment ownership returns. */}
+          reappear the moment ownership returns.
+
+          The input ⋯ menu is NOT owner-gated, because its view toggles are not
+          input: a viewer who hid the phone's top bar from the header menu hid
+          the menu with it, and had no way back at all. Their menu carries that
+          one item; see `inputMenuGates`. */}
       {isOwner ? (
         <>
           {/* The accessory bar is additionally gated on the
               `ui.mobile_accessory_bar` preference (default on): hiding it
-              returns its two key rows to the terminal. The compose bar's
-              restore button (below) and Preferences bring it back. */}
-          {touchSurfaces && accessoryBarVisible ? (
+              returns its two key rows to the terminal. The input ⋯ menu (which
+              is on screen in every bar state) and Preferences bring it back.
+
+              ANCHOR: when the message box is off, this row is the bottom-most
+              input row, so it carries the menu. When the box is up, the compose
+              row below carries it instead and this passes nothing. */}
+          {accessoryBarShown ? (
             <AccessoryBar
               onEsc={() => sendSeq(ESC)}
               onTab={() => sendSeq(TAB)}
@@ -3555,6 +3651,9 @@ export function TerminalPane(props: TerminalPaneProps) {
                       setTypingSurface(composeBarEnabled ? "direct" : "compose")
                   : undefined
               }
+              inputMenu={
+                !composeBarShownHere && menuHasItems ? inputMenu : undefined
+              }
             />
           ) : null}
           {/* The compose bar: the row below the accessory bar's two key rows,
@@ -3562,8 +3661,11 @@ export function TerminalPane(props: TerminalPaneProps) {
               is off nothing renders and the tap-to-focus redirect stays
               dormant, so the terminal behaves exactly as it did before the bar
               existed. The draft value lives in this pane's state, so losing and
-              regaining ownership keeps an in-progress draft. */}
-          {composeBarEnabled ? (
+              regaining ownership keeps an in-progress draft.
+
+              ANCHOR: whenever this row exists it is the bottom-most input row,
+              so it carries the menu in its leading slot. */}
+          {composeBarShownHere ? (
             <ComposeBar
               value={composeText}
               onChange={setComposeText}
@@ -3578,26 +3680,22 @@ export function TerminalPane(props: TerminalPaneProps) {
               placeholder={
                 kind === "agent" ? AGENT_PLACEHOLDER : TERMINAL_PLACEHOLDER
               }
-              showRestoreBars={restorableBarHidden}
-              onRestoreBars={() => void restoreMobileBars()}
+              leading={menuHasItems ? inputMenu : undefined}
             />
-          ) : restorableBarHidden ? (
-            // The compose bar is off AND a bar is hidden: without this the
-            // terminal screen would be completely chrome-free, and the app
-            // ships as a standalone PWA where no browser Back button exists.
-            // A minimal bottom row carries ONLY the same restore button the
-            // compose bar would (the shared RestoreBarsButton), so the way
-            // back is always one visible tap. It appears in the DESKTOP shell
-            // too, on a coarse pointer: the accessory keys belong to that
-            // shell as well, so a hidden key row is just as much a dead end
-            // there (see `restorableBarHidden`).
-            <div className="flex shrink-0 items-end gap-1.5 border-t bg-background px-1 py-1">
-              <RestoreBarsButton
-                onRestoreBars={() => void restoreMobileBars()}
-              />
-            </div>
           ) : null}
         </>
+      ) : null}
+      {/* THE MENU'S OWN ROW, the third anchor: neither bar rendered, so
+          without this the terminal screen would be completely chrome-free, and
+          the app ships as a standalone PWA where no browser Back button
+          exists. It is the way back to the keys in the DESKTOP shell too, on a
+          coarse pointer: the accessory keys belong to that shell as well, so a
+          hidden key row is just as much a dead end there. See `inputMenuRow`
+          for why "neither bar" alone is not enough to put it on screen. */}
+      {inputMenuRow ? (
+        <div className="flex shrink-0 items-end gap-1.5 border-t bg-background px-1 py-1">
+          {inputMenu}
+        </div>
       ) : null}
     </div>
   )
