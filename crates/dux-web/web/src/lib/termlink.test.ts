@@ -1,9 +1,11 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it } from "vitest"
 
+import { isDuxReplay } from "./termreplay"
 import {
   activateLinkAtPoint,
   linkifierElement,
+  primeLinkHover,
   terminalTapAction,
 } from "./termlink"
 
@@ -53,7 +55,10 @@ describe("activateLinkAtPoint", () => {
     }
     activateLinkAtPoint(screen, 10, 20, () => 0)
     expect(seen).toEqual([
-      // The first move primes a different cell; see the priming comment.
+      // A reset first, so a point with no cell under it cannot leave a stale
+      // hover behind; then the first move primes a different cell (see the
+      // priming comment).
+      "mouseleave",
       "mousemove",
       "mousemove",
       "mousedown",
@@ -117,8 +122,9 @@ describe("activateLinkAtPoint", () => {
     expect(activateLinkAtPoint(screen, 1, 1, () => 7)).toBe(false)
   })
 
-  it("does not count an activation that the trailing mouseleave produced", () => {
-    // The reset event must not be able to fake a hit.
+  it("does not count an activation that either mouseleave produced", () => {
+    // Neither reset event (the one that opens the prime, the one that closes
+    // the replay) may fake a hit.
     const { screen } = openTerminal()
     let activations = 0
     screen.addEventListener("mouseleave", () => {
@@ -151,9 +157,55 @@ describe("terminalTapAction", () => {
     ).toEqual({ forwardClick: true, focusCompose: true })
   })
 
-  it("forwards the SGR click on a link tap too, as a desktop click does both", () => {
+  // The tap that dispatched a link is dux's, not the app's: replaying it would
+  // hand the mouse-tracking CLI the same click and it would open the URL on the
+  // SERVER's machine, where the person holding the phone cannot see it.
+  it("does not replay the click when the tap opened a link", () => {
     expect(
       terminalTapAction({ linkActivated: true, mouseTracking: true }),
-    ).toEqual({ forwardClick: true, focusCompose: false })
+    ).toEqual({ forwardClick: false, focusCompose: false })
+  })
+})
+
+describe("primeLinkHover", () => {
+  it("resolves the link under a point without pressing anything", () => {
+    const { screen } = openTerminal()
+    const seen: string[] = []
+    for (const type of ["mousemove", "mousedown", "mouseup", "mouseleave"]) {
+      screen.addEventListener(type, () => seen.push(type))
+    }
+    primeLinkHover(screen, 10, 20)
+    // A reset, then two moves: the far-side prime and the point. No press and
+    // no release: a press-time hover check must not activate anything itself.
+    expect(seen).toEqual(["mouseleave", "mousemove", "mousemove"])
+  })
+
+  it("does not bubble, so a 1003 any-motion app sees no motion reports", () => {
+    const { screen, outer } = openTerminal()
+    primeLinkHover(screen, 5, 5)
+    expect(outer).toEqual([])
+  })
+
+  it("is a no-op before the terminal is open", () => {
+    expect(() => primeLinkHover(null, 1, 1)).not.toThrow()
+  })
+})
+
+describe("dux-replay tagging", () => {
+  it("marks every event the link probe dispatches", () => {
+    const { screen } = openTerminal()
+    const untagged: string[] = []
+    for (const type of ["mousemove", "mousedown", "mouseup", "mouseleave"]) {
+      screen.addEventListener(type, (e) => {
+        if (!isDuxReplay(e)) untagged.push(type)
+      })
+    }
+    activateLinkAtPoint(screen, 5, 5, () => 0)
+    primeLinkHover(screen, 5, 5)
+    expect(untagged).toEqual([])
+  })
+
+  it("leaves a real browser event untagged", () => {
+    expect(isDuxReplay(new MouseEvent("mousedown"))).toBe(false)
   })
 })

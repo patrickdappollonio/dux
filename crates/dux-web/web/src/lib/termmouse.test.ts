@@ -9,6 +9,31 @@ import {
   wheelReplaySteps,
 } from "@/lib/termmouse"
 import { installXtermMouseModel } from "@/lib/xtermMouseModel"
+import { isDuxReplay } from "@/lib/termreplay"
+
+// The link intercept sits in the CAPTURE phase on the pane container, which a
+// replay dispatched at a descendant still travels through. Tagging is what
+// tells dux's own events apart from the visitor's, since a jsdom (or an
+// assistive technology) event is never `isTrusted`.
+describe("dux-replay tagging", () => {
+  it("marks every event a forwarded gesture dispatches", () => {
+    const element = document.createElement("div")
+    document.body.appendChild(element)
+    const untagged: string[] = []
+    for (const type of ["mousedown", "mouseup", "wheel"]) {
+      element.addEventListener(type, (e) => {
+        if (!isDuxReplay(e)) untagged.push(type)
+      })
+      document.addEventListener(type, (e) => {
+        if (!isDuxReplay(e)) untagged.push(`doc:${type}`)
+      })
+    }
+    dispatchMouseReplay(element, tapReplaySteps(), 5, 5)
+    dispatchMouseReplay(element, wheelReplaySteps(1), 5, 5)
+    expect(untagged).toEqual([])
+    element.remove()
+  })
+})
 
 describe("tapReplaySteps", () => {
   // A press at the element and a release at the DOCUMENT, in that order. xterm

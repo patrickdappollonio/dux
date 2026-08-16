@@ -38,6 +38,8 @@
  *    invalidated.
  */
 
+import { markDuxReplay } from "./termreplay"
+
 /** The screen element xterm binds its Linkifier to, or null when not open. */
 export function linkifierElement(root: HTMLElement | null | undefined): HTMLElement | null {
   return root?.querySelector<HTMLElement>(".xterm-screen") ?? null
@@ -63,20 +65,95 @@ export function activateLinkAtPoint(
   activations: () => number,
 ): boolean {
   if (!screen) return false
+  const mouse = linkMouseEvent(clientX, clientY)
+  // Hover resolves the link under the point, down arms the Linkifier's
+  // press/release pairing, up is what activates.
+  primeLinkHover(screen, clientX, clientY)
+  // Sampled AFTER the hover and before the press, so only the press/release
+  // pair can count as a hit: neither the reset that opens the prime nor the one
+  // that closes this replay may fake one.
   const before = activations()
-  // No `view`: xterm resolves a cell from `clientX`/`clientY` alone
-  // (`MouseService.getCoords` takes exactly those two fields) and reads the
-  // window from its own services, so a viewless event is enough.
-  const mouse = (type: string, buttons: number, x = clientX, y = clientY) =>
-    new MouseEvent(type, {
-      bubbles: false,
-      cancelable: true,
-      clientX: x,
-      clientY: y,
-      button: 0,
-      buttons,
-      detail: 1,
-    })
+  screen.dispatchEvent(mouse("mousedown", 1))
+  screen.dispatchEvent(mouse("mouseup", 0))
+  const activated = activations() > before
+  // Back to rest: drops the hover underline and the pointer cursor a finger
+  // leaves behind, and clears the cached link so the next tap re-resolves.
+  screen.dispatchEvent(mouse("mouseleave", 0))
+  return activated
+}
+
+/**
+ * Builds one event of a link replay at a fixed point.
+ *
+ * No `view`: xterm resolves a cell from `clientX`/`clientY` alone
+ * (`MouseService.getCoords` takes exactly those two fields) and reads the
+ * window from its own services, so a viewless event is enough.
+ *
+ * Every event is TAGGED as a dux replay. The pane's capture-phase link
+ * intercept sits above this element and a capture listener runs even for a
+ * `bubbles: false` dispatch, so without the tag dux's own probe would be judged
+ * as if a human had pressed the mouse. `isTrusted` cannot do that job; see
+ * `lib/termreplay.ts`.
+ */
+function linkMouseEvent(clientX: number, clientY: number) {
+  return (type: string, buttons: number, x = clientX, y = clientY) =>
+    markDuxReplay(
+      new MouseEvent(type, {
+        bubbles: false,
+        cancelable: true,
+        clientX: x,
+        clientY: y,
+        button: 0,
+        buttons,
+        detail: 1,
+      }),
+    )
+}
+
+/**
+ * Resolves the link under a point through xterm's own Linkifier, synchronously,
+ * without pressing anything.
+ *
+ * This is how the desktop press-time decision learns whether the pointer is on
+ * an OSC 8 link. Passive hover tracking alone cannot answer it: the buffer can
+ * scroll under a stationary pointer, the first click of a page may follow no
+ * mousemove at all, and a resize clears the Linkifier's current link. Each of
+ * those leaks either a server-side open or (worse) a stale true that swallows a
+ * TUI button press. Driving the Linkifier at the moment of the press is what
+ * makes the answer truthful, and the whole chain (the OSC link provider's
+ * `provideLinks`, its callback, and `linkHandler.hover`) is synchronous in the
+ * installed xterm 6, so the hover ref is up to date by the time this returns.
+ *
+ * TWO PROPERTIES ARE LOAD-BEARING and must not be "tidied":
+ *
+ *  - `bubbles: false`, and
+ *  - dispatched at `.xterm-screen`, not at `Terminal.element`.
+ *
+ * xterm's mouse-report listener lives one level UP, on `Terminal.element`. A
+ * bubbling or element-targeted move would therefore be encoded and sent to the
+ * app: harmless under DECSET 1000/1002, but an any-motion (1003) app would
+ * receive two MOTION reports per click, one of them at a fabricated cell on the
+ * far side of the row.
+ *
+ * NIT, accepted: the far-side prime can hover, then leave, a DIFFERENT link
+ * sharing the row. The ref is correct either way (last write wins, all in the
+ * same tick) and the only cost is a possible one-frame underline flicker.
+ */
+export function primeLinkHover(
+  screen: HTMLElement | null,
+  clientX: number,
+  clientY: number,
+): void {
+  if (!screen) return
+  const mouse = linkMouseEvent(clientX, clientY)
+  // Start from REST. `mouseleave` makes xterm drop its current link, which
+  // fires `leave` and empties the caller's hover record, so a point that
+  // resolves to no cell at all (a press in the pane's padding, or a buffer that
+  // scrolled out from under a still pointer) leaves "no link here" behind
+  // rather than the last link the pointer happened to touch. The moves below
+  // then re-resolve from xterm's own per-line cache, so this costs a lookup,
+  // not a repaint.
+  screen.dispatchEvent(mouse("mouseleave", 0))
   // A PRIMING move at a different cell first. xterm's Linkifier only re-runs
   // its providers when the pointer's CELL changes from the last one it saw, and
   // a finger that taps the same link twice reports the same cell both times: on
@@ -90,16 +167,7 @@ export function activateLinkAtPoint(
   const primeX =
     clientX >= rect.left + rect.width / 2 ? rect.left + 1 : rect.right - 1
   screen.dispatchEvent(mouse("mousemove", 0, primeX, clientY))
-  // Hover resolves the link under the point, down arms the Linkifier's
-  // press/release pairing, up is what activates.
   screen.dispatchEvent(mouse("mousemove", 0))
-  screen.dispatchEvent(mouse("mousedown", 1))
-  screen.dispatchEvent(mouse("mouseup", 0))
-  const activated = activations() > before
-  // Back to rest: drops the hover underline and the pointer cursor a finger
-  // leaves behind, and clears the cached link so the next tap re-resolves.
-  screen.dispatchEvent(mouse("mouseleave", 0))
-  return activated
 }
 
 /** What the rest of a tap should do once the link question is settled. */
@@ -121,11 +189,16 @@ export interface TerminalTapContext {
 /**
  * Decides what a tap does after the link probe.
  *
- * The SGR click is INDEPENDENT of the link, deliberately. On a desktop the two
- * paths are bound to different elements and both run, so clicking a link
- * inside a mouse-tracking TUI both reports the click to the app and opens the
- * tab; a touch tap keeps that behaviour rather than inventing a rule where a
- * link swallows the click.
+ * A tap that OPENED A LINK is not forwarded. dux is the sole opener of a
+ * terminal hyperlink: the agent CLI answers a forwarded click by opening the
+ * URL on the SERVER's machine, where the person holding the phone cannot see
+ * it, so a link tap used to open the page twice, once in the right place and
+ * once in the wrong one. This used to mirror the desktop, which forwarded the
+ * click as well; the desktop no longer does either (the pane's capture-phase
+ * link intercept withholds the whole press/release pair from xterm), so both
+ * surfaces now say the same thing: the click that dispatched a link belongs to
+ * dux. There is deliberately NO force-forward hatch on touch, since the long
+ * press already owns "force local" and a finger has no modifier keys.
  *
  * Focus is the opposite: a link tap does NOT pull the caret into the compose
  * box. The gesture asked to go somewhere else (the tab is already opening),
@@ -136,7 +209,7 @@ export interface TerminalTapContext {
  */
 export function terminalTapAction(ctx: TerminalTapContext): TerminalTapOutcome {
   return {
-    forwardClick: ctx.mouseTracking,
+    forwardClick: ctx.mouseTracking && !ctx.linkActivated,
     focusCompose: !ctx.linkActivated,
   }
 }

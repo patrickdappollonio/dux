@@ -4,6 +4,7 @@ import { act, cleanup, render } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
 import type { ConnState } from "@/lib/types"
+import { activateLinkAtPoint } from "@/lib/termlink"
 
 // Unlike TerminalPane.test.tsx, this file mounts the pane against the REAL
 // @xterm/xterm. The bug it guards lives in the seam between xterm's Linkifier
@@ -47,6 +48,11 @@ class FakePtySocket {
 }
 
 vi.mock("@xterm/addon-fit", () => ({ FitAddon: FitStub }))
+const notifyInfoMock = vi.fn()
+vi.mock("@/lib/notify", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/notify")>()
+  return { ...actual, notifyInfo: (...args: unknown[]) => notifyInfoMock(...args) }
+})
 vi.mock("sonner", () => ({
   toast: Object.assign(vi.fn(), { success: vi.fn(), error: vi.fn() }),
 }))
@@ -192,6 +198,9 @@ function forceLayout() {
 
 const LINK_URL = "https://example.com"
 const OSC8_LINK = `\x1b]8;;${LINK_URL}\x07link\x1b]8;;\x07`
+// VT200 mouse tracking plus SGR encoding: what every measured agent CLI asks
+// for (see the table in `lib/termmouse.ts`).
+const MOUSE_TRACKING_ON = "\x1b[?1000h\x1b[?1006h"
 
 let openSpy: ReturnType<typeof vi.fn>
 
@@ -201,6 +210,7 @@ beforeEach(() => {
   installStubs()
   forceLayout()
   openSpy = vi.fn()
+  notifyInfoMock.mockReset()
   vi.stubGlobal("open", openSpy)
 })
 
@@ -212,17 +222,84 @@ afterEach(() => {
 // Mount the pane, push an OSC 8 hyperlink through the PTY socket, and hand back
 // the xterm screen element the Linkifier listens on.
 async function mountWithLink(): Promise<HTMLElement> {
+  return (await mountLinkPane({ mouseTracking: false })).screen
+}
+
+/**
+ * The same mount, plus the two things the suppression tests need: the option to
+ * turn the child's mouse tracking on, and the socket whose `sendInput` IS the
+ * byte stream the app would have received (the pane is the input owner in these
+ * tests, so xterm's `onData`/`onBinary` both land there).
+ */
+async function mountLinkPane({
+  mouseTracking,
+}: {
+  mouseTracking: boolean
+}): Promise<{ screen: HTMLElement; sock: FakePtySocket }> {
   const { container } = render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
   const sock = FakePtySocket.instances.at(-1)
   if (!sock) throw new Error("no PtySocket constructed")
   await act(async () => {
-    sock.bytesCb?.(new TextEncoder().encode(OSC8_LINK))
+    sock.bytesCb?.(
+      new TextEncoder().encode((mouseTracking ? MOUSE_TRACKING_ON : "") + OSC8_LINK),
+    )
     await new Promise((r) => setTimeout(r, 20))
   })
   const screenEl = container.querySelector(".xterm-screen")
   if (!screenEl) throw new Error("xterm did not render a screen element")
-  return screenEl as HTMLElement
+  // Everything written before this point is setup, not a mouse report.
+  sock.sendInput.mockClear()
+  return { screen: screenEl as HTMLElement, sock }
 }
+
+/** Everything the pane sent to the PTY, as one string. */
+function sentBytes(sock: FakePtySocket): string {
+  return sock.sendInput.mock.calls
+    .map(([b]) => String.fromCharCode(...(b as Uint8Array)))
+    .join("")
+}
+
+/** A press and release with no mousemove in front of them. */
+async function pressReleaseNoMove(
+  el: HTMLElement,
+  clientX: number,
+  clientY: number,
+): Promise<void> {
+  const opts = { bubbles: true, clientX, clientY, detail: 1, button: 0 }
+  await act(async () => {
+    el.dispatchEvent(new MouseEvent("mousedown", opts))
+    el.dispatchEvent(new MouseEvent("mouseup", opts))
+  })
+}
+
+/** A press/release pair at an arbitrary point, with optional modifiers. */
+async function clickAt(
+  el: HTMLElement,
+  clientX: number,
+  clientY: number,
+  over: { detail?: number; button?: number; ctrlKey?: boolean; metaKey?: boolean } = {},
+): Promise<void> {
+  const opts = { bubbles: true, clientX, clientY, detail: 1, button: 0, ...over }
+  await act(async () => {
+    el.dispatchEvent(new MouseEvent("mousemove", { ...opts, detail: 0, button: 0 }))
+    el.dispatchEvent(new MouseEvent("mousedown", opts))
+    el.dispatchEvent(new MouseEvent("mouseup", opts))
+  })
+}
+
+// The first cell of the link written on row 1, and a point far away from it on
+// row 6 (an 8x17 glyph in an 800x408 viewport; see `forceLayout`).
+// SGR mouse reports for the left button: press ends in `M`, release in `m`.
+// `no-control-regex` is disabled deliberately: an ESC is precisely the byte
+// under test here, and matching it is the point of the assertion.
+/* eslint-disable no-control-regex */
+const SGR_PRESS = new RegExp("\\x1b\\[<0;\\d+;\\d+M")
+const SGR_RELEASE = new RegExp("\\x1b\\[<0;\\d+;\\d+m")
+const SGR_ANY = new RegExp("\\x1b\\[<\\d+;\\d+;\\d+M")
+/* eslint-enable no-control-regex */
+
+const ON_LINK: [number, number] = [5, 5]
+const OFF_LINK: [number, number] = [300, 100]
 
 // One press/release pair over the link's first cell. `detail` is the browser's
 // click counter (2 on the second click of a double-click); `button` is 0 for the
@@ -284,5 +361,196 @@ describe("TerminalPane OSC 8 hyperlinks", () => {
     const el = await mountWithLink()
     await clickLink(el)
     expect(openSpy).not.toHaveBeenCalled()
+  })
+
+  // With mouse tracking OFF nothing is suppressed, so the click must reach
+  // xterm's own machinery exactly as it always did.
+  it("sends no mouse report for a link click when the app is not tracking", async () => {
+    const { screen, sock } = await mountLinkPane({ mouseTracking: false })
+    await clickAt(screen, ...ON_LINK)
+    expect(openSpy).toHaveBeenCalledTimes(1)
+    expect(sentBytes(sock)).toBe("")
+  })
+})
+
+/**
+ * The click that dispatches a link never reaches a mouse-tracking app.
+ *
+ * The bug: with tracking on, dux's browser-side `window.open` AND the forwarded
+ * mouse report both fired, and the agent CLI answers the report by opening the
+ * URL on the SERVER's machine. Two tabs, one of them on the wrong computer.
+ *
+ * ORDER MATTERS in this file. The positive control comes first: without it a
+ * "zero bytes were sent" assertion would pass just as happily against a broken
+ * harness that never sends bytes at all.
+ */
+describe("a link click under a mouse-tracking app", () => {
+  it("POSITIVE CONTROL: an ordinary click off the link is still reported", async () => {
+    const { screen, sock } = await mountLinkPane({ mouseTracking: true })
+    await clickAt(screen, ...OFF_LINK)
+    // SGR press and release at the clicked cell.
+    expect(sentBytes(sock)).toMatch(SGR_PRESS)
+    expect(sentBytes(sock)).toMatch(SGR_RELEASE)
+    expect(openSpy).not.toHaveBeenCalled()
+  })
+
+  // The hint tells the visitor the hatch exists, the first time dux takes a
+  // click away from the app, and never again in this page session. The latch is
+  // module scope, so this has to be the FIRST suppressing test in the file and
+  // every test after it asserts the silence (see the one below it).
+  it("names the hatch chord on the first suppressed click", async () => {
+    const { screen } = await mountLinkPane({ mouseTracking: true })
+    await clickAt(screen, ...ON_LINK)
+    await clickAt(screen, ...ON_LINK)
+    expect(notifyInfoMock).toHaveBeenCalledTimes(1)
+    expect(String(notifyInfoMock.mock.calls[0][0])).toMatch(/Ctrl/)
+  })
+
+  it("opens exactly one tab and reports nothing to the app", async () => {
+    const { screen, sock } = await mountLinkPane({ mouseTracking: true })
+    await clickAt(screen, ...ON_LINK)
+    expect(openSpy.mock.calls).toEqual([[LINK_URL, "_blank", "noopener,noreferrer"]])
+    expect(sentBytes(sock)).toBe("")
+    // ...and the hint stays retired for the rest of the session.
+    expect(notifyInfoMock).not.toHaveBeenCalled()
+  })
+
+  // The second press of a double-click is still swallowed even though it opens
+  // nothing: forwarding it would hand the app a clean click and resurrect the
+  // server-side open, once per extra click of a select-a-word gesture.
+  it("leaks neither a second tab nor a report on a double-click", async () => {
+    const { screen, sock } = await mountLinkPane({ mouseTracking: true })
+    await clickAt(screen, ...ON_LINK, { detail: 1 })
+    await clickAt(screen, ...ON_LINK, { detail: 2 })
+    expect(openSpy).toHaveBeenCalledTimes(1)
+    expect(sentBytes(sock)).toBe("")
+  })
+
+  // The escape hatch: Ctrl (Cmd on a Mac) hands the click to the app instead,
+  // and dux opens nothing, or the hatch would be a double-open of its own.
+  it("forwards a hatch-chord click to the app and opens nothing", async () => {
+    const { screen, sock } = await mountLinkPane({ mouseTracking: true })
+    await clickAt(screen, ...ON_LINK, { ctrlKey: true })
+    expect(sentBytes(sock)).toMatch(SGR_ANY)
+    expect(openSpy).not.toHaveBeenCalled()
+  })
+
+  // A press swallowed on a link and released somewhere else must emit NOTHING:
+  // a release-without-press report is a gesture the app never saw begin. And
+  // the next click must still work, so the in-flight state cannot wedge.
+  it("emits no report for a press that slides off the link, and does not wedge", async () => {
+    const { screen, sock } = await mountLinkPane({ mouseTracking: true })
+    await act(async () => {
+      screen.dispatchEvent(
+        new MouseEvent("mousemove", { bubbles: true, clientX: 5, clientY: 5 }),
+      )
+      screen.dispatchEvent(
+        new MouseEvent("mousedown", {
+          bubbles: true,
+          clientX: 5,
+          clientY: 5,
+          button: 0,
+          detail: 1,
+        }),
+      )
+      screen.dispatchEvent(
+        new MouseEvent("mouseup", {
+          bubbles: true,
+          clientX: 300,
+          clientY: 100,
+          button: 0,
+          detail: 1,
+        }),
+      )
+    })
+    expect(sentBytes(sock)).toBe("")
+    expect(openSpy).not.toHaveBeenCalled()
+    // Not wedged: the next ordinary click reports as usual.
+    await clickAt(screen, ...OFF_LINK)
+    expect(sentBytes(sock)).toMatch(SGR_PRESS)
+  })
+
+  // The one-shot document listener that clears an outside release OBSERVES; it
+  // must never stop propagation, or a stale arming (a release that happened
+  // off-window, so no mouseup ever arrived) would eat an unrelated one later.
+  it("never swallows an unrelated mouseup after a release off-window", async () => {
+    const { screen, sock } = await mountLinkPane({ mouseTracking: true })
+    await act(async () => {
+      screen.dispatchEvent(
+        new MouseEvent("mousemove", { bubbles: true, clientX: 5, clientY: 5 }),
+      )
+      screen.dispatchEvent(
+        new MouseEvent("mousedown", {
+          bubbles: true,
+          clientX: 5,
+          clientY: 5,
+          button: 0,
+          detail: 1,
+        }),
+      )
+    })
+    // ...the visitor releases outside the browser window, so no mouseup is
+    // delivered for that press at all. Some later, unrelated mouseup elsewhere
+    // on the page must reach its own listeners untouched.
+    let seen = 0
+    const spy = () => {
+      seen++
+    }
+    document.addEventListener("mouseup", spy)
+    await act(async () => {
+      document.body.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }))
+    })
+    document.removeEventListener("mouseup", spy)
+    expect(seen).toBe(1)
+    expect(openSpy).not.toHaveBeenCalled()
+    expect(sentBytes(sock)).toBe("")
+  })
+
+  // The two halves of "the hover record must be TRUE at the moment of the
+  // press", which is what the press-time prime buys. Both use a press with NO
+  // mousemove of its own, the case passive hover tracking cannot answer: the
+  // pointer can end up somewhere new without a move event dux saw (the buffer
+  // scrolls under a still pointer, a resize clears the current link, or the
+  // click is simply the first thing that happens on the page).
+  //
+  // A stale TRUE is the dangerous direction: it swallows an ordinary click,
+  // which in a TUI is a button press.
+  it("does not swallow an unhovered click off the link after hovering it", async () => {
+    const { screen, sock } = await mountLinkPane({ mouseTracking: true })
+    await act(async () => {
+      screen.dispatchEvent(
+        new MouseEvent("mousemove", { bubbles: true, clientX: 5, clientY: 5 }),
+      )
+    })
+    await pressReleaseNoMove(screen, ...OFF_LINK)
+    expect(sentBytes(sock)).toMatch(SGR_PRESS)
+    expect(sentBytes(sock)).toMatch(SGR_RELEASE)
+    expect(openSpy).not.toHaveBeenCalled()
+  })
+
+  // ...and a stale FALSE leaks the server-side open the whole change is about.
+  it("suppresses a press on a link that no mousemove ever hovered", async () => {
+    const { screen, sock } = await mountLinkPane({ mouseTracking: true })
+    await pressReleaseNoMove(screen, ...ON_LINK)
+    expect(openSpy).toHaveBeenCalledTimes(1)
+    expect(sentBytes(sock)).toBe("")
+  })
+
+  // dux's own replays travel the capture phase too (a `bubbles: false` event
+  // still runs capture listeners on its ancestors), so the intercept has to let
+  // them past or the touch link probe would probe nothing.
+  it("lets dux's own tagged link probe through", async () => {
+    const { screen, sock } = await mountLinkPane({ mouseTracking: true })
+    let activations = 0
+    const opened = () => {
+      activations = openSpy.mock.calls.length
+      return activations
+    }
+    const hit = activateLinkAtPoint(screen, 5, 5, opened)
+    expect(hit).toBe(true)
+    expect(openSpy).toHaveBeenCalledTimes(1)
+    // ...and the probe itself reports nothing to the app either, because it is
+    // dispatched at the screen element and does not bubble.
+    expect(sentBytes(sock)).toBe("")
   })
 })

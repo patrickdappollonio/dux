@@ -71,6 +71,8 @@ import {
   forcesTextPaste,
   LF,
   linkActivateAction,
+  linkPressAction,
+  linkReleaseOpens,
   pageKeySeq,
   softNewlineAction,
   TAB,
@@ -85,8 +87,10 @@ import {
 import {
   activateLinkAtPoint,
   linkifierElement,
+  primeLinkHover,
   terminalTapAction,
 } from "@/lib/termlink"
+import { isDuxReplay } from "@/lib/termreplay"
 import {
   edgeAutoScroll,
   glyphAt,
@@ -185,6 +189,11 @@ function writeSoftNewline(term: Terminal | null, pty: PtySocket | null): void {
 // shown. Module level so it fires at most once per page session, surviving the pane
 // remounts that happen on every agent/tab switch (a per-component ref would reset).
 let mouseCaptureHintShown = false
+
+// Whether the "dux opened that link, hold the chord to send the click to the app
+// instead" hint has been shown. Module level for the same reason as the latch
+// above: at most once per page session, across every pane remount.
+let linkForwardHintShown = false
 
 // The pointer must move at least this many CSS px between mousedown and mouseup to
 // count as a drag (a selection attempt) rather than a click. Guards the mouse-capture
@@ -900,6 +909,40 @@ export function TerminalPane(props: TerminalPaneProps) {
     // link, which is what keeps the open logic in ONE place (see
     // `activateLinkAtPoint`).
     let linkActivations = 0
+    // The OSC 8 link under the pointer, as xterm's own Linkifier resolves it.
+    // Written by the `hover`/`leave` half of the link handler below, and driven
+    // deliberately at press time by `primeLinkHover` so the desktop intercept
+    // reads a truthful value rather than whatever a passive mousemove last left
+    // here (the buffer can scroll under a still pointer, the first click of a
+    // page may follow no move at all, and a resize clears the current link).
+    let hoveredLinkUri: string | null = null
+    // Stable for this mount, and read from the link paths below as well as the
+    // key handler further down: it decides which chord is the force-forward
+    // hatch (Cmd on a Mac, Ctrl elsewhere) and which clipboard chords to
+    // intercept.
+    const isMac = isApplePlatform()
+    // THE ONE PLACE A TERMINAL HYPERLINK IS OPENED. Two call sites reach it:
+    // xterm's Linkifier `activate` (the tracking-off path, unchanged) and the
+    // capture-phase intercept's release (the tracking-on path). They must stay
+    // identical in every respect that is visible to the user, which is what a
+    // shared function buys: the same `linkActivateAction` truth table, the same
+    // `noopener,noreferrer` window, and the same activation counter the touch
+    // probe reads to learn whether a tap hit a link.
+    const openTerminalLink = (
+      ev: { button: number; detail: number; ctrlKey: boolean; metaKey: boolean },
+      uri: string,
+    ): boolean => {
+      const action = linkActivateAction(ev, {
+        hyperlinks: hyperlinksRef.current,
+        uri,
+        mouseTracking: term.modes.mouseTrackingMode !== "none",
+        isMac,
+      })
+      if (action !== "open") return false
+      window.open(uri, "_blank", "noopener,noreferrer")
+      linkActivations++
+      return true
+    }
     const fontFamily = terminalFontFamily(terminalFontFamilyRef.current)
     const fontSize = clampTerminalFontSize(terminalFontSizeRef.current)
     const term = new Terminal({
@@ -936,15 +979,19 @@ export function TerminalPane(props: TerminalPaneProps) {
       // click-count check, so without the filter the second click of a
       // double-click (the select-a-word gesture) opened a SECOND tab, and a
       // right-click opened one on top of dux's own paste. See the helper.
+      //
+      // `hover`/`leave` exist for the desktop intercept below, not for
+      // decoration: they are the only public read of "is there a link at this
+      // point", since the OSC 8 uri lives in an internal service.
       linkHandler: {
         activate: (event, uri) => {
-          const action = linkActivateAction(
-            { button: event.button, detail: event.detail },
-            { hyperlinks: hyperlinksRef.current, uri },
-          )
-          if (action !== "open") return
-          window.open(uri, "_blank", "noopener,noreferrer")
-          linkActivations++
+          openTerminalLink(event, uri)
+        },
+        hover: (_event, uri) => {
+          hoveredLinkUri = uri
+        },
+        leave: () => {
+          hoveredLinkUri = null
         },
       },
     })
@@ -1087,8 +1134,7 @@ export function TerminalPane(props: TerminalPaneProps) {
     // clipboard) and Ctrl+c / a selection never reach the system clipboard. We
     // intercept only the clipboard chords; everything else (Ctrl+c SIGINT, plain
     // typing, mac Control/Cmd) passes through to xterm unchanged. `isMac` is stable
-    // for this mount.
-    const isMac = isApplePlatform()
+    // for this mount and is resolved above, beside the link handler.
     term.attachCustomKeyEventHandler((e) => {
       const action = softNewlineAction(e, {
         isOwner: isOwnerRef.current,
@@ -1227,6 +1273,160 @@ export function TerminalPane(props: TerminalPaneProps) {
     }
     container.addEventListener("mousedown", onMouseDown)
     container.addEventListener("mouseup", onMouseUp)
+
+    // ONE CLICK ON A HYPERLINK OPENS ONE TAB, ON THE CLICKER'S SIDE.
+    //
+    // With the app in the PTY tracking the mouse, a click on an OSC 8 link used
+    // to open the page TWICE: dux's `window.open` in this browser, and the same
+    // click forwarded as a mouse report, which an agent CLI answers by shelling
+    // out to `open <url>` ON THE SERVER'S MACHINE. Only the first one reaches
+    // the person who clicked, so dux is the sole opener and the click that
+    // dispatched a link is withheld from the app entirely.
+    //
+    // dux DIVERGES from iTerm2, Ghostty and kitty here, deliberately: they give
+    // a plain click to the app and reserve links for a modifier. That is the
+    // right answer for a local terminal and the wrong one for a remote-first
+    // tool, where the app's own open runs on a computer the user may never see.
+    // The escape hatch is the chord in `linkHatchHeld`, which forwards the click
+    // and refuses dux's open.
+    //
+    // MECHANISM (version-dependent, MEASURED against the installed xterm 6):
+    // xterm feeds mouse reports from DOM MOUSE listeners only (there is no
+    // pointer-event path) through one choke point, `bindMouse` in
+    // `CoreBrowserTerminal`, and it registers the document-level release and
+    // drag reporters INSIDE its element `mousedown` handler. So swallowing the
+    // PRESS suppresses the whole report pair, including a release that happens
+    // outside the pane, and nothing else needs suppressing out there.
+    //
+    // Everything about the shape of this is load-bearing:
+    //  - CAPTURE phase on the CONTAINER, the same trick as the paste guard
+    //    below: xterm's listeners are on descendants, so a capture listener here
+    //    decides first, and `stopPropagation` (not `stopImmediatePropagation`,
+    //    which would also silence dux's own bubble-phase copy-on-select) keeps
+    //    the event from ever reaching them.
+    //  - PRESS TIME, because xterm emits the press report from `mousedown`.
+    //    Deciding at release would already have leaked a lone press, and
+    //    press-activated TUI controls act on exactly that.
+    //  - PRIMARY BUTTON ONLY, so right-click paste and every context menu path
+    //    are untouched.
+    //  - TRACKING ON ONLY. With no app capturing the mouse there is no report to
+    //    suppress, and swallowing would cost the focus grab, the selection clear
+    //    and the drag-select that starts on a link.
+    //  - dux's OWN replays are tagged and skipped (`lib/termreplay.ts`); an
+    //    `isTrusted` check would instead skip every test and every
+    //    assistive-technology click.
+    let linkPress: { uri: string; x: number; y: number; open: boolean } | null = null
+    let outsideReleaseWatch: ((e: MouseEvent) => void) | null = null
+    const disarmOutsideRelease = () => {
+      if (!outsideReleaseWatch) return
+      document.removeEventListener("mouseup", outsideReleaseWatch, true)
+      outsideReleaseWatch = null
+    }
+    // A swallowed press may be released anywhere, including over another pane or
+    // the desktop, and the in-flight record has to clear either way or the next
+    // click reads a stale one. This OBSERVES AND CLEARS and never stops
+    // propagation: xterm's own document reporter was never attached for a press
+    // dux swallowed, so there is nothing out here to suppress, and a swallowing
+    // one-shot would eat an unrelated mouseup after a release the window never
+    // saw (an alt-tab away with the button down).
+    const armOutsideRelease = () => {
+      disarmOutsideRelease()
+      const watch = (e: MouseEvent) => {
+        disarmOutsideRelease()
+        // A release INSIDE the pane belongs to the capture handler below. This
+        // one runs first (the document is the outermost node of the capture
+        // path), so it must leave the record alone for it.
+        if (e.target instanceof Node && container.contains(e.target)) return
+        linkPress = null
+      }
+      outsideReleaseWatch = watch
+      document.addEventListener("mouseup", watch, true)
+    }
+    const onLinkPressCapture = (e: MouseEvent) => {
+      if (isDuxReplay(e)) return
+      // A new press ends the previous gesture whatever happened to it, so a
+      // release the window never delivered cannot wedge the next click.
+      linkPress = null
+      disarmOutsideRelease()
+      if (e.button !== 0) return
+      if (term.modes.mouseTrackingMode === "none") return
+      // Resolve the link under the press SYNCHRONOUSLY through xterm's own
+      // Linkifier rather than trusting whatever hover last wrote; see
+      // `primeLinkHover` for the gaps that closes and for the two dispatch
+      // properties that keep a 1003 any-motion app from seeing motion reports.
+      primeLinkHover(linkifierElement(term.element), e.clientX, e.clientY)
+      const uri = hoveredLinkUri
+      const decision = linkPressAction(
+        {
+          button: e.button,
+          detail: e.detail,
+          ctrlKey: e.ctrlKey,
+          metaKey: e.metaKey,
+        },
+        {
+          hoveredUri: uri,
+          mouseTracking: true,
+          hyperlinks: hyperlinksRef.current,
+          isMac,
+        },
+      )
+      if (!decision.suppress || uri === null) return
+      e.stopPropagation()
+      linkPress = { uri, x: e.clientX, y: e.clientY, open: decision.open }
+      armOutsideRelease()
+      // xterm's `mousedown` handler is what focuses the terminal, and it never
+      // runs for a swallowed press, so do its job explicitly: a click into the
+      // pane must still leave the keyboard pointed at the terminal.
+      term.focus()
+      if (!linkForwardHintShown) {
+        linkForwardHintShown = true
+        notifyInfo(
+          `dux opened that link in your browser. Hold ${
+            isMac ? "⌘ Command" : "Ctrl"
+          } and click to send the click to the app instead.`,
+        )
+      }
+    }
+    const onLinkReleaseCapture = (e: MouseEvent) => {
+      if (isDuxReplay(e)) return
+      const press = linkPress
+      if (!press) return
+      linkPress = null
+      disarmOutsideRelease()
+      // Paired with its press, always: a release forwarded on its own would be
+      // a report for a gesture the app never saw begin.
+      e.stopPropagation()
+      const withinDragThreshold =
+        Math.hypot(e.clientX - press.x, e.clientY - press.y) < DRAG_THRESHOLD_PX
+      // Only a gesture that TRAVELLED needs a second resolution, which keeps the
+      // extra hover dispatch off the ordinary click.
+      let releaseUri: string | null = press.uri
+      if (!withinDragThreshold) {
+        primeLinkHover(linkifierElement(term.element), e.clientX, e.clientY)
+        releaseUri = hoveredLinkUri
+      }
+      if (
+        !linkReleaseOpens({
+          open: press.open,
+          withinDragThreshold,
+          releaseUri,
+          pressedUri: press.uri,
+        })
+      ) {
+        return
+      }
+      openTerminalLink(
+        {
+          button: e.button,
+          detail: e.detail,
+          ctrlKey: e.ctrlKey,
+          metaKey: e.metaKey,
+        },
+        press.uri,
+      )
+    }
+    container.addEventListener("mousedown", onLinkPressCapture, true)
+    container.addEventListener("mouseup", onLinkReleaseCapture, true)
 
     // Kill xterm's right-click paste. On a mouse right-click xterm's own handler
     // stuffs the current selection into its hidden input textarea (its
@@ -1628,6 +1828,11 @@ export function TerminalPane(props: TerminalPaneProps) {
     // rest of the tap does. See `lib/termlink.ts` for why the probe is a
     // replay rather than a hit-test of our own.
     //
+    // A tap that HIT a link forwards no click at all, matching the desktop's
+    // capture-phase intercept: dux is the sole opener of a terminal hyperlink,
+    // because the agent CLI answers a forwarded click by opening the URL on the
+    // server's machine, which the person holding the phone cannot see.
+    //
     // A SCROLL takes the branch above and is untouched. A long-press SELECTION
     // takes the branch below, which copies and returns; it is deliberately not
     // a tap, so it never reaches the redirect and never raises the keyboard
@@ -1721,9 +1926,14 @@ export function TerminalPane(props: TerminalPaneProps) {
         //
         // xterm's own mousedown handler grabs focus for its hidden textarea
         // (`focus({preventScroll: true})`), which is exactly what this redirect
-        // exists to prevent, so focus is put back immediately below: onto the
-        // compose box for an ordinary tap, or onto whatever held it for a link
-        // tap, which deliberately raises no keyboard.
+        // exists to prevent, so focus is put back immediately below, onto the
+        // compose box.
+        //
+        // The other branch of that restore is now UNREACHABLE, and deliberately
+        // kept as the general rule rather than trimmed to today's single caller:
+        // a tap that opened a link no longer forwards anything (see
+        // `terminalTapAction`), so there is no xterm focus grab left to undo on
+        // that path. Focus ends up in the same place either way.
         const focusedBefore = document.activeElement
         dispatchMouseReplay(
           term.element,
@@ -2173,6 +2383,9 @@ export function TerminalPane(props: TerminalPaneProps) {
       clearInterval(viewedTimer)
       container.removeEventListener("mousedown", onMouseDown)
       container.removeEventListener("mouseup", onMouseUp)
+      container.removeEventListener("mousedown", onLinkPressCapture, true)
+      container.removeEventListener("mouseup", onLinkReleaseCapture, true)
+      disarmOutsideRelease()
       container.removeEventListener("contextmenu", onContextMenuPasteGuard)
       container.removeEventListener("paste", onPasteCapture, true)
       container.removeEventListener("touchstart", onTouchStart)

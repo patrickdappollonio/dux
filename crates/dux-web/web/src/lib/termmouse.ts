@@ -110,6 +110,8 @@
  * the padding resolves to the edge cell exactly as a desktop click there does.
  */
 
+import { markDuxReplay } from "./termreplay"
+
 /** Which node an event has to be dispatched at to reach xterm's handler. */
 export type MouseReplayTarget = "element" | "document"
 
@@ -189,6 +191,11 @@ export function rectCenter(rect: {
  * a no-op. The events BUBBLE, unlike the link replay's: xterm's listener is on
  * this exact node, and a bubbling event is what the browser would really have
  * delivered.
+ *
+ * Every event is TAGGED as a dux replay, because a bubbling event dispatched
+ * inside the pane travels the container's capture-phase link intercept on the
+ * way down, and that intercept must judge only what a human did. See
+ * `lib/termreplay.ts` for why the tag exists rather than an `isTrusted` check.
  */
 export function dispatchMouseReplay(
   element: HTMLElement | null | undefined,
@@ -217,7 +224,7 @@ export function dispatchMouseReplay(
             deltaMode: 1, // WheelEvent.DOM_DELTA_LINE
           })
         : new MouseEvent(step.type, init)
-    target.dispatchEvent(event)
+    target.dispatchEvent(markDuxReplay(event))
   }
 }
 

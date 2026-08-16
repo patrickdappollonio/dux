@@ -436,6 +436,10 @@ export interface LinkActivateEvent {
    * Synthetic and assistive-technology events may report 0.
    */
   detail: number
+  /** `MouseEvent.ctrlKey`: the force-forward hatch chord off an Apple platform. */
+  ctrlKey: boolean
+  /** `MouseEvent.metaKey`: the force-forward hatch chord on an Apple platform. */
+  metaKey: boolean
 }
 
 /** The runtime context an activation is judged against. */
@@ -444,6 +448,27 @@ export interface LinkActivateContext {
   hyperlinks: boolean
   /** The URI xterm resolved from the OSC 8 sequence. */
   uri: string
+  /** The app in the PTY has mouse reporting on (`mouseTrackingMode !== "none"`). */
+  mouseTracking: boolean
+  /** Apple platform, which moves the hatch chord from Ctrl to Cmd. */
+  isMac: boolean
+}
+
+/**
+ * Whether the force-forward hatch chord is held.
+ *
+ * Cmd on macOS, Ctrl everywhere else. It is deliberately NOT the
+ * force-local-selection modifier (Shift, or Option on a Mac): xterm's own
+ * `mousedown` returns before it encodes anything while that modifier is held,
+ * so a click passed through under it forwards zero bytes, and it is already the
+ * documented selection hatch, which matters most on a URL, the text people
+ * select the most. Cmd and Ctrl both survive xterm's mouse path (meta is not
+ * encoded into the SGR modifier bits at all; CAVEAT: Ctrl travels to the app as
+ * the +16 modifier bit, so a Linux visitor's hatch click arrives as a
+ * ctrl-click rather than a plain one).
+ */
+export function linkHatchHeld(ev: LinkActivateEvent, isMac: boolean): boolean {
+  return isMac ? ev.metaKey : ev.ctrlKey
 }
 
 /** Only these two schemes are ever handed to the browser. */
@@ -468,6 +493,12 @@ const OPENABLE_SCHEME = /^https?:\/\//i
  * The scheme gate is defence in depth: xterm already filters to http(s) unless
  * `allowNonHttpProtocols` is set (we never set it), but the decision to hand an
  * agent-emitted string to `window.open` should be legible in one place.
+ *
+ * The HATCH rule is the third: while the app in the PTY is tracking the mouse,
+ * the hatch chord means "this click belongs to the app", and dux opening a tab
+ * as well would be the very double-open the suppression exists to end. With
+ * tracking OFF the chord keeps its browser meaning and still opens, because
+ * there is no app to hand the click to.
  */
 export function linkActivateAction(
   ev: LinkActivateEvent,
@@ -476,6 +507,115 @@ export function linkActivateAction(
   if (!ctx.hyperlinks) return "ignore"
   if (ev.button !== 0) return "ignore"
   if (ev.detail > 1) return "ignore"
+  if (ctx.mouseTracking && linkHatchHeld(ev, ctx.isMac)) return "ignore"
   if (!OPENABLE_SCHEME.test(ctx.uri)) return "ignore"
   return "open"
+}
+
+/** The runtime facts a PRESS over the terminal is judged against. */
+export interface LinkPressContext {
+  /**
+   * The URI of the OSC 8 link under the press point, or null for anything else.
+   * Resolved synchronously at press time by priming xterm's own Linkifier (see
+   * `primeLinkHover`), never by geometry of dux's own.
+   */
+  hoveredUri: string | null
+  /** The app in the PTY has mouse reporting on (`mouseTrackingMode !== "none"`). */
+  mouseTracking: boolean
+  /** The `capabilities.hyperlinks` preference (default on). */
+  hyperlinks: boolean
+  /** Apple platform, which moves the hatch chord from Ctrl to Cmd. */
+  isMac: boolean
+}
+
+/** What the pane does with a press over the terminal. */
+export interface LinkPressDecision {
+  /**
+   * Withhold this press (and its release) from xterm entirely, so no mouse
+   * report reaches the app.
+   */
+  suppress: boolean
+  /**
+   * This press is eligible to open the link when it is released. Ask
+   * `linkReleaseOpens` at release time for the final answer.
+   */
+  open: boolean
+}
+
+/**
+ * Decides, AT PRESS TIME, whether a click over the terminal belongs to dux.
+ *
+ * dux diverges from iTerm2/Ghostty/kitty here, deliberately: a real terminal
+ * gives a plain click to the app while it is tracking the mouse and reserves
+ * links for a modifier. dux is remote-first, so the app's own "open this URL"
+ * runs on the SERVER's machine, where the person who clicked cannot see it. dux
+ * is therefore the sole opener, and the click that dispatched a link never
+ * reaches the app at all.
+ *
+ * The decision is at PRESS time because xterm emits the press report from
+ * `mousedown`. Deciding at release would already have leaked a lone press, and
+ * press-activated TUI controls (buttons, menus) act on exactly that. Keying on
+ * the link dispatch is also what keeps those controls intact: a button is not
+ * an OSC 8 cell, so its press is never in the suppression set.
+ *
+ * The two outputs are genuinely different questions, and collapsing them
+ * reintroduces the bug from a different direction:
+ *
+ *  - the second press of a DOUBLE-CLICK (the select-a-word gesture) must still
+ *    be swallowed, or a clean click reaches the app and the server-side open is
+ *    back, once per extra click;
+ *  - a press here and a release somewhere else is a drag, and must open
+ *    nothing.
+ */
+export function linkPressAction(
+  ev: LinkActivateEvent,
+  ctx: LinkPressContext,
+): LinkPressDecision {
+  const nothing: LinkPressDecision = { suppress: false, open: false }
+  // Tracking off: there was never a report to suppress, and swallowing would
+  // cost xterm's focus grab, its selection clear and the copy-on-select
+  // listeners, and make a drag-select that starts on a link impossible. Today's
+  // Linkifier path stays byte-identical.
+  if (!ctx.mouseTracking) return nothing
+  if (ctx.hoveredUri === null) return nothing
+  // Non-primary buttons keep every contextmenu and paste path untouched.
+  if (ev.button !== 0) return nothing
+  // The hatch: the visitor asked for the app to have this click, so forward it
+  // AND (in `linkActivateAction`) refuse dux's own open.
+  if (linkHatchHeld(ev, ctx.isMac)) return nothing
+  // Swallowed but not opened is a real answer: forwarding a press dux will not
+  // act on would hand the app a press with no release. It happens for the tail
+  // of a multi-click, and for a link dux would refuse to open anyway (the
+  // preference toggled off under a link already on screen, or a scheme the
+  // browser should not be handed).
+  const open =
+    linkActivateAction(ev, {
+      hyperlinks: ctx.hyperlinks,
+      uri: ctx.hoveredUri,
+      mouseTracking: ctx.mouseTracking,
+      isMac: ctx.isMac,
+    }) === "open"
+  return { suppress: true, open }
+}
+
+/**
+ * Decides whether a swallowed press opens its link on release.
+ *
+ * A press and release on the same spot is a click. A gesture that travelled is
+ * only a click if it stayed on the link it started on, which is what makes a
+ * press-on-a-link, release-on-a-word drag open nothing.
+ */
+export function linkReleaseOpens(ctx: {
+  /** `LinkPressDecision.open` from the press. */
+  open: boolean
+  /** The pointer moved less than the drag threshold between press and release. */
+  withinDragThreshold: boolean
+  /** The link under the RELEASE point, re-resolved the same way as the press. */
+  releaseUri: string | null
+  /** The link the press landed on. */
+  pressedUri: string
+}): boolean {
+  if (!ctx.open) return false
+  if (ctx.withinDragThreshold) return true
+  return ctx.releaseUri === ctx.pressedUri
 }

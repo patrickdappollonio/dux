@@ -14,6 +14,9 @@ import {
   linkActivateAction,
   type LinkActivateContext,
   type LinkActivateEvent,
+  linkPressAction,
+  type LinkPressContext,
+  linkReleaseOpens,
   pageKeySeq,
   softNewline,
   softNewlineAction,
@@ -528,11 +531,15 @@ describe("linkActivateAction", () => {
   const ev = (over: Partial<LinkActivateEvent> = {}): LinkActivateEvent => ({
     button: 0,
     detail: 1,
+    ctrlKey: false,
+    metaKey: false,
     ...over,
   })
   const ctx = (over: Partial<LinkActivateContext> = {}): LinkActivateContext => ({
     hyperlinks: true,
     uri: "https://example.com",
+    mouseTracking: false,
+    isMac: false,
     ...over,
   })
 
@@ -576,5 +583,179 @@ describe("linkActivateAction", () => {
     ]) {
       expect(linkActivateAction(ev(), ctx({ uri }))).toBe("ignore")
     }
+  })
+
+  // The force-forward hatch hands the click to the app in the PTY, so dux must
+  // not ALSO open a tab: without this the hatch is the double-open it exists to
+  // avoid. It reaches here because the hatch click is deliberately not
+  // swallowed, so xterm's own Linkifier still activates the link on mouseup.
+  it("refuses the hatch chord while the app is tracking the mouse", () => {
+    expect(
+      linkActivateAction(ev({ ctrlKey: true }), ctx({ mouseTracking: true })),
+    ).toBe("ignore")
+    expect(
+      linkActivateAction(
+        ev({ metaKey: true }),
+        ctx({ mouseTracking: true, isMac: true }),
+      ),
+    ).toBe("ignore")
+  })
+
+  // The chord is per platform, and the OTHER platform's chord is not a hatch.
+  it("reads the hatch chord per platform", () => {
+    expect(
+      linkActivateAction(
+        ev({ metaKey: true }),
+        ctx({ mouseTracking: true, isMac: false }),
+      ),
+    ).toBe("open")
+    expect(
+      linkActivateAction(
+        ev({ ctrlKey: true }),
+        ctx({ mouseTracking: true, isMac: true }),
+      ),
+    ).toBe("open")
+  })
+
+  // With tracking OFF there is no app to forward to, so the chord keeps its
+  // browser meaning (open in a new tab) rather than becoming a way to open
+  // nothing at all.
+  it("keeps chord-click opening when the app is not tracking the mouse", () => {
+    expect(linkActivateAction(ev({ ctrlKey: true }), ctx())).toBe("open")
+    expect(linkActivateAction(ev({ metaKey: true }), ctx({ isMac: true }))).toBe("open")
+  })
+})
+
+describe("linkPressAction", () => {
+  const ev = (over: Partial<LinkActivateEvent> = {}): LinkActivateEvent => ({
+    button: 0,
+    detail: 1,
+    ctrlKey: false,
+    metaKey: false,
+    ...over,
+  })
+  const ctx = (over: Partial<LinkPressContext> = {}): LinkPressContext => ({
+    hoveredUri: "https://example.com",
+    mouseTracking: true,
+    hyperlinks: true,
+    isMac: false,
+    ...over,
+  })
+
+  it("swallows a plain primary press on a link and opens it", () => {
+    expect(linkPressAction(ev(), ctx())).toEqual({ suppress: true, open: true })
+  })
+
+  // The whole point: with tracking off there is no report to suppress, and
+  // swallowing would cost the focus grab, the selection clear and the
+  // copy-on-select listeners. Today's Linkifier path stays byte-identical.
+  it("leaves every press alone when the app is not tracking the mouse", () => {
+    expect(linkPressAction(ev(), ctx({ mouseTracking: false }))).toEqual({
+      suppress: false,
+      open: false,
+    })
+  })
+
+  it("leaves a press that is not on a link alone", () => {
+    expect(linkPressAction(ev(), ctx({ hoveredUri: null }))).toEqual({
+      suppress: false,
+      open: false,
+    })
+  })
+
+  it("leaves non-primary buttons alone, so paste and menus are untouched", () => {
+    for (const button of [1, 2]) {
+      expect(linkPressAction(ev({ button }), ctx())).toEqual({
+        suppress: false,
+        open: false,
+      })
+    }
+  })
+
+  // The hatch is the escape valve: the app gets the click, dux opens nothing.
+  it("forwards the press under the platform hatch chord", () => {
+    expect(linkPressAction(ev({ ctrlKey: true }), ctx())).toEqual({
+      suppress: false,
+      open: false,
+    })
+    expect(
+      linkPressAction(ev({ metaKey: true }), ctx({ isMac: true })),
+    ).toEqual({ suppress: false, open: false })
+    // ...and the other platform's chord is an ordinary click.
+    expect(linkPressAction(ev({ metaKey: true }), ctx())).toEqual({
+      suppress: true,
+      open: true,
+    })
+    expect(
+      linkPressAction(ev({ ctrlKey: true }), ctx({ isMac: true })),
+    ).toEqual({ suppress: true, open: true })
+  })
+
+  // The split. The second press of a double-click must still be SWALLOWED (a
+  // clean click reaching the app resurrects the server-side open) while opening
+  // nothing, because a double-click is the select-a-word gesture.
+  it("swallows the tail of a multi-click gesture without opening", () => {
+    expect(linkPressAction(ev({ detail: 2 }), ctx())).toEqual({
+      suppress: true,
+      open: false,
+    })
+    expect(linkPressAction(ev({ detail: 3 }), ctx())).toEqual({
+      suppress: true,
+      open: false,
+    })
+  })
+
+  it("treats a detail-less press as a single click", () => {
+    expect(linkPressAction(ev({ detail: 0 }), ctx())).toEqual({
+      suppress: true,
+      open: true,
+    })
+  })
+
+  // A press dux swallows but cannot open is still swallowed: forwarding it
+  // would hand the app a lone press with no release.
+  it("swallows without opening when the preference or the scheme refuses", () => {
+    expect(linkPressAction(ev(), ctx({ hyperlinks: false }))).toEqual({
+      suppress: true,
+      open: false,
+    })
+    expect(linkPressAction(ev(), ctx({ hoveredUri: "ftp://example.com" }))).toEqual({
+      suppress: true,
+      open: false,
+    })
+  })
+})
+
+describe("linkReleaseOpens", () => {
+  const ctx = (over: Partial<Parameters<typeof linkReleaseOpens>[0]> = {}) => ({
+    open: true,
+    withinDragThreshold: true,
+    releaseUri: "https://example.com",
+    pressedUri: "https://example.com",
+    ...over,
+  })
+
+  it("opens a release that barely moved", () => {
+    expect(linkReleaseOpens(ctx({ releaseUri: null }))).toBe(true)
+  })
+
+  it("opens a release that travelled but stayed on the pressed link", () => {
+    expect(linkReleaseOpens(ctx({ withinDragThreshold: false }))).toBe(true)
+  })
+
+  // Press here, release elsewhere: a drag, not a click.
+  it("refuses a release that left the pressed link", () => {
+    expect(
+      linkReleaseOpens(ctx({ withinDragThreshold: false, releaseUri: null })),
+    ).toBe(false)
+    expect(
+      linkReleaseOpens(
+        ctx({ withinDragThreshold: false, releaseUri: "https://other.example" }),
+      ),
+    ).toBe(false)
+  })
+
+  it("refuses when the press was never eligible to open", () => {
+    expect(linkReleaseOpens(ctx({ open: false }))).toBe(false)
   })
 })
