@@ -381,7 +381,10 @@ describe("InsetHeader macros and the pane-edge spacer", () => {
     expect(rule.className).toContain("inset-y-0")
     expect(rule.className).toContain("bg-border")
     expect(rule.className).toContain("pointer-events-none")
-    expect(rule.style.right).toBe("26%")
+    // 26% of the full width minus the 1px panel handle's share: the panes
+    // split (width - 1px), so a pure percentage sits spacer/100 px left of
+    // the divider, one visible pixel under browser zoom.
+    expect(rule.style.right).toBe("calc(26% - 0.26px)")
   })
 
   it("draws no rule when the Changes pane is hidden", () => {

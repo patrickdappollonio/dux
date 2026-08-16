@@ -216,13 +216,20 @@ export function InsetHeader() {
           also outside the flex flow, so it collects no `gap-2` and cannot push
           the macro button off the pane edge. Same visibility rule as before:
           only while the Changes pane is actually on screen, because hidden
-          there is no divider below to continue. */}
+          there is no divider below to continue.
+
+          The calc's pixel term compensates for the panel HANDLE: the group
+          lays out as terminal, a 1px handle, changes, so the two panes split
+          the full width MINUS that pixel and a pure percentage of the full
+          width lands spacer/100 px left of the real divider. Sub-pixel at
+          100 percent zoom, a visible one-pixel step under browser zoom
+          (reported from a zoomed screenshot). */}
       {!changesPaneEffectivelyHidden(dux) && (
         <span
           aria-hidden="true"
           data-testid="changes-divider-continuation"
           className="pointer-events-none absolute inset-y-0 w-px bg-border"
-          style={{ right: `${spacer}%` }}
+          style={{ right: `calc(${spacer}% - ${spacer / 100}px)` }}
         />
       )}
       {/* The chips share one shrink budget so the header clips instead of
