@@ -1372,6 +1372,16 @@ export function TerminalPane(props: TerminalPaneProps) {
       )
       if (!decision.suppress || uri === null) return
       e.stopPropagation()
+      // xterm's element `mousedown` opens with `preventDefault(); this.focus()`
+      // for EVERY press, before it even asks whether the app is tracking the
+      // mouse. Neither runs for a press dux swallows, so both are done here:
+      // the default action a terminal suppresses is the browser starting its
+      // own text-selection drag over the rows. Note that xterm's SELECTION
+      // service is disabled while the app captures the mouse, so there is no
+      // local selection clear to restore alongside them (MEASURED in the
+      // installed bundle: `SelectionService.handleMouseDown` returns early
+      // when disabled unless the force-selection modifier is held).
+      e.preventDefault()
       linkPress = { uri, x: e.clientX, y: e.clientY, open: decision.open }
       armOutsideRelease()
       // xterm's `mousedown` handler is what focuses the terminal, and it never
