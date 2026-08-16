@@ -167,6 +167,14 @@ your host terminal supports OSC 8) and in the web terminal. For safety the web o
 opens `http` and `https` links, and it opens them in a fresh tab with no way to
 reach back into the app.
 
+In the web terminal, dux is the **only** thing that opens the link. When the agent
+has mouse reporting on (most full-screen TUIs do), a click on a link is not passed
+through to it, because the agent would answer by opening the URL on the machine
+running dux rather than on the device you are holding. Every other click still
+reaches the app exactly as before, so buttons and menus are unaffected. If you want
+the app to have a particular click on a link, hold `Cmd` (macOS) or `Ctrl`
+(everywhere else) while you click; dux then stays out of the way and opens nothing.
+
 ## Pasting into the terminal UI
 
 Bracketed paste gets the same "honest middleman" treatment. When you paste into
