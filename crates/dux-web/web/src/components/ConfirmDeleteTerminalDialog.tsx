@@ -67,7 +67,7 @@ export function ConfirmDeleteTerminalDialog() {
             warning about, so an idle terminal confirms with just the title. */}
         {foreground ? (
           <p className="text-sm text-destructive">
-            <span className="font-mono">{foreground}</span> is running in this
+            <span className="font-mono break-all">{foreground}</span> is running in this
             terminal and will be killed.
           </p>
         ) : null}

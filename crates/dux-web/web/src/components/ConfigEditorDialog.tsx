@@ -63,7 +63,7 @@ function ConfigEditorForm({
         </ChunkBoundary>
       </div>
       {error ? (
-        <p className="max-h-24 overflow-y-auto font-mono text-sm whitespace-pre-wrap text-destructive">
+        <p className="max-h-24 overflow-y-auto font-mono text-sm break-words whitespace-pre-wrap text-destructive">
           {error}
         </p>
       ) : null}

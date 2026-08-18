@@ -52,7 +52,7 @@ export function ConfirmCloseEditorTabDialog() {
           <DialogTitle>Discard unsaved changes?</DialogTitle>
         </DialogHeader>
         <p className="text-sm text-destructive">
-          Your edits to <span className="font-mono">{path}</span> haven&rsquo;t
+          Your edits to <span className="font-mono break-all">{path}</span> haven&rsquo;t
           been saved. They will be lost.
         </p>
         {/* Misclick-safe spacing between the warning and the buttons. */}

@@ -37,9 +37,11 @@ export function ConfirmUseExistingBranchDialog() {
     <Dialog open={isOpen} onOpenChange={handleOpenChange}>
       <DialogContent showCloseButton={false} destructive>
         <DialogHeader>
-          <DialogTitle>Attach to existing branch “{name}”?</DialogTitle>
+          <DialogTitle>
+            Attach to existing branch “<span className="break-all">{name}</span>”?
+          </DialogTitle>
           <DialogDescription>
-            A branch named “{name}” already exists {where}. Creating this agent
+            A branch named “<span className="break-all">{name}</span>” already exists {where}. Creating this agent
             will attach to that branch and adopt its history, not start a fresh
             branch. Continue, or cancel and pick a different name.
           </DialogDescription>

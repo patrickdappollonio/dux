@@ -49,7 +49,9 @@ export function ConfirmForceReconnectDialog() {
     <Dialog open={isOpen} onOpenChange={handleOpenChange}>
       <DialogContent showCloseButton={false} destructive>
         <DialogHeader>
-          <DialogTitle>Force recreate {name || "agent"}?</DialogTitle>
+          <DialogTitle>
+            Force recreate <span className="break-all">{name || "agent"}</span>?
+          </DialogTitle>
           <DialogDescription>
             Do you want to force reconnect the agent? This will start a fresh
             session instead of continuing the existing session.

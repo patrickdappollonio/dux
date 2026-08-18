@@ -187,7 +187,7 @@ function MoveEntryDialogBody({
       <div className="flex flex-col gap-1">
         <p className="text-sm text-muted-foreground">
           Destination folder:{" "}
-          <span className="font-mono text-foreground">
+          <span className="font-mono break-all text-foreground">
             {dir === "" ? "/ (worktree root)" : dir}
           </span>
         </p>

@@ -53,7 +53,7 @@ export function ProjectInfoDialog() {
           {branch ? (
             <SimpleTooltip content={branch.tooltip ?? undefined}>
               <span
-                className={`font-mono ${
+                className={`font-mono break-all ${
                   branch.warn ? "text-amber-500" : ""
                 }`}
               >
@@ -66,7 +66,7 @@ export function ProjectInfoDialog() {
         </InfoRow>
         <InfoRow label="Default branch">
           {project.leading_branch ? (
-            <span className="font-mono">{project.leading_branch}</span>
+            <span className="font-mono break-all">{project.leading_branch}</span>
           ) : (
             <span className="text-muted-foreground">Not detected</span>
           )}

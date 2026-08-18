@@ -48,6 +48,10 @@ import { useState } from "react"
 import { AgentVitalsTooltip } from "@/components/AgentVitalsTooltip"
 import { InputMenuItems } from "@/components/InputMenuItems"
 import { ProjectMenuItems } from "@/components/ProjectMenuItems"
+import {
+  quietTailManualChoice,
+  setQuietTailManualChoice,
+} from "@/lib/quietTailChoice"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Button } from "@/components/ui/button"
 import {
@@ -945,8 +949,10 @@ function TerminalsSection({
   )
 }
 
-// The collapsed Quiet tail: detached / exited agents, hidden by default so
-// dormant work stops hogging the list. Its rows reuse the same AgentFlatRow (they
+// The Quiet tail: detached / exited agents, collapsed while anything active is
+// on screen so dormant work stops hogging the list, but OPEN while the whole
+// workspace is dormant (see the auto-manage note on `manual` below; the rule is
+// the TUI's, kept in step by hand). Its rows reuse the same AgentFlatRow (they
 // render dimmed via agentRowVisual and carry the Detached/Exited state word).
 //
 // Search auto-expand is DERIVED state, never a mutation of the collapse
@@ -965,6 +971,7 @@ function QuietTail({
   handlers,
   query,
   searchHit,
+  anyActive,
 }: {
   sessions: SessionView[]
   projectName: (id: string) => string
@@ -972,8 +979,23 @@ function QuietTail({
   handlers: FlatSelectHandlers
   query: string
   searchHit: boolean
+  // Whether ANY agent in the workspace is active (pre-search, whole list).
+  anyActive: boolean
 }) {
-  const [open, setOpen] = useState(false)
+  // Auto-managed until the user toggles the section by hand, mirroring the
+  // TUI's rule: a wholly-dormant workspace renders its Inactive tail OPEN
+  // (hiding every agent behind a collapsed toggle is the worst possible
+  // landing screen after a restart, which brings agents back dormant), and
+  // the tail collapses once any agent is active. The first manual toggle
+  // takes over from the automation; `null` means "still automatic". The
+  // choice is mirrored into page-load-scoped module state (see
+  // lib/quietTailChoice.ts for why component state is not enough here).
+  const [manual, setManual] = useState<boolean | null>(quietTailManualChoice())
+  const setManualChoice = (next: boolean) => {
+    setQuietTailManualChoice(next)
+    setManual(next)
+  }
+  const open = manual ?? !anyActive
   // The NORMALIZED query under which the user explicitly collapsed a
   // search-expanded tail; inert once the normalized query changes. Keying on the
   // normalized query (not the raw text) matches what the filter actually matches
@@ -996,10 +1018,10 @@ function QuietTail({
       // dismissal for this normalized query; the base state collapses too, so
       // clearing the query lands on the state the user last chose.
       if (forcedOpen) setDismissedQuery(normalizedQuery)
-      setOpen(false)
+      setManualChoice(false)
     } else {
       setDismissedQuery(null)
-      setOpen(true)
+      setManualChoice(true)
     }
   }
   if (sessions.length === 0) return null
@@ -1338,6 +1360,9 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
               // A live query with a quiet hit derives the section open (see the
               // QuietTail doc); an empty query never forces anything.
               searchHit={query.trim() !== "" && visibleQuiet.length > 0}
+              // Keyed on the FULL list, not the filtered one: a search that
+              // hides every active agent must not resurrect the auto-open.
+              anyActive={main.length > 0}
             />
           </>
         )}

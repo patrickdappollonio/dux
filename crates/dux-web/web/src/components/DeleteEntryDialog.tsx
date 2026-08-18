@@ -51,20 +51,20 @@ export function DeleteEntryDialog({
         </DialogHeader>
         {blockedBySave ? (
           <p className="text-sm text-destructive">
-            <span className="font-mono">{path}</span> is currently being
+            <span className="font-mono break-all">{path}</span> is currently being
             saved. Wait for the save to finish before deleting it.
           </p>
         ) : (
           <p className="text-sm text-destructive">
             {isDir ? (
               <>
-                <span className="font-mono">{path}</span> and everything
+                <span className="font-mono break-all">{path}</span> and everything
                 inside it will be permanently deleted from disk (recursive).
                 This cannot be undone.
               </>
             ) : (
               <>
-                <span className="font-mono">{path}</span> will be permanently
+                <span className="font-mono break-all">{path}</span> will be permanently
                 deleted from disk. This cannot be undone.
               </>
             )}{" "}

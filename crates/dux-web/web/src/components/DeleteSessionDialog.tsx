@@ -81,7 +81,10 @@ export function DeleteSessionDialog() {
         </div>
         {branchIsKept && (
           <p className="text-sm text-muted-foreground">
-            The branch &ldquo;{session?.initial_branch || session?.branch_name}
+            The branch &ldquo;
+            <span className="break-all">
+              {session?.initial_branch || session?.branch_name}
+            </span>
             &rdquo;{" "}
             {/* One clause per provenance, and the unrecognized one gets its
                own rather than borrowing "existed before this agent": that is

@@ -52,12 +52,12 @@ export function ConfirmDiscardFileDialog() {
         <p className="text-sm text-destructive">
           {untracked ? (
             <>
-              <span className="font-mono">{path}</span> is untracked and will be{" "}
+              <span className="font-mono break-all">{path}</span> is untracked and will be{" "}
               permanently DELETED from disk. This action cannot be undone.
             </>
           ) : (
             <>
-              All changes to <span className="font-mono">{path}</span> will be{" "}
+              All changes to <span className="font-mono break-all">{path}</span> will be{" "}
               restored to its last committed state. This action cannot be undone.
             </>
           )}

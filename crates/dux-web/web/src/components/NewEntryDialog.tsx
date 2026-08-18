@@ -84,7 +84,7 @@ function NewEntryDialogBody({
       <DialogHeader>
         <DialogTitle>{title}</DialogTitle>
         <DialogDescription>
-          in <span className="font-mono">{dirLabel}</span>
+          in <span className="font-mono break-all">{dirLabel}</span>
         </DialogDescription>
       </DialogHeader>
       <Input

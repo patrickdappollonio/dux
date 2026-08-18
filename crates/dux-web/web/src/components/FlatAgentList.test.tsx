@@ -92,6 +92,7 @@ function installStubs() {
 }
 installStubs()
 const { FlatAgentList } = await import("./FlatAgentList")
+const { resetQuietTailManualChoiceForTests } = await import("@/lib/quietTailChoice")
 
 function makeSession(over: Partial<SessionView> & { id: string }): SessionView {
   return {
@@ -189,6 +190,7 @@ beforeEach(() => {
   reorderTerminalsMock.mockClear()
   setAgentSortMock.mockClear()
   mockState = makeState("name")
+  resetQuietTailManualChoiceForTests()
   installStubs()
 })
 
@@ -227,11 +229,102 @@ describe("FlatAgentList section order", () => {
     expect(position & Node.DOCUMENT_POSITION_FOLLOWING).toBe(4)
   })
 
-  it("keeps the collapse defaults: Terminals open, Inactive closed", () => {
+  it("keeps the collapse defaults: Terminals open, Inactive closed while an agent is active", () => {
     render(<FlatAgentList handlers={handlers} />)
     expect(
       screen.getByText("Terminals").closest("button")?.getAttribute("aria-expanded"),
     ).toBe("true")
+    expect(
+      screen.getByText("Inactive").closest("button")?.getAttribute("aria-expanded"),
+    ).toBe("false")
+  })
+})
+
+// The Inactive tail is auto-managed until the user toggles it by hand,
+// mirroring the TUI's rule: a wholly-dormant workspace (the landing screen
+// after a restart, which brings agents back dormant) renders the tail OPEN so
+// the agents are not hidden behind a collapsed toggle; any active agent
+// collapses it; the first manual toggle takes over from the automation.
+describe("FlatAgentList inactive tail auto-open", () => {
+  function dormantOnlyState() {
+    const state = makeState("name")
+    state.spine!.sessions = [
+      makeSession({ id: "gone", title: "Gone", status: "exited" }),
+      makeSession({ id: "away", title: "Away", status: "detached" }),
+    ]
+    return state
+  }
+
+  it("renders the tail OPEN when no agent is active", () => {
+    mockState = dormantOnlyState()
+    render(<FlatAgentList handlers={handlers} />)
+    expect(
+      screen.getByText("Inactive").closest("button")?.getAttribute("aria-expanded"),
+    ).toBe("true")
+    // The rows themselves are on screen, not just the header.
+    expect(screen.getByText("Gone")).toBeTruthy()
+    expect(screen.getByText("Away")).toBeTruthy()
+  })
+
+  it("a manual collapse wins over the automation and sticks", () => {
+    mockState = dormantOnlyState()
+    render(<FlatAgentList handlers={handlers} />)
+    fireEvent.click(screen.getByText("Inactive"))
+    expect(
+      screen.getByText("Inactive").closest("button")?.getAttribute("aria-expanded"),
+    ).toBe("false")
+    expect(screen.queryByText("Gone")).toBeNull()
+  })
+
+  it("a manual choice survives an activity flip AND a remount", () => {
+    mockState = dormantOnlyState()
+    const first = render(<FlatAgentList handlers={handlers} />)
+    fireEvent.click(screen.getByText("Inactive"))
+    // An agent goes active, then everything goes dormant again: the explicit
+    // collapse holds through both flips.
+    mockState = makeState("name")
+    first.rerender(<FlatAgentList handlers={handlers} />)
+    mockState = dormantOnlyState()
+    first.rerender(<FlatAgentList handlers={handlers} />)
+    expect(
+      screen.getByText("Inactive").closest("button")?.getAttribute("aria-expanded"),
+    ).toBe("false")
+    // Navigation unmounts the sidebar list (mobile hub round trip, the
+    // nothing-matches search branch); the page-load-scoped choice survives it.
+    first.unmount()
+    mockState = dormantOnlyState()
+    render(<FlatAgentList handlers={handlers} />)
+    expect(
+      screen.getByText("Inactive").closest("button")?.getAttribute("aria-expanded"),
+    ).toBe("false")
+  })
+
+  it("the workspace going dormant while mounted pops an untouched tail open", () => {
+    const view = render(<FlatAgentList handlers={handlers} />)
+    expect(
+      screen.getByText("Inactive").closest("button")?.getAttribute("aria-expanded"),
+    ).toBe("false")
+    mockState = dormantOnlyState()
+    view.rerender(<FlatAgentList handlers={handlers} />)
+    expect(
+      screen.getByText("Inactive").closest("button")?.getAttribute("aria-expanded"),
+    ).toBe("true")
+  })
+
+  it("an agent becoming active collapses an untouched tail", () => {
+    mockState = dormantOnlyState()
+    const view = render(<FlatAgentList handlers={handlers} />)
+    expect(
+      screen.getByText("Inactive").closest("button")?.getAttribute("aria-expanded"),
+    ).toBe("true")
+    // The dormant workspace wakes up: one agent goes active. The untouched
+    // tail follows the automation and collapses.
+    mockState = dormantOnlyState()
+    mockState.spine!.sessions = [
+      makeSession({ id: "zeta", title: "Zeta" }),
+      ...mockState.spine!.sessions,
+    ]
+    view.rerender(<FlatAgentList handlers={handlers} />)
     expect(
       screen.getByText("Inactive").closest("button")?.getAttribute("aria-expanded"),
     ).toBe("false")

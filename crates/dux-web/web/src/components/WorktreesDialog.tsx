@@ -167,7 +167,7 @@ function ConfirmDeleteWorktree() {
           className="grid gap-2 text-sm text-destructive"
         >
           <p>
-            <span className="font-mono">{entry?.worktree_path}</span> will be
+            <span className="font-mono break-all">{entry?.worktree_path}</span> will be
             removed from disk. This action cannot be undone: dux has no trash and
             removes the directory forcibly.
           </p>
@@ -184,13 +184,13 @@ function ConfirmDeleteWorktree() {
             </p>
           ) : deleteBranch ? (
             <p>
-              The branch <span className="font-mono">{branch}</span> will be
+              The branch <span className="font-mono break-all">{branch}</span> will be
               deleted with it, forcibly. Any commits on it that are not merged
               anywhere else go too.
             </p>
           ) : (
             <p className="text-muted-foreground">
-              The branch <span className="font-mono">{branch}</span> is kept.
+              The branch <span className="font-mono break-all">{branch}</span> is kept.
               Only the working directory is removed.
             </p>
           )}
@@ -203,7 +203,8 @@ function ConfirmDeleteWorktree() {
               onCheckedChange={setDeleteBranch}
             />
             <label htmlFor="delete-worktree-branch" className="text-sm">
-              Also delete the branch {branch}
+              Also delete the branch{" "}
+              <span className="font-mono break-all">{branch}</span>
             </label>
           </div>
         ) : null}
