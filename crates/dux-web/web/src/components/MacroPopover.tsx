@@ -16,6 +16,7 @@ import {
 } from "@/components/ui/popover"
 import { Button } from "@/components/ui/button"
 import { getComposeInsertSink } from "@/lib/composeInsert"
+import { useIsMobile } from "@/hooks/use-mobile"
 import { macrosForTarget } from "@/lib/macros"
 import { openMacrosDialog, runMacro, useDux } from "@/lib/store"
 import { getTerminalFocusElement } from "@/lib/terminalFocus"
@@ -64,6 +65,7 @@ export function MacroPopover({
 }) {
   const { bootstrap } = useDux()
   const [open, setOpen] = useState(false)
+  const isMobile = useIsMobile()
   // Set when the LAST pick landed in the mobile compose draft rather than the
   // PTY, consumed by the close-focus resolver below. A ref, not state: it is
   // read during Base UI's close-focus pass, never rendered.
@@ -152,7 +154,19 @@ export function MacroPopover({
       </PopoverTrigger>
       <PopoverContent
         align="end"
-        className="w-72 p-0"
+        // Desktop: the fixed 288px-wide anchored panel. Phone: PopoverContent
+        // presents as the shared bottom sheet (full width, so no w-72), and
+        // the sheet's own whole-popup scroll is replaced with a flex column so
+        // the search field and the Edit-macros footer stay pinned while the
+        // LIST scrolls, same as the desktop layout. p-0 eats the sheet's
+        // safe-area bottom padding along with the rest (tailwind-merge folds
+        // the whole padding group), so the pb is restated: it is what keeps
+        // the Edit-macros footer above a phone's home-indicator strip.
+        className={
+          isMobile
+            ? "flex flex-col overflow-hidden p-0 pb-[max(env(safe-area-inset-bottom),0.25rem)]"
+            : "w-72 p-0"
+        }
         finalFocus={resolveFinalFocus}
       >
         {allMacros.length === 0 ? (
@@ -164,12 +178,28 @@ export function MacroPopover({
             No macros for this target kind — add one via Edit macros below.
           </div>
         ) : (
-          <Command>
-            <CommandInput placeholder="Search macros…" autoFocus />
+          // min-h-0 lets the Command column shrink when the popup hits its
+          // viewport cap, so the list below scrolls instead of pushing the
+          // Edit-macros footer off screen.
+          <Command className="min-h-0">
+            {/* No autofocus in the sheet: menus never pop the soft keyboard
+                on open, and this now presents as one of them; tapping the
+                field summons the keyboard. Desktop keeps type-immediately
+                (the filters-are-type-immediately convention). */}
+            <CommandInput placeholder="Search macros…" autoFocus={!isMobile} />
             {/* CommandGroup's padding puts breathing room between the search
                 field and the first result, matching the gap above the Edit
                 macros footer below. */}
-            <CommandList>
+            {/* max-h-[none]: the primitive's fixed cap would hold this list
+                at 288px with a whole screen free below it. Like every other
+                menu, the bound is the popup's max-h-(--available-height) (see
+                popover.tsx); min-h-0 makes the list the flex child that
+                shrinks, which is what engages its own overflow-y scroll. The
+                arbitrary-value form is deliberate: the installed
+                tailwind-merge does not recognize bare max-h-none as a max-h
+                conflict, so the primitive's max-h-72 would survive beside it
+                and which one wins would be stylesheet-order luck. */}
+            <CommandList className="max-h-[none] min-h-0">
               <CommandEmpty>No matching macros.</CommandEmpty>
               <CommandGroup>
                 {macros.map((macro) => (
@@ -188,7 +218,9 @@ export function MacroPopover({
         )}
         <button
           type="button"
-          className="flex w-full items-center gap-2 border-t px-3 py-2 text-left text-sm text-muted-foreground hover:text-foreground"
+          // shrink-0: the footer never gives up height to the list; when the
+          // popup is at its viewport cap it is the list that scrolls.
+          className="flex w-full shrink-0 items-center gap-2 border-t px-3 py-2 text-left text-sm text-muted-foreground hover:text-foreground"
           onClick={() => {
             setOpen(false)
             openMacrosDialog()

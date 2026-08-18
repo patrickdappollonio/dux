@@ -9,13 +9,14 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
+import { useIsMobile } from "@/hooks/use-mobile"
 import {
   closeFirstLoad,
   openAddProject,
   useDux,
   type FirstLoadDialogState,
 } from "@/lib/store"
-import type { Bootstrap } from "@/lib/bootstrapApi"
+import type { Bootstrap, WelcomeScreenView } from "@/lib/bootstrapApi"
 import { hasRenderableBody, NO_NOTES_EXPLANATION } from "@/lib/releaseNotes"
 
 // THE first-load dialog: the first-run welcome AND the post-upgrade what's-new
@@ -56,11 +57,17 @@ export function FirstLoadDialog() {
     <Dialog open={firstLoad !== null} onOpenChange={handleOpenChange}>
       {/* 700px: comfortably wider than a routine dialog, because this one
           carries the duck column plus prose. On phones it becomes a bottom
-          sheet — docked to the bottom edge, full width, square bottom corners —
-          while staying the same component. The base primitive already caps the
-          height to the visible viewport and scrolls internally. */}
+          sheet, docked to the bottom edge, full width, square bottom corners,
+          while staying the same component. The base primitive caps the height
+          to the visible viewport and would scroll the WHOLE popup, which takes
+          the title and the buttons away with the prose; on phones we therefore
+          neutralize its `grid`/`overflow-y-auto` (a later variant wins over the
+          unvariant utility, the same trick the docking classes already use) and
+          make the popup a non-scrolling flex column whose middle region is the
+          only scroller. This is the EditorOverlay pattern. Desktop is untouched:
+          every override here is `max-md:`. */}
       <DialogContent
-        className="sm:max-w-[700px] max-md:top-auto max-md:bottom-0 max-md:left-0 max-md:max-w-none max-md:translate-x-0 max-md:translate-y-0 max-md:rounded-b-none"
+        className="sm:max-w-[700px] max-md:top-auto max-md:bottom-0 max-md:left-0 max-md:flex max-md:max-w-none max-md:translate-x-0 max-md:translate-y-0 max-md:flex-col max-md:overflow-hidden max-md:rounded-b-none"
       >
         {/* Guard the body on the state so nothing renders (and no stale content
             flashes) between closes. */}
@@ -84,10 +91,42 @@ function Body({
   // destination is visible before it is clicked (the same affordance the TUI
   // gallery puts in its footer).
   const destination = isWelcome ? website : notesUrl
+  // Width picks the layout. The phone masthead and the desktop header are the
+  // same three pieces in different places, and only one of them may exist: two
+  // DialogTitles in one dialog is two accessible names, and the version chip
+  // rendered twice is the same text queried twice. So this is a real DOM branch,
+  // not a `hidden`/`md:block` pair. The dropdown-menu primitive splits the same
+  // way, off the same hook.
+  const isMobile = useIsMobile()
 
   return (
     <>
-      <div className="flex gap-4">
+      {isMobile ? (
+        // Pinned: the mark, the title and (on what's-new) the version chip stay
+        // put while the prose scrolls beneath them. `pr-8` clears the popup's
+        // own absolutely positioned close button in the top-right corner.
+        <div
+          data-slot="first-load-masthead"
+          className="flex shrink-0 items-center gap-3 border-b border-border pr-8 pb-3"
+        >
+          <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted">
+            <img
+              src="/dux-logo.png"
+              alt=""
+              aria-hidden
+              className="size-7 object-contain"
+            />
+          </span>
+          {/* `leading-snug`: the base title is `leading-none`, which a wrapped
+              release headline cannot survive on a narrow phone. */}
+          <DialogTitle className="min-w-0 flex-1 leading-snug">
+            {isWelcome ? WELCOME_TITLE : whatsNewTitle(state)}
+          </DialogTitle>
+          {isWelcome ? null : <VersionChip state={state} />}
+        </div>
+      ) : null}
+
+      <div className="flex gap-4 max-md:min-h-0 max-md:flex-1">
         {/* The duck, in its own column with a hairline divider. Dropped on
             phones: a duck plus a ribbon of text is worse than no duck. */}
         <div
@@ -101,19 +140,33 @@ function Body({
           />
         </div>
 
-        <div className="flex min-w-0 flex-1 flex-col gap-3">
-          {isWelcome ? (
-            <WelcomeContent bootstrap={bootstrap} />
+        <div className="flex min-w-0 flex-1 flex-col gap-3 max-md:min-h-0">
+          {isMobile ? null : isWelcome ? (
+            <WelcomeHeader bootstrap={bootstrap} />
           ) : (
-            <WhatsNewContent state={state} />
+            <WhatsNewHeader state={state} />
           )}
+
+          {/* The ONLY scrolling region on phones. Inert on desktop, where the
+              popup itself still scrolls and this is a plain wrapper carrying
+              the same `gap-3` its children used to get from the column. */}
+          <div
+            data-slot="first-load-body"
+            className="flex flex-col gap-3 max-md:min-h-0 max-md:flex-1 max-md:overflow-y-auto"
+          >
+            {isWelcome ? (
+              <WelcomeContent bootstrap={bootstrap} withTagline={isMobile} />
+            ) : (
+              <WhatsNewContent state={state} />
+            )}
+          </div>
         </div>
       </div>
 
       {/* Misclick-safe spacing between the body and the buttons. */}
-      <div className="h-2" />
+      <div className="h-2 max-md:shrink-0" />
 
-      <DialogFooter className="sm:items-center sm:justify-between">
+      <DialogFooter className="max-md:shrink-0 sm:items-center sm:justify-between">
         {/* Muted, and on the opposite side from the buttons. `break-all` so a
             long release URL cannot widen the dialog. */}
         <p className="min-w-0 text-xs break-all text-muted-foreground/70">
@@ -133,18 +186,40 @@ function Body({
 
 // ── the welcome screen ───────────────────────────────────────────────────────
 
-function WelcomeContent({ bootstrap }: { bootstrap: Bootstrap | null }) {
+const WELCOME_TITLE = "Welcome to dux"
+
+function WelcomeHeader({ bootstrap }: { bootstrap: Bootstrap | null }) {
+  const welcome = bootstrap?.welcome_screen
+  return (
+    <DialogHeader>
+      <DialogTitle>{WELCOME_TITLE}</DialogTitle>
+      {welcome ? <Tagline welcome={welcome} /> : null}
+    </DialogHeader>
+  )
+}
+
+function Tagline({ welcome }: { welcome: WelcomeScreenView }) {
+  return (
+    <DialogDescription className="font-medium text-foreground">
+      {welcome.tagline}
+    </DialogDescription>
+  )
+}
+
+// `withTagline`: on phones the title lives in the pinned masthead and the
+// tagline scrolls with the prose it introduces, so it is rendered here instead
+// of in the header.
+function WelcomeContent({
+  bootstrap,
+  withTagline,
+}: {
+  bootstrap: Bootstrap | null
+  withTagline: boolean
+}) {
   const welcome = bootstrap?.welcome_screen
   return (
     <>
-      <DialogHeader>
-        <DialogTitle>Welcome to dux</DialogTitle>
-        {welcome ? (
-          <DialogDescription className="font-medium text-foreground">
-            {welcome.tagline}
-          </DialogDescription>
-        ) : null}
-      </DialogHeader>
+      {welcome && withTagline ? <Tagline welcome={welcome} /> : null}
 
       {welcome ? (
         <>
@@ -263,23 +338,37 @@ function WelcomeButtons({ website }: { website: string }) {
 
 // ── the what's-new screen ────────────────────────────────────────────────────
 
+/** The headline, or what to say while it is not in hand. */
+function whatsNewTitle(state: FirstLoadDialogState): string {
+  return state.notes?.headline || (state.loading ? "Loading…" : "Release notes")
+}
+
+/** The version chip. Muted, not accented: it is a label, not a state. Above the
+ *  title on desktop, at the masthead's trailing edge on phones. */
+function VersionChip({ state }: { state: FirstLoadDialogState }) {
+  return (
+    <span className="flex shrink-0 items-center gap-2 text-xs text-muted-foreground">
+      <span className="rounded-md bg-muted px-1.5 py-0.5 font-medium text-foreground">
+        What&apos;s new in
+      </span>
+      <span className="font-mono">{state.notes?.version ?? ""}</span>
+    </span>
+  )
+}
+
+function WhatsNewHeader({ state }: { state: FirstLoadDialogState }) {
+  return (
+    <DialogHeader>
+      <VersionChip state={state} />
+      <DialogTitle>{whatsNewTitle(state)}</DialogTitle>
+    </DialogHeader>
+  )
+}
+
 function WhatsNewContent({ state }: { state: FirstLoadDialogState }) {
   const notes = state.notes
   return (
     <>
-      <DialogHeader>
-        {/* The version chip. Muted, not accented: it is a label, not a state. */}
-        <span className="flex items-center gap-2 text-xs text-muted-foreground">
-          <span className="rounded-md bg-muted px-1.5 py-0.5 font-medium text-foreground">
-            What&apos;s new in
-          </span>
-          <span className="font-mono">{notes?.version ?? ""}</span>
-        </span>
-        <DialogTitle>
-          {notes?.headline || (state.loading ? "Loading…" : "Release notes")}
-        </DialogTitle>
-      </DialogHeader>
-
       {state.loading ? (
         <p className="text-sm text-muted-foreground">
           Fetching the release notes from GitHub…

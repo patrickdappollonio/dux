@@ -401,6 +401,137 @@ describe("FirstLoadDialog", () => {
     expect(footer().className).toContain("sm:justify-between")
   })
 
+  // ── the phone masthead ─────────────────────────────────────────────────────
+  //
+  // On phones the sheet is three bands: a pinned masthead, ONE scrolling body,
+  // and the pinned footer. The split is driven by useIsMobile, whose snapshot
+  // reads window.innerWidth, so these tests resize jsdom's window. The original
+  // width is captured and restored: hardcoding a "desktop" width on the way out
+  // would quietly redefine the default every other test in the file runs at.
+  describe("the phone bottom sheet", () => {
+    const ORIGINAL_WIDTH = window.innerWidth
+
+    function setViewportWidth(width: number) {
+      Object.defineProperty(window, "innerWidth", {
+        configurable: true,
+        writable: true,
+        value: width,
+      })
+    }
+
+    function masthead(): HTMLElement | null {
+      return document.querySelector('[data-slot="first-load-masthead"]')
+    }
+
+    function bodyRegion(): HTMLElement {
+      const el = document.querySelector('[data-slot="first-load-body"]')
+      if (el === null) throw new Error("no scrolling body region rendered")
+      return el as HTMLElement
+    }
+
+    beforeEach(() => setViewportWidth(390))
+    afterEach(() => setViewportWidth(ORIGINAL_WIDTH))
+
+    it("pins a masthead carrying the dux mark and the title", () => {
+      seed({ screen: "welcome" })
+      render(<FirstLoadDialog />)
+
+      const bar = masthead()
+      expect(bar).not.toBeNull()
+      // The real logo mark, decorative to screen readers, in its own chip.
+      const mark = bar!.querySelector('img[src="/dux-logo.png"]')
+      expect(mark).not.toBeNull()
+      expect(mark!.getAttribute("aria-hidden")).toBe("true")
+      expect(mark!.getAttribute("alt")).toBe("")
+      // The title travels with it, so it cannot scroll away.
+      expect(
+        within(bar as HTMLElement).getByText("Welcome to dux"),
+      ).toBeTruthy()
+    })
+
+    it("makes the body the only scroller, with the masthead and footer outside it", () => {
+      seed({ screen: "welcome" })
+      render(<FirstLoadDialog />)
+
+      // The popup stops being the scroller: the base primitive's `grid` and
+      // `overflow-y-auto` are neutralized so the sheet is a flex column.
+      const popup = document.querySelector('[data-slot="dialog-content"]')!
+      expect(popup.className).toContain("max-md:flex")
+      expect(popup.className).toContain("max-md:flex-col")
+      expect(popup.className).toContain("max-md:overflow-hidden")
+
+      // ...and the middle band scrolls instead.
+      const body = bodyRegion()
+      expect(body.className).toContain("max-md:min-h-0")
+      expect(body.className).toContain("max-md:flex-1")
+      expect(body.className).toContain("max-md:overflow-y-auto")
+
+      // The prose is inside it; the pinned bands exist AND sit outside it
+      // (Node.contains(null) is false, so the null checks keep "outside the
+      // scroller" distinguishable from "not rendered at all").
+      expect(within(body).getByText(/Point dux at any git repo\./)).toBeTruthy()
+      const bar = masthead()
+      const foot = footer()
+      expect(bar).not.toBeNull()
+      expect(foot).not.toBeNull()
+      expect(body.contains(bar)).toBe(false)
+      expect(body.contains(foot)).toBe(false)
+
+      // The tagline moved INTO the scrolling body on phones (it introduces
+      // the prose it scrolls with); losing it there is silent design drift.
+      expect(
+        within(body).getByText("One git worktree per coding agent, and a real terminal."),
+      ).toBeTruthy()
+    })
+
+    it("carries the version chip in the what's-new masthead", () => {
+      seed({ screen: "whats_new", notes: NOTES })
+      render(<FirstLoadDialog />)
+
+      const bar = masthead()
+      expect(bar).not.toBeNull()
+      const inBar = within(bar as HTMLElement)
+      expect(inBar.getByText("What's new in")).toBeTruthy()
+      expect(inBar.getByText("v0.6.0")).toBeTruthy()
+      expect(inBar.getByText("Quieter plumbing, louder failures")).toBeTruthy()
+      // The release bullets still scroll.
+      expect(within(bodyRegion()).getByText("In this release")).toBeTruthy()
+    })
+
+    it("keeps exactly one dialog title per screen, at either width", () => {
+      for (const width of [390, 1280]) {
+        for (const state of [
+          { screen: "welcome" as const },
+          { screen: "whats_new" as const, notes: NOTES },
+        ]) {
+          setViewportWidth(width)
+          seed(state)
+          render(<FirstLoadDialog />)
+          // Two titles in one dialog is two accessible names, which is why the
+          // masthead is a DOM branch rather than a `hidden`/`md:block` pair.
+          expect(
+            document.querySelectorAll('[data-slot="dialog-title"]'),
+          ).toHaveLength(1)
+          cleanup()
+        }
+      }
+    })
+
+    it("shows the art column and no masthead at desktop width", () => {
+      setViewportWidth(1280)
+      seed({ screen: "welcome" })
+      render(<FirstLoadDialog />)
+
+      expect(masthead()).toBeNull()
+      // Exactly one logo on desktop: the duck in its own column.
+      const logos = document.querySelectorAll('img[src="/dux-logo.png"]')
+      expect(logos).toHaveLength(1)
+      expect(logos[0].parentElement!.className).toContain("md:w-[152px]")
+      // And the title is back inside the text column beside it.
+      expect(screen.getByText("Welcome to dux")).toBeTruthy()
+    })
+  })
+
   it("drops the duck on phones and keeps it on desktop", () => {
     seed({ screen: "welcome" })
     render(<FirstLoadDialog />)

@@ -85,6 +85,77 @@ async function openAndPick() {
   await settle()
 }
 
+// On a phone the picker presents as the SAME bottom sheet every dropdown
+// menu uses (ui/popupSheet.ts): full width, backdrop, slide-from-bottom. The
+// search field loses its autofocus there, because menus never pop the soft
+// keyboard on open. The split is useIsMobile's innerWidth snapshot, the same
+// idiom dropdown-menu.test.tsx flips.
+describe("MacroPopover phone sheet presentation", () => {
+  function setViewportWidth(width: number) {
+    Object.defineProperty(window, "innerWidth", {
+      configurable: true,
+      writable: true,
+      value: width,
+    })
+  }
+
+  it("renders as the shared bottom sheet, search not autofocused", async () => {
+    const originalWidth = window.innerWidth
+    setViewportWidth(500)
+    try {
+      render(<MacroPopover target={target} />)
+      fireEvent.click(screen.getByRole("button", { name: "Run a macro" }))
+      await settle()
+      const popup = document.querySelector('[data-slot="popover-content"]')
+      expect(popup?.className).toContain("rounded-t-2xl")
+      expect(popup?.className).toContain("slide-in-from-bottom")
+      expect(popup?.className).not.toContain("w-72")
+      expect(document.querySelector('[data-slot="popover-backdrop"]')).toBeTruthy()
+      // The sheet's home-indicator clearance must survive the p-0 override
+      // (tailwind-merge folds the whole padding group, so it is restated).
+      expect(popup?.className).toContain(
+        "pb-[max(env(safe-area-inset-bottom),0.25rem)]",
+      )
+      const input = document.querySelector('[data-slot="command-input"]')
+      expect(input).toBeTruthy()
+      expect(document.activeElement).not.toBe(input)
+    } finally {
+      setViewportWidth(originalWidth)
+    }
+  })
+
+  it("keeps the anchored panel and the autofocused search on desktop", async () => {
+    render(<MacroPopover target={target} />)
+    fireEvent.click(screen.getByRole("button", { name: "Run a macro" }))
+    await settle()
+    const popup = document.querySelector('[data-slot="popover-content"]')
+    expect(popup?.className).toContain("w-72")
+    expect(popup?.className).not.toContain("rounded-t-2xl")
+    expect(document.querySelector('[data-slot="popover-backdrop"]')).toBeNull()
+    const input = document.querySelector('[data-slot="command-input"]')
+    expect(document.activeElement).toBe(input)
+  })
+})
+
+// The list grows like every other menu: the popup is capped at the
+// positioner's --available-height (the dropdown menus' rule) and the command
+// list drops the primitive's fixed 288px cap, so with a tall window the whole
+// macro set is visible and only a genuinely over-tall list scrolls. jsdom has
+// no layout, so the pin is the class contract on both halves.
+describe("MacroPopover list height", () => {
+  it("caps the popup at the available height and uncaps the list", async () => {
+    render(<MacroPopover target={target} />)
+    fireEvent.click(screen.getByRole("button", { name: "Run a macro" }))
+    await settle()
+    const popup = document.querySelector('[data-slot="popover-content"]')
+    expect(popup?.className).toContain("max-h-(--available-height)")
+    const list = document.querySelector('[data-slot="command-list"]')
+    expect(list?.className).toContain("max-h-[none]")
+    expect(list?.className).toContain("min-h-0")
+    expect(list?.className).not.toContain("max-h-72")
+  })
+})
+
 describe("MacroPopover pick focus routing", () => {
   it("a pick that landed in the compose draft focuses the compose textarea", async () => {
     // The pane-side sink is registered (the compose bar is the typing
