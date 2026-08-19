@@ -1114,6 +1114,137 @@ async fn a_second_pty_connection_is_replayed_scrollback_and_claims_only_by_takin
     );
 }
 
+/// Read the next Text frame that carries the given `event` value, or `None` if
+/// none arrives inside `within`. Binary frames (the scrollback replay and live
+/// PTY output) and pings are skipped, as is any Text frame of another kind.
+///
+/// Both halves of this helper are load-bearing for the tests below: finding a
+/// frame proves a broadcast happened, and finding NONE inside a window is how a
+/// refused resize is proven to have announced nothing.
+async fn next_event_frame(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    event: &str,
+    within: Duration,
+) -> Option<serde_json::Value> {
+    let deadline = tokio::time::Instant::now() + within;
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Some(Ok(Message::Text(t)))) =
+            tokio::time::timeout(Duration::from_millis(200), ws.next()).await
+            && let Ok(v) = serde_json::from_str::<serde_json::Value>(&t)
+            && v["event"].as_str() == Some(event)
+        {
+            return Some(v);
+        }
+    }
+    None
+}
+
+/// Every socket attached to a PTY is told when that PTY's grid actually moves,
+/// and a refused resize tells nobody anything.
+///
+/// ONE PTY HAS ONE AUTHORITATIVE GRID, the owner's, and every other attached
+/// browser renders the same byte stream into its own differently sized xterm.
+/// Before this the wire never told a non-owner the PTY's size at all, so a
+/// viewer could not know that what it was rendering was wrapped and clamped
+/// garbage. The `connected` handshake carries the grid at attach and this
+/// event carries every change after it.
+///
+/// The refusal half matters just as much: a non-owner's plain resize applies
+/// nothing, so announcing it would tell every viewer the grid had moved to a
+/// size the child never took, and each of them would then heal itself towards a
+/// lie.
+#[tokio::test]
+async fn an_applied_resize_tells_every_attached_socket_the_ptys_new_grid() {
+    let (addr, _tmp) = boot().await;
+    let url = format!("ws://{addr}/ws/sessions/s1/pty");
+
+    let (mut ws_a, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("connect first pty socket");
+    let hello_a = next_event_frame(&mut ws_a, "connected", Duration::from_secs(8))
+        .await
+        .expect("the connected handshake");
+    assert!(
+        hello_a["rows"].as_u64().is_some() && hello_a["cols"].as_u64().is_some(),
+        "the handshake must carry the pty's grid; without it an arriving viewer \
+         cannot tell whether it agrees with the child's geometry: {hello_a}"
+    );
+
+    // A claims the unowned pty by sizing it. B attaches as a watcher.
+    ws_a.send(Message::Text(r#"{"rows":24,"cols":80}"#.into()))
+        .await
+        .unwrap();
+    let (mut ws_b, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("connect second pty socket");
+    let _ = next_event_frame(&mut ws_b, "connected", Duration::from_secs(8))
+        .await
+        .expect("the second socket's connected handshake");
+
+    // The owner resizes. The WATCHER must hear about it: this is the frame that
+    // lets it say it is sized for another device, and heal.
+    ws_a.send(Message::Text(r#"{"rows":40,"cols":120}"#.into()))
+        .await
+        .unwrap();
+    let size_b = next_event_frame(&mut ws_b, "size", Duration::from_secs(8))
+        .await
+        .expect("a granted resize must be announced to the other attached socket");
+    assert_eq!(size_b["rows"].as_u64(), Some(40));
+    assert_eq!(size_b["cols"].as_u64(), Some(120));
+
+    // The announcement goes to EVERY socket attached to the pty, the resizer
+    // included (its grid already agrees, so it costs it nothing, and one rule
+    // for all attached sockets is simpler than an exception). Drain A up to the
+    // change it just made, so the refusal assertion below is reading an empty
+    // queue rather than A's own backlog.
+    loop {
+        let own = next_event_frame(&mut ws_a, "size", Duration::from_secs(8))
+            .await
+            .expect("the resizing socket hears its own applied grid too");
+        if own["rows"].as_u64() == Some(40) {
+            break;
+        }
+    }
+
+    // A watcher's PLAIN resize is refused whole, so it must announce nothing.
+    ws_b.send(Message::Text(r#"{"rows":10,"cols":30}"#.into()))
+        .await
+        .unwrap();
+    let refused = next_event_frame(&mut ws_a, "size", Duration::from_secs(2)).await;
+    assert!(
+        refused.is_none(),
+        "a REFUSED resize changed nothing and must announce nothing; the owner \
+         was told the grid moved to {refused:?}, which the child never took"
+    );
+
+    // A fresh arrival's handshake reports the size the owner actually applied,
+    // read off the live PTY rather than remembered from a frame. The resize
+    // crosses the engine actor's queue, so this polls rather than assuming the
+    // child has been resized by the time the assertion runs.
+    let mut seen = serde_json::Value::Null;
+    for _ in 0..10 {
+        let (mut ws_c, _) = tokio_tungstenite::connect_async(&url)
+            .await
+            .expect("connect a fresh pty socket");
+        seen = next_event_frame(&mut ws_c, "connected", Duration::from_secs(8))
+            .await
+            .expect("the fresh arrival's connected handshake");
+        let _ = ws_c.close(None).await;
+        if seen["rows"].as_u64() == Some(40) && seen["cols"].as_u64() == Some(120) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    assert_eq!(
+        (seen["rows"].as_u64(), seen["cols"].as_u64()),
+        (Some(40), Some(120)),
+        "the handshake grid must be the LIVE pty's, or a viewer starts out \
+         believing it agrees with a geometry the child left behind"
+    );
+}
+
 /// The owner leaving is BROADCAST, so a watcher's card stops naming a browser
 /// tab that closed.
 ///

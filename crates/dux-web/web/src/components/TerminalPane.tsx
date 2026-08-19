@@ -68,6 +68,10 @@ import {
 import { useTerminalLifecycle } from "@/components/terminal/useTerminalLifecycle"
 import { useTerminalOwnership } from "@/components/terminal/ownership"
 import {
+  gridsDiverge,
+  useViewerGrid,
+} from "@/components/terminal/viewerGrid"
+import {
   focusTypingSurfaceIn,
   useInputSurface,
 } from "@/components/terminal/inputSurface"
@@ -327,6 +331,24 @@ export function TerminalPane(props: TerminalPaneProps) {
     claimFreedPtyRef,
   })
 
+  // THE VIEWER-GRID MACHINE: the honest badge and the bounce-heal. One PTY has
+  // one authoritative grid, the owner's, and a viewer rendering the same bytes
+  // at a different size is rendering wrapped and clamped output into a local
+  // scrollback nothing else will ever clean up. It says so, and it heals by
+  // re-attaching, never by resizing the PTY (that is the silent steal).
+  const viewerGrid = useViewerGrid({
+    ptyRef,
+    ownership,
+    takeoverIntent,
+    setReconnecting,
+  })
+  // A statement of fact about THIS pane, and only ever about a non-owner: the
+  // owner defines the grid, so it cannot disagree with it. Unknown on either
+  // side reads as "nothing to claim", so a server that does not report the grid
+  // shows no badge rather than a guess.
+  const sizedForAnotherDevice =
+    !isOwner && gridsDiverge(viewerGrid.localGrid, viewerGrid.remoteGrid)
+
   // THE INPUT SURFACE: the compose Send, the accessory sends, the sticky
   // modifier latches and the draft splice.
   const input = useInputSurface({
@@ -529,6 +551,9 @@ export function TerminalPane(props: TerminalPaneProps) {
     ownership,
     connId,
     seedOwnershipFromConnected: seedFromConnected,
+    noteRemotePtyGrid: viewerGrid.noteRemoteGrid,
+    noteLocalGrid: viewerGrid.noteLocalGrid,
+    noteSocketOpen: viewerGrid.noteSocketOpen,
     focusTypingSurface,
     onClipboardPaste: (e) => upload.onClipboardPaste(e),
     armForcedTextPaste: () => upload.armForcedTextPaste(),
@@ -818,6 +843,28 @@ export function TerminalPane(props: TerminalPaneProps) {
           unchanged: the terminal screen's header icon button (MobileShell).
           Focus still returns to this pane's typing surface on close, through the
           `terminalFocus` registration above rather than a prop. */}
+      {/* THE HONEST VIEWER BADGE. One PTY has one grid, the owner's, and this
+          pane is rendering that byte stream at a different one, so what is on
+          screen is wrapped and clamped. It says so rather than letting the user
+          read mangled output as the agent's actual work.
+
+          A statement, never a control: no button, no menu, and therefore
+          pointer-events-none so it cannot swallow a click meant for the
+          terminal underneath. It renders only on real divergence (this client
+          is not the driver AND the two grids actually differ) and disappears
+          the moment either side moves, because both are live values.
+
+          Under the take-over card's z-20 on purpose: when that card is up it is
+          the fuller answer to the same question, and two answers stacked is
+          worse than one. */}
+      {sizedForAnotherDevice ? (
+        <div
+          data-testid="viewer-grid-badge"
+          className="pointer-events-none absolute right-2 bottom-2 z-10 rounded-md border bg-card/90 px-2 py-1 text-xs text-muted-foreground"
+        >
+          Sized for another device
+        </div>
+      ) : null}
       {/* Readiness / reconnect overlay. Non-blocking (pointer-events-none) so it
           never steals input. Shows while the PTY is still starting up (before its
           first output latches `everReady`) OR whenever the socket has dropped and

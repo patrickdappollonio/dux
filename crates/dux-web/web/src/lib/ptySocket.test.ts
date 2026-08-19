@@ -184,6 +184,134 @@ describe("PtySocket", () => {
     expect(sock.replayGeneration).toBeNull()
   })
 
+  // ONE PTY HAS ONE AUTHORITATIVE GRID, the owner's, and every other attached
+  // browser renders the same byte stream into its own differently sized xterm.
+  // The wire is the only way a viewer can learn that, and it learns it twice
+  // over: the handshake's snapshot at attach, and a `size` event on every
+  // applied resize after it. The `fromHandshake` flag is what tells them apart,
+  // and the consumer acts on them differently (an attach is already sized
+  // against the handshake; only a later CHANGE makes a viewer re-attach).
+  it("reports the pty's grid from the handshake and from every size event", () => {
+    const sock = new PtySocket("ws://x/pty")
+    const seen: [{ rows: number; cols: number } | null, boolean][] = []
+    sock.onPtyGrid = (grid, fromHandshake) => {
+      seen.push([grid, fromHandshake])
+    }
+    sock.connect()
+    last().open()
+    expect(sock.grid).toBeNull()
+    last().text(
+      JSON.stringify({
+        event: "connected",
+        id: "c-1",
+        gen: 1,
+        rows: 24,
+        cols: 80,
+      }),
+    )
+    expect(sock.grid).toEqual({ rows: 24, cols: 80 })
+    last().text(JSON.stringify({ event: "size", rows: 40, cols: 120 }))
+    expect(sock.grid).toEqual({ rows: 40, cols: 120 })
+    expect(seen).toEqual([
+      [{ rows: 24, cols: 80 }, true],
+      [{ rows: 40, cols: 120 }, false],
+    ])
+  })
+
+  it("reads a grid the server could not answer as UNKNOWN, never as agreement", () => {
+    // A server that cannot read the pty sends explicit nulls, and an older one
+    // omits the keys. Both mean "nothing known": a viewer that read either as
+    // "it matches mine" would sit silently on wrapped, clamped output.
+    const sock = new PtySocket("ws://x/pty")
+    sock.connect()
+    last().open()
+    last().text(
+      JSON.stringify({
+        event: "connected",
+        id: "c-1",
+        gen: 1,
+        rows: null,
+        cols: null,
+      }),
+    )
+    expect(sock.grid).toBeNull()
+    last().text(JSON.stringify({ event: "connected", id: "c-2", gen: 2 }))
+    expect(sock.grid).toBeNull()
+  })
+
+  it("drops a size event whose seq the handshake already covers", () => {
+    // The server stamps seqs in apply order but publishes after that order is
+    // fixed, so a broadcast can arrive AFTER a handshake whose grid already
+    // reflects it (it was buffered on the socket when the handshake was sent).
+    // Applying it would regress the grid to an older geometry and, worse, read
+    // as a fresh change and arm a heal bounce at a just-attached socket.
+    const sock = new PtySocket("ws://x/pty")
+    const seen: [{ rows: number; cols: number } | null, boolean][] = []
+    sock.onPtyGrid = (grid, fromHandshake) => {
+      seen.push([grid, fromHandshake])
+    }
+    sock.connect()
+    last().open()
+    last().text(
+      JSON.stringify({
+        event: "connected",
+        id: "c-1",
+        gen: 1,
+        rows: 40,
+        cols: 120,
+        grid_seq: 5,
+      }),
+    )
+    // Stale: seq 4 predates the handshake's read. Neither the grid nor the
+    // consumer hears it, so nothing downstream can arm a heal from it.
+    last().text(JSON.stringify({ event: "size", rows: 24, cols: 80, seq: 4 }))
+    expect(sock.grid).toEqual({ rows: 40, cols: 120 })
+    // A seq equal to the handshake's is covered too.
+    last().text(JSON.stringify({ event: "size", rows: 24, cols: 80, seq: 5 }))
+    expect(sock.grid).toEqual({ rows: 40, cols: 120 })
+    // A genuinely newer change still lands and still reads as a change.
+    last().text(JSON.stringify({ event: "size", rows: 30, cols: 100, seq: 6 }))
+    expect(sock.grid).toEqual({ rows: 30, cols: 100 })
+    expect(seen).toEqual([
+      [{ rows: 40, cols: 120 }, true],
+      [{ rows: 30, cols: 100 }, false],
+    ])
+  })
+
+  it("drops a size event that arrives behind a newer one, by seq alone", () => {
+    // Two sockets' publishes of two ORDERED applies can invert on the way to
+    // this client (the take-over interleaving): the newer geometry lands
+    // first, then the stale one. Last-write-wins without the seq would leave
+    // every viewer on the loser's geometry.
+    const sock = new PtySocket("ws://x/pty")
+    sock.connect()
+    last().open()
+    last().text(
+      JSON.stringify({
+        event: "connected",
+        id: "c-1",
+        gen: 1,
+        rows: 24,
+        cols: 80,
+        grid_seq: 1,
+      }),
+    )
+    last().text(JSON.stringify({ event: "size", rows: 30, cols: 100, seq: 3 }))
+    last().text(JSON.stringify({ event: "size", rows: 26, cols: 90, seq: 2 }))
+    expect(sock.grid).toEqual({ rows: 30, cols: 100 })
+  })
+
+  it("applies size events without a seq, for an old server that stamps none", () => {
+    const sock = new PtySocket("ws://x/pty")
+    sock.connect()
+    last().open()
+    last().text(
+      JSON.stringify({ event: "connected", id: "c-1", gen: 1, rows: 24, cols: 80 }),
+    )
+    last().text(JSON.stringify({ event: "size", rows: 30, cols: 100 }))
+    expect(sock.grid).toEqual({ rows: 30, cols: 100 })
+  })
+
   // THREE distinct answers to "who drives this pty", and the pane needs all
   // three: a null OWNER means "nobody, claim it if you are foregrounded", while
   // an ABSENT owner key means "this server does not say" and must fall back to

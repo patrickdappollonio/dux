@@ -139,6 +139,18 @@ export type TerminalLifecyclePorts = {
     owner: HandshakeOwner,
     ownerEpoch?: number,
   ) => void
+  /// Record a grid the wire reported for this PTY (the `connected` handshake's
+  /// snapshot, then every applied change). The viewer-grid machine decides what
+  /// it means; the frames land here.
+  noteRemotePtyGrid: (
+    grid: { rows: number; cols: number } | null,
+    fromHandshake: boolean,
+  ) => void
+  /// Record THIS xterm's grid, so the pane can tell whether it is rendering at
+  /// the geometry the child is drawing for.
+  noteLocalGrid: (grid: { rows: number; cols: number }) => void
+  /// The socket opened, which retires any heal bounce that was in flight.
+  noteSocketOpen: () => void
   focusTypingSurface: () => void
   onClipboardPaste: (e: ClipboardEvent) => void
   /// Arm the force-text-paste hatch. The key handler here arms it and the
@@ -186,6 +198,9 @@ export function useTerminalLifecycle(
     ownership,
     connId,
     seedOwnershipFromConnected,
+    noteRemotePtyGrid,
+    noteLocalGrid,
+    noteSocketOpen,
     focusTypingSurface,
     onClipboardPaste,
     armForcedTextPaste,
@@ -394,6 +409,14 @@ export function useTerminalLifecycle(
       term.textarea.setAttribute("spellcheck", "false")
     }
     resize.fitAfterOpen()
+    // THE LOCAL HALF of the divergence comparison. A pure observation: it never
+    // fits and never sends, so the coordinator remains the one owner of both
+    // (see its module doc). xterm fires this only when the grid really changed,
+    // and the mount fit above has already happened, so seed it by hand first.
+    noteLocalGrid({ rows: term.rows, cols: term.cols })
+    const localGridSub = term.onResize(({ rows, cols }) =>
+      noteLocalGrid({ rows, cols }),
+    )
     termRef.current = term
     fitAddonRef.current = fit
     // Open synchronously against fallback metrics (above), then refit once the
@@ -428,6 +451,15 @@ export function useTerminalLifecycle(
       // to a strictly newer `pty.owner` this client already applied off the
       // events socket (the two sockets have no ordering between them).
       seedOwnershipFromConnected(connectionId, owner, ownerEpoch)
+    }
+
+    // THE REMOTE HALF: the grid the child is actually drawing for, reported by
+    // the `connected` handshake at attach and by a `size` event on every applied
+    // resize thereafter. The flag says which, because they mean different
+    // things: an attach is already sized against the handshake's answer, while a
+    // change after it is what a diverged viewer heals from.
+    pty.onPtyGrid = (grid, fromHandshake) => {
+      noteRemotePtyGrid(grid, fromHandshake)
     }
 
     // Forward keystrokes to the PTY as binary. On mobile, sticky modifiers from
@@ -908,6 +940,9 @@ export function useTerminalLifecycle(
       }
       connId.write(null)
       setReconnecting(false)
+      // A heal bounce (if this open is one) has landed; let the next grid
+      // change arm another.
+      noteSocketOpen()
       // The next binary frame is this open's scrollback replay: arm the repaint
       // handling (generation-drop + resize). Only opens AFTER the first also reset
       // the buffer first, since the first open starts from an empty terminal.
@@ -1075,6 +1110,7 @@ export function useTerminalLifecycle(
       window.removeEventListener("focus", resyncToForeground)
       dataSub.dispose()
       binarySub.dispose()
+      localGridSub.dispose()
       // Close this target's PTY socket (user-initiated: no reconnect) and clear
       // the active-socket registration ONLY if it still points at this one. A
       // focus switch swaps panes; whichever order React runs old-cleanup vs

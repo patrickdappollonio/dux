@@ -31,6 +31,17 @@ export const WHEEL_SCROLL_SENSITIVITY = 3
 /// time to finish collapsing.
 export const RESIZE_SEND_DEBOUNCE_MS = 200
 
+/// How long the PTY's grid must hold still before a diverged VIEWER bounces its
+/// socket to heal (see `viewerGrid.ts`). Deliberately longer than the two things
+/// that make an applied grid arrive in bursts: the owner's own send debounce
+/// above (200ms, so a divider drag lands one grid per settle) and the first
+/// open's width jiggle (two grids 60ms apart, in `lib/firstFrameResize.ts`). A
+/// window shorter than either would reconnect a watching phone several times
+/// for one gesture on the desktop; this collapses a burst into exactly one
+/// reconnect, at the cost of the badge standing for half a second longer than
+/// it strictly must.
+export const VIEWER_HEAL_DEBOUNCE_MS = 500
+
 /// Bytes written straight to the PTY (bypassing xterm's data pipeline), plus
 /// the view side effects a typed key would get through that pipeline: snap to
 /// the live edge and drop any stale selection so the user sees where the input

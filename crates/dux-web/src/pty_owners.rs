@@ -41,6 +41,18 @@ pub(crate) struct OwnersState {
     /// wire to order client-side arrivals. The fingerprint compare downstream
     /// remains the precise emit gate.
     pub(crate) generation: u64,
+    /// Per-pty grid sequence, bumped on every resize that APPLIES, inside the
+    /// same critical section that enqueues the resize to the engine actor. The
+    /// applies come out of the actor in claim order (see
+    /// [`PtySizeOwners::claim_for_resize`]), but each socket task publishes its
+    /// grid broadcast AFTER this lock releases, so two sockets' announcements
+    /// of two ordered applies can reach the bus inverted (A applies G2, B takes
+    /// over and applies G3, B's publish lands first, A's stale G2 becomes every
+    /// viewer's last word). Stamping the seq under the lock gives every
+    /// receiver a total order to drop stale announcements by, exactly as
+    /// `epoch` does for `pty.owner`. Keyed per pty because the broadcasts are
+    /// filtered per pty; never decreases within a process.
+    pub(crate) grid_seq: std::collections::HashMap<String, u64>,
 }
 
 /// Tracks which connection currently owns sizing+input for each PTY, keyed by
@@ -87,10 +99,16 @@ pub(crate) struct WriteClaim {
 /// non-owner's plain resize is refused whole (`apply: false`, `epoch: None`);
 /// an unowned pty and an explicit take-over both apply AND hand over
 /// (`apply: true`, `epoch: Some`).
+///
+/// `seq` is `Some` exactly when `apply` is: the per-pty grid sequence stamped
+/// in the SAME critical section that enqueued the resize, carried onto the
+/// grid broadcast so receivers can drop a stale announcement that the runtime
+/// reordered after the lock released (see [`OwnersState::grid_seq`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ResizeClaim {
     pub(crate) apply: bool,
     pub(crate) epoch: Option<u64>,
+    pub(crate) seq: Option<u64>,
 }
 
 impl PtySizeOwners {
@@ -160,14 +178,16 @@ impl PtySizeOwners {
         apply_resize: impl FnOnce(),
     ) -> ResizeClaim {
         let mut owners = self.owners.lock().unwrap();
-        let outcome = match owners.map.get(pty_id) {
+        let mut outcome = match owners.map.get(pty_id) {
             Some(&owner) if owner == conn_id => ResizeClaim {
                 apply: true,
                 epoch: None,
+                seq: None,
             },
             Some(_) if !takeover => ResizeClaim {
                 apply: false,
                 epoch: None,
+                seq: None,
             },
             _ => {
                 owners.map.insert(pty_id.to_string(), conn_id);
@@ -176,10 +196,19 @@ impl PtySizeOwners {
                 ResizeClaim {
                     apply: true,
                     epoch: Some(owners.epoch),
+                    seq: None,
                 }
             }
         };
         if outcome.apply {
+            // Stamp the grid sequence in the SAME critical section that
+            // enqueues the resize, so the seq order IS the apply order. The
+            // caller's grid broadcast happens after this lock releases and is
+            // freely reorderable by the runtime; the seq is what lets every
+            // receiver drop an announcement that arrives behind a newer one.
+            let seq = owners.grid_seq.entry(pty_id.to_string()).or_insert(0);
+            *seq += 1;
+            outcome.seq = Some(*seq);
             apply_resize();
         }
         outcome
@@ -285,6 +314,25 @@ impl PtySizeOwners {
         Some(owners.epoch)
     }
 
+    /// The per-pty grid sequence as of now: the seq of the last APPLIED resize,
+    /// or 0 before any. Read once per PTY-socket handshake, BEFORE the
+    /// actor-queued grid read, which makes it a valid lower bound for the grid
+    /// that read returns: a resize stamped at or below this value was enqueued
+    /// (inside the same critical section that stamped it) before this call, and
+    /// the actor drains in order, so the handshake's grid already reflects it.
+    /// The client seeds its last-seen seq from this value, so a stale broadcast
+    /// that was still buffered on the socket when the handshake was sent can
+    /// never regress the grid after it.
+    pub(crate) fn grid_seq(&self, pty_id: &str) -> u64 {
+        self.owners
+            .lock()
+            .unwrap()
+            .grid_seq
+            .get(pty_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
     /// The mutation counter for the owner map, read by the engine actor's spine
     /// check as its cheap "ownership might have changed" gate signal, exactly
     /// like `mutation_version` and `streaming_version`. See
@@ -336,6 +384,7 @@ mod tests {
         let (out, applied) = claim_resize(&owners, "p", a, false);
         assert!(out.apply);
         assert!(out.epoch.is_some(), "an unowned pty is claimed by a resize");
+        assert_eq!(out.seq, Some(1), "the first applied resize starts the seq");
         assert!(applied, "the resize applies when the claim is granted");
         assert!(owners.is_owner("p", a));
 
@@ -346,7 +395,8 @@ mod tests {
             out,
             ResizeClaim {
                 apply: true,
-                epoch: None
+                epoch: None,
+                seq: Some(2)
             }
         );
         assert!(applied);
@@ -358,7 +408,8 @@ mod tests {
             out,
             ResizeClaim {
                 apply: true,
-                epoch: None
+                epoch: None,
+                seq: Some(3)
             }
         );
 
@@ -371,7 +422,8 @@ mod tests {
             out,
             ResizeClaim {
                 apply: false,
-                epoch: None
+                epoch: None,
+                seq: None
             }
         );
         assert!(!applied, "a refused resize must not reach the PTY");
@@ -435,6 +487,44 @@ mod tests {
             owners.is_owner("p", winner),
             "the LAST geometry applied must belong to the connection recorded as owner"
         );
+    }
+
+    /// THE SEQ the grid broadcast is ordered by: stamped under the owners lock
+    /// in apply order, strictly increasing per pty across interleaved claims by
+    /// different connections, absent on a refusal, and independent per pty. The
+    /// broadcasts themselves are published after the lock releases and can
+    /// invert on the runtime; this order is what lets a receiver drop the stale
+    /// one, so it must be airtight at the source.
+    #[test]
+    fn grid_seq_is_monotonic_per_pty_in_apply_order_and_absent_on_refusal() {
+        let owners = PtySizeOwners::default();
+        let a = owners.next_conn_id();
+        let b = owners.next_conn_id();
+
+        assert_eq!(owners.grid_seq("p"), 0, "no applied resize yet");
+
+        // Interleaved: A claims, B takes over, A takes back, each apply gets
+        // the next seq in the order the lock granted them.
+        let s1 = claim_resize(&owners, "p", a, false).0.seq;
+        let s2 = claim_resize(&owners, "p", b, true).0.seq;
+        let s3 = claim_resize(&owners, "p", a, true).0.seq;
+        assert_eq!((s1, s2, s3), (Some(1), Some(2), Some(3)));
+
+        // A refusal advances nothing: the resize did not land, so announcing a
+        // seq for it would let a stale geometry outrank a real one.
+        let (refused, _) = claim_resize(&owners, "p", b, false);
+        assert_eq!(refused.seq, None);
+        assert_eq!(
+            owners.grid_seq("p"),
+            3,
+            "the accessor reports the last APPLIED seq"
+        );
+
+        // Another pty counts on its own: the broadcasts are filtered per pty,
+        // so the order only has to hold within one.
+        let (other, _) = claim_resize(&owners, "q", b, false);
+        assert_eq!(other.seq, Some(1));
+        assert_eq!(owners.grid_seq("p"), 3);
     }
 
     /// A release that really cleared an owner reports an epoch, so the caller can

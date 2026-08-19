@@ -1441,6 +1441,19 @@ impl PtyClient {
         self.terminal.lock().is_ok_and(|t| t.is_alt_screen())
     }
 
+    /// The child's current grid as `(rows, cols)`, read under the terminal lock.
+    ///
+    /// One PTY has ONE authoritative grid, and every attached browser renders the
+    /// same byte stream into its own xterm. A viewer sized differently is
+    /// rendering wrapped, clamped garbage and has no way to know it, so the web
+    /// layer puts this on the wire (the PTY socket's `connected` handshake) and a
+    /// viewer compares it against its own grid. `None` only when the lock is
+    /// poisoned, which the caller reports as "this server does not know" rather
+    /// than inventing a size.
+    pub fn grid_size(&self) -> Option<(u16, u16)> {
+        self.terminal.lock().ok().map(|t| (t.rows, t.cols))
+    }
+
     /// Resize the PTY and the internal terminal parser.
     ///
     /// The kernel resize and the emulator resize are ONE critical section. The
@@ -5220,6 +5233,27 @@ mod tests {
                 "the reap instant must be the FIRST observation, not the latest poll"
             );
         }
+    }
+
+    #[test]
+    fn grid_size_reports_the_spawn_geometry_and_follows_every_resize() {
+        // The web layer puts this on the wire so a viewer can tell that the PTY
+        // is sized for somebody else's window. It has to answer with the grid
+        // the child is actually drawing for, which means it must move with
+        // `resize` rather than reporting the size the PTY was spawned at.
+        let client = PtyClient::spawn("cat", &[], Path::new("."), 5, 40, 100).expect("spawn");
+        assert_eq!(
+            client.grid_size(),
+            Some((5, 40)),
+            "the freshly spawned grid is the one the child was handed"
+        );
+        client.resize(31, 101).expect("resize the pty");
+        assert_eq!(
+            client.grid_size(),
+            Some((31, 101)),
+            "a viewer reading a stale grid would decide it agrees with the PTY \
+             when it does not"
+        );
     }
 
     #[test]

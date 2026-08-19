@@ -211,6 +211,145 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     canvas paint (oklch to hex), applied to canvas and padded host alike.**
     Fix: src/components/terminal/useTerminalLifecycle.ts:203-224, src/components/terminal/useTerminalLifecycle.ts:272-272. Pinned: unpinned.
 
+20. **NEW at the viewer-geometry arc: the PTY's grid is ON THE WIRE, twice over.**
+    Trap (proven): one PTY has ONE authoritative grid, the owner's, and every other
+    attached browser renders the same byte stream into its own differently sized
+    xterm. Nothing told a non-owner the PTY's size (no field on the event bus, none
+    on the pty-socket `connected` frame), so a viewer could not know that its live
+    view was wrapped and clamped and that every child repaint was scrolling mangled
+    rows into its LOCAL scrollback, where they stay until a fresh attach. The
+    handshake now carries the grid at attach (`rows`/`cols`, always serialized, null
+    when the server could not read the pty, which the client reads as "nothing
+    known" and never as agreement), and every APPLIED resize is pushed to every
+    socket attached to that pty as a Text event frame
+    `{"event":"size","rows":R,"cols":C,"seq":N}`. A refused resize (a non-owner's
+    plain frame) applies nothing and therefore announces nothing, exactly like the
+    `pty.owner` broadcast beside it, or every viewer would heal itself towards a
+    size the child never took. The broadcast is a `tokio::sync::broadcast` read by
+    one more arm in each socket's existing `select!` loop, NOT a registry of sinks:
+    the crate deliberately holds no other task's sink and locks none across an
+    await.
+    ORDERED BY `seq`, exactly the way `pty.owner` is ordered by `epoch`. Trap
+    (found in review): the applies serialize under the owners lock, but each
+    socket task publishes to the bus AFTER releasing it, so two sockets'
+    announcements of two ordered applies can invert (A applies G2, B takes over
+    and applies G3, B's publish lands first, A's stale G2 becomes every viewer's
+    last word). `claim_for_resize` therefore stamps a per-pty seq inside the
+    same critical section that enqueues the resize, the `size` frame carries it,
+    and the client keeps only the highest seq seen, dropping any older arrival.
+    The handshake carries the same counter as `grid_seq`, read server-side
+    BEFORE the actor-queued grid read (so the handshake's grid is at least as
+    new as it); the client seeds its filter from it, which is what stops a stale
+    broadcast buffered from before the handshake from regressing the grid after
+    the attach (and from arming a spurious heal bounce). The server's select arm
+    keeps the same filter, seeded the same way, purely to save the wire trip;
+    the client-side filter is the one that must exist. Old servers stamp no
+    seqs, and the client then leaves the filter off rather than reading "no
+    seq" as "seq zero".
+    Fix: `crates/dux-core/src/pty.rs` (`grid_size`), `crates/dux-web/src/pty_sizes.rs`
+    (the bus, and the two doc paragraphs on why it is a broadcast and not the
+    event bus), `crates/dux-web/src/engine_actor.rs` (`PtyGridSize` /
+    `pty_grid_size`), `crates/dux-web/src/pty_owners.rs` (`OwnersState.grid_seq`,
+    the seq stamp in `claim_for_resize`, the `grid_seq` accessor),
+    `crates/dux-web/src/server.rs` (`PtyConnectedFrame.rows/cols/grid_seq`,
+    `PtySizeFrame`, `pty_size_frame_text`, the `grid_changes` select arm and its
+    seq filter, the publish inside the `outcome.seq` branch),
+    `src/lib/ptySocket.ts` (`onPtyGrid`, the `grid` getter, `readGrid`,
+    `lastGridSeq`).
+    RESIZE PATHS COVERED: for a web client the ONE path that resizes a live pty's
+    grid is the socket's Text arm (`claim_for_resize` -> `EngineRequest::ResizePty`),
+    which is where the publish sits. Launch and reopen paths SPAWN at their initial
+    geometry rather than resizing a live pty, and a freshly spawned pty has no
+    attached socket to tell (the first attach reads the grid off the handshake).
+    The TUI's own `provider.resize` never coexists with web sockets, because
+    `dux server` runs headless.
+    Pinned: `crates/dux-core/src/pty.rs`
+    `grid_size_reports_the_spawn_geometry_and_follows_every_resize`;
+    `crates/dux-web/src/pty_sizes.rs` (both tests);
+    `crates/dux-web/src/server.rs` `pty_connected_frame_serializes_with_generation`,
+    `pty_connected_frame_spells_an_unknown_grid_as_explicit_nulls`,
+    `pty_size_frame_serializes_as_a_size_event`;
+    `crates/dux-web/tests/ws_transport.rs`
+    `an_applied_resize_tells_every_attached_socket_the_ptys_new_grid` (announced to
+    every socket, NOT announced on a refusal, and the handshake reporting the live
+    grid); `src/lib/ptySocket.test.ts` "reports the pty's grid from the handshake
+    and from every size event", "reads a grid the server could not answer as
+    UNKNOWN, never as agreement", "drops a size event whose seq the handshake
+    already covers", "drops a size event that arrives behind a newer one, by seq
+    alone", and "applies size events without a seq, for an old server that
+    stamps none"; `crates/dux-web/src/pty_owners.rs`
+    `grid_seq_is_monotonic_per_pty_in_apply_order_and_absent_on_refusal`;
+    `crates/dux-web/src/pty_sizes.rs`
+    `a_stale_publish_arriving_after_a_newer_one_is_droppable_by_seq`.
+
+21. **NEW at the viewer-geometry arc: a diverged viewer SAYS SO.** A non-owner whose
+    local xterm grid differs from the wire-known PTY grid renders a small, quiet
+    badge ("Sized for another device"). It is a statement, never a control:
+    `pointer-events-none`, no button, no menu, so it cannot swallow a click meant
+    for the terminal. It renders ONLY on real divergence (owner known to be somebody
+    else AND the two grids actually differ) and disappears live when either side
+    moves, because both are live values. Unknown on either side reads as "nothing to
+    claim", so an older server produces no badge rather than a guess.
+    KNOWN OCCLUSION, stated rather than hidden: the take-over card paints solid over
+    the whole pane for every non-owner (C12), and the badge deliberately sits under
+    it at `z-10`, so today the badge is in the DOM but behind that card in the
+    common case. It becomes visible when the viewer renders the terminal (the
+    follow-up arc), and two answers stacked would be worse than one until then.
+    Fix: `src/components/terminal/viewerGrid.ts` (`gridsDiverge`, `useViewerGrid`),
+    `src/components/TerminalPane.tsx` (`sizedForAnotherDevice`, the badge).
+    Pinned: `src/components/terminal/viewerGrid.test.ts` `gridsDiverge` suite;
+    `components/TerminalPane.test.tsx` "TerminalPane viewer grid divergence" (says
+    so, never to the owner, quiet when the grids agree, retires when they come back
+    together, silent when the server reports no grid).
+
+22. **NEW at the viewer-geometry arc: a viewer HEALS BY RE-ATTACHING, never by
+    resizing the PTY.** A non-owner that hears a `size` event different from the last
+    known remote grid schedules a socket bounce (`pty.connect()`), debounced by
+    `VIEWER_HEAL_DEBOUNCE_MS` (500ms, chosen longer than both things that make
+    applied grids arrive in bursts: the owner's own 200ms send debounce and the
+    first open's two-step 60ms jiggle), so one gesture on the owner's desktop
+    produces exactly ONE reconnect on a watching phone. The bounce is the existing
+    reconnect machinery and nothing new (reset, fresh generation, replay, mode
+    restore), which is precisely what clears the viewer-era scrollback; a viewer
+    resizing the PTY instead would be the silent steal reborn. FIVE GUARDS, all
+    mandatory: never when this client is the owner, never while a take-over intent
+    is armed (take-over is already a bounce), never while a bounce is in flight,
+    never without a socket (a dormant pane is never mounted), and the `connected`
+    frame's own grid never triggers one (it would loop forever). At FIRING time the
+    timer re-derives the four LIVE inputs (owner, take-over armed, bounce in
+    flight, socket present) and routes them through the same
+    `shouldHealByReattaching` table as arming, so the two decision points cannot
+    drift; `fromHandshake` and `changed` are arming-time facts (a heal is only ever
+    armed by a non-handshake change) and are passed as the constants that armed it.
+    A SOCKET OPEN CLEARS AN ARMED HEAL, not just the in-flight flag: any open (a
+    network blip's reconnect, a take-over) has just rebuilt the buffer from the
+    server's repaint, so a timer armed before it firing after it would be a
+    redundant bounce at a just-healed socket. The reconnect cue is raised by hand,
+    as the take-over bounce raises it, because a deliberate `connect()` fires no
+    `onReconnecting`. THE BADGE STAYS after a successful heal if the grids still
+    differ, and that is correct: the reattach rebuilds the buffer cleanly but moves
+    neither grid.
+    RECORDED FOLLOW-UP: the `bouncing` latch is cleared by an open and by
+    teardown, but not by the socket declaring the connection lost; a bounce whose
+    socket never reopens leaves heals disabled for the rest of the mount (any
+    later successful open, the manual Reconnect included, clears it). Wiring the
+    connection-lost signal into the machine is deliberately not done here because
+    it needs a new port through the lifecycle, not a one-line clear.
+    Fix: `src/components/terminal/viewerGrid.ts` (`shouldHealByReattaching`, the
+    debounce and the firing-time re-check), `src/components/terminal/constants.ts`
+    (`VIEWER_HEAL_DEBOUNCE_MS`),
+    `src/components/terminal/useTerminalLifecycle.ts` (`onPtyGrid`, the local-grid
+    observation subscription, `noteSocketOpen` in `onOpen`).
+    Pinned: `src/components/terminal/viewerGrid.test.ts` `shouldHealByReattaching`
+    suite (one row per guard) and the `useViewerGrid` suite ("clears an armed heal
+    when the socket opens...", "still bounces once when nothing intervenes...",
+    "stands down at firing time when the client became the owner meanwhile");
+    `components/TerminalPane.test.tsx` "TerminalPane
+    viewer grid divergence": "bounces the socket ONCE after a burst of grid changes
+    settles" (which also pins the badge surviving the heal), "never bounces on the
+    handshake's OWN grid", "never bounces the OWNER", "stands down while a take-over
+    is armed".
+
 ## B. Attach, replay, freshness
 
 1. **Opening the PTY socket IS the subscription; connecting an agent socket
@@ -225,7 +364,15 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
 
 2. **The server's first frame is Text `connected` carrying this socket's connection id
     and the replay generation; the replay follows as one Binary frame.**
-    Fix: `src/lib/ptySocket.ts:227-268`; `crates/dux-web/src/server.rs:1472-1521`.
+    AMENDED at the take-over arc (it also names the pty's `owner` and the
+    `owner_epoch` of that snapshot, C1) and again at the viewer-geometry arc (it
+    also carries the pty's `rows`/`cols`, plus the `grid_seq` those are at least
+    as new as, A20). It is now the only frame a client
+    needs to know all three things about the pty it just joined: who drives it,
+    since when, and at what geometry. `size` is the one OTHER Text frame the
+    server sends on this socket, and the two are told apart by `event` alone.
+    Fix: `src/lib/ptySocket.ts` (`handleMessage`); `crates/dux-web/src/server.rs`
+    (`PtyConnectedFrame`, `send_pty_connected`).
     Pinned: `src/lib/ptySocket.test.ts` "records connection id and replay generation from
     the connected frame", "leaves replayGeneration null when the connected frame omits gen".
 
@@ -380,8 +527,15 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     for A with B recorded as its driver, permanently (B believes it already told the
     child). Two doc comments claiming a non-owner's resize was already ignored were
     fiction and are corrected in the same change.
+    AMENDED at the viewer-geometry arc: the same branch that decides `apply` is
+    now also where an APPLIED grid is announced to every socket attached to the
+    pty (A20). The two halves are deliberately one condition, so a refusal can
+    never announce: `outcome.apply` gates the publish exactly as `outcome.epoch`
+    gates the `pty.owner` emit beside it, and both run after the owners lock is
+    released.
     Fix: `crates/dux-web/src/pty_owners.rs` (`claim_for_resize`, `ResizeClaim`),
-    `crates/dux-web/src/server.rs` (the Text-frame arm, `PtyResizeFrame.takeover`).
+    `crates/dux-web/src/server.rs` (the Text-frame arm, `PtyResizeFrame.takeover`,
+    the `pty_grid_bus.publish` inside the `apply` branch).
     Pinned: `crates/dux-web/src/pty_owners.rs` `claim_for_resize_table` (the full
     {unowned, owned-by-other, owned-by-self} x {plain, takeover} table) and
     `claim_for_resize_applies_in_claim_order_so_the_owner_owns_the_geometry`;

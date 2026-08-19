@@ -72,6 +72,11 @@ pub enum EngineRequest {
     SubscribePty(String, oneshot::Sender<Result<PtySubscription, String>>),
     WritePty(String, Vec<u8>),
     ResizePty(String, u16, u16),
+    /// Read a live PTY's current grid as `(rows, cols)`, replying `None` when the
+    /// id names nothing running. The PTY socket asks once per attach so the
+    /// `connected` handshake can tell an arriving viewer what geometry the child
+    /// is actually drawing for.
+    PtyGridSize(String, oneshot::Sender<Option<(u16, u16)>>),
     /// A "user is looking at this tab" ping from a foregrounded, input-owning
     /// browser terminal. Fire-and-forget; routed to
     /// [`dux_core::engine::Engine::note_agent_viewed_if_known`] so continuous
@@ -777,6 +782,18 @@ impl EngineHandle {
         let _ = self
             .req_tx
             .try_send(EngineRequest::ResizePty(session_id, rows, cols));
+    }
+
+    /// The PTY's current grid as `(rows, cols)`, or `None` when the id names no
+    /// running PTY (or the engine is gone). Asked once per PTY-socket attach so
+    /// the `connected` handshake can carry the geometry the child is drawing for.
+    pub async fn pty_grid_size(&self, pty_id: String) -> Option<(u16, u16)> {
+        let (tx, rx) = oneshot::channel();
+        self.req_tx
+            .send(EngineRequest::PtyGridSize(pty_id, tx))
+            .await
+            .ok()?;
+        rx.await.ok().flatten()
     }
 
     pub fn note_viewed(&self, pty_id: String) {
@@ -1541,6 +1558,11 @@ fn request_mutates_spine(req: &EngineRequest) -> bool {
         // `ResizePty` resolves the client through `pty_for`, which borrows the
         // engine immutably. Neither adds, removes, or restates a spine row.
         EngineRequest::SubscribeTerminal(..) | EngineRequest::ResizePty(..) => false,
+
+        // A read of a live PTY's grid through the same immutable `pty_for`
+        // borrow `ResizePty` uses. It clones two integers out from under the
+        // terminal lock and writes nothing anywhere.
+        EngineRequest::PtyGridSize(..) => false,
 
         // Read-only git. `create_agent_branch_preflight` is a `branch_exists`
         // probe answering "fresh or existing branch?"; it writes nothing.
@@ -2640,6 +2662,9 @@ fn handle_request(
             if let Some(client) = pty_for(engine, &id) {
                 let _ = client.resize(rows, cols);
             }
+        }
+        EngineRequest::PtyGridSize(id, reply) => {
+            let _ = reply.send(pty_for(engine, &id).and_then(|client| client.grid_size()));
         }
         EngineRequest::NoteViewed(id) => {
             // The engine gates on the id resolving to a real agent tab, so a
@@ -4835,6 +4860,11 @@ mod tests {
                 EngineRequest::ResizePty("s1".into(), 24, 80),
                 false,
             ),
+            (
+                "PtyGridSize",
+                EngineRequest::PtyGridSize("s1".into(), dead_reply()),
+                false,
+            ),
             ("NoteViewed", EngineRequest::NoteViewed("s1".into()), true),
             (
                 "SubscribeTerminal",
@@ -5082,7 +5112,7 @@ mod tests {
         // through with a copied-from-its-neighbour `false` that nothing reads.
         assert_eq!(
             request_kind_answers().len(),
-            39,
+            40,
             "every EngineRequest kind needs a row in request_kind_answers; \
              update the count deliberately when adding one"
         );

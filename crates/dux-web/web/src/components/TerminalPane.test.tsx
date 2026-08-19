@@ -315,6 +315,13 @@ class FakePtySocket {
   // owner exercise the older-server fallback (the key absent, so the foreground
   // guess still decides), which is what most of this file wants.
   onConnected: (id: string, owner?: string | null) => void = () => {}
+  // The PTY's authoritative grid, reported by the `connected` handshake at
+  // attach (`fromHandshake` true) and by a `size` event on every applied resize
+  // after it. A test drives it directly, which is exactly what the server does.
+  onPtyGrid: (
+    grid: { rows: number; cols: number } | null,
+    fromHandshake: boolean,
+  ) => void = () => {}
   onOpen: () => void = () => {}
   onReconnecting: () => void = () => {}
   onConn: (state: ConnState) => void = () => {}
@@ -634,6 +641,151 @@ describe("TerminalPane seeds its ownership verdict from the connected frame", ()
     // Claimed by SENDING, unflagged: there is nobody to take it from, and the
     // send goes through the resize coordinator like every other one.
     expect(pty.sendResize).toHaveBeenCalledWith(24, 80)
+  })
+})
+
+// ONE PTY HAS ONE AUTHORITATIVE GRID, the owner's, and every other attached
+// browser renders the same byte stream into its own, differently sized xterm.
+// A viewer in that state is looking at wrapped and clamped output, and every
+// child repaint scrolls mangled rows into its LOCAL scrollback, which nothing
+// but a fresh attach ever cleans up. Two answers, pinned here: the pane SAYS SO,
+// and it HEALS BY RE-ATTACHING (never by resizing the PTY, which is the silent
+// steal this whole arc exists to kill).
+//
+// The stub terminal's grid is 24x80, so a reported grid of anything else is a
+// diverged viewer.
+describe("TerminalPane viewer grid divergence", () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  const badge = () => screen.queryByTestId("viewer-grid-badge")
+
+  /// Mount, settle the deferred first-frame resize, and make this pane a
+  /// WATCHER by answering the handshake with somebody else's connection id.
+  const mountWatcher = () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const pty = last()
+    act(() => pty.onOpen())
+    act(() => {
+      vi.advanceTimersByTime(400)
+    })
+    act(() => pty.onConnected("conn-self", "conn-other"))
+    pty.connect.mockClear()
+    return pty
+  }
+
+  it("says so when this viewer's grid differs from the PTY's", () => {
+    const pty = mountWatcher()
+    expect(badge()).toBeNull()
+    act(() => pty.onPtyGrid({ rows: 40, cols: 120 }, true))
+    expect(badge()?.textContent).toBe("Sized for another device")
+  })
+
+  it("never says it to the OWNER, who is the one defining the grid", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const pty = last()
+    act(() => pty.onOpen())
+    act(() => {
+      vi.advanceTimersByTime(400)
+    })
+    // An UNOWNED pty, so this foregrounded pane is the driver.
+    act(() => pty.onConnected("conn-self", null))
+    act(() => pty.onPtyGrid({ rows: 40, cols: 120 }, true))
+    expect(badge()).toBeNull()
+  })
+
+  it("stays quiet when the grids agree", () => {
+    const pty = mountWatcher()
+    act(() => pty.onPtyGrid({ rows: 24, cols: 80 }, true))
+    expect(badge()).toBeNull()
+  })
+
+  it("retires itself the moment the PTY's grid comes back to this viewer's", () => {
+    const pty = mountWatcher()
+    act(() => pty.onPtyGrid({ rows: 40, cols: 120 }, true))
+    expect(badge()).toBeTruthy()
+    act(() => pty.onPtyGrid({ rows: 24, cols: 80 }, false))
+    expect(badge()).toBeNull()
+  })
+
+  it("says nothing when the server does not report a grid at all", () => {
+    // An older server omits the keys; the client must read that as "nothing
+    // known", never as agreement and never as divergence.
+    const pty = mountWatcher()
+    act(() => pty.onPtyGrid(null, true))
+    expect(badge()).toBeNull()
+  })
+
+  it("bounces the socket ONCE after a burst of grid changes settles", () => {
+    const pty = mountWatcher()
+    act(() => pty.onPtyGrid({ rows: 40, cols: 120 }, true))
+    // A divider drag on the owner's desktop: several applied grids in quick
+    // succession. Each re-arms the debounce; none of them may reconnect a
+    // watching phone on its own.
+    act(() => {
+      pty.onPtyGrid({ rows: 41, cols: 121 }, false)
+      vi.advanceTimersByTime(100)
+      pty.onPtyGrid({ rows: 42, cols: 122 }, false)
+      vi.advanceTimersByTime(100)
+      pty.onPtyGrid({ rows: 43, cols: 123 }, false)
+    })
+    expect(pty.connect).not.toHaveBeenCalled()
+    act(() => {
+      vi.advanceTimersByTime(600)
+    })
+    expect(pty.connect).toHaveBeenCalledTimes(1)
+    // The heal is a reconnect, and a deliberate `connect()` fires no
+    // `onReconnecting` of its own, so the cue is raised by hand exactly as the
+    // take-over bounce raises it.
+    expect(screen.getByText("Reconnecting…")).toBeTruthy()
+    // AND THE BADGE STAYS, which is correct: the reattach rebuilds this
+    // viewer's buffer cleanly, but it does not change either grid, so this
+    // pane is still rendering at a size the child is not drawing for. The badge
+    // goes when the geometry agrees, not when the buffer is clean.
+    expect(badge()).toBeTruthy()
+  })
+
+  it("never bounces on the handshake's OWN grid", () => {
+    // A fresh attach has just rebuilt its buffer from the server's repaint.
+    // Bouncing on the grid that attach reported would loop forever.
+    const pty = mountWatcher()
+    act(() => pty.onPtyGrid({ rows: 40, cols: 120 }, true))
+    act(() => {
+      vi.advanceTimersByTime(1000)
+    })
+    expect(pty.connect).not.toHaveBeenCalled()
+  })
+
+  it("never bounces the OWNER, whose own resize is echoed back to it", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const pty = last()
+    act(() => pty.onOpen())
+    act(() => {
+      vi.advanceTimersByTime(400)
+    })
+    act(() => pty.onConnected("conn-self", null))
+    pty.connect.mockClear()
+    act(() => pty.onPtyGrid({ rows: 40, cols: 120 }, false))
+    act(() => {
+      vi.advanceTimersByTime(1000)
+    })
+    expect(pty.connect).not.toHaveBeenCalled()
+  })
+
+  it("stands down while a take-over is armed, which is already a bounce", () => {
+    const pty = mountWatcher()
+    fireEvent.click(screen.getByText("Take over"))
+    // The take-over's own bounce, and the only one this test permits.
+    expect(pty.connect).toHaveBeenCalledTimes(1)
+    act(() => pty.onPtyGrid({ rows: 40, cols: 120 }, false))
+    act(() => {
+      vi.advanceTimersByTime(1000)
+    })
+    expect(pty.connect).toHaveBeenCalledTimes(1)
   })
 })
 

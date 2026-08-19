@@ -7,8 +7,19 @@
 // Protocol (matches `handle_pty_socket` in `crates/dux-web/src/server.rs`):
 //   - On (re)open the server sends a Text `connected` frame FIRST carrying this
 //     socket's connection id, the replay generation, who currently drives the
-//     PTY, and the ownership epoch of that owner snapshot:
-//     `{"event":"connected","id":"<connId>","gen":<n>,"owner":"<connId>"|null,"owner_epoch":<n>}`.
+//     PTY, the ownership epoch of that owner snapshot, the PTY's current
+//     grid, and the grid sequence that grid is at least as new as:
+//     `{"event":"connected","id":"<connId>","gen":<n>,"owner":"<connId>"|null,"owner_epoch":<n>,"rows":<n>|null,"cols":<n>|null,"grid_seq":<n>}`.
+//   - Whenever a resize is APPLIED to the PTY, every socket attached to it gets
+//     a Text event frame `{"event":"size","rows":R,"cols":C,"seq":<n>}`. One PTY
+//     has one authoritative grid (the owner's) and every other attached browser
+//     renders the same byte stream into its own differently sized xterm, so this
+//     is how a viewer learns that what it is rendering is wrapped and clamped.
+//     `seq` is a per-pty counter stamped server-side in APPLY order; the
+//     broadcasts behind these frames are emitted after that order is fixed and
+//     can invert in flight, so this client keeps only the highest seq seen
+//     (seeded from the handshake's `grid_seq`) and drops any older arrival, or
+//     a stale announcement could become its last word on the grid.
 //   - Then the server sends ONE Binary frame replaying the buffered
 //     scrollback/repaint; feed it straight to xterm like any other byte chunk. The
 //     `gen` labels this replay so the client can drop one it already applied.
@@ -117,6 +128,19 @@ export function tabPtyUrl(sessionId: string, tabId: string): string {
   )}/tabs/${encodeURIComponent(tabId)}/pty`
 }
 
+// A grid off a wire frame, or null when the frame does not carry one. Both
+// dimensions must be real numbers: half a grid is not a grid, and a partial
+// read would be worse than none, because the comparison it feeds would then be
+// against a number nobody sent.
+function readGrid(frame: {
+  rows?: number | null
+  cols?: number | null
+}): { rows: number; cols: number } | null {
+  return typeof frame.rows === "number" && typeof frame.cols === "number"
+    ? { rows: frame.rows, cols: frame.cols }
+    : null
+}
+
 export class PtySocket extends ReconnectingSocket {
   private bytesCb: (bytes: Uint8Array) => void = () => {}
   // This socket's server-assigned connection id, delivered as the first Text frame
@@ -156,6 +180,22 @@ export class PtySocket extends ReconnectingSocket {
   // key was absent (an old server, which then omitted `owner` too).
   private connectedOwnerEpoch: number | undefined = undefined
 
+  // The PTY's grid as of the most recent frame that reported one: the
+  // `connected` handshake at attach, then every `size` event after it. Null
+  // when the server did not answer (an old server, or a pty it could not read),
+  // which reads as "nothing is known about the grid" and must never be mistaken
+  // for agreement with the local one.
+  private ptyGrid: { rows: number; cols: number } | null = null
+
+  // The highest grid seq applied so far: the handshake's `grid_seq` seed, then
+  // every accepted `size` event's `seq`. The server stamps seqs in apply order
+  // but publishes after that order is fixed, so two sockets' announcements can
+  // reach this client inverted; a `size` event at or below this mark carries
+  // OLDER geometry than `ptyGrid` already holds and is dropped, never applied.
+  // Null against an old server that sends no seqs, which disables the filter
+  // rather than mistaking "no seq" for "seq zero".
+  private lastGridSeq: number | null = null
+
   // Fired with this socket's connection id, the pty's current owner, and the
   // ownership epoch of that owner snapshot, each time the `connected` frame
   // lands. Lets the terminal view track which connection id is "us" for the
@@ -165,6 +205,18 @@ export class PtySocket extends ReconnectingSocket {
     id: string,
     owner: string | null | undefined,
     ownerEpoch: number | undefined,
+  ) => void = () => {}
+
+  // Fired with the PTY's grid every time the wire reports one, and with
+  // `fromHandshake` saying WHICH frame reported it. The two are acted on
+  // differently and the distinction is the whole point of the flag: the
+  // handshake's grid is the state a fresh attach is already sized against,
+  // while a CHANGE after the attach is what makes a viewer re-attach to heal.
+  // A frame that carries no grid (an old server, or a pty the server could not
+  // read) reports null rather than a guess.
+  onPtyGrid: (
+    grid: { rows: number; cols: number } | null,
+    fromHandshake: boolean,
   ) => void = () => {}
 
   // `onOpen`, `onReconnecting`, and `onConn` are inherited from ReconnectingSocket.
@@ -214,6 +266,12 @@ export class PtySocket extends ReconnectingSocket {
     return this.connectedOwner
   }
 
+  // The PTY's grid as last reported by the wire, or null when nothing has
+  // reported one; see the field.
+  get grid(): { rows: number; cols: number } | null {
+    return this.ptyGrid
+  }
+
   // Request arraybuffer framing so server→client Binary frames arrive as
   // `ArrayBuffer` (raw PTY bytes) rather than Blobs.
   protected configureSocket(ws: WebSocket): void {
@@ -241,6 +299,31 @@ export class PtySocket extends ReconnectingSocket {
           gen?: number
           owner?: string | null
           owner_epoch?: number
+          rows?: number | null
+          cols?: number | null
+          seq?: number
+          grid_seq?: number
+        }
+        // A grid change on a PTY somebody else is driving. Handled before the
+        // handshake branch because the two are told apart by `event` alone.
+        if (frame.event === "size") {
+          const grid = readGrid(frame)
+          if (grid) {
+            // Drop a stale announcement: one whose seq is at or below the
+            // newest applied (the handshake's seed included, so a broadcast
+            // buffered from before the handshake cannot regress the grid the
+            // handshake just reported). An event with no seq is an old
+            // server, which never stamped an order to enforce.
+            if (typeof frame.seq === "number") {
+              if (this.lastGridSeq !== null && frame.seq <= this.lastGridSeq) {
+                return
+              }
+              this.lastGridSeq = frame.seq
+            }
+            this.ptyGrid = grid
+            this.onPtyGrid(grid, false)
+          }
+          return
         }
         if (frame.event === "connected" && typeof frame.id === "string") {
           this.connId = frame.id
@@ -259,7 +342,18 @@ export class PtySocket extends ReconnectingSocket {
           // together, so an absent epoch is the same mixed-version signal.
           this.connectedOwnerEpoch =
             typeof frame.owner_epoch === "number" ? frame.owner_epoch : undefined
+          // The grid this attach is joining. A server that cannot answer sends
+          // explicit nulls (and an older one omits the keys), and both land
+          // here as null: "nothing known", never "it matches".
+          this.ptyGrid = readGrid(frame)
+          // Seed the seq filter from the handshake: the server read `grid_seq`
+          // before the grid, so the grid above is at least as new as this
+          // mark, and any `size` event at or below it is stale. Absent on an
+          // old server, which leaves the filter off.
+          this.lastGridSeq =
+            typeof frame.grid_seq === "number" ? frame.grid_seq : null
           this.onConnected(frame.id, this.connectedOwner, this.connectedOwnerEpoch)
+          this.onPtyGrid(this.ptyGrid, true)
         }
       } catch {
         // A malformed control frame is not fatal to the byte stream; ignore it.

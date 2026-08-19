@@ -133,6 +133,11 @@ pub struct AppState {
     /// The most recently attached per-PTY socket owns sizing; a non-owner's resize
     /// frame is ignored (see [`PtySizeOwners`]).
     pty_size_owners: Arc<PtySizeOwners>,
+    /// The per-PTY grid-change bus. Every applied resize is announced here and
+    /// forwarded to every socket attached to that PTY as a `size` event frame,
+    /// so a viewer learns the authoritative grid it is NOT rendering at (see
+    /// [`crate::pty_sizes`]).
+    pty_grid_bus: Arc<crate::pty_sizes::PtyGridBus>,
     /// The live-connection registry: every upgraded WebSocket (events + both PTY
     /// families) records its server-minted id and class here on connect and removes
     /// it on disconnect. Read by `scope_from_headers` to validate an inbound
@@ -590,6 +595,7 @@ pub fn build_app(
         // overlays the owner map onto the spine so every client learns which
         // connection is driving each agent PTY without attaching to it.
         pty_size_owners: engine_pty_owners,
+        pty_grid_bus: Arc::new(crate::pty_sizes::PtyGridBus::default()),
         connections: Arc::new(crate::rest_common::ConnectionRegistry::new()),
         first_load,
     };
@@ -1016,6 +1022,7 @@ async fn ws_session_pty_upgrade(
     let engine = state.engine.clone();
     let console = state.console.clone();
     let pty_size_owners = Arc::clone(&state.pty_size_owners);
+    let pty_grid_bus = Arc::clone(&state.pty_grid_bus);
     let bus = Arc::clone(&state.event_bus);
     let connections = Arc::clone(&state.connections);
     let peer_ip = peer.ip();
@@ -1032,6 +1039,7 @@ async fn ws_session_pty_upgrade(
                 peer_ip,
                 permit,
                 pty_size_owners,
+                pty_grid_bus,
                 bus,
                 connections,
                 user_agent,
@@ -1090,6 +1098,7 @@ async fn ws_terminal_pty_upgrade(
     let engine = state.engine.clone();
     let console = state.console.clone();
     let pty_size_owners = Arc::clone(&state.pty_size_owners);
+    let pty_grid_bus = Arc::clone(&state.pty_grid_bus);
     let bus = Arc::clone(&state.event_bus);
     let connections = Arc::clone(&state.connections);
     let peer_ip = peer.ip();
@@ -1104,6 +1113,7 @@ async fn ws_terminal_pty_upgrade(
                 peer_ip,
                 permit,
                 pty_size_owners,
+                pty_grid_bus,
                 bus,
                 connections,
                 user_agent,
@@ -1162,6 +1172,7 @@ async fn ws_project_terminal_pty_upgrade(
     let engine = state.engine.clone();
     let console = state.console.clone();
     let pty_size_owners = Arc::clone(&state.pty_size_owners);
+    let pty_grid_bus = Arc::clone(&state.pty_grid_bus);
     let bus = Arc::clone(&state.event_bus);
     let connections = Arc::clone(&state.connections);
     let peer_ip = peer.ip();
@@ -1176,6 +1187,7 @@ async fn ws_project_terminal_pty_upgrade(
                 peer_ip,
                 permit,
                 pty_size_owners,
+                pty_grid_bus,
                 bus,
                 connections,
                 user_agent,
@@ -1229,6 +1241,7 @@ async fn ws_standalone_terminal_pty_upgrade(
     let engine = state.engine.clone();
     let console = state.console.clone();
     let pty_size_owners = Arc::clone(&state.pty_size_owners);
+    let pty_grid_bus = Arc::clone(&state.pty_grid_bus);
     let bus = Arc::clone(&state.event_bus);
     let connections = Arc::clone(&state.connections);
     let peer_ip = peer.ip();
@@ -1243,6 +1256,7 @@ async fn ws_standalone_terminal_pty_upgrade(
                 peer_ip,
                 permit,
                 pty_size_owners,
+                pty_grid_bus,
                 bus,
                 connections,
                 user_agent,
@@ -1366,6 +1380,7 @@ async fn ws_tab_pty_upgrade(
     let engine = state.engine.clone();
     let console = state.console.clone();
     let pty_size_owners = Arc::clone(&state.pty_size_owners);
+    let pty_grid_bus = Arc::clone(&state.pty_grid_bus);
     let bus = Arc::clone(&state.event_bus);
     let connections = Arc::clone(&state.connections);
     let peer_ip = peer.ip();
@@ -1383,6 +1398,7 @@ async fn ws_tab_pty_upgrade(
                 peer_ip,
                 permit,
                 pty_size_owners,
+                pty_grid_bus,
                 bus,
                 connections,
                 user_agent,
@@ -1411,6 +1427,11 @@ async fn handle_pty_socket(
     // slot when this returns). Never read.
     _permit: tokio::sync::OwnedSemaphorePermit,
     pty_size_owners: Arc<PtySizeOwners>,
+    // The grid-change bus. This socket both PUBLISHES to it (when its own
+    // resize is granted) and LISTENS on it (for every other connection's), so
+    // a viewer of this PTY is told the authoritative grid it is not rendering
+    // at.
+    pty_grid_bus: Arc<crate::pty_sizes::PtyGridBus>,
     bus: Arc<EventBus>,
     connections: Arc<crate::rest_common::ConnectionRegistry>,
     // The claiming connection's raw `User-Agent`, captured at the upgrade before the
@@ -1492,6 +1513,16 @@ async fn handle_pty_socket(
     // newer verdict, instead of re-seeding itself as a phantom owner from an
     // outdated `owner: null` that nothing would ever correct.
     let (current_owner, owner_epoch) = pty_size_owners.current_owner(target.pty_id());
+    // The per-pty grid sequence, read BEFORE the actor-queued grid read below,
+    // which makes it a valid LOWER bound for the grid the handshake carries: a
+    // resize stamped at or below this value was enqueued to the engine actor
+    // inside the same critical section that stamped it, and the actor drains in
+    // order, so the grid read already reflects it. Seeded into this socket's
+    // forwarding filter and handed to the client on the handshake, so a stale
+    // broadcast still in flight when the handshake was sent can never regress
+    // the grid after it. Reading it early only errs towards forwarding a
+    // redundant same-geometry change, which the client de-duplicates.
+    let handshake_grid_seq = pty_size_owners.grid_seq(target.pty_id());
     // Hand the client this PTY socket's connection id as the first frame (a Text
     // frame, distinct from the Binary PTY-byte frames), mirroring how `/ws/events`
     // opens with a `connected` frame. The client records it and compares it against
@@ -1509,12 +1540,27 @@ async fn handle_pty_socket(
     // duplicated-text bug). A fresh generation per open makes every legitimate
     // reconnect strictly newer, so the guard only ever fires on the anomaly.
     let replay_generation = next_replay_generation();
+    // Subscribe to the grid-change bus BEFORE reading the grid for the
+    // handshake, and before the loop starts. A broadcast receiver does not
+    // replay sends that happened before it existed, so subscribing after the
+    // read would leave a hole: a resize landing between the read and the
+    // subscribe would be reported to nobody on this socket and its viewer would
+    // sit on a stale grid until the next change.
+    let mut grid_changes = pty_grid_bus.subscribe();
+    // The grid the child is actually drawing for, read once for the handshake.
+    // A viewer compares it against its own xterm's grid: one PTY has one
+    // authoritative grid (the owner's), and every other attached browser is
+    // rendering the same byte stream into a differently sized terminal without,
+    // until this frame, any way to know it.
+    let grid = engine.pty_grid_size(target.pty_id().to_string()).await;
     let _ = send_pty_connected(
         &sink,
         conn_id,
         replay_generation,
         current_owner,
         owner_epoch,
+        grid,
+        handshake_grid_seq,
     )
     .await;
     // Replay the buffered scrollback/repaint before streaming live bytes.
@@ -1526,6 +1572,15 @@ async fn handle_pty_socket(
     let mut ping = tokio::time::interval(WS_LIVENESS_PING_PERIOD);
     ping.tick().await;
 
+    // The newest grid seq this socket has forwarded, seeded from the
+    // handshake's own read. Grid publishes happen after the owners lock
+    // releases, so two sockets' announcements of two ordered applies can reach
+    // the bus inverted; anything at or below this mark is older geometry than
+    // the client already knows and is dropped here. The client keeps the same
+    // filter itself (seeded from the handshake's `grid_seq`), which is the
+    // guard that must exist; this one just saves the wire trip.
+    let mut last_grid_seq = handshake_grid_seq;
+
     loop {
         let msg = tokio::select! {
             // Liveness ping: a failed send reaps a dead/half-open peer.
@@ -1534,6 +1589,44 @@ async fn handle_pty_socket(
                     break;
                 }
                 continue;
+            }
+            // Somebody resized THIS pty (possibly this very connection). Push
+            // the new grid down as a `size` event frame so a viewer can tell
+            // that it is rendering the child's output at a geometry the child
+            // is not drawing for. One arm in the loop this socket already runs,
+            // rather than a registry holding other tasks' sinks; see
+            // `pty_sizes.rs` for why.
+            change = grid_changes.recv() => {
+                match change {
+                    Ok(change) => {
+                        if change.pty_id != target.pty_id() {
+                            continue;
+                        }
+                        // A stale announcement (reordered after the newer one
+                        // it lost to, or already covered by this socket's own
+                        // handshake read): drop it rather than letting the
+                        // older geometry become the client's last word.
+                        if change.seq <= last_grid_seq {
+                            continue;
+                        }
+                        last_grid_seq = change.seq;
+                        let text = pty_size_frame_text(change.rows, change.cols, change.seq);
+                        if !text.is_empty() && send_text(&sink, text).await.is_err() {
+                            break;
+                        }
+                        continue;
+                    }
+                    // Lagged: this socket fell behind the bus. Nothing to
+                    // recover, and deliberately nothing sent: the NEXT change
+                    // carries the current geometry, and a reconnect's handshake
+                    // re-reads it from scratch. Keep listening.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    // Unreachable: this handler holds an `Arc` of the bus for
+                    // its whole lifetime, so the sender cannot have been
+                    // dropped while this receiver lives. Stated as a break
+                    // rather than a `continue`, which would spin.
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
             }
             // The forwarder task ends when the PTY is torn down server-side
             // (close_tab/DetachAgent/crash) even while the client stays
@@ -1614,7 +1707,24 @@ async fn handle_pty_socket(
                             user_agent.as_deref(),
                         ));
                     }
-                    if !outcome.apply {
+                    if let Some(seq) = outcome.seq {
+                        // The grid really moved, so tell every socket attached
+                        // to this pty. Published here, after the owners lock is
+                        // released, exactly like the `pty.owner` broadcast
+                        // above it, and keyed on the seq (present exactly when
+                        // the resize applied) so a refused resize (which
+                        // changed nothing) announces nothing. The announced
+                        // size is the one the closure enqueued, which is what
+                        // the child will be drawing for; the seq, stamped in
+                        // the same critical section, lets receivers drop this
+                        // announcement if a newer one overtook it on the way
+                        // out. One accepted anomaly: the closure's `try_send`
+                        // can drop the resize under a full engine queue while
+                        // this publish still announces it, and that is fine
+                        // because the viewer's healing handshake re-reads the
+                        // real grid, so the announcement self-corrects.
+                        pty_grid_bus.publish(pty_id, frame.rows, frame.cols, seq);
+                    } else {
                         // Same diagnostic weight as a dropped non-owner keystroke:
                         // expected traffic (a viewer's window really does change
                         // size), not an error.
@@ -1934,18 +2044,84 @@ struct PtyConnectedFrame {
     /// verdict. An old server omits both keys together, which is the client's
     /// mixed-version fallback signal.
     owner_epoch: u64,
+    /// The PTY's grid at attach time, the geometry the child is drawing for.
+    /// Deliberately serialized even when null, for the same reason `owner` is:
+    /// the field's PRESENCE tells the client this server answers the question
+    /// at all, and a client that finds it absent knows nothing about the grid
+    /// rather than assuming it agrees. Null is the honest answer when the pty
+    /// could not be read (it is not running, or its terminal lock is poisoned);
+    /// inventing a size would make a viewer certain it agreed when it did not.
+    ///
+    /// This is the attach-time snapshot ONLY. Later changes arrive as `size`
+    /// event frames on this same socket (see [`PtySizeFrame`]), and a client
+    /// deliberately treats the two differently: the handshake is what its fresh
+    /// attach is already sized against, while a later change is what makes a
+    /// viewer re-attach to heal.
+    rows: Option<u16>,
+    cols: Option<u16>,
+    /// The per-pty grid sequence as of this handshake, the SAME counter every
+    /// `size` event's `seq` is drawn from (stamped under the owners lock in
+    /// apply order; see [`PtySizeFrame::seq`]). Read server-side BEFORE the
+    /// grid above, so it is a lower bound for what `rows`/`cols` reflect: the
+    /// client seeds its last-seen seq from it and drops any `size` event at or
+    /// below it, which is what stops a stale broadcast, buffered on this socket
+    /// from before the handshake, from regressing the grid after the attach.
+    /// Named `grid_seq` rather than a bare `seq` because this frame already
+    /// carries two other counters (`gen` and `owner_epoch`).
+    grid_seq: u64,
+}
+
+/// A grid-change event frame pushed to every socket attached to one PTY:
+/// `{"event":"size","rows":R,"cols":C}`. Named `event` to match the `connected`
+/// handshake beside it on this socket and the `pty.owner` events on
+/// `/ws/events`, so one client-side parse can tell the frames apart by that key
+/// alone.
+///
+/// Emitted only where a resize was really APPLIED to the child. A refused
+/// resize (a non-owner's plain frame) changed nothing and says nothing, exactly
+/// like the `pty.owner` broadcast beside it, or every viewer would be told the
+/// grid had moved to a size the PTY never took.
+#[derive(serde::Serialize)]
+struct PtySizeFrame {
+    event: &'static str,
+    rows: u16,
+    cols: u16,
+    /// The per-pty grid sequence, stamped by `claim_for_resize` under the
+    /// owners lock in apply order, exactly as `epoch` is documented on
+    /// `pty.owner`: the broadcasts behind these frames are emitted AFTER the
+    /// lock releases and the runtime may reorder two near-simultaneous ones,
+    /// so the client keeps only the highest seq seen per socket (seeded from
+    /// the handshake's `grid_seq`) and ignores any older arrival, and a stale
+    /// announcement can never become its last word on the grid.
+    seq: u64,
+}
+
+/// Serialize a [`PtySizeFrame`] for the wire. Falls back to an empty string on
+/// the impossible serialization failure; the caller skips an empty frame.
+fn pty_size_frame_text(rows: u16, cols: u16, seq: u64) -> String {
+    serde_json::to_string(&PtySizeFrame {
+        event: "size",
+        rows,
+        cols,
+        seq,
+    })
+    .unwrap_or_default()
 }
 
 /// Serialize and send the PTY-socket `connected` handshake carrying this socket's
-/// connection id, the replay generation for the repaint that follows, and the
+/// connection id, the replay generation for the repaint that follows, the
 /// pty's current owner plus the ownership epoch of that snapshot (both read
-/// under ONE owners-lock acquisition by the caller).
+/// under ONE owners-lock acquisition by the caller), the grid the child is
+/// currently drawing for, and the grid sequence that grid is at least as new
+/// as (see [`PtyConnectedFrame::grid_seq`]).
 async fn send_pty_connected(
     sink: &SharedSink,
     conn_id: u64,
     generation: u64,
     owner: Option<u64>,
     owner_epoch: u64,
+    grid: Option<(u16, u16)>,
+    grid_seq: u64,
 ) -> Result<(), ()> {
     let frame = PtyConnectedFrame {
         event: "connected",
@@ -1953,6 +2129,9 @@ async fn send_pty_connected(
         generation,
         owner: owner.map(|id| id.to_string()),
         owner_epoch,
+        rows: grid.map(|(rows, _)| rows),
+        cols: grid.map(|(_, cols)| cols),
+        grid_seq,
     };
     let text = serde_json::to_string(&frame).map_err(|_| ())?;
     let mut guard = sink.lock().await;
@@ -4061,10 +4240,47 @@ mod tests {
             generation: 7,
             owner: Some("41".into()),
             owner_epoch: 3,
+            rows: Some(30),
+            cols: Some(100),
+            grid_seq: 5,
         };
         assert_eq!(
             serde_json::to_string(&frame).unwrap(),
-            r#"{"event":"connected","id":"abc-123","gen":7,"owner":"41","owner_epoch":3}"#
+            r#"{"event":"connected","id":"abc-123","gen":7,"owner":"41","owner_epoch":3,"rows":30,"cols":100,"grid_seq":5}"#
+        );
+    }
+
+    /// The handshake's grid is what makes a viewer's own divergence knowable at
+    /// all, and an unreadable pty spells it as an explicit null rather than
+    /// inventing a size. Both keys are always present, for the same reason
+    /// `owner` is: a client that finds them ABSENT is talking to a server that
+    /// does not answer the question, and must not read that as agreement.
+    #[test]
+    fn pty_connected_frame_spells_an_unknown_grid_as_explicit_nulls() {
+        let frame = PtyConnectedFrame {
+            event: "connected",
+            id: "abc-123".into(),
+            generation: 7,
+            owner: None,
+            owner_epoch: 0,
+            rows: None,
+            cols: None,
+            grid_seq: 0,
+        };
+        assert_eq!(
+            serde_json::to_string(&frame).unwrap(),
+            r#"{"event":"connected","id":"abc-123","gen":7,"owner":null,"owner_epoch":0,"rows":null,"cols":null,"grid_seq":0}"#
+        );
+    }
+
+    /// The grid-change event frame, the one pushed to every socket attached to a
+    /// pty whose grid moved. Keyed by `event` like the `connected` handshake
+    /// beside it, so one client-side parse tells them apart.
+    #[test]
+    fn pty_size_frame_serializes_as_a_size_event() {
+        assert_eq!(
+            pty_size_frame_text(30, 100, 4),
+            r#"{"event":"size","rows":30,"cols":100,"seq":4}"#
         );
     }
 
@@ -4081,10 +4297,13 @@ mod tests {
             generation: 7,
             owner: None,
             owner_epoch: 0,
+            rows: Some(24),
+            cols: Some(80),
+            grid_seq: 0,
         };
         assert_eq!(
             serde_json::to_string(&frame).unwrap(),
-            r#"{"event":"connected","id":"abc-123","gen":7,"owner":null,"owner_epoch":0}"#
+            r#"{"event":"connected","id":"abc-123","gen":7,"owner":null,"owner_epoch":0,"rows":24,"cols":80,"grid_seq":0}"#
         );
     }
 
