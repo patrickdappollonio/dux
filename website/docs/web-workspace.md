@@ -19,9 +19,13 @@ On a desktop-width screen it is three panes:
   longer grouped by project, with the dormant ones tucked into a collapsible
   Inactive tail. A sort control orders the list (Active first by default, or by
   recently updated, recently created, name, or a manual drag order), and a
-  search box filters it. Drag rows to arrange them by hand, and use the New
-  agent and Add project controls (each a split button with a menu) to create
-  work or reach a project. Toggle the sidebar with `Ctrl-b`.
+  search box filters it. Drag rows to arrange them by hand, and use the launcher
+  at the bottom to create work: one button for the next agent, and one `⋯`
+  beside it holding every other way in, grouped into agents, terminals and
+  projects. On an empty dux the button reads **Add project** instead, since that
+  is the only useful next step. The Agents header carries a **+** of its own, and
+  the Terminals divider one that opens a standalone shell. Toggle the sidebar
+  with `Ctrl-b`.
 - The **center pane** is the focused agent's live terminal, or a welcome screen
   when nothing is selected.
 - The **right Changes pane** shows what the focused agent has changed. You can
@@ -86,8 +90,9 @@ nothing at all, and tidies the address bar to match.
 
 ## Adding projects
 
-The sidebar's **Add project** button opens a folder picker that browses the
-server's filesystem. Pick a git repository and it joins the workspace. But here
+**Add project…**, in the launcher's `⋯` menu at the bottom of the sidebar (and
+the launcher button itself while you have no projects yet), opens a folder picker
+that browses the server's filesystem. Pick a git repository and it joins the workspace. But here
 is the trick worth knowing when you are on your phone with no terminal in
 reach: the folder does **not** have to be a repository yet.
 
@@ -104,7 +109,7 @@ reach: the folder does **not** have to be a repository yet.
   refuses, pointing you at the repository root instead, so you never end up
   with a project nested in another project's history.
 
-The `⋯` half of the Add-project button holds both flavors ("Add project…" and
+The launcher's `⋯` holds both flavors under **Projects** ("Add project…" and
 "Initialize a repository…"); either way the picker inspects your selection and
 offers the right action. The TUI's project browser makes the same offer when
 you point it at a plain folder.
@@ -249,7 +254,9 @@ And then there is the third kind, which belongs to nothing at all. A **standalon
 terminal** opens in your home directory with no agent and no project behind it,
 so you can reach for one before you have added a single project. It is the plain
 shell you would have opened on the machine anyway, except it is in the browser.
-Open one from the cog menu ("New standalone terminal"). Its row shows the
+Open one from the **Terminals** group of the launcher's `⋯` menu, from the
+**+** on the sidebar's Terminals divider, or from the same entry in the cog
+menu's **New** submenu. Its row shows the
 directory it opened in, shortened with `~`, where the other two show their owner,
 so the sidebar search finds it by path.
 
@@ -308,8 +315,10 @@ Below tablet width, the web UI becomes a **hub-and-spoke** shell built for one
 thumb, not a squished desktop:
 
 - The **home** screen is the hub: your projects and sessions with the same `⋯`
-  menus as desktop, an **Add project** button, and a **cog** button that opens the
-  app menu as a bottom sheet (submenus drill down in place, with a back arrow).
+  menus as desktop, the same launcher pair along the bottom, and a **cog** button
+  that opens the app menu as a bottom sheet (submenus drill down in place, with a
+  back arrow). The launcher's `⋯` opens as a bottom sheet too, headings and
+  all.
   Tap a session to jump straight into its terminal.
 - The **terminal** screen is a full-screen terminal with a slim bar on top (Back,
   branch name, an optional PR chip, and a chip showing the changed-file count) and

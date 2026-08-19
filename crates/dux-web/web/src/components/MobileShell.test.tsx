@@ -1220,3 +1220,29 @@ describe("MobileShell agent header lanes", () => {
     expect(header().querySelector("svg.lucide-square-terminal")).toBeNull()
   })
 })
+
+// The hub's bottom bar renders the SAME launcher corner as the desktop sidebar
+// footer, so the verb flip and the sizing are inherited rather than repeated
+// here. This pins that the bar carries that one component: the verb, its ⋯, and
+// nothing else that could drift back into a second control.
+describe("MobileShell hub bottom bar", () => {
+  it("carries the launcher corner: one verb, one ⋯, at one height", () => {
+    mockState = makeState({ spine: makeSessionSpine(1) })
+    render(<MobileShell />)
+    const overflow = screen.getByLabelText("More ways to create")
+    const corner = overflow.parentElement as HTMLElement
+    const controls = Array.from(corner.querySelectorAll("button"))
+    expect(controls).toHaveLength(2)
+    for (const control of controls) {
+      expect(control.className, control.textContent ?? "").toContain("h-7")
+      expect(control.className, control.textContent ?? "").toContain(
+        "max-md:min-h-11",
+      )
+    }
+    expect(
+      controls.map((c) => c.textContent?.trim()).filter(Boolean),
+    ).toEqual(["New agent"])
+    // The old second split button is gone, not moved.
+    expect(screen.queryByLabelText("More ways to add a project")).toBeNull()
+  })
+})

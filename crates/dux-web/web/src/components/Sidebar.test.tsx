@@ -913,8 +913,10 @@ describe("AppSidebar auto-collapse on narrow drag", () => {
   })
 })
 
-describe("AppSidebar footer responsive stacking", () => {
-  it("makes the footer a container-query context and stacks the split buttons when narrow", () => {
+describe("AppSidebar launcher corner", () => {
+  // The corner is one verb plus one ⋯, so there is nothing left to stack: the
+  // footer's container-query scaffolding went with the second split button.
+  it("drops the container-query stacking scaffolding", () => {
     mockState = makeState()
     const { container } = render(
       <SidebarProvider>
@@ -922,57 +924,67 @@ describe("AppSidebar footer responsive stacking", () => {
       </SidebarProvider>,
     )
 
-    // The footer is the @container so the query tracks the sidebar's own width.
     const footer = container.querySelector('[data-sidebar="footer"]')
     expect(footer).toBeTruthy()
-    expect(footer!.className).toContain("@container")
-
-    // The button row stacks by default (flex-col + items-stretch) and only goes
-    // side by side at/above the @[18rem] container width.
-    const row = footer!.querySelector("div")
-    expect(row).toBeTruthy()
-    expect(row!.className).toContain("flex-col")
-    expect(row!.className).toContain("items-stretch")
-    expect(row!.className).toContain("@[18rem]:flex-row")
+    expect(footer!.className).not.toContain("@container")
+    expect(footer!.innerHTML).not.toContain("@[18rem]")
   })
 
-  it("gives each split button a full-width stacked treatment while keeping the ⋯ segment attached", () => {
+  // No seam-joined group any more, so no base-ui focus-guard rounding hack
+  // either: both died with the split buttons.
+  it("renders the verb and the ⋯ as two gapped buttons, not a button group", () => {
     mockState = makeState()
-    render(
+    const { container } = render(
       <SidebarProvider>
         <AppSidebar />
       </SidebarProvider>,
     )
 
-    // Select each split button by its unique ⋯ trigger (the primary label is
-    // shared with the icon-rail bare buttons), then walk to the enclosing group.
-    const newAgentGroup = screen
-      .getByLabelText("More ways to create an agent")
-      .closest('[data-slot="button-group"]') as HTMLElement
-    expect(newAgentGroup).toBeTruthy()
-    expect(newAgentGroup.className).toContain("w-full")
-    expect(newAgentGroup.className).toContain("@[18rem]:flex-1")
-    // The ⋯ segment stays inside the same group (attached, misclick-safe seam).
-    expect(
-      newAgentGroup.querySelector('[aria-label="More ways to create an agent"]'),
-    ).toBeTruthy()
+    const footer = container.querySelector(
+      '[data-sidebar="footer"]',
+    ) as HTMLElement
+    expect(footer.querySelector('[data-slot="button-group"]')).toBeNull()
+    expect(footer.innerHTML).not.toContain("rounded-r-lg")
 
-    // Add-project split button: full width stacked, natural width in the row.
-    const addProjectGroup = screen
-      .getByLabelText("More ways to add a project")
-      .closest('[data-slot="button-group"]') as HTMLElement
-    expect(addProjectGroup).toBeTruthy()
-    expect(addProjectGroup.className).toContain("w-full")
-    expect(addProjectGroup.className).toContain("@[18rem]:w-fit")
-    expect(
-      addProjectGroup.querySelector(
-        '[aria-label="More ways to add a project"]',
-      ),
-    ).toBeTruthy()
-    // The seam-rounding fix that keeps the trigger's outer corner rounded stays.
-    expect(addProjectGroup.className).toContain(
-      "[&>button:last-of-type]:rounded-r-lg",
+    // The corner's own two controls, at one height plus the touch floor. The
+    // verb is picked by its LABEL TEXT: the rail's icon button carries the same
+    // accessible name and no text of its own.
+    const verb = Array.from(footer.querySelectorAll("button")).find(
+      (b) => b.textContent?.trim() === "New agent",
+    ) as HTMLElement
+    expect(verb).toBeTruthy()
+    const overflow = footer.querySelector(
+      '[aria-label="More ways to create"]:not(.size-8)',
+    ) as HTMLElement
+    expect(overflow).toBeTruthy()
+    for (const control of [verb, overflow]) {
+      expect(control.className, control.textContent ?? "").toContain("h-7")
+      expect(control.className, control.textContent ?? "").toContain(
+        "max-md:min-h-11",
+      )
+    }
+  })
+
+  // The rail is icon-only: a bare verb icon and the SAME grouped ⋯ menu the
+  // corner above carries, so a collapsed sidebar is not a dead end for
+  // everything the ⋯ holds (Add project included).
+  it("gives the collapsed rail a New agent icon and its own ⋯", () => {
+    mockState = makeState()
+    const { container } = render(
+      <SidebarProvider>
+        <AppSidebar />
+      </SidebarProvider>,
     )
+    const railVerb = container.querySelector(
+      '[data-sidebar="footer"] [aria-label="New agent"].size-8',
+    )
+    expect(railVerb).toBeTruthy()
+    const railOverflow = container.querySelector(
+      '[data-sidebar="footer"] [aria-label="More ways to create"].size-8',
+    )
+    expect(railOverflow).toBeTruthy()
+    // The Add-project rail icon is gone; its action lives in that ⋯ now.
+    expect(screen.queryByLabelText("Add project")).toBeNull()
   })
 })
 

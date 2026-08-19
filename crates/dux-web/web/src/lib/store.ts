@@ -562,7 +562,8 @@ export interface DuxState {
   // How the New-agent picker was opened, so it can guide the right creation flow:
   // "new" (pick project + provider + Create), "from_pr" (pick a project to create
   // an agent from a PR), or "from_worktree" (pick a project to adopt an existing
-  // worktree). The split button's ⋯ menu sets this; a bare open defaults to "new".
+  // worktree). The launcher corner's ⋯ menu sets this; a bare open defaults to
+  // "new".
   newAgentPickerIntent: "new" | "from_pr" | "from_worktree"
   // When set, the picker lists ONLY these project ids. Used when a pull-request
   // reference matched several projects (one repository checked out twice):
@@ -4112,7 +4113,7 @@ export function openAddProject(): void {
   runBrowse(null)
 }
 
-// Open the same picker with the "init" intent (the split button's
+// Open the same picker with the "init" intent (the launcher corner's
 // "Initialize a repository…" entry). The intent only changes a header hint;
 // the primary-action ladder decides the real action from the inspection.
 export function openAddProjectForInit(): void {

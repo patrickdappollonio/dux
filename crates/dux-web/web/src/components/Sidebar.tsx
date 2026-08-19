@@ -4,14 +4,13 @@ import { useEffect, useRef } from "react"
 
 import { agentRowVisual } from "@/lib/agentRow"
 
-import { AddProjectMenuItems } from "@/components/AddProjectMenuItems"
-import { NewAgentSplitButton } from "@/components/NewAgentSplitButton"
+import { CreationOverflowMenuItems } from "@/components/CreationOverflowMenuItems"
+import { LauncherCorner } from "@/components/LauncherCorner"
 import { AgentVitalsTooltip } from "@/components/AgentVitalsTooltip"
 import { ConnDot } from "@/components/ConnDot"
 import { FlatAgentList } from "@/components/FlatAgentList"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Button } from "@/components/ui/button"
-import { ButtonGroup } from "@/components/ui/button-group"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -40,7 +39,6 @@ import {
 } from "@/lib/sidebarResize"
 import { applyPendingOrders } from "@/lib/reorder"
 import {
-  openAddProject,
   openNewAgentPicker,
   selectSession,
   selectTerminal,
@@ -354,68 +352,56 @@ export function AppSidebar() {
         />
       </SidebarContent>
 
-      {/* @container: the footer is a container-query context tracking the
-          sidebar's OWN (user-resizable) width, so the two split buttons stack
-          when the sidebar is too narrow to fit them side by side instead of
-          overflowing into the center pane. */}
-      <SidebarFooter className="@container">
-        {/* Below the @[18rem] container width the row becomes a full-width
-            vertical stack (one on top, one on the bottom); at/above it they sit
-            side by side. Icon-rail mode keeps its own centered column. */}
-        <div className="flex flex-col items-stretch gap-2 @[18rem]:flex-row @[18rem]:items-center group-data-[collapsible=icon]:flex-col group-data-[collapsible=icon]:items-center group-data-[collapsible=icon]:justify-center">
-          {/* Primary New-agent action (moved here from the list header): a split
-              button whose ⋯ offers the from-PR / from-worktree variants, beside the
-              Add-project split button. Both collapse to bare icons in the rail.
-              Full-width when stacked; grows to share the row when side by side. */}
-          <NewAgentSplitButton className="w-full @[18rem]:w-auto @[18rem]:flex-1 group-data-[collapsible=icon]:hidden" />
-          {/* Collapsed rail: New agent as a bare icon. */}
-          <Button
-            size="sm"
-            aria-label="New agent"
-            onClick={() => openNewAgentPicker("new")}
-            className="hidden group-data-[collapsible=icon]:flex group-data-[collapsible=icon]:size-8 group-data-[collapsible=icon]:flex-none group-data-[collapsible=icon]:p-0"
-          >
-            <Plus />
-          </Button>
-          <ButtonGroup className="w-full @[18rem]:w-fit group-data-[collapsible=icon]:hidden [&>button:last-of-type]:rounded-r-lg">
+      {/* No @container here any more. The footer used to be a container-query
+          context so two side-by-side split buttons could stack when the user
+          dragged the sidebar narrow; the corner is now ONE verb whose label
+          truncates plus a 28px ⋯, so there is nothing left to stack and nothing
+          that can overflow into the center pane at any width the resize handle
+          allows. If the corner ever grows a third control, the scaffolding
+          (`@container` here, `@[18rem]:` on the row) is what to bring back. */}
+      <SidebarFooter>
+        <div className="flex flex-col items-stretch gap-2 group-data-[collapsible=icon]:items-center group-data-[collapsible=icon]:justify-center">
+          {/* The launcher corner: the shared component, never a copy. This
+              footer used to hand-roll its own group and drifted from the shared
+              one on size and variant. */}
+          <LauncherCorner className="group-data-[collapsible=icon]:hidden" />
+          {/* Collapsed rail: the same two controls as bare icons, stacked. The
+              verb does NOT flip here (a rail is too narrow to say what it would
+              flip to); everything else, Add project included, is one tap away
+              in the ⋯, which renders the very same grouped menu as the corner
+              above. */}
+          <div className="hidden flex-col items-center gap-2 group-data-[collapsible=icon]:flex">
             <Button
-              variant="outline"
               size="sm"
-              aria-label="Add project"
-              onClick={openAddProject}
-              className="flex-1"
+              aria-label="New agent"
+              onClick={() => openNewAgentPicker("new")}
+              className="size-8 flex-none p-0"
             >
               <Plus />
-              <span>Add project</span>
             </Button>
             <DropdownMenu>
+              {/* Outline like the corner's ⋯ (one primary per cluster; a
+                  menu-revealer stays quieter, and outline carries the
+                  data-popup-open open tint). */}
               <DropdownMenuTrigger
                 render={
                   <Button
-                    variant="outline"
                     size="sm"
-                    aria-label="More ways to add a project"
-                    className="min-w-8"
+                    variant="outline"
+                    aria-label="More ways to create"
+                    className="size-8 flex-none p-0"
                   >
                     <EllipsisVertical />
                   </Button>
                 }
               />
-              <DropdownMenuContent align="end" side="top">
-                <AddProjectMenuItems />
+              {/* Anchored to the rail's own edge: the rail hugs the left of the
+                  window, where an end-aligned popup has nowhere to go. */}
+              <DropdownMenuContent align="start" side="top">
+                <CreationOverflowMenuItems />
               </DropdownMenuContent>
             </DropdownMenu>
-          </ButtonGroup>
-          {/* Collapsed rail: Add project as a bare icon under New agent. */}
-          <Button
-            variant="outline"
-            size="sm"
-            aria-label="Add project"
-            onClick={openAddProject}
-            className="hidden group-data-[collapsible=icon]:flex group-data-[collapsible=icon]:size-8 group-data-[collapsible=icon]:flex-none group-data-[collapsible=icon]:p-0"
-          >
-            <Plus />
-          </Button>
+          </div>
         </div>
       </SidebarFooter>
       <SidebarResizeHandle />

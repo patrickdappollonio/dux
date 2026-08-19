@@ -13,7 +13,7 @@ import {
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable"
 import {
-  ArrowUpDown,
+  ArrowDownWideNarrow,
   Bot,
   Check,
   ChevronDown,
@@ -36,6 +36,7 @@ import {
   ScrollText,
   Search,
   SquareChevronRight,
+  SquarePlus,
   SquareTerminal,
   Trash2,
   Unlink,
@@ -68,6 +69,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 import {
   Empty,
+  EmptyContent,
   EmptyDescription,
   EmptyHeader,
   EmptyMedia,
@@ -107,16 +109,19 @@ import {
   type FlatTerminal,
 } from "@/lib/flatTerminals"
 import { prIconClass, prIconHoverClass, prStateLabel } from "@/lib/pr"
+import { launcherVerb } from "@/lib/launcherVerb"
 import { partitionProjects } from "@/lib/projects"
 import { moveItem, ordersMatch, reorderById } from "@/lib/reorder"
 import {
   addTab,
   agentSortValue,
+  createStandaloneTerminal,
   createTerminal,
   detachPullRequest,
   openAgentEnv,
   openAgentInfo,
   openAgentStartupCommand,
+  openAddProject,
   openAttachPullRequest,
   openChangeProvider,
   openDelete,
@@ -125,6 +130,7 @@ import {
   standaloneEditorHash,
   openForceReconnect,
   openForkAgent,
+  openNewAgentPicker,
   openRename,
   openStartupLogs,
   reorderAgents,
@@ -874,6 +880,14 @@ function TerminalFlatRow({
 // unlike the Quiet tail: a listed terminal is a live PTY worth surfacing, so it
 // is shown by default but can be collapsed to reclaim space. Renders nothing
 // when there are no terminals.
+//
+// That last sentence is load-bearing for the divider's + : the section is
+// absent at zero terminals, so the + can never create the FIRST standalone
+// terminal. Its zero-state home is the launcher corner's ⋯, which is always on
+// screen. Deliberate, not an oversight, and written here so nobody "fixes" it
+// by rendering an empty section. There is also no search-forced-open here (only
+// the Quiet tail carries that machinery), so a search cannot conjure the
+// divider either.
 function TerminalsSection({
   terminals,
   selectedTarget,
@@ -894,20 +908,48 @@ function TerminalsSection({
   if (terminals.length === 0) return null
   return (
     <div className="mt-2 border-t border-border/50 pt-2">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        aria-expanded={open}
-        className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground max-md:min-h-10"
-      >
-        <ChevronRight
-          className={cn("size-3 shrink-0 transition-transform", open && "rotate-90")}
-        />
-        <span>Terminals</span>
-        <span className="ml-auto rounded-full bg-muted px-1.5 py-0.5 text-[10px] leading-none tabular-nums text-muted-foreground">
-          {terminals.length}
-        </span>
-      </button>
+      {/* The divider is a ROW of two siblings, not one button with another
+          nested inside it (nested interactive elements are invalid HTML and
+          the click routing is a coin toss). Same shape as AgentFlatRow and
+          TerminalFlatRow: a full-width primary button plus its own control in
+          a flex wrapper. The word "Terminals" stays INSIDE the toggle, so the
+          whole label is still what expands the section. */}
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+          className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground max-md:min-h-10"
+        >
+          <ChevronRight
+            className={cn("size-3 shrink-0 transition-transform", open && "rotate-90")}
+          />
+          <span>Terminals</span>
+          <span className={SECTION_COUNT_PILL}>{terminals.length}</span>
+        </button>
+        {/* One tap, no dialog: a standalone terminal has nothing to confirm
+            (that is why its shared menu entry carries no trailing "…").
+
+            Variant: ghost, quieter than even the header's outline +, because
+            it lives inside a section divider whose whole row is muted chrome;
+            an outlined block here would outweigh the divider it decorates.
+
+            Sizing: 28px square on desktop, the per-axis exemption from the
+            40px floor. Its only neighbour on either axis is the collapse
+            toggle 8px to its left, which expands a section and executes
+            nothing; on touch it takes the floor on both axes anyway. */}
+        <SimpleTooltip content="New standalone terminal">
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            aria-label="New standalone terminal"
+            onClick={() => createStandaloneTerminal()}
+            className="shrink-0 text-muted-foreground max-md:min-h-10 max-md:min-w-10"
+          >
+            <Plus />
+          </Button>
+        </SimpleTooltip>
+      </div>
       {open ? (
         // A SEPARATE DndContext + SortableContext from the agents one above: its
         // items are ONLY terminal ids, so dnd-kit can never pick an agent row as
@@ -1040,9 +1082,10 @@ function QuietTail({
           )}
         />
         <span>Inactive</span>
-        <span className="ml-auto rounded-full bg-muted px-1.5 py-0.5 text-[10px] leading-none tabular-nums text-muted-foreground">
-          {sessions.length}
-        </span>
+        {/* Right after the word, like every other section count. The Inactive
+            divider deliberately gains NO button beside it: there is no such
+            thing as creating a dormant agent. */}
+        <span className={SECTION_COUNT_PILL}>{sessions.length}</span>
       </button>
       {effectiveOpen ? (
         <div className="mt-1 flex flex-col gap-1">
@@ -1067,43 +1110,64 @@ function QuietTail({
 // "active first"; "manual" is the only mode that enables drag-reorder.
 const SORT_KEYS: FlatSortKey[] = ["active", "updated", "created", "name", "manual"]
 
+// One height token for every control in the Agents header (the new-agent + and
+// the sort trigger): they sit side by side, so a difference of a pixel reads as
+// a mistake. Written as an explicit height rather than inherited from padding,
+// per the CLAUDE.md control-height tenet, and lifted to the 40px floor where a
+// finger is the pointer (the hub renders this header too).
+const HEADER_CONTROL_SIZING = "h-7 max-md:min-h-10"
+
+// One counter pill for every section of the list. "Agents" used to render its
+// count as bare muted text while Terminals and Inactive used this pill, and the
+// two dividers pushed theirs to the right edge; the count now sits immediately
+// after the section word everywhere, and right edges carry controls only.
+const SECTION_COUNT_PILL =
+  "rounded-full bg-muted px-1.5 py-0.5 text-[10px] leading-none tabular-nums text-muted-foreground"
+
 function SortControl() {
   const agentSort = agentSortValue(useDux())
+  // The menu, not the trigger, is where the active mode is legible: the trigger
+  // is static ("Sort"), so the checkmark below is the touch-visible truth and
+  // the tooltip is a desktop nicety on top of it.
+  //
+  // name_desc is the one mode the web never OFFERS (only the TUI cycles into
+  // it), so its row is appended only while it is the active mode. Without that
+  // row a TUI-set name_desc would be a checkmark-less menu: five rows, none of
+  // them ticked, and no way to see what the list is actually sorted by.
+  const keys: FlatSortKey[] =
+    agentSort === "name_desc" ? [...SORT_KEYS, "name_desc"] : SORT_KEYS
   return (
     <DropdownMenu>
-      {/* 36px on a phone (`max-md:min-h-9`) rather than the 40px touch floor,
-          and it EARNS the relaxation through clear spacing (the third way to
-          earn it in the touch-target tenet). These are MEASURED in the real
-          container at a 390px viewport, not estimated:
+      <SimpleTooltip content={`Sorted by ${FLAT_SORT_LABELS[agentSort]}`}>
+        {/* The trigger reads "Sort" and never the mode name: the full label
+            plus the neighbouring + overflows a narrow sidebar and wraps, and a
+            control that changes width when you use it is its own small
+            annoyance. The mode lives in the tooltip and the menu instead.
 
-            - Along the HORIZONTAL axis it has no interactive neighbour at
-              all. `ml-auto` pins it to the right edge of its row, and the only
-              other things on that row are the "Agents" heading and the count,
-              both plain text.
-            - Along the VERTICAL axis the nearest interactive neighbour is the
-              search field 12px below it, and the app-menu trigger is 21px
-              above.
-
-          12px of clear space on the only axis that has a neighbour is enough
-          that an imprecise tap lands on neither control, which is what the
-          40px floor is protecting against in the first place. Do not "fix"
-          this by growing it: the height is deliberate, and if these gaps ever
-          close, restore the height rather than deleting this comment. */}
-      <DropdownMenuTrigger
-        render={
-          <button
-            type="button"
-            className="flex items-center gap-1.5 rounded-md border border-border/60 bg-input/30 px-2 py-1 text-xs text-muted-foreground transition-colors hover:border-border hover:bg-input/60 hover:text-foreground data-[popup-open]:border-border data-[popup-open]:bg-input/60 data-[popup-open]:text-foreground max-md:min-h-9"
-            aria-label="Sort agents"
-          />
-        }
-      >
-        <ArrowUpDown className="size-3 shrink-0" />
-        <span className="text-foreground/90">{FLAT_SORT_LABELS[agentSort]}</span>
-        <ChevronDown className="size-3 shrink-0 opacity-60" />
-      </DropdownMenuTrigger>
+            The old 36px phone exemption is retired: this trigger now HAS a
+            horizontal neighbour (the new-agent + immediately to its left), so
+            the "no interactive neighbour on that axis" basis for the
+            relaxation is gone. It takes the 40px floor through the shared
+            header sizing token, same as the +. */}
+        <DropdownMenuTrigger
+          render={
+            <button
+              type="button"
+              className={cn(
+                "flex items-center gap-1.5 rounded-md border border-border/60 bg-input/30 px-2 text-xs text-muted-foreground transition-colors hover:border-border hover:bg-input/60 hover:text-foreground data-[popup-open]:border-border data-[popup-open]:bg-input/60 data-[popup-open]:text-foreground",
+                HEADER_CONTROL_SIZING,
+              )}
+              aria-label="Sort agents"
+            />
+          }
+        >
+          <ArrowDownWideNarrow className="size-3 shrink-0" />
+          <span className="text-foreground/90">Sort</span>
+          <ChevronDown className="size-3 shrink-0 opacity-60" />
+        </DropdownMenuTrigger>
+      </SimpleTooltip>
       <DropdownMenuContent align="end">
-        {SORT_KEYS.map((key) => (
+        {keys.map((key) => (
           <DropdownMenuItem key={key} onClick={() => setAgentSort(key)}>
             {agentSort === key ? <Check /> : <span className="size-4" />}
             {FLAT_SORT_LABELS[key]}
@@ -1253,6 +1317,12 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
     reorderAgents(next)
   }
 
+  // The empty state's hero button says the same thing the launcher corner's
+  // verb says, through the same helper: with no project on the spine, "New
+  // agent" would open a picker with nothing to pick.
+  const emptyVerbIsAddProject =
+    launcherVerb(spine ? rawProjects.length : null) === "add-project"
+
   const nothing =
     coreSessions.length === 0 &&
     flatTerminals.length === 0 &&
@@ -1265,18 +1335,51 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      {/* Header: title + sort on one row, then search. The New-agent action now
-          lives in the bottom bar next to Add project (both surfaces). px-2 matches
+      {/* Header: the section word and its count on the left, the section's own
+          controls (new agent, sort) at the right edge, then search. px-2 matches
           the sidebar header (the logo row's p-2) and the list below, so the search
           box and the agent rows share one inset and none of it hugs the edge. */}
       <div className="flex flex-col gap-2 px-2 pt-2 pb-3">
         <div className="flex items-center gap-2">
           <span className="text-sm font-semibold">Agents</span>
-          <span className="text-xs text-muted-foreground">
-            {coreSessions.length}
-          </span>
+          <span className={SECTION_COUNT_PILL}>{coreSessions.length}</span>
           {coreSessions.length > 0 ? (
-            <div className="ml-auto">
+            <div className="ml-auto flex items-center gap-2">
+              {/* The section's own + : one tap to the same picker the launcher
+                  corner's verb opens. A deliberate duplicate of that verb, and
+                  worth it, because this is where the eye already is when the
+                  thought "another one" arrives.
+
+                  Variant: outline, while the sort trigger beside it keeps its
+                  quieter borderless-until-hover styling. They are not two peers
+                  in one cluster: this one acts (it opens a creation dialog) and
+                  that one only reveals a menu.
+
+                  It rides the same `coreSessions.length > 0` gate as sort,
+                  because the empty state below carries its own hero button and
+                  two buttons offering the same click on one screen is one too
+                  many.
+
+                  Sizing: 28px square on desktop is the per-axis exemption from
+                  the 40px floor; its one horizontal neighbour is the Sort
+                  trigger 8px to the right, which only reveals a menu, so a
+                  misclick opens a list rather than executing anything. On
+                  touch both controls take the floor through the shared header
+                  token. */}
+              <SimpleTooltip content="New agent">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  aria-label="New agent"
+                  onClick={() => openNewAgentPicker("new")}
+                  className={cn(
+                    "w-7 px-0 max-md:min-w-10",
+                    HEADER_CONTROL_SIZING,
+                  )}
+                >
+                  <Plus />
+                </Button>
+              </SimpleTooltip>
               <SortControl />
             </div>
           ) : null}
@@ -1301,10 +1404,38 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
                 <Bot />
               </EmptyMedia>
               <EmptyTitle>No agents yet</EmptyTitle>
+              {/* Copy unchanged by the launcher overhaul: the button flips, the
+                  sentence does not (it is what was signed off, and it reads
+                  true either way). */}
               <EmptyDescription>
-                Create one from the New agent picker.
+                Pick a project and dux gives the agent its own worktree.
               </EmptyDescription>
             </EmptyHeader>
+            {/* A real button, not a sentence pointing at one elsewhere: an
+                empty workspace is exactly where the next click should be on
+                screen. It doubles with the launcher corner's verb, which is
+                accepted: the duplicate costs a tap nobody needs, while the
+                missing one costs a hunt.
+
+                It flips through the SAME pure helper the corner's verb reads,
+                so the two buttons on screen can never offer different next
+                steps. max-md:min-h-11 is the touch floor, matching the
+                corner. */}
+            <EmptyContent>
+              <Button
+                variant="outline"
+                size="sm"
+                className="max-md:min-h-11"
+                onClick={
+                  emptyVerbIsAddProject
+                    ? openAddProject
+                    : () => openNewAgentPicker("new")
+                }
+              >
+                {emptyVerbIsAddProject ? <SquarePlus /> : <Plus />}
+                {emptyVerbIsAddProject ? "Add project" : "New agent"}
+              </Button>
+            </EmptyContent>
           </Empty>
         ) : nothingMatches ? (
           <p className="px-3 py-4 text-sm text-muted-foreground">

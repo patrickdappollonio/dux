@@ -66,7 +66,10 @@ what they belong to:
 - A **project terminal** belongs to a project and opens at its repo root.
 - A **standalone terminal** belongs to nothing at all. It opens in your home
   directory, which means you can have one before you have added a single project.
-  Open one from the cog menu ("New standalone terminal").
+  Open one from the `⋯` menu beside the launcher button at the bottom of the
+  sidebar, under **Terminals**, or from the cog menu's **New** submenu. Once you
+  have one, the sidebar's Terminals divider grows a **+** that opens the next in
+  a single tap.
 
 Environment is the one place the third kind is genuinely different: the two owned
 kinds merge your global `[env]` with their project's, and a standalone terminal has

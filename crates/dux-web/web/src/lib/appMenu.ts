@@ -26,7 +26,6 @@
 import {
   Activity,
   ArrowDownAZ,
-  Bot,
   PartyPopper,
   ArrowUpDown,
   CalendarPlus,
@@ -34,18 +33,18 @@ import {
   FileCode,
   FolderGit2,
   Globe,
+  Plus,
   RefreshCw,
   Rocket,
   SlidersHorizontal,
   SquarePen,
-  SquareTerminal,
   Wrench,
   type LucideIcon,
 } from "lucide-react"
 import { notifyError } from "./notify"
 
 import { configApi } from "@/lib/configApi"
-import { addProjectMenuItems, newAgentMenuItems } from "@/lib/creationMenus"
+import { addProjectMenuItems, newMenuItems } from "@/lib/creationMenus"
 import {
   openConfigEditor,
   openReleaseNotes,
@@ -55,7 +54,6 @@ import {
   openTaskManager,
   openMacrosDialog,
   sortAgents,
-  createStandaloneTerminal,
 } from "@/lib/store"
 
 export type AppMenuEntry = AppMenuItem | AppMenuSubmenu | AppMenuSeparator
@@ -87,8 +85,8 @@ export interface AppMenuSeparator {
 
 export interface AppMenuContext {
   /** Whether GitHub / `gh` integration is usable (`bootstrap.gh_available`).
-   *  Gates the from-PR agent variant, exactly as the sidebar's split button
-   *  and the per-project `⋯` menu gate theirs. */
+   *  Gates the from-PR agent variant, exactly as the launcher corner's `⋯`
+   *  menu and the per-project `⋯` menu gate theirs. */
   ghAvailable: boolean
 }
 
@@ -101,32 +99,45 @@ export interface AppMenuContext {
  * one that is always there and explains itself when used.
  */
 export function appMenuModel(ctx: AppMenuContext): AppMenuEntry[] {
-  // The creation submenus mirror the sidebar's split-button menus: their
-  // entries are the shared lists in creationMenus.ts, spliced in verbatim so
-  // the cog menu and the sidebar cannot drift (appMenu.test.ts pins this).
-  const asItems = (items: ReturnType<typeof addProjectMenuItems>) =>
-    items.map((item): AppMenuItem => ({ kind: "item", ...item }))
+  // The creation submenus mirror the launcher corner's `⋯` menu: their
+  // entries are the shared lists in creationMenus.ts, spliced into the cog
+  // verbatim (appMenu.test.ts pins this; the corner renders the same lists
+  // grouped under headings and minus the one item its own verb already is,
+  // which is presentation, not a second list). The shared
+  // entries carry the same `kind` tag this tree uses, items and separators
+  // alike, so the splice is a plain assignment: the annotation, not a cast,
+  // is what makes the compiler own the "same shape" claim, so a future
+  // divergence between the two unions fails here instead of rendering wrong.
+  const asEntries = (
+    items: ReturnType<typeof addProjectMenuItems>,
+  ): AppMenuEntry[] => items
   return [
-    // The two creation submenus OPEN the menu: creating an agent or adding a
+    // The two creation submenus OPEN the menu: creating something or adding a
     // project is the most common reason to reach for the cog, so they
-    // outrank Preferences. They are the menu's twins of the
-    // sidebar's New-agent and Add-project split buttons; their entries are
-    // the shared lists spliced in verbatim (see asItems above). No trailing
+    // outrank Preferences. They are the menu's twins of the launcher
+    // corner's grouped `⋯` menu; their entries are
+    // the shared lists spliced in verbatim (see asEntries above). No trailing
     // "…" on the submenu titles: a submenu opens a list, not a dialog; the
     // "…" lives on the variants inside.
+    //
+    // Titled "New" and iconed Plus rather than "New agent" / Bot: the list
+    // carries the standalone terminal too, so a Bot would promise agents only.
+    // This submenu is the standalone terminal's ONE home in the cog menu; it
+    // used to also sit at the top level, and that duplicate is deliberately
+    // gone.
     {
       kind: "submenu",
       id: "new-agent",
-      title: "New agent",
-      icon: Bot,
-      entries: asItems(newAgentMenuItems(ctx)),
+      title: "New",
+      icon: Plus,
+      entries: asEntries(newMenuItems(ctx)),
     },
     {
       kind: "submenu",
       id: "add-project",
       title: "Add project",
       icon: FolderGit2,
-      entries: asItems(addProjectMenuItems()),
+      entries: asEntries(addProjectMenuItems()),
     },
     { kind: "separator", id: "sep-create" },
     {
@@ -221,19 +232,9 @@ export function appMenuModel(ctx: AppMenuContext): AppMenuEntry[] {
         },
       ],
     },
+    // Still here now that the standalone terminal has moved into the "New"
+    // submenu: this rule separates Configuration from the Task Manager.
     { kind: "separator", id: "sep-agents" },
-    {
-      kind: "item",
-      id: "new-standalone-terminal",
-      // GLOBAL and parameter-free: it needs no agent, no project and nothing
-      // selected, which is exactly why it belongs here rather than in a row's
-      // own `⋯` menu (the twin of the TUI's `new-standalone-terminal` palette
-      // command). No trailing "…": it opens the terminal immediately, with no
-      // dialog and nothing to confirm.
-      title: "New standalone terminal",
-      icon: SquareTerminal,
-      run: () => createStandaloneTerminal(),
-    },
     {
       kind: "item",
       id: "task-manager",

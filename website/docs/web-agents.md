@@ -30,11 +30,18 @@ project info, and remove project, among the agent-creation actions below.
 
 There are two doors into agent creation, and they differ in what you start from.
 
-The **New agent** split button sits at the bottom of the sidebar (and on the
-mobile hub). Its one-click primary opens the picker for a plain new agent; the
-attached `⋯` segment carries the same three variants below. This is the door to
-use when you have not picked a project yet, and it is the only place the
-reference-first flow lives.
+The **launcher** sits at the bottom of the sidebar (and on the mobile hub): one
+filled button and one `⋯` beside it. The button is a single click to a plain new
+agent, and it is the only thing that changes with your workspace: on a brand-new
+dux with no project yet it reads **Add project**, because an agent has nowhere to
+go until one exists. The `⋯` never changes. It groups everything else you can
+create from nothing, under **Agents** (from a pull request, from an existing
+worktree), **Terminals** (a standalone shell, for when what you want is not an
+agent at all) and **Projects**. This is the door to use when you have not picked
+a project yet, and it is the only place the reference-first flow lives.
+
+The Agents header just above the list carries a **+** too, for when the thought
+"another one" arrives while you are already looking at the list.
 
 ### Starting from a pull request, with no project
 

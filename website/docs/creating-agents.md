@@ -108,8 +108,9 @@ and embedded-repository contents, and empty directories.
 
 ## Creating an agent from a GitHub PR
 
-In the browser, that is **New agent from PR…** in the New-agent split button's
-`⋯` menu (or in a project's own `⋯` menu, to start from that project); in the
+In the browser, that is **New agent from PR…** in the launcher's `⋯` menu at
+the bottom of the sidebar, under **Agents** (or in a project's own `⋯` menu, to
+start from that project); in the
 terminal UI, the `new-agent-from-pr` palette command. This path is only
 available when the `gh` CLI is installed, authenticated
 (`gh auth login`), and the `github_integration` setting is enabled (it defaults to
@@ -147,7 +148,7 @@ else, upgrade `gh`.
 ### The reference comes first, and dux works out the project
 
 Open this from the global command (the `new-agent-from-pr` palette entry in the
-terminal UI, **New agent from PR…** in the browser's New-agent menu) and the
+terminal UI, **New agent from PR…** in the browser's launcher `⋯` menu) and the
 first thing you see is the reference field. No project is chosen and none is
 asked for: paste the link and dux compares the repository it names against every
 project you have, then takes you to the right one.

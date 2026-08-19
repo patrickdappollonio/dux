@@ -1,9 +1,8 @@
 import { ChevronLeft, Ellipsis, GitPullRequest, Settings, X } from "lucide-react"
 import { Suspense, useState, type ReactElement } from "react"
 
-import { AddProjectSplitButton } from "@/components/AddProjectSplitButton"
 import { AgentNotFound } from "@/components/AgentNotFound"
-import { NewAgentSplitButton } from "@/components/NewAgentSplitButton"
+import { LauncherCorner } from "@/components/LauncherCorner"
 import { AppMenuSheet } from "@/components/AppMenuSheet"
 import { ChangedFiles } from "@/components/ChangedFiles"
 import { ChunkBoundary } from "@/components/ChunkBoundary"
@@ -58,8 +57,9 @@ function selectTerminalAndOpen(
 }
 
 // The hub: the shared flat agent list at touch size, mirroring the desktop
-// sidebar. The New-agent picker button + search + sort live in the list header;
-// the Add-project split button sits below it.
+// sidebar. Search, sort and the new-agent + live in the list header; the
+// launcher corner (one filled verb plus its ⋯) sits in the bottom bar, the same
+// component and the same size tokens as the desktop sidebar's footer.
 function HomeScreen() {
   const { bootstrap } = useDux()
   const [menuOpen, setMenuOpen] = useState(false)
@@ -95,9 +95,8 @@ function HomeScreen() {
         }}
       />
 
-      <div className="flex shrink-0 items-center gap-2 border-t p-3">
-        <NewAgentSplitButton className="flex-1" />
-        <AddProjectSplitButton className="flex-1" />
+      <div className="flex shrink-0 items-center border-t p-3">
+        <LauncherCorner className="flex-1" />
       </div>
     </div>
   )

@@ -64,7 +64,7 @@ function AppMenuEntries({ entries }: { entries: AppMenuEntry[] }) {
 
 export function AppMenu() {
   // The model's one context input: gh availability gates the from-PR agent
-  // variant, exactly as the sidebar's NewAgentSplitButton gates its copy.
+  // variant, exactly as the launcher corner's ⋯ menu gates its copy.
   const { bootstrap } = useDux()
   const ghAvailable = bootstrap?.gh_available ?? false
   return (

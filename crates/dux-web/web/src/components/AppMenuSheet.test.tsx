@@ -6,6 +6,7 @@ const openCustomizeWebapp = vi.fn()
 const sortAgents = vi.fn()
 const openNewAgentPicker = vi.fn()
 const openAddProjectForInit = vi.fn()
+const createStandaloneTerminal = vi.fn()
 // The renderer reads gh availability from the live bootstrap; tests flip this.
 let ghAvailable = true
 vi.mock("@/lib/store", () => ({
@@ -21,6 +22,7 @@ vi.mock("@/lib/store", () => ({
   openAddProjectForInit: () => openAddProjectForInit(),
   openCreateAgentFromPr: vi.fn(),
   openNewAgentPicker: (intent: string) => openNewAgentPicker(intent),
+  createStandaloneTerminal: () => createStandaloneTerminal(),
   useDux: () => ({ bootstrap: { gh_available: ghAvailable } }),
 }))
 vi.mock("@/lib/configApi", () => ({
@@ -142,11 +144,11 @@ describe("AppMenuSheet", () => {
   })
 
   // The mobile twin of AppMenu.test.tsx's creation-submenu checks: the sheet
-  // drills into the same shared lists the sidebar's split buttons render.
-  it("drills into New agent and routes a variant to its store action", async () => {
+  // drills into the same shared lists the launcher corner's ⋯ menu renders.
+  it("drills into New and routes a variant to its store action", async () => {
     const onOpenChange = vi.fn()
     render(<AppMenuSheet open onOpenChange={onOpenChange} />)
-    fireEvent.click(screen.getByText("New agent"))
+    fireEvent.click(screen.getByText("New"))
     await settle()
     expect(screen.getByLabelText("Back")).toBeTruthy()
     expect(screen.getByText("New agent from PR…")).toBeTruthy()
@@ -155,10 +157,23 @@ describe("AppMenuSheet", () => {
     expect(onOpenChange).toHaveBeenCalledWith(false)
   })
 
+  // The standalone terminal has no top-level row any more, so the drilled New
+  // list is the sheet's only route to it.
+  it("opens a standalone terminal from the drilled New list", async () => {
+    const onOpenChange = vi.fn()
+    render(<AppMenuSheet open onOpenChange={onOpenChange} />)
+    expect(screen.queryByText("New standalone terminal")).toBeNull()
+    fireEvent.click(screen.getByText("New"))
+    await settle()
+    fireEvent.click(screen.getByText("New standalone terminal"))
+    expect(createStandaloneTerminal).toHaveBeenCalledOnce()
+    expect(onOpenChange).toHaveBeenCalledWith(false)
+  })
+
   it("hides the from-PR variant when gh is unavailable", async () => {
     ghAvailable = false
     render(<Harness />)
-    fireEvent.click(screen.getByText("New agent"))
+    fireEvent.click(screen.getByText("New"))
     await settle()
     expect(screen.getByText("New agent…")).toBeTruthy()
     expect(screen.queryByText("New agent from PR…")).toBeNull()

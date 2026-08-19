@@ -47,6 +47,9 @@ vi.mock("@dnd-kit/sortable", () => ({
 const reorderAgentsMock = vi.fn()
 const reorderTerminalsMock = vi.fn()
 const setAgentSortMock = vi.fn()
+const openNewAgentPickerMock = vi.fn()
+const openAddProjectMock = vi.fn()
+const createStandaloneTerminalMock = vi.fn()
 let mockState: DuxState
 vi.mock("@/lib/store", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/store")>()
@@ -56,6 +59,10 @@ vi.mock("@/lib/store", async (importOriginal) => {
     reorderAgents: (...args: unknown[]) => reorderAgentsMock(...args),
     reorderTerminals: (...args: unknown[]) => reorderTerminalsMock(...args),
     setAgentSort: (...args: unknown[]) => setAgentSortMock(...args),
+    openNewAgentPicker: (...args: unknown[]) => openNewAgentPickerMock(...args),
+    openAddProject: (...args: unknown[]) => openAddProjectMock(...args),
+    createStandaloneTerminal: (...args: unknown[]) =>
+      createStandaloneTerminalMock(...args),
   }
 })
 
@@ -189,6 +196,9 @@ beforeEach(() => {
   reorderAgentsMock.mockClear()
   reorderTerminalsMock.mockClear()
   setAgentSortMock.mockClear()
+  openNewAgentPickerMock.mockClear()
+  openAddProjectMock.mockClear()
+  createStandaloneTerminalMock.mockClear()
   mockState = makeState("name")
   resetQuietTailManualChoiceForTests()
   installStubs()
@@ -696,5 +706,219 @@ describe("FlatAgentList attach-a-file entries", () => {
     await openTerminalMenu()
     fireEvent.click(item()!)
     expect(attach).toHaveBeenCalledTimes(1)
+  })
+})
+
+// The section's own controls: a + that acts and a sort trigger that only
+// reveals a menu, sharing one height token at the header's right edge.
+describe("FlatAgentList Agents header", () => {
+  it("offers a + that opens the new-agent picker in one tap", () => {
+    render(<FlatAgentList handlers={handlers} />)
+    fireEvent.click(screen.getByRole("button", { name: "New agent" }))
+    expect(openNewAgentPickerMock).toHaveBeenCalledWith("new")
+  })
+
+  it("gives the + and the sort trigger one height and the phone floor", () => {
+    render(<FlatAgentList handlers={handlers} />)
+    const plus = screen.getByRole("button", { name: "New agent" })
+    const sort = screen.getByRole("button", { name: "Sort agents" })
+    for (const control of [plus, sort]) {
+      expect(control.className).toContain("h-7")
+      // The sort trigger's old 36px exemption is retired: the + is now its
+      // horizontal neighbour, which was the stated basis for the relaxation.
+      expect(control.className).toContain("max-md:min-h-10")
+      expect(control.className).not.toContain("max-md:min-h-9")
+    }
+  })
+
+  // The + rides sort's gate: the empty state below carries its own hero button,
+  // and two buttons offering the same click on one screen is one too many.
+  it("hides both controls when there is no agent to sort", () => {
+    mockState = {
+      ...makeState("name"),
+      spine: {
+        projects: [{ id: "p1", name: "Repo" }],
+        terminals: [],
+        sessions: [],
+        sidebar: {
+          groups: [{ project_id: "p1", name: "Repo", orphaned: false }],
+          agentless_start: null,
+        },
+      },
+    } as unknown as DuxState
+    render(<FlatAgentList handlers={handlers} />)
+    expect(screen.queryByRole("button", { name: "Sort agents" })).toBeNull()
+    // The empty state's hero remains, and it is the only "New agent" button.
+    expect(screen.getAllByRole("button", { name: /^new agent$/i })).toHaveLength(
+      1,
+    )
+  })
+})
+
+describe("FlatAgentList sort control", () => {
+  it("reads a static Sort and names the mode in its tooltip instead", () => {
+    mockState = makeState("updated")
+    render(<FlatAgentList handlers={handlers} />)
+    const trigger = screen.getByRole("button", { name: "Sort agents" })
+    // Never the mode name: the full label plus the + overflows a narrow
+    // sidebar, and a control that changes width when used is its own annoyance.
+    expect(trigger.textContent).toBe("Sort")
+    expect(screen.queryByText("Recently updated")).toBeNull()
+  })
+
+  it("checkmarks the active mode in the menu", async () => {
+    mockState = makeState("created")
+    render(<FlatAgentList handlers={handlers} />)
+    fireEvent.click(screen.getByRole("button", { name: "Sort agents" }))
+    await screen.findByRole("menu")
+    const active = screen
+      .getAllByRole("menuitem")
+      .find((i) => i.textContent === "Recently created")!
+    expect(active.querySelector("svg.lucide-check")).toBeTruthy()
+  })
+
+  // The web never OFFERS name_desc (only the TUI cycles into it), so without
+  // this row a TUI-set name_desc would be a menu of five unticked rows.
+  it("appends the TUI-only Name (Z to A) row while it is the active mode", async () => {
+    mockState = makeState("name_desc")
+    render(<FlatAgentList handlers={handlers} />)
+    fireEvent.click(screen.getByRole("button", { name: "Sort agents" }))
+    await screen.findByRole("menu")
+    const rows = screen.getAllByRole("menuitem")
+    const zToA = rows.find((i) => i.textContent === "Name (Z to A)")!
+    expect(zToA).toBeTruthy()
+    expect(zToA.querySelector("svg.lucide-check")).toBeTruthy()
+    // Exactly one checkmark in the menu, and it is that row.
+    expect(
+      rows.filter((i) => i.querySelector("svg.lucide-check")),
+    ).toHaveLength(1)
+  })
+
+  it("leaves it out in every mode the web can reach", async () => {
+    render(<FlatAgentList handlers={handlers} />)
+    fireEvent.click(screen.getByRole("button", { name: "Sort agents" }))
+    await screen.findByRole("menu")
+    expect(
+      screen.getAllByRole("menuitem").map((i) => i.textContent),
+    ).toEqual([
+      "Active first",
+      "Recently updated",
+      "Recently created",
+      "Name (A to Z)",
+      "Manual order",
+    ])
+  })
+})
+
+// One pill style for every section count, immediately after the section word.
+// Right edges carry controls only.
+describe("FlatAgentList section counters", () => {
+  it("renders the Agents, Terminals and Inactive counts in the same pill", () => {
+    render(<FlatAgentList handlers={handlers} />)
+    for (const word of ["Agents", "Terminals", "Inactive"]) {
+      const pill = screen.getByText(word).nextElementSibling as HTMLElement
+      expect(pill, word).toBeTruthy()
+      expect(pill.className, word).toContain("rounded-full")
+      expect(pill.className, word).toContain("bg-muted")
+      // Not pushed to the right edge any more.
+      expect(pill.className, word).not.toContain("ml-auto")
+    }
+  })
+})
+
+describe("FlatAgentList Terminals divider", () => {
+  it("creates a standalone terminal in one tap", () => {
+    render(<FlatAgentList handlers={handlers} />)
+    fireEvent.click(
+      screen.getByRole("button", { name: "New standalone terminal" }),
+    )
+    expect(createStandaloneTerminalMock).toHaveBeenCalledOnce()
+  })
+
+  // Nested interactive elements are invalid HTML and route clicks by coin
+  // toss: the + is a SIBLING of the collapse toggle, as on the agent rows.
+  it("keeps the + outside the collapse toggle", () => {
+    render(<FlatAgentList handlers={handlers} />)
+    const toggle = screen.getByText("Terminals").closest("button")!
+    const plus = screen.getByRole("button", { name: "New standalone terminal" })
+    expect(toggle.contains(plus)).toBe(false)
+    expect(plus.contains(toggle)).toBe(false)
+    // Misclick-safe spacing between the two, and the word stays in the toggle
+    // so the whole label still expands the section.
+    expect((plus.parentElement as HTMLElement).className).toContain("gap-2")
+  })
+
+  it("still collapses and expands, and the + does not toggle it", () => {
+    render(<FlatAgentList handlers={handlers} />)
+    const toggle = () => screen.getByText("Terminals").closest("button")!
+    expect(toggle().getAttribute("aria-expanded")).toBe("true")
+    fireEvent.click(
+      screen.getByRole("button", { name: "New standalone terminal" }),
+    )
+    expect(toggle().getAttribute("aria-expanded")).toBe("true")
+    fireEvent.click(toggle())
+    expect(toggle().getAttribute("aria-expanded")).toBe("false")
+    fireEvent.click(toggle())
+    expect(toggle().getAttribute("aria-expanded")).toBe("true")
+  })
+
+  // The section renders nothing at zero terminals, so the divider + can never
+  // create the FIRST one; the launcher corner's ⋯ is its zero-state home.
+  it("is absent entirely when there is no terminal", () => {
+    mockState = {
+      ...makeState("name"),
+      spine: { ...makeState("name").spine, terminals: [] },
+    } as unknown as DuxState
+    render(<FlatAgentList handlers={handlers} />)
+    expect(screen.queryByText("Terminals")).toBeNull()
+    expect(
+      screen.queryByRole("button", { name: "New standalone terminal" }),
+    ).toBeNull()
+  })
+})
+
+// An empty workspace is exactly where the next click should be ON SCREEN, so
+// the empty state carries a real button rather than a sentence pointing at a
+// control somewhere else.
+describe("FlatAgentList empty state", () => {
+  function emptyState(projects: { id: string; name: string }[]): DuxState {
+    return {
+      ...makeState("name"),
+      spine: {
+        projects,
+        terminals: [],
+        sessions: [],
+        sidebar: {
+          groups: projects.map((p) => ({
+            project_id: p.id,
+            name: p.name,
+            orphaned: false,
+          })),
+          agentless_start: null,
+        },
+      },
+    } as unknown as DuxState
+  }
+
+  it("offers a New agent button that opens the picker", () => {
+    mockState = emptyState([{ id: "p1", name: "Repo" }])
+    render(<FlatAgentList handlers={handlers} />)
+    expect(screen.getByText("No agents yet")).toBeTruthy()
+    const button = screen.getByRole("button", { name: /^new agent$/i })
+    // The touch floor, matching the launcher corner this button stands in for.
+    expect(button.className).toContain("max-md:min-h-11")
+    fireEvent.click(button)
+    expect(openNewAgentPickerMock).toHaveBeenCalledWith("new")
+  })
+
+  // Same pure helper as the launcher corner's verb, so the two buttons on
+  // screen can never offer different next steps.
+  it("flips to Add project when there is no project to make an agent in", () => {
+    mockState = emptyState([])
+    render(<FlatAgentList handlers={handlers} />)
+    expect(screen.queryByRole("button", { name: /^new agent$/i })).toBeNull()
+    fireEvent.click(screen.getByRole("button", { name: /^add project$/i }))
+    expect(openAddProjectMock).toHaveBeenCalledOnce()
+    expect(openNewAgentPickerMock).not.toHaveBeenCalled()
   })
 })

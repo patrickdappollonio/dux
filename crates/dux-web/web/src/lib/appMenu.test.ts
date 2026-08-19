@@ -12,6 +12,7 @@ const openAddProject = vi.fn()
 const openAddProjectForInit = vi.fn()
 const openCreateAgentFromPr = vi.fn()
 const openNewAgentPicker = vi.fn()
+const createStandaloneTerminal = vi.fn()
 const reload = vi.fn(() => Promise.resolve())
 
 vi.mock("@/lib/store", () => ({
@@ -28,6 +29,7 @@ vi.mock("@/lib/store", () => ({
   openCreateAgentFromPr: (projectId: string | null) =>
     openCreateAgentFromPr(projectId),
   openNewAgentPicker: (intent: string) => openNewAgentPicker(intent),
+  createStandaloneTerminal: () => createStandaloneTerminal(),
 }))
 vi.mock("@/lib/configApi", () => ({ configApi: { reload: () => reload() } }))
 
@@ -38,7 +40,7 @@ import {
   findSubmenu,
   type AppMenuEntry,
 } from "@/lib/appMenu"
-import { addProjectMenuItems, newAgentMenuItems } from "@/lib/creationMenus"
+import { addProjectMenuItems, newMenuItems } from "@/lib/creationMenus"
 
 // Depth-first walk of every entry in the tree, submenu children included.
 function walk(entries: AppMenuEntry[]): AppMenuEntry[] {
@@ -65,7 +67,8 @@ describe("appMenuModel", () => {
       ["submenu", "sort-agents"],
       ["submenu", "configuration"],
       ["separator", "sep-agents"],
-      ["item", "new-standalone-terminal"],
+      // No top-level new-standalone-terminal: its one home is the New submenu
+      // above (pinned as absent by the test below).
       ["item", "task-manager"],
       ["separator", "sep-about"],
       ["item", "welcome-screen"],
@@ -74,41 +77,65 @@ describe("appMenuModel", () => {
   })
 
   // THE ANTI-DRIFT PIN for the creation submenus: their entries are the same
-  // shared lists the sidebar's split-button menus render (creationMenus.ts), so
+  // shared lists the launcher corner's ⋯ menu renders (creationMenus.ts), so
   // the cog menu and the sidebar cannot disagree about labels, icons, order, or
   // gating.
   it("builds the creation submenus from the shared sidebar lists", () => {
     // `run` is a fresh closure per construction, so compare everything else;
     // the run behavior itself is pinned by the store-routing test below.
+    // Separators pass straight through, so the shape function has to handle
+    // both arms of the shared list's union.
     const shape = (entries: AppMenuEntry[] | undefined) =>
       entries?.map((e) =>
         e.kind === "item"
           ? { kind: e.kind, id: e.id, title: e.title, icon: e.icon }
-          : e,
+          : { kind: e.kind, id: e.id },
+      )
+    const sharedShape = (
+      entries: ReturnType<typeof addProjectMenuItems>,
+    ) =>
+      entries.map((e) =>
+        e.kind === "item"
+          ? { kind: e.kind, id: e.id, title: e.title, icon: e.icon }
+          : { kind: e.kind, id: e.id },
       )
     for (const ghAvailable of [true, false]) {
       const model = appMenuModel({ ghAvailable })
       const agentSub = findSubmenu(model, "new-agent")
-      expect(agentSub?.title).toBe("New agent")
+      expect(agentSub?.title).toBe("New")
       expect(shape(agentSub?.entries)).toEqual(
-        newAgentMenuItems({ ghAvailable }).map((i) => ({
-          kind: "item",
-          id: i.id,
-          title: i.title,
-          icon: i.icon,
-        })),
+        sharedShape(newMenuItems({ ghAvailable })),
+      )
+      // The cog keeps the whole list, separator and standalone terminal
+      // included: unlike the launcher corner there is no adjacent verb here.
+      expect(agentSub?.entries.map((e) => e.id)).toContain(
+        "new-standalone-terminal",
       )
       const projectSub = findSubmenu(model, "add-project")
       expect(projectSub?.title).toBe("Add project")
       expect(shape(projectSub?.entries)).toEqual(
-        addProjectMenuItems().map((i) => ({
-          kind: "item",
-          id: i.id,
-          title: i.title,
-          icon: i.icon,
-        })),
+        sharedShape(addProjectMenuItems()),
       )
     }
+  })
+
+  // The standalone terminal used to ALSO sit at the top level. It has one home
+  // now, so the cog cannot offer the same click twice.
+  it("offers the standalone terminal only inside the New submenu", () => {
+    const model = appMenuModel(ctx)
+    expect(model.map((e) => e.id)).not.toContain("new-standalone-terminal")
+    expect(walk(model).filter((e) => e.id === "new-standalone-terminal")).toHaveLength(
+      1,
+    )
+  })
+
+  it("routes the standalone terminal to its store action", () => {
+    const entry = walk(appMenuModel(ctx)).find(
+      (e) => e.id === "new-standalone-terminal",
+    )
+    if (entry?.kind !== "item") throw new Error("not an item")
+    entry.run()
+    expect(createStandaloneTerminal).toHaveBeenCalledOnce()
   })
 
   it("hides the from-PR agent variant when gh is unavailable", () => {
@@ -146,6 +173,10 @@ describe("appMenuModel", () => {
     }
     // Reload config runs immediately: no dialog, no confirmation, no ellipsis.
     expect(titleOf("reload-config")?.title).toBe("Reload config")
+    // Same for the standalone terminal: it opens the terminal on the spot.
+    expect(titleOf("new-standalone-terminal")?.title).toBe(
+      "New standalone terminal",
+    )
   })
 
   it("gives every item and submenu a leading icon", () => {

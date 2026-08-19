@@ -29,7 +29,11 @@ export const FLAT_SORT_LABELS: Record<FlatSortKey, string> = {
   created: "Recently created",
   name: "Name (A to Z)",
   // The web picker does not OFFER name_desc (only the TUI cycles into it), but
-  // the web must DISPLAY it when the TUI set it, so it needs a label.
+  // the web must DISPLAY it when the TUI set it, so it needs a label. Where it
+  // is displayed changed with the static sort trigger: the trigger now always
+  // reads "Sort", so the sort MENU appends a checked "Name (Z to A)" row while
+  // that mode is active (the touch-visible truth), and the trigger's tooltip
+  // names the mode as a desktop nicety on top of it.
   name_desc: "Name (Z to A)",
   manual: "Manual order",
 }

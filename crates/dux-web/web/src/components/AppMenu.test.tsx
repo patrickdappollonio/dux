@@ -6,6 +6,7 @@ const openCustomizeWebapp = vi.fn()
 const openCreateAgentFromPr = vi.fn()
 const openNewAgentPicker = vi.fn()
 const openAddProject = vi.fn()
+const createStandaloneTerminal = vi.fn()
 // The renderer reads gh availability from the live bootstrap; tests flip this.
 let ghAvailable = true
 vi.mock("@/lib/store", () => ({
@@ -22,6 +23,7 @@ vi.mock("@/lib/store", () => ({
   openCreateAgentFromPr: (projectId: string | null) =>
     openCreateAgentFromPr(projectId),
   openNewAgentPicker: (intent: string) => openNewAgentPicker(intent),
+  createStandaloneTerminal: () => createStandaloneTerminal(),
   useDux: () => ({ bootstrap: { gh_available: ghAvailable } }),
 }))
 vi.mock("@/lib/configApi", () => ({
@@ -165,20 +167,33 @@ describe("AppMenu", () => {
     expect(screen.getByText("Name")).toBeTruthy()
   })
 
-  // The creation submenus mirror the sidebar's split-button menus: same items,
+  // The creation submenus mirror the launcher corner's ⋯ menu: same items,
   // same store actions, same gh gating. This is the desktop half; the sheet
   // test has the mobile twin.
-  it("expands the New agent submenu and routes a variant to its store action", async () => {
+  it("expands the New submenu and routes a variant to its store action", async () => {
     render(<AppMenu />)
     fireEvent.click(screen.getByRole("button", { name: /^settings$/i }))
     await screen.findByRole("menu")
-    fireEvent.click(screen.getByText("New agent"))
+    fireEvent.click(screen.getByText("New"))
     await settle()
     expect(screen.getByText("New agent…")).toBeTruthy()
     expect(screen.getByText("New agent from PR…")).toBeTruthy()
     expect(screen.getByText("New agent from existing worktree…")).toBeTruthy()
+    // The terminal rides along in the same submenu, and it is the cog's only
+    // route to it now that the top-level entry is gone.
+    expect(screen.getByText("New standalone terminal")).toBeTruthy()
     fireEvent.click(screen.getByText("New agent from PR…"))
     expect(openCreateAgentFromPr).toHaveBeenCalledWith(null)
+  })
+
+  it("opens a standalone terminal from the New submenu", async () => {
+    render(<AppMenu />)
+    fireEvent.click(screen.getByRole("button", { name: /^settings$/i }))
+    await screen.findByRole("menu")
+    fireEvent.click(screen.getByText("New"))
+    await settle()
+    fireEvent.click(screen.getByText("New standalone terminal"))
+    expect(createStandaloneTerminal).toHaveBeenCalledOnce()
   })
 
   it("hides the from-PR variant when gh is unavailable", async () => {
@@ -186,7 +201,7 @@ describe("AppMenu", () => {
     render(<AppMenu />)
     fireEvent.click(screen.getByRole("button", { name: /^settings$/i }))
     await screen.findByRole("menu")
-    fireEvent.click(screen.getByText("New agent"))
+    fireEvent.click(screen.getByText("New"))
     await settle()
     expect(screen.getByText("New agent…")).toBeTruthy()
     expect(screen.queryByText("New agent from PR…")).toBeNull()
