@@ -2259,7 +2259,15 @@ impl Engine {
                 // pause is needed here.
                 let snapshot = backoff.lock().unwrap_or_else(|e| e.into_inner()).clone();
                 let policy = policy.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                let (results, signals) = crate::gh::run_pr_sync(&sessions, &snapshot, &policy);
+                // The blind poll: nobody asked, so a dormant agent whose pull
+                // request is already closed is left alone until a one-shot
+                // trigger looks at it.
+                let (results, signals) = crate::gh::run_pr_sync(
+                    &sessions,
+                    &snapshot,
+                    &policy,
+                    crate::gh::SyncTrigger::BlindPoll,
+                );
                 Self::apply_pr_backoff(&backoff, &signals, tx);
                 if !results.is_empty() && tx.send(WorkerEvent::PrStatusReady(results)).is_err() {
                     // Receiver dropped (shutdown). Release the slot anyway, so a
@@ -2425,7 +2433,15 @@ impl Engine {
             },
             move |tx| {
                 let snapshot = backoff.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                let (results, signals) = crate::gh::run_pr_sync(&sessions, &snapshot, &policy);
+                // Boot is a one-shot: a pull request closed before the last
+                // shutdown may have been reopened since, and this is the pass
+                // that notices.
+                let (results, signals) = crate::gh::run_pr_sync(
+                    &sessions,
+                    &snapshot,
+                    &policy,
+                    crate::gh::SyncTrigger::OneShot,
+                );
                 Self::apply_pr_backoff(&backoff, &signals, &tx);
                 if !results.is_empty() {
                     let _ = tx.send(WorkerEvent::PrStatusReady(results));
@@ -2660,7 +2676,12 @@ impl Engine {
             },
             move |tx| {
                 let snapshot = backoff.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                let (result, signals) = crate::gh::check_pr_for_entry(&entry, &snapshot, &policy);
+                let (result, signals) = crate::gh::check_pr_for_entry(
+                    &entry,
+                    &snapshot,
+                    &policy,
+                    crate::gh::SyncTrigger::OneShot,
+                );
                 // Event-driven checks feed the shared backoff too, so a sustained
                 // failure arms the pause (and clears it on recovery) even when the
                 // blind poll is disabled.

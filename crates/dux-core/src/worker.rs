@@ -680,13 +680,15 @@ pub struct PrSyncEntry {
     pub branch_name: String,
     pub worktree_path: String,
     /// If we already know a PR for this session, the worker can use `gh pr view`
-    /// (works even after branch deletion) and skip terminal states (merged/closed).
+    /// (works even after branch deletion) and skip a merged PR entirely. A CLOSED
+    /// one is still refreshed, because it can be reopened.
     /// For a pinned session this is the OVERRIDE row, never the `session_prs`
     /// latest (which can be a different, autodetected PR).
     pub known_pr: Option<StoredPr>,
-    /// Whether the agent process has exited. Used to skip PR discovery calls
-    /// for sessions that are both exited and in a terminal PR state — nobody
-    /// is pushing to that branch anymore.
+    /// Whether the agent process has exited. Used to skip PR discovery calls for
+    /// sessions that are both exited and merged (nobody is pushing to that branch
+    /// anymore, and a merge is final), and to keep an exited session whose PR is
+    /// CLOSED out of the blind poll while a one-shot trigger still refreshes it.
     pub agent_exited: bool,
     /// A manually attached PR. When set, the planner short-circuits the
     /// remote-derived target: the query goes to the pinned `(host, owner_repo)`,

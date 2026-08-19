@@ -93,12 +93,29 @@ pub fn run_pr_sync(
     sessions: &Arc<Mutex<Vec<PrSyncEntry>>>,
     backoff: &BackoffSnapshot,
     policy: &GithubHostPolicy,
+    trigger: SyncTrigger,
 ) -> PrSyncOutcome {
     let snapshot = match sessions.lock() {
         Ok(guard) => guard.clone(),
         Err(_) => return (Vec::new(), Vec::new()),
     };
-    run_entries(&snapshot, backoff, policy)
+    run_entries(&snapshot, backoff, policy, trigger)
+}
+
+/// What caused this sync, which decides how much a dormant session is worth
+/// spending a call on.
+///
+/// It is a CALL-SITE parameter rather than a field on `PrSyncEntry` on purpose:
+/// the blind poll and the initial refresh read the same shared entries vector,
+/// so a per-entry field could not tell them apart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SyncTrigger {
+    /// The periodic poll loop, running on its own with nobody asking. It is the
+    /// one trigger that skips a closed pull request on an exited agent.
+    BlindPoll,
+    /// A user- or event-driven check: boot, foreground focus, a refs change, or
+    /// the single-session check. Worth a call even for a dormant session.
+    OneShot,
 }
 
 /// Single-session PR check (foreground / refs-watcher / exit triggers). Shares
@@ -108,8 +125,9 @@ pub fn check_pr_for_entry(
     entry: &PrSyncEntry,
     backoff: &BackoffSnapshot,
     policy: &GithubHostPolicy,
+    trigger: SyncTrigger,
 ) -> (Option<PrInfo>, Vec<HostSignal>) {
-    let (results, signals) = run_entries(std::slice::from_ref(entry), backoff, policy);
+    let (results, signals) = run_entries(std::slice::from_ref(entry), backoff, policy, trigger);
     let pr = results.into_iter().next().and_then(|(_, pr)| pr);
     (pr, signals)
 }
@@ -139,9 +157,37 @@ struct Planned {
 }
 
 /// Single source of truth for "this stored PR is terminal (MERGED/CLOSED)".
-/// Used by both `run_entries`' zero-network short-circuit and `Planned::new`.
+/// This is the PLANNING shape: a terminal row gets discovery only and no
+/// by-number alias, so a reopen is still noticed through the discovery node at
+/// no extra API cost. Whether a terminal row may skip the network entirely is a
+/// narrower question, answered by [`exited_entry_needs_no_network`].
 fn stored_pr_is_terminal(known: Option<&StoredPr>) -> bool {
     known.is_some_and(|k| k.state == "MERGED" || k.state == "CLOSED")
+}
+
+/// A MERGED stored PR: the one state dux treats as final. A merge cannot
+/// practically un-happen, so nothing about it is worth another call.
+fn stored_pr_is_merged(known: Option<&StoredPr>) -> bool {
+    known.is_some_and(|k| k.state == "MERGED")
+}
+
+/// Whether an EXITED agent's entry can be answered from SQLite with no `gh`
+/// call at all.
+///
+/// MERGED is always free: nothing can change it. CLOSED is refreshable, because
+/// a closed pull request can be reopened and only a real call notices, but a
+/// wall of dormant sessions with closed pull requests must not tick the API
+/// every poll interval. So a closed row on an exited agent is skipped by the
+/// blind poll and refreshed by the one-shot triggers: boot, foreground focus,
+/// and a refs change. A closed row on a RUNNING agent refreshes like an open
+/// one, under either trigger.
+fn exited_entry_needs_no_network(known: Option<&StoredPr>, trigger: SyncTrigger) -> bool {
+    // Spelled as the rule reads: merged is always free, and terminal-but-not-
+    // merged is exactly closed, free only on the blind poll.
+    stored_pr_is_merged(known)
+        || (stored_pr_is_terminal(known)
+            && !stored_pr_is_merged(known)
+            && trigger == SyncTrigger::BlindPoll)
 }
 
 impl Planned {
@@ -224,14 +270,20 @@ impl Planned {
 /// | None           | any            | head-ref discovery                        |
 /// | OPEN           | any            | head-ref discovery **+** by-number refresh|
 /// | MERGED/CLOSED  | yes            | head-ref discovery (catches a follow-up PR)|
-/// | MERGED/CLOSED  | no             | **zero calls** — reconstruct from SQLite  |
+/// | MERGED         | no             | **zero calls** - reconstruct from SQLite  |
+/// | CLOSED         | no             | zero calls on the blind poll, discovery on a one-shot |
 fn run_entries(
     entries: &[PrSyncEntry],
     backoff: &BackoffSnapshot,
     policy: &GithubHostPolicy,
+    trigger: SyncTrigger,
 ) -> PrSyncOutcome {
-    let (mut results, planned) =
-        plan_entries(entries, &|path| live_remote_resolver(path, policy), policy);
+    let (mut results, planned) = plan_entries(
+        entries,
+        &|path| live_remote_resolver(path, policy),
+        policy,
+        trigger,
+    );
 
     // Group by host; for each host either skip it (already backed off — keep
     // last-known PRs, no gh call, no signal) or chunk its sessions by alias
@@ -321,6 +373,7 @@ fn plan_entries(
     entries: &[PrSyncEntry],
     resolve_remote: &dyn Fn(&Path) -> git::RemoteResolution,
     policy: &GithubHostPolicy,
+    trigger: SyncTrigger,
 ) -> (Vec<(String, Option<PrInfo>)>, Vec<Planned>) {
     let mut results: Vec<(String, Option<PrInfo>)> = Vec::new();
     let mut planned: Vec<Planned> = Vec::new();
@@ -358,8 +411,9 @@ fn plan_entries(
                 results.push((entry.session_id.clone(), reconstruct_from_stored(&known)));
                 continue;
             }
-            // Terminal pin + exited agent: zero network, like the unpinned rule.
-            if stored_pr_is_terminal(Some(&known)) && entry.agent_exited {
+            // Terminal pin + exited agent: zero network, like the unpinned rule,
+            // and with the same closed-is-refreshable narrowing.
+            if entry.agent_exited && exited_entry_needs_no_network(Some(&known), trigger) {
                 results.push((entry.session_id.clone(), reconstruct_from_stored(&known)));
                 continue;
             }
@@ -427,9 +481,11 @@ fn plan_entries(
             continue;
         }
 
-        // Terminal PR + exited agent: nobody is pushing to that branch anymore,
-        // so reconstruct from SQLite with zero network calls.
-        if stored_pr_is_terminal(entry.known_pr.as_ref()) && entry.agent_exited {
+        // Merged PR + exited agent: nobody is pushing to that branch anymore and
+        // a merge is final, so reconstruct from SQLite with zero network calls.
+        // A CLOSED PR takes this path only on the blind poll; see
+        // `exited_entry_needs_no_network`.
+        if entry.agent_exited && exited_entry_needs_no_network(entry.known_pr.as_ref(), trigger) {
             let pr = entry.known_pr.as_ref().and_then(reconstruct_from_stored);
             results.push((entry.session_id.clone(), pr));
             continue;
@@ -1021,6 +1077,13 @@ fn build_chunk_query(planned: &[Planned], chunk: &[usize]) -> (String, Vec<usize
         for &pos in positions {
             let p = &planned[chunk[pos]];
             if p.emit_ref {
+                // Discovery asks for exactly ONE node, the newest-created pull
+                // request on the branch. That is what makes a reopen free to
+                // notice for the common case, and it carries an accepted limit:
+                // if a branch has both an older pull request and a newer one,
+                // reopening the OLDER one stays invisible, because the newer one
+                // is the only node this alias returns. Deliberate, and cheaper
+                // than paging every branch's history on every cycle.
                 let qname = graphql_string(&format!("refs/heads/{}", p.branch));
                 q.push_str(&format!(
                     "    {}: ref(qualifiedName: {qname}) {{ associatedPullRequests(first: 1, orderBy: {{field: CREATED_AT, direction: DESC}}) {{ nodes {{ number state title url }} }} }}\n",
@@ -1095,7 +1158,8 @@ fn parse_chunk_response(
 
 /// Reconcile the head-ref discovery result and the by-number refresh into the
 /// single PR to report, matching the pre-batch behavior:
-///   - terminal + running: a strictly-newer follow-up PR wins, else the stored PR
+///   - terminal + running: a strictly-newer follow-up PR wins, then a same-numbered
+///     discovery result that says a CLOSED PR is no longer closed, else the stored PR
 ///   - open known: the newest PR by number wins (a newer PR opened on the same
 ///     branch), else the by-number refresh (robust when the branch was deleted)
 ///   - undiscovered: whatever the head-ref discovery found
@@ -1113,6 +1177,25 @@ fn merge_pr_result(p: &Planned, ref_pr: Option<PrInfo>, num_pr: Option<PrInfo>) 
     if p.is_terminal {
         if let Some(r) = &ref_pr
             && r.number > known.pr_number
+        {
+            return ref_pr;
+        }
+        // A CLOSED pull request can be reopened, and discovery already told us:
+        // the same number came back in a state that is no longer closed. Accept
+        // it, at zero extra API cost, so the badge follows the reopen.
+        //
+        // This is deliberately not extended to MERGED. A merge cannot practically
+        // un-happen, and a stale read replica answering OPEN for a merged pull
+        // request must never flip a merged badge back.
+        //
+        // The comparison is by number alone, in deliberate parity with the
+        // strictly-higher-number rule above: discovery answers for the one
+        // target repo the planner chose for this session, and the by-number
+        // alias is separately guarded by known_matches_target.
+        if known.state == "CLOSED"
+            && let Some(r) = &ref_pr
+            && r.number == known.pr_number
+            && r.state != PrState::Closed
         {
             return ref_pr;
         }
@@ -1153,7 +1236,7 @@ fn parse_rate_limit(data: &serde_json::Value) -> Option<RateLimitInfo> {
 }
 
 /// Reconstruct a PrInfo from stored data without a network call.
-/// Used for terminal states (merged/closed) that don't need refreshing.
+/// Used wherever a call is skipped or failed and the stored row is the answer.
 /// Reconstruct a live [`PrInfo`] from a stored PR row's decoded state, or `None`
 /// when the stored state string is unrecognized. Shared by the PR-sync
 /// reconstruction paths and by `Engine::seed_pr_statuses_from_store` (startup PR
@@ -2554,7 +2637,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_chunk_response_terminal_running_keeps_stored_unless_newer() {
+    fn parse_chunk_response_merged_running_keeps_stored_unless_newer() {
         let ps = vec![planned(
             "s0",
             "octocat",
@@ -2573,6 +2656,76 @@ mod tests {
         let (results, _) = parse_chunk_response(&ps, &chunk, &pos_repo, Some(&newer));
         let pr = results[0].1.as_ref().unwrap();
         assert_eq!(pr.number, 50);
+        assert_eq!(pr.state, PrState::Open);
+        // A merge is final: a same-numbered answer claiming OPEN (a stale read
+        // replica) must NOT flip the merged badge back. This is the one place
+        // the closed-reopen rule deliberately does not reach.
+        let stale = serde_json::json!({ "r0": { "s0_ref": ref_node(42, "OPEN") } });
+        let (results, _) = parse_chunk_response(&ps, &chunk, &pos_repo, Some(&stale));
+        let pr = results[0].1.as_ref().unwrap();
+        assert_eq!(pr.number, 42);
+        assert_eq!(pr.state, PrState::Merged);
+    }
+
+    #[test]
+    fn parse_chunk_response_closed_still_closed_keeps_stored() {
+        // The counterpart to the reopen case: discovery confirming the pull
+        // request is still closed changes nothing.
+        let ps = vec![planned(
+            "s0",
+            "octocat",
+            "Hello-World",
+            "feat/x",
+            Some(stored(12, "CLOSED")),
+        )];
+        let chunk = [0usize];
+        let (_, pos_repo) = build_chunk_query(&ps, &chunk);
+        let same = serde_json::json!({ "r0": { "s0_ref": ref_node(12, "CLOSED") } });
+        let (results, _) = parse_chunk_response(&ps, &chunk, &pos_repo, Some(&same));
+        let pr = results[0].1.as_ref().unwrap();
+        assert_eq!(pr.number, 12);
+        assert_eq!(pr.state, PrState::Closed);
+    }
+
+    #[test]
+    fn parse_chunk_response_closed_ignores_a_different_lower_number() {
+        // The reopen rule matches the SAME number only: discovery answering
+        // with some other, lower-numbered pull request must not flip the
+        // stored closed badge onto it.
+        let ps = vec![planned(
+            "s0",
+            "octocat",
+            "Hello-World",
+            "feat/x",
+            Some(stored(12, "CLOSED")),
+        )];
+        let chunk = [0usize];
+        let (_, pos_repo) = build_chunk_query(&ps, &chunk);
+        let other = serde_json::json!({ "r0": { "s0_ref": ref_node(7, "OPEN") } });
+        let (results, _) = parse_chunk_response(&ps, &chunk, &pos_repo, Some(&other));
+        let pr = results[0].1.as_ref().unwrap();
+        assert_eq!(pr.number, 12);
+        assert_eq!(pr.state, PrState::Closed);
+    }
+
+    /// A CLOSED pull request can be reopened, and discovery already carries the
+    /// answer: the same number comes back with state OPEN. The stored CLOSED row
+    /// must yield to it, at no extra API cost.
+    #[test]
+    fn parse_chunk_response_closed_accepts_the_same_number_reopened() {
+        let ps = vec![planned(
+            "s0",
+            "octocat",
+            "Hello-World",
+            "feat/x",
+            Some(stored(12, "CLOSED")),
+        )];
+        let chunk = [0usize];
+        let (_, pos_repo) = build_chunk_query(&ps, &chunk);
+        let reopened = serde_json::json!({ "r0": { "s0_ref": ref_node(12, "OPEN") } });
+        let (results, _) = parse_chunk_response(&ps, &chunk, &pos_repo, Some(&reopened));
+        let pr = results[0].1.as_ref().expect("reopened pr");
+        assert_eq!(pr.number, 12);
         assert_eq!(pr.state, PrState::Open);
     }
 
@@ -2606,9 +2759,10 @@ mod tests {
     }
 
     #[test]
-    fn run_entries_terminal_exited_reconstructs_without_network() {
-        // A terminal + exited session is reconstructed from SQLite with no gh call
-        // (the worktree path is bogus, so any git/gh access would fail).
+    fn run_entries_merged_exited_reconstructs_without_network_under_either_trigger() {
+        // A merged + exited session is reconstructed from SQLite with no gh call
+        // (the worktree path is bogus, so any git/gh access would fail). A merge
+        // is final, so this holds for a one-shot trigger too.
         let entry = PrSyncEntry {
             session_id: "s0".to_string(),
             branch_name: "feat/done".to_string(),
@@ -2617,17 +2771,47 @@ mod tests {
             agent_exited: true,
             pinned: None,
         };
+        for trigger in [SyncTrigger::BlindPoll, SyncTrigger::OneShot] {
+            let (results, signals) = run_entries(
+                std::slice::from_ref(&entry),
+                &std::collections::HashMap::new(),
+                &legacy_policy(),
+                trigger,
+            );
+            // Zero-network (merged+exited) → no host was queried, so no signal.
+            assert!(
+                signals.is_empty(),
+                "no network call means no host signal ({trigger:?})"
+            );
+            assert_eq!(results.len(), 1);
+            let pr = results[0].1.as_ref().expect("reconstructed");
+            assert_eq!(pr.number, 42);
+            assert_eq!(pr.state, PrState::Merged);
+        }
+    }
+
+    #[test]
+    fn run_entries_closed_exited_makes_no_call_on_the_blind_poll() {
+        // A wall of dormant sessions with closed pull requests must not tick the
+        // API every interval, so the blind poll still reconstructs from SQLite.
+        let entry = PrSyncEntry {
+            session_id: "s0".to_string(),
+            branch_name: "feat/done".to_string(),
+            worktree_path: "/nonexistent/dux-test-path".to_string(),
+            known_pr: Some(stored(42, "CLOSED")),
+            agent_exited: true,
+            pinned: None,
+        };
         let (results, signals) = run_entries(
             std::slice::from_ref(&entry),
             &std::collections::HashMap::new(),
             &legacy_policy(),
+            SyncTrigger::BlindPoll,
         );
-        // Zero-network (terminal+exited) → no host was queried, so no signal.
         assert!(signals.is_empty(), "no network call means no host signal");
-        assert_eq!(results.len(), 1);
         let pr = results[0].1.as_ref().expect("reconstructed");
         assert_eq!(pr.number, 42);
-        assert_eq!(pr.state, PrState::Merged);
+        assert_eq!(pr.state, PrState::Closed);
     }
 
     #[test]
@@ -3276,6 +3460,7 @@ mod tests {
                 })
             },
             &legacy_policy(),
+            SyncTrigger::BlindPoll,
         );
 
         assert!(
@@ -3330,6 +3515,7 @@ mod tests {
             std::slice::from_ref(&entry),
             &|_| panic!("a pinned session must not resolve the worktree remote"),
             &legacy_policy(),
+            SyncTrigger::BlindPoll,
         );
 
         assert!(results.is_empty(), "a pinned OPEN session is queried");
@@ -3374,6 +3560,7 @@ mod tests {
             std::slice::from_ref(&entry),
             &|_| panic!("a pinned session must not resolve the worktree remote"),
             &policy,
+            SyncTrigger::BlindPoll,
         );
 
         assert!(planned.is_empty(), "a denied pinned host is never queried");
@@ -3386,10 +3573,38 @@ mod tests {
         assert_eq!(pr.owner_repo, "forker/Hello-World");
     }
 
-    /// Terminal pin + exited agent: zero network, reconstructed from the pin.
+    /// Merged pin + exited agent: zero network under either trigger,
+    /// reconstructed from the pin.
     #[test]
-    fn plan_entries_pinned_terminal_exited_reconstructs_the_pin_without_network() {
+    fn plan_entries_pinned_merged_exited_reconstructs_the_pin_without_network() {
         let stored = pinned_stored("MERGED");
+        let entry = PrSyncEntry {
+            known_pr: Some(stored.clone()),
+            pinned: Some(pin_of(&stored)),
+            agent_exited: true,
+            ..planning_entry()
+        };
+
+        for trigger in [SyncTrigger::BlindPoll, SyncTrigger::OneShot] {
+            let (results, planned) = plan_entries(
+                std::slice::from_ref(&entry),
+                &|_| panic!("a pinned session must not resolve the worktree remote"),
+                &legacy_policy(),
+                trigger,
+            );
+
+            assert!(planned.is_empty(), "merged pins are never queried");
+            let pr = results[0].1.as_ref().expect("reconstructed pin");
+            assert_eq!(pr.number, 12);
+            assert_eq!(pr.state, PrState::Merged);
+        }
+    }
+
+    /// Closed pin + exited agent: skipped by the blind poll, refreshed by a
+    /// one-shot, because a closed pull request can be reopened.
+    #[test]
+    fn plan_entries_pinned_closed_exited_is_skipped_by_the_poll_and_refreshed_one_shot() {
+        let stored = pinned_stored("CLOSED");
         let entry = PrSyncEntry {
             known_pr: Some(stored.clone()),
             pinned: Some(pin_of(&stored)),
@@ -3401,12 +3616,65 @@ mod tests {
             std::slice::from_ref(&entry),
             &|_| panic!("a pinned session must not resolve the worktree remote"),
             &legacy_policy(),
+            SyncTrigger::BlindPoll,
         );
-
-        assert!(planned.is_empty());
+        assert!(planned.is_empty(), "the blind poll spends no call here");
         let pr = results[0].1.as_ref().expect("reconstructed pin");
         assert_eq!(pr.number, 12);
-        assert_eq!(pr.state, PrState::Merged);
+        assert_eq!(pr.state, PrState::Closed);
+
+        let (results, planned) = plan_entries(
+            std::slice::from_ref(&entry),
+            &|_| panic!("a pinned session must not resolve the worktree remote"),
+            &legacy_policy(),
+            SyncTrigger::OneShot,
+        );
+        assert!(results.is_empty(), "a one-shot asks about the closed pin");
+        assert_eq!(planned.len(), 1);
+        assert_eq!(planned[0].owner, "forker");
+    }
+
+    /// The unpinned half of the same rule, at the other short-circuit site.
+    #[test]
+    fn plan_entries_closed_exited_is_skipped_by_the_poll_and_refreshed_one_shot() {
+        let entry = PrSyncEntry {
+            known_pr: Some(stored(12, "CLOSED")),
+            agent_exited: true,
+            ..planning_entry()
+        };
+        let resolve = |_: &Path| {
+            git::RemoteResolution::Allowed(git::GitHubRemote {
+                host: "github.com".to_string(),
+                owner_repo: "octocat/Hello-World".to_string(),
+            })
+        };
+
+        let (results, planned) = plan_entries(
+            std::slice::from_ref(&entry),
+            &resolve,
+            &legacy_policy(),
+            SyncTrigger::BlindPoll,
+        );
+        assert!(planned.is_empty(), "the blind poll spends no call here");
+        let pr = results[0].1.as_ref().expect("reconstructed");
+        assert_eq!(pr.state, PrState::Closed);
+
+        let (results, planned) = plan_entries(
+            std::slice::from_ref(&entry),
+            &resolve,
+            &legacy_policy(),
+            SyncTrigger::OneShot,
+        );
+        assert!(
+            results.is_empty(),
+            "a one-shot asks whether the closed pull request came back"
+        );
+        assert_eq!(planned.len(), 1);
+        // Discovery only: a terminal row gets no by-number alias, so noticing a
+        // reopen costs nothing extra.
+        let (q, _) = build_chunk_query(&planned, &[0]);
+        assert!(q.contains("s0_ref"), "discovery is planned: {q}");
+        assert!(!q.contains("s0_num"), "no extra by-number alias: {q}");
     }
 
     /// A per-alias fetch failure (the pinned repo alias came back null) keeps
@@ -3423,6 +3691,7 @@ mod tests {
             std::slice::from_ref(&entry),
             &|_| panic!("no remote resolution for pins"),
             &legacy_policy(),
+            SyncTrigger::BlindPoll,
         );
         let chunk = [0usize];
         let (_, pos_repo) = build_chunk_query(&planned, &chunk);
@@ -3462,6 +3731,7 @@ mod tests {
                 })
             },
             &legacy_policy(),
+            SyncTrigger::BlindPoll,
         );
         assert!(results.is_empty());
         assert_eq!(planned.len(), 1);
@@ -3498,6 +3768,7 @@ mod tests {
                 })
             },
             &legacy_policy(),
+            SyncTrigger::BlindPoll,
         );
         let (q, _) = build_chunk_query(&planned, &[0]);
         assert!(q.contains("s0_num: pullRequest(number: 12)"), "{q}");
@@ -3630,6 +3901,7 @@ mod tests {
             std::slice::from_ref(&entry),
             &|_| git::RemoteResolution::Unresolved,
             &legacy_policy(),
+            SyncTrigger::BlindPoll,
         );
 
         assert!(planned.is_empty(), "a non-GitHub remote is never queried");
@@ -3687,6 +3959,7 @@ mod tests {
                 )
             },
             &policy,
+            SyncTrigger::BlindPoll,
         );
 
         assert!(
@@ -3733,6 +4006,7 @@ mod tests {
             std::slice::from_ref(&entry),
             &|_| git::RemoteResolution::Unresolved,
             &policy,
+            SyncTrigger::BlindPoll,
         );
 
         assert!(
@@ -3755,6 +4029,7 @@ mod tests {
             std::slice::from_ref(&entry),
             &|_| git::RemoteResolution::Unresolved,
             &serving,
+            SyncTrigger::BlindPoll,
         );
         assert_eq!(planned.len(), 1);
         assert_eq!(planned[0].host, "git.company.example");
@@ -3784,6 +4059,7 @@ mod tests {
             std::slice::from_ref(&entry),
             &|_| git::RemoteResolution::Unresolved,
             &legacy_policy(),
+            SyncTrigger::BlindPoll,
         );
 
         assert_eq!(planned.len(), 1);
