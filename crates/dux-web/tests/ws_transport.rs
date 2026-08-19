@@ -1184,7 +1184,7 @@ async fn an_applied_resize_tells_every_attached_socket_the_ptys_new_grid() {
         .expect("the second socket's connected handshake");
 
     // The owner resizes. The WATCHER must hear about it: this is the frame that
-    // lets it say it is sized for another device, and heal.
+    // lets it heal its grid to the pty's true size.
     ws_a.send(Message::Text(r#"{"rows":40,"cols":120}"#.into()))
         .await
         .unwrap();

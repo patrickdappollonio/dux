@@ -260,10 +260,15 @@ export function useTerminalOwnership(
       // ONE write implementation, so anything the channel ever grows reaches
       // this, the highest-traffic transition, by construction.
       ownership.write(mine)
-      if (!mine) {
-        // A demotion retires any armed take-over WITHOUT sending it: this
-        // client raced somebody else's claim and lost, and re-arming is the
-        // user's decision, not a retry loop's.
+      if (!mine && !freed) {
+        // A genuine lost race, an event naming ANOTHER owner, retires any
+        // armed take-over WITHOUT sending it: re-arming is the user's
+        // decision, not a retry loop's. A FREED event does not: owner-cleared
+        // names no winner, so it clears nobody's victory. The intent survives
+        // it, which is what lets a mid-bounce take-over ride out the old
+        // owner's concurrent disconnect (the bounce's handshake seeds with
+        // the intent still armed and claims flagged) and keeps the reap's
+        // broadcast from killing a self-succession's in-flight claim.
         takeoverIntent.clear()
       }
       // Remember which device took over (for the placeholder's copy) while

@@ -318,6 +318,36 @@ describe("a freed pty", () => {
     expect(view.result.current.isOwner).toBe(false)
     expect(view.result.current.ownerPresent).toBe(false)
   })
+
+  it("leaves an ARMED take-over intent in place, and the next unowned handshake claims flagged", () => {
+    const { view } = setup()
+    act(() => view.result.current.seedFromConnected("mine", "theirs"))
+    act(() => view.result.current.takeOver())
+    expect(view.result.current.takeoverIntent.read()).toBe(true)
+    // The old owner disconnects mid-bounce and the server broadcasts
+    // owner-cleared. A freed event names no winner, so it clears nobody's
+    // victory: the armed intent must survive it.
+    act(() => notifyPtyOwner("p1", undefined, 2, undefined))
+    expect(view.result.current.takeoverIntent.read()).toBe(true)
+    // The bounce's handshake then finds the pty unowned; with the intent still
+    // armed the seed claims, and the flagged frame rides the first resize of
+    // the new connection.
+    act(() => view.result.current.seedFromConnected("mine2", null, 3))
+    expect(view.result.current.isOwner).toBe(true)
+    expect(view.result.current.takeoverIntent.read()).toBe(true)
+  })
+
+  it("clears an armed intent only for a genuine lost race: an event naming ANOTHER owner", () => {
+    const { view } = setup()
+    act(() => view.result.current.seedFromConnected("mine", "theirs"))
+    act(() => view.result.current.takeOver())
+    expect(view.result.current.takeoverIntent.read()).toBe(true)
+    // Somebody else's claim landed first. This is the demotion that retires
+    // the intent without sending it; re-arming is the user's decision.
+    act(() => notifyPtyOwner("p1", "conn-other", 2, undefined))
+    expect(view.result.current.takeoverIntent.read()).toBe(false)
+    expect(view.result.current.isOwner).toBe(false)
+  })
 })
 
 // SELF-SUCCESSION. The server's liveness reap is send-failure based and takes

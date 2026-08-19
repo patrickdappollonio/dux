@@ -1084,8 +1084,10 @@ export function TerminalPane(props: TerminalPaneProps) {
               {/* THREE TITLES, because there are three truths and the card used
                   to tell only two of them. "Nobody is driving" is the one the
                   owner-cleared broadcast made reachable: the device that was
-                  driving has disconnected, and this pane is backgrounded, so it
-                  did not auto-claim. Saying "Active on another device" there
+                  driving has disconnected, and nobody claims passively, so
+                  every viewer, foregrounded or not, keeps the card and this
+                  title until a deliberate act (the arc's own test asserts the
+                  foregrounded case). Saying "Active on another device" there
                   would name a browser tab that has closed. */}
               <CardTitle>
                 {takeoverLabel

@@ -850,6 +850,9 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     BACKGROUNDED does not self-succeed either. Its reconnect's handshake reseeds it as a
     watcher and its human presses Take over on return. That is "attaching never steals"
     applied to our own reconnect, which is an attach like any other.
+    THE FREED EXCEPTION: an owner-cleared event leaves an ARMED take-over intent in
+    place, because it names no winner and so clears nobody's victory; only an event
+    naming ANOTHER owner (a genuine lost race) retires the intent.
     Fix: `crates/dux-web/src/pty_owners.rs` (`release` returning the epoch),
     `crates/dux-web/src/server.rs` (`pty_owner_cleared_event`, the disconnect path),
     src/components/terminal/ownership.ts (site 5 inside the `onPtyOwner` effect,
@@ -860,8 +863,10 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     `crates/dux-web/tests/ws_transport.rs`
     `an_owner_disconnecting_broadcasts_an_owner_cleared_pty_owner`;
     `src/components/terminal/ownership.test.ts` "a freed pty" suite (the absence of the
-    claim, foregrounded and backgrounded, and the demotion of a pane that believed it
-    owned the pty) and its "self-succession after a blipped socket" suite (claims back,
+    claim, foregrounded and backgrounded, the demotion of a pane that believed it
+    owned the pty, the armed intent surviving the freed broadcast so the next unowned
+    handshake claims flagged, and the lost-race clear on an event naming another
+    owner) and its "self-succession after a blipped socket" suite (claims back,
     not while backgrounded, not for somebody else's id, not against a superseded
     handshake); `components/TerminalPane.test.tsx` "says nobody is driving once the
     owner disconnects, to a backgrounded viewer", "does not claim the freed pty, even

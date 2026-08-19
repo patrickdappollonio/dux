@@ -99,9 +99,13 @@ export type ConnectionIdentity = Channel<string | null>
 /// wire write (`sendResize === true`). A frame the socket silently discarded
 /// must leave the intent armed, or the take-over is lost with it.
 ///
-/// ALSO CLEARED, without ever being sent, by a `pty.owner` demoting this client
-/// (the take-over lost a race; re-arming is the user's to decide) and by the
-/// lifecycle teardown (unmount, or a switch to a different target).
+/// ALSO CLEARED, without ever being sent, by a `pty.owner` naming ANOTHER
+/// owner (the take-over lost a race; re-arming is the user's to decide) and by
+/// the lifecycle teardown (unmount, or a switch to a different target). An
+/// owner-cleared `pty.owner` (freed) deliberately does NOT clear it: freed
+/// names no winner, so it clears nobody's victory, and the intent must survive
+/// the old owner disconnecting mid-bounce or the reap racing a
+/// self-succession's in-flight flagged frame.
 export type TakeoverIntent = {
   read: () => boolean
   arm: () => void
