@@ -23,6 +23,23 @@ pub enum InFlightKey {
     /// call can run up to `GH_CALL_TIMEOUT`, longer than the debounce). Cleared
     /// by the `PrStatusReady`/`PrCheckAborted` handlers.
     PrCheck(String),
+    /// A manual pull-request attach is resolving for this session id: the one
+    /// keyed op that spans the `gh` lookup and the attach that follows it.
+    /// While set, this session's other pull-request operations (detach, resume
+    /// autodetection, and a second attach) are refused rather than allowed to
+    /// race the attach's own writes. Marked in
+    /// `Engine::dispatch_attach_pull_request` after validation (the
+    /// `BranchRename` precedent) and cleared in the `PullRequestResolved`
+    /// attach arm, keyed on the purpose's session id so the path where the
+    /// keyed op has gone missing clears it too.
+    ///
+    /// Liveness, and why there is no timed expiry: every dispatch terminates
+    /// in exactly one `PullRequestResolved` for the session. The lookup worker
+    /// posts one, and it runs inside `catch_unwind` with a sender held outside
+    /// it, so even a panicking job posts a failed resolution. Success,
+    /// failure, a session deleted mid-lookup, and a panic therefore all reach
+    /// the same clear point.
+    PrAttach(String),
     /// Creating an initial commit for the repo at this path, then registering
     /// it. Keyed by canonical path so two concurrent "create initial commit &
     /// add" requests for the same repo can't both run and append two commits.

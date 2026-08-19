@@ -3886,8 +3886,13 @@ impl App {
         match action {
             Action::OpenCurrentPullRequest => self.current_pr_info().is_some(),
             // The PR flows require GitHub integration plus an authenticated gh.
-            Action::NewAgentFromPr | Action::AttachPullRequest => {
-                self.github_pr_agent_command_available()
+            Action::NewAgentFromPr => self.github_pr_agent_command_available(),
+            // Attach is additionally hidden while one is already resolving for
+            // the selected agent: the engine refuses a second attach, and an
+            // offered command that can only refuse is a worse answer than an
+            // absent one.
+            Action::AttachPullRequest => {
+                self.github_pr_agent_command_available() && !self.pr_attach_pending_on_selection()
             }
             // Detach is meaningful whenever the selected agent has a pull
             // request associated at all, pinned or autodetected: an
@@ -3896,16 +3901,22 @@ impl App {
             // touches no network, and an association must never outlive the
             // ability to remove it (gh could be uninstalled or signed out
             // after the fact).
-            Action::DetachPullRequest => self.selected_session().is_some_and(|s| {
-                self.engine.pr_overrides.contains_key(&s.id)
-                    || self.engine.pr_statuses.contains_key(&s.id)
-            }),
+            Action::DetachPullRequest => {
+                !self.pr_attach_pending_on_selection()
+                    && self.selected_session().is_some_and(|s| {
+                        self.engine.pr_overrides.contains_key(&s.id)
+                            || self.engine.pr_statuses.contains_key(&s.id)
+                    })
+            }
             // The way back, offered only where it means something: while the
             // selected agent is actually detached. Not gh-gated either, for
             // the same reason (the suppression is dux's own state).
-            Action::ResumePullRequestAutodetection => self
-                .selected_session()
-                .is_some_and(|s| self.engine.pr_suppressions.contains(&s.id)),
+            Action::ResumePullRequestAutodetection => {
+                !self.pr_attach_pending_on_selection()
+                    && self
+                        .selected_session()
+                        .is_some_and(|s| self.engine.pr_suppressions.contains(&s.id))
+            }
             // The terminal-move commands are offered only when a terminal exists;
             // the agent-move commands are always offered (they fall through to
             // `true` and guard at invoke, like the rest of the palette).
@@ -3915,6 +3926,22 @@ impl App {
             | Action::MoveTerminalBottom => !self.engine.companion_terminals.is_empty(),
             _ => true,
         }
+    }
+
+    /// True while a manual pull-request attach is still resolving for the
+    /// selected agent. The engine refuses attach, detach and resume for that
+    /// agent until the attach lands or fails, and the palette hides them
+    /// rather than offering a command that can only refuse.
+    ///
+    /// Deliberately `PrAttach` only: `InFlightKey::PrCheck` is the background
+    /// and resume-triggered check, which blocks nothing. Do not unify the two
+    /// here; a poll running in the background is not a reason to take the
+    /// user's own pull-request commands away.
+    fn pr_attach_pending_on_selection(&self) -> bool {
+        self.selected_session().is_some_and(|s| {
+            self.engine
+                .is_in_flight(&dux_core::engine::InFlightKey::PrAttach(s.id.clone()))
+        })
     }
 
     pub(crate) fn github_pr_agent_command_available(&self) -> bool {

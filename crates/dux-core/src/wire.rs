@@ -6233,12 +6233,166 @@ mod tests {
         assert_eq!(pending.key.as_deref(), Some(op_id.as_str()));
         assert!(engine.pending_pr_attach_ops.contains_key(&op_id));
 
-        // Gated exactly like the new-agent-from-PR flow.
+        // A second attach for the same session while the first is still
+        // resolving is refused as busy, not queued behind it.
+        let err = engine
+            .dispatch_attach_pull_request("s1", "#43")
+            .expect_err("one attach at a time per agent");
+        assert!(
+            err.to_string()
+                .contains(crate::engine::PR_ATTACH_IN_FLIGHT_MARKER),
+            "got {err:#}",
+        );
+
+        // Gated exactly like the new-agent-from-PR flow. Resolve the pending
+        // attach first so this asserts the gh gate rather than the busy guard.
+        engine.clear_in_flight(&crate::engine::InFlightKey::PrAttach("s1".to_string()));
         engine.gh_status = crate::model::GhStatus::NotInstalled;
         let err = engine
             .dispatch_attach_pull_request("s1", "#42")
             .expect_err("no gh, no attach");
         assert!(err.to_string().contains("gh CLI"), "got {err:#}");
+    }
+
+    /// The headline of the mutual-blocking ruling: while an attach is
+    /// resolving, a detach for the same agent is refused outright with an
+    /// honest message instead of racing the attach's own write.
+    #[test]
+    fn a_pending_attach_blocks_detach_and_resume_for_the_same_session() {
+        let (mut engine, _tmp) = test_engine();
+        enable_gh(&mut engine);
+        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        let session = sample_session("s1", "p1", "feat");
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+        let other = sample_session("s2", "p1", "other");
+        engine.session_store.upsert_session(&other).unwrap();
+        engine.sessions.push(other);
+
+        engine
+            .dispatch_attach_pull_request("s1", "#42")
+            .expect("dispatch");
+        assert!(engine.is_in_flight(&crate::engine::InFlightKey::PrAttach("s1".to_string())));
+
+        let err = engine
+            .clear_pull_request_override("s1")
+            .expect_err("a detach must not race a resolving attach");
+        assert!(
+            err.to_string()
+                .contains(crate::engine::PR_ATTACH_IN_FLIGHT_MARKER),
+            "got {err:#}",
+        );
+        assert!(
+            !engine.pr_suppressions.contains("s1"),
+            "the refused detach must not have written the suppression"
+        );
+
+        let err = engine
+            .resume_pr_autodetection("s1")
+            .expect_err("a resume must not race a resolving attach either");
+        assert!(
+            err.to_string()
+                .contains(crate::engine::PR_ATTACH_IN_FLIGHT_MARKER),
+            "got {err:#}",
+        );
+
+        // The block is per session: another agent's PR operations are untouched.
+        engine
+            .clear_pull_request_override("s2")
+            .expect("an unrelated agent still detaches");
+    }
+
+    /// Every attach dispatch ends in exactly one `PullRequestResolved`, and
+    /// that arm is what unblocks the session. Both outcomes clear it: a
+    /// successful attach and a failed lookup.
+    #[test]
+    fn an_attach_resolution_unblocks_the_session_on_success_and_on_failure() {
+        let (mut engine, _tmp) = test_engine();
+        enable_gh(&mut engine);
+        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        let session = sample_session("s1", "p1", "feat");
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+
+        let (op_id, _) = engine
+            .dispatch_attach_pull_request("s1", "#12")
+            .expect("dispatch");
+        engine.process_worker_event(crate::worker::WorkerEvent::PullRequestResolved {
+            result: Ok(crate::worker::ResolvedPullRequest {
+                project: sample_project("p1", "/tmp/p1"),
+                host: "github.com".to_string(),
+                owner_repo: "o/r".to_string(),
+                number: 12,
+                title: "Pinned".to_string(),
+                state: "OPEN".to_string(),
+                head_ref_name: "feat".to_string(),
+                custom_name: None,
+            }),
+            purpose: crate::worker::PrLookupPurpose::Attach {
+                session_id: "s1".to_string(),
+            },
+            status_op_id: Some(op_id),
+        });
+        assert!(
+            !engine.is_in_flight(&crate::engine::InFlightKey::PrAttach("s1".to_string())),
+            "a landed attach unblocks the session"
+        );
+        engine
+            .clear_pull_request_override("s1")
+            .expect("detach works again once the attach has landed");
+        engine
+            .resume_pr_autodetection("s1")
+            .expect("and so does resume");
+
+        // The failure path: a lookup that never found a PR must unblock too,
+        // and the user's very next act is typically the detach they were
+        // refused, so that interleaving is exercised directly.
+        let (op_id, _) = engine
+            .dispatch_attach_pull_request("s1", "#99")
+            .expect("dispatch");
+        engine.process_worker_event(crate::worker::WorkerEvent::PullRequestResolved {
+            result: Err("no such pull request".to_string()),
+            purpose: crate::worker::PrLookupPurpose::Attach {
+                session_id: "s1".to_string(),
+            },
+            status_op_id: Some(op_id),
+        });
+        assert!(
+            !engine.is_in_flight(&crate::engine::InFlightKey::PrAttach("s1".to_string())),
+            "a failed attach unblocks the session as surely as a successful one"
+        );
+        engine
+            .clear_pull_request_override("s1")
+            .expect("detach immediately after a failed attach");
+    }
+
+    /// The fallback resolution path (no keyed op id, or an op id the map no
+    /// longer holds) still has to unblock the session: the clear is keyed on
+    /// the purpose's session id, never on the op id.
+    #[test]
+    fn an_attach_resolution_without_its_keyed_op_still_unblocks_the_session() {
+        let (mut engine, _tmp) = test_engine();
+        enable_gh(&mut engine);
+        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        let session = sample_session("s1", "p1", "feat");
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+
+        let (op_id, _) = engine
+            .dispatch_attach_pull_request("s1", "#12")
+            .expect("dispatch");
+        engine.pending_pr_attach_ops.remove(&op_id);
+        engine.process_worker_event(crate::worker::WorkerEvent::PullRequestResolved {
+            result: Err("no such pull request".to_string()),
+            purpose: crate::worker::PrLookupPurpose::Attach {
+                session_id: "s1".to_string(),
+            },
+            status_op_id: None,
+        });
+        assert!(
+            !engine.is_in_flight(&crate::engine::InFlightKey::PrAttach("s1".to_string())),
+            "the op-id-missing fallback clears the guard too"
+        );
     }
 
     /// The engine-side attach arm: a resolved lookup applies the pin and the

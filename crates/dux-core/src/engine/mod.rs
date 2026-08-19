@@ -846,6 +846,24 @@ pub const FOREGROUND_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 /// resolves, but short enough that the map self-trims on a long-running server.
 pub const CREATED_SESSION_TTL: Duration = Duration::from_secs(120);
 
+/// The distinctive phrase every "an attach is already resolving for this
+/// agent" refusal carries. The engine is the authority on the refusal; the
+/// surfaces match on this phrase to classify it (the web REST routes turn it
+/// into a `409 CONFLICT`, the way they classify "unknown session" as a `404`),
+/// so it lives here rather than being retyped per surface.
+pub const PR_ATTACH_IN_FLIGHT_MARKER: &str = "already being attached";
+
+/// The refusal a session's pull-request operations give while a manual attach
+/// is still resolving for it. Actionable on purpose: the wait is bounded,
+/// because every attach ends in a success or a failure that unblocks the
+/// agent.
+pub(crate) fn pr_attach_in_flight_message(agent_name: &str) -> String {
+    format!(
+        "A pull request is {PR_ATTACH_IN_FLIGHT_MARKER} to agent \"{agent_name}\". Wait for \
+         that attach to finish or fail, then try again."
+    )
+}
+
 /// Minimum spacing between per-session PR checks for the background triggers
 /// (refs watcher, agent exit). Guards against a burst of triggers spawning
 /// concurrent `gh` calls for the same session.
@@ -3063,6 +3081,19 @@ impl Engine {
             .title
             .clone()
             .unwrap_or_else(|| session.branch_name.clone());
+        // A manual attach for this agent is mid-flight, so its outcome is
+        // still to come: detaching now would be undone (or half-undone) by the
+        // attach landing a moment later. Refuse instead of racing it. The
+        // guard sits AFTER the existence check so an unknown session still
+        // gets the unknown-session error (the surfaces' 404).
+        //
+        // Deliberately `PrAttach` only. `InFlightKey::PrCheck` (the resume
+        // one-shot and the background checks) must NEVER block these
+        // operations: a background poll is not the user's own half-finished
+        // act, and blocking on it would make detach fail at random moments.
+        if self.is_in_flight(&InFlightKey::PrAttach(session_id.to_string())) {
+            anyhow::bail!(pr_attach_in_flight_message(&agent_name));
+        }
         self.pr_overrides.remove(session_id);
         self.session_store.delete_pr_override(session_id)?;
         // Write the suppression BEFORE re-deriving the sync snapshot, so the
@@ -3097,6 +3128,12 @@ impl Engine {
             .title
             .clone()
             .unwrap_or_else(|| session.branch_name.clone());
+        // Same mutual block as the detach beside it: an attach that is still
+        // resolving owns this agent's pull-request state until it lands or
+        // fails. `PrCheck` is deliberately not consulted here either.
+        if self.is_in_flight(&InFlightKey::PrAttach(session_id.to_string())) {
+            anyhow::bail!(pr_attach_in_flight_message(&agent_name));
+        }
         let was_suppressed = self.pr_suppressions.remove(session_id);
         self.session_store.delete_pr_suppression(session_id)?;
         self.update_pr_sync_sessions();
@@ -3150,6 +3187,14 @@ impl Engine {
             .title
             .clone()
             .unwrap_or_else(|| session.branch_name.clone());
+        // One attach at a time per agent: a second one would resolve against
+        // the same session and the arrival order would decide which pin wins.
+        // After the existence check, so an unknown session still 404s. Only
+        // `PrAttach` blocks here; a running `PrCheck` is background work and
+        // must never stop the user attaching a pull request by hand.
+        if self.is_in_flight(&InFlightKey::PrAttach(session_id.to_string())) {
+            anyhow::bail!(pr_attach_in_flight_message(&agent_name));
+        }
         let Some(project) = self
             .projects
             .iter()
@@ -3164,6 +3209,12 @@ impl Engine {
         if raw_input.trim().is_empty() {
             anyhow::bail!("Enter a GitHub PR URL, owner/repo#123, or a PR number.");
         }
+
+        // Validation is done and the worker is about to be spawned, so the
+        // agent's other pull-request operations are blocked from here until
+        // the resolution arrives (the `BranchRename` ordering: mark once the
+        // dispatch is certain, never before a refusal path).
+        self.mark_in_flight(InFlightKey::PrAttach(session_id.to_string()));
 
         let op = status_op(format!(
             "Resolving PR to attach to agent \"{agent_name}\"..."

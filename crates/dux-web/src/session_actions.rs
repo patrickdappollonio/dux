@@ -699,6 +699,12 @@ async fn attach_pull_request(
         // Defense in depth for a session deleted between the check above and
         // the dispatch: the engine's own unknown-session error stays a 404.
         Err(e) if e.contains("unknown session") => (StatusCode::NOT_FOUND, e).into_response(),
+        // An attach that is still resolving owns this agent's pull-request
+        // state; the engine refuses the operation and 409 is this codebase's
+        // busy-refusal code (the create and delete in-flight guards above).
+        Err(e) if e.contains(dux_core::engine::PR_ATTACH_IN_FLIGHT_MARKER) => {
+            (StatusCode::CONFLICT, e).into_response()
+        }
         Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
     }
 }
@@ -729,6 +735,12 @@ async fn detach_pull_request(
         // The engine returns "unknown session: …" when the row is gone; surface
         // that as 404, not a generic 400 (the `kill_session` pattern).
         Err(e) if e.contains("unknown session") => (StatusCode::NOT_FOUND, e).into_response(),
+        // An attach that is still resolving owns this agent's pull-request
+        // state; the engine refuses the operation and 409 is this codebase's
+        // busy-refusal code (the create and delete in-flight guards above).
+        Err(e) if e.contains(dux_core::engine::PR_ATTACH_IN_FLIGHT_MARKER) => {
+            (StatusCode::CONFLICT, e).into_response()
+        }
         Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
     }
 }
@@ -757,6 +769,12 @@ async fn resume_pull_request_autodetection(
         // The engine returns "unknown session: …" when the row is gone; surface
         // that as 404, not a generic 400 (the `kill_session` pattern).
         Err(e) if e.contains("unknown session") => (StatusCode::NOT_FOUND, e).into_response(),
+        // An attach that is still resolving owns this agent's pull-request
+        // state; the engine refuses the operation and 409 is this codebase's
+        // busy-refusal code (the create and delete in-flight guards above).
+        Err(e) if e.contains(dux_core::engine::PR_ATTACH_IN_FLIGHT_MARKER) => {
+            (StatusCode::CONFLICT, e).into_response()
+        }
         Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
     }
 }
@@ -987,6 +1005,17 @@ mod tests {
     /// use), so the pull-request routes can be exercised against a session
     /// that exists without creating a worktree or spawning a provider.
     fn router_with_seeded_session(id: &str) -> (TempDir, axum::Router) {
+        router_with_seeded_session_prepared(id, |_| {})
+    }
+
+    /// The same seeded router, with one last chance to touch the engine before
+    /// the actor thread takes ownership of it. The pull-request busy guard is
+    /// engine state no route can set up on its own (dispatching a real attach
+    /// needs an authenticated `gh`), so the tests mark it here.
+    fn router_with_seeded_session_prepared(
+        id: &str,
+        prepare: impl FnOnce(&mut dux_core::engine::Engine),
+    ) -> (TempDir, axum::Router) {
         let tmp = tempfile::tempdir().unwrap();
         let paths = dux_core::config::DuxPaths {
             root: tmp.path().to_path_buf(),
@@ -1020,7 +1049,8 @@ mod tests {
             })
             .unwrap();
         drop(store);
-        let engine = crate::bootstrap::bootstrap_engine(&paths).unwrap();
+        let mut engine = crate::bootstrap::bootstrap_engine(&paths).unwrap();
+        prepare(&mut engine);
         let (handle, _join) = crate::engine_actor::spawn_engine_thread(engine);
         (tmp, crate::server::router(handle))
     }
@@ -1228,6 +1258,65 @@ mod tests {
             )
             .await;
             assert_eq!(resp.status(), StatusCode::OK);
+            let _ = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        }
+    }
+
+    /// While an attach is resolving for the agent, every one of its
+    /// pull-request routes answers 409 with the engine's own refusal text: the
+    /// same busy-refusal code the create and delete in-flight guards use.
+    #[tokio::test]
+    async fn the_pull_request_routes_409_while_an_attach_is_resolving() {
+        let cases: [(&str, &str); 3] = [
+            ("PUT", "/api/v1/sessions/s1/pull-request"),
+            ("DELETE", "/api/v1/sessions/s1/pull-request"),
+            ("POST", "/api/v1/sessions/s1/pull-request/autodetect"),
+        ];
+        for (method, uri) in cases {
+            let (_tmp, app) = router_with_seeded_session_prepared("s1", |engine| {
+                engine.github_integration_enabled = true;
+                engine.gh_status = dux_core::model::GhStatus::Available;
+                engine.mark_in_flight(dux_core::engine::InFlightKey::PrAttach("s1".to_string()));
+            });
+            let body = (method == "PUT").then(|| serde_json::json!({ "pr": "#12" }));
+            let resp = send_json(&app, method, uri, body).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::CONFLICT,
+                "{method} {uri} must refuse while an attach is resolving"
+            );
+            let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            let msg = String::from_utf8_lossy(&bytes);
+            assert!(
+                msg.contains(dux_core::engine::PR_ATTACH_IN_FLIGHT_MARKER),
+                "the body must say why, got: {msg}"
+            );
+        }
+    }
+
+    /// The busy guard sits behind the existence check, so an unknown id is
+    /// still the truthful 404 on all three routes rather than a 409.
+    #[tokio::test]
+    async fn the_pull_request_routes_still_404_for_an_unknown_session_while_an_attach_is_resolving()
+    {
+        let cases: [(&str, &str); 3] = [
+            ("PUT", "/api/v1/sessions/ghost/pull-request"),
+            ("DELETE", "/api/v1/sessions/ghost/pull-request"),
+            ("POST", "/api/v1/sessions/ghost/pull-request/autodetect"),
+        ];
+        for (method, uri) in cases {
+            let (_tmp, app) = router_with_seeded_session_prepared("s1", |engine| {
+                engine.github_integration_enabled = true;
+                engine.gh_status = dux_core::model::GhStatus::Available;
+                engine.mark_in_flight(dux_core::engine::InFlightKey::PrAttach("s1".to_string()));
+            });
+            let body = (method == "PUT").then(|| serde_json::json!({ "pr": "#12" }));
+            let resp = send_json(&app, method, uri, body).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::NOT_FOUND,
+                "{method} {uri} on a ghost id must stay a 404"
+            );
             let _ = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         }
     }

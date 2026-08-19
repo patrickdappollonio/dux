@@ -17108,6 +17108,71 @@ not_a_real_action = ["x"]
         );
     }
 
+    /// While an attach is resolving for the selected agent, the engine refuses
+    /// every one of that agent's pull-request operations, so the palette stops
+    /// offering them. A background PR check (`PrCheck`) is not the same thing
+    /// and takes nothing away.
+    #[test]
+    fn command_palette_hides_the_pull_request_commands_while_an_attach_is_resolving() {
+        let mut app = test_app(default_bindings());
+        app.engine.github_integration_enabled = true;
+        app.engine.gh_status = dux_core::model::GhStatus::Available;
+        app.engine
+            .pr_overrides
+            .insert("session-1".to_string(), pinned_stored_pr("session-1"));
+        app.engine.pr_suppressions.insert("session-1".to_string());
+        for name in [
+            "attach-pull-request",
+            "detach-pull-request",
+            "resume-pull-request-autodetection",
+        ] {
+            assert!(
+                !app.filtered_palette_commands(name).is_empty(),
+                "{name} is offered before the attach starts"
+            );
+        }
+
+        app.engine
+            .mark_in_flight(dux_core::engine::InFlightKey::PrAttach(
+                "session-1".to_string(),
+            ));
+        for name in [
+            "attach-pull-request",
+            "detach-pull-request",
+            "resume-pull-request-autodetection",
+        ] {
+            assert!(
+                app.filtered_palette_commands(name).is_empty(),
+                "{name} must be hidden while an attach is resolving for this agent"
+            );
+        }
+
+        // Another agent's attach is not this agent's business.
+        app.engine
+            .clear_in_flight(&dux_core::engine::InFlightKey::PrAttach(
+                "session-1".to_string(),
+            ));
+        app.engine
+            .mark_in_flight(dux_core::engine::InFlightKey::PrAttach(
+                "session-2".to_string(),
+            ));
+        // A background check for this very agent blocks nothing either.
+        app.engine
+            .mark_in_flight(dux_core::engine::InFlightKey::PrCheck(
+                "session-1".to_string(),
+            ));
+        for name in [
+            "attach-pull-request",
+            "detach-pull-request",
+            "resume-pull-request-autodetection",
+        ] {
+            assert!(
+                !app.filtered_palette_commands(name).is_empty(),
+                "{name} comes back once this agent's attach is done"
+            );
+        }
+    }
+
     /// The way back is offered only where it means something: while the
     /// selected agent is actually detached. Like detach, it is not gh-gated.
     #[test]

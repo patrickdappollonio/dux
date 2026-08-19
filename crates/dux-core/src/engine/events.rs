@@ -2455,6 +2455,13 @@ impl Engine {
                 status_op_id,
                 purpose: crate::worker::PrLookupPurpose::Attach { session_id },
             } => {
+                // The one clear point for the mutual block. Keyed on the
+                // purpose's session id rather than the status op id, so the
+                // fallback below (no keyed op, or an op the map no longer
+                // holds) unblocks the agent too. It runs before anything that
+                // can return early, so success, failure, a session deleted
+                // mid-lookup, and a panicking worker all end the block.
+                self.clear_in_flight(&crate::engine::InFlightKey::PrAttach(session_id.clone()));
                 // The attach application is engine-side and surface-agnostic:
                 // this arm is the real vanished-session guard for BOTH
                 // surfaces. The lookup is async, so a delete can land first,
