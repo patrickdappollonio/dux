@@ -1053,10 +1053,13 @@ eventsSocket.onEvent = (ev: EventsServerMessage) => {
     return
   }
   // A `pty.owner` event means a connection claimed (took over, or first-claimed an
-  // unowned) PTY's sizing+input. Fan it out to the mounted terminal view for that
-  // pty id along with the claimer's connection id (`owner`); the view compares that
-  // against its own PTY-socket connection id to decide definitively whether it is
-  // the owner (stays interactive) or has been taken over (read-only placeholder).
+  // unowned) PTY's sizing+input, OR that the owner disconnected and nobody holds
+  // it, in which case `owner` is ABSENT. Fan it out to the mounted terminal view
+  // for that pty id along with the claimer's connection id (`owner`); the view
+  // compares that against its own PTY-socket connection id to decide definitively
+  // whether it is the owner (stays interactive), has been taken over (read-only
+  // placeholder), or may pick up a freed pty. A missing owner reads as "not us"
+  // for every client, which is exactly right: nobody is driving.
   // The id is the pty id (session id for an agent, terminal id for a companion).
   // Delivered on the coarse `sessions` topic, subscribed at module load.
   if (ev.event === "pty.owner") {

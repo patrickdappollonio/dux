@@ -79,7 +79,9 @@ import type {
   ConnectionIdentity,
   ModifierLatch,
   OwnershipVerdict,
+  TakeoverIntent,
 } from "./channels"
+import type { HandshakeOwner } from "@/lib/ptyOwnership"
 import {
   mouseCaptureHintShown,
   raiseMouseCaptureHint,
@@ -120,13 +122,23 @@ export type TerminalLifecyclePorts = {
   /// effect outside this hook.
   visibleSinceRef: RefObject<number | undefined>
   prevVisibleRef: RefObject<boolean | undefined>
-  /// A take-over that fired before the connection id was known: consumed by the
-  /// next `connected` frame.
-  pendingClaimRef: RefObject<boolean>
+  /// The armed take-over, consumed by the ONE confirmed resize write below.
+  takeoverIntent: TakeoverIntent
+  /// The port the ownership machine's freed-pty claim (site 5) sends through.
+  /// The lifecycle installs a closure over THIS mount's coordinator and clears
+  /// it on teardown, so the claim can never fire into a disposed terminal.
+  claimFreedPtyRef: RefObject<(() => void) | null>
   live: LiveSettings
   mods: ModifierLatch
   ownership: OwnershipVerdict
   connId: ConnectionIdentity
+  /// Re-seed the ownership verdict from the `connected` handshake's `owner`
+  /// field. The frame lands here; the decision lives in the ownership machine.
+  seedOwnershipFromConnected: (
+    myConnId: string,
+    owner: HandshakeOwner,
+    ownerEpoch?: number,
+  ) => void
   focusTypingSurface: () => void
   onClipboardPaste: (e: ClipboardEvent) => void
   /// Arm the force-text-paste hatch. The key handler here arms it and the
@@ -167,11 +179,13 @@ export function useTerminalLifecycle(
     pointerTypeRef,
     visibleSinceRef,
     prevVisibleRef,
-    pendingClaimRef,
+    takeoverIntent,
+    claimFreedPtyRef,
     live,
     mods,
     ownership,
     connId,
+    seedOwnershipFromConnected,
     focusTypingSurface,
     onClipboardPaste,
     armForcedTextPaste,
@@ -331,9 +345,40 @@ export function useTerminalLifecycle(
     const resize = createResizeCoordinator({
       term,
       fit,
-      sendResize: (rows, cols) => pty.sendResize(rows, cols),
+      // THE ONE PLACE A TAKE-OVER INTENT IS CONSUMED. Every resize frame the
+      // pane sends passes through here, so whichever frame reaches the wire
+      // first carries the flag; the intent does not care which one that is,
+      // which is exactly why it is a flag and not a parked closure (a closure
+      // was lost to the gesture coalescer and to a re-dropped socket, both
+      // measured).
+      //
+      // Cleared only on a CONFIRMED write. `sendResize` answers whether the
+      // frame really went out, and a socket that is CONNECTING or CLOSED
+      // discards it silently; clearing the intent on a discarded frame would
+      // spend the take-over on nothing and leave the user pressing a button
+      // that does not work.
+      sendResize: (rows, cols) => {
+        const takeover = takeoverIntent.read()
+        // The ordinary frame is left untouched, arity included: a take-over is
+        // rare and a resize is not, so the common call stays exactly the call
+        // it always was rather than growing a `false` every frame.
+        const sent = takeover
+          ? pty.sendResize(rows, cols, true)
+          : pty.sendResize(rows, cols)
+        if (sent && takeover) takeoverIntent.clear()
+        return sent
+      },
       isOwner: () => ownership.read(),
     })
+    // The freed-pty claim's send port (ownership site 5). Through the
+    // coordinator's direct-send path like every other non-debounced resize, so
+    // it takes the gesture hold and refits before it notifies.
+    claimFreedPtyRef.current = () => {
+      resize.directSend(() => {
+        const t = termRef.current
+        if (t) resize.sendOwned(t.rows, t.cols)
+      })
+    }
 
     term.open(container)
     // A virtual keyboard must never autocorrect, autocomplete, autocapitalize, or
@@ -362,29 +407,27 @@ export function useTerminalLifecycle(
     // Record this socket's connection id (the socket's first `connected` frame, and
     // again on every reconnect since the server allocates a fresh id per open) so
     // the `pty.owner` handler can compare a handover's claimer id against ours.
-    pty.onConnected = (connectionId) => {
+    pty.onConnected = (connectionId, owner, ownerEpoch) => {
       connId.write(connectionId)
       // Register the id as one of OURS in the store, so the server-published
       // `input_owner` spine field can be compared against this client's own
       // identity by surfaces outside this pane (see `sessionActiveElsewhere`).
       noteOwnPtyConnection(connectionId, true)
-      // A take-over requested before our id was known deferred its claim; now that
-      // we know our id, perform the resize/claim so the server's resulting
-      // `pty.owner` carries an id we recognise as ours.
-      if (pendingClaimRef.current) {
-        pendingClaimRef.current = false
-        // Through the coordinator's gesture hold like every other resize path:
-        // a claim that lands mid-touch-gesture waits for the lift rather than
-        // refitting under the finger. The size is read when the send actually
-        // runs, so a claim deferred across a keyboard collapse claims at the
-        // FINAL size. It sends DIRECTLY rather than through the owner-gated
-        // recorder, because a claim runs while the verdict still says somebody
-        // else owns the PTY and must leave the dedupe record untouched.
-        resize.directSend(() => {
-          const t = termRef.current
-          if (t) pty.sendResize(t.rows, t.cols)
-        })
-      }
+      // SEED THE VERDICT from the server's own answer. This replaced a direct
+      // claim send that used to live here (the deferred take-over): with the
+      // take-over intent now riding the ordinary first-frame resize, there is
+      // nothing left for this handler to send, and the coordinator's last
+      // send exception died with it.
+      //
+      // What it does instead is the correction that makes the whole arc safe: a
+      // plain claim is refused SILENTLY by the server now, so a foregrounded
+      // arrival's optimistic "mine" would never be corrected and the pane would
+      // render typing surfaces over a pty whose keystrokes are all dropped. The
+      // handshake says who drives; the foreground guess survives only for
+      // claiming an UNOWNED pty. The epoch rides along so the seed can defer
+      // to a strictly newer `pty.owner` this client already applied off the
+      // events socket (the two sockets have no ordering between them).
+      seedOwnershipFromConnected(connectionId, owner, ownerEpoch)
     }
 
     // Forward keystrokes to the PTY as binary. On mobile, sticky modifiers from
@@ -1009,6 +1052,17 @@ export function useTerminalLifecycle(
 
     return () => {
       resize.dispose()
+      // An armed take-over dies with the mount it was armed in. This covers
+      // unmount AND a switch to a different target: the intent names no pty of
+      // its own, so carrying it across would flag the first resize of a
+      // completely different terminal as a take-over of that one. Losing an
+      // in-flight take-over to a target switch is the accepted cost, and the
+      // button is one tap away on the new target.
+      takeoverIntent.clear()
+      // Retire the freed-pty send port with the coordinator it closes over,
+      // BEFORE the terminal is disposed, so a `pty.owner` arriving during
+      // teardown cannot fit a dead terminal.
+      if (claimFreedPtyRef.current !== null) claimFreedPtyRef.current = null
       clearTimeout(graceTimer)
       clearInterval(viewedTimer)
       container.removeEventListener("mousedown", onMouseDown)

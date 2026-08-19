@@ -184,6 +184,98 @@ describe("PtySocket", () => {
     expect(sock.replayGeneration).toBeNull()
   })
 
+  // THREE distinct answers to "who drives this pty", and the pane needs all
+  // three: a null OWNER means "nobody, claim it if you are foregrounded", while
+  // an ABSENT owner key means "this server does not say" and must fall back to
+  // the foreground guess. Collapsing the two would make an old server look like
+  // an unowned pty on every attach, which is the silent steal reborn.
+  it("tells an absent owner key apart from an explicitly null one", () => {
+    const seen: (string | null | undefined)[] = []
+    const sock = new PtySocket("ws://x/pty")
+    sock.onConnected = (_id, owner) => {
+      seen.push(owner)
+    }
+    sock.connect()
+    last().open()
+
+    last().text(JSON.stringify({ event: "connected", id: "c-1", gen: 1 }))
+    expect(seen.at(-1)).toBeUndefined()
+    expect(sock.handshakeOwner).toBeUndefined()
+
+    last().text(
+      JSON.stringify({ event: "connected", id: "c-2", gen: 2, owner: null }),
+    )
+    expect(seen.at(-1)).toBeNull()
+    expect(sock.handshakeOwner).toBeNull()
+
+    last().text(
+      JSON.stringify({ event: "connected", id: "c-3", gen: 3, owner: "c-9" }),
+    )
+    expect(seen.at(-1)).toBe("c-9")
+    expect(sock.handshakeOwner).toBe("c-9")
+  })
+
+  // The epoch stamps the handshake's owner snapshot so the seed can defer to a
+  // strictly newer `pty.owner` that arrived on the OTHER socket first. An old
+  // server omits it together with `owner`, and the callback then reports
+  // undefined so the mixed-version fallback stays intact.
+  it("passes the handshake's owner_epoch through, and undefined when absent", () => {
+    const epochs: (number | undefined)[] = []
+    const sock = new PtySocket("ws://x/pty")
+    sock.onConnected = (_id, _owner, ownerEpoch) => {
+      epochs.push(ownerEpoch)
+    }
+    sock.connect()
+    last().open()
+
+    last().text(
+      JSON.stringify({
+        event: "connected",
+        id: "c-1",
+        gen: 1,
+        owner: null,
+        owner_epoch: 0,
+      }),
+    )
+    expect(epochs.at(-1)).toBe(0)
+
+    last().text(
+      JSON.stringify({
+        event: "connected",
+        id: "c-2",
+        gen: 2,
+        owner: "c-9",
+        owner_epoch: 7,
+      }),
+    )
+    expect(epochs.at(-1)).toBe(7)
+
+    // Old server: no owner key, no epoch.
+    last().text(JSON.stringify({ event: "connected", id: "c-3", gen: 3 }))
+    expect(epochs.at(-1)).toBeUndefined()
+  })
+
+  // A take-over is the ONE frame this client sends while it knows it is not the
+  // owner, and the flag is what makes the server grant it. The ordinary frame
+  // stays byte-identical to the one every prior version sent, so an old server
+  // reading it sees exactly what it always did.
+  it("flags a take-over resize, and only a take-over resize", () => {
+    const sock = new PtySocket("ws://x/pty")
+    sock.connect()
+    const ws = last()
+    ws.open()
+    expect(sock.sendResize(40, 120)).toBe(true)
+    expect(JSON.parse(ws.sent[0] as string)).toEqual({ rows: 40, cols: 120 })
+    expect(sock.sendResize(40, 120, false)).toBe(true)
+    expect(JSON.parse(ws.sent[1] as string)).toEqual({ rows: 40, cols: 120 })
+    expect(sock.sendResize(40, 120, true)).toBe(true)
+    expect(JSON.parse(ws.sent[2] as string)).toEqual({
+      rows: 40,
+      cols: 120,
+      takeover: true,
+    })
+  })
+
   it("fires onOpen on each (re)open", () => {
     const sock = new PtySocket("ws://x/pty")
     let opens = 0

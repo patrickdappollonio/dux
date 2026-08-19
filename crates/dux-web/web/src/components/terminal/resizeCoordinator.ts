@@ -25,15 +25,16 @@
 // plan (jiggle or single resize, including the jiggle's held continuation), the
 // foreground re-assert, and the gesture hold.
 //
-// TWO STATED EXCEPTIONS. First, to "no other call site sends": the take-over
-// button's IMMEDIATE claim (`ownership.ts`, `takeOver`) calls the socket's
-// `sendResize` directly, because it needs the synchronous did-it-go-out
-// boolean to decide whether to reopen a dead socket, and `directSend` cannot
-// answer that once a request may be deferred. It never touches the dedupe
-// record, and it cannot land mid-gesture: the take-over card overlays the
-// whole container, so no touch scroll can be in flight when it is pressed.
+// THERE IS NO LONGER AN EXCEPTION TO "no other call site sends". The take-over
+// button used to be one: it called the socket's `sendResize` directly for the
+// synchronous did-it-go-out boolean that told it whether to reopen a dead
+// socket. Take-over is now a socket BOUNCE carrying an armed intent, so it
+// sends nothing itself and the claim rides the reconnect's ordinary first-frame
+// resize, through here like everything else. The intent is read and cleared in
+// the `sendResize` the lifecycle hands this machine, which is the one confirmed
+// write; this machine does not know the flag exists.
 //
-// Second, to "no other call site fits": the two FONT-driven
+// ONE STATED EXCEPTION REMAINS, to "no other call site fits": the two FONT-driven
 // refits, in `lib/terminalFont.ts` (the late refit once the bundled faces land)
 // and in the pane's live font-preference effect. Both re-grid the terminal
 // without asking this machine, and both are pre-existing and deliberate,
@@ -90,8 +91,8 @@ export type ResizeCoordinator = {
   /// The first PTY frame after a (re)open has fully parsed: fit and notify.
   firstFrameLanded: () => void
   /// A DIRECT (non-debounced) resize request: refit and notify now, or defer
-  /// BOTH halves to the gesture's lift. The deferred ownership claim is the one
-  /// external caller.
+  /// BOTH halves to the gesture's lift. The freed-pty claim (a viewer taking an
+  /// unowned pty when its driver disconnects) is the one external caller.
   directSend: (send: () => void) => void
   /// Force-resend the current size, bypassing the dedupe, once xterm's write
   /// queue has drained. The PTY is shared, so another client may have resized
@@ -152,12 +153,21 @@ export function createResizeCoordinator(
   // claims nothing more.
   //
   // A steady-state resize by the current owner does NOT change the owner (no
-  // `pty.owner` echo), so it deliberately does not arm a handover; only the
-  // ownership-ACQUIRING claim does, and those claims deliberately leave this
-  // record untouched (they run while the verdict still says somebody else owns
-  // the PTY, and recording them would poison the dedupe). The direction of that
-  // error is the safe one: the next size check may send a same-size frame the
-  // PTY already has, which is a kernel no-op.
+  // `pty.owner` echo), so it deliberately does not arm a handover; only an
+  // ownership-ACQUIRING claim does. Every claim now runs with the verdict
+  // ALREADY flipped to "mine" (take-over flips it before bouncing the socket;
+  // the freed-pty claim flips it before sending), so claims pass this gate and
+  // are recorded like any other send. That is a change from the shape this
+  // comment used to describe, where a claim ran while the verdict still said
+  // somebody else owned the pty and had to bypass the record entirely.
+  //
+  // What has NOT changed is the direction of the surviving error: a resize the
+  // server refuses is still booked here as sent (this records "written to the
+  // socket" and claims nothing about what the server did with it), so the next
+  // size check may skip a frame the PTY never actually got. The foreground
+  // resync's forced re-send is the standing recovery, and a same-size frame is
+  // a kernel no-op. A non-owner cannot reach here at all, so the only refusable
+  // frame is one whose ownership was lost between the gate and the wire.
   const sendOwned = (rows: number, cols: number): boolean => {
     if (!isOwner()) return false
     if (!sendResize(rows, cols)) return false
@@ -194,7 +204,7 @@ export function createResizeCoordinator(
   }
 
   // A direct resize request (the first-frame jiggle, the reconnect resize, the
-  // deferred ownership claim, the foreground resync): refit and notify the
+  // freed-pty claim, the foreground resync): refit and notify the
   // child now, or defer BOTH halves to gesture end. These paths bypass the
   // debounce on purpose, so each has to route through the hold explicitly or
   // the pair comes apart again.

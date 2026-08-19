@@ -935,15 +935,28 @@ impl PtyTarget {
     }
 }
 
-/// A resize control frame on a PTY socket: the Text frame `{"rows":R,"cols":C}`,
+/// A resize control frame on a PTY socket: the Text frame
+/// `{"rows":R,"cols":C}`, optionally `{"rows":R,"cols":C,"takeover":true}`,
 /// distinct from the Binary stdin frames. Routed to `engine.resize_pty` for the
-/// socket's own PTY ONLY when this connection currently owns sizing for it (see
-/// [`PtySizeOwners`]); a non-owner's resize is ignored so two viewers of one PTY
-/// don't thrash its size last-writer-wins.
+/// socket's own PTY ONLY when [`PtySizeOwners::claim_for_resize`] grants it: the
+/// sender already owns sizing, the pty is unowned, or the frame explicitly asks
+/// to take over. A non-owner's plain resize applies nothing and transfers
+/// nothing, so two viewers of one PTY cannot thrash its size last-writer-wins
+/// and an ordinary attach cannot steal the prompt.
+///
+/// `takeover` defaults to false, so a client too old to send it behaves exactly
+/// as it always did in the one case where its claim was granted anyway (an
+/// unowned pty). Its Take over button dies silently against a new server; the
+/// mitigation is the run-identity hard reload, which replaces a stale page as
+/// soon as the server run changes, so the window is one server run at most.
 #[derive(serde::Deserialize)]
 struct PtyResizeFrame {
     rows: u16,
     cols: u16,
+    /// Set only by a deliberate press of Take over, and the ONLY frame a client
+    /// that knows it is not the owner ever sends.
+    #[serde(default)]
+    takeover: bool,
 }
 
 /// A "user is looking at this tab" control frame on a PTY socket: the Text frame
@@ -1456,12 +1469,29 @@ async fn handle_pty_socket(
             return;
         }
     };
-    // Allocate this connection's id, but do NOT claim ownership yet: attaching is
-    // not the same as taking over. A connection claims sizing+input ownership only
-    // when it sends a size frame (see the resize arm below), so a backgrounded tab
-    // can attach as a silent read-only observer without stealing the foregrounded
-    // device's control. Ownership is released on disconnect below.
+    // Allocate this connection's id, but do NOT claim ownership: attaching is not
+    // taking over, and now the server means it. A connection becomes the owner
+    // only by resizing an UNOWNED pty or by sending a resize explicitly flagged
+    // as a take-over (see the resize arm below), so no attach of any kind can
+    // steal the device that is actually being typed on. Ownership is released on
+    // disconnect below.
     let conn_id = pty_size_owners.next_conn_id();
+    // Who is driving right now, read once for the handshake frame. This is what
+    // stops a foregrounded arrival from wedging itself as a phantom owner: with
+    // a plain claim now refused SILENTLY, the client's optimistic "I am
+    // foregrounded so I must be the owner" guess would never be corrected, and it
+    // would render typing surfaces over a pty whose every keystroke the server
+    // drops. The client seeds its verdict from this and keeps the foreground
+    // guess only for deciding whether to claim an UNOWNED pty.
+    //
+    // The ownership epoch is read in the SAME lock acquisition as the owner and
+    // travels on the frame: the handshake rides the PTY socket while `pty.owner`
+    // broadcasts ride the events socket, two TCP connections with no ordering
+    // between them. Stamping the snapshot lets a client that has already applied
+    // a strictly newer `pty.owner` recognize this frame as stale and keep the
+    // newer verdict, instead of re-seeding itself as a phantom owner from an
+    // outdated `owner: null` that nothing would ever correct.
+    let (current_owner, owner_epoch) = pty_size_owners.current_owner(target.pty_id());
     // Hand the client this PTY socket's connection id as the first frame (a Text
     // frame, distinct from the Binary PTY-byte frames), mirroring how `/ws/events`
     // opens with a `connected` frame. The client records it and compares it against
@@ -1479,7 +1509,14 @@ async fn handle_pty_socket(
     // duplicated-text bug). A fresh generation per open makes every legitimate
     // reconnect strictly newer, so the guard only ever fires on the anomaly.
     let replay_generation = next_replay_generation();
-    let _ = send_pty_connected(&sink, conn_id, replay_generation).await;
+    let _ = send_pty_connected(
+        &sink,
+        conn_id,
+        replay_generation,
+        current_owner,
+        owner_epoch,
+    )
+    .await;
     // Replay the buffered scrollback/repaint before streaming live bytes.
     send_binary(&sink, repaint).await;
     let mut pty_forwarder = spawn_pty_forwarder(Arc::clone(&sink), rx, engine.shutdown_flag());
@@ -1553,22 +1590,40 @@ async fn handle_pty_socket(
                     ));
                 }
             }
-            // Text frame = a resize control message. Sending a size IS the claim:
-            // it makes this connection the owner (most-recent claim wins, taking
-            // over a prior owner), then applies the resize. On a real handover we
-            // broadcast a `pty.owner` signal (carrying this connection's id) so other
-            // clients viewing this PTY flip to the read-only take-over placeholder.
+            // Text frame = a resize control message. The claim decision and the
+            // resize itself are resolved ATOMICALLY by `claim_for_resize`: an
+            // unowned pty is claimed, the current owner resizes freely, an
+            // explicit `takeover` transfers ownership, and any other non-owner's
+            // resize is refused whole (nothing applied, nothing broadcast) so
+            // attaching cannot steal the device being typed on. On a real
+            // handover we broadcast a `pty.owner` (carrying this connection's id)
+            // so other clients viewing this PTY flip to the read-only take-over
+            // placeholder.
             Message::Text(text) => {
                 if let Ok(frame) = serde_json::from_str::<PtyResizeFrame>(text.as_str()) {
-                    if let Some(epoch) = pty_size_owners.claim(target.pty_id(), conn_id) {
+                    let pty_id = target.pty_id();
+                    let outcome =
+                        pty_size_owners.claim_for_resize(pty_id, conn_id, frame.takeover, || {
+                            engine.resize_pty(pty_id.to_string(), frame.rows, frame.cols);
+                        });
+                    if let Some(epoch) = outcome.epoch {
                         bus.emit(pty_owner_event(
-                            target.pty_id(),
+                            pty_id,
                             conn_id,
                             epoch,
                             user_agent.as_deref(),
                         ));
                     }
-                    engine.resize_pty(target.pty_id().to_string(), frame.rows, frame.cols);
+                    if !outcome.apply {
+                        // Same diagnostic weight as a dropped non-owner keystroke:
+                        // expected traffic (a viewer's window really does change
+                        // size), not an error.
+                        dux_core::logger::debug(&format!(
+                            "PTY resize from non-owner conn {conn_id} refused for pty \
+                             {pty_id} (another connection currently owns sizing; a \
+                             take-over must say so explicitly)"
+                        ));
+                    }
                 } else if serde_json::from_str::<PtyViewedFrame>(text.as_str()).is_ok() {
                     // A viewed ping never claims sizing ownership; it only stamps
                     // the engine's engagement window for this pty's tab. The engine
@@ -1582,15 +1637,27 @@ async fn handle_pty_socket(
     }
 
     // Detach: stop the forwarder so it doesn't linger on the subscription, and
-    // release sizing ownership so the next attach (or the next live resize) claims it.
+    // release sizing ownership so the next resize (or the next mounted viewer)
+    // can claim the now-unowned pty.
+    //
+    // A release that really cleared an owner is BROADCAST as an owner-cleared
+    // `pty.owner`. Ownership no longer follows focus, so nothing else would ever
+    // tell the other devices that the driver has gone: their "Active on another
+    // device" card would stay up, naming a browser tab that closed, until
+    // somebody pressed Take over. On the other side of the broadcast a mounted,
+    // foregrounded viewer claims the freed pty by itself, which is the same
+    // thing a fresh foreground attach on an unowned pty does.
     pty_forwarder.abort();
-    pty_size_owners.release(target.pty_id(), conn_id);
+    if let Some(epoch) = pty_size_owners.release(target.pty_id(), conn_id) {
+        bus.emit(pty_owner_cleared_event(target.pty_id(), epoch));
+    }
     console.client_disconnected(peer_ip);
 }
 
 /// A `pty.owner` signal: the connection that owns a PTY's sizing+input changed (a
-/// new device took over by sending its size, or an uncontested first writer
-/// claimed an unowned PTY). `id` is the pty id (the session id for an agent PTY,
+/// new device pressed Take over, a client sized an UNOWNED pty, or an uncontested
+/// first writer claimed one). A plain resize against a pty somebody else owns
+/// emits nothing at all, because it changes nothing. `id` is the pty id (the session id for an agent PTY,
 /// the terminal id for a companion); `owner` is the claiming connection's id (the
 /// `PtySizeOwners` conn id). It carries no `rev`. Delivered on the coarse
 /// `sessions` topic (every client holds it), so any other client currently viewing
@@ -1614,6 +1681,31 @@ fn pty_owner_event(pty_id: &str, owner_conn_id: u64, epoch: u64, device: Option<
         owner: Some(owner_conn_id.to_string()),
         epoch: Some(epoch),
         device: device.map(str::to_owned),
+    }
+}
+
+/// The OWNER-CLEARED `pty.owner`: same event, no `owner` field, emitted when the
+/// driving connection disconnects and its ownership is released. Every client
+/// reads a missing owner as "not me" (see `isOwnerAfterHandover`), so all of them
+/// converge on "nobody is driving"; a mounted, foregrounded viewer then claims
+/// the freed pty and a backgrounded one switches its card's copy.
+///
+/// It exists because ownership stopped following focus. Before that, a departed
+/// owner was corrected by the next device that happened to attach or alt-tab,
+/// which was also the silent steal; with the steal gone, this is the ONLY signal
+/// that the other device has left, and without it the take-over card becomes a
+/// permanent lie about a browser tab that closed. It carries the epoch assigned
+/// under the owners lock by the release itself, so the client's epoch ordering
+/// places it correctly against the claim it retires, and no `device` (there is
+/// no claimer to name).
+fn pty_owner_cleared_event(pty_id: &str, epoch: u64) -> Event {
+    Event::Resource {
+        event: "pty.owner".to_string(),
+        id: Some(pty_id.to_string()),
+        rev: None,
+        owner: None,
+        epoch: Some(epoch),
+        device: None,
     }
 }
 
@@ -1809,11 +1901,13 @@ fn next_replay_generation() -> u64 {
     PTY_REPLAY_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
-/// The opening handshake frame on a PTY socket: `{event:"connected", id, gen}`. A
-/// superset of the events-socket `connected` frame (which is a [`WireEvent`] and
-/// carries no generation): a PTY socket also stamps the scrollback replay that
-/// follows with its `gen` so the client can drop an already-applied replay. Adding
-/// a field is backward-safe (an older client ignores `gen`).
+/// The opening handshake frame on a PTY socket:
+/// `{event:"connected", id, gen, owner}`. A superset of the events-socket
+/// `connected` frame (which is a [`WireEvent`] and carries no generation): a PTY
+/// socket also stamps the scrollback replay that follows with its `gen` so the
+/// client can drop an already-applied replay, and names the pty's current
+/// `owner` so the arriving client knows whether it is joining as the driver or
+/// as a watcher. Adding a field is backward-safe (an older client ignores both).
 #[derive(serde::Serialize)]
 struct PtyConnectedFrame {
     event: &'static str,
@@ -1823,15 +1917,42 @@ struct PtyConnectedFrame {
     /// 2024 edition, so the field is spelled out and renamed for JSON).
     #[serde(rename = "gen")]
     generation: u64,
+    /// Who currently owns sizing+input for this pty: the owning connection's id,
+    /// or `null` when nobody is driving it. Deliberately serialized even when
+    /// null, so the field's PRESENCE tells the client it is talking to a server
+    /// that answers the question at all; a client that finds it absent falls back
+    /// to the old foreground guess rather than assuming an unowned pty.
+    owner: Option<String>,
+    /// The ownership epoch as of the same owners-lock read that produced
+    /// `owner`, the SAME counter every `pty.owner` broadcast is stamped with.
+    /// Named `owner_epoch` rather than a bare `epoch` because this frame already
+    /// carries a second counter (`gen`, the replay generation) and the two must
+    /// not be mistaken for each other. Always serialized alongside `owner`: the
+    /// handshake and the `pty.owner` broadcasts travel on different sockets, so
+    /// a client that has already applied a strictly newer `pty.owner` uses this
+    /// to recognize the handshake's owner snapshot as stale and keep the newer
+    /// verdict. An old server omits both keys together, which is the client's
+    /// mixed-version fallback signal.
+    owner_epoch: u64,
 }
 
 /// Serialize and send the PTY-socket `connected` handshake carrying this socket's
-/// connection id and the replay generation for the repaint that follows.
-async fn send_pty_connected(sink: &SharedSink, conn_id: u64, generation: u64) -> Result<(), ()> {
+/// connection id, the replay generation for the repaint that follows, and the
+/// pty's current owner plus the ownership epoch of that snapshot (both read
+/// under ONE owners-lock acquisition by the caller).
+async fn send_pty_connected(
+    sink: &SharedSink,
+    conn_id: u64,
+    generation: u64,
+    owner: Option<u64>,
+    owner_epoch: u64,
+) -> Result<(), ()> {
     let frame = PtyConnectedFrame {
         event: "connected",
         id: conn_id.to_string(),
         generation,
+        owner: owner.map(|id| id.to_string()),
+        owner_epoch,
     };
     let text = serde_json::to_string(&frame).map_err(|_| ())?;
     let mut guard = sink.lock().await;
@@ -3329,10 +3450,6 @@ mod tests {
         );
     }
 
-    /// Two viewers of one PTY: the most recently CLAIMING connection owns it (a
-    /// claim happens when a client sends a size). The later claimer owns; the
-    /// earlier one does not. After the owner drops, the surviving connection
-    /// reclaims on its next size.
     /// The file-drop route's courtesy check. It is NOT the protection (the
     /// socket's own write gate is), so its only job is turning "your file was
     /// saved and then silently not pasted" into a refusal a viewer can act on.
@@ -3363,15 +3480,21 @@ mod tests {
              written, not after"
         );
 
-        owners.release(pty, driver);
+        let _ = owners.release(pty, driver);
         assert!(
             !denied(viewer),
             "once the driver disconnects the pty is unowned again"
         );
     }
 
+    /// Two viewers of one PTY, both taking over EXPLICITLY (`claim` is the
+    /// take-over spelling of `claim_for_resize`): the most recently claiming
+    /// connection owns it, and after the owner drops the surviving connection can
+    /// claim the now-unowned pty. Deliberately scoped to explicit take-overs: a
+    /// plain resize from the non-owner would be refused, which is the point of
+    /// the claim table in `pty_owners.rs`.
     #[test]
-    fn pty_size_owner_is_most_recent_claim_and_releases_on_drop() {
+    fn pty_size_owner_is_most_recent_takeover_and_releases_on_drop() {
         let owners = PtySizeOwners::default();
         let pty = "session-1";
 
@@ -3387,7 +3510,7 @@ mod tests {
             "the sole claimant owns the PTY"
         );
 
-        // Second viewer claims: it takes over (most-recent claim wins).
+        // Second viewer takes over EXPLICITLY: most-recent take-over wins.
         let conn_b = owners.next_conn_id();
         assert!(
             owners.claim(pty, conn_b).is_some(),
@@ -3403,7 +3526,7 @@ mod tests {
         );
 
         // The owner (B) disconnects and releases ownership.
-        owners.release(pty, conn_b);
+        let _ = owners.release(pty, conn_b);
         assert!(
             !owners.is_owner(pty, conn_b),
             "a released owner no longer owns it"
@@ -3615,7 +3738,7 @@ mod tests {
         owners.claim(pty, conn_b);
 
         // A disconnects after B took over: releasing A must not drop B's ownership.
-        owners.release(pty, conn_a);
+        let _ = owners.release(pty, conn_a);
         assert!(
             owners.is_owner(pty, conn_b),
             "B remains the owner after A's stale release"
@@ -3926,18 +4049,42 @@ mod tests {
         );
     }
 
-    /// The PTY-socket `connected` handshake serializes to `{event, id, gen}`, a
-    /// superset of the events-socket frame carrying the replay generation.
+    /// The PTY-socket `connected` handshake serializes to
+    /// `{event, id, gen, owner, owner_epoch}`, a superset of the events-socket
+    /// frame carrying the replay generation, the pty's current owner, and the
+    /// ownership epoch of that owner snapshot.
     #[test]
     fn pty_connected_frame_serializes_with_generation() {
         let frame = PtyConnectedFrame {
             event: "connected",
             id: "abc-123".into(),
             generation: 7,
+            owner: Some("41".into()),
+            owner_epoch: 3,
         };
         assert_eq!(
             serde_json::to_string(&frame).unwrap(),
-            r#"{"event":"connected","id":"abc-123","gen":7}"#
+            r#"{"event":"connected","id":"abc-123","gen":7,"owner":"41","owner_epoch":3}"#
+        );
+    }
+
+    /// An UNOWNED pty still serializes the `owner` key, as an explicit null. The
+    /// client tells "this server does not answer the question" (key absent, fall
+    /// back to the foreground guess) from "nobody is driving" (key null, claim
+    /// it) by the key's PRESENCE, so skipping it when null would make an unowned
+    /// pty indistinguishable from an old server.
+    #[test]
+    fn pty_connected_frame_spells_an_unowned_pty_as_an_explicit_null() {
+        let frame = PtyConnectedFrame {
+            event: "connected",
+            id: "abc-123".into(),
+            generation: 7,
+            owner: None,
+            owner_epoch: 0,
+        };
+        assert_eq!(
+            serde_json::to_string(&frame).unwrap(),
+            r#"{"event":"connected","id":"abc-123","gen":7,"owner":null,"owner_epoch":0}"#
         );
     }
 

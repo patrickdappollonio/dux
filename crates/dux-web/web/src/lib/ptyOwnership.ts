@@ -26,6 +26,90 @@ export function isForeground(): boolean {
     : document.visibilityState === "visible"
 }
 
+/// What the `connected` handshake said about who drives this pty:
+/// a connection id, `null` for "nobody", or `undefined` for a server that does
+/// not answer the question (the key was absent).
+export type HandshakeOwner = string | null | undefined
+
+// SEED the ownership verdict from the server's own answer, at the moment the
+// `connected` frame lands. This is the correction that makes "a plain resize
+// claims only an unowned pty" safe to ship.
+//
+// The foreground guess alone used to be enough because a foregrounded attach
+// really did take the pty (the server granted any resize as a claim). Now it
+// does not, and a refused claim is SILENT by design, so a phone opening an agent
+// its owner's desktop is driving would guess "foregrounded, therefore mine",
+// render its typing surfaces, and have every keystroke dropped server-side with
+// no card ever explaining why. The handshake closes that hole: the foreground
+// check survives only as the decision to claim an UNOWNED pty.
+//
+// The order of the rules is the whole content:
+//   1. An ARMED take-over outranks everything. The client is deliberately
+//      claiming, its first resize frame will carry the flag, and the server will
+//      grant it; demoting it here would flash the card back over a pane the user
+//      has just taken.
+//   2. A SUPERSEDED handshake defers. The handshake rides the PTY socket while
+//      `pty.owner` rides the events socket, two TCP connections with no
+//      ordering between them, so a fresh `pty.owner{owner:B}` can be applied
+//      before a STALE `connected{owner:null}` lands. The server stamps both
+//      with the same monotonic epoch counter; when the newest `pty.owner`
+//      already applied for this pty is strictly newer than the handshake's
+//      snapshot, the seed keeps the verdict that newer event wrote instead of
+//      resurrecting the stale answer, because the stale-null direction emits no
+//      correcting event, ever.
+//   3. An ABSENT owner key means an older server that still grants any claim, so
+//      fall back to the foreground guess rather than assuming anything. (An old
+//      server sends no epoch either, so rule 2 never fires for it.)
+//   4. `null` means nobody is driving: the foreground guess decides, exactly as
+//      it always did, and this is now the ONLY case it decides.
+//   5. Otherwise, compare ids. Equal is ours (unreachable at a fresh handshake,
+//      since the id is minted for this socket, but the comparison is the honest
+//      rule rather than an assumption about allocation order); anything else
+//      means another device drives it and this client is a watcher.
+export function seedVerdictFromConnected(input: {
+  owner: HandshakeOwner
+  myConnId: string
+  foreground: boolean
+  takeoverArmed: boolean
+  /// The `owner_epoch` stamped on the `connected` frame; undefined on an old
+  /// server (which then omitted `owner` too).
+  handshakeEpoch?: number
+  /// The newest `pty.owner` epoch already applied for this pty (the client's
+  /// per-pty dedup high-water mark); undefined when none has been applied.
+  appliedEpoch?: number
+  /// The verdict standing when the handshake landed, returned unchanged when
+  /// the handshake is superseded by a newer applied `pty.owner`.
+  priorVerdict?: boolean
+}): boolean {
+  if (input.takeoverArmed) return true
+  if (handshakeSuperseded(input.handshakeEpoch, input.appliedEpoch)) {
+    return input.priorVerdict ?? false
+  }
+  if (input.owner === undefined) return input.foreground
+  if (input.owner === null) return input.foreground
+  return input.owner === input.myConnId
+}
+
+// Whether a `connected` handshake's owner snapshot has been overtaken by a
+// `pty.owner` already applied for the same pty: true only when BOTH epochs are
+// known and the applied one is strictly newer. Equal epochs mean the handshake
+// snapshot was taken at (or after) that claim, so it is fresh; a missing epoch
+// on either side means there is nothing to order by (an old server, or no
+// handover applied yet) and the handshake seeds normally. The ONE
+// implementation of the comparison: `seedVerdictFromConnected` gates the
+// verdict on it, and the ownership machine gates its `ownerPresent` side
+// effect on the same answer so the two cannot drift.
+export function handshakeSuperseded(
+  handshakeEpoch: number | undefined,
+  appliedEpoch: number | undefined,
+): boolean {
+  return (
+    typeof handshakeEpoch === "number" &&
+    typeof appliedEpoch === "number" &&
+    appliedEpoch > handshakeEpoch
+  )
+}
+
 // Decide ownership after a `pty.owner` handover by comparing the claimer's
 // connection id (the event's `owner` field) against THIS client's own PTY-socket
 // connection id (received as the socket's first `connected` frame). The comparison
@@ -84,6 +168,15 @@ const lastEpochByPty = new Map<string, number>()
 // reach this client). Exported primarily for that wiring and for test isolation.
 export function resetPtyOwnerEpochs(): void {
   lastEpochByPty.clear()
+}
+
+// The newest `pty.owner` epoch already applied for `ptyId`, or undefined when
+// none has been. Read by the handshake seed so it can tell a stale `connected`
+// owner snapshot (taken before a handover this client has already applied)
+// from a fresh one, and defer to the newer verdict; see
+// `seedVerdictFromConnected` rule 2.
+export function appliedPtyOwnerEpoch(ptyId: string): number | undefined {
+  return lastEpochByPty.get(ptyId)
 }
 
 export function notifyPtyOwner(

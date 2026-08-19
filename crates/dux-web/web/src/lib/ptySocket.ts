@@ -6,14 +6,19 @@
 //
 // Protocol (matches `handle_pty_socket` in `crates/dux-web/src/server.rs`):
 //   - On (re)open the server sends a Text `connected` frame FIRST carrying this
-//     socket's connection id and the replay generation:
-//     `{"event":"connected","id":"<connId>","gen":<n>}`.
+//     socket's connection id, the replay generation, who currently drives the
+//     PTY, and the ownership epoch of that owner snapshot:
+//     `{"event":"connected","id":"<connId>","gen":<n>,"owner":"<connId>"|null,"owner_epoch":<n>}`.
 //   - Then the server sends ONE Binary frame replaying the buffered
 //     scrollback/repaint; feed it straight to xterm like any other byte chunk. The
 //     `gen` labels this replay so the client can drop one it already applied.
 //   - server→client Binary = raw PTY bytes (write to xterm).
 //   - client→server Binary = PTY stdin (xterm `onData`).
-//   - client→server Text = a resize control frame `{"rows":R,"cols":C}`.
+//   - client→server Text = a resize control frame `{"rows":R,"cols":C}`, which
+//     claims sizing+input ONLY when the PTY is unowned. A resize that also
+//     carries `"takeover":true` transfers ownership from whoever holds it, and
+//     is the only frame this client ever sends while it knows it is not the
+//     owner.
 //   - Close = detach (the server drops the subscription/forwarder).
 //
 // Reconnect behavior is the shared `ReconnectingSocket` base: capped exponential
@@ -129,10 +134,38 @@ export class PtySocket extends ReconnectingSocket {
   // late blob can never stack a second copy of the scrollback.
   private replayGen: number | null = null
 
-  // Fired with this socket's connection id each time the `connected` frame lands.
-  // Lets the terminal view track which connection id is "us" for the ownership
-  // comparison, re-issued on every reconnect.
-  onConnected: (id: string) => void = () => {}
+  // Who the server says currently drives this PTY, as of the most recent
+  // `connected` frame. THREE distinct values, and the pane needs all three:
+  //   - a connection id: somebody is driving (this client, if it equals `connId`)
+  //   - `null`: the key was present and empty, so nobody is driving
+  //   - `undefined`: the key was ABSENT, so this server does not answer the
+  //     question and the client falls back to its foreground guess
+  // Only the handshake writes it; live changes arrive as `pty.owner` events on
+  // the separate events socket.
+  private connectedOwner: string | null | undefined = undefined
+
+  // The ownership epoch stamped on the handshake's owner snapshot
+  // (`owner_epoch`), read server-side under the same lock as `owner` and drawn
+  // from the SAME counter every `pty.owner` event carries. The handshake rides
+  // this socket while `pty.owner` rides the events socket, two TCP connections
+  // with no ordering between them, so the seed compares this against the newest
+  // `pty.owner` epoch already applied and DEFERS to a strictly newer one:
+  // without it, a stale `connected{owner:null}` arriving after a fresh
+  // `pty.owner{owner:B}` would re-seed this client as a phantom owner, and the
+  // stale-null direction emits no correcting event, ever. `undefined` means the
+  // key was absent (an old server, which then omitted `owner` too).
+  private connectedOwnerEpoch: number | undefined = undefined
+
+  // Fired with this socket's connection id, the pty's current owner, and the
+  // ownership epoch of that owner snapshot, each time the `connected` frame
+  // lands. Lets the terminal view track which connection id is "us" for the
+  // ownership comparison, and SEED its verdict from the server rather than from
+  // a guess, re-issued on every reconnect.
+  onConnected: (
+    id: string,
+    owner: string | null | undefined,
+    ownerEpoch: number | undefined,
+  ) => void = () => {}
 
   // `onOpen`, `onReconnecting`, and `onConn` are inherited from ReconnectingSocket.
   // The pane wires `onOpen` (re-arm first-frame resize; the server replays
@@ -176,6 +209,11 @@ export class PtySocket extends ReconnectingSocket {
     return this.replayGen
   }
 
+  // The pty's owner as of the most recent `connected` frame; see the field.
+  get handshakeOwner(): string | null | undefined {
+    return this.connectedOwner
+  }
+
   // Request arraybuffer framing so server→client Binary frames arrive as
   // `ArrayBuffer` (raw PTY bytes) rather than Blobs.
   protected configureSocket(ws: WebSocket): void {
@@ -201,6 +239,8 @@ export class PtySocket extends ReconnectingSocket {
           event?: string
           id?: string
           gen?: number
+          owner?: string | null
+          owner_epoch?: number
         }
         if (frame.event === "connected" && typeof frame.id === "string") {
           this.connId = frame.id
@@ -208,7 +248,18 @@ export class PtySocket extends ReconnectingSocket {
           // without `gen` (older server) leaves it null, which the guard reads as
           // "always apply" so the change is backward-safe.
           this.replayGen = typeof frame.gen === "number" ? frame.gen : null
-          this.onConnected(frame.id)
+          // ABSENT and NULL are different answers here, so this reads the KEY,
+          // not the value: `owner: null` means "nobody is driving, claim it if
+          // you are foregrounded", while a missing key means "this server does
+          // not say" and the client must not read that as unowned.
+          this.connectedOwner =
+            "owner" in frame ? (frame.owner ?? null) : undefined
+          // The epoch travels with `owner`: a server that answers the owner
+          // question stamps the snapshot, and an old server omits both keys
+          // together, so an absent epoch is the same mixed-version signal.
+          this.connectedOwnerEpoch =
+            typeof frame.owner_epoch === "number" ? frame.owner_epoch : undefined
+          this.onConnected(frame.id, this.connectedOwner, this.connectedOwnerEpoch)
         }
       } catch {
         // A malformed control frame is not fatal to the byte stream; ignore it.
@@ -263,15 +314,25 @@ export class PtySocket extends ReconnectingSocket {
   // Send a resize control frame as Text. The server parses `{rows, cols}` (u16)
   // and issues the SIGWINCH; an unchanged size is a kernel no-op server-side.
   //
+  // `takeover` is the ownership TRANSFER request, set only by a deliberate press
+  // of Take over. Without it the server grants the claim only when the pty is
+  // unowned, and refuses the resize outright when somebody else drives it, which
+  // is what stops an ordinary attach or window change from stealing the prompt.
+  // The flag is omitted from the JSON when false rather than sent as `false`, so
+  // the ordinary frame is byte-identical to the one every prior version sent.
+  //
   // Returns whether the frame actually went on the wire. Unlike a keystroke, a
   // dropped resize is not re-typed by anybody: the caller remembers the last
   // size it told the PTY about and skips a size it believes is already there,
   // so a frame silently discarded here (the socket is CONNECTING or CLOSED,
   // which is every reconnect) must be reported rather than swallowed, or the
-  // size is booked as delivered and never re-asserted.
-  sendResize(rows: number, cols: number): boolean {
+  // size is booked as delivered and never re-asserted. A take-over intent rides
+  // on exactly this answer: it is cleared only when this returns true.
+  sendResize(rows: number, cols: number, takeover = false): boolean {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ rows, cols }))
+      this.ws.send(
+        JSON.stringify(takeover ? { rows, cols, takeover: true } : { rows, cols }),
+      )
       return true
     }
     return false

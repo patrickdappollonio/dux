@@ -2,8 +2,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { act, renderHook } from "@testing-library/react"
 
-import type { Terminal } from "@xterm/xterm"
-
 import { notifyPtyOwner, resetPtyOwnerEpochs } from "@/lib/ptyOwnership"
 import type { PtySocket } from "@/lib/ptySocket"
 
@@ -25,43 +23,52 @@ vi.mock("@/lib/store", () => ({
 class PtyFake {
   isOpen = true
   connects = 0
-  resizes: [number, number][] = []
-  /// Whether a resize frame actually goes on the wire. A socket mid-reconnect
-  /// answers false, which is the third health check `takeOver` makes.
-  wire = true
   connect() {
     this.connects++
   }
-  sendResize(rows: number, cols: number) {
-    if (!this.wire) return false
-    this.resizes.push([rows, cols])
-    return true
-  }
+}
+
+/// `document.visibilityState`, which is what `isForeground` reads. The initial
+/// guess and the freed-pty auto-claim both turn on it.
+function setVisibility(state: "visible" | "hidden") {
+  Object.defineProperty(document, "visibilityState", {
+    value: state,
+    configurable: true,
+  })
 }
 
 function setup(opts: { kind?: "agent" | "terminal" } = {}) {
-  const term = { rows: 24, cols: 80 } as unknown as Terminal
   const pty = new PtyFake()
   const focuses: number[] = []
+  const reconnecting: boolean[] = []
+  // The lifecycle's send port for the freed-pty claim, recorded rather than
+  // performed: this hook's contract is "ask the coordinator", not "send".
+  const freedClaims: number[] = []
+  const claimFreedPtyRef = { current: () => freedClaims.push(1) } as {
+    current: (() => void) | null
+  }
   const view = renderHook(() =>
     useTerminalOwnership({
       id: "p1",
       kind: opts.kind ?? "agent",
       conn: "open",
-      termRef: { current: term },
       ptyRef: { current: pty as unknown as PtySocket },
       focusTypingSurface: () => focuses.push(1),
+      setReconnecting: (v) => reconnecting.push(v),
+      claimFreedPtyRef,
     }),
   )
-  return { view, pty, focuses }
+  return { view, pty, focuses, reconnecting, freedClaims, claimFreedPtyRef }
 }
 
 beforeEach(() => {
   ledger.length = 0
   resetPtyOwnerEpochs()
+  setVisibility("visible")
 })
 afterEach(() => {
   vi.restoreAllMocks()
+  setVisibility("visible")
 })
 
 describe("the initial verdict", () => {
@@ -124,50 +131,197 @@ describe("a handover", () => {
   })
 })
 
+// SITE 4. The handshake is now what decides, and the foreground guess survives
+// only for an UNOWNED pty. Without this a phone opening a desktop-driven agent
+// would sit under typing surfaces whose every keystroke the server drops, with
+// no card, forever: a refused claim is silent by design.
+describe("seeding the verdict from the connected handshake", () => {
+  it("demotes a foregrounded pane that joined a pty somebody else drives", () => {
+    const { view } = setup()
+    expect(view.result.current.isOwner).toBe(true) // the pre-handshake guess
+    act(() => view.result.current.seedFromConnected("mine", "theirs"))
+    expect(view.result.current.isOwner).toBe(false)
+    expect(view.result.current.ownership.read()).toBe(false)
+    expect(view.result.current.ownerPresent).toBe(true)
+  })
+
+  it("keeps a foregrounded pane the owner of an UNOWNED pty", () => {
+    const { view } = setup()
+    act(() => view.result.current.seedFromConnected("mine", null))
+    expect(view.result.current.isOwner).toBe(true)
+    expect(view.result.current.ownerPresent).toBe(false)
+  })
+
+  it("leaves a BACKGROUNDED pane a watcher of an unowned pty", () => {
+    setVisibility("hidden")
+    const { view } = setup()
+    act(() => view.result.current.seedFromConnected("mine", null))
+    expect(view.result.current.isOwner).toBe(false)
+    // And it says so honestly rather than naming a device.
+    expect(view.result.current.ownerPresent).toBe(false)
+  })
+
+  it("falls back to the foreground guess against a server that omits the owner", () => {
+    const { view } = setup()
+    act(() => view.result.current.seedFromConnected("mine", undefined))
+    expect(view.result.current.isOwner).toBe(true)
+    expect(view.result.current.ownerPresent).toBe(true)
+  })
+
+  // THE CROSS-SOCKET RACE, replayed exactly. The handshake rides the PTY socket
+  // and `pty.owner` rides the events socket; nothing orders the two TCP
+  // connections. Here the fresh `pty.owner{owner:B, epoch:1}` is applied FIRST
+  // and the stale `connected{owner:null, owner_epoch:0}` lands second. Without
+  // the epoch deferral the seed would read null+foreground as "claim it" and
+  // wedge this pane as a phantom owner forever: a plain resize is refused
+  // silently, and the stale-null direction emits no correcting event.
+  it("does NOT become owner from a stale null handshake after a newer pty.owner", () => {
+    const { view } = setup()
+    act(() => {
+      view.result.current.connId.write("mine")
+    })
+    // The newer handover is applied first: another device claimed, epoch 1.
+    act(() => {
+      notifyPtyOwner("p1", "theirs", 1, "Mozilla/5.0 (Macintosh) Chrome/1")
+    })
+    expect(view.result.current.isOwner).toBe(false)
+    // The stale handshake, snapshotted before that claim, arrives second.
+    act(() => view.result.current.seedFromConnected("mine", null, 0))
+    expect(view.result.current.isOwner).toBe(false)
+    expect(view.result.current.ownership.read()).toBe(false)
+    // ownerPresent is deferred on the same comparison: somebody IS driving.
+    expect(view.result.current.ownerPresent).toBe(true)
+    // And the demoting device's name survives the stale frame too.
+    expect(view.result.current.takeoverLabel).not.toBeNull()
+  })
+
+  it("seeds normally from a handshake at or after the applied epoch", () => {
+    const { view } = setup()
+    act(() => {
+      view.result.current.connId.write("mine")
+    })
+    act(() => {
+      notifyPtyOwner("p1", "theirs", 1, undefined)
+    })
+    expect(view.result.current.isOwner).toBe(false)
+    // The owner then released and this pane reconnected: the handshake's
+    // snapshot (epoch 2, unowned) is strictly newer than the applied handover,
+    // so the foreground guess claims exactly as a fresh attach would.
+    act(() => view.result.current.seedFromConnected("mine2", null, 2))
+    expect(view.result.current.isOwner).toBe(true)
+    expect(view.result.current.ownerPresent).toBe(false)
+  })
+
+  // The bounce's own handshake still reports the OLD owner: the claim rides the
+  // first resize of the new connection, so ownership lags by one replay parse.
+  // Demoting here would flash the card back over a pane the user just took.
+  it("does not demote a pane whose take-over is armed and mid-bounce", () => {
+    const { view } = setup()
+    act(() => view.result.current.seedFromConnected("mine", "theirs"))
+    act(() => view.result.current.takeOver())
+    act(() => view.result.current.seedFromConnected("mine2", "theirs"))
+    expect(view.result.current.isOwner).toBe(true)
+  })
+})
+
 describe("taking over", () => {
-  it("flips the verdict, sends the claim, and refocuses", () => {
-    const { view, pty, focuses } = setup()
+  it("arms the intent, flips the verdict, bounces the socket, and refocuses", () => {
+    const { view, pty, focuses, reconnecting } = setup()
     act(() => {
       view.result.current.connId.write("mine")
       notifyPtyOwner("p1", "theirs", 1, undefined)
     })
     expect(view.result.current.isOwner).toBe(false)
+
     act(() => view.result.current.takeOver())
     expect(view.result.current.isOwner).toBe(true)
-    expect(pty.resizes).toEqual([[24, 80]])
-    expect(pty.connects).toBe(0)
+    expect(view.result.current.takeoverIntent.read()).toBe(true)
+    // A FRESH ATTACH, always: nothing is written down the live socket, because
+    // a live claim leaves this client's polluted viewer-era scrollback exactly
+    // where it is.
+    expect(pty.connects).toBe(1)
+    // The bounce is visible. A deliberate `connect()` fires no `onReconnecting`
+    // of its own, so the half-second window would otherwise read as dead.
+    expect(reconnecting).toEqual([true])
     expect(focuses).toHaveLength(1)
     expect(view.result.current.takeoverLabel).toBeNull()
   })
 
-  it("PARKS the claim and reopens the socket when the id is not known yet", () => {
+  it("is a NO-OP while the bounce is still in flight", () => {
     const { view, pty } = setup()
+    act(() => view.result.current.seedFromConnected("mine", "theirs"))
     act(() => view.result.current.takeOver())
-    expect(view.result.current.pendingClaimRef.current).toBe(true)
+    act(() => view.result.current.takeOver())
+    act(() => view.result.current.takeOver())
     expect(pty.connects).toBe(1)
-    expect(pty.resizes).toEqual([])
+    expect(view.result.current.takeoverIntent.read()).toBe(true)
   })
 
-  it("PARKS it when the socket could not carry the frame, even though it looked open", () => {
-    const { view, pty } = setup()
+  // The intent is state, not a queued frame, precisely so it survives the
+  // socket churn a bounce is made of. It is spent by the lifecycle's confirmed
+  // write, which this hook does not perform.
+  it("keeps the intent armed across a socket bounce until something writes it", () => {
+    const { view } = setup()
+    act(() => view.result.current.seedFromConnected("mine", "theirs"))
+    act(() => view.result.current.takeOver())
+    // The bounce's reconnect: a new id, and the handshake still naming the old
+    // owner (the claim has not gone out yet).
+    act(() => view.result.current.seedFromConnected("mine2", "theirs"))
+    expect(view.result.current.takeoverIntent.read()).toBe(true)
+  })
+
+  it("retires an armed intent WITHOUT sending it when a handover demotes us", () => {
+    const { view } = setup()
     act(() => {
       view.result.current.connId.write("mine")
     })
-    pty.wire = false
     act(() => view.result.current.takeOver())
-    expect(view.result.current.pendingClaimRef.current).toBe(true)
-    expect(pty.connects).toBe(1)
+    expect(view.result.current.takeoverIntent.read()).toBe(true)
+    // Somebody else's claim landed first; this client lost the race. Re-arming
+    // is the user's decision, not a retry loop's.
+    act(() => notifyPtyOwner("p1", "theirs", 2, undefined))
+    expect(view.result.current.takeoverIntent.read()).toBe(false)
+    expect(view.result.current.isOwner).toBe(false)
+    // And the button works again, because the intent is no longer armed.
+    act(() => view.result.current.takeOver())
+    expect(view.result.current.takeoverIntent.read()).toBe(true)
+  })
+})
+
+// SITE 5. The driver's socket closed and the server broadcast an owner-cleared
+// `pty.owner`. Ownership no longer follows focus, so without this the card
+// would be a permanent lie about a browser tab that has gone.
+describe("a freed pty", () => {
+  it("is claimed by a mounted, FOREGROUNDED viewer", () => {
+    const { view, freedClaims } = setup()
+    act(() => view.result.current.seedFromConnected("mine", "theirs"))
+    expect(view.result.current.isOwner).toBe(false)
+
+    act(() => notifyPtyOwner("p1", undefined, 2, undefined))
+    expect(view.result.current.isOwner).toBe(true)
+    // Through the coordinator's port, never straight at the socket.
+    expect(freedClaims).toHaveLength(1)
+    expect(view.result.current.takeoverLabel).toBeNull()
   })
 
-  it("PARKS it when the socket is closed", () => {
-    const { view, pty } = setup()
-    act(() => {
-      view.result.current.connId.write("mine")
-    })
-    pty.isOpen = false
-    act(() => view.result.current.takeOver())
-    expect(view.result.current.pendingClaimRef.current).toBe(true)
-    expect(pty.connects).toBe(1)
+  it("leaves a BACKGROUNDED viewer watching, and says nobody is driving", () => {
+    const { view, freedClaims } = setup()
+    act(() => view.result.current.seedFromConnected("mine", "theirs"))
+    setVisibility("hidden")
+    act(() => notifyPtyOwner("p1", undefined, 2, undefined))
+    expect(view.result.current.isOwner).toBe(false)
+    expect(view.result.current.ownerPresent).toBe(false)
+    expect(freedClaims).toHaveLength(0)
+  })
+
+  it("does not send through a port the lifecycle has already torn down", () => {
+    const { view, claimFreedPtyRef } = setup()
+    act(() => view.result.current.seedFromConnected("mine", "theirs"))
+    claimFreedPtyRef.current = null
+    act(() => notifyPtyOwner("p1", undefined, 2, undefined))
+    // No throw, and the verdict still flips: the pane believes it owns an
+    // unowned pty, and its next ordinary resize claims it.
+    expect(view.result.current.isOwner).toBe(true)
   })
 })
 
@@ -195,7 +349,6 @@ describe("the LOST state", () => {
 
 describe("the other device's NAME across an events-socket outage", () => {
   it("is dropped whenever the events socket is not open, while the verdict stands", () => {
-    const term = { rows: 24, cols: 80 } as unknown as Terminal
     const pty = new PtyFake()
     const view = renderHook(
       ({ conn }: { conn: "open" | "connecting" }) =>
@@ -203,9 +356,10 @@ describe("the other device's NAME across an events-socket outage", () => {
           id: "p1",
           kind: "agent",
           conn,
-          termRef: { current: term },
           ptyRef: { current: pty as unknown as PtySocket },
           focusTypingSurface: () => {},
+          setReconnecting: () => {},
+          claimFreedPtyRef: { current: null },
         }),
       { initialProps: { conn: "open" as const } },
     )

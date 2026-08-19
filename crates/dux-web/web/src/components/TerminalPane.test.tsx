@@ -257,7 +257,13 @@ class TermStub {
   clearSelection() {
     this.selection = null
   }
-  reset() {}
+  // Counted, because "take-over is a fresh attach" means precisely that the
+  // bounce runs the reset-then-replay path: the reset is what discards this
+  // viewer's polluted scrollback, and nothing else in the pane clears it.
+  resets = 0
+  reset() {
+    this.resets++
+  }
   paste() {}
   write(_data: unknown, cb?: () => void) {
     cb?.()
@@ -304,7 +310,11 @@ class FakePtySocket {
   // Mirrors the real socket's `isOpen` getter; a test flips it to false to
   // model a disconnected socket (the compose bar's Send checks it).
   isOpen = true
-  onConnected: (id: string) => void = () => {}
+  // The handshake now carries the pty's current OWNER as well as this socket's
+  // id, and the pane seeds its ownership verdict from it. Tests that pass no
+  // owner exercise the older-server fallback (the key absent, so the foreground
+  // guess still decides), which is what most of this file wants.
+  onConnected: (id: string, owner?: string | null) => void = () => {}
   onOpen: () => void = () => {}
   onReconnecting: () => void = () => {}
   onConn: (state: ConnState) => void = () => {}
@@ -316,6 +326,11 @@ class FakePtySocket {
   }
   shouldRetry: () => boolean = () => true
   onGone: () => void = () => {}
+  // The generation the server stamps on each open's scrollback replay. A test
+  // that drives a reconnect bumps it, exactly as a real server would, so the
+  // pane's already-applied guard does not drop the second replay as a
+  // duplicate.
+  replayGeneration: number | null = null
   constructor(url: string) {
     this.url = url
     FakePtySocket.instances.push(this)
@@ -560,6 +575,68 @@ describe.each([
   })
 })
 
+// THE PHANTOM OWNER, and the frame that prevents it.
+//
+// A plain claim is refused SILENTLY server-side now, so a foregrounded pane
+// arriving at a pty another device drives gets no `pty.owner`, no error, and no
+// correction of any kind. Left to its foreground guess it would render typing
+// surfaces over a pty whose every keystroke the server drops, with no card ever
+// explaining why. The `connected` handshake's `owner` field is the correction.
+describe("TerminalPane seeds its ownership verdict from the connected frame", () => {
+  it("shows the take-over card to a FOREGROUNDED pane that joined a driven pty", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    // The pre-handshake guess: foregrounded, so optimistically the owner.
+    expect(screen.queryByText("Active on another device")).toBeNull()
+    act(() => last().onConnected("conn-self", "conn-other"))
+    expect(screen.getByText("Active on another device")).toBeTruthy()
+  })
+
+  it("leaves a foregrounded pane driving an UNOWNED pty", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    act(() => last().onConnected("conn-self", null))
+    expect(screen.queryByText("Active on another device")).toBeNull()
+  })
+
+  // The owner's browser tab closed. Nothing else would ever say so, because
+  // ownership stopped following focus, and the card would name a device that is
+  // gone. This pane is BACKGROUNDED, so it watches rather than auto-claiming.
+  it("says nobody is driving once the owner disconnects, to a backgrounded viewer", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    act(() => last().onConnected("conn-self", "conn-other"))
+    expect(screen.getByText("Active on another device")).toBeTruthy()
+    Object.defineProperty(document, "visibilityState", {
+      value: "hidden",
+      configurable: true,
+    })
+    try {
+      act(() => notifyPtyOwner("s1", undefined, 7))
+      expect(screen.getByText("Nobody is driving")).toBeTruthy()
+      expect(screen.queryByText("Active on another device")).toBeNull()
+    } finally {
+      Object.defineProperty(document, "visibilityState", {
+        value: "visible",
+        configurable: true,
+      })
+    }
+  })
+
+  // Foregrounded and mounted, the same broadcast is a claim: identical
+  // semantics to a fresh foreground attach on an unowned pty.
+  it("claims the freed pty when the viewer is foregrounded and mounted", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const pty = last()
+    act(() => pty.onConnected("conn-self", "conn-other"))
+    expect(screen.getByText("Active on another device")).toBeTruthy()
+    pty.sendResize.mockClear()
+    act(() => notifyPtyOwner("s1", undefined, 7))
+    expect(screen.queryByText("Active on another device")).toBeNull()
+    expect(screen.queryByText("Nobody is driving")).toBeNull()
+    // Claimed by SENDING, unflagged: there is nobody to take it from, and the
+    // send goes through the resize coordinator like every other one.
+    expect(pty.sendResize).toHaveBeenCalledWith(24, 80)
+  })
+})
+
 // The take-over placeholder's device naming: a `pty.owner` handover carrying the
 // other device's raw User-Agent must render "Open on {parsed label}", our own claim
 // echo must restore the owner view, and a non-open events socket must drop the
@@ -603,16 +680,21 @@ describe("TerminalPane take-over device naming", () => {
   })
 })
 
-// TAKING OVER OVER A SICK SOCKET. The take-over card sits on top of a socket
-// this client cannot see the health of, and the claim IS a resize frame: on a
-// socket that is closed (or has given up entirely) the frame is dropped on the
-// floor, the optimistic ownership flip stands, and the pane shows a black,
-// input-less terminal until the user switches agents (which remounts and
-// replays). These pin the recovery: an unusable socket is reconnected (which
-// resets the retry budget AND re-requests the server's scrollback replay) and
-// the claim is deferred to the resulting `connected` frame, while a healthy
-// socket keeps the cheap one-frame claim.
-describe("TerminalPane take-over over an unhealthy socket", () => {
+// TAKE-OVER IS A FRESH ATTACH. The button writes nothing down the live socket;
+// it arms an intent and BOUNCES the socket, and the claim rides the first
+// resize frame of the new connection, flagged.
+//
+// The reason is the viewer's own buffer. While the owner drives a wider grid,
+// every cursor-positioned repaint overflows this narrower viewport and scrolls
+// mangled wrapped rows into the LOCAL scrollback. A live claim resized the PTY,
+// the child repainted cleanly, and nothing cleared what was already recorded:
+// scrolling up after a take-over read back the garbage. Reconnecting routes
+// through the reset-then-repaint path every reconnect already uses, so a
+// take-over structurally cannot inherit viewer-era history.
+//
+// It also collapses the old dead-socket special case: there is no healthy path
+// and unhealthy path any more, only the bounce.
+describe("TerminalPane take-over is a fresh attach", () => {
   beforeEach(() => {
     vi.useFakeTimers()
   })
@@ -624,52 +706,144 @@ describe("TerminalPane take-over over an unhealthy socket", () => {
   // so a test observes only what its own click causes.
   const mountSettled = () => {
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const pty = last()
+    // The mount's OWN open, which the real socket fires from `connect()`. It
+    // matters here and nowhere else in this file: it is what makes the bounce's
+    // reopen a RECONNECT (one plain resize) rather than a first open (the
+    // two-step jiggle), and the claim rides that single frame.
+    act(() => pty.onOpen())
     act(() => {
       vi.advanceTimersByTime(400)
     })
-    const pty = last()
     pty.sendResize.mockClear()
     pty.connect.mockClear()
     return pty
   }
 
-  it("reconnects and defers the claim when the socket cannot carry it", () => {
-    const pty = mountSettled()
-    act(() => pty.onConnected("conn-self"))
-    act(() => notifyPtyOwner("s1", "conn-other"))
-    // The socket drops. Our connection id is dead (the pane nulls it) and a
-    // frame written now goes nowhere: `sendResize` says so by returning false.
-    act(() => pty.onReconnecting())
-    pty.isOpen = false
-    pty.sendResize.mockReturnValue(false)
-    pty.connect.mockClear()
-    fireEvent.click(screen.getByText("Take over"))
-    // The pane must reopen the socket itself rather than waiting for a
-    // `connected` frame a stopped socket will never produce.
-    expect(pty.connect).toHaveBeenCalledTimes(1)
-    // The reopen mints a fresh connection id, and THAT is when the deferred
-    // claim goes out, stamped with an id we can recognise as ours.
-    pty.sendResize.mockReturnValue(true)
+  /// Drive the reconnect the bounce asked for, all the way to the first PTY
+  /// frame that triggers the first-frame resize. This is the reattach sequence
+  /// the pane's own wiring runs on every reopen.
+  const completeBounce = (pty: FakePtySocket, id = "conn-2") => {
     act(() => {
       pty.onOpen()
-      pty.onConnected("conn-2")
+      pty.onConnected(id, "conn-other")
     })
-    expect(pty.sendResize).toHaveBeenCalledTimes(1)
-    expect(pty.sendResize).toHaveBeenCalledWith(24, 80)
+    act(() => pty.bytesCb?.(new Uint8Array([0x61])))
+    act(() => {
+      vi.advanceTimersByTime(400)
+    })
+  }
+
+  it("bounces the socket instead of claiming over it, and says it is reconnecting", () => {
+    const pty = mountSettled()
+    act(() => pty.onConnected("conn-self", null))
+    act(() => notifyPtyOwner("s1", "conn-other"))
+
+    fireEvent.click(screen.getByText("Take over"))
+    // A FRESH ATTACH, whatever the socket's health: nothing goes down the live
+    // one, because the polluted scrollback is on THIS side and only a replay
+    // clears it.
+    expect(pty.connect).toHaveBeenCalledTimes(1)
+    expect(pty.sendResize).not.toHaveBeenCalled()
+    // A deliberate `connect()` fires no `onReconnecting` of its own, so the
+    // window would otherwise read as a frozen terminal.
+    expect(screen.getByText("Reconnecting…")).toBeTruthy()
   })
 
-  it("claims in place, without reconnecting, when the socket is healthy", () => {
+  it("carries the claim on the reconnect's FIRST resize frame, and spends it once", () => {
     const pty = mountSettled()
-    act(() => pty.onConnected("conn-self"))
+    act(() => pty.onConnected("conn-self", null))
     act(() => notifyPtyOwner("s1", "conn-other"))
-    pty.sendResize.mockClear()
-    pty.connect.mockClear()
     fireEvent.click(screen.getByText("Take over"))
+
+    completeBounce(pty)
+    // Flagged: a plain resize would be refused, because the pty is still
+    // recorded to the other device until this frame lands.
+    expect(pty.sendResize).toHaveBeenCalledWith(24, 80, true)
+    // And the cue is gone: the reopen cleared it.
+    expect(screen.queryByText("Reconnecting…")).toBeNull()
+
+    // The intent is SPENT. Every later resize is an ordinary one; a second
+    // flagged frame would re-take a pty this client already owns.
+    pty.sendResize.mockClear()
+    act(() => {
+      TermStub.instances.at(-1)!.resize(100, 30)
+      vi.advanceTimersByTime(400)
+    })
     expect(pty.sendResize).toHaveBeenCalledTimes(1)
-    expect(pty.sendResize).toHaveBeenCalledWith(24, 80)
-    // The cheap path: a working socket is never torn down and reopened, which
-    // would cost a full scrollback replay for nothing.
-    expect(pty.connect).not.toHaveBeenCalled()
+    expect(pty.sendResize).toHaveBeenCalledWith(30, 100)
+  })
+
+  // The intent is state, not a queued frame, exactly so it survives the socket
+  // churn a bounce is made of. A frame the socket silently discarded must leave
+  // it armed, or the take-over is spent on nothing and the button looks broken.
+  it("keeps the intent armed when the claim frame is dropped, and re-sends it", () => {
+    const pty = mountSettled()
+    act(() => pty.onConnected("conn-self", null))
+    act(() => notifyPtyOwner("s1", "conn-other"))
+    fireEvent.click(screen.getByText("Take over"))
+
+    // The reopen's first resize is written into a socket that has re-dropped.
+    pty.sendResize.mockReturnValue(false)
+    completeBounce(pty)
+    expect(pty.sendResize).toHaveBeenCalledWith(24, 80, true)
+
+    // The next frame that actually goes out still carries it.
+    pty.sendResize.mockClear()
+    pty.sendResize.mockReturnValue(true)
+    act(() => {
+      TermStub.instances.at(-1)!.resize(100, 30)
+      vi.advanceTimersByTime(400)
+    })
+    expect(pty.sendResize).toHaveBeenCalledWith(30, 100, true)
+  })
+
+  // THE POINT OF THE WHOLE ARC. A take-over must run the reset-then-replay path,
+  // because this viewer's own scrollback is the thing that is polluted: while
+  // the owner drove a wider grid, every repaint overflowed this narrower
+  // viewport and scrolled mangled wrapped rows into it. Resizing the PTY makes
+  // the child repaint cleanly and clears NOTHING already recorded. Only a fresh
+  // attach's `reset()` does, and this pins that it happens, against a genuinely
+  // NEW replay generation (a repeated generation is dropped whole, so a test
+  // that forgot to bump it would pass for the wrong reason).
+  it("runs the reset-and-replay path, against a fresh replay generation", () => {
+    const pty = mountSettled()
+    pty.replayGeneration = 1
+    act(() => pty.onConnected("conn-self", null))
+    act(() => notifyPtyOwner("s1", "conn-other"))
+    const term = TermStub.instances.at(-1)!
+    const resetsBefore = term.resets
+
+    fireEvent.click(screen.getByText("Take over"))
+    // The bounce's reopen, with the generation the server would mint for it.
+    pty.replayGeneration = 2
+    act(() => {
+      pty.onOpen()
+      pty.onConnected("conn-2", "conn-other")
+    })
+    act(() => pty.bytesCb?.(new Uint8Array([0x61])))
+    expect(term.resets).toBe(resetsBefore + 1)
+  })
+
+  // Losing the race mid-bounce puts the card straight back, and the second
+  // press works: the demotion retired the armed intent rather than leaving it
+  // stuck and the button inert. (Idempotence of the press itself is pinned at
+  // the machine, in `terminal/ownership.test.ts`, where a second press is
+  // reachable without the card.)
+  it("restores the card and re-arms when another device wins the race mid-bounce", () => {
+    const pty = mountSettled()
+    act(() => pty.onConnected("conn-self", null))
+    act(() => notifyPtyOwner("s1", "conn-other"))
+    fireEvent.click(screen.getByText("Take over"))
+    expect(screen.queryByText("Take over")).toBeNull()
+
+    act(() => pty.onOpen())
+    act(() => pty.onConnected("conn-2", "conn-other"))
+    act(() => notifyPtyOwner("s1", "conn-third", 9))
+    expect(screen.getByText("Take over")).toBeTruthy()
+
+    fireEvent.click(screen.getByText("Take over"))
+    expect(pty.connect).toHaveBeenCalledTimes(2)
   })
 
   it("shows the Reconnect affordance, not the take-over card, on a dead socket", () => {
@@ -2458,14 +2632,33 @@ describe("TerminalPane reports every local re-grid to the PTY", () => {
     expect(pty.sendResize).toHaveBeenCalledWith(24, 80)
   })
 
-  it("still claims by sending this viewport's size on TAKE OVER", () => {
+  // Re-scoped at the take-over arc. Take-over no longer sends anything itself:
+  // it bounces the socket, and the REOPEN's ordinary first-frame resize carries
+  // the claim, flagged. So the property this suite cares about (a take-over
+  // still tells the PTY this viewport's size) now holds one reconnect later,
+  // through the same path every reattach uses.
+  it("still claims by sending this viewport's size on TAKE OVER, one reattach later", () => {
     const pty = mountSettled()
-    act(() => pty.onConnected("conn-self"))
+    // The mount's own open, so the bounce's reopen is a reconnect (one plain
+    // resize) rather than a first open (the jiggle).
+    act(() => pty.onOpen())
+    pty.sendResize.mockClear()
+    act(() => pty.onConnected("conn-self", null))
     act(() => notifyPtyOwner("s1", "conn-other"))
     pty.sendResize.mockClear()
     fireEvent.click(screen.getByText("Take over"))
+    expect(pty.sendResize).not.toHaveBeenCalled()
+
+    act(() => {
+      pty.onOpen()
+      pty.onConnected("conn-2", "conn-other")
+    })
+    act(() => pty.bytesCb?.(new Uint8Array([0x61])))
+    act(() => {
+      vi.advanceTimersByTime(400)
+    })
     expect(pty.sendResize).toHaveBeenCalledTimes(1)
-    expect(pty.sendResize).toHaveBeenCalledWith(24, 80)
+    expect(pty.sendResize).toHaveBeenCalledWith(24, 80, true)
   })
 
   it("still re-asserts an UNCHANGED size on a foreground return (the dedupe bypass)", () => {
@@ -2923,15 +3116,21 @@ describe("TerminalPane input menu for a non-owner", () => {
     })
   })
 
+  // A VIEWER, made one the way the server makes one: the `connected` handshake
+  // names another connection as the pty's owner and the pane seeds its verdict
+  // from that. It used to be made by backgrounding the document, which was the
+  // pane's whole non-owner story back when a foregrounded attach really did
+  // claim; now a plain claim is refused silently, so the handshake is the only
+  // thing that can tell a foregrounded pane it is watching rather than driving.
+  // (The document stays VISIBLE here on purpose: seeding from the server has to
+  // beat the foreground guess, and hiding the document would let the old
+  // mechanism pass this suite whatever the seeding did.)
   const renderViewer = (state: DuxState) => {
     mockState = state
-    // A BACKGROUNDED tab attaches as a silent observer and never claims input,
-    // which is the pane's own non-owner state (`isForeground`, read at mount).
-    Object.defineProperty(document, "visibilityState", {
-      value: "hidden",
-      configurable: true,
-    })
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    act(() => {
+      FakePtySocket.instances.at(-1)!.onConnected("conn-self", "conn-other")
+    })
   }
 
   it("offers the top-bar item once the top bar is hidden", () => {

@@ -132,21 +132,32 @@ buffer. Only after several failed attempts does it fall back to a blocking
 ### One writer, many watchers
 
 Every device pointed at the same terminal sees the same output at the same time,
-but **only one device at a time can type.** That device is the owner. Whoever
-attaches with the tab in the foreground claims ownership automatically; attaching
-with the tab in the background joins as a silent read-only watcher, so you can
-peek without stealing the keyboard out from under whoever is driving.
+but **only one device at a time can type.** That device is the owner, and
+**you join as a watcher unless nobody is driving.** Open a phone on an agent your
+desktop is already typing into and the phone watches; nothing you do by merely
+arriving takes the keyboard away. If nobody holds it, the first device to look at
+it picks it up.
 
 A read-only view shows a full-cover card naming who has it ("Open on Chrome on
-macOS") with a **Take over** button. Click it and input snaps to you, most-recent
-claim wins. Nothing is lost, the other device simply becomes the watcher until it
-takes over in turn. It is a polite hand-off, not a fight.
+macOS") with a **Take over** button. Click it and input snaps to you. Nothing is
+lost, the other device simply becomes the watcher until it takes over in turn. It
+is a polite hand-off, not a fight, and it happens only when somebody asks for it:
+the device you took over from stays a watcher even when you go back to it, until
+you press its own Take over. One tap is the whole cost of switching devices, and
+in exchange nothing ever quietly grabs the keyboard mid-sentence.
 
-If the watching device's own connection to the terminal has dropped, taking over
-reconnects it first and then claims, so you get the current screen rather than a
-blank one. If that connection has given up entirely, the card steps aside for the
-**Connection lost** notice and its **Reconnect** button, because a Take over
-button over a socket that is not there would only look like it worked.
+Taking over always reattaches: the terminal reconnects, the server repaints the
+current screen, and the keyboard arrives with it. That takes a moment (you will
+see "Reconnecting…") and it is deliberate, because a fresh screen is the only
+thing that clears the mangled leftovers a narrow watcher accumulates while
+watching a wide one.
+
+If the driving device disconnects, everyone watching is told. A watcher you are
+looking at picks the terminal up on the spot; one sitting in a background tab
+switches its card to **Nobody is driving** rather than naming a browser that has
+gone. And if the watcher's own connection has given up entirely, the card steps
+aside for the **Connection lost** notice and its **Reconnect** button, because a
+Take over button over a socket that is not there would only look like it worked.
 
 ### Clipboard: the classic terminal model
 

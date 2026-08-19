@@ -1021,20 +1021,25 @@ async fn accumulate_until(
     acc
 }
 
-/// The two halves of the server contract that the web client's take-over
-/// recovery leans on, pinned over a real socket.
+/// The three halves of the server contract that the web client's take-over
+/// leans on, pinned over a real socket.
 ///
-/// The client's fix for "take over while my socket is dead" is: reopen the
-/// socket, then claim. That only works because (1) a SECOND connection to a PTY
-/// another connection currently owns is still replayed the scrollback on open,
-/// which is the only thing that repaints a black viewport (the child's SIGWINCH
-/// redraw is a no-op when the size it is handed already matches), and (2) a
-/// resize frame from that second connection IS the claim, so its stdin is
-/// forwarded from then on. Neither is obvious from the route code, and a change
-/// to either would break take-over on the web while every client-side test
-/// stayed green.
+/// Take-over on the web is now a RECONNECT carrying intent: reopen the socket,
+/// then let the first resize frame of the new connection claim, flagged. That
+/// works because (1) a SECOND connection to a PTY another connection currently
+/// owns is still replayed the scrollback on open, which is the only thing that
+/// repaints a black viewport (the child's SIGWINCH redraw is a no-op when the
+/// size it is handed already matches); (2) a PLAIN resize from that second
+/// connection claims NOTHING, which is what stops an ordinary attach from
+/// stealing the prompt; and (3) a resize carrying `takeover` DOES claim, so its
+/// stdin is forwarded from then on. None of it is obvious from the route code,
+/// and a change to any of it would break take-over on the web while every
+/// client-side test stayed green.
+///
+/// Re-scoped at the take-over arc: this test used to assert the OPPOSITE of (2),
+/// pinning the silent steal as if it were the contract.
 #[tokio::test]
-async fn a_second_pty_connection_is_replayed_scrollback_and_claims_by_resizing() {
+async fn a_second_pty_connection_is_replayed_scrollback_and_claims_only_by_taking_over() {
     let (addr, _tmp) = boot().await;
     let url = format!("ws://{addr}/ws/sessions/s1/pty");
 
@@ -1069,20 +1074,235 @@ async fn a_second_pty_connection_is_replayed_scrollback_and_claims_by_resizing()
         replay.len()
     );
 
-    // B claims with a resize, and its stdin is forwarded from then on. A
-    // non-owner's stdin is dropped server-side, so the echo IS the proof that
-    // ownership flipped.
+    // B sends a PLAIN resize, the way any foregrounded attach or window change
+    // does. It must claim NOTHING: B's stdin is still dropped server-side, so the
+    // ABSENCE of an echo is the proof that attaching did not steal. (A's echo of
+    // the same bytes would not appear on B's socket either, so this asserts on a
+    // marker only B could have produced.)
     ws_b.send(Message::Text(r#"{"rows":30,"cols":100}"#.into()))
         .await
         .unwrap();
+    ws_b.send(Message::Binary(
+        b"dux-attach-steal-marker\n".to_vec().into(),
+    ))
+    .await
+    .unwrap();
+    let stolen =
+        accumulate_until(&mut ws_b, "dux-attach-steal-marker", Duration::from_secs(2)).await;
+    assert!(
+        !String::from_utf8_lossy(&stolen).contains("dux-attach-steal-marker"),
+        "a PLAIN resize from a second connection stole input ownership; attaching \
+         must never steal"
+    );
+
+    // B now takes over EXPLICITLY. Ownership transfers and its stdin is forwarded
+    // from then on; the echo IS the proof that ownership flipped.
+    ws_b.send(Message::Text(
+        r#"{"rows":30,"cols":100,"takeover":true}"#.into(),
+    ))
+    .await
+    .unwrap();
     ws_b.send(Message::Binary(b"dux-taker-b-marker\n".to_vec().into()))
         .await
         .unwrap();
     let after = accumulate_until(&mut ws_b, "dux-taker-b-marker", Duration::from_secs(8)).await;
     assert!(
         String::from_utf8_lossy(&after).contains("dux-taker-b-marker"),
-        "the second connection's resize did not claim input ownership; got {} bytes",
+        "the second connection's flagged take-over did not claim input ownership; \
+         got {} bytes",
         after.len()
+    );
+}
+
+/// The owner leaving is BROADCAST, so a watcher's card stops naming a browser
+/// tab that closed.
+///
+/// Ownership no longer follows focus, so nothing else corrects a departed owner:
+/// before this, the next device to attach or alt-tab silently stole the pty and
+/// that theft was what cleared the stale card. With the theft gone, an
+/// owner-cleared `pty.owner` is the only signal that the driver has left, and
+/// without it "Active on another device" is a permanent lie. It carries an epoch,
+/// strictly newer than the claim it retires, or the client's epoch ordering would
+/// discard it as a stale duplicate.
+#[tokio::test]
+async fn an_owner_disconnecting_broadcasts_an_owner_cleared_pty_owner() {
+    let (addr, _tmp) = boot().await;
+
+    // A watcher on the events socket, subscribed to the coarse `sessions` topic
+    // that carries `pty.owner`.
+    let (mut events, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/events"))
+        .await
+        .expect("connect the events socket");
+    events
+        .send(Message::Text(r#"{"subscribe":["sessions"]}"#.into()))
+        .await
+        .unwrap();
+
+    /// Drain events until a `pty.owner` for `s1` arrives, or give up.
+    async fn next_pty_owner(
+        ws: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ) -> Option<serde_json::Value> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+        while tokio::time::Instant::now() < deadline {
+            if let Ok(Some(Ok(Message::Text(t)))) =
+                tokio::time::timeout(Duration::from_millis(300), ws.next()).await
+                && t.contains(r#""event":"pty.owner""#)
+            {
+                return Some(serde_json::from_str(&t).expect("pty.owner is JSON"));
+            }
+        }
+        None
+    }
+
+    // The driver attaches and claims the unowned pty with an ordinary resize.
+    let url = format!("ws://{addr}/ws/sessions/s1/pty");
+    let (mut ws_a, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("connect the driving pty socket");
+    ws_a.send(Message::Text(r#"{"rows":24,"cols":80}"#.into()))
+        .await
+        .unwrap();
+
+    let claimed = next_pty_owner(&mut events)
+        .await
+        .expect("the claim must broadcast a pty.owner");
+    assert_eq!(claimed["id"].as_str(), Some("s1"));
+    let claim_owner = claimed["owner"]
+        .as_str()
+        .expect("a claim names its owner")
+        .to_string();
+    let claim_epoch = claimed["epoch"].as_u64().expect("a claim carries an epoch");
+
+    // The driver goes away. Its ownership is released, and that release is
+    // announced.
+    ws_a.close(None).await.unwrap();
+
+    let cleared = next_pty_owner(&mut events)
+        .await
+        .expect("the owner's disconnect must broadcast an owner-cleared pty.owner");
+    assert_eq!(cleared["id"].as_str(), Some("s1"));
+    assert!(
+        cleared.get("owner").is_none() || cleared["owner"].is_null(),
+        "an owner-cleared event names nobody, so every client reads it as 'not \
+         me'; got {cleared}"
+    );
+    assert!(
+        cleared["epoch"].as_u64().expect("an epoch") > claim_epoch,
+        "the cleared event must be strictly newer than the claim it retires \
+         (owner was {claim_owner})"
+    );
+}
+
+/// The `connected` handshake tells an arriving client whether it is joining as
+/// the driver or as a watcher.
+///
+/// This is the frame amendment 1 of the take-over plan exists for. With a plain
+/// claim now refused SILENTLY, nothing else would ever correct a foregrounded
+/// arrival's optimistic "I must be the owner" guess: it would render typing
+/// surfaces over a pty whose every keystroke the server drops, and no take-over
+/// card would ever appear. The first connection must see `owner: null` (nobody
+/// driving), and a second one arriving after that first connection has claimed
+/// must see the first connection's id.
+#[tokio::test]
+async fn the_connected_handshake_names_the_ptys_current_owner() {
+    let (addr, _tmp) = boot().await;
+    let url = format!("ws://{addr}/ws/sessions/s1/pty");
+
+    // A watcher on the events socket, to capture the epoch the claim's own
+    // `pty.owner` broadcast carries. The handshake's `owner_epoch` must be read
+    // from the SAME counter in the same lock acquisition as the owner, so the
+    // two values must agree.
+    let (mut events, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/events"))
+        .await
+        .expect("connect the events socket");
+    events
+        .send(Message::Text(r#"{"subscribe":["sessions"]}"#.into()))
+        .await
+        .unwrap();
+
+    /// The first Text frame on a PTY socket is the `connected` handshake; the
+    /// Binary frames around it are the scrollback replay and live output.
+    async fn first_text(
+        ws: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ) -> serde_json::Value {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+        while tokio::time::Instant::now() < deadline {
+            if let Ok(Some(Ok(Message::Text(t)))) =
+                tokio::time::timeout(Duration::from_millis(300), ws.next()).await
+            {
+                return serde_json::from_str(&t).expect("the connected frame is JSON");
+            }
+        }
+        panic!("no connected frame arrived");
+    }
+
+    let (mut ws_a, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("connect first pty socket");
+    let hello_a = first_text(&mut ws_a).await;
+    assert_eq!(
+        hello_a["owner"],
+        serde_json::Value::Null,
+        "the first arrival joins an unowned pty, and the key must be PRESENT and \
+         null rather than absent, or it cannot be told from an older server"
+    );
+    let epoch_a = hello_a["owner_epoch"].as_u64().expect(
+        "the handshake must stamp its owner snapshot with the ownership epoch, \
+         or a client cannot order it against the pty.owner broadcasts on the \
+         other socket",
+    );
+    let conn_a = hello_a["id"].as_str().expect("a connection id").to_string();
+
+    // A claims the unowned pty with an ordinary resize (this is the one case a
+    // plain resize still claims).
+    ws_a.send(Message::Text(r#"{"rows":24,"cols":80}"#.into()))
+        .await
+        .unwrap();
+    ws_a.send(Message::Binary(b"dux-hello-owner-marker\n".to_vec().into()))
+        .await
+        .unwrap();
+    let _ = accumulate_until(&mut ws_a, "dux-hello-owner-marker", Duration::from_secs(8)).await;
+
+    // The claim's own `pty.owner` broadcast, and the epoch it was stamped with.
+    let claim_epoch = {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+        let mut epoch = None;
+        while tokio::time::Instant::now() < deadline && epoch.is_none() {
+            if let Ok(Some(Ok(Message::Text(t)))) =
+                tokio::time::timeout(Duration::from_millis(300), events.next()).await
+                && t.contains(r#""event":"pty.owner""#)
+            {
+                let ev: serde_json::Value = serde_json::from_str(&t).expect("pty.owner is JSON");
+                epoch = ev["epoch"].as_u64();
+            }
+        }
+        epoch.expect("the claim must broadcast a pty.owner carrying an epoch")
+    };
+
+    let (mut ws_b, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("connect second pty socket");
+    let hello_b = first_text(&mut ws_b).await;
+    assert_eq!(
+        hello_b["owner"].as_str(),
+        Some(conn_a.as_str()),
+        "the second arrival must be told which connection is driving, or it \
+         wedges itself as a phantom owner"
+    );
+    assert_eq!(
+        hello_b["owner_epoch"].as_u64(),
+        Some(claim_epoch),
+        "the handshake's owner_epoch must equal the epoch of the claim it \
+         reports, because both are read from the one counter under the owners \
+         lock; a drift here means the snapshot was not taken atomically"
+    );
+    assert!(
+        claim_epoch > epoch_a,
+        "the claim must be strictly newer than the pre-claim handshake snapshot"
     );
 }
 

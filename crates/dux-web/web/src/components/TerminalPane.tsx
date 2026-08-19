@@ -290,15 +290,30 @@ export function TerminalPane(props: TerminalPaneProps) {
   const focusTypingSurface = () =>
     focusTypingSurfaceIn({ live, composeInputRef, termRef })
 
-  // THE OWNERSHIP MACHINE: the four states, the six transition sites, the
-  // verdict channel and the connection identity, all in one module. See
-  // `terminal/ownership.ts`.
+  // True while the PTY socket has dropped and is retrying (non-blocking), or
+  // while a take-over is deliberately bouncing it. Drives a "Reconnecting…"
+  // overlay that re-arms even after `everReady` has latched, so a mid-session
+  // disconnect is visible rather than the terminal silently freezing. Cleared on
+  // the next (re)open. Input typed while disconnected is dropped by the socket's
+  // readyState guard; this overlay is the signal that it would be. Declared
+  // ABOVE the ownership machine because the take-over bounce raises it: a
+  // deliberate `connect()` fires no `onReconnecting` of its own.
+  const [reconnecting, setReconnecting] = useState(false)
+  // The ownership machine's send port for the freed-pty claim, installed by the
+  // lifecycle over THIS mount's resize coordinator and nulled on teardown.
+  const claimFreedPtyRef = useRef<(() => void) | null>(null)
+
+  // THE OWNERSHIP MACHINE: the four states, the seven transition sites, the
+  // verdict channel, the connection identity and the take-over intent, all in
+  // one module. See `terminal/ownership.ts`.
   const {
     isOwner,
     ownership,
     connId,
-    pendingClaimRef,
+    takeoverIntent,
+    seedFromConnected,
     takeoverLabel,
+    ownerPresent,
     connectionLost,
     setConnectionLost,
     takeOver,
@@ -306,9 +321,10 @@ export function TerminalPane(props: TerminalPaneProps) {
     id,
     kind,
     conn,
-    termRef,
     ptyRef,
     focusTypingSurface,
+    setReconnecting,
+    claimFreedPtyRef,
   })
 
   // THE INPUT SURFACE: the compose Send, the accessory sends, the sticky
@@ -492,13 +508,6 @@ export function TerminalPane(props: TerminalPaneProps) {
   if (hasOutput && !everReady) {
     setEverReady(true)
   }
-  // True while the PTY socket has dropped and is retrying (non-blocking). Drives a
-  // "Reconnecting…" overlay that re-arms even after `everReady` has latched, so a
-  // mid-session disconnect is visible rather than the terminal silently freezing.
-  // Cleared on the next (re)open. Input typed while disconnected is dropped by the
-  // socket's readyState guard; this overlay is the signal that it would be.
-  const [reconnecting, setReconnecting] = useState(false)
-
   // THE ONE LIFECYCLE OWNER. It creates the terminal and the socket, wires
   // every listener the pair needs, and tears both down, re-running only when
   // the streamed target changes. Everything it reads travels through the
@@ -513,11 +522,13 @@ export function TerminalPane(props: TerminalPaneProps) {
     pointerTypeRef,
     visibleSinceRef,
     prevVisibleRef,
-    pendingClaimRef,
+    takeoverIntent,
+    claimFreedPtyRef,
     live,
     mods: input.mods,
     ownership,
     connId,
+    seedOwnershipFromConnected: seedFromConnected,
     focusTypingSurface,
     onClipboardPaste: (e) => upload.onClipboardPaste(e),
     armForcedTextPaste: () => upload.armForcedTextPaste(),
@@ -880,13 +891,24 @@ export function TerminalPane(props: TerminalPaneProps) {
           <Card className="w-full max-w-sm text-center">
             <CardHeader className="items-center gap-3">
               <MonitorSmartphone className="size-8 text-muted-foreground" />
+              {/* THREE TITLES, because there are three truths and the card used
+                  to tell only two of them. "Nobody is driving" is the one the
+                  owner-cleared broadcast made reachable: the device that was
+                  driving has disconnected, and this pane is backgrounded, so it
+                  did not auto-claim. Saying "Active on another device" there
+                  would name a browser tab that has closed. */}
               <CardTitle>
                 {takeoverLabel
                   ? `Open on ${takeoverLabel}`
-                  : "Active on another device"}
+                  : ownerPresent
+                    ? "Active on another device"
+                    : "Nobody is driving"}
               </CardTitle>
               <CardDescription>
-                Only one device can type at a time. Take over to drive this{" "}
+                {ownerPresent
+                  ? "Only one device can type at a time."
+                  : "Whoever was driving has disconnected."}{" "}
+                Take over to drive this{" "}
                 {kind === "agent" ? "agent" : "terminal"} from here.
               </CardDescription>
             </CardHeader>
