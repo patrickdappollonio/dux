@@ -29,7 +29,7 @@ class PtyFake {
 }
 
 /// `document.visibilityState`, which is what `isForeground` reads. The initial
-/// guess and the freed-pty auto-claim both turn on it.
+/// guess and the self-succession rule both turn on it.
 function setVisibility(state: "visible" | "hidden") {
   Object.defineProperty(document, "visibilityState", {
     value: state,
@@ -41,12 +41,6 @@ function setup(opts: { kind?: "agent" | "terminal" } = {}) {
   const pty = new PtyFake()
   const focuses: number[] = []
   const reconnecting: boolean[] = []
-  // The lifecycle's send port for the freed-pty claim, recorded rather than
-  // performed: this hook's contract is "ask the coordinator", not "send".
-  const freedClaims: number[] = []
-  const claimFreedPtyRef = { current: () => freedClaims.push(1) } as {
-    current: (() => void) | null
-  }
   const view = renderHook(() =>
     useTerminalOwnership({
       id: "p1",
@@ -55,10 +49,9 @@ function setup(opts: { kind?: "agent" | "terminal" } = {}) {
       ptyRef: { current: pty as unknown as PtySocket },
       focusTypingSurface: () => focuses.push(1),
       setReconnecting: (v) => reconnecting.push(v),
-      claimFreedPtyRef,
     }),
   )
-  return { view, pty, focuses, reconnecting, freedClaims, claimFreedPtyRef }
+  return { view, pty, focuses, reconnecting }
 }
 
 beforeEach(() => {
@@ -289,39 +282,97 @@ describe("taking over", () => {
 })
 
 // SITE 5. The driver's socket closed and the server broadcast an owner-cleared
-// `pty.owner`. Ownership no longer follows focus, so without this the card
-// would be a permanent lie about a browser tab that has gone.
+// `pty.owner`. LOSING OWNERSHIP IS STICKY: the broadcast re-titles the card and
+// claims nothing, whatever this pane's visibility is. Sitting on an open card
+// must never win the pty back, because that passive path is exactly what let an
+// idle desktop beat the returning owner to its own pty.
 describe("a freed pty", () => {
-  it("is claimed by a mounted, FOREGROUNDED viewer", () => {
-    const { view, freedClaims } = setup()
+  it("does NOT claim, even for a mounted, FOREGROUNDED viewer", () => {
+    const { view } = setup()
     act(() => view.result.current.seedFromConnected("mine", "theirs"))
     expect(view.result.current.isOwner).toBe(false)
 
     act(() => notifyPtyOwner("p1", undefined, 2, undefined))
-    expect(view.result.current.isOwner).toBe(true)
-    // Through the coordinator's port, never straight at the socket.
-    expect(freedClaims).toHaveLength(1)
+    expect(view.result.current.isOwner).toBe(false)
+    expect(view.result.current.ownership.read()).toBe(false)
+    // Only the card's copy moves: nobody is driving, and this pane is still a
+    // watcher until its human says otherwise.
+    expect(view.result.current.ownerPresent).toBe(false)
     expect(view.result.current.takeoverLabel).toBeNull()
   })
 
   it("leaves a BACKGROUNDED viewer watching, and says nobody is driving", () => {
-    const { view, freedClaims } = setup()
+    const { view } = setup()
     act(() => view.result.current.seedFromConnected("mine", "theirs"))
     setVisibility("hidden")
     act(() => notifyPtyOwner("p1", undefined, 2, undefined))
     expect(view.result.current.isOwner).toBe(false)
     expect(view.result.current.ownerPresent).toBe(false)
-    expect(freedClaims).toHaveLength(0)
   })
 
-  it("does not send through a port the lifecycle has already torn down", () => {
-    const { view, claimFreedPtyRef } = setup()
-    act(() => view.result.current.seedFromConnected("mine", "theirs"))
-    claimFreedPtyRef.current = null
-    act(() => notifyPtyOwner("p1", undefined, 2, undefined))
-    // No throw, and the verdict still flips: the pane believes it owns an
-    // unowned pty, and its next ordinary resize claims it.
+  it("demotes a pane that believed it was the owner, because the server says nobody is", () => {
+    const { view } = setup()
+    act(() => view.result.current.seedFromConnected("mine", null))
     expect(view.result.current.isOwner).toBe(true)
+    act(() => notifyPtyOwner("p1", undefined, 2, undefined))
+    expect(view.result.current.isOwner).toBe(false)
+    expect(view.result.current.ownerPresent).toBe(false)
+  })
+})
+
+// SELF-SUCCESSION. The server's liveness reap is send-failure based and takes
+// tens of seconds; a blipped client is back in about one, with a fresh
+// connection id. Its handshake therefore names its OWN dead previous id as the
+// owner, and a plain id comparison would demote the returning driver to a
+// watcher of its own ghost, with no later event to correct it (the reap's
+// release finds a different owner by then and broadcasts nothing).
+describe("self-succession after a blipped socket", () => {
+  it("claims back a pty the handshake says our own DEAD connection owns", () => {
+    const { view } = setup()
+    act(() => view.result.current.connId.write("conn-a"))
+    // The drop: the lifecycle retires the id, and the machine remembers it.
+    act(() => view.result.current.connId.write(null))
+    // The reconnect's handshake, a second later: the server has not reaped
+    // conn-a yet, so it still names it as the driver.
+    act(() => view.result.current.seedFromConnected("conn-b", "conn-a"))
+    expect(view.result.current.isOwner).toBe(true)
+    // Flagged, because the server grants a flagged claim against ANY owner and
+    // the owner being displaced here is our own ghost. Nothing is stolen.
+    expect(view.result.current.takeoverIntent.read()).toBe(true)
+  })
+
+  it("does NOT self-succeed while the page is backgrounded", () => {
+    const { view } = setup()
+    act(() => view.result.current.connId.write("conn-a"))
+    act(() => view.result.current.connId.write(null))
+    setVisibility("hidden")
+    act(() => view.result.current.seedFromConnected("conn-b", "conn-a"))
+    // The backgrounded-owner contract stands: it returns as a watcher and its
+    // human presses Take over.
+    expect(view.result.current.isOwner).toBe(false)
+    expect(view.result.current.takeoverIntent.read()).toBe(false)
+  })
+
+  it("stays a watcher when the handshake names somebody ELSE", () => {
+    const { view } = setup()
+    act(() => view.result.current.connId.write("conn-a"))
+    act(() => view.result.current.connId.write(null))
+    act(() => view.result.current.seedFromConnected("conn-b", "conn-other"))
+    expect(view.result.current.isOwner).toBe(false)
+    expect(view.result.current.takeoverIntent.read()).toBe(false)
+  })
+
+  it("does not resurrect a ghost the events socket has already superseded", () => {
+    const { view } = setup()
+    act(() => view.result.current.connId.write("conn-a"))
+    act(() => view.result.current.connId.write(null))
+    // Another device took the pty while this one was away, and that handover
+    // reached this client first.
+    act(() => notifyPtyOwner("p1", "conn-other", 5, undefined))
+    // The reconnect's handshake was snapshotted before it and names our ghost.
+    act(() => view.result.current.seedFromConnected("conn-b", "conn-a", 3))
+    expect(view.result.current.isOwner).toBe(false)
+    expect(view.result.current.takeoverIntent.read()).toBe(false)
   })
 })
 
@@ -359,7 +410,6 @@ describe("the other device's NAME across an events-socket outage", () => {
           ptyRef: { current: pty as unknown as PtySocket },
           focusTypingSurface: () => {},
           setReconnecting: () => {},
-          claimFreedPtyRef: { current: null },
         }),
       { initialProps: { conn: "open" as const } },
     )

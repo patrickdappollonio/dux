@@ -377,8 +377,9 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     ownership verdict channel AND `ui.watcher_view`, so it cannot drift from who
     actually drives the pty, and neither promotion nor demotion needs a
     transition to be written: a take-over bounces the socket and its first frame
-    fits and claims through the existing path, the freed-pty claim comes through
-    `directSend`, and a demotion is answered by the next `applyViewerGrid`. The
+    fits and claims through the existing path (a blipped owner's self-succession
+    is the same path, flagged against its own ghost; see C15), and a demotion is
+    answered by the next `applyViewerGrid`. The
     owner's own applied grid is RECORDED in both modes precisely so a demotion
     has something to adopt at once rather than waiting for the next `size`
     event. Null is "nothing known", never agreement: the last grid the server
@@ -810,36 +811,60 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     `src/components/terminal/resizeCoordinator.test.ts` "does not record a resize
     the OWNER GATE dropped...".
 
-15. **NEW at the take-over arc: the owner's disconnect is BROADCAST, and a mounted,
-    foregrounded viewer claims the freed pty.** Trap: with the silent steal gone, nothing
-    else ever corrects a departed owner. Before, the next device to attach or alt-tab
-    took the pty and that theft was what cleared the stale card; now "Active on another
-    device" would be a permanent lie about a browser tab that closed. So `release()`
-    reports an epoch and the handler emits an owner-cleared `pty.owner` (no `owner`
-    field, which every client reads as "not me"). A mounted FOREGROUNDED viewer then
-    claims it, identical semantics to a fresh foreground attach on an unowned pty, and
-    sends through the coordinator's direct-send port rather than at the socket. A
-    BACKGROUNDED one switches the card's copy to "Nobody is driving". The release takes a
-    real epoch, not just a generation bump, or the client's epoch dedup discards the
-    event as a stale duplicate and the lie survives anyway.
+15. **REWRITTEN at the sticky-demotion arc: the owner's disconnect is BROADCAST, it
+    only RE-TITLES the card, and a blipped owner takes its own pty back by
+    SELF-SUCCESSION.** Trap: with the silent steal gone, nothing else ever corrects a
+    departed owner. Before, the next device to attach or alt-tab took the pty and that
+    theft was what cleared the stale card; now "Active on another device" would be a
+    permanent lie about a browser tab that closed. So `release()` reports an epoch and
+    the handler emits an owner-cleared `pty.owner` (no `owner` field, which every client
+    reads as "not me"). The release takes a real epoch, not just a generation bump, or
+    the client's epoch dedup discards the event as a stale duplicate and the lie
+    survives anyway.
+    NOBODY CLAIMS ON THAT BROADCAST. Every client demotes and every card re-titles
+    itself to "Nobody is driving", foregrounded or not. LOSING OWNERSHIP IS STICKY until
+    a deliberate act, and sitting on an open card is not one. The passive claim this
+    entry used to describe (a mounted foregrounded viewer taking the freed pty through
+    the coordinator's `directSend` port) is DELETED, along with the port, because it
+    lost the wifi-blip race for the real owner: the server's liveness reap is send-
+    failure based and lands tens of seconds after the drop, while the blipped client is
+    back in about one, so an idle desktop sitting on a card won a race the returning
+    driver did not know it was in.
+    THE FOUR RE-CLAIM GESTURES are a full reload, the card's Take over button,
+    navigating away to another agent and back, and the blipped owner's own reconnect.
+    All four are a FRESH HANDSHAKE (or the explicit flagged claim from the button), and
+    the last one needs its own rule, because the same reap lag means the handshake
+    usually still names the returning client's OWN dead connection id rather than null.
+    SELF-SUCCESSION covers it: the ownership machine keeps the pane's previous
+    connection id (`prevConnIdRef`, written by the `connId` channel wherever the
+    lifecycle nulls the live id), and a handshake whose owner equals that ghost, on a
+    FOREGROUNDED page, arms the take-over intent so the claim rides the first resize
+    frame of the new connection FLAGGED. The server grants a flagged claim against any
+    owner and the owner being displaced is this pane's own ghost, so nothing is stolen.
+    A superseded handshake does not self-succeed (rule 2 of the seed: another device's
+    newer claim is already applied), and the late reap broadcasts nothing at all,
+    because by then `release` finds a different owner recorded.
     DELIBERATE CONSEQUENCE, not a bug: an owner whose socket drops while its own tab is
-    backgrounded is released like any other departed owner, its reconnect's handshake
-    reseeds it as a watcher, and its human presses Take over on return; only a
-    FOREGROUNDED owner auto-reclaims through the freed-pty claim. That is "attaching
-    never steals" applied to our own reconnect, which is an attach like any other.
+    BACKGROUNDED does not self-succeed either. Its reconnect's handshake reseeds it as a
+    watcher and its human presses Take over on return. That is "attaching never steals"
+    applied to our own reconnect, which is an attach like any other.
     Fix: `crates/dux-web/src/pty_owners.rs` (`release` returning the epoch),
     `crates/dux-web/src/server.rs` (`pty_owner_cleared_event`, the disconnect path),
-    src/components/terminal/ownership.ts (site 5 inside the `onPtyOwner` effect),
-    src/components/terminal/useTerminalLifecycle.ts (`claimFreedPtyRef`),
+    src/components/terminal/ownership.ts (site 5 inside the `onPtyOwner` effect,
+    `prevConnIdRef`, the self-succession branch of `seedFromConnected`),
     `src/components/TerminalPane.tsx` (the card's three titles).
     Pinned: `crates/dux-web/src/pty_owners.rs`
     `release_reports_an_epoch_only_when_it_cleared_a_real_owner`;
     `crates/dux-web/tests/ws_transport.rs`
     `an_owner_disconnecting_broadcasts_an_owner_cleared_pty_owner`;
-    `src/components/terminal/ownership.test.ts` "a freed pty" suite;
-    `components/TerminalPane.test.tsx` "says nobody is driving once the owner
-    disconnects, to a backgrounded viewer" and "claims the freed pty when the viewer is
-    foregrounded and mounted".
+    `src/components/terminal/ownership.test.ts` "a freed pty" suite (the absence of the
+    claim, foregrounded and backgrounded, and the demotion of a pane that believed it
+    owned the pty) and its "self-succession after a blipped socket" suite (claims back,
+    not while backgrounded, not for somebody else's id, not against a superseded
+    handshake); `components/TerminalPane.test.tsx` "says nobody is driving once the
+    owner disconnects, to a backgrounded viewer", "does not claim the freed pty, even
+    foregrounded and mounted", and "self-succeeds when the reconnect's handshake names
+    its own dead connection".
 
 16. **NEW at the take-over arc: ownership stops following focus, and mixed versions
     degrade one way.** A desktop taken over by the phone stays a WATCHER when refocused

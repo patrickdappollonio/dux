@@ -200,8 +200,12 @@ describe("the resize coordinator's gesture hold", () => {
     settleFirstFrame(coord, sent)
     const before = fit.fits
     coord.setHolding(true)
-    coord.directSend(() => {})
-    coord.directSend(() => {})
+    // Two direct sends through the two real paths that take one: a reopen's
+    // first frame and a foreground return.
+    coord.noteOpen(false)
+    coord.firstFrameLanded()
+    coord.resyncToForeground()
+    vi.advanceTimersByTime(200)
     expect(fit.fits).toBe(before)
     coord.setHolding(false)
     coord.flushHeld()
@@ -209,16 +213,28 @@ describe("the resize coordinator's gesture hold", () => {
   })
 
   it("keeps the FIRST held direct send and drops later ones", () => {
+    // The reason the rule is FIRST-wins rather than last: the first-open
+    // jiggle's closure is not interchangeable with a plain resize, and a later
+    // one overwriting it would silently skip that open's redraw nudge.
     const { coord, sent } = setup()
     coord.start(document.createElement("div"))
     settleFirstFrame(coord, sent)
-    const ran: string[] = []
     coord.setHolding(true)
-    coord.directSend(() => ran.push("jiggle"))
-    coord.directSend(() => ran.push("plain"))
+    // The parked jiggle, from a first open.
+    coord.noteOpen(true)
+    coord.firstFrameLanded()
+    // A plain resize arriving behind it, from a foreground return.
+    coord.resyncToForeground()
+    vi.advanceTimersByTime(200)
     coord.setHolding(false)
     coord.flushHeld()
-    expect(ran).toEqual(["jiggle"])
+    // The jiggle survived: one column down, then back at the step.
+    expect(sent).toEqual([{ rows: 24, cols: 79 }])
+    vi.advanceTimersByTime(60)
+    expect(sent).toEqual([
+      { rows: 24, cols: 79 },
+      { rows: 24, cols: 80 },
+    ])
   })
 
   it("defers the DEBOUNCED send until the lift, then sends exactly once", () => {
@@ -322,7 +338,8 @@ describe("the resize coordinator's debounce hold", () => {
     expect(fit.fits).toBe(before)
 
     // A direct send fits for itself, which satisfies the parked refit.
-    coord.directSend(() => {})
+    coord.noteOpen(false)
+    coord.firstFrameLanded()
     expect(fit.fits).toBe(before + 1)
     vi.advanceTimersByTime(500)
     expect(fit.fits).toBe(before + 1)

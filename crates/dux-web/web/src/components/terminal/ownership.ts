@@ -51,11 +51,14 @@
 //   4. the `connected` HANDSHAKE re-seeding the verdict from the server's own
 //      answer (`seedVerdictFromConnected`, called by the lifecycle). This is
 //      what stops a foregrounded arrival wedging itself as a phantom owner now
-//      that a refused claim emits nothing.
-//   5. an OWNER-CLEARED `pty.owner` (the driver disconnected): a mounted,
-//      FOREGROUNDED viewer claims the freed pty, which is the same thing a
-//      fresh foreground attach on an unowned pty does. A backgrounded one just
-//      changes the card's copy.
+//      that a refused claim emits nothing. It is also where SELF-SUCCESSION
+//      lives: a handshake naming this pane's own previous, dead connection id
+//      is a blipped owner meeting its own ghost, and a foregrounded page takes
+//      its pty back with a flagged claim.
+//   5. an OWNER-CLEARED `pty.owner` (the driver disconnected): every client
+//      demotes and the card re-titles itself to "Nobody is driving". NOBODY
+//      CLAIMS. Losing ownership is sticky until a deliberate act, and sitting
+//      on an open card is not one.
 //   6. the socket's CONN STATE: `failed` is the hard stop that means LOST; any
 //      retry or reopen clears it.
 //   7. the EVENTS SOCKET going away, which drops the other device's NAME (never
@@ -103,12 +106,6 @@ export type TerminalOwnershipDeps = {
   /// `ReconnectingSocket.connect`), so the cue is raised here or the half-second
   /// window reads as a dead terminal rather than a reconnecting one.
   setReconnecting: (value: boolean) => void
-  /// Re-assert this viewport's size through the resize coordinator, installed by
-  /// the lifecycle for the lifetime of one mount and null outside it. It is how
-  /// the freed-pty claim (site 5) sends: everything that fits or resizes goes
-  /// through the coordinator, so this machine asks rather than reaching for the
-  /// socket itself.
-  claimFreedPtyRef: { current: (() => void) | null }
 }
 
 export type TerminalOwnership = {
@@ -148,15 +145,7 @@ export type TerminalOwnership = {
 export function useTerminalOwnership(
   deps: TerminalOwnershipDeps,
 ): TerminalOwnership {
-  const {
-    id,
-    kind,
-    conn,
-    ptyRef,
-    focusTypingSurface,
-    setReconnecting,
-    claimFreedPtyRef,
-  } = deps
+  const { id, kind, conn, ptyRef, focusTypingSurface, setReconnecting } = deps
 
   // SITE 1: the initial guess, and now ONLY a guess: it holds for the handful of
   // milliseconds before the `connected` handshake answers (site 4), and after
@@ -176,10 +165,19 @@ export function useTerminalOwnership(
   )
 
   const myConnIdRef = useRef<string | null>(null)
+  // THE GHOST: the last id this pane held before the socket retired it. The
+  // lifecycle nulls the live id on every drop, reopen and unmount, and this is
+  // what the null takes the place of, because a returning owner has to be able
+  // to recognise its own dead connection in the next handshake's answer (see
+  // the self-succession rule in `seedFromConnected`).
+  const prevConnIdRef = useRef<string | null>(null)
   const connId = useMemo<ConnectionIdentity>(
     () => ({
       read: () => myConnIdRef.current,
       write: (next) => {
+        if (myConnIdRef.current !== null) {
+          prevConnIdRef.current = myConnIdRef.current
+        }
         myConnIdRef.current = next
       },
     }),
@@ -240,27 +238,24 @@ export function useTerminalOwnership(
   // SITE 5 lives here too: an event with NO owner is the server saying the
   // driver disconnected and nobody holds the pty. Every client reads that as
   // "not me" (a missing id is "not us" by rule), so the fan-out below demotes
-  // everyone; a mounted, FOREGROUNDED viewer then immediately claims the freed
-  // pty, which is exactly what a fresh foreground attach on an unowned pty does.
-  // Without this the card would be a permanent lie about a browser tab that
-  // closed, because ownership no longer follows focus and nothing else would
-  // ever correct it.
+  // everyone, and that is ALL it does. LOSING OWNERSHIP IS STICKY: the
+  // broadcast re-titles the card to "Nobody is driving" and claims nothing,
+  // whatever this pane's visibility is.
+  //
+  // There used to be a passive claim here, taken by any mounted foregrounded
+  // viewer. It was the thing that beat a blipped owner back to its own pty: the
+  // server's liveness reap is send-failure based and lands tens of seconds
+  // after the drop, by which time the real owner has reconnected, so an idle
+  // desktop sitting on an open card won a race the returning driver did not
+  // know it was in. The four legitimate re-claim gestures all funnel through a
+  // fresh handshake or the card's own button instead, and the blipped owner's
+  // half of that is the self-succession rule in `seedFromConnected`.
   useEffect(() => {
     return onPtyOwner((ptyId, ownerId, device) => {
       if (ptyId !== id) return
       const freed = ownerId === undefined || ownerId === null
       const mine = isOwnerAfterHandover(ownerId, myConnIdRef.current)
       setOwnerPresent(!freed)
-      if (freed && isForeground()) {
-        // Claim it. The verdict flips first so the coordinator's owner gate
-        // passes, then the coordinator sends this viewport's size, which the
-        // server grants because the pty is unowned. No take-over flag: there is
-        // nobody to take it from, and arming one would be a lie in the log.
-        ownership.write(true)
-        setTakeoverDevice(null)
-        claimFreedPtyRef.current?.()
-        return
-      }
       // Through the channel, not an inline copy of its body: the verdict has
       // ONE write implementation, so anything the channel ever grows reaches
       // this, the highest-traffic transition, by construction.
@@ -328,6 +323,37 @@ export function useTerminalOwnership(
     const superseded = handshakeSuperseded(ownerEpoch, appliedEpoch)
     if (!superseded) {
       setOwnerPresent(owner === undefined ? true : owner !== null)
+    }
+    // SELF-SUCCESSION, the blipped owner's half of "losing ownership is
+    // sticky". The server reaps a dead connection by send failure, which takes
+    // tens of seconds; a client whose wifi blipped is back in about one, with a
+    // freshly allocated connection id. Its handshake therefore names its OWN
+    // previous, dead id as the driver, and a plain id comparison would demote
+    // the returning owner to a watcher of its own ghost. Nothing would correct
+    // it either: by the time the reap runs, `release` finds a different owner
+    // recorded (or none) and broadcasts nothing at all.
+    //
+    // So the id is compared against the ghost as well as against the live id,
+    // and a match on a FOREGROUNDED page is treated as succeeding ourselves.
+    // The claim goes out as a take-over: the server grants a flagged claim
+    // against any owner, and the owner being displaced here is a connection
+    // this pane already knows is gone, so nothing is stolen from anyone. Arming
+    // the intent is the whole mechanism, because the flag rides the first
+    // resize frame of this new connection like any other take-over.
+    //
+    // A BACKGROUNDED page does not self-succeed: that is the C15/C16
+    // backgrounded-owner contract, which says a departed owner comes back as a
+    // watcher and presses the button. A superseded handshake does not either,
+    // for the same reason rule 2 of the seed exists: another device's newer
+    // claim has already been applied and this frame is stale.
+    if (
+      !superseded &&
+      typeof owner === "string" &&
+      owner !== myConnId &&
+      owner === prevConnIdRef.current &&
+      isForeground()
+    ) {
+      takeoverIntent.arm()
     }
     const mine = seedVerdictFromConnected({
       owner,

@@ -628,9 +628,11 @@ describe("TerminalPane seeds its ownership verdict from the connected frame", ()
     }
   })
 
-  // Foregrounded and mounted, the same broadcast is a claim: identical
-  // semantics to a fresh foreground attach on an unowned pty.
-  it("claims the freed pty when the viewer is foregrounded and mounted", () => {
+  // LOSING OWNERSHIP IS STICKY. Foregrounded and mounted changes nothing: the
+  // same broadcast only re-titles the card, because sitting on an open card is
+  // not a gesture. The passive claim that used to live here is exactly what let
+  // an idle desktop beat the blipped owner back to its own pty.
+  it("does not claim the freed pty, even foregrounded and mounted", () => {
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     const pty = last()
     act(() => pty.onConnected("conn-self", "conn-other"))
@@ -638,10 +640,46 @@ describe("TerminalPane seeds its ownership verdict from the connected frame", ()
     pty.sendResize.mockClear()
     act(() => notifyPtyOwner("s1", undefined, 7))
     expect(screen.queryByText("Active on another device")).toBeNull()
-    expect(screen.queryByText("Nobody is driving")).toBeNull()
-    // Claimed by SENDING, unflagged: there is nobody to take it from, and the
-    // send goes through the resize coordinator like every other one.
-    expect(pty.sendResize).toHaveBeenCalledWith(24, 80)
+    expect(screen.getByText("Nobody is driving")).toBeTruthy()
+    expect(pty.sendResize).not.toHaveBeenCalled()
+  })
+
+  // THE HALF-OPEN ORDERING, end to end through the pane. The owner's socket
+  // half-opens, the client is back in about a second with a fresh id, and the
+  // server has not reaped the old one, so the handshake names this pane's own
+  // ghost. It takes its pty back with a FLAGGED claim on the first resize of
+  // the new connection.
+  it("self-succeeds when the reconnect's handshake names its own dead connection", () => {
+    vi.useFakeTimers()
+    try {
+      render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+      const pty = last()
+      act(() => pty.onOpen())
+      act(() => pty.onConnected("conn-a", null))
+      act(() => {
+        vi.advanceTimersByTime(400)
+      })
+      expect(screen.queryByText("Active on another device")).toBeNull()
+
+      // The blip: the socket drops and comes back with a new id while the
+      // server still records conn-a as the driver.
+      act(() => pty.onReconnecting())
+      pty.sendResize.mockClear()
+      act(() => {
+        pty.onOpen()
+        pty.onConnected("conn-b", "conn-a")
+      })
+      // No card: the returning driver is the driver again.
+      expect(screen.queryByText("Active on another device")).toBeNull()
+      act(() => pty.bytesCb?.(new Uint8Array([0x61])))
+      act(() => {
+        vi.advanceTimersByTime(400)
+      })
+      // And the claim rode the first resize of the new connection, FLAGGED.
+      expect(pty.sendResize).toHaveBeenCalledWith(24, 80, true)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 

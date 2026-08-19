@@ -160,10 +160,16 @@ mangled ever piles up in the scrollback. **Watcher view** in Preferences has a
 **Fit my window** setting that keeps that hidden copy at your own size
 instead, wrapping and all.
 
-If the driving device disconnects, everyone watching is told. A watcher you are
-looking at picks the terminal up on the spot; one sitting in a background tab
-switches its card to **Nobody is driving** rather than naming a browser that
-has gone. And if the watcher's own connection has given up entirely, the card
+If the driving device disconnects, everyone watching is told: every card
+switches to **Nobody is driving** rather than naming a browser that has gone.
+Nobody picks the terminal up for you, though. **Losing the keyboard is sticky.**
+Sitting in front of an open take-over card is not a gesture, so a watcher left
+on screen never quietly grabs a terminal somebody's flaky wifi dropped. Press
+**Take over**, reload, or walk away and come back, and it is yours. The one
+device that does get its terminal back on its own is the one that lost it to a
+blip: when a dropped connection returns and finds the server still holding its
+own dead session, it succeeds itself and carries on typing.
+And if the watcher's own connection has given up entirely, the card
 steps aside for the **Connection lost** notice and its **Reconnect** button,
 because a Take over button over a socket that is not there would only look like
 it worked.

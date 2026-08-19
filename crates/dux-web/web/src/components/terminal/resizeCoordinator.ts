@@ -44,9 +44,9 @@
 // mode is not a latch to be switched: it is `viewerMode()`, read live off the
 // ownership verdict and the user's `ui.watcher_view` preference, so it can
 // never drift from who actually drives the pty. Promotion needs nothing new
-// here (a take-over bounces the socket, whose first frame fits and sends; the
-// freed-pty claim comes through `directSend`), and demotion needs nothing but
-// the next `applyViewerGrid`.
+// here (a take-over bounces the socket, whose first frame fits and sends, and
+// so does a blipped owner's self-succession, which is a take-over against its
+// own ghost), and demotion needs nothing but the next `applyViewerGrid`.
 //
 // The presentation half of the faithful view, shrinking the FONT until the
 // adopted grid fits the window, is not here: it is the pane's, over the pure
@@ -139,10 +139,6 @@ export type ResizeCoordinator = {
   needsFirstFrameResize: () => boolean
   /// The first PTY frame after a (re)open has fully parsed: fit and notify.
   firstFrameLanded: () => void
-  /// A DIRECT (non-debounced) resize request: refit and notify now, or defer
-  /// BOTH halves to the gesture's lift. The freed-pty claim (a viewer taking an
-  /// unowned pty when its driver disconnects) is the one external caller.
-  directSend: (send: () => void) => void
   /// Force-resend the current size, bypassing the dedupe, once xterm's write
   /// queue has drained. The PTY is shared, so another client may have resized
   /// it while this tab was away and the cached size would wrongly suppress the
@@ -252,9 +248,9 @@ export function createResizeCoordinator(
   // A steady-state resize by the current owner does NOT change the owner (no
   // `pty.owner` echo), so it deliberately does not arm a handover; only an
   // ownership-ACQUIRING claim does. Every claim now runs with the verdict
-  // ALREADY flipped to "mine" (take-over flips it before bouncing the socket;
-  // the freed-pty claim flips it before sending), so claims pass this gate and
-  // are recorded like any other send. That is a change from the shape this
+  // ALREADY flipped to "mine" (a take-over flips it before bouncing the socket,
+  // and a self-succeeding owner flips it at the handshake), so claims pass this
+  // gate and are recorded like any other send. That is a change from the shape this
   // comment used to describe, where a claim ran while the verdict still said
   // somebody else owned the pty and had to bypass the record entirely.
   //
@@ -323,10 +319,16 @@ export function createResizeCoordinator(
   }
 
   // A direct resize request (the first-frame jiggle, the reconnect resize, the
-  // freed-pty claim, the foreground resync): refit and notify the
-  // child now, or defer BOTH halves to gesture end. These paths bypass the
-  // debounce on purpose, so each has to route through the hold explicitly or
-  // the pair comes apart again.
+  // foreground resync): refit and notify the child now, or defer BOTH halves to
+  // gesture end. These paths bypass the debounce on purpose, so each has to
+  // route through the hold explicitly or the pair comes apart again.
+  //
+  // THIS IS NO LONGER AN EXPORTED PORT. It used to be published as
+  // `directSend`, for exactly one external caller: the freed-pty auto-claim in
+  // the ownership machine. That claim is gone (losing ownership is sticky, and
+  // a blipped owner takes its pty back through the ordinary flagged first-frame
+  // resize of its new connection instead), so the port went with it rather than
+  // being left dangling with no caller.
   const fitAndSend = (send: () => void) => {
     if (holding) {
       fitHeldByGesture = true
@@ -471,7 +473,6 @@ export function createResizeCoordinator(
     },
     needsFirstFrameResize: () => !initialResizeDone,
     firstFrameLanded,
-    directSend: fitAndSend,
     resyncToForeground() {
       // Debounced (coalescing rapid focus/visibility flaps) and gated on xterm
       // draining its write queue: a foreground return can coincide with the

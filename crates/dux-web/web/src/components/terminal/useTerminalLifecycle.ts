@@ -125,12 +125,8 @@ export type TerminalLifecyclePorts = {
   prevVisibleRef: RefObject<boolean | undefined>
   /// The armed take-over, consumed by the ONE confirmed resize write below.
   takeoverIntent: TakeoverIntent
-  /// The port the ownership machine's freed-pty claim (site 5) sends through.
-  /// The lifecycle installs a closure over THIS mount's coordinator and clears
-  /// it on teardown, so the claim can never fire into a disposed terminal.
-  claimFreedPtyRef: RefObject<(() => void) | null>
-  /// THE TWO VIEWER-VIEW PORTS, the same mount-scoped idiom as the claim above
-  /// and pointing in opposite directions.
+  /// THE TWO VIEWER-VIEW PORTS, a mount-scoped idiom pointing in opposite
+  /// directions.
   ///
   /// `viewerRegridRef` is INSTALLED here over this mount's coordinator: the
   /// pane calls it to re-assert the adopted grid after anything that could
@@ -206,7 +202,6 @@ export function useTerminalLifecycle(
     visibleSinceRef,
     prevVisibleRef,
     takeoverIntent,
-    claimFreedPtyRef,
     viewerRegridRef,
     viewerRelayoutRef,
     live,
@@ -402,16 +397,6 @@ export function useTerminalLifecycle(
     })
     // The pane's handle on this mount's grid adoption (see the port's doc).
     viewerRegridRef.current = () => resize.applyViewerGrid()
-    // The freed-pty claim's send port (ownership site 5). Through the
-    // coordinator's direct-send path like every other non-debounced resize, so
-    // it takes the gesture hold and refits before it notifies.
-    claimFreedPtyRef.current = () => {
-      resize.directSend(() => {
-        const t = termRef.current
-        if (t) resize.sendOwned(t.rows, t.cols)
-      })
-    }
-
     term.open(container)
     // A virtual keyboard must never autocorrect, autocomplete, autocapitalize, or
     // spellcheck into the PTY stream: a shell has no editable buffer for those to
@@ -1163,12 +1148,9 @@ export function useTerminalLifecycle(
       // in-flight take-over to a target switch is the accepted cost, and the
       // button is one tap away on the new target.
       takeoverIntent.clear()
-      // Retire the freed-pty send port with the coordinator it closes over,
-      // BEFORE the terminal is disposed, so a `pty.owner` arriving during
-      // teardown cannot fit a dead terminal.
-      if (claimFreedPtyRef.current !== null) claimFreedPtyRef.current = null
-      // Same reason, same moment: the pane must not re-grid a disposed
-      // terminal through a port still pointing at this mount's coordinator.
+      // The pane must not re-grid a disposed terminal through a port still
+      // pointing at this mount's coordinator, so retire it BEFORE the terminal
+      // goes.
       if (viewerRegridRef.current !== null) viewerRegridRef.current = null
       clearTimeout(graceTimer)
       clearInterval(viewedTimer)

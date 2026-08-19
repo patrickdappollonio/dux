@@ -312,9 +312,6 @@ export function TerminalPane(props: TerminalPaneProps) {
   // ABOVE the ownership machine because the take-over bounce raises it: a
   // deliberate `connect()` fires no `onReconnecting` of its own.
   const [reconnecting, setReconnecting] = useState(false)
-  // The ownership machine's send port for the freed-pty claim, installed by the
-  // lifecycle over THIS mount's resize coordinator and nulled on teardown.
-  const claimFreedPtyRef = useRef<(() => void) | null>(null)
 
   // THE OWNERSHIP MACHINE: the four states, the seven transition sites, the
   // verdict channel, the connection identity and the take-over intent, all in
@@ -337,7 +334,6 @@ export function TerminalPane(props: TerminalPaneProps) {
     ptyRef,
     focusTypingSurface,
     setReconnecting,
-    claimFreedPtyRef,
   })
 
   // THE VIEWER-GRID MACHINE: the honest badge and the bounce-heal. One PTY has
@@ -717,7 +713,6 @@ export function TerminalPane(props: TerminalPaneProps) {
     visibleSinceRef,
     prevVisibleRef,
     takeoverIntent,
-    claimFreedPtyRef,
     viewerRegridRef,
     viewerRelayoutRef,
     live,
