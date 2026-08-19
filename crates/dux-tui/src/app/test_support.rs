@@ -246,6 +246,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         agent_tab_regions: Vec::new(),
         terminal_return_to_list: false,
         last_pty_size: (0, 0),
+        last_pty_resize_target: None,
         grid_generation: 0,
         scroll_mode: std::collections::HashSet::new(),
         last_diff_height: 0,

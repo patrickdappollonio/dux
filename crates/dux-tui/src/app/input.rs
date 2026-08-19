@@ -16,6 +16,77 @@ use ratatui::buffer::CellWidth;
 /// scrolling is unaffected: arrows stay one line, PgUp/PgDn stay a page. The
 /// web surface matches via xterm's `scrollSensitivity: 3` in TerminalPane.tsx.
 const MOUSE_WHEEL_LINES: usize = 3;
+
+/// How many grid COLUMNS one snapshot cell occupies.
+///
+/// A snapshot cell's symbol is one base character plus any zero-width marks
+/// folded onto it, and the emulator drops the spacer cell that follows a wide
+/// glyph, so the cell count is decided by the base character alone: the marks
+/// add nothing, however many there are. Anything unmeasurable falls back to one,
+/// because a cell that exists occupies at least one column.
+fn snapshot_cell_columns(symbol: &str) -> u16 {
+    let Some(first) = symbol.chars().next() else {
+        return 1;
+    };
+    if first.is_control() {
+        return 1;
+    }
+    let mut buf = [0u8; 4];
+    first.encode_utf8(&mut buf).cell_width().max(1)
+}
+
+/// Assemble the copied text from the selected cells, given in (row, col) order.
+///
+/// `selected` carries each cell already translated into the selection's own row
+/// frame and already filtered to the highlighted region. The start and end
+/// coordinates are needed only to reproduce the gaps: a run that begins to the
+/// right of where the highlight started keeps that indent, and rows the
+/// highlight covered but nothing painted come out as empty lines.
+///
+/// The column bookkeeping is a running COLUMN, never the length of the text
+/// built so far, because a cell is not a char. The snapshot omits the spacer
+/// cell of a wide glyph and folds combining marks into the cell they modify, so
+/// measuring by chars invented a space after every CJK glyph ("日本語" copied as
+/// "日 本 語") and lost one after every combined cell.
+fn assemble_selection_text(
+    selected: &[(u16, u16, &str)],
+    start_row: u16,
+    start_col: u16,
+    end_row: u16,
+) -> String {
+    if selected.is_empty() {
+        return String::new();
+    }
+    let mut lines: Vec<String> = Vec::new();
+    let mut current_row = start_row;
+    let mut current_line = String::new();
+    let mut expected_next_col: Option<u16> = None;
+
+    for &(row, col, symbol) in selected {
+        if row != current_row {
+            lines.push(current_line.trim_end().to_string());
+            for _ in (current_row + 1)..row {
+                lines.push(String::new());
+            }
+            current_line = String::new();
+            current_row = row;
+            expected_next_col = None;
+        }
+        let expected_col = expected_next_col.unwrap_or(start_col.min(col));
+        for _ in expected_col..col {
+            current_line.push(' ');
+        }
+        current_line.push_str(symbol);
+        expected_next_col = Some(col.saturating_add(snapshot_cell_columns(symbol)));
+    }
+
+    lines.push(current_line.trim_end().to_string());
+    for _ in (current_row + 1)..=end_row {
+        lines.push(String::new());
+    }
+    lines.join("\n")
+}
+
 /// Terminal rows one run occupies in the startup-log picker's list: the file
 /// name, then its modified timestamp. Shared with the renderer that builds
 /// those two lines (which asserts against it) so the click mapping and the
@@ -1801,8 +1872,17 @@ impl App {
     /// rebuild and re-stamped along with it. That window is a frame wide and
     /// fails toward the old behaviour, which is the safer of the two.
     pub(crate) fn drop_drifted_selection(&mut self) {
+        let live_cols = self.snapshot_buf.cols;
         let drifted = self.terminal_selection.as_ref().is_some_and(|sel| {
-            sel.origin.history_saturated && sel.origin.grid_generation != self.grid_generation
+            // A WIDTH change reflows the grid under the recorded rows, at ANY
+            // history depth, so it is its own retirement trigger and not a
+            // saturation case. A height-only change moves whole lines between
+            // history and viewport without rewrapping them, and the offset and
+            // total arithmetic translates that exactly, so the selection
+            // follows its text. See `SelectionOrigin::grid_size`.
+            sel.origin.grid_size.1 != live_cols
+                || (sel.origin.history_saturated
+                    && sel.origin.grid_generation != self.grid_generation)
         });
         if drifted {
             self.terminal_selection = None;
@@ -1849,6 +1929,100 @@ impl App {
         } else {
             viewer.scroll_offset = viewer.scroll_offset.saturating_sub(delta.unsigned_abs());
         }
+    }
+
+    /// Retire startup-log state that only made sense at the width it was
+    /// computed at, called once per frame after the layout is known.
+    ///
+    /// Everything this surface remembers is an index into text WRAPPED to the
+    /// body width: the search result's scroll offset is a visual-line index, and
+    /// a selection's rows and columns are positions in those wrapped lines. Widen
+    /// or narrow the pane and every one of them names different text, silently.
+    /// The copy path then re-wraps at the NEW width and hands back whatever now
+    /// sits at those coordinates.
+    ///
+    /// The cheap, honest answer, rather than absolute logical coordinates the
+    /// whole viewer would have to be rebuilt around: drop the selection, because
+    /// a highlight the user can no longer see the origin of is not worth
+    /// preserving, and recompute the scroll from the thing that IS width
+    /// independent, the search query. The rebase is owed only while the offset
+    /// is still the one the search itself set (the match's visual index at the
+    /// OLD width): a user who searched and then scrolled somewhere else has
+    /// overridden the search, and snapping them back to the match on a resize
+    /// would discard that choice, so their offset is only clamped. With no
+    /// query the offset is likewise only clamped, so an ordinary scroll
+    /// position survives a resize approximately rather than exactly. Silent on
+    /// purpose: a resize is not an error, so a query that stops matching
+    /// leaves the offset where it is instead of raising a status.
+    pub(crate) fn reconcile_startup_log_wrap_width(&mut self) {
+        if matches!(self.fullscreen_overlay, FullscreenOverlay::StartupLog)
+            && let Some(area) = self.mouse_layout.agent_term
+            && let Some(viewer) = self.startup_log_viewer.as_ref()
+        {
+            let width = area.width;
+            if viewer.wrap_width == width {
+                return;
+            }
+            let known = viewer.wrap_width != 0;
+            let old_width = viewer.wrap_width;
+            let query = viewer.search.text.trim().to_lowercase();
+            let lines = startup_command_log_visual_lines(&viewer.content, width);
+            let max_scroll = u16::try_from(lines.len())
+                .unwrap_or(u16::MAX)
+                .saturating_sub(area.height);
+            // Rebase only while the offset is still the one the search set:
+            // the match's visual index at the OLD width, as
+            // `update_startup_log_search_scroll` computed it. Anywhere else
+            // means the user scrolled away from the match, and a resize must
+            // clamp that position rather than snap them back.
+            let offset_is_the_searchs = known
+                && !query.is_empty()
+                && startup_command_log_visual_lines(&viewer.content, old_width)
+                    .iter()
+                    .position(|line| line.to_lowercase().contains(&query))
+                    .and_then(|index| u16::try_from(index).ok())
+                    .is_some_and(|old_index| old_index == viewer.scroll_offset);
+            let rebased = if offset_is_the_searchs {
+                lines
+                    .iter()
+                    .position(|line| line.to_lowercase().contains(&query))
+                    .and_then(|index| u16::try_from(index).ok())
+            } else {
+                None
+            };
+            if let Some(viewer) = self.startup_log_viewer.as_mut() {
+                viewer.wrap_width = width;
+                if !known {
+                    return;
+                }
+                viewer.scroll_offset = rebased.unwrap_or(viewer.scroll_offset).min(max_scroll);
+            }
+            self.terminal_selection = None;
+            return;
+        }
+
+        let OverlayMouseLayout::StartupCommandLogs { body, .. } = self.overlay_layout.active else {
+            return;
+        };
+        let PromptState::StartupCommandLogs(prompt) = &mut self.prompt else {
+            return;
+        };
+        if prompt.wrap_width == body.width {
+            return;
+        }
+        let known = prompt.wrap_width != 0;
+        prompt.wrap_width = body.width;
+        if !known {
+            return;
+        }
+        // The picker's filter searches RUNS, not the body text, so there is no
+        // logical match to rebase onto here; clamping is all this half can do.
+        let max_scroll =
+            u16::try_from(startup_command_log_visual_lines(&prompt.content, body.width).len())
+                .unwrap_or(u16::MAX)
+                .saturating_sub(body.height);
+        prompt.scroll_offset = prompt.scroll_offset.min(max_scroll);
+        self.startup_log_selection = None;
     }
 
     fn update_startup_log_search_scroll(&mut self) {
@@ -9124,60 +9298,21 @@ impl App {
         // rows it is correcting.
         let now = self.snapshot_selection_origin();
 
-        let mut lines: Vec<String> = Vec::new();
-        let mut current_row = start.row;
-        let mut current_line = String::new();
-
-        for cell in &self.snapshot_buf.cells {
-            // Rows are recorded in the frame the drag started in, so translate
-            // each live cell back into that frame before testing it. Without
-            // this the copy takes whatever text has since scrolled into those
-            // screen rows instead of the text the user highlighted.
-            let Some(cell_row) = sel.to_origin_row(cell.row, now) else {
-                continue;
-            };
-            if !sel.contains(cell_row, cell.col) {
-                continue;
-            }
-            if cell_row != current_row {
-                // Flush the previous line (trim trailing whitespace).
-                lines.push(current_line.trim_end().to_string());
-                // Insert empty lines for any gap rows.
-                for _ in (current_row + 1)..cell_row {
-                    lines.push(String::new());
-                }
-                current_line = String::new();
-                current_row = cell_row;
-            }
-            // Pad with spaces if columns are not contiguous (sparse cells).
-            let expected_col = if current_line.is_empty() {
-                start.col.min(cell.col)
-            } else {
-                // Approximate: one char per column.
-                let line_cols = current_line.chars().count() as u16;
-                if cell_row == start.row {
-                    start.col + line_cols
-                } else {
-                    line_cols
-                }
-            };
-            if cell.col > expected_col {
-                for _ in 0..(cell.col - expected_col) {
-                    current_line.push(' ');
-                }
-            }
-            current_line.push_str(&cell.symbol);
-        }
-        // Flush last line.
-        if !current_line.is_empty() || !lines.is_empty() {
-            lines.push(current_line.trim_end().to_string());
-            // Fill gap rows between last populated row and end.
-            for _ in (current_row + 1)..=end.row {
-                lines.push(String::new());
-            }
-        }
-
-        lines.join("\n")
+        // Rows are recorded in the frame the drag started in, so translate each
+        // live cell back into that frame before testing it. Without this the copy
+        // takes whatever text has since scrolled into those screen rows instead of
+        // the text the user highlighted.
+        let selected: Vec<(u16, u16, &str)> = self
+            .snapshot_buf
+            .cells
+            .iter()
+            .filter_map(|cell| {
+                let cell_row = sel.to_origin_row(cell.row, now)?;
+                sel.contains(cell_row, cell.col)
+                    .then(|| (cell_row, cell.col, cell.symbol.as_str()))
+            })
+            .collect();
+        assemble_selection_text(&selected, start.row, start.col, end.row)
     }
 
     fn screen_to_startup_log_grid(&self, screen_col: u16, screen_row: u16) -> Option<TermGridPos> {
@@ -9488,8 +9623,10 @@ mod tests {
     use super::components::{ButtonPressedTarget, PressedButton};
     use crate::app::ConfirmFocus;
     use crate::app::ResizeDragState;
+    use crate::app::SelectionOrigin;
     use crate::app::input::{
-        configure_focus, configure_project_text_input, cursor_from_single_line_position,
+        assemble_selection_text, configure_focus, configure_project_text_input,
+        cursor_from_single_line_position, snapshot_cell_columns, startup_command_log_visual_lines,
     };
     use crate::app::test_support::*;
     use crate::app::{
@@ -9925,6 +10062,7 @@ not_a_real_action = ["x"]
                 .collect::<Vec<_>>()
                 .join("\n"),
             scroll_offset: 0,
+            wrap_width: 0,
             focus: StartupCommandLogFocus::List,
         }
     }
@@ -15182,6 +15320,63 @@ not_a_real_action = ["x"]
         row
     }
 
+    #[test]
+    fn a_cells_column_count_comes_from_its_base_character() {
+        // The snapshot folds combining marks into the cell they modify and drops
+        // the spacer that follows a wide glyph, so the base character alone
+        // decides how many columns the cell spans.
+        assert_eq!(snapshot_cell_columns("a"), 1);
+        assert_eq!(snapshot_cell_columns("日"), 2);
+        assert_eq!(snapshot_cell_columns("e\u{301}"), 1);
+        assert_eq!(
+            snapshot_cell_columns("\u{301}"),
+            1,
+            "a bare mark still owns a cell"
+        );
+        assert_eq!(snapshot_cell_columns(""), 1);
+    }
+
+    #[test]
+    fn copied_wide_glyphs_carry_no_invented_spaces() {
+        // The wide glyph's spacer cell is absent from the snapshot, so the run is
+        // at columns 0, 2, 4. Counting chars read that as a gap and padded it.
+        let cells = [(0u16, 0u16, "日"), (0, 2, "本"), (0, 4, "語")];
+        assert_eq!(assemble_selection_text(&cells, 0, 0, 0), "日本語");
+    }
+
+    #[test]
+    fn copied_combining_marks_do_not_eat_the_next_column() {
+        // "e" plus a combining acute is ONE cell, so the next cell is at column 1
+        // and nothing is padded. Measuring by chars made the cell look two wide
+        // and swallowed the following character's column.
+        let cells = [(0u16, 0u16, "e\u{301}"), (0, 1, "x")];
+        assert_eq!(assemble_selection_text(&cells, 0, 0, 0), "e\u{301}x");
+    }
+
+    #[test]
+    fn a_genuine_column_gap_is_still_padded() {
+        // Nothing about the wide-glyph fix may lose a real hole: a run that skips
+        // columns keeps its spacing, and a run indented past the selection start
+        // keeps that indent.
+        let cells = [(0u16, 0u16, "a"), (0, 4, "b")];
+        assert_eq!(assemble_selection_text(&cells, 0, 0, 0), "a   b");
+
+        let indented = [(0u16, 3u16, "a")];
+        assert_eq!(assemble_selection_text(&indented, 0, 0, 0), "   a");
+
+        // A wide glyph followed by a real hole pads from the column AFTER the
+        // glyph's two cells, not from the column after its one char.
+        let mixed = [(0u16, 0u16, "日"), (0, 5, "z")];
+        assert_eq!(assemble_selection_text(&mixed, 0, 0, 0), "日   z");
+    }
+
+    #[test]
+    fn a_multi_row_selection_keeps_its_blank_rows() {
+        let cells = [(1u16, 0u16, "a"), (3, 0, "b")];
+        assert_eq!(assemble_selection_text(&cells, 0, 0, 4), "\na\n\nb\n");
+        assert!(assemble_selection_text(&[], 0, 0, 4).is_empty());
+    }
+
     /// Output arriving after the drag must not change what the copy yields.
     /// This is the live-edge race: the rows slide up under the recorded
     /// coordinates, so without translating them the copy takes whatever text
@@ -15453,6 +15648,103 @@ not_a_real_action = ["x"]
         );
     }
 
+    /// A WIDTH change reflows the grid under the recorded rows at ANY history
+    /// depth, so the selection has to be retired on a column change and not
+    /// only at saturation. Before this, a selection quietly survived a resize
+    /// and named whatever text landed on its rows.
+    #[test]
+    fn a_selection_is_retired_when_the_grid_is_narrowed_under_it() {
+        let mut app = test_app(default_bindings());
+        fill_and_select_l30(&mut app);
+        let stamped = app
+            .terminal_selection
+            .as_ref()
+            .expect("selection")
+            .origin
+            .grid_size;
+        assert!(
+            !app.terminal_selection
+                .as_ref()
+                .expect("selection")
+                .origin
+                .history_saturated,
+            "test premise: this must be the BELOW-saturation regime, where the \
+             generation check does not fire"
+        );
+
+        app.selected_terminal_surface_client()
+            .expect("provider")
+            .resize(stamped.0, stamped.1 - 10)
+            .expect("resize");
+        app.refresh_snapshot_buf();
+        app.drop_drifted_selection();
+
+        assert!(
+            app.terminal_selection.is_none(),
+            "a narrowed grid must retire the selection rather than translate it \
+             onto arbitrary rows"
+        );
+    }
+
+    /// The paired half of the width rule: a HEIGHT-only change is not a
+    /// reflow. Alacritty moves whole lines between history and the viewport
+    /// without rewrapping them, the offset/total arithmetic translates that
+    /// exactly, and the selection keeps naming its text. Retiring on any
+    /// dimension change threw away a selection every time the user resized the
+    /// terminal vertically, which the arithmetic never needed.
+    #[test]
+    fn a_selection_survives_a_rows_only_resize_and_keeps_naming_its_text() {
+        let mut app = test_app(default_bindings());
+        fill_and_select_l30(&mut app);
+        let stamped = app
+            .terminal_selection
+            .as_ref()
+            .expect("selection")
+            .origin
+            .grid_size;
+
+        app.selected_terminal_surface_client()
+            .expect("provider")
+            .resize(stamped.0 - 4, stamped.1)
+            .expect("resize");
+        app.refresh_snapshot_buf();
+        app.drop_drifted_selection();
+
+        assert_eq!(
+            app.terminal_selection_text(),
+            "L30",
+            "a rows-only resize must keep the selection on the text it named"
+        );
+    }
+
+    /// The paired half: the ring capacity a selection is judged against is the
+    /// one the PTY was SPAWNED with. Capacity is fixed when the emulator is
+    /// built, so reading live config made a full ring read as unsaturated the
+    /// moment someone raised the setting through a reload.
+    #[test]
+    fn saturation_is_judged_against_the_ptys_own_capacity_not_live_config() {
+        let mut app = app_with_saturated_scrollback();
+        assert!(
+            app.snapshot_selection_origin().history_saturated,
+            "test premise: the 5-line ring must be full"
+        );
+
+        // A live reload raises the setting. No running PTY hears about it, so
+        // the ring is still full and the selection must still be retired.
+        app.engine.config.ui.agent_scrollback_lines = 10_000;
+        assert_eq!(
+            app.selected_terminal_surface_client()
+                .expect("provider")
+                .scrollback_capacity(),
+            5,
+            "capacity is fixed at spawn; a config reload cannot move it"
+        );
+        assert!(
+            app.snapshot_selection_origin().history_saturated,
+            "the reload must not make a saturated ring read as unsaturated"
+        );
+    }
+
     /// A wheel that is FORWARDED to the child does drop it. The child repaints
     /// the grid however it likes, and nothing in the snapshot's scroll numbers
     /// describes that, so there is no text left to follow.
@@ -15480,9 +15772,17 @@ not_a_real_action = ["x"]
     fn rendered_highlight_follows_its_text_when_the_view_scrolls() {
         let mut app = test_app(default_bindings());
         app.center_mode = CenterMode::Agent;
-        let row = fill_and_select_l30(&mut app);
+        fill_and_select_l30(&mut app);
 
         let mut terminal = test_terminal();
+        // The first frame resizes the PTY from its spawn geometry to the pane's,
+        // and a selection stamped against a geometry that was never drawn is
+        // retired by design (see `SelectionOrigin::grid_size`). A real drag
+        // happens on a drawn grid, so settle the geometry and stamp there.
+        draw_frame(&mut app, &mut terminal);
+        let row = snapshot_row_of(&mut app, "L30");
+        select_row(&mut app, row, 2);
+
         draw_frame(&mut app, &mut terminal);
         let before = highlighted_rows(&terminal);
         assert_eq!(
@@ -15491,10 +15791,7 @@ not_a_real_action = ["x"]
             "the fixture must draw exactly one highlighted row or this test \
              proves nothing"
         );
-        // Naming the TEXT, not just the row. The frame resizes the PTY from the
-        // 24 rows it was spawned with to the 23 the pane offers, which pushes
-        // one line into history, and the highlight lands on L30 anyway because
-        // `to_origin_row` reads that as the one-row shift it is.
+        // Naming the TEXT, not just the row.
         assert_eq!(
             highlighted_text(&terminal, before[0]),
             "L30",
@@ -20930,6 +21227,7 @@ cyan = "#00ffff"
             display_name: "viewer.log".to_string(),
             content: String::new(),
             scroll_offset: 0,
+            wrap_width: 0,
             search: TextInput::new(),
             searching: false,
             return_to: None,
@@ -21012,6 +21310,7 @@ cyan = "#00ffff"
                 .collect::<Vec<_>>()
                 .join("\n"),
             scroll_offset: 0,
+            wrap_width: 0,
             search: TextInput::new(),
             searching: false,
             return_to: None,
@@ -21032,6 +21331,241 @@ cyan = "#00ffff"
         assert_eq!(viewer.scroll_offset, 20);
     }
 
+    /// Everything the startup-log viewer remembers is an index into text wrapped
+    /// at one width, so a width change has to retire the selection and rebase the
+    /// search scroll rather than let both name different text.
+    #[test]
+    fn a_startup_log_width_change_drops_the_selection_and_rebases_the_search() {
+        // One long logical line before the needle, so re-wrapping genuinely moves
+        // the needle's VISUAL index: at width 20 it wraps into five rows, at
+        // width 80 into two.
+        let long = "x".repeat(90);
+        let tail = (0..30)
+            .map(|n| format!("tail {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let content = format!("{long}\nneedle line\n{tail}");
+        let mut app = test_app(default_bindings());
+        app.startup_log_viewer = Some(crate::app::StartupLogViewer {
+            scope_label: "project \"demo\"".to_string(),
+            path: None,
+            display_name: "startup.log".to_string(),
+            content,
+            scroll_offset: 0,
+            wrap_width: 0,
+            search: TextInput::new(),
+            searching: false,
+            return_to: None,
+        });
+        app.fullscreen_overlay = FullscreenOverlay::StartupLog;
+        app.mouse_layout.agent_term = Some(Rect::new(0, 0, 20, 4));
+
+        // First reconcile only records the width; nothing has been stamped yet.
+        app.reconcile_startup_log_wrap_width();
+        assert_eq!(
+            app.startup_log_viewer.as_ref().expect("viewer").wrap_width,
+            20
+        );
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
+            .unwrap();
+        for ch in "needle".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+                .unwrap();
+        }
+        let narrow_offset = app
+            .startup_log_viewer
+            .as_ref()
+            .expect("viewer")
+            .scroll_offset;
+        assert_eq!(
+            startup_command_log_visual_lines(
+                &app.startup_log_viewer.as_ref().expect("viewer").content,
+                20
+            )[narrow_offset as usize],
+            "needle line",
+            "test premise: the recorded offset names the match at this width"
+        );
+
+        app.terminal_selection = Some(TerminalSelection {
+            anchor: TermGridPos {
+                row: narrow_offset,
+                col: 0,
+            },
+            end: TermGridPos {
+                row: narrow_offset,
+                col: 5,
+            },
+            dragging: false,
+            origin: SelectionOrigin::default(),
+        });
+
+        app.mouse_layout.agent_term = Some(Rect::new(0, 0, 80, 4));
+        app.reconcile_startup_log_wrap_width();
+
+        let viewer = app.startup_log_viewer.as_ref().expect("viewer");
+        assert_eq!(viewer.wrap_width, 80);
+        assert!(
+            app.terminal_selection.is_none(),
+            "a stamped selection must be dropped when the wrap width moves"
+        );
+        assert_ne!(
+            viewer.scroll_offset, narrow_offset,
+            "test premise: the match sits at a different visual row once rewrapped"
+        );
+        assert_eq!(
+            startup_command_log_visual_lines(&viewer.content, 80)[viewer.scroll_offset as usize],
+            "needle line",
+            "the search offset must still name the match, not the text that \
+             rewrapped into its old row"
+        );
+    }
+
+    /// The rebase belongs to the SEARCH, not to the width change. A user who
+    /// searched and then scrolled somewhere else has overridden the search's
+    /// position, so a resize clamps their offset and must not snap the view
+    /// back to the match.
+    #[test]
+    fn a_startup_log_width_change_does_not_override_a_manual_scroll() {
+        let long = "x".repeat(90);
+        let tail = (0..30)
+            .map(|n| format!("tail {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let content = format!("{long}\nneedle line\n{tail}");
+        let mut app = test_app(default_bindings());
+        app.startup_log_viewer = Some(crate::app::StartupLogViewer {
+            scope_label: "project \"demo\"".to_string(),
+            path: None,
+            display_name: "startup.log".to_string(),
+            content,
+            scroll_offset: 0,
+            wrap_width: 0,
+            search: TextInput::new(),
+            searching: false,
+            return_to: None,
+        });
+        app.fullscreen_overlay = FullscreenOverlay::StartupLog;
+        app.mouse_layout.agent_term = Some(Rect::new(0, 0, 20, 4));
+        app.reconcile_startup_log_wrap_width();
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
+            .unwrap();
+        for ch in "needle".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+                .unwrap();
+        }
+        let search_offset = app
+            .startup_log_viewer
+            .as_ref()
+            .expect("viewer")
+            .scroll_offset;
+        assert_eq!(
+            startup_command_log_visual_lines(
+                &app.startup_log_viewer.as_ref().expect("viewer").content,
+                20
+            )[search_offset as usize],
+            "needle line",
+            "test premise: the search must have parked the view on the match"
+        );
+
+        // The user scrolls away from the match, past what the new width can
+        // hold, so the clamp genuinely has something to do.
+        app.startup_log_viewer
+            .as_mut()
+            .expect("viewer")
+            .scroll_offset = 32;
+
+        app.mouse_layout.agent_term = Some(Rect::new(0, 0, 80, 4));
+        app.reconcile_startup_log_wrap_width();
+
+        let viewer = app.startup_log_viewer.as_ref().expect("viewer");
+        let wide_lines = startup_command_log_visual_lines(&viewer.content, 80);
+        let wide_max_scroll = u16::try_from(wide_lines.len())
+            .unwrap_or(u16::MAX)
+            .saturating_sub(4);
+        assert_eq!(
+            viewer.scroll_offset, wide_max_scroll,
+            "a manually scrolled offset is clamped to the new wrap, not rebased"
+        );
+        let wide_match = wide_lines
+            .iter()
+            .position(|line| line == "needle line")
+            .expect("match at the wide width");
+        assert_ne!(
+            viewer.scroll_offset as usize, wide_match,
+            "test premise: the clamped offset must differ from the match's row \
+             or this proves nothing"
+        );
+    }
+
+    /// The PICKER half of the same rule: the StartupCommandLogs prompt keeps a
+    /// scroll offset and a body selection that are indices into text wrapped at
+    /// one width, so a width change must clamp the one and retire the other.
+    #[test]
+    fn a_startup_log_picker_width_change_clamps_the_scroll_and_drops_the_selection() {
+        // Lines long enough that rewrapping genuinely changes the visual line
+        // count: 30 columns wrap into two rows at width 20 and one at width 80.
+        let content = (0..40)
+            .map(|_| "y".repeat(30))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::StartupCommandLogs(StartupCommandLogPrompt {
+            scope_label: "project \"demo\"".to_string(),
+            entries: Vec::new(),
+            selected: 0,
+            filter: TextInput::new(),
+            searching: false,
+            content,
+            scroll_offset: 0,
+            wrap_width: 0,
+            focus: StartupCommandLogFocus::List,
+        });
+        let layout = |body: Rect| OverlayMouseLayout::StartupCommandLogs {
+            input: None,
+            list: Rect::new(0, 0, 20, 4),
+            body,
+            items: 0,
+            offset: 0,
+            close_button: Rect::new(0, 20, 10, 1),
+        };
+        app.overlay_layout.active = layout(Rect::new(0, 4, 20, 10));
+
+        // First reconcile only records the width; nothing has been stamped yet.
+        app.reconcile_startup_log_wrap_width();
+        let PromptState::StartupCommandLogs(prompt) = &mut app.prompt else {
+            panic!("prompt must survive the reconcile");
+        };
+        assert_eq!(prompt.wrap_width, 20);
+
+        // A scroll and a selection recorded against the narrow wrap: 80 visual
+        // lines minus the 10-row body leaves room for offset 35.
+        prompt.scroll_offset = 35;
+        app.startup_log_selection = Some(TerminalSelection {
+            anchor: TermGridPos { row: 35, col: 0 },
+            end: TermGridPos { row: 35, col: 5 },
+            dragging: false,
+            origin: SelectionOrigin::default(),
+        });
+
+        app.overlay_layout.active = layout(Rect::new(0, 4, 80, 10));
+        app.reconcile_startup_log_wrap_width();
+
+        let PromptState::StartupCommandLogs(prompt) = &app.prompt else {
+            panic!("prompt must survive the reconcile");
+        };
+        assert_eq!(prompt.wrap_width, 80);
+        assert_eq!(
+            prompt.scroll_offset, 30,
+            "40 visual lines minus the 10-row body caps the scroll at 30"
+        );
+        assert!(
+            app.startup_log_selection.is_none(),
+            "a stamped body selection must be dropped when the wrap width moves"
+        );
+    }
+
     #[test]
     fn startup_log_fullscreen_drag_selection_copies_text() {
         use ratatui::Terminal;
@@ -21045,6 +21579,7 @@ cyan = "#00ffff"
             display_name: "startup.log".to_string(),
             content: "first line\nsecond line".to_string(),
             scroll_offset: 0,
+            wrap_width: 0,
             search: TextInput::new(),
             searching: false,
             return_to: None,
@@ -27800,6 +28335,7 @@ cyan = "#00ffff"
                 .collect::<Vec<_>>()
                 .join("\n"),
             scroll_offset: 0,
+            wrap_width: 0,
             search: TextInput::new(),
             searching: false,
             return_to: None,
@@ -27907,6 +28443,7 @@ cyan = "#00ffff"
             searching: true,
             content: String::new(),
             scroll_offset: 0,
+            wrap_width: 0,
             focus: StartupCommandLogFocus::List,
         });
 
@@ -28655,6 +29192,7 @@ cyan = "#00ffff"
             searching: true,
             content: String::new(),
             scroll_offset: 0,
+            wrap_width: 0,
             focus: StartupCommandLogFocus::List,
         });
         render_once(&mut app);

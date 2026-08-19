@@ -9,6 +9,8 @@ use std::env;
 use std::ffi::OsStr;
 use std::io::Write;
 use std::path::Path;
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
@@ -300,6 +302,109 @@ fn mode_restore_sequence(mode: TermMode) -> String {
     out
 }
 
+/// The DECSCUSR and OSC colour sequences that re-assert the child's cursor SHAPE
+/// and any palette entries it repainted, for a client that has just
+/// (re)connected.
+///
+/// Same reasoning as [`mode_restore_sequence`]: a repaint rebuilds cells, and
+/// neither of these is a cell. A child sets its cursor shape (`CSI Ps SP q`) and
+/// its palette (`OSC 4/10/11/12`) once and never mentions them again, so a
+/// reconnecting client would otherwise never learn either. `alacritty_terminal`
+/// tracks both and exposes them (`Term::cursor_style`, `Term::colors`), and
+/// xterm.js honours both on the way back in, so the round trip is available; it
+/// was simply never made.
+///
+/// The two halves make different promises, because a client-side `reset()`
+/// treats them differently (measured against xterm.js): reset re-defaults the
+/// cursor style (DECSCUSR state lives in the private-mode set that reset
+/// re-clones) but does NOT restore the palette (OSC 4/10/11/12 overrides
+/// survive a reset; only OSC 104/110/111/112 clear them).
+///
+/// So the palette half is RESET-THEN-DIFFS: it leads with the full resets
+/// (`OSC 104/110/111/112`), then re-asserts every entry the child repainted.
+/// Both replay call sites already follow a client-side reset plus a full
+/// repaint, so the leading resets never un-paint a client that was correct;
+/// what they buy is a client whose palette a reset could not scrub (or one
+/// re-used from another PTY) coming back to a known baseline.
+///
+/// The cursor half ALWAYS asserts the current style. The client's cursor
+/// baseline is not a value this side can name: dux's own web client opens
+/// xterm with a blinking cursor, so "steady block" is alacritty's default but
+/// not the client's, and suppressing it left a child that asked for DECSCUSR 2
+/// showing the client's blink. Always emitting is one line where a baseline
+/// table would have to guess per client. Accepted cost: a child that never
+/// set a style gets alacritty's default asserted anyway, because
+/// `Term::cursor_style` folds "never set" into the default and cannot report
+/// the difference.
+///
+/// Known limit, of the same kind as the legacy X10 mouse mode (`?9`) that
+/// [`mode_restore_sequence`] cannot assert because the engine keeps no flag for
+/// it: the rest of the child's non-cell state is in `Term`'s PRIVATE fields with
+/// no accessor at all. Tab stops, the DECSC saved cursor, and the G0..G3 charset
+/// assignments cannot be read back out of the crate, so they are not restored and
+/// cannot be until upstream exposes them. A child that moved its tab stops or
+/// switched to the line-drawing charset and then stopped emitting comes back
+/// without either. Do not reach into the crate for these; the fix is upstream.
+fn cursor_and_palette_restore_sequence(
+    style: alacritty_terminal::vte::ansi::CursorStyle,
+    colors: &term::color::Colors,
+) -> String {
+    use alacritty_terminal::vte::ansi::CursorShape;
+
+    let mut out = String::new();
+
+    // DECSCUSR pairs each shape with a blinking and a steady code. `Hidden` has no
+    // DECSCUSR spelling at all; visibility is `?25`, which the mode block already
+    // restores, so it contributes nothing here. `HollowBlock` likewise: it is the
+    // shape alacritty renders for an unfocused window, never one a child can ask
+    // for, so it maps to the block codes it came from.
+    let code = match style.shape {
+        CursorShape::Block | CursorShape::HollowBlock => Some(if style.blinking { 1 } else { 2 }),
+        CursorShape::Underline => Some(if style.blinking { 3 } else { 4 }),
+        CursorShape::Beam => Some(if style.blinking { 5 } else { 6 }),
+        CursorShape::Hidden => None,
+    };
+    // Always asserted, never diffed: the client's baseline is unknowable (see
+    // the doc comment), so the current style goes out whether or not it is
+    // alacritty's default.
+    if let Some(code) = code {
+        out.push_str(&format!("\x1b[{code} q"));
+    }
+
+    // The palette baseline first: a client-side reset does not scrub OSC
+    // colour overrides, so put every slot back to the client's defaults before
+    // re-asserting the child's diffs.
+    out.push_str("\x1b]104\x1b\\\x1b]110\x1b\\\x1b]111\x1b\\\x1b]112\x1b\\");
+
+    // `Colors` is a fixed array with `None` for "never touched", so a `Some` is
+    // exactly an entry the child repainted. The named slots past the background
+    // are mostly alacritty's own derived colours (dim and bright variants) with
+    // no OSC a child could have set them through; the cursor colour is the one
+    // exception, tracked from `OSC 12` under `NamedColor::Cursor`, so it is
+    // diffed alongside the foreground and background.
+    for index in 0..256usize {
+        if let Some(rgb) = colors[index] {
+            out.push_str(&format!("\x1b]4;{index};{}\x1b\\", osc_color(rgb)));
+        }
+    }
+    if let Some(rgb) = colors[alacritty_terminal::vte::ansi::NamedColor::Foreground] {
+        out.push_str(&format!("\x1b]10;{}\x1b\\", osc_color(rgb)));
+    }
+    if let Some(rgb) = colors[alacritty_terminal::vte::ansi::NamedColor::Background] {
+        out.push_str(&format!("\x1b]11;{}\x1b\\", osc_color(rgb)));
+    }
+    if let Some(rgb) = colors[alacritty_terminal::vte::ansi::NamedColor::Cursor] {
+        out.push_str(&format!("\x1b]12;{}\x1b\\", osc_color(rgb)));
+    }
+    out
+}
+
+/// An `rgb:RR/GG/BB` colour specification, the form xterm defines for `OSC 4` and
+/// friends and the one xterm.js parses most reliably.
+fn osc_color(rgb: alacritty_terminal::vte::ansi::Rgb) -> String {
+    format!("rgb:{:02x}/{:02x}/{:02x}", rgb.r, rgb.g, rgb.b)
+}
+
 fn sgr_sequence(fg: CellColor, bg: CellColor, modifier: CellModifier) -> String {
     let mut params: Vec<String> = Vec::new();
     if modifier.bold {
@@ -569,6 +674,71 @@ impl Drop for PtyViewerGuard {
     }
 }
 
+/// Test-only instrumentation for the resize critical section, used to pin the
+/// ordering that [`PtyClient::resize`] guarantees: the `TIOCSWINSZ` and the
+/// emulator resize happen under one hold of the terminal lock, so no PTY bytes
+/// can be parsed into the old geometry in between. The gate lets a test hold
+/// that section open after the ioctl and observe the reader thread queueing on
+/// the lock, which is the state the ordering has to survive. It is keyed on one
+/// terminal's identity so a test never observes another test's reader.
+#[cfg(test)]
+struct ResizeTestGate {
+    /// Address of the watched client's terminal `Arc`, compared by pointer.
+    terminal: usize,
+    /// Reader-thread chunks currently queued on that terminal's lock.
+    waiting: AtomicUsize,
+    /// Set once the resize is inside the critical section, past the ioctl.
+    entered: AtomicBool,
+    release: Mutex<bool>,
+    released: std::sync::Condvar,
+}
+
+#[cfg(test)]
+static RESIZE_TEST_GATE: Mutex<Option<Arc<ResizeTestGate>>> = Mutex::new(None);
+
+#[cfg(test)]
+fn resize_test_gate_for(terminal: &Arc<Mutex<TerminalState>>) -> Option<Arc<ResizeTestGate>> {
+    let armed = RESIZE_TEST_GATE.lock().ok()?;
+    let gate = armed.as_ref()?;
+    (gate.terminal == Arc::as_ptr(terminal) as usize).then(|| Arc::clone(gate))
+}
+
+/// Called from inside the resize critical section, after the ioctl. Blocks until
+/// the test releases the gate, keeping the window the bug lived in wide open.
+#[cfg(test)]
+fn resize_test_gate_hold(terminal: &Arc<Mutex<TerminalState>>) {
+    let Some(gate) = resize_test_gate_for(terminal) else {
+        return;
+    };
+    gate.entered.store(true, Ordering::Release);
+    let mut released = gate.release.lock().expect("resize gate mutex poisoned");
+    while !*released {
+        released = gate
+            .released
+            .wait(released)
+            .expect("resize gate mutex poisoned");
+    }
+}
+
+/// Called from the reader thread immediately before it takes the terminal lock.
+/// Returns a token whose drop records that the parse is no longer queued.
+#[cfg(test)]
+fn resize_test_gate_reader_waiting(terminal: &Arc<Mutex<TerminalState>>) -> Option<ReaderWaiting> {
+    let gate = resize_test_gate_for(terminal)?;
+    gate.waiting.fetch_add(1, Ordering::Release);
+    Some(ReaderWaiting(gate))
+}
+
+#[cfg(test)]
+struct ReaderWaiting(Arc<ResizeTestGate>);
+
+#[cfg(test)]
+impl Drop for ReaderWaiting {
+    fn drop(&mut self) {
+        self.0.waiting.fetch_sub(1, Ordering::Release);
+    }
+}
+
 /// A PTY-based client that spawns a CLI tool in a pseudo-terminal and keeps a
 /// full terminal grid with scrollback using `alacritty_terminal`.
 pub struct PtyClient {
@@ -590,6 +760,15 @@ pub struct PtyClient {
     /// the moment someone types `cd`, so this is a fallback, not the live
     /// answer. Nothing here looks up the live one yet.
     spawn_dir: std::path::PathBuf,
+    /// The scrollback ring capacity this PTY was spawned with, in lines.
+    ///
+    /// Capacity is fixed when `alacritty_terminal`'s `Term` is built and nothing
+    /// resizes the ring afterwards, so a live config reload changes the setting
+    /// without changing any running PTY. Callers that need to know whether the
+    /// ring is saturated (selection drift detection) must read THIS, never the
+    /// current config value, or a reload that raises the setting makes a full
+    /// ring read as unsaturated.
+    scrollback_capacity: usize,
     /// The child's exit status the first time [`PtyClient::try_wait`] observed
     /// it, plus when that reap happened. `Child::try_wait` yields the status
     /// EXACTLY ONCE (the second call sees no zombie and returns `None`), so
@@ -851,6 +1030,7 @@ impl PtyClient {
             terminal,
             child,
             spawn_dir: cwd.to_path_buf(),
+            scrollback_capacity: scrollback_lines,
             reaped: None,
             exited,
             exited_at,
@@ -1024,6 +1204,8 @@ impl PtyClient {
                     // while holding it. Nothing here can fix that, but the fan-out
                     // is independent of the grid, so keep streaming to web clients
                     // exactly as this loop did before and skip only the ingest.
+                    #[cfg(test)]
+                    let _queued = resize_test_gate_reader_waiting(&terminal);
                     let Ok(mut terminal) = terminal.lock() else {
                         fan_out_to_subscribers(&subscribers, data);
                         continue;
@@ -1226,6 +1408,13 @@ impl PtyClient {
         self.mutate_scroll(|t| t.scroll(up, amount));
     }
 
+    /// The scrollback ring capacity this PTY actually has, in lines. Fixed at
+    /// spawn; a config reload does not reach a running PTY, so this is the only
+    /// honest answer to "is the ring saturated".
+    pub fn scrollback_capacity(&self) -> usize {
+        self.scrollback_capacity
+    }
+
     /// Set the scrollback offset (0 = normal view, positive = scrolled back).
     pub fn set_scrollback(&self, rows: usize) {
         self.mutate_scroll(|t| t.set_scrollback(rows));
@@ -1253,7 +1442,22 @@ impl PtyClient {
     }
 
     /// Resize the PTY and the internal terminal parser.
+    ///
+    /// The kernel resize and the emulator resize are ONE critical section. The
+    /// `TIOCSWINSZ` delivers `SIGWINCH`, and a child that repaints on that signal
+    /// races the reader thread, which parses every chunk under this same terminal
+    /// lock. Resizing the kernel first and then queueing for the lock lets the
+    /// repaint be parsed into the OLD geometry, and the lock is not fair, so the
+    /// window is not bounded by a scheduler quantum: a reconnect replay build
+    /// holding the lock stretches it to tens of milliseconds. Taking the lock
+    /// first closes it. `TIOCSWINSZ` does not block, so nothing long-running runs
+    /// under the lock here.
     pub fn resize(&self, rows: u16, cols: u16) -> Result<()> {
+        // A resize can move the scrollback offset (growing the viewport pulls
+        // history into the grid and resets the display offset to 0). That is
+        // purely a view change now, so there is nothing to synchronize beyond
+        // marking the grid dirty.
+        let guard = self.terminal.lock();
         self.master
             .resize(PtySize {
                 rows,
@@ -1262,11 +1466,9 @@ impl PtyClient {
                 pixel_height: 0,
             })
             .context("failed to resize PTY")?;
-        // A resize can move the scrollback offset (growing the viewport pulls
-        // history into the grid and resets the display offset to 0). That is
-        // purely a view change now, so there is nothing to synchronize beyond
-        // marking the grid dirty.
-        if let Ok(mut terminal) = self.terminal.lock() {
+        #[cfg(test)]
+        resize_test_gate_hold(&self.terminal);
+        if let Ok(mut terminal) = guard {
             terminal.resize(rows, cols);
             self.dirty.store(true, Ordering::Release);
         }
@@ -2219,6 +2421,10 @@ impl TerminalState {
             // (every web reconnect does) comes back with mouse tracking,
             // bracketed paste and cursor visibility intact.
             out.extend_from_slice(mode_restore_sequence(*self.term.mode()).as_bytes());
+            out.extend_from_slice(
+                cursor_and_palette_restore_sequence(self.term.cursor_style(), self.term.colors())
+                    .as_bytes(),
+            );
             return out;
         }
 
@@ -2368,6 +2574,10 @@ impl TerminalState {
         // rows through the client's own autowrap) is put back to whatever the
         // child actually has, alongside the rest of its private modes.
         out.push_str(&mode_restore_sequence(*self.term.mode()));
+        out.push_str(&cursor_and_palette_restore_sequence(
+            self.term.cursor_style(),
+            self.term.colors(),
+        ));
         out.into_bytes()
     }
 
@@ -2950,6 +3160,110 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         panic!("timed out waiting for {needle:?} in the PTY viewport");
+    }
+
+    /// A child that repaints its bottom-right corner on demand: every line it
+    /// reads makes it home the cursor to an over-large position, which the
+    /// emulator clamps to whatever geometry it currently has. Driven by input
+    /// rather than by a `SIGWINCH` trap on purpose: POSIX shells defer a trap
+    /// until the foreground command returns, so a signal-driven repaint is not a
+    /// deterministic thing for a test to wait on, while a line the test writes is.
+    const CORNER_REPAINTER: &str =
+        "stty -echo; while IFS= read -r n; do printf '\\033[999;999H@'; done";
+
+    #[test]
+    fn resize_parses_no_pty_bytes_between_the_ioctl_and_the_emulator_resize() {
+        // The invariant: the `TIOCSWINSZ` and the emulator resize are one critical
+        // section, so a repaint provoked by the resize cannot be parsed into the
+        // old geometry. The gate holds the section open right after the ioctl and
+        // the helper thread makes the child paint into that window; the reader has
+        // to be observably QUEUED on the terminal lock, and once released its
+        // bytes must land in the NEW geometry. With the ioctl outside the lock the
+        // reader takes the lock first and the '@' is clamped to the old width.
+        let args = vec!["-c".to_string(), CORNER_REPAINTER.to_string()];
+        let client =
+            PtyClient::spawn("/bin/sh", &args, Path::new("."), 24, 80, 100).expect("spawn pty");
+
+        // Prove the child is up and the old clamp is what it looks like, so a
+        // silent spawn failure cannot pass this test by painting nothing.
+        client.write_bytes(b"go\n").expect("write to pty");
+        wait_for_viewport(&client, "@");
+        assert_eq!(
+            corner_row_width(&client),
+            80,
+            "at 24x80 the clamped repaint must sit at the last column of 80"
+        );
+
+        let gate = Arc::new(ResizeTestGate {
+            terminal: Arc::as_ptr(&client.terminal) as usize,
+            waiting: AtomicUsize::new(0),
+            entered: AtomicBool::new(false),
+            release: Mutex::new(false),
+            released: std::sync::Condvar::new(),
+        });
+        *RESIZE_TEST_GATE.lock().expect("gate slot poisoned") = Some(Arc::clone(&gate));
+
+        // The client is not `Sync`, so the resize runs on this thread and the
+        // helper drives the child through a clone of the write queue's sender.
+        let writer_tx = client.writer.sender();
+        let helper = {
+            let gate = Arc::clone(&gate);
+            std::thread::spawn(move || {
+                let deadline = std::time::Duration::from_secs(10);
+                let start = Instant::now();
+                while !gate.entered.load(Ordering::Acquire) && start.elapsed() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                let entered = gate.entered.load(Ordering::Acquire);
+                pty_queue_send(&writer_tx, b"go\n".to_vec());
+                let start = Instant::now();
+                while gate.waiting.load(Ordering::Acquire) == 0 && start.elapsed() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                let queued = gate.waiting.load(Ordering::Acquire);
+                *gate.release.lock().expect("resize gate mutex poisoned") = true;
+                gate.released.notify_all();
+                (entered, queued)
+            })
+        };
+
+        client.resize(24, 120).expect("resize");
+        let (entered, queued) = helper.join().expect("helper thread panicked");
+        *RESIZE_TEST_GATE.lock().expect("gate slot poisoned") = None;
+
+        assert!(entered, "the resize never reached its critical section");
+        assert!(
+            queued > 0,
+            "the reader never queued on the terminal lock, so this run proves \
+             nothing about the ordering"
+        );
+
+        // The repaint that was pending throughout the critical section must be
+        // clamped to the NEW width.
+        for _ in 0..200 {
+            if corner_row_width(&client) == 120 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(
+            corner_row_width(&client),
+            120,
+            "the repaint was parsed into the pre-resize geometry, so PTY bytes \
+             reached the emulator between the ioctl and the emulator resize"
+        );
+    }
+
+    /// Width of the one viewport row carrying the corner marker, counting the
+    /// padding the clamp left in front of it. Char-based, never byte-based.
+    fn corner_row_width(client: &PtyClient) -> usize {
+        let snapshot = client.snapshot();
+        viewport_lines(&snapshot)
+            .iter()
+            .filter(|line| line.contains('@'))
+            .map(|line| line.trim_end().chars().count())
+            .max()
+            .unwrap_or(0)
     }
 
     // A one-shot child that emits, in order: an OSC 9;4 working progress report, an
@@ -3853,12 +4167,20 @@ mod tests {
         assert!(terminal.is_alt_screen());
 
         // On the alt screen there is no scrollback to replay, so the reconnect
-        // repaint is the viewport-only repaint plus the private-mode restore a
-        // reconnecting client needs (`synthesize_repaint` takes a snapshot, which
-        // carries cells and no modes, so it cannot emit that block itself).
+        // repaint is the viewport-only repaint plus the private-mode restore and
+        // the cursor/palette baseline a reconnecting client needs
+        // (`synthesize_repaint` takes a snapshot, which carries cells and no
+        // modes, so it cannot emit those blocks itself).
         let mut expected =
             synthesize_repaint(&terminal.snapshot(), true, terminal.scroll_region.region());
         expected.extend_from_slice(mode_restore_sequence(*terminal.term.mode()).as_bytes());
+        expected.extend_from_slice(
+            cursor_and_palette_restore_sequence(
+                terminal.term.cursor_style(),
+                terminal.term.colors(),
+            )
+            .as_bytes(),
+        );
         assert_eq!(terminal.reconnect_repaint(), expected);
     }
 
@@ -4108,6 +4430,122 @@ mod tests {
         assert!(!all_off.contains("\x1b[?6"), "{all_off:?}");
     }
 
+    /// The `OSC 104/110/111/112` prefix the palette half always leads with: a
+    /// client-side reset does not scrub colour overrides, so every restore
+    /// starts from the client's own defaults before re-asserting diffs.
+    const PALETTE_RESETS: &str = "\x1b]104\x1b\\\x1b]110\x1b\\\x1b]111\x1b\\\x1b]112\x1b\\";
+
+    #[test]
+    fn cursor_and_palette_restore_of_untouched_state_asserts_only_the_baseline() {
+        // An untouched terminal still emits the baseline: the full palette
+        // resets (a client reset cannot scrub OSC overrides itself), plus the
+        // current cursor style, which is always asserted because alacritty
+        // cannot report "never set" and the client's own default is unknowable.
+        let seq = cursor_and_palette_restore_sequence(
+            alacritty_terminal::vte::ansi::CursorStyle::default(),
+            &term::color::Colors::default(),
+        );
+        assert_eq!(seq, format!("\x1b[2 q{PALETTE_RESETS}"), "{seq:?}");
+    }
+
+    #[test]
+    fn cursor_and_palette_restore_round_trips_a_set_cursor_style() {
+        use alacritty_terminal::vte::ansi::{CursorShape, CursorStyle};
+
+        for (shape, blinking, expected) in [
+            (CursorShape::Block, true, "\x1b[1 q"),
+            // Steady block used to be suppressed as "the client default", but
+            // dux's web client opens xterm with a blinking cursor, so a child
+            // that asked for DECSCUSR 2 must get it.
+            (CursorShape::Block, false, "\x1b[2 q"),
+            (CursorShape::Underline, true, "\x1b[3 q"),
+            (CursorShape::Underline, false, "\x1b[4 q"),
+            (CursorShape::Beam, true, "\x1b[5 q"),
+            (CursorShape::Beam, false, "\x1b[6 q"),
+        ] {
+            let seq = cursor_and_palette_restore_sequence(
+                CursorStyle { shape, blinking },
+                &term::color::Colors::default(),
+            );
+            assert_eq!(
+                seq,
+                format!("{expected}{PALETTE_RESETS}"),
+                "{shape:?} blinking={blinking}"
+            );
+        }
+
+        // A hidden cursor has no DECSCUSR spelling; `?25` in the mode block is the
+        // one that carries it, so only the palette baseline goes out.
+        let hidden = cursor_and_palette_restore_sequence(
+            CursorStyle {
+                shape: CursorShape::Hidden,
+                blinking: false,
+            },
+            &term::color::Colors::default(),
+        );
+        assert_eq!(hidden, PALETTE_RESETS, "{hidden:?}");
+    }
+
+    #[test]
+    fn cursor_and_palette_restore_emits_only_the_repainted_colors() {
+        use alacritty_terminal::vte::ansi::{NamedColor, Rgb};
+
+        let mut colors = term::color::Colors::default();
+        colors[3usize] = Some(Rgb {
+            r: 0x12,
+            g: 0xab,
+            b: 0x00,
+        });
+        colors[NamedColor::Foreground] = Some(Rgb {
+            r: 0xff,
+            g: 0xff,
+            b: 0xff,
+        });
+        colors[NamedColor::Background] = Some(Rgb {
+            r: 0x00,
+            g: 0x00,
+            b: 0x08,
+        });
+        colors[NamedColor::Cursor] = Some(Rgb {
+            r: 0xde,
+            g: 0xad,
+            b: 0x00,
+        });
+
+        let seq = cursor_and_palette_restore_sequence(
+            alacritty_terminal::vte::ansi::CursorStyle::default(),
+            &colors,
+        );
+        assert_eq!(
+            seq,
+            format!(
+                "\x1b[2 q{PALETTE_RESETS}\x1b]4;3;rgb:12/ab/00\x1b\\\x1b]10;rgb:ff/ff/ff\x1b\\\x1b]11;rgb:00/00/08\x1b\\\x1b]12;rgb:de/ad/00\x1b\\"
+            ),
+            "{seq:?}"
+        );
+        // Every other index stayed `None`, so no other diff may be named. The
+        // `104` in the leading resets does not count: a diff is `OSC 4` with an
+        // index, and this matches the parameter separator to exclude it.
+        assert_eq!(seq.matches("\x1b]4;").count(), 1, "{seq:?}");
+    }
+
+    #[test]
+    fn a_replay_carries_the_childs_cursor_shape_and_palette() {
+        // End to end through the real replay path: a child sets a beam cursor and
+        // repaints one palette slot, and the bytes a reconnecting client receives
+        // put both back.
+        let mut terminal = TerminalState::new(6, 20, 100);
+        terminal.process(b"\x1b[5 q\x1b]4;9;rgb:aa/bb/cc\x1b\\\x1b]12;rgb:01/02/03\x1b\\hello");
+        let replay = terminal.reconnect_repaint();
+        let replay = String::from_utf8_lossy(&replay);
+        assert!(replay.contains("\x1b[5 q"), "{replay:?}");
+        assert!(replay.contains("\x1b]4;9;rgb:aa/bb/cc\x1b\\"), "{replay:?}");
+        assert!(replay.contains("\x1b]12;rgb:01/02/03\x1b\\"), "{replay:?}");
+        // And the baseline travels ahead of the diffs, so a palette the client
+        // still carries from before the reset is scrubbed first.
+        assert!(replay.contains(PALETTE_RESETS), "{replay:?}");
+    }
+
     // The receiving terminal folds 1000/1002/1003 into ONE active mouse protocol
     // and a disable of any of them clears it, so a disable emitted after the
     // enable silently undoes it. Pin the ordering: every disable in the tracking
@@ -4351,10 +4789,15 @@ mod tests {
 
         let replay = String::from_utf8(terminal.reconnect_repaint()).unwrap();
         // The cursor position is the last thing painted; only the mode-restore
-        // block (which never moves the cursor) follows it.
+        // block and the cursor/palette baseline (neither of which moves the
+        // cursor) follow it.
         let modes = mode_restore_sequence(*terminal.term.mode());
+        let cursor_and_palette = cursor_and_palette_restore_sequence(
+            terminal.term.cursor_style(),
+            terminal.term.colors(),
+        );
         assert!(
-            replay.ends_with(&format!("\x1b[3;5H{modes}")),
+            replay.ends_with(&format!("\x1b[3;5H{modes}{cursor_and_palette}")),
             "replay should restore the cursor position; full replay: {replay:?}"
         );
     }

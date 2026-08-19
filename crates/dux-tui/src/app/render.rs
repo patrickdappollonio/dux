@@ -902,6 +902,10 @@ impl App {
         self.render_files(frame, right);
         self.render_footer(frame, footer);
         self.render_overlay(frame);
+        // Last, with this frame's rects recorded: the startup-log surfaces keep
+        // indices into text wrapped at one width, so a width change has to retire
+        // them before any key or click can act on them.
+        self.reconcile_startup_log_wrap_width();
     }
 
     fn render_header(&self, frame: &mut Frame, area: Rect) {
@@ -2571,9 +2575,15 @@ impl App {
             SessionSurface::Terminal => terminal_status.is_running(),
         };
         let new_size = (term_area.height, term_area.width);
-        let should_resize = new_size != self.last_pty_size && new_size.0 > 0 && new_size.1 > 0;
+        // Keyed by target, so a switch to a different PTY always sends once even
+        // when the pane happens to measure the same. See `last_pty_resize_target`.
+        let resize_target = self.selected_terminal_surface_id();
+        let target_changed = self.last_pty_resize_target != resize_target;
+        let should_resize =
+            (new_size != self.last_pty_size || target_changed) && new_size.0 > 0 && new_size.1 > 0;
         if should_resize {
             self.last_pty_size = new_size;
+            self.last_pty_resize_target = resize_target;
         }
 
         if let Some(provider) = self.selected_terminal_surface_client() {
@@ -12372,6 +12382,95 @@ mod tests {
         terminal.backend_mut().assert_cursor_position(expected);
     }
 
+    /// Switching to a different agent must resize THAT agent's PTY, even when
+    /// the centre pane measures exactly what it measured for the previous one.
+    /// The dedupe used to compare geometry alone against one workspace-wide slot,
+    /// so the second agent kept whatever geometry it was spawned with for as long
+    /// as it lived.
+    #[test]
+    fn switching_agents_resizes_the_newly_shown_pty_at_an_unchanged_pane_size() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        let first_id = app.engine.sessions[0].id.clone();
+        let mut second = app.engine.sessions[0].clone();
+        second.id = "session-two".to_string();
+        second.branch_name = "second".to_string();
+        let second_id = second.id.clone();
+        app.engine.sessions.push(second);
+        app.rebuild_left_items();
+
+        let args = vec!["-c".to_string(), "sleep 30".to_string()];
+        for id in [&first_id, &second_id] {
+            let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 5, 40, 100)
+                .expect("spawn pty");
+            app.engine.providers.insert(id.clone(), client);
+        }
+
+        let select = |app: &mut App, index: usize| {
+            let at = app
+                .left_items()
+                .iter()
+                .position(|item| matches!(item, LeftItem::Session(i) if *i == index))
+                .expect("session row");
+            app.selected_left = at;
+        };
+        let draw = |app: &mut App| {
+            let backend = TestBackend::new(100, 40);
+            let mut terminal = Terminal::new(backend).expect("terminal");
+            terminal
+                .draw(|frame| app.render(frame))
+                .expect("render frame");
+        };
+
+        app.center_mode = CenterMode::Agent;
+        app.session_surface = SessionSurface::Agent;
+        select(&mut app, 0);
+        draw(&mut app);
+        let pane = app.last_pty_size;
+        assert_ne!(
+            pane,
+            (5, 40),
+            "test setup: the pane must differ from the spawn geometry"
+        );
+        assert_eq!(
+            app.last_pty_resize_target.as_deref(),
+            Some(first_id.as_str())
+        );
+
+        // Same pane, different agent. Comparing geometry alone says "nothing
+        // changed" here, which is exactly the bug.
+        select(&mut app, 1);
+        draw(&mut app);
+        assert_eq!(
+            app.last_pty_size, pane,
+            "test premise: the pane did not change between the two frames"
+        );
+        assert_eq!(
+            app.last_pty_resize_target.as_deref(),
+            Some(second_id.as_str())
+        );
+        let snapshot = app.engine.providers[&second_id].snapshot();
+        assert_eq!(
+            (snapshot.rows, snapshot.cols),
+            pane,
+            "the newly shown agent kept its spawn geometry"
+        );
+
+        // A redraw with neither the pane nor the target moving still dedupes.
+        app.engine.providers[&second_id]
+            .resize(9, 9)
+            .expect("resize");
+        draw(&mut app);
+        let snapshot = app.engine.providers[&second_id].snapshot();
+        assert_eq!(
+            (snapshot.rows, snapshot.cols),
+            (9, 9),
+            "an unchanged pane on an unchanged target must send nothing"
+        );
+    }
+
     /// The cue has to be ON SCREEN, not merely constructible: the hint bar is
     /// the only surface that can say "your typing is going nowhere" while the
     /// pane itself looks perfectly alive. Renders a real frame over a real,
@@ -14934,6 +15033,7 @@ mod tests {
             display_name: "startup.log".to_string(),
             content,
             scroll_offset: scroll,
+            wrap_width: 0,
             search: crate::app::text_input::TextInput::new(),
             searching: false,
             return_to: None,
@@ -15070,6 +15170,7 @@ mod tests {
             searching: false,
             content,
             scroll_offset: scroll,
+            wrap_width: 0,
             focus: StartupCommandLogFocus::List,
         });
         let mut terminal = Terminal::new(TestBackend::new(size.0, size.1)).expect("terminal");
@@ -15773,6 +15874,7 @@ mod tests {
                 searching,
                 content: String::new(),
                 scroll_offset: 0,
+                wrap_width: 0,
                 focus: StartupCommandLogFocus::List,
             })
         };

@@ -1,13 +1,23 @@
 // THE RESIZE COORDINATOR.
 //
 // Sizing has two halves with very different costs:
-//  - LOCAL refits (`fit.fit()`) are cheap, so the canvas tracks the container
-//    every frame while the user drags a divider or the window edge.
+//  - LOCAL refits (`fit.fit()`) are cheap in CPU terms.
 //  - PTY resizes are expensive: each one is a SIGWINCH that makes the child TUI
 //    fully redraw. Sending them per-frame during a drag is the resize jitter.
 //    So the send is DEBOUNCED (one resize with the final dimensions once the
 //    drag settles) and deduplicated, since ResizeObserver also fires an initial
 //    callback on observe.
+//
+// Cheap is not the same as free, and the debounce is the SECOND hold source. The
+// ResizeObserver used to refit per animation frame while the send waited out the
+// debounce, so for the whole of a divider drag the local grid ran ahead of the
+// child's. Measured on a simulated drag: 13 transcript rows duplicated
+// permanently into local scrollback, and zero once the fit was held with the
+// send. So the observer's refit is parked for the debounce window and released
+// WITH the send, coalesced, last geometry wins. The accepted tradeoff mirrors
+// the touch hold's, in the other direction: the canvas letterboxes for up to
+// RESIZE_SEND_DEBOUNCE_MS while the drag is in flight, rather than the child
+// repainting into a geometry the viewer no longer has.
 //
 // THE INVARIANT, and the reason this is a machine rather than a handful of
 // closures: NO CALL SITE TOUCHES `fit.fit()` OR `sendResize` EXCEPT THROUGH
@@ -137,6 +147,12 @@ export function createResizeCoordinator(
   // The LOCAL refit's half of the same hold. Holding only the SIGWINCH is not
   // enough; see the module doc for the measured reason.
   let fitHeldByGesture = false
+  // The second hold source: the debounce window. Same atomic-pair rule as the
+  // gesture hold, and the same accepted tradeoff stated in the module doc.
+  let fitHeldByDebounce = false
+  // Whether a debounced send is armed and therefore holding the fit. Cleared at
+  // the top of the settle, never by `clearTimeout` alone.
+  let debouncePending = false
   // The one deferred DIRECT resize request, if any.
   let heldResizeSend: (() => void) | null = null
   // Mirrors "a touch scroll is in flight", written by the touch machine.
@@ -176,12 +192,29 @@ export function createResizeCoordinator(
     return true
   }
 
+  // The debounce settling. Releases the pair it held: the refit runs first, at
+  // the final container size, and the child's notification follows it.
   const sendSize = () => {
+    debouncePending = false
     // Never land a SIGWINCH inside an active touch-scroll's wheel-report
     // stream: hold the send and let the lift flush it after the finger goes.
+    // A gesture outliving the debounce inherits the parked fit too, so the pair
+    // stays together rather than the fit escaping through this settle.
     if (holding) {
       resizeHeldByGesture = true
+      if (fitHeldByDebounce) {
+        fitHeldByDebounce = false
+        fitHeldByGesture = true
+      }
       return
+    }
+    if (fitHeldByDebounce) {
+      fitHeldByDebounce = false
+      // Coalesced, last geometry wins: `fit.fit()` reads the container now, so
+      // however many observer callbacks were parked, this is one fit at the
+      // size the drag ended on. It re-enters `armDebounce` through xterm's own
+      // resize event, which is a no-op send one window later.
+      fit.fit()
     }
     if (term.rows !== lastRows || term.cols !== lastCols) {
       sendOwned(term.rows, term.cols)
@@ -190,14 +223,19 @@ export function createResizeCoordinator(
 
   const armDebounce = () => {
     clearTimeout(sendTimer)
+    debouncePending = true
     sendTimer = setTimeout(sendSize, RESIZE_SEND_DEBOUNCE_MS)
   }
 
-  // The ResizeObserver's local refit: do it now, or mark it held for the
-  // gesture-end flush. Never fit while the pair is held.
+  // The ResizeObserver's local refit: do it now, or mark it held. Never fit
+  // while either hold is on.
   const fitOrHold = () => {
     if (holding) {
       fitHeldByGesture = true
+      return
+    }
+    if (debouncePending) {
+      fitHeldByDebounce = true
       return
     }
     fit.fit()
@@ -219,6 +257,10 @@ export function createResizeCoordinator(
       heldResizeSend = heldResizeSend ?? send
       return
     }
+    // A direct send fits for itself, which satisfies anything the debounce
+    // window had parked; leaving the flag set would fit a second time at the
+    // settle for no reason.
+    fitHeldByDebounce = false
     fit.fit()
     send()
   }
@@ -368,8 +410,11 @@ export function createResizeCoordinator(
       // flush cannot double-fit.
       const pendingSend = heldResizeSend
       heldResizeSend = null
-      if (fitHeldByGesture) {
+      // Either hold is discharged by the one fit; leaving the debounce's flag
+      // set would fit a second time at the settle.
+      if (fitHeldByGesture || fitHeldByDebounce) {
         fitHeldByGesture = false
+        fitHeldByDebounce = false
         fit.fit()
       }
       pendingSend?.()

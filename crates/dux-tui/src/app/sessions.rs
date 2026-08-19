@@ -2899,6 +2899,9 @@ impl App {
             display_name: entry.display_name.clone(),
             content: prompt.content.clone(),
             scroll_offset: 0,
+            // Inherit the width the promoting picker was measured at, so a
+            // promotion that keeps the same body width keeps its scroll.
+            wrap_width: prompt.wrap_width,
             search: TextInput::new(),
             searching: false,
             return_to: Some(Box::new(prompt.clone())),
@@ -4206,6 +4209,7 @@ mod tests {
             agent_tab_regions: Vec::new(),
             terminal_return_to_list: false,
             last_pty_size: (0, 0),
+            last_pty_resize_target: None,
             grid_generation: 0,
             scroll_mode: std::collections::HashSet::new(),
             last_diff_height: 0,

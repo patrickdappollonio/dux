@@ -95,8 +95,11 @@ function setup(opts: { owner?: boolean; wire?: boolean } = {}) {
 }
 
 let observed: Element[] = []
+let observers: ResizeObserverStub[] = []
 class ResizeObserverStub {
-  constructor(private cb: () => void) {}
+  constructor(private cb: () => void) {
+    observers.push(this)
+  }
   observe(el: Element) {
     observed.push(el)
   }
@@ -109,6 +112,7 @@ class ResizeObserverStub {
 beforeEach(() => {
   vi.useFakeTimers()
   observed = []
+  observers = []
   vi.stubGlobal("ResizeObserver", ResizeObserverStub)
   vi.stubGlobal("requestAnimationFrame", (cb: () => void) => {
     return setTimeout(cb, 0) as unknown as number
@@ -224,6 +228,83 @@ describe("the resize coordinator's gesture hold", () => {
     vi.advanceTimersByTime(500)
     expect(sent).toEqual([])
     expect(fit.fits).toBe(before)
+  })
+})
+
+describe("the resize coordinator's debounce hold", () => {
+  it("performs NO refit during an observer burst, then exactly one fit+send at the settle", () => {
+    // A divider drag. The refit used to run per animation frame while the send
+    // waited out the debounce, so the local grid ran ahead of the child's for
+    // the whole drag and the child's repaints duplicated rows into scrollback.
+    const { fit, coord, sent } = setup()
+    coord.start(document.createElement("div"))
+    settleFirstFrame(coord, sent)
+    const ro = observers.at(-1)
+    if (!ro) throw new Error("the coordinator never constructed a ResizeObserver")
+    const before = fit.fits
+
+    for (let i = 0; i < 10; i++) {
+      ro.fire()
+      vi.advanceTimersByTime(16)
+    }
+    expect(fit.fits).toBe(before)
+    expect(sent).toEqual([])
+
+    // Coalesced, last geometry wins: the one released fit reads the container
+    // as the drag left it.
+    fit.next = { rows: 30, cols: 100 }
+    vi.advanceTimersByTime(500)
+    expect(fit.fits).toBe(before + 1)
+    expect(sent).toEqual([{ rows: 30, cols: 100 }])
+  })
+
+  it("hands a parked fit to a gesture that starts inside the window, and the lift releases the pair", () => {
+    const { fit, coord, sent } = setup()
+    coord.start(document.createElement("div"))
+    settleFirstFrame(coord, sent)
+    const ro = observers.at(-1)
+    if (!ro) throw new Error("the coordinator never constructed a ResizeObserver")
+    const before = fit.fits
+
+    ro.fire()
+    vi.advanceTimersByTime(16)
+    expect(fit.fits).toBe(before)
+
+    // The finger lands before the debounce settles: the settle must defer to
+    // the gesture rather than let the fit escape on its own.
+    coord.setHolding(true)
+    fit.next = { rows: 30, cols: 100 }
+    vi.advanceTimersByTime(500)
+    expect(fit.fits).toBe(before)
+    expect(sent).toEqual([])
+
+    coord.setHolding(false)
+    coord.flushHeld()
+    expect(fit.fits).toBe(before + 1)
+    // The send re-arms through the ordinary debounce, as the gesture hold has
+    // always done.
+    expect(sent).toEqual([])
+    vi.advanceTimersByTime(500)
+    expect(sent).toEqual([{ rows: 30, cols: 100 }])
+  })
+
+  it("does not fit twice when a direct send lands on a parked observer refit", () => {
+    const { fit, coord, sent } = setup()
+    coord.start(document.createElement("div"))
+    settleFirstFrame(coord, sent)
+    const ro = observers.at(-1)
+    if (!ro) throw new Error("the coordinator never constructed a ResizeObserver")
+    const before = fit.fits
+
+    ro.fire()
+    vi.advanceTimersByTime(16)
+    expect(fit.fits).toBe(before)
+
+    // A direct send fits for itself, which satisfies the parked refit.
+    coord.directSend(() => {})
+    expect(fit.fits).toBe(before + 1)
+    vi.advanceTimersByTime(500)
+    expect(fit.fits).toBe(before + 1)
   })
 })
 

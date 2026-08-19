@@ -660,6 +660,7 @@ mod tests {
             searching: false,
             content: String::new(),
             scroll_offset: 0,
+            wrap_width: 0,
             focus: StartupCommandLogFocus::List,
         });
         assert_eq!(
@@ -946,6 +947,7 @@ mod tests {
                     searching: false,
                     content: String::new(),
                     scroll_offset: 0,
+                    wrap_width: 0,
                     focus: StartupCommandLogFocus::List,
                 }),
             ),

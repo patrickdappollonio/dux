@@ -42,19 +42,34 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
    scrollbars and oscillates the layout (scrollbar shrinks box, RO fires, refit, repeat).
    Fix: TP:689-706. Pinned: unpinned.
 
-3. **Local refits are per-frame; the PTY resize is debounced to one send at 200ms.**
+3. **The PTY resize is debounced to one send at 200ms, and the local refit is HELD for
+   that window and released with it.**
    Trap: each PTY resize is a SIGWINCH (full child repaint); per-frame sends during a
-   divider drag are the resize jitter. Fix: src/components/terminal/constants.ts:26-32 (`RESIZE_SEND_DEBOUNCE_MS`),
-   src/components/terminal/resizeCoordinator.ts:179-194 (`sendSize`/`armDebounce`),
-   src/components/terminal/resizeCoordinator.ts:323-329 (per-frame refit, debounced send).
+   divider drag are the resize jitter, which is why the send is debounced. But the refit
+   used to run per animation frame anyway, so for the whole drag the local grid ran ahead
+   of the child's, and the child's repaints landed in a geometry the viewer no longer had
+   (measured on a simulated drag: 13 transcript rows duplicated permanently into local
+   scrollback; zero with the fit held). The debounce is therefore the SECOND hold source
+   alongside the touch gesture, coalesced, last geometry wins. Accepted tradeoff, the
+   mirror of A11's: the canvas letterboxes for up to `RESIZE_SEND_DEBOUNCE_MS` during a
+   drag. Fix: src/components/terminal/constants.ts:26-32 (`RESIZE_SEND_DEBOUNCE_MS`),
+   src/components/terminal/resizeCoordinator.ts:150-155 (`fitHeldByDebounce`,
+   `debouncePending`), src/components/terminal/resizeCoordinator.ts:195-228
+   (`sendSize` releases the pair, `armDebounce`),
+   src/components/terminal/resizeCoordinator.ts:230-242 (`fitOrHold` holds on either
+   source), src/components/terminal/resizeCoordinator.ts:364-371 (RO routes through
+   `fitOrHold`).
    Pinned: `components/TerminalPane.test.tsx` "a resize outside any gesture still sends
-   through the normal debounce".
+   through the normal debounce"; `src/components/terminal/resizeCoordinator.test.ts`
+   "the resize coordinator's debounce hold" (all three: no refit during an observer
+   burst then one fit+send at the settle, a gesture starting inside the window inherits
+   the parked fit, a direct send does not cause a double fit).
 
 4. **Geometry reaches the PTY from exactly one place: xterm's own `onResize` event.**
    Trap: the font-load refit re-grids with no container resize anywhere; nothing was
    watching, the PTY kept the fallback-metrics size, and on a phone a copy of the agent's
    cursor-relative status line was left behind on every redraw (the size healed at the
-   next container resize; the scrollback garbage did not). Fix: src/components/terminal/resizeCoordinator.ts:289-305.
+   next container resize; the scrollback garbage did not). Fix: src/components/terminal/resizeCoordinator.ts:330-347.
    Pinned: `components/TerminalPane.test.tsx` "sends the resize when a FONT LOAD re-grids
    the terminal, with no container resize".
 
@@ -75,15 +90,15 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
 
 6. **The initial PTY resize waits for the first PTY frame (the repaint) to fully parse.**
    Trap: resizing before or mid-repaint races a half-painted buffer and leaves the
-   cursor and bottom-anchored prompt in the wrong rows. Fix: src/components/terminal/resizeCoordinator.ts:226-247
-   (`firstFrameLanded` fired from the write callback), src/components/terminal/resizeCoordinator.ts:313-319 (250ms fallback for
+   cursor and bottom-anchored prompt in the wrong rows. Fix: src/components/terminal/resizeCoordinator.ts:267-288
+   (`firstFrameLanded` fired from the write callback), src/components/terminal/resizeCoordinator.ts:354-360 (250ms fallback for
    a session that emits no first frame). Pinned: `components/TerminalPane.test.tsx`
    "reports the re-grid caused by the first-frame handler's OWN fit".
 
 7. **The very first open jiggles the width (down one column and back, 60ms apart).**
    Trap: a same-size resize is a kernel no-op (no SIGWINCH), so when the PTY already
    matches the viewport the agent never repaints over the imperfect initial snapshot.
-   Fix: src/components/terminal/resizeCoordinator.ts:253-269, `src/lib/firstFrameResize.ts:24-26`.
+   Fix: src/components/terminal/resizeCoordinator.ts:294-311, `src/lib/firstFrameResize.ts:24-26`.
    Pinned: `src/lib/firstFrameResize.test.ts` "jiggles on the very first open to repaint
    over the initial snapshot"; `components/TerminalPane.test.tsx` "still jiggles on the
    very first open (the deliberate first-frame bypass)" and "carries a re-grid landing
@@ -94,14 +109,14 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
    when one is armed (the flag rides it; the plan itself is unchanged). Original entry:
    Trap: mobile reconnects constantly; a jiggle forces two full-screen repaints at two
    widths on every one. The single resize still re-asserts ownership and is a kernel
-   no-op when the size is unchanged. Fix: src/components/terminal/resizeCoordinator.ts:270-279, `src/lib/firstFrameResize.ts`.
+   no-op when the size is unchanged. Fix: src/components/terminal/resizeCoordinator.ts:312-322, `src/lib/firstFrameResize.ts`.
    Pinned: `src/lib/firstFrameResize.test.ts` "sends a single resize on a reconnect...";
    `components/TerminalPane.test.tsx` "still sends one plain resize on a RECONNECT's
    first frame, and does not jiggle".
 
 9. **`lastRows`/`lastCols` are seeded right after the mount-time fit.**
    Trap: ResizeObserver fires an initial callback on observe; unseeded, it would send a
-   racing resize before the first paint. Fix: src/components/terminal/resizeCoordinator.ts:306-312.
+   racing resize before the first paint. Fix: src/components/terminal/resizeCoordinator.ts:348-354.
    Pinned: NEW at the rebuild, `src/components/terminal/resizeCoordinator.test.ts`
    "sends nothing when the geometry has not moved since the last send" (and the
    first-frame suite exercises it too).
@@ -127,9 +142,10 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     the finger, the RO refits every frame) hands a region-relative mouse-tracking pager a
     viewer whose margins are gone; its repaint stamps one line per forwarded wheel notch,
     the repeated-line bug on phones. Holding only the SIGWINCH was not enough.
-    Fix: src/components/terminal/resizeCoordinator.ts:137-139 (`fitHeldByGesture`), src/components/terminal/resizeCoordinator.ts:196-224
-    (`fitOrHold`, `fitAndSend`), src/components/terminal/resizeCoordinator.ts:363-383
-    (`flushHeld`, the lift's flush), src/components/terminal/resizeCoordinator.ts:323-329 (RO routes through `fitOrHold`).
+    Fix: src/components/terminal/resizeCoordinator.ts:146-149 (`fitHeldByGesture`), src/components/terminal/resizeCoordinator.ts:230-266
+    (`fitOrHold`, `fitAndSend`), src/components/terminal/resizeCoordinator.ts:405-428
+    (`flushHeld`, the lift's flush, which discharges EITHER hold with one fit),
+    src/components/terminal/resizeCoordinator.ts:364-371 (RO routes through `fitOrHold`).
     Pinned: `components/TerminalPane.test.tsx` "TerminalPane holds the PTY resize while a
     touch-scroll gesture is active": "performs NO local refit while the gesture holds the
     pair", "refits exactly once at the lift, together with the one send", "defers the
@@ -142,9 +158,9 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     when it runs) but the first-open jiggle closure is not; a later plain resize
     overwriting a parked jiggle silently skips the redraw nudge for that open
     (`initialResizeDone` is already latched). The jiggle's 60ms continuation is its own
-    direct send and takes the same hold. Fix: src/components/terminal/resizeCoordinator.ts:140-141 (`heldResizeSend`),
-    src/components/terminal/resizeCoordinator.ts:211-224 (first-one-wins in `fitAndSend`),
-    src/components/terminal/resizeCoordinator.ts:264-269 (continuation through `fitAndSend`).
+    direct send and takes the same hold. Fix: src/components/terminal/resizeCoordinator.ts:156-157 (`heldResizeSend`),
+    src/components/terminal/resizeCoordinator.ts:249-262 (first-one-wins in `fitAndSend`),
+    src/components/terminal/resizeCoordinator.ts:305-311 (continuation through `fitAndSend`).
     Pinned: the held-resize suite above pins the hold and single flush; the
     first-one-wins ordering itself is NEW at the rebuild,
     `src/components/terminal/resizeCoordinator.test.ts` "keeps the FIRST held
@@ -154,7 +170,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
 13. **The debounced `sendSize` also holds during a touch scroll and re-arms at the lift.**
     Trap: the debounced SIGWINCH coming due mid-wheel-stream corrupts the pager repaint
     (see A11); the keyboard-collapse resize is the ordinary trigger, not an exotic one.
-    Fix: src/components/terminal/resizeCoordinator.ts:128-136 (`resizeHeldByGesture`), src/components/terminal/resizeCoordinator.ts:179-189 (`sendSize` holds), src/components/terminal/resizeCoordinator.ts:376-382 (the lift re-arms).
+    Fix: src/components/terminal/resizeCoordinator.ts:138-145 (`resizeHeldByGesture`), src/components/terminal/resizeCoordinator.ts:195-211 (`sendSize` holds, and hands its parked fit to the gesture), src/components/terminal/resizeCoordinator.ts:422-427 (the lift re-arms).
     Pinned: `components/TerminalPane.test.tsx` "defers the debounced resize until
     touchend, then sends exactly once", "touchcancel flushes a held resize too",
     "a gesture without any held resize sends nothing on touchend".

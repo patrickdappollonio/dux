@@ -1274,6 +1274,7 @@ mod tests {
             searching: false,
             content: "line one\nline two".to_string(),
             scroll_offset: 0,
+            wrap_width: 0,
             focus: StartupCommandLogFocus::List,
         });
         app.startup_log_selection = None;

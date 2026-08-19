@@ -180,6 +180,17 @@ pub struct App {
     pub(crate) agent_tab_regions: Vec<(String, Rect)>,
     pub(crate) terminal_return_to_list: bool,
     pub(crate) last_pty_size: (u16, u16),
+    /// Which terminal surface `last_pty_size` was last SENT to, so the resize
+    /// dedupe is keyed by target and not by geometry alone.
+    ///
+    /// One slot for the size was a workspace-wide filter: resize the window while
+    /// looking at agent A, then select agent B, and B's pane measures the same as
+    /// A's does now, so the send is deduped away and B's child keeps its
+    /// pre-resize geometry for as long as it lives. Comparing the target too
+    /// makes every switch send once, which also covers a target resized by some
+    /// other surface (the web pane drives the same PTYs) and cannot be defeated
+    /// by a new switch site forgetting to reset anything.
+    pub(crate) last_pty_resize_target: Option<String>,
     /// How many times the selected surface's grid has been REBUILT (see
     /// `refresh_snapshot_buf`). Not a clock and not a line count: it only
     /// answers "has the grid moved since I looked?", which is the one question
@@ -1166,6 +1177,12 @@ pub(crate) struct StartupCommandLogPrompt {
     pub(crate) searching: bool,
     pub(crate) content: String,
     pub(crate) scroll_offset: u16,
+    /// The body width `scroll_offset` (and any live selection) was computed at.
+    /// Zero until the overlay has been laid out once. See
+    /// [`App::reconcile_startup_log_wrap_width`]: every index this surface keeps
+    /// is an index into text WRAPPED at one width, so a width change invalidates
+    /// them all.
+    pub(crate) wrap_width: u16,
     pub(crate) focus: StartupCommandLogFocus,
 }
 
@@ -1176,6 +1193,10 @@ pub(crate) struct StartupLogViewer {
     pub(crate) display_name: String,
     pub(crate) content: String,
     pub(crate) scroll_offset: u16,
+    /// The pane width `scroll_offset` (and any live selection) was computed at.
+    /// Zero until the viewer has been laid out once. See
+    /// [`App::reconcile_startup_log_wrap_width`].
+    pub(crate) wrap_width: u16,
     pub(crate) search: TextInput,
     pub(crate) searching: bool,
     /// The picker this viewer was PROMOTED from, to be restored when the
@@ -2151,13 +2172,30 @@ pub(crate) struct SelectionOrigin {
     /// stand in for the grid's advancing bottom, so a selection stamped here
     /// cannot be corrected once anything else moves the grid; `App::
     /// drop_drifted_selection` retires it instead of letting it point at other
-    /// text. Read from `ui.agent_scrollback_lines`, which is the value every
-    /// agent PTY and companion terminal is spawned with.
+    /// text. Read from the selected PTY's own spawn-time capacity
+    /// (`PtyClient::scrollback_capacity`), never from live config: capacity is
+    /// fixed when the emulator is built, so a reload that raises the setting
+    /// leaves every running PTY on the old number.
     pub history_saturated: bool,
     /// The value of `App::grid_generation` in this frame: how many times the
     /// grid had been rebuilt when the origin was stamped. Only meaningful
     /// alongside `history_saturated`; see `App::drop_drifted_selection`.
     pub grid_generation: u64,
+    /// The viewport dimensions (rows, cols) the selection was recorded against.
+    ///
+    /// KNOWN LIMIT 3 from [`TerminalSelection::to_origin_row`], and it is handled
+    /// here rather than tolerated. A WIDTH change REFLOWS the grid: alacritty
+    /// rewraps rows to the new width and moves lines between history and the
+    /// viewport, so the recorded row no longer names the text it named and the
+    /// offset/total arithmetic translates it to an arbitrary row. Below
+    /// saturation nothing else notices, so the selection used to survive a
+    /// resize and quietly point somewhere else. `App::drop_drifted_selection`
+    /// retires it on a column change only: a height-only change moves whole,
+    /// unrewrapped lines between history and the viewport, which the offset and
+    /// total arithmetic translates exactly, so the selection keeps following
+    /// its text. Both dimensions are still stamped so the record says what was
+    /// measured, even though only the width is compared.
+    pub grid_size: (u16, u16),
 }
 
 /// Active text selection in the terminal viewport.
@@ -2172,8 +2210,10 @@ pub(crate) struct TerminalSelection {
     /// Grid scroll state when the drag started. `anchor`/`end` are viewport
     /// rows, which only name a fixed piece of text while this stays true, so
     /// the PTY paths translate live rows back into this frame before testing
-    /// them. Unused by the startup-log viewer, which shares this type but
-    /// stores absolute log line numbers (see `screen_to_startup_log_grid`).
+    /// them. Unused by the startup-log viewers, which share this type but store
+    /// WRAPPED VISUAL LINE indices, valid only at the width they were computed
+    /// at (see `screen_to_startup_log_grid` and
+    /// `App::reconcile_startup_log_wrap_width`).
     pub origin: SelectionOrigin,
 }
 
@@ -3054,6 +3094,7 @@ impl App {
             agent_tab_regions: Vec::new(),
             terminal_return_to_list: false,
             last_pty_size: (0, 0),
+            last_pty_resize_target: None,
             grid_generation: 0,
             scroll_mode: std::collections::HashSet::new(),
             last_diff_height: 0,
@@ -5597,19 +5638,25 @@ impl App {
     /// [`SelectionOrigin`]. Callers stamp it onto a new selection and pass it
     /// back in as the "now" frame when testing live cells.
     pub(crate) fn snapshot_selection_origin(&self) -> SelectionOrigin {
-        // The capacity every terminal surface is spawned with: agents through
-        // `dux_core::agent_job` and companion terminals through
-        // `dux_core::engine::companion` both pass `ui.agent_scrollback_lines`
-        // to `PtyClient::spawn`. The PTY does not expose its own limit, so this
-        // is where the number has to come from; a zero capacity is treated as
-        // "never saturated" rather than "always", so an unconfigured surface
-        // keeps the ordinary behaviour instead of dropping every selection.
-        let capacity = self.engine.config.ui.agent_scrollback_lines;
+        // The capacity the SELECTED PTY was actually spawned with, read from the
+        // client rather than from config. Capacity is fixed when the emulator is
+        // built and a live config reload never reaches a running PTY, so reading
+        // `ui.agent_scrollback_lines` here made a full ring read as unsaturated
+        // the moment someone raised the setting, and drift detection stopped
+        // firing for every PTY that predates the reload. A zero capacity, or no
+        // resolvable client, is treated as "never saturated" rather than
+        // "always", so an unconfigured surface keeps the ordinary behaviour
+        // instead of dropping every selection.
+        let capacity = self
+            .selected_terminal_surface_client()
+            .map(|client| client.scrollback_capacity())
+            .unwrap_or(0);
         SelectionOrigin {
             history_saturated: capacity > 0 && self.snapshot_buf.scrollback_total >= capacity,
             grid_generation: self.grid_generation,
             scrollback_offset: self.snapshot_buf.scrollback_offset,
             scrollback_total: self.snapshot_buf.scrollback_total,
+            grid_size: (self.snapshot_buf.rows, self.snapshot_buf.cols),
         }
     }
 
