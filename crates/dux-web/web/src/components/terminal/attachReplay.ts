@@ -1,0 +1,188 @@
+// THE ATTACH-AND-REPLAY MACHINE.
+//
+// Every (re)open of the PTY socket is answered by the server with a fresh
+// repaint: the whole scrollback, as the first Binary frame. This machine owns
+// what happens to that frame and to everything that races it.
+//
+// On a RECONNECT xterm still holds the buffer from before the drop, so writing
+// the replay on top would stack a second copy of history (duplicated, garbled
+// output). It resets xterm before that first reconnect frame so the replay
+// rebuilds the buffer cleanly. The very FIRST open starts from an empty buffer
+// (a fresh terminal), so it needs no reset; only opens after the first do.
+//
+// `reset()` clears every private MODE too (mouse tracking, bracketed paste,
+// cursor visibility, autowrap, application cursor keys), and the child emitted
+// those once at its own startup and never repeats them, so nothing on the live
+// stream puts them back. The repaint therefore carries an explicit mode-restore
+// tail from the server (`dux_core::pty::mode_restore_sequence`). Do NOT try to
+// infer modes here from what the replay draws. Without that tail a reconnect
+// landed on a full-screen agent with `mouseTrackingMode === "none"`, and the
+// touch-scroll forward path (gated on exactly that) returned before it read the
+// finger delta, so a finger drag did nothing at all until a hard refresh.
+//
+// On mobile the socket reconnects constantly, so TWO defensive guards keep a
+// replay from ever stacking (Mechanism A):
+//
+//  1. IDEMPOTENCY BY GENERATION. The `connected` frame tags each replay with a
+//     monotonic generation. This records the last generation applied and DROPS
+//     any replay whose generation it has already applied: a duplicate replay,
+//     or a late blob from a torn-down forwarder, becomes a no-op instead of a
+//     second copy of history. An untagged replay (an older server) always
+//     applies.
+//
+//  2. DRAIN-GATING. Before resetting and replaying it lets the PREVIOUS
+//     connection's xterm write queue fully drain (the empty-write callback
+//     fires only once queued writes have parsed), so a stale queued byte cannot
+//     land after `reset()` and among the replay. Because that callback is
+//     async, bytes arriving during the drain window are HELD and written in
+//     order after the reset, so nothing is reordered or written ahead of the
+//     fresh replay.
+//
+// It also owns the REPLAY FOCUS-REPORT WINDOW. Parsing a replay's mode-restore
+// tail makes xterm volunteer a focus report of its own (measured: DECSET 1004
+// makes `CoreBrowserTerminal` immediately answer through `onData`), which is
+// the viewer answering for state dux-core already owns; those reports are
+// dropped for the duration of the write rather than typed at the child. It is a
+// COUNTER, not a flag, so overlapping replay writes cannot close the window
+// early, and it is bounded by the write CALLBACK, never a timer: xterm says
+// exactly when it has finished parsing the chunk. On the reconnect drain path
+// only the FIRST held chunk (the replay itself) gets the window; anything after
+// it is live output that raced in.
+import type { Terminal } from "@xterm/xterm"
+
+import {
+  nextAppliedGeneration,
+  shouldApplyReplay,
+} from "@/lib/replayGeneration"
+
+export type AttachReplayDeps = {
+  term: Terminal
+  /// The generation stamped on the replay that follows the most recent
+  /// `connected` frame, read at the instant the replay is applied.
+  replayGeneration: () => number | null
+  /// Whether the next chunk written should carry the first-frame resize
+  /// callback, and the callback itself. Both belong to the resize coordinator;
+  /// this machine only decides which write they ride on.
+  needsFirstFrameResize: () => boolean
+  firstFrameLanded: () => void
+}
+
+export type AttachReplay = {
+  /// The socket's byte feed.
+  onBytes: (bytes: Uint8Array) => void
+  /// A (re)open landed. Returns whether it was the FIRST open, which is what
+  /// decides both the reset (only later opens reset) and the resize plan.
+  noteOpen: () => { firstOpen: boolean }
+  /// Whether a REPLAY chunk is being parsed right now. The `onData` gate reads
+  /// this to drop a focus report the replay itself provoked.
+  replayInFlight: () => boolean
+}
+
+export function createAttachReplay(deps: AttachReplayDeps): AttachReplay {
+  const { term, replayGeneration, needsFirstFrameResize, firstFrameLanded } =
+    deps
+
+  let firstOpen = true
+  let awaitingRepaint = false
+  let repaintNeedsReset = false
+  let lastAppliedGen: number | null = null
+  // Set only while draining the previous connection's write queue; incoming
+  // bytes are buffered here (repaint first, then any live bytes) and flushed in
+  // order once the drain completes so nothing is written ahead of the
+  // reset+replay.
+  let draining = false
+  let heldChunks: Uint8Array[] = []
+  // Non-zero while a REPLAY chunk is being applied to xterm.
+  let replayWritesInFlight = 0
+
+  const writeChunk = (bytes: Uint8Array) => {
+    if (needsFirstFrameResize()) {
+      // Resize only once xterm has parsed this first frame (the repaint).
+      term.write(bytes, firstFrameLanded)
+    } else {
+      term.write(bytes)
+    }
+  }
+
+  // The replay chunk specifically: the same write, wrapped in the focus-report
+  // suppression window. The window opens before the bytes go in and closes in
+  // the write's own completion callback, so it covers exactly the parse of this
+  // chunk, mode-restore tail included, and not a millisecond of real user focus
+  // activity either side of it.
+  const writeReplayChunk = (bytes: Uint8Array) => {
+    replayWritesInFlight++
+    const done = () => {
+      replayWritesInFlight = Math.max(0, replayWritesInFlight - 1)
+    }
+    if (needsFirstFrameResize()) {
+      term.write(bytes, () => {
+        done()
+        firstFrameLanded()
+      })
+    } else {
+      term.write(bytes, done)
+    }
+  }
+
+  return {
+    replayInFlight: () => replayWritesInFlight > 0,
+    noteOpen() {
+      const wasFirst = firstOpen
+      // The next binary frame is this open's scrollback replay: arm the repaint
+      // handling. Only opens AFTER the first also reset the buffer, since the
+      // first open starts from an empty terminal.
+      awaitingRepaint = true
+      if (firstOpen) {
+        firstOpen = false
+        repaintNeedsReset = false
+      } else {
+        repaintNeedsReset = true
+      }
+      return { firstOpen: wasFirst }
+    },
+    onBytes(bytes) {
+      // Mid-drain: hold everything (the repaint plus any live bytes that raced
+      // in) so it lands in order after reset(), never ahead of the fresh
+      // replay.
+      if (draining) {
+        heldChunks.push(bytes)
+        return
+      }
+      if (awaitingRepaint) {
+        awaitingRepaint = false
+        const gen = replayGeneration()
+        if (!shouldApplyReplay(gen, lastAppliedGen)) {
+          // A replay already applied (duplicate, or a stale/late blob): drop it
+          // entirely (no reset, no write) so it can never stack a second copy.
+          return
+        }
+        lastAppliedGen = nextAppliedGeneration(gen, lastAppliedGen)
+        if (repaintNeedsReset) {
+          // Reconnect replay: drain the previous connection's queue, then reset
+          // and replay (plus any raced-in live bytes) in order.
+          draining = true
+          heldChunks = [bytes]
+          term.write("", () => {
+            term.reset()
+            const chunks = heldChunks
+            heldChunks = []
+            draining = false
+            // The FIRST held chunk is the replay itself (it seeded the array
+            // above); anything after it is live output that raced in, so only
+            // the first gets the focus-report suppression window.
+            chunks.forEach((c, i) => {
+              if (i === 0) writeReplayChunk(c)
+              else writeChunk(c)
+            })
+          })
+        } else {
+          // Very first open: the buffer is already empty, so no reset or drain
+          // is needed. Write the repaint straight through.
+          writeReplayChunk(bytes)
+        }
+        return
+      }
+      writeChunk(bytes)
+    },
+  }
+}

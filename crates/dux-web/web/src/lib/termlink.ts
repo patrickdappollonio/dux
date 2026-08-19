@@ -49,7 +49,7 @@ export function linkifierElement(root: HTMLElement | null | undefined): HTMLElem
  * Replays the mouse sequence a tap would have produced, straight at the
  * Linkifier, and reports whether it activated a link.
  *
- * `activations` is a counter the pane bumps inside its `linkHandler.activate`
+ * `activations` is a counter the link-press machine bumps inside its one opener (`openLink`), whichever client triggered it
  * whenever it actually opens a tab; comparing it across the dispatch is what
  * tells a link tap from an ordinary one WITHOUT duplicating the open logic or
  * inspecting xterm's internals.
