@@ -138,36 +138,32 @@ desktop is already typing into and the phone watches; nothing you do by merely
 arriving takes the keyboard away. If nobody holds it, the first device to look at
 it picks it up.
 
-**Watching shows you the real thing.** A terminal has one true size, the
-driver's, and every other device renders the same output. So a watcher redraws
-at that size and shrinks the text until it fits the window: what is on your
-phone is what is on the desktop, character for character, just smaller. No
-wrapped lines, no clipped right-hand edge, and no mangled leftovers piling up in
-the scrollback you scroll back through. If the agent's screen is so much bigger
-than yours that even the smallest readable text will not fit, the terminal keeps
-its real size and you pan around it. Prefer big text to a faithful picture?
-**Watcher view** in Preferences has a **Fit my window** setting that draws at
-your own size instead, wrapping and all; dux marks such a view as sized for
-another device so you always know which one you are looking at.
+**A watcher sees the take-over card.** A watched terminal is covered by a
+full-pane card naming who has the keyboard ("Open on Chrome on macOS") with a
+**Take over** button. The card is deliberate, and it is telling you something
+specific: a device with a different screen size than yours is driving, and a
+terminal only has one size at a time. Hit **Take over** and dux resizes the
+PTY to your screen, repaints it fresh, and hands you the keyboard. Nothing is
+lost, the other device simply becomes the watcher until it takes over in turn.
+It is a polite hand-off, not a fight, and it happens only when somebody asks
+for it: the device you took over from stays a watcher even when you go back to
+it, until you press its own Take over. One tap is the whole cost of switching
+devices, and in exchange nothing ever quietly grabs the keyboard mid-sentence.
 
-Along the bottom of a watched terminal sits a small banner naming who has it
-("Open on Chrome on macOS") with a **Take over** button. Click it and input snaps
-to you. Nothing is lost, the other device simply becomes the watcher until it
-takes over in turn. It is a polite hand-off, not a fight, and it happens only
-when somebody asks for it: the device you took over from stays a watcher even
-when you go back to it, until you press its own Take over. One tap is the whole
-cost of switching devices, and in exchange nothing ever quietly grabs the
-keyboard mid-sentence.
-
-Taking over always reattaches: the terminal reconnects, the server repaints the
-current screen, and the keyboard arrives with it. That takes a moment (you will
-see "Reconnecting…") and it is deliberate, because a fresh screen is the only
-thing that clears whatever the buffer collected before you took it.
+Taking over always reattaches: the terminal reconnects, the server repaints
+the current screen at your size, and the keyboard arrives with it. That takes
+a moment (you will see "Reconnecting…") and it is deliberate, because a fresh
+attach is what guarantees you start from a clean picture rather than someone
+else's leftovers. Behind the card, dux keeps a watcher's copy of the terminal
+at the driver's true size, shrinking the text until it fits, so nothing
+mangled ever piles up in the scrollback. **Watcher view** in Preferences has a
+**Fit my window** setting that keeps that hidden copy at your own size
+instead, wrapping and all.
 
 If the driving device disconnects, everyone watching is told. A watcher you are
 looking at picks the terminal up on the spot; one sitting in a background tab
-switches its banner to **Nobody is driving** rather than naming a browser that
-has gone. And if the watcher's own connection has given up entirely, the banner
+switches its card to **Nobody is driving** rather than naming a browser that
+has gone. And if the watcher's own connection has given up entirely, the card
 steps aside for the **Connection lost** notice and its **Reconnect** button,
 because a Take over button over a socket that is not there would only look like
 it worked.

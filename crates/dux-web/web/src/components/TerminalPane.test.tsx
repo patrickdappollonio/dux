@@ -880,34 +880,39 @@ describe("TerminalPane viewer grid divergence", () => {
   })
 })
 
-// THE WATCHER'S BANNER. It used to be a solid card over the whole pane, which
-// was right while a watcher's picture was garbage. With the faithful view the
-// picture underneath is the agent's own screen, so the same content and the
-// same action now ride a compact bottom-anchored banner that occludes nothing.
-describe("TerminalPane watcher banner", () => {
-  const banner = () => screen.getByText("Take over").closest("div")
+// THE TAKE-OVER CARD, full-pane and solid on purpose. It is not a rendering
+// shield (the faithful view keeps the picture underneath clean); it says that
+// a device with a different viewport size is driving this PTY and that taking
+// over retargets the PTY's size to this device. The xterm stays mounted
+// underneath, still receiving output, so reclaiming is instant.
+describe("TerminalPane take-over card", () => {
+  const card = () => screen.getByText("Take over").closest("div")
 
-  it("renders compact and non-occluding, with no full-pane backdrop", () => {
+  it("paints solid over the whole pane, with the terminal still mounted underneath", () => {
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     act(() => notifyPtyOwner("s1", "conn-other"))
-    // The strip the card sits in must not swallow clicks meant for the
-    // terminal, and it must not cover it: bottom-anchored, not inset-0.
-    const strip = screen.getByText("Active on another device").closest(
-      ".pointer-events-none",
-    )
-    expect(strip).toBeTruthy()
-    expect(strip!.className).toContain("bottom-0")
-    expect(strip!.className).not.toContain("inset-0")
-    // And the terminal is still mounted and still on screen underneath it.
+    // A full-pane, solid backdrop: it reads as "instead of" the terminal
+    // rather than a banner over it.
+    const backdrop = screen
+      .getByText("Active on another device")
+      .closest(".absolute")
+    expect(backdrop).toBeTruthy()
+    expect(backdrop!.className).toContain("inset-0")
+    expect(backdrop!.className).toContain("bg-background")
+    // And the terminal stays mounted underneath it, so reclaiming is instant.
     expect(screen.getByTestId("terminal-container")).toBeTruthy()
   })
 
-  it("keeps the three titles and the one action", () => {
+  it("keeps the three titles, the second sentence, and the one action", () => {
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     act(() => notifyPtyOwner("s1", "conn-other"))
     expect(screen.getByText("Active on another device")).toBeTruthy()
+    // The placeholder explains what the covered pane is for.
+    expect(
+      screen.getByText(/Take over to drive this agent from here/),
+    ).toBeTruthy()
     expect(screen.getByText("Take over")).toBeTruthy()
-    expect(banner()).toBeTruthy()
+    expect(card()).toBeTruthy()
   })
 
   it("is not rendered for the owner at all", () => {

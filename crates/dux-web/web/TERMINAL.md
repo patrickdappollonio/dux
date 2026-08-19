@@ -290,9 +290,13 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     else AND the two grids actually differ) and disappears live when either side
     moves, because both are live values. Unknown on either side reads as "nothing to
     claim", so an older server produces no badge rather than a guess.
-    AMENDED at the faithful-view arc (A23): the occlusion is gone with the card.
-    The take-over surface is now a bottom-anchored banner (C17), so the badge
-    moved to the pane's TOP-RIGHT and the two never overlap. What also changed is
+    KNOWN OCCLUSION, stated rather than hidden: the take-over card paints solid
+    over the whole pane for every non-owner (C17), and the badge deliberately
+    sits under it at `z-10` (top-right since the faithful-view arc), so the
+    badge is in the DOM but behind that card in the common case. The card is
+    the fuller answer to the same question, and two answers stacked would be
+    worse than one; the badge surfaces only when the card stands down for the
+    connection-lost affordance (C12). What the faithful-view arc changed is
     how much the badge has left to say: in the default FAITHFUL view the
     coordinator adopts the PTY's grid, the two sides agree, and the badge retires
     itself without knowing why. It is deliberately still driven by the LIVE
@@ -772,14 +776,12 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     own and retires it on reconnect and unmount"; `src/lib/storePtyOwnership.test.ts`
     "noteOwnPtyConnection registers and retires this client's socket ids".
 
-12. **The take-over surface yields to the connection-lost affordance.** Trap: it
-    used to paint solid over the whole pane; a non-owner with a dead socket would see
+12. **The take-over surface yields to the connection-lost affordance.** Trap: the
+    card paints solid over the whole pane; a non-owner with a dead socket would see
     only "Take over" and never Reconnect. One state on screen at a time, by suppressing
-    it rather than lifting z-orders. AMENDED at the faithful-view arc: the surface is
-    now the non-occluding banner (C17), so the two would no longer physically collide,
-    but the suppression stays deliberately: a watcher whose socket has died needs
+    it rather than lifting z-orders: a watcher whose socket has died needs
     Reconnect, and a Take over that cannot reach the server is an offer dux cannot
-    keep. Fix: the banner's `!isOwner && !(connectionLost && !offline)` gate in
+    keep. Fix: the card's `!isOwner && !(connectionLost && !offline)` gate in
     `src/components/TerminalPane.tsx`.
     Pinned: `components/TerminalPane.test.tsx` "shows the Reconnect affordance, not the
     take-over card, on a dead socket".
@@ -862,28 +864,28 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     guards are C2's claim table and
     `a_second_pty_connection_is_replayed_scrollback_and_claims_only_by_taking_over`.
 
-17. **NEW at the faithful-view arc: the take-over card became a BANNER.** It used
-    to be a solid `bg-background` overlay across the whole pane, and that was
-    right for exactly as long as a watcher's picture was garbage: there was
-    nothing underneath worth looking at. With the faithful view the picture
-    underneath IS the agent's screen as its driver sees it, so covering it hides
-    the thing the user came to watch. It is now a compact, bottom-anchored card:
-    same three titles, same single Take over action, same confirm-free
-    semantics, same 40px touch floor. NON-OCCLUDING is structural rather than
-    visual: the strip it sits in is `pointer-events-none` and only the card
-    re-enables pointer events for its own bounds, so every click outside it
-    reaches the terminal (a watcher cannot type, but selection, links and
-    scrolling are still theirs).
-    ONE DELIBERATE COPY CUT, stated rather than hidden: the description's second
-    sentence ("Take over to drive this agent from here") is gone. It existed
-    because the card was a full-pane PLACEHOLDER that had to explain what the
-    pane was for; the button now sits beside the sentence and says it.
-    Fix: `src/components/TerminalPane.tsx` (the banner, replacing the `Card`
-    overlay; the badge moved to the top-right in the same change, A21).
-    Pinned: `components/TerminalPane.test.tsx` "TerminalPane watcher banner"
-    (compact and non-occluding with no full-pane backdrop, the three titles and
-    the one action, and nothing at all for the owner), plus every pre-existing
-    take-over test, which asserts the same titles and the same button.
+17. **RESTORED after the faithful-view arc: the take-over card is FULL-PANE, and
+    that is a design decision, not a leftover.** The faithful-view arc briefly
+    turned it into a compact bottom banner, on the theory that the card had only
+    ever been a shield over a garbage picture and that the now-clean picture
+    underneath deserved to be seen. That theory misread what the card is FOR:
+    it is deliberate communication that a device with a DIFFERENT viewport size
+    is driving this PTY, and that taking over retargets the PTY's size to this
+    device. A solid `bg-background` overlay across the whole pane says that
+    plainly; a strip along one edge reads as a footnote to a screen that looks
+    drivable. The card is not a rendering shield, and the faithful at-grid
+    buffer (A23) does its work underneath it regardless: the watcher's local
+    scrollback stays clean whatever covers the pane, and take-over remains a
+    fresh attach (C8). Same three titles, same second description sentence
+    ("Take over to drive this agent from here", or its terminal variant), same
+    single confirm-free Take over action.
+    Fix: `src/components/TerminalPane.tsx` (the `Card` overlay; the badge
+    stays top-right and sits back under the card's z-20, A21).
+    Pinned: `components/TerminalPane.test.tsx` "TerminalPane take-over card"
+    (full-pane solid backdrop with the terminal still mounted underneath, the
+    three titles, the second sentence and the one action, and nothing at all
+    for the owner), plus every pre-existing take-over test, which asserts the
+    same titles and the same button.
 
 ## D. Keys and clipboard
 
