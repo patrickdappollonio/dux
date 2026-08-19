@@ -56,6 +56,7 @@ pub enum Action {
     OpenCurrentPullRequest,
     AttachPullRequest,
     DetachPullRequest,
+    ResumePullRequestAutodetection,
     ToggleFullscreen,
     ScrollPageUp,
     ScrollPageDown,
@@ -233,6 +234,7 @@ impl Action {
             Action::OpenCurrentPullRequest => "open_current_pull_request",
             Action::AttachPullRequest => "attach_pull_request",
             Action::DetachPullRequest => "detach_pull_request",
+            Action::ResumePullRequestAutodetection => "resume_pull_request_autodetection",
             Action::ToggleFullscreen => "toggle_fullscreen",
             Action::ScrollPageUp => "scroll_page_up",
             Action::ScrollPageDown => "scroll_page_down",
@@ -401,7 +403,10 @@ impl Action {
                 "Attach a GitHub pull request to the selected agent, pausing autodetection."
             }
             Action::DetachPullRequest => {
-                "Detach the manually attached pull request so branch autodetection resumes."
+                "Detach the selected agent's pull request and stop looking for one on it, until you attach a pull request by hand or resume autodetection."
+            }
+            Action::ResumePullRequestAutodetection => {
+                "Start looking for a pull request on the selected agent's branch again, after a detach."
             }
             Action::ToggleFullscreen => {
                 "Toggle the agent pane between windowed and fullscreen. Windowed, typing reaches the agent while dux chords stay active; fullscreen, keys go to the agent verbatim."
@@ -655,6 +660,7 @@ impl Action {
             | Action::ForceReconnectAgent
             | Action::AttachPullRequest
             | Action::DetachPullRequest
+            | Action::ResumePullRequestAutodetection
             | Action::RefreshChanges
             | Action::ChangeDefaultProvider
             | Action::ChangeProjectDefaultProvider

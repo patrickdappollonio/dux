@@ -543,6 +543,32 @@ fn tables_added_since_are_created_empty_and_immediately_usable() {
     assert_eq!(pins.len(), 1);
     assert_eq!(pins[0].pr_number, 7);
     assert_eq!(pins[0].owner_repo, "forker/widget");
+
+    // `session_pr_suppressions`: empty, so an upgrading database keeps every
+    // agent's autodetection on (nobody detached before the table existed), and
+    // immediately usable once someone does detach.
+    assert!(
+        store
+            .load_pr_suppressions()
+            .expect("load suppressions")
+            .is_empty()
+    );
+    store
+        .set_pr_suppressed("sess-1")
+        .expect("suppress autodetection");
+    assert_eq!(
+        store.load_pr_suppressions().expect("load suppressions"),
+        vec!["sess-1".to_string()]
+    );
+    store
+        .delete_pr_suppression("sess-1")
+        .expect("resume autodetection");
+    assert!(
+        store
+            .load_pr_suppressions()
+            .expect("load suppressions")
+            .is_empty()
+    );
 }
 
 #[test]

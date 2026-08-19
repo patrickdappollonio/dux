@@ -323,6 +323,22 @@ impl SessionStore {
             );
             "#,
         )?;
+        // A session whose pull-request autodetection the user switched off by
+        // detaching. One row per session, presence is the whole meaning, so the
+        // table has a single column. Durable on purpose: a detach is a user
+        // decision and a restart must not quietly resume detection. Like
+        // `session_pr_overrides` the FK is declared for parity only (the
+        // connection never enables `PRAGMA foreign_keys`), so `delete_session`
+        // and `remove_project_records` delete these rows explicitly. Derived
+        // runtime state, so it lives here and never in portable config.
+        self.conn.execute_batch(
+            r#"
+            create table if not exists session_pr_suppressions (
+                session_id text primary key
+                    references agent_sessions(id) on delete cascade
+            );
+            "#,
+        )?;
         // Per-session monotonic changed-files revision counter (server mode).
         // Separate from the session record so it is purely housekeeping: a single
         // chokepoint that hands out a strictly-increasing `rev` per session,
@@ -759,6 +775,11 @@ impl SessionStore {
              (select id from agent_sessions where project_id = ?1)",
             params![project_id],
         )?;
+        tx.execute(
+            "delete from session_pr_suppressions where session_id in \
+             (select id from agent_sessions where project_id = ?1)",
+            params![project_id],
+        )?;
         // Drop the per-session changed-files rev counters BEFORE the sessions
         // themselves (the subquery resolves the ids while the rows still exist),
         // so a project removal cannot leave orphaned `changes_rev` rows behind.
@@ -939,6 +960,42 @@ impl SessionStore {
             params![session_id],
         )?;
         Ok(())
+    }
+
+    /// Record that a session's pull-request autodetection is suppressed (the
+    /// user detached). Idempotent: suppressing an already-suppressed session
+    /// changes nothing.
+    pub fn set_pr_suppressed(&self, session_id: &str) -> Result<()> {
+        self.conn.execute(
+            "insert into session_pr_suppressions (session_id) values (?1) \
+             on conflict(session_id) do nothing",
+            params![session_id],
+        )?;
+        Ok(())
+    }
+
+    /// Clear a session's suppression so autodetection runs again (a no-op when
+    /// the session was not suppressed).
+    pub fn delete_pr_suppression(&self, session_id: &str) -> Result<()> {
+        self.conn.execute(
+            "delete from session_pr_suppressions where session_id = ?1",
+            params![session_id],
+        )?;
+        Ok(())
+    }
+
+    /// Every session id whose pull-request autodetection is suppressed. Loaded
+    /// once at boot into the engine's in-memory mirror.
+    pub fn load_pr_suppressions(&self) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("select session_id from session_pr_suppressions")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
     }
 
     pub fn upsert_session(&self, session: &AgentSession) -> Result<()> {
@@ -1212,6 +1269,10 @@ impl SessionStore {
         tx.execute("delete from session_prs where session_id = ?1", params![id])?;
         tx.execute(
             "delete from session_pr_overrides where session_id = ?1",
+            params![id],
+        )?;
+        tx.execute(
+            "delete from session_pr_suppressions where session_id = ?1",
             params![id],
         )?;
         // Drop the per-session changed-files revision counter too, so a deleted
@@ -1708,6 +1769,53 @@ mod tests {
         store.delete_pr_override("s1").unwrap();
     }
 
+    /// A detach must outlive the process: dux restarting is not the user
+    /// changing their mind, so the suppression row round-trips a reopen.
+    #[test]
+    fn pr_suppression_round_trips_and_survives_reopen() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("sessions.sqlite3");
+        let now = Utc::now();
+        {
+            let store = SessionStore::open(&db).unwrap();
+            store.upsert_session(&test_session("s1", now, now)).unwrap();
+            store.upsert_session(&test_session("s2", now, now)).unwrap();
+            assert!(store.load_pr_suppressions().unwrap().is_empty());
+            store.set_pr_suppressed("s1").unwrap();
+            // Suppressing twice is the same single row: presence is the whole
+            // meaning, so the write is idempotent.
+            store.set_pr_suppressed("s1").unwrap();
+            assert_eq!(
+                store.load_pr_suppressions().unwrap(),
+                vec!["s1".to_string()]
+            );
+        }
+        let store = SessionStore::open(&db).unwrap();
+        assert_eq!(
+            store.load_pr_suppressions().unwrap(),
+            vec!["s1".to_string()]
+        );
+        store.delete_pr_suppression("s1").unwrap();
+        assert!(store.load_pr_suppressions().unwrap().is_empty());
+        // Clearing an absent suppression is a harmless no-op.
+        store.delete_pr_suppression("s1").unwrap();
+    }
+
+    #[test]
+    fn delete_session_also_removes_its_pr_suppression_row() {
+        let store = test_store();
+        let now = Utc::now();
+        store.upsert_session(&test_session("s1", now, now)).unwrap();
+        store.set_pr_suppressed("s1").unwrap();
+
+        store.delete_session("s1").unwrap();
+
+        // The declared FK cascade never fires (PRAGMA foreign_keys is off), so
+        // the explicit delete is what keeps a later session reusing the id from
+        // inheriting a detach it never asked for.
+        assert!(store.load_pr_suppressions().unwrap().is_empty());
+    }
+
     #[test]
     fn delete_session_also_removes_its_pr_override_row() {
         let store = test_store();
@@ -1763,6 +1871,10 @@ mod tests {
         // is proven to drop exactly its own project's override rows.
         store.upsert_pr_override(&stored_pr("a", 1)).unwrap();
         store.upsert_pr_override(&stored_pr("c", 3)).unwrap();
+        // One suppressed session per project, so the removal is proven to drop
+        // exactly its own project's suppression rows.
+        store.set_pr_suppressed("b").unwrap();
+        store.set_pr_suppressed("c").unwrap();
         // Advance a changed-files rev for one of p1's sessions so there is a
         // `changes_rev` row to prove the bulk removal drops it too.
         assert_eq!(store.next_changes_rev("a").unwrap(), 1);
@@ -1784,6 +1896,8 @@ mod tests {
         assert!(store.load_all_latest_prs().unwrap().is_empty());
         // p1's override row went with its sessions; p2's survives untouched.
         assert_eq!(store.load_pr_overrides().unwrap(), vec![stored_pr("c", 3)]);
+        // Same for the suppression rows: p1's went, p2's stayed.
+        assert_eq!(store.load_pr_suppressions().unwrap(), vec!["c".to_string()]);
         // The project row itself is deleted in the same transaction — only p2
         // remains, so a removal cannot leave a row that reappears on restart.
         let project_ids: Vec<String> = store

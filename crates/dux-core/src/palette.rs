@@ -320,9 +320,16 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
         action: Action::DetachPullRequest,
         name: "detach-pull-request",
-        description: "Detach the manually attached pull request so autodetection resumes",
-        // Per-session: the web's agent ⋯ menu carries "Detach pull request"
-        // (already shipped), so no app-menu entry is warranted.
+        description: "Detach the selected agent's pull request and stop looking for one on it",
+        // Per-session: the web's agent ⋯ menu carries "Detach pull request",
+        // so no app-menu entry is warranted.
+    },
+    PaletteCommand {
+        action: Action::ResumePullRequestAutodetection,
+        name: "resume-pull-request-autodetection",
+        description: "Look for a pull request on the selected agent's branch again, after a detach",
+        // Per-session: the web's agent ⋯ menu carries "Resume PR
+        // autodetection" on the same gate, so no app-menu entry is warranted.
     },
     // ── Global ────────────────────────────────────────────────────
     PaletteCommand {

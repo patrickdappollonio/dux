@@ -234,6 +234,16 @@ describe("store write actions route to REST", () => {
     expect(actionCalls[0].method).toBe("DELETE")
   })
 
+  it("resumePullRequestAutodetection POSTs the autodetect endpoint", async () => {
+    const mod = await loadStore()
+    mod.resumePullRequestAutodetection("s1")
+    await vi.waitFor(() => expect(actionCalls.length).toBe(1))
+    expect(actionCalls[0].url).toBe(
+      "/api/v1/sessions/s1/pull-request/autodetect",
+    )
+    expect(actionCalls[0].method).toBe("POST")
+  })
+
   it("pullProject POSTs the new project pull endpoint", async () => {
     const mod = await loadStore()
     mod.pullProject("p1")
@@ -317,6 +327,16 @@ describe("store write actions surface REST errors as a toast", () => {
     const mod = await loadStore()
     actionFails = true
     mod.detachPullRequest("s1")
+    await vi.waitFor(() => expect(toast.error).toHaveBeenCalled())
+    expect(vi.mocked(toast.error).mock.calls[0][0]).toContain(
+      "the server said no",
+    )
+  })
+
+  it("resumePullRequestAutodetection shows an error toast on a non-2xx", async () => {
+    const mod = await loadStore()
+    actionFails = true
+    mod.resumePullRequestAutodetection("s1")
     await vi.waitFor(() => expect(toast.error).toHaveBeenCalled())
     expect(vi.mocked(toast.error).mock.calls[0][0]).toContain(
       "the server said no",

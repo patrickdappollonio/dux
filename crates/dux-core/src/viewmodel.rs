@@ -458,6 +458,13 @@ pub struct SessionView {
     pub auto_reopen_enabled: bool,
     /// Associated GitHub pull request, if one is tracked for this session.
     pub pr: Option<PrView>,
+    /// Whether the user detached this agent's pull request, which switches
+    /// autodetection off for it until they attach one by hand or resume
+    /// detection explicitly. Lives on `SessionView` and not on `PrView`
+    /// (unlike `overridden`) precisely because it is the state in which there
+    /// is NO pull request to hang it off: it is what lets a surface offer the
+    /// way back.
+    pub pr_autodetect_suppressed: bool,
     /// Provider tabs for this session, **Main first** (`tabs[0]`, `id ==
     /// session id`) then extra tabs in creation order. Always non-empty. The
     /// client shows the tab strip only when `tabs.len() >= 2`; with one tab the
@@ -725,11 +732,11 @@ pub struct PrView {
     pub state: String,
     pub title: String,
     pub url: String,
-    /// Whether this PR was manually attached (pinned) rather than autodetected.
-    /// On `PrView` and NOT on `SessionView`, so "overridden without a PR" is
-    /// unrepresentable. Also what makes a DETACH observable to the web's
-    /// sessions fingerprint in the window where the pinned PR data itself has
-    /// not changed yet; a propagation prerequisite, not a UI convenience.
+    /// Whether this PR was manually attached (pinned) rather than autodetected:
+    /// plain provenance. On `PrView` and NOT on `SessionView`, so "overridden
+    /// without a PR" is unrepresentable. Detach itself no longer needs this
+    /// flag to propagate; it removes the PR from the view in the same spine
+    /// change.
     pub overridden: bool,
 }
 
@@ -858,6 +865,7 @@ impl SessionView {
         s: &AgentSession,
         pr: Option<&PrInfo>,
         pr_overridden: bool,
+        pr_autodetect_suppressed: bool,
         tabs: Vec<AgentTabView>,
         has_output: bool,
         working: bool,
@@ -877,6 +885,7 @@ impl SessionView {
             status: s.status.as_str().to_string(),
             auto_reopen_enabled: s.auto_reopen_enabled,
             pr: pr.map(|pr| PrView::from_pr(pr, pr_overridden)),
+            pr_autodetect_suppressed,
             tabs,
             has_output,
             working,
@@ -1110,6 +1119,7 @@ impl Engine {
             s,
             self.pr_statuses.get(&s.id),
             self.pr_overrides.contains_key(&s.id),
+            self.pr_suppressions.contains(&s.id),
             tabs,
             has_output,
             working,
@@ -1350,6 +1360,26 @@ mod tests {
         );
         let pr = engine.spine().sessions[0].pr.clone().expect("pr view");
         assert!(pr.overridden, "a pinned PR reports overridden");
+    }
+
+    /// The detach flag rides `SessionView`, not `PrView`: the state it
+    /// describes is precisely the one with no PR, and it is what lets a
+    /// surface offer "resume autodetection" only where that means something.
+    #[test]
+    fn session_view_reports_a_detached_agents_suppressed_autodetection() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/repo"));
+        engine.sessions.push(sample_session("s1", "p1", "feature"));
+
+        assert!(!engine.spine().sessions[0].pr_autodetect_suppressed);
+
+        engine.pr_suppressions.insert("s1".to_string());
+        let view = &engine.spine().sessions[0];
+        assert!(view.pr_autodetect_suppressed);
+        assert!(
+            view.pr.is_none(),
+            "a detached agent shows no PR to hang the flag off"
+        );
     }
 
     #[test]

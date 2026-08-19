@@ -17031,7 +17031,7 @@ not_a_real_action = ["x"]
     }
 
     #[test]
-    fn command_palette_gates_attach_and_detach_pull_request_on_gh_and_the_pin() {
+    fn command_palette_gates_the_pull_request_commands_on_gh_and_the_association() {
         let mut app = test_app(default_bindings());
 
         // gh unavailable: attach (which needs gh to resolve) is not offered.
@@ -17039,9 +17039,9 @@ not_a_real_action = ["x"]
             app.filtered_palette_commands("attach-pull-request")
                 .is_empty()
         );
-        // Detach is NOT gh-gated: it touches no network, and a pin must never
-        // outlive the ability to remove it. With no pin it stays hidden; with
-        // one it appears even while gh is unavailable.
+        // Detach is NOT gh-gated: it touches no network, and an association
+        // must never outlive the ability to remove it. With no PR at all it
+        // stays hidden; with a pin it appears even while gh is unavailable.
         assert!(
             app.filtered_palette_commands("detach-pull-request")
                 .is_empty()
@@ -17056,7 +17056,27 @@ not_a_real_action = ["x"]
         );
         app.engine.pr_overrides.clear();
 
-        // gh available, selected session has no pin: attach only.
+        // An AUTODETECTED badge is detachable too: it is the case the user
+        // wants gone, and the old pin-only gate hid the command from them.
+        app.engine.pr_statuses.insert(
+            "session-1".to_string(),
+            dux_core::model::PrInfo {
+                number: 7,
+                state: dux_core::model::PrState::Open,
+                title: "Autodetected".to_string(),
+                host: "github.com".to_string(),
+                owner_repo: "o/r".to_string(),
+                url: "https://github.com/o/r/pull/7".to_string(),
+            },
+        );
+        assert!(
+            !app.filtered_palette_commands("detach-pull-request")
+                .is_empty(),
+            "an autodetected association is detachable"
+        );
+        app.engine.pr_statuses.clear();
+
+        // gh available, selected session has no PR at all: attach only.
         app.engine.github_integration_enabled = true;
         app.engine.gh_status = dux_core::model::GhStatus::Available;
         assert_eq!(
@@ -17071,7 +17091,7 @@ not_a_real_action = ["x"]
         assert!(
             app.filtered_palette_commands("detach-pull-request")
                 .is_empty(),
-            "detach must not be offered while the selected agent holds no pin"
+            "detach must not be offered while the selected agent has no PR"
         );
 
         // Pin the selected session: detach appears alongside attach.
@@ -17084,6 +17104,35 @@ not_a_real_action = ["x"]
         );
         assert!(
             !app.filtered_palette_commands("detach-pull-request")
+                .is_empty()
+        );
+    }
+
+    /// The way back is offered only where it means something: while the
+    /// selected agent is actually detached. Like detach, it is not gh-gated.
+    #[test]
+    fn command_palette_offers_resume_only_while_the_selected_agent_is_detached() {
+        let mut app = test_app(default_bindings());
+
+        assert!(
+            app.filtered_palette_commands("resume-pull-request-autodetection")
+                .is_empty(),
+            "nothing to resume on an agent nobody detached"
+        );
+
+        app.engine.pr_suppressions.insert("session-1".to_string());
+        assert!(
+            !app.filtered_palette_commands("resume-pull-request-autodetection")
+                .is_empty(),
+            "a detach must be undoable without gh"
+        );
+
+        // Scoped to the SELECTED agent: another agent's detach is not this
+        // agent's way back.
+        app.engine.pr_suppressions.clear();
+        app.engine.pr_suppressions.insert("session-2".to_string());
+        assert!(
+            app.filtered_palette_commands("resume-pull-request-autodetection")
                 .is_empty()
         );
     }
@@ -17144,7 +17193,7 @@ not_a_real_action = ["x"]
     }
 
     #[test]
-    fn detach_pull_request_drops_the_pin_and_reports_the_no_op_honestly() {
+    fn detach_pull_request_drops_the_pin_and_the_badge_and_resume_puts_it_back() {
         let mut app = test_app(default_bindings());
         // The override row has a foreign key on the session row, so the
         // fixture session must be persisted before the pin can be.
@@ -17180,14 +17229,16 @@ not_a_real_action = ["x"]
             app.status.message()
         );
 
-        // On an unpinned session the command still reports the honest no-op.
-        app.execute_command("detach-pull-request".to_string())
-            .expect("detach again");
+        // The detach is recorded, so autodetection stays off for the agent.
+        assert!(app.engine.pr_suppressions.contains("session-1"));
+
+        // And the palette carries the way back out.
+        app.execute_command("resume-pull-request-autodetection".to_string())
+            .expect("resume");
+        assert!(app.engine.pr_suppressions.is_empty());
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Info);
         assert!(
-            app.status
-                .message()
-                .contains("no manually attached pull request"),
+            app.status.message().contains("Resumed"),
             "got {:?}",
             app.status.message()
         );

@@ -55,7 +55,8 @@ export interface PrView {
   /** True when this PR was manually attached (pinned) rather than autodetected
    * from the branch name. Lives on the PR view, not the session, so
    * "overridden without a PR" is unrepresentable. Drives the agent menu's
-   * attach-label flip and the detach item's visibility. */
+   * attach-label flip. Detach is offered on ANY association, pinned or not, so
+   * it is gated on the PR's presence rather than on this. */
   overridden: boolean
 }
 
@@ -175,6 +176,13 @@ export interface SessionView {
   status: SessionStatus
   auto_reopen_enabled: boolean
   pr?: PrView
+  /** True while the user has detached this agent's pull request, which stops
+   * dux looking for one on it until they attach a PR by hand or resume
+   * detection. Lives on the session and not on `pr` (unlike `overridden`)
+   * precisely because it describes the state where there IS no PR: it is what
+   * gates the menu's "Resume PR autodetection" way back. An older server omits
+   * it, which reads as false. */
+  pr_autodetect_suppressed?: boolean
   /** The agent's provider tabs in creation order (`tabs[0].id === id`). A session
    * always has at least one tab; the tab strip renders only when there are two or
    * more. See `AgentTabView`. An older server that predates tabs (e.g. after a

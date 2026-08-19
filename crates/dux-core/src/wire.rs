@@ -209,10 +209,21 @@ pub enum WireCommand {
         state: String,
         url: String,
     },
-    /// Remove a session's manual pull-request attachment so branch-name
-    /// autodetection resumes on the next sync cycle. Synchronous; the
-    /// last-known badge stays visible until that cycle re-evaluates.
+    /// Detach a session's pull request: this agent has no PR, as of now. The
+    /// pin goes if there was one, the badge clears immediately, and
+    /// autodetection is suppressed for the session (durably) so it cannot put
+    /// the badge straight back. Synchronous. Applies to an autodetected
+    /// association too, not only to a pin. Reversed by an
+    /// `AttachPullRequest` or a `ResumePullRequestAutodetection`.
     ClearPullRequestOverride {
+        session_id: String,
+    },
+    /// Undo a detach: switch pull-request autodetection back on for the
+    /// session and run one immediate check, so the badge returns now rather
+    /// than at the next poll. Synchronous, and deliberately not gated on `gh`
+    /// (the suppression is dux's own state); without a usable `gh` the check
+    /// is a no-op and the session is picked up once the integration re-arms.
+    ResumePullRequestAutodetection {
         session_id: String,
     },
     /// Flip `ui.copy_on_select` and persist it, mirroring the web
@@ -1386,6 +1397,14 @@ impl Engine {
             }
             WireCommand::ClearPullRequestOverride { session_id } => {
                 let message = self.clear_pull_request_override(&session_id)?;
+                return Ok(WireCommandOutcome {
+                    status: Some(WireStatus::new("info", message)),
+                    detached: None,
+                    created_op_id: None,
+                });
+            }
+            WireCommand::ResumePullRequestAutodetection { session_id } => {
+                let message = self.resume_pr_autodetection(&session_id)?;
                 return Ok(WireCommandOutcome {
                     status: Some(WireStatus::new("info", message)),
                     detached: None,
@@ -4038,6 +4057,7 @@ impl Engine {
             | WireCommand::CreateAgentFromPr { .. }
             | WireCommand::AttachPullRequest { .. }
             | WireCommand::ClearPullRequestOverride { .. }
+            | WireCommand::ResumePullRequestAutodetection { .. }
             | WireCommand::SetChangesPaneVisible { .. }
             | WireCommand::SetInstanceIdentity { .. }
             | WireCommand::SetSettings(..)
@@ -6069,8 +6089,9 @@ mod tests {
         assert_eq!(pin.number, 12);
         assert_eq!(pin.owner_repo, "fork/r");
 
-        // Detach: the row and map entry go, but the badge stays until the next
-        // sync cycle re-evaluates (no blanking).
+        // Detach: the row and the map entry go, the badge goes WITH them (a
+        // detach means "no pull request", now, not at the next cycle), and the
+        // session drops out of the sync plan entirely.
         let outcome = engine
             .apply_wire(WireCommand::ClearPullRequestOverride {
                 session_id: "s1".to_string(),
@@ -6079,15 +6100,51 @@ mod tests {
         assert_eq!(outcome.status.expect("detach confirmation").tone, "info");
         assert!(engine.session_store.load_pr_overrides().unwrap().is_empty());
         assert!(engine.pr_overrides.is_empty());
-        assert_eq!(
-            engine.pr_statuses.get("s1").map(|p| p.number),
-            Some(12),
-            "the last-known PR stays visible until autodetection re-evaluates"
+        assert!(
+            !engine.pr_statuses.contains_key("s1"),
+            "the badge disappears with the detach"
         );
         assert!(
-            engine.pr_sync_sessions.lock().unwrap()[0].pinned.is_none(),
-            "the sync snapshot no longer carries the pin"
+            engine.pr_sync_sessions.lock().unwrap().is_empty(),
+            "a detached session is not planned for at all"
         );
+
+        // Resume: the session rejoins the plan, and the confirmation says so.
+        let outcome = engine
+            .apply_wire(WireCommand::ResumePullRequestAutodetection {
+                session_id: "s1".to_string(),
+            })
+            .expect("resume");
+        let status = outcome.status.expect("resume confirmation");
+        assert_eq!(status.tone, "info");
+        assert!(
+            status.message.contains("Resumed"),
+            "got {:?}",
+            status.message
+        );
+        assert!(engine.pr_suppressions.is_empty());
+        assert_eq!(engine.pr_sync_sessions.lock().unwrap().len(), 1);
+    }
+
+    /// Both PR-detachment commands refuse a session that is not there, so the
+    /// REST layer can map the message onto a 404 the way its siblings do.
+    #[test]
+    fn detach_and_resume_refuse_an_unknown_session() {
+        let (mut engine, _tmp) = test_engine();
+        enable_gh(&mut engine);
+        for command in [
+            WireCommand::ClearPullRequestOverride {
+                session_id: "ghost".to_string(),
+            },
+            WireCommand::ResumePullRequestAutodetection {
+                session_id: "ghost".to_string(),
+            },
+        ] {
+            let err = engine
+                .apply_wire(command)
+                .expect_err("a vanished session must refuse");
+            assert!(err.to_string().contains("unknown session"), "got {err:#}");
+        }
     }
 
     /// The stored pin's host must be byte-identical to what the sync planner

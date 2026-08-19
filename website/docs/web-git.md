@@ -93,14 +93,31 @@ field takes the same spellings as the from-PR agent flow: a full PR URL,
 A manually attached PR is pinned: dux keeps tracking that exact pull request
 (its state still refreshes) and stops second-guessing it with autodetection,
 and the Agent Info dialog says "manually attached" so you can tell a pin from a
-find. Detaching (**Detach pull request** in the same menu, or
-`detach-pull-request` in the palette) lets autodetection take over again on the
-next sync pass; it is not destructive, so there is no confirmation. Attaching
-needs GitHub integration and a signed-in `gh` (it resolves the reference
-through `gh`); detaching does not, so a pin never outlives your ability to
-remove it. With GitHub integration switched off entirely, the pin is hidden
-(and not removable) until the integration is re-armed, at which point the
-badge reseeds from what dux remembered.
+find.
+
+### Detaching, and getting detection back
+
+**Detach pull request** (in the same menu, or `detach-pull-request` in the
+palette) means what it says: this agent has no pull request. The badge goes
+immediately, a pin is dropped if there was one, and dux stops looking for a PR
+on the agent's branch, so nothing puts the badge back a minute later. It works
+on an autodetected PR too, not only on a pin, which is the point: a wrong guess
+is exactly what you want to be able to switch off. The detach is remembered
+across restarts.
+
+Two things bring detection back. Attaching a PR by hand is one, since you have
+just told dux what the pull request is. The other is **Resume PR
+autodetection**, which appears in the agent's ⋯ menu (and as
+`resume-pull-request-autodetection` in the palette) only while the agent is
+detached; it switches detection on again and checks GitHub straight away.
+Neither detaching nor resuming is destructive, so neither asks for
+confirmation.
+
+Attaching needs GitHub integration and a signed-in `gh` (it resolves the
+reference through `gh`); detaching and resuming do not, so an association never
+outlives your ability to remove it. With GitHub integration switched off
+entirely, the pin is hidden (and not removable) until the integration is
+re-armed, at which point the badge reseeds from what dux remembered.
 
 ## Staying in sync
 

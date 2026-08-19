@@ -218,13 +218,20 @@ export const sessionsApi = {
       `/api/v1/sessions/${encodeURIComponent(id)}/pull-request`,
       { pr },
     ),
-  // Detach the manual pin so branch-name autodetection resumes. Synchronous;
-  // the info status rides the stream. A session without a pin is a successful
-  // no-op server-side.
+  // Detach the agent's pull request: the pin goes if there is one, the badge
+  // clears, and dux stops looking for a PR on this agent. Synchronous; the
+  // info status rides the stream. Applies to an autodetected association too.
   detachPullRequest: (id: string) =>
     request<void>(
       "DELETE",
       `/api/v1/sessions/${encodeURIComponent(id)}/pull-request`,
+    ),
+  // The way back from a detach: switch autodetection on again and check once
+  // now. Synchronous, shaped like the detach beside it.
+  resumePullRequestAutodetection: (id: string) =>
+    request<void>(
+      "POST",
+      `/api/v1/sessions/${encodeURIComponent(id)}/pull-request/autodetect`,
     ),
   reorder: (projectId: string, sessionIds: string[]) =>
     request<void>("POST", "/api/v1/sessions/reorder", {

@@ -2969,6 +2969,7 @@ impl App {
             gh_probe: Default::default(),
             pr_statuses: HashMap::new(),
             pr_overrides: HashMap::new(),
+            pr_suppressions: HashSet::new(),
             branch_sync_sessions,
             pr_sync_sessions,
             pr_sync,
@@ -3888,14 +3889,23 @@ impl App {
             Action::NewAgentFromPr | Action::AttachPullRequest => {
                 self.github_pr_agent_command_available()
             }
-            // Detach is only meaningful when the selected agent actually holds
-            // a manually attached (pinned) pull request. Deliberately NOT
-            // gated on gh availability: detaching touches no network, and a
-            // pin must never outlive the ability to remove it (gh could be
-            // uninstalled or signed out after the attach).
-            Action::DetachPullRequest => self
+            // Detach is meaningful whenever the selected agent has a pull
+            // request associated at all, pinned or autodetected: an
+            // autodetected badge the user does not want is exactly what detach
+            // is for. Deliberately NOT gated on gh availability: detaching
+            // touches no network, and an association must never outlive the
+            // ability to remove it (gh could be uninstalled or signed out
+            // after the fact).
+            Action::DetachPullRequest => self.selected_session().is_some_and(|s| {
+                self.engine.pr_overrides.contains_key(&s.id)
+                    || self.engine.pr_statuses.contains_key(&s.id)
+            }),
+            // The way back, offered only where it means something: while the
+            // selected agent is actually detached. Not gh-gated either, for
+            // the same reason (the suppression is dux's own state).
+            Action::ResumePullRequestAutodetection => self
                 .selected_session()
-                .is_some_and(|s| self.engine.pr_overrides.contains_key(&s.id)),
+                .is_some_and(|s| self.engine.pr_suppressions.contains(&s.id)),
             // The terminal-move commands are offered only when a terminal exists;
             // the agent-move commands are always offered (they fall through to
             // `true` and guard at invoke, like the rest of the palette).
@@ -4059,6 +4069,7 @@ impl App {
             "open-current-pr" => self.open_current_pr_in_browser(),
             "attach-pull-request" => self.open_attach_pull_request_prompt(),
             "detach-pull-request" => self.detach_pull_request(),
+            "resume-pull-request-autodetection" => self.resume_pull_request_autodetection(),
             "toggle-project" => {
                 self.toggle_collapse_selected_project();
                 Ok(())

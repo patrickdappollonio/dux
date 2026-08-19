@@ -1243,6 +1243,9 @@ impl Engine {
         // session); leaving it would ghost-gate the identity guard and the
         // detach palette entry for a later session reusing the id.
         self.pr_overrides.remove(&session.id);
+        // The detach state goes with the session too, so a later session that
+        // reuses the id does not inherit a detach it never asked for.
+        self.pr_suppressions.remove(&session.id);
         self.update_branch_sync_sessions();
 
         let project_still_has_sessions = self
@@ -2308,6 +2311,24 @@ impl Engine {
                         continue;
                     }
                     self.pr_last_checked.insert(session_id.clone(), now);
+                    // Suppression guard, the in-flight race's answer. A check
+                    // dispatched before the user detached can land after it,
+                    // and re-badging an agent one tick after it was detached
+                    // is exactly the bug the detach exists to fix. Dropped
+                    // here, BEFORE `upsert_pr` and the `pr_statuses` insert,
+                    // so nothing durable is written either. A pin is exempt:
+                    // an attach lifts the suppression, so a session holding
+                    // both is impossible, and the pin refresh path must keep
+                    // working if one ever arose.
+                    if self.pr_suppressions.contains(&session_id)
+                        && !self.pr_overrides.contains_key(&session_id)
+                    {
+                        logger::debug(&format!(
+                            "[gh-integration] dropping PR result for detached session \
+                             {session_id}",
+                        ));
+                        continue;
+                    }
                     // Identity guard for pinned sessions. This is deliberately
                     // NOT a `None`-only guard: several paths can still produce
                     // `Some(other_pr)` for a pinned session (a one-shot check
@@ -4379,9 +4400,11 @@ mod tests {
     }
 
     /// The full detach cycle from the review: pin a FORK PR, accept one pinned
-    /// sync result, detach, and the next sync snapshot must not carry the fork
-    /// row as `known_pr` (which would query the session's own repo with the
-    /// fork's number and could surface an unrelated PR).
+    /// sync result, detach, and check what the next cycle would do. Under the
+    /// detach-suppresses-everything rule the session is simply absent from the
+    /// snapshot, so there is no cycle to smuggle the fork into; the residue
+    /// half is still asserted at the store, because a resume later puts the
+    /// session back in the plan and `session_prs` is what feeds its `known_pr`.
     #[test]
     fn detaching_a_fork_pin_leaves_no_fork_residue_for_the_next_cycle() {
         let (mut engine, _tmp) = test_engine();
@@ -4421,8 +4444,23 @@ mod tests {
 
         engine.clear_pull_request_override("s1").expect("detach");
 
-        // The next cycle's snapshot: no pin, and no fork row smuggled in as
-        // the known PR (session_prs never learned about the fork).
+        // The next cycle's snapshot: the detached session is not in it at all.
+        assert!(
+            engine.pr_sync_sessions.lock().unwrap().is_empty(),
+            "a detached session is excluded from the plan entirely"
+        );
+        // And the fork left no residue behind for a later resume to pick up:
+        // a pinned cycle never writes `session_prs`, so the row that would
+        // become a resumed session's `known_pr` does not exist.
+        assert!(
+            engine
+                .session_store
+                .load_all_latest_prs()
+                .expect("load stored prs")
+                .is_empty(),
+            "the fork pin must leave nothing in session_prs to resume onto"
+        );
+        engine.resume_pr_autodetection("s1").expect("resume");
         let entries = engine.pr_sync_sessions.lock().unwrap().clone();
         assert_eq!(entries.len(), 1);
         assert!(entries[0].pinned.is_none());
@@ -4430,6 +4468,53 @@ mod tests {
             entries[0].known_pr.is_none(),
             "the fork pin must not survive detach as known_pr, got {:?}",
             entries[0].known_pr,
+        );
+    }
+
+    /// The in-flight race: a PR check dispatched BEFORE the detach answers
+    /// after it. The result must be dropped before it can reach `upsert_pr` or
+    /// the badge, or the agent re-badges one tick after the user detached it.
+    #[test]
+    fn an_in_flight_pr_result_for_a_suppressed_session_is_dropped() {
+        let (mut engine, _tmp) = test_engine();
+        engine.github_integration_enabled = true;
+        engine.gh_status = crate::model::GhStatus::Available;
+        let session = sample_session("s1", "p1", "feat");
+        engine
+            .session_store
+            .upsert_session(&session)
+            .expect("seed session");
+        engine.sessions.push(session);
+        engine.clear_pull_request_override("s1").expect("detach");
+
+        let late = PrInfo {
+            number: 12,
+            state: PrState::Open,
+            title: "Detected while the detach was landing".to_string(),
+            host: "github.com".to_string(),
+            owner_repo: "o/r".to_string(),
+            url: "https://github.com/o/r/pull/12".to_string(),
+        };
+        let reaction = engine.process_worker_event(WorkerEvent::PrStatusReady(vec![(
+            "s1".to_string(),
+            Some(late),
+        )]));
+
+        assert!(
+            !engine.pr_statuses.contains_key("s1"),
+            "a late result must not re-badge a detached agent"
+        );
+        assert!(
+            engine
+                .session_store
+                .load_all_latest_prs()
+                .expect("load stored prs")
+                .is_empty(),
+            "and it must not be persisted either, or a restart would resurrect it"
+        );
+        assert!(
+            matches!(reaction, EventReaction::Nothing),
+            "nothing changed, so there is nothing to rebuild"
         );
     }
 

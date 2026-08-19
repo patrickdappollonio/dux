@@ -157,6 +157,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         gh_probe: Default::default(),
         pr_statuses: std::collections::HashMap::new(),
         pr_overrides: std::collections::HashMap::new(),
+        pr_suppressions: std::collections::HashSet::new(),
         branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
         pr_sync_sessions: Arc::new(Mutex::new(Vec::new())),
         pr_sync: Arc::new(Default::default()),

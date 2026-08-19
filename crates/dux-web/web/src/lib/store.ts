@@ -3787,13 +3787,27 @@ export function submitAttachPullRequest(): void {
   })
 }
 
-// Detach a session's manually attached pull request so branch-name
-// autodetection resumes. No confirm: it is reversible (re-attach any time),
-// and the server's info status rides the toast stream.
+// Detach a session's pull request: the pin goes if there is one, the badge
+// clears, and dux stops looking for a PR on this agent. No confirm: nothing is
+// destroyed and there are two ways back (attach one by hand, or resume
+// autodetection from the same menu), so a dialog would only be in the way. The
+// server's info status rides the toast stream.
 export function detachPullRequest(sessionId: string): void {
   sessionsApi.detachPullRequest(sessionId).catch((e) => {
     notifyError(
       e instanceof Error ? e.message : "Could not detach the pull request.",
+    )
+  })
+}
+
+// The way back from a detach: autodetection is switched on again and one check
+// runs now. No confirm, for the same reason as the detach it undoes.
+export function resumePullRequestAutodetection(sessionId: string): void {
+  sessionsApi.resumePullRequestAutodetection(sessionId).catch((e) => {
+    notifyError(
+      e instanceof Error
+        ? e.message
+        : "Could not resume pull-request autodetection.",
     )
   })
 }

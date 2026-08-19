@@ -31,6 +31,7 @@ import {
   Pencil,
   Play,
   Plus,
+  Radar,
   RotateCcw,
   RefreshCw,
   ScrollText,
@@ -118,6 +119,7 @@ import {
   createStandaloneTerminal,
   createTerminal,
   detachPullRequest,
+  resumePullRequestAutodetection,
   openAgentEnv,
   openAgentInfo,
   openAgentStartupCommand,
@@ -194,6 +196,14 @@ export function AgentActionsMenu({
   )?.name
   const ghAvailable = bootstrap?.gh_available ?? false
   const prOverridden = session.pr?.overridden ?? false
+  // Detach answers "this agent has no PR", so it is offered on ANY association,
+  // pinned or autodetected: an autodetected badge the user does not want is the
+  // case it exists for, and gating on the pin hid it from exactly those people.
+  const prAssociated = session.pr != null
+  // The way back, offered only where it means something. Both are gh-free: the
+  // suppression is dux's own state, so it must be removable even if gh went
+  // away after the detach.
+  const prSuppressed = session.pr_autodetect_suppressed ?? false
   // While another connection input-owns one of this agent's PTYs, the entries
   // that MUTATE the agent disable: deleting, renaming or relaunching an agent
   // someone else is actively driving is a surprise for them. Two sources feed
@@ -358,15 +368,27 @@ export function AgentActionsMenu({
             : "Attach pull request…"}
         </DropdownMenuItem>
       )}
-      {/* No confirm and no ellipsis: detaching is reversible (autodetection
-          resumes, and the PR can be re-attached any time). */}
-      {prOverridden && (
+      {/* No confirm and no ellipsis: detaching destroys nothing and there are
+          two ways back (attach one by hand, or the resume entry below). */}
+      {prAssociated && (
         <DropdownMenuItem
           disabled={activeElsewhere}
           onClick={() => detachPullRequest(session.id)}
         >
           <Unlink />
           Detach pull request
+        </DropdownMenuItem>
+      )}
+      {/* The way back out of a detach, so the agent is never locked out of PR
+          tracking. Same shape as the detach it undoes: icon, no ellipsis (it
+          opens no dialog), no confirm, and no gh gate. */}
+      {prSuppressed && (
+        <DropdownMenuItem
+          disabled={activeElsewhere}
+          onClick={() => resumePullRequestAutodetection(session.id)}
+        >
+          <Radar />
+          Resume PR autodetection
         </DropdownMenuItem>
       )}
       <DropdownMenuItem onClick={() => openAgentInfo(session.id)}>

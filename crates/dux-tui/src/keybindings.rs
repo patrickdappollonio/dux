@@ -621,8 +621,16 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         hint_contexts: &[],
     },
     BindingDef {
-        // Palette-only: drop the pin so branch autodetection resumes.
+        // Palette-only: detach the agent's pull request and stop looking.
         action: Action::DetachPullRequest,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+    },
+    BindingDef {
+        // Palette-only: the way back from a detach.
+        action: Action::ResumePullRequestAutodetection,
         default_keys: &[],
         scopes: &[],
         help: None,
@@ -2683,6 +2691,7 @@ mod tests {
             "rename-agent",
             "rerun-startup-command-on-agent",
             "resource-monitor",
+            "resume-pull-request-autodetection",
             "show-agent",
             "show-release-notes",
             "show-terminal",

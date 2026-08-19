@@ -257,6 +257,15 @@ pub struct Engine {
     /// `AttachPullRequest`/`ClearPullRequestOverride` and loaded at boot by
     /// [`Engine::seed_pr_statuses_from_store`].
     pub pr_overrides: HashMap<String, crate::storage::StoredPr>,
+    /// Sessions whose pull-request autodetection the user switched off by
+    /// detaching: the in-memory mirror of the `session_pr_suppressions` table.
+    /// A suppressed session is left out of the sync entries entirely, skipped
+    /// by the one-shot check, and any non-pin `PrStatusReady` result for it is
+    /// dropped before it can reach the store or the badge (the in-flight race
+    /// guard). Written by `ClearPullRequestOverride`, `AttachPullRequest` and
+    /// `ResumePullRequestAutodetection`, and loaded at boot by
+    /// [`Engine::seed_pr_statuses_from_store`].
+    pub pr_suppressions: HashSet<String>,
     pub branch_sync_sessions: Arc<Mutex<Vec<BranchSyncEntry>>>,
     pub pr_sync_sessions: Arc<Mutex<Vec<PrSyncEntry>>>,
     /// Arm state and single-instance guard for pull-request background work.
@@ -2588,8 +2597,20 @@ impl Engine {
         if !self.github_integration_enabled {
             return;
         }
+        // Load the durable detaches FIRST: a suppressed session's stored
+        // `session_prs` row is history, not a badge, and re-badging it here
+        // would make a restart quietly undo the user's detach.
+        self.pr_suppressions = self
+            .session_store
+            .load_pr_suppressions()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
         let stored = self.session_store.load_all_latest_prs().unwrap_or_default();
         for pr in stored {
+            if self.pr_suppressions.contains(&pr.session_id) {
+                continue;
+            }
             if let Some(info) = crate::gh::reconstruct_pr_from_stored(&pr) {
                 self.pr_statuses.insert(pr.session_id, info);
             }
@@ -2599,6 +2620,9 @@ impl Engine {
         // the badge must show the pin. Loading the map here is also what arms
         // the `PrStatusReady` identity guard and the pinned sync planning from
         // boot (and again on the integration re-arm paths, which re-call this).
+        // No suppression check here: a pin and a suppression cannot coexist
+        // (attaching lifts the suppression, detaching removes the pin), and a
+        // pin is a manual association the user asked for, not autodetection.
         for pinned in self.session_store.load_pr_overrides().unwrap_or_default() {
             if let Some(info) = crate::gh::reconstruct_pr_from_stored(&pinned) {
                 self.pr_statuses.insert(pinned.session_id.clone(), info);
@@ -2625,6 +2649,14 @@ impl Engine {
         // the debounce forward). Backed-off hosts are skipped inside the sync
         // itself (per-host), so no host check is needed here.
         if self.is_in_flight(&InFlightKey::PrCheck(session_id.to_string())) {
+            return;
+        }
+        // The user detached this agent's pull request, so there is nothing to
+        // detect for it. Checked before the debounce stamp so a resume gets a
+        // genuinely immediate check rather than one the skipped calls pushed
+        // out. `update_pr_sync_sessions` drops the session from the batched
+        // loop for the same reason; this is the one-shot half.
+        if self.pr_suppressions.contains(session_id) {
             return;
         }
         // Rate-limit: skip if checked more recently than `min_interval` ago.
@@ -2920,6 +2952,10 @@ impl Engine {
             *guard = self
                 .sessions
                 .iter()
+                // A detached session is left out of the plan entirely: dux was
+                // told there is no pull request here, so it neither asks
+                // GitHub nor has anything to answer with.
+                .filter(|s| !self.pr_suppressions.contains(&s.id))
                 .map(|s| {
                     // A pinned session syncs against its PIN: the override row
                     // is the known PR (the `session_prs` latest can be a
@@ -2993,6 +3029,11 @@ impl Engine {
             url,
         };
         self.session_store.upsert_pr_override(&stored)?;
+        // Plugging a pull request back in by hand lifts an earlier detach: the
+        // user has said what this agent's PR is, so the session is tracked
+        // again (against the pin, and against autodetection once unpinned).
+        self.pr_suppressions.remove(session_id);
+        self.session_store.delete_pr_suppression(session_id)?;
         if let Some(info) = crate::gh::reconstruct_pr_from_stored(&stored) {
             self.pr_statuses.insert(session_id.to_string(), info);
         }
@@ -3004,9 +3045,16 @@ impl Engine {
         ))
     }
 
-    /// Remove a session's manual pull-request attachment so autodetection kicks
-    /// back in on the next sync cycle. The last-known PR badge deliberately
-    /// stays visible until that cycle re-evaluates, rather than blanking.
+    /// Detach a session's pull request: this agent has no PR, as of now. The
+    /// pin goes if there was one, the badge is cleared immediately (rather
+    /// than surviving until some later sync cycle re-evaluates), and the
+    /// session is recorded as suppressed so autodetection cannot put the badge
+    /// straight back. Applies to an AUTODETECTED association too, which is the
+    /// case the old pin-only detach could not answer at all.
+    ///
+    /// The suppression is durable: a restart is not the user changing their
+    /// mind. It is lifted by a manual attach or by
+    /// [`Self::resume_pr_autodetection`].
     pub fn clear_pull_request_override(&mut self, session_id: &str) -> anyhow::Result<String> {
         let Some(session) = self.sessions.iter().find(|s| s.id == session_id) else {
             anyhow::bail!("unknown session: {session_id}");
@@ -3015,18 +3063,60 @@ impl Engine {
             .title
             .clone()
             .unwrap_or_else(|| session.branch_name.clone());
-        let had_pin = self.pr_overrides.remove(session_id).is_some();
+        self.pr_overrides.remove(session_id);
         self.session_store.delete_pr_override(session_id)?;
+        // Write the suppression BEFORE re-deriving the sync snapshot, so the
+        // snapshot this detach produces already excludes the session.
+        self.pr_suppressions.insert(session_id.to_string());
+        self.session_store.set_pr_suppressed(session_id)?;
+        // The badge goes now. Callers reach this through a wire command, and
+        // every wire command is a spine mutation, so the cleared badge is
+        // published to the web with this change rather than a cycle later; the
+        // TUI rebuilds its rows off the same call.
+        self.pr_statuses.remove(session_id);
         self.update_pr_sync_sessions();
-        if had_pin {
+        Ok(format!(
+            "Detached the pull request from agent \"{agent_name}\". dux will stop looking for \
+             one on this agent until you attach a pull request by hand or resume autodetection \
+             for it."
+        ))
+    }
+
+    /// Undo a detach: autodetection is switched back on for the session and one
+    /// immediate check runs so the badge comes back now rather than at the next
+    /// poll. Deliberately not gated on `gh` (like the detach itself): the
+    /// suppression is dux's own state, and clearing it must never depend on a
+    /// CLI that could have been uninstalled since. Without a usable `gh` the
+    /// check is a no-op and the next cycle after the integration re-arms picks
+    /// the session up.
+    pub fn resume_pr_autodetection(&mut self, session_id: &str) -> anyhow::Result<String> {
+        let Some(session) = self.sessions.iter().find(|s| s.id == session_id) else {
+            anyhow::bail!("unknown session: {session_id}");
+        };
+        let agent_name = session
+            .title
+            .clone()
+            .unwrap_or_else(|| session.branch_name.clone());
+        let was_suppressed = self.pr_suppressions.remove(session_id);
+        self.session_store.delete_pr_suppression(session_id)?;
+        self.update_pr_sync_sessions();
+        // A zero interval on purpose: the user just asked for this, so the
+        // debounce a background trigger would respect has nothing to protect.
+        self.spawn_pr_check_for_session(session_id, Duration::from_secs(0));
+        // The one-shot above is a no-op while gh is unusable, so the message
+        // must not claim a check that never started.
+        let tail = if self.pr_agent_command_available() {
+            "dux is checking GitHub for a pull request on its branch now."
+        } else {
+            "dux will check GitHub once the GitHub integration is enabled and gh is signed in."
+        };
+        if was_suppressed {
             Ok(format!(
-                "Detached the pull request from agent \"{agent_name}\". Autodetection from the \
-                 branch name resumes on the next sync cycle."
+                "Resumed pull-request autodetection for agent \"{agent_name}\". {tail}"
             ))
         } else {
             Ok(format!(
-                "Agent \"{agent_name}\" had no manually attached pull request; autodetection \
-                 was already active."
+                "Pull-request autodetection was already running for agent \"{agent_name}\"; {tail}"
             ))
         }
     }
@@ -6070,6 +6160,312 @@ mod tests {
             engine.pr_overrides.get("s1").map(|p| p.pr_number),
             Some(10),
             "the override map is loaded alongside the badge",
+        );
+    }
+
+    /// A detached session's stored `session_prs` row must not come back as a
+    /// badge on the next boot. The suppression row is durable precisely so a
+    /// restart is not a way to undo the user's detach by accident.
+    #[test]
+    fn seed_pr_statuses_skips_a_suppressed_sessions_stored_rows() {
+        let (mut engine, _tmp) = test_engine();
+        engine.github_integration_enabled = true;
+        engine
+            .session_store
+            .upsert_session(&sample_session("s1", "p1", "feat"))
+            .expect("seed session");
+        engine
+            .session_store
+            .upsert_session(&sample_session("s2", "p1", "other"))
+            .expect("seed session");
+        for (id, number) in [("s1", 42), ("s2", 43)] {
+            engine
+                .session_store
+                .upsert_pr(&crate::storage::StoredPr {
+                    session_id: id.to_string(),
+                    pr_number: number,
+                    host: "github.com".to_string(),
+                    owner_repo: "o/r".to_string(),
+                    state: "OPEN".to_string(),
+                    title: "A PR".to_string(),
+                    url: format!("https://github.com/o/r/pull/{number}"),
+                })
+                .expect("seed a stored PR");
+        }
+        engine
+            .session_store
+            .set_pr_suppressed("s1")
+            .expect("persist the detach");
+
+        engine.seed_pr_statuses_from_store();
+
+        assert!(
+            engine.pr_suppressions.contains("s1"),
+            "seeding loads the durable suppression into the in-memory mirror"
+        );
+        assert!(
+            !engine.pr_statuses.contains_key("s1"),
+            "a detached agent must come back from a restart with no badge"
+        );
+        assert_eq!(
+            engine.pr_statuses.get("s2").map(|p| p.number),
+            Some(43),
+            "an untouched agent still seeds its badge"
+        );
+    }
+
+    /// Detach is the whole feature: the badge goes now, the pin goes, and the
+    /// session is recorded as suppressed both in memory and on disk.
+    #[test]
+    fn detach_clears_the_badge_now_and_suppresses_autodetection() {
+        let (mut engine, _tmp) = test_engine();
+        engine.github_integration_enabled = true;
+        engine.gh_status = crate::model::GhStatus::Available;
+        let session = sample_session("s1", "p1", "feat");
+        engine
+            .session_store
+            .upsert_session(&session)
+            .expect("seed session");
+        engine.sessions.push(session);
+        engine
+            .apply_pr_attach("s1", "github.com", "o/r", 12, "Pinned", "OPEN", "")
+            .expect("attach");
+        assert!(engine.pr_statuses.contains_key("s1"));
+
+        engine.clear_pull_request_override("s1").expect("detach");
+
+        assert!(
+            !engine.pr_statuses.contains_key("s1"),
+            "the badge must disappear with the detach, not one sync cycle later"
+        );
+        assert!(engine.pr_overrides.is_empty(), "the pin goes too");
+        assert!(engine.pr_suppressions.contains("s1"));
+        assert_eq!(
+            engine
+                .session_store
+                .load_pr_suppressions()
+                .expect("load suppressions"),
+            vec!["s1".to_string()],
+            "the detach is durable"
+        );
+    }
+
+    /// Detach is no longer a no-op without a pin: an AUTODETECTED badge is
+    /// exactly the case the user is complaining about, so it must clear too.
+    #[test]
+    fn detach_without_a_pin_still_clears_the_badge_and_suppresses() {
+        let (mut engine, _tmp) = test_engine();
+        engine.github_integration_enabled = true;
+        let session = sample_session("s1", "p1", "feat");
+        engine
+            .session_store
+            .upsert_session(&session)
+            .expect("seed session");
+        engine.sessions.push(session);
+        engine.pr_statuses.insert(
+            "s1".to_string(),
+            crate::model::PrInfo {
+                number: 12,
+                state: crate::model::PrState::Open,
+                title: "Autodetected".to_string(),
+                host: "github.com".to_string(),
+                owner_repo: "o/r".to_string(),
+                url: "https://github.com/o/r/pull/12".to_string(),
+            },
+        );
+
+        let message = engine.clear_pull_request_override("s1").expect("detach");
+
+        assert!(
+            !engine.pr_statuses.contains_key("s1"),
+            "an autodetected badge is detachable, got {:?}",
+            engine.pr_statuses.get("s1"),
+        );
+        assert!(engine.pr_suppressions.contains("s1"));
+        assert!(
+            !message.contains("no manually attached pull request"),
+            "the old honest-no-op copy is now false, got {message:?}"
+        );
+    }
+
+    /// A suppressed session is left out of the sync snapshot entirely, so the
+    /// poll loop never asks GitHub about it and can never re-badge it.
+    #[test]
+    fn a_suppressed_session_is_excluded_from_the_sync_entries() {
+        let (mut engine, _tmp) = test_engine();
+        engine.github_integration_enabled = true;
+        for id in ["s1", "s2"] {
+            let session = sample_session(id, "p1", id);
+            engine
+                .session_store
+                .upsert_session(&session)
+                .expect("seed session");
+            engine.sessions.push(session);
+        }
+
+        engine.clear_pull_request_override("s1").expect("detach");
+
+        let entries = engine.pr_sync_sessions.lock().unwrap().clone();
+        let ids: Vec<String> = entries.into_iter().map(|e| e.session_id).collect();
+        assert_eq!(
+            ids,
+            vec!["s2".to_string()],
+            "a detached agent must not be planned for at all"
+        );
+    }
+
+    /// The one-shot paths (focus, refs change, agent exit) must respect the
+    /// detach too, or focusing a detached agent would re-detect its PR.
+    #[test]
+    fn a_suppressed_session_gets_no_one_shot_pr_check() {
+        let (mut engine, _tmp) = test_engine();
+        engine.github_integration_enabled = true;
+        engine.gh_status = crate::model::GhStatus::Available;
+        let session = sample_session("s1", "p1", "feat");
+        engine
+            .session_store
+            .upsert_session(&session)
+            .expect("seed session");
+        engine.sessions.push(session);
+        engine.clear_pull_request_override("s1").expect("detach");
+
+        engine.spawn_pr_check_for_session("s1", Duration::from_secs(0));
+
+        assert!(
+            !engine.pr_last_checked.contains_key("s1"),
+            "a suppressed session must be skipped before the check is stamped"
+        );
+    }
+
+    /// Plugging the PR back in by hand is the documented way out of a detach,
+    /// so an attach clears the suppression in memory and on disk.
+    #[test]
+    fn a_manual_attach_lifts_the_suppression() {
+        let (mut engine, _tmp) = test_engine();
+        engine.github_integration_enabled = true;
+        engine.gh_status = crate::model::GhStatus::Available;
+        let session = sample_session("s1", "p1", "feat");
+        engine
+            .session_store
+            .upsert_session(&session)
+            .expect("seed session");
+        engine.sessions.push(session);
+        engine.clear_pull_request_override("s1").expect("detach");
+
+        engine
+            .apply_pr_attach("s1", "github.com", "o/r", 12, "Pinned", "OPEN", "")
+            .expect("attach");
+
+        assert!(engine.pr_suppressions.is_empty());
+        assert!(
+            engine
+                .session_store
+                .load_pr_suppressions()
+                .expect("load suppressions")
+                .is_empty()
+        );
+        assert_eq!(engine.pr_statuses.get("s1").map(|p| p.number), Some(12));
+        let entries = engine.pr_sync_sessions.lock().unwrap().clone();
+        assert_eq!(
+            entries.len(),
+            1,
+            "the session is planned for again once it is attached"
+        );
+    }
+
+    /// The way back from a detach: the suppression is lifted in memory and on
+    /// disk, the session rejoins the sync plan, and one immediate check is
+    /// spawned so the badge can come back now rather than at the next poll.
+    #[test]
+    fn resume_lifts_the_suppression_and_checks_once_immediately() {
+        let (mut engine, _tmp) = test_engine();
+        engine.github_integration_enabled = true;
+        engine.gh_status = crate::model::GhStatus::Available;
+        let session = sample_session("s1", "p1", "feat");
+        engine
+            .session_store
+            .upsert_session(&session)
+            .expect("seed session");
+        engine.sessions.push(session);
+        engine.clear_pull_request_override("s1").expect("detach");
+        assert!(engine.pr_sync_sessions.lock().unwrap().is_empty());
+
+        engine.resume_pr_autodetection("s1").expect("resume");
+
+        assert!(engine.pr_suppressions.is_empty());
+        assert!(
+            engine
+                .session_store
+                .load_pr_suppressions()
+                .expect("load suppressions")
+                .is_empty(),
+            "the resume is durable too"
+        );
+        let entries = engine.pr_sync_sessions.lock().unwrap().clone();
+        assert_eq!(
+            entries.len(),
+            1,
+            "the session is planned for again from this cycle on"
+        );
+        assert!(
+            engine.pr_last_checked.contains_key("s1"),
+            "one immediate check runs, so the badge does not wait for the poll"
+        );
+    }
+
+    /// A detach followed by a fresh engine over the same database: the badge
+    /// stays gone, and the resume brings detection back for good.
+    #[test]
+    fn a_detach_survives_a_restart_and_a_resume_survives_one_too() {
+        // "Restart" here is the seeding layer: the in-memory mirrors are
+        // dropped and rebuilt from the database exactly as a fresh boot does.
+        // That the rows themselves survive a real file reopen is proven by
+        // `storage::tests::pr_suppression_round_trips_and_survives_reopen`.
+        fn reboot(engine: &mut Engine) {
+            engine.pr_statuses.clear();
+            engine.pr_overrides.clear();
+            engine.pr_suppressions.clear();
+            engine.seed_pr_statuses_from_store();
+        }
+
+        let (mut engine, _tmp) = test_engine();
+        engine.github_integration_enabled = true;
+        let session = sample_session("s1", "p1", "feat");
+        engine
+            .session_store
+            .upsert_session(&session)
+            .expect("seed session");
+        engine.sessions.push(session);
+        engine
+            .session_store
+            .upsert_pr(&crate::storage::StoredPr {
+                session_id: "s1".to_string(),
+                pr_number: 12,
+                host: "github.com".to_string(),
+                owner_repo: "o/r".to_string(),
+                state: "OPEN".to_string(),
+                title: "Detected".to_string(),
+                url: "https://github.com/o/r/pull/12".to_string(),
+            })
+            .expect("seed a stored PR");
+        engine.clear_pull_request_override("s1").expect("detach");
+
+        reboot(&mut engine);
+        assert!(engine.pr_suppressions.contains("s1"));
+        assert!(
+            !engine.pr_statuses.contains_key("s1"),
+            "the detach outlives the process"
+        );
+
+        engine.resume_pr_autodetection("s1").expect("resume");
+
+        // And so does the resume.
+        reboot(&mut engine);
+        assert!(engine.pr_suppressions.is_empty());
+        assert_eq!(
+            engine.pr_statuses.get("s1").map(|p| p.number),
+            Some(12),
+            "the remembered association badges again once detection is back"
         );
     }
 

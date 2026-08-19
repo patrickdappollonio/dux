@@ -7,9 +7,11 @@ import type { SessionView } from "@/lib/types"
 
 // The agent ⋯ menu's pull-request entries. What is pinned here is the GATING:
 // the attach item exists only with a usable gh (matching the project menu's
-// from-PR gate), its label flips on the OVERRIDE (a manually attached PR), not
-// on mere PR presence, and the detach item exists only while an override is
-// in place (and needs no gh, since detaching talks to nothing).
+// from-PR gate) and its label flips on the OVERRIDE (a manually attached PR),
+// not on mere PR presence; the detach item exists whenever ANY pull request is
+// associated, pinned or autodetected; and the resume item exists only while
+// the agent is detached. Neither detach nor resume needs gh, since both talk
+// to dux's own state.
 let mockState: DuxState
 vi.mock("@/lib/store", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/store")>()
@@ -18,6 +20,7 @@ vi.mock("@/lib/store", async (importOriginal) => {
     useDux: () => mockState,
     openAttachPullRequest: vi.fn(),
     detachPullRequest: vi.fn(),
+    resumePullRequestAutodetection: vi.fn(),
   }
 })
 
@@ -61,6 +64,9 @@ const { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } = await import(
 const store = await import("@/lib/store")
 const openAttachPullRequest = vi.mocked(store.openAttachPullRequest)
 const detachPullRequest = vi.mocked(store.detachPullRequest)
+const resumePullRequestAutodetection = vi.mocked(
+  store.resumePullRequestAutodetection,
+)
 
 function makeSession(over: Partial<SessionView> & { id: string }): SessionView {
   return {
@@ -122,6 +128,7 @@ beforeEach(() => {
   installStubs()
   openAttachPullRequest.mockClear()
   detachPullRequest.mockClear()
+  resumePullRequestAutodetection.mockClear()
 })
 
 afterEach(() => {
@@ -280,7 +287,7 @@ describe("AgentActionsMenu pull-request entries", () => {
     // required on every item in these menus.
     expect(item!.textContent?.endsWith("…")).toBe(true)
     expect(item!.querySelector("svg")).toBeTruthy()
-    // No override: no detach entry.
+    // No PR associated at all: nothing to detach.
     expect(screen.queryByText("Detach pull request")).toBeNull()
     fireEvent.click(screen.getByText("Attach pull request…"))
     expect(openAttachPullRequest).toHaveBeenCalledWith("s1")
@@ -292,7 +299,45 @@ describe("AgentActionsMenu pull-request entries", () => {
     await openMenu(session)
     expect(screen.getByText("Attach pull request…")).toBeTruthy()
     expect(screen.queryByText("Change attached pull request…")).toBeNull()
+  })
+
+  it("offers detach on an AUTODETECTED PR, the case detaching exists for", async () => {
+    const session = makeSession({ id: "s1", pr: prAuto })
+    seed(session, true)
+    await openMenu(session)
+    fireEvent.click(screen.getByText("Detach pull request"))
+    expect(detachPullRequest).toHaveBeenCalledWith("s1")
+  })
+
+  it("offers the resume way back only while the agent is detached", async () => {
+    const detached = makeSession({ id: "s1", pr_autodetect_suppressed: true })
+    seed(detached, true)
+    await openMenu(detached)
+    const resume = screen
+      .getByText("Resume PR autodetection")
+      .closest('[role="menuitem"]')
+    expect(resume).toBeTruthy()
+    // Opens no dialog, so no trailing ellipsis; a leading icon is required.
+    expect(resume!.textContent?.endsWith("…")).toBe(false)
+    expect(resume!.querySelector("svg")).toBeTruthy()
+    // Nothing is associated while detached, so there is nothing to detach.
     expect(screen.queryByText("Detach pull request")).toBeNull()
+    fireEvent.click(screen.getByText("Resume PR autodetection"))
+    expect(resumePullRequestAutodetection).toHaveBeenCalledWith("s1")
+  })
+
+  it("keeps resume available without gh (the suppression is dux's own state)", async () => {
+    const detached = makeSession({ id: "s1", pr_autodetect_suppressed: true })
+    seed(detached, false)
+    await openMenu(detached)
+    expect(screen.getByText("Resume PR autodetection")).toBeTruthy()
+  })
+
+  it("hides resume on an agent nobody detached", async () => {
+    const session = makeSession({ id: "s1", pr: prAuto })
+    seed(session, true)
+    await openMenu(session)
+    expect(screen.queryByText("Resume PR autodetection")).toBeNull()
   })
 
   it("flips to the change label and offers detach while an override is pinned", async () => {

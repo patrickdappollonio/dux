@@ -28,8 +28,12 @@
 //!   PR from a raw typed reference; `202` + `{op_id}` (deferred, the outcome
 //!   rides the toast stream and the pushed workspace document, announced by
 //!   `sessions.changed`).
-//! - `DELETE /api/v1/sessions/:id/pull-request`, detach the manual pin so
-//!   autodetection resumes (synchronous, `200`).
+//! - `DELETE /api/v1/sessions/:id/pull-request`, detach the agent's pull
+//!   request: the pin goes if there is one, the badge clears, and
+//!   autodetection stops for the agent (synchronous, `200`).
+//! - `POST   /api/v1/sessions/:id/pull-request/autodetect`, the way back:
+//!   resume autodetection for the agent and check once now (synchronous,
+//!   `200`).
 //! - `POST   /api/v1/pull-requests/resolve`, read a typed pull-request
 //!   reference and say which projects are checkouts of the repository it names.
 //!   A READ, not a write: it starts nothing and changes nothing, so it answers
@@ -93,6 +97,10 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/api/v1/sessions/{id}/pull-request",
             put(attach_pull_request).delete(detach_pull_request),
+        )
+        .route(
+            "/api/v1/sessions/{id}/pull-request/autodetect",
+            post(resume_pull_request_autodetection),
         )
 }
 
@@ -695,10 +703,12 @@ async fn attach_pull_request(
     }
 }
 
-/// Remove a session's manual pull-request attachment so branch-name
-/// autodetection resumes. Synchronous; the info status rides the stream like
-/// the sibling handlers' outcomes (the `ApplyWire` arm broadcasts it). A
-/// session without a pin is a successful no-op with an honest message.
+/// Detach a session's pull request: this agent has no PR, as of now. Removes
+/// a pin if there is one, clears the badge immediately, and stops
+/// autodetection for the session until it is attached by hand or detection is
+/// resumed. Applies to an autodetected association too, so it is no longer a
+/// no-op on an unpinned session. Synchronous; the info status rides the stream
+/// like the sibling handlers' outcomes (the `ApplyWire` arm broadcasts it).
 async fn detach_pull_request(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -711,6 +721,34 @@ async fn detach_pull_request(
         .engine
         .apply_wire_scoped(
             WireCommand::ClearPullRequestOverride { session_id: id },
+            scope_from_headers(&headers, &state.connections),
+        )
+        .await
+    {
+        Ok(_) => StatusCode::OK.into_response(),
+        // The engine returns "unknown session: …" when the row is gone; surface
+        // that as 404, not a generic 400 (the `kill_session` pattern).
+        Err(e) if e.contains("unknown session") => (StatusCode::NOT_FOUND, e).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
+}
+
+/// Undo a detach: switch pull-request autodetection back on for the session
+/// and run one immediate check. Synchronous and shaped exactly like the detach
+/// beside it (same scoping, same `200`, same 404 mapping); resuming a session
+/// nobody detached is a harmless success.
+async fn resume_pull_request_autodetection(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if !id_within_bound(&id) {
+        return unknown_session();
+    }
+    match state
+        .engine
+        .apply_wire_scoped(
+            WireCommand::ResumePullRequestAutodetection { session_id: id },
             scope_from_headers(&headers, &state.connections),
         )
         .await
@@ -1164,13 +1202,47 @@ mod tests {
         let _ = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     }
 
-    /// Detaching a session that never had a manual pin is a successful no-op
-    /// (200); the honest "was already active" info rides the status stream.
+    /// Detaching a session that never had a manual pin is a real detach now,
+    /// not a no-op: it suppresses autodetection just the same, and answers
+    /// 200. The engine-side proof that it clears the badge and records the
+    /// suppression lives in `dux_core::engine`; this asserts the route shape.
     #[tokio::test]
     async fn detach_pull_request_200_without_override() {
         let (_tmp, app) = router_with_seeded_session("s1");
         let resp = send_json(&app, "DELETE", "/api/v1/sessions/s1/pull-request", None).await;
         assert_eq!(resp.status(), StatusCode::OK);
+        let _ = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    }
+
+    /// The way back is shaped exactly like the detach: synchronous, 200, and
+    /// resuming a session nobody detached is a harmless success.
+    #[tokio::test]
+    async fn resume_pull_request_autodetection_200_after_a_detach_and_without_one() {
+        let (_tmp, app) = router_with_seeded_session("s1");
+        for _ in 0..2 {
+            let resp = send_json(
+                &app,
+                "POST",
+                "/api/v1/sessions/s1/pull-request/autodetect",
+                None,
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::OK);
+            let _ = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn resume_pull_request_autodetection_404_for_unknown_session() {
+        let (_tmp, app) = router_no_auth();
+        let resp = send_json(
+            &app,
+            "POST",
+            "/api/v1/sessions/ghost/pull-request/autodetect",
+            None,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         let _ = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     }
 
