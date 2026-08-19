@@ -389,10 +389,6 @@ export function useTerminalLifecycle(
         return sent
       },
       isOwner: () => ownership.read(),
-      // VIEWER MODE, derived and never latched: not the driver, and the user
-      // has not asked for the legacy fit-my-window view. Both halves are read
-      // live, so the coordinator's answer cannot lag a handover.
-      viewerMode: () => !ownership.read() && live.current.watcherFaithful,
       onViewerLayout: () => viewerRelayoutRef.current?.(),
     })
     // The pane's handle on this mount's grid adoption (see the port's doc).

@@ -124,15 +124,6 @@ pub struct BootstrapView {
     /// the browser never receives a value it has no case for. Read by the
     /// terminal pane and by the web's Preferences dialog. Web-only.
     pub compose_bar: String,
-    /// Mirrors `config.ui.watcher_view`: HOW the web renders a PTY another
-    /// device drives. One of `"faithful"` (the default: re-grid this
-    /// emulator to the PTY's real size and shrink the font until it fits) or
-    /// `"fit_window"` (the legacy behavior, fit the container and live with
-    /// the divergence).
-    ///
-    /// Normalized through [`crate::config::WatcherViewMode`] on the way out,
-    /// so the browser never receives a value it has no case for. Web-only.
-    pub watcher_view: String,
     /// Mirrors `config.ui.mobile_top_bar`: whether the web's mobile terminal
     /// screens show the top bar (the back/branch header plus the agent tab
     /// strip), default true. A pure render gate read by the mobile shell and
@@ -1238,12 +1229,6 @@ impl Engine {
             )
             .as_str()
             .to_string(),
-            // Normalized on the way out for the same reason `compose_bar` is.
-            watcher_view: crate::config::WatcherViewMode::from_config_str(
-                &self.config.ui.watcher_view,
-            )
-            .as_str()
-            .to_string(),
             mobile_top_bar: self.config.ui.mobile_top_bar,
             mobile_accessory_bar: self.config.ui.mobile_accessory_bar,
             upload_write_gitignore: self.config.ui.upload_write_gitignore,
@@ -2247,24 +2232,6 @@ mod tests {
         assert_eq!(engine.bootstrap().compose_bar, "always");
     }
 
-    /// A value that never went through `load_config` (the raw config editor,
-    /// `set_settings`) is normalized by the projection rather than shipped to a
-    /// browser that has no case for it.
-    #[test]
-    fn watcher_view_is_projected_from_config_and_normalizes_an_unknown_mode() {
-        let (mut engine, _tmp) = test_engine();
-        assert_eq!(engine.bootstrap().watcher_view, "faithful");
-
-        engine.config.ui.watcher_view = "fit_window".to_string();
-        assert_eq!(engine.bootstrap().watcher_view, "fit_window");
-
-        // A value that reached memory without passing `load_config` (the raw
-        // config editor, `set_settings`) is still normalized on the way out, so
-        // the browser never has to hold a case for a typo.
-        engine.config.ui.watcher_view = "shrunken".to_string();
-        assert_eq!(engine.bootstrap().watcher_view, "faithful");
-    }
-
     #[test]
     fn compose_bar_projection_normalizes_an_unknown_mode() {
         let (mut engine, _tmp) = test_engine();
@@ -2668,7 +2635,6 @@ mod tests {
             "terminal_font_family",
             "terminal_font_size",
             "compose_bar",
-            "watcher_view",
             "mobile_top_bar",
             "mobile_accessory_bar",
             "upload_write_gitignore",

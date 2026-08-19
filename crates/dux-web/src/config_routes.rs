@@ -299,9 +299,6 @@ async fn set_instance_identity(
 struct UiSettingsPatch {
     copy_on_select: Option<bool>,
     compose_bar: Option<String>,
-    /// How the web renders a PTY another device drives: "faithful" or
-    /// "fit_window".
-    watcher_view: Option<String>,
     mobile_top_bar: Option<bool>,
     mobile_accessory_bar: Option<bool>,
     /// Whether the agent upload directory keeps a self-ignoring `.gitignore`.
@@ -430,7 +427,6 @@ async fn set_settings(
         WireCommand::SetSettings(SettingsPatch {
             copy_on_select: body.ui.copy_on_select,
             compose_bar: body.ui.compose_bar,
-            watcher_view: body.ui.watcher_view,
             mobile_top_bar: body.ui.mobile_top_bar,
             mobile_accessory_bar: body.ui.mobile_accessory_bar,
             upload_write_gitignore: body.ui.upload_write_gitignore,
@@ -949,7 +945,6 @@ mod tests {
                     "ui": {
                         "copy_on_select": false,
                         "compose_bar": "never",
-                        "watcher_view": "fit_window",
                         "mobile_top_bar": false,
                         "mobile_accessory_bar": false,
                         "upload_write_gitignore": false,
@@ -987,7 +982,6 @@ mod tests {
         for expected in [
             "copy_on_select = false",
             "compose_bar = \"never\"",
-            "watcher_view = \"fit_window\"",
             "mobile_top_bar = false",
             "mobile_accessory_bar = false",
             "upload_write_gitignore = false",

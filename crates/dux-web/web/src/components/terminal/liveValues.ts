@@ -85,14 +85,6 @@ export type TerminalLiveSettings = {
   /// The owning session's tabs, for the tab-gone check. A dependency of the
   /// lifecycle effect would rebuild the socket on every spine refresh.
   sessionTabs: AgentTabView[] | undefined
-  /// `ui.watcher_view` resolved to a boolean: whether a NON-OWNER renders at
-  /// the PTY's own grid (shrinking the font to fit) rather than fitting this
-  /// container. Read by the resize coordinator's `viewerMode`, which ANDs it
-  /// with the live ownership verdict. The layout-phase publish above is what
-  /// keeps it in step with the relayout: a preference flip must be visible to
-  /// the coordinator in the SAME commit the relayout acts on it, or the flip
-  /// shrinks the font without ever adopting the grid.
-  watcherFaithful: boolean
   /// Whether the faithful watcher is OVERFLOWING on purpose: even the floor
   /// font could not fit the adopted grid, so the terminal stands at its true
   /// size and the host scrolls to the rest of it. Read by the touch gesture's
@@ -127,9 +119,9 @@ export function useTerminalLiveSettings(
   // synchronisation, and enumerating the fields here would reintroduce exactly
   // the per-field bookkeeping the container exists to delete. Writing a ref is
   // not a render effect, so running it on every commit costs one assignment.
-  // A LAYOUT effect, not a passive one: the pane's relayout is a layout effect
-  // that reaches this container through the coordinator's `viewerMode`, and it
-  // must read THIS commit's snapshot (see the module doc).
+  // A LAYOUT effect, not a passive one: the pane's relayout is itself a layout
+  // effect and reads this container (the overflow flag, the fonts), so it must
+  // see THIS commit's snapshot rather than last commit's (see the module doc).
   useLayoutEffect(() => {
     ref.current = values
   })

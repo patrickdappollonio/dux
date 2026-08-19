@@ -24,20 +24,6 @@
 // Deliberately free of any xterm/React/DOM import, so the arithmetic is
 // testable without a layout (see `viewerFit.test.ts`). The caller measures.
 
-/// How the web renders a PTY another device is driving. Mirrors
-/// `config.ui.watcher_view` / `WatcherViewMode` in
-/// `crates/dux-core/src/config.rs`.
-export type WatcherView = "faithful" | "fit_window"
-
-/// Read the bootstrap document's `watcher_view` as a mode. An older server
-/// omits the field and an unrecognized value is a typo the server already
-/// warned about; both read as the default, exactly as `composeBarMode` does.
-export function watcherViewMode(
-  value: string | null | undefined,
-): WatcherView {
-  return value === "fit_window" ? "fit_window" : "faithful"
-}
-
 /// The smallest font the faithful view will shrink to, in CSS pixels.
 ///
 /// Below this the text is not small, it is gone: at 6px and under the bundled
@@ -46,8 +32,11 @@ export function watcherViewMode(
 /// at this size the terminal is left OVERFLOWING its container and the pane
 /// makes the overflow pannable, which is an honest answer (the picture is
 /// still correct, you scroll to the rest of it) where an illegible one is not.
-/// Chosen rather than measured: it is a legibility judgement, and the config
-/// escape hatch for anyone who disagrees is `ui.watcher_view = "fit_window"`.
+/// Chosen rather than measured: it is a legibility judgement. There is no
+/// preference to escape it with any more: `ui.watcher_view` was removed with
+/// the badge, because the full-pane take-over card hid the only difference the
+/// two modes ever had, and the pannable overflow below the floor is the honest
+/// answer for a window too small to hold the driver's grid.
 export const VIEWER_MIN_FONT_SIZE = 7
 
 /// The granularity of the shrink, in CSS pixels. Half steps rather than whole

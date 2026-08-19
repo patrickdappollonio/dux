@@ -282,33 +282,37 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     `crates/dux-web/src/pty_sizes.rs`
     `a_stale_publish_arriving_after_a_newer_one_is_droppable_by_seq`.
 
-21. **NEW at the viewer-geometry arc: a diverged viewer SAYS SO.** A non-owner whose
-    local xterm grid differs from the wire-known PTY grid renders a small, quiet
-    badge ("Sized for another device"). It is a statement, never a control:
-    `pointer-events-none`, no button, no menu, so it cannot swallow a click meant
-    for the terminal. It renders ONLY on real divergence (owner known to be somebody
-    else AND the two grids actually differ) and disappears live when either side
-    moves, because both are live values. Unknown on either side reads as "nothing to
-    claim", so an older server produces no badge rather than a guess.
-    KNOWN OCCLUSION, stated rather than hidden: the take-over card paints solid
-    over the whole pane for every non-owner (C17), and the badge deliberately
-    sits under it at `z-10` (top-right since the faithful-view arc), so the
-    badge is in the DOM but behind that card in the common case. The card is
-    the fuller answer to the same question, and two answers stacked would be
-    worse than one; the badge surfaces only when the card stands down for the
-    connection-lost affordance (C12). What the faithful-view arc changed is
-    how much the badge has left to say: in the default FAITHFUL view the
-    coordinator adopts the PTY's grid, the two sides agree, and the badge retires
-    itself without knowing why. It is deliberately still driven by the LIVE
-    divergence rather than gated on the preference, so the sentence stays true in
-    every state; the only state that keeps it standing is the legacy
-    `fit_window` view, where the divergence is the user's informed choice.
-    Fix: `src/components/terminal/viewerGrid.ts` (`gridsDiverge`, `useViewerGrid`),
-    `src/components/TerminalPane.tsx` (`sizedForAnotherDevice`, the badge).
-    Pinned: `src/components/terminal/viewerGrid.test.ts` `gridsDiverge` suite;
-    `components/TerminalPane.test.tsx` "TerminalPane viewer grid divergence" (says
-    so, never to the owner, quiet when the grids agree, retires when they come back
-    together, silent when the server reports no grid).
+21. **RETIRED at the sticky-demotion arc: the "sized for another device" badge is
+    GONE, and the history is the point.** It was a small, quiet, click-through
+    statement (`pointer-events-none`, no button, no menu) that a non-owner's local
+    xterm grid differed from the wire-known PTY grid. The faithful view (A23) then
+    removed the class of state it described: a watcher adopts the PTY's grid, so
+    the two sides agree and the badge retired itself without knowing why. The only
+    thing left standing it was the legacy `fit_window` view, and that preference is
+    gone too (A25), so the element rendered for nobody.
+    WHY THAT IS PROVABLE, and it is worth being careful about which argument is
+    the real one. The tempting proof is "the full-pane take-over card covers every
+    non-owner in every state", and it is FALSE: the connection-lost affordance
+    stands the card down (C12) and raises a floating box, not a cover. The correct
+    proof is the ADOPTION one: whenever a remote grid is known at all, faithful
+    adoption has already made the grids equal, and no new remote grid can arrive
+    on a dead socket. So the divergence the badge reports cannot come into being
+    while the card is down.
+    ACCEPTED RESIDUE, stated rather than hidden: a divergence frozen mid-gesture
+    at the exact moment the socket dies (adoption in flight, the socket gone
+    before it lands) is unlabeled for the duration of the connection-lost window.
+    That window already carries its own, louder message, and Reconnect resolves
+    both at once.
+    WHAT STAYS: `gridsDiverge` (now the heal's own "is this announcement really a
+    change" predicate, so the definition and the behavior cannot drift), the
+    remote- and local-grid tracking, and the bounce-heal (A22). The heal is real
+    behavior; only the pixel presentation was unreachable.
+    Fix: `src/components/TerminalPane.tsx` (the badge JSX and
+    `sizedForAnotherDevice`, both deleted),
+    `src/components/terminal/viewerGrid.ts` (`gridsDiverge` rewired into
+    `noteRemoteGrid`).
+    Pinned: `src/components/terminal/viewerGrid.test.ts` `gridsDiverge` suite,
+    which now guards the heal's change detection.
 
 22. **NEW at the viewer-geometry arc: a viewer HEALS BY RE-ATTACHING, never by
     resizing the PTY.** A non-owner that hears a `size` event different from the last
@@ -334,17 +338,13 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     accident: the bounce's replay must be parsed at the child's geometry, not at
     the one this window happened to have. The bounce itself is unchanged and
     still worth taking, because adopting the grid does not clean the scrollback
-    the pre-adoption view already recorded; only a fresh attach does. The
-    "THE BADGE STAYS" note below is now true of the legacy `fit_window` view
-    only; in the faithful view the grids agree by the time the bounce fires.
+    the pre-adoption view already recorded; only a fresh attach does.
     A SOCKET OPEN CLEARS AN ARMED HEAL, not just the in-flight flag: any open (a
     network blip's reconnect, a take-over) has just rebuilt the buffer from the
     server's repaint, so a timer armed before it firing after it would be a
     redundant bounce at a just-healed socket. The reconnect cue is raised by hand,
     as the take-over bounce raises it, because a deliberate `connect()` fires no
-    `onReconnecting`. THE BADGE STAYS after a successful heal if the grids still
-    differ, and that is correct: the reattach rebuilds the buffer cleanly but moves
-    neither grid.
+    `onReconnecting`.
     RECORDED FOLLOW-UP: the `bouncing` latch is cleared by an open and by
     teardown, but not by the socket declaring the connection lost; a bounce whose
     socket never reopens leaves heals disabled for the rest of the mount (any
@@ -362,9 +362,8 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     "stands down at firing time when the client became the owner meanwhile");
     `components/TerminalPane.test.tsx` "TerminalPane
     viewer grid divergence": "bounces the socket ONCE after a burst of grid changes
-    settles" (which also pins the badge surviving the heal), "never bounces on the
-    handshake's OWN grid", "never bounces the OWNER", "stands down while a take-over
-    is armed".
+    settles", "never bounces on the handshake's OWN grid", "never bounces the
+    OWNER", "stands down while a take-over is armed".
 
 23. **NEW at the faithful-view arc: a WATCHER RENDERS AT THE PTY'S TRUE GRID.**
     The divergence class is not managed, it is removed: the coordinator gains a
@@ -373,8 +372,9 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     (`term.resize`), so a watcher's emulator is geometry-identical to the
     driver's. The live view is then byte-faithful and the local scrollback can
     no longer record wrapped garbage.
-    THE MODE IS NOT A LATCH. It is `viewerMode()`, derived live from the
-    ownership verdict channel AND `ui.watcher_view`, so it cannot drift from who
+    THE MODE IS NOT A LATCH, and since the sticky-demotion arc it has no
+    preference behind it either: it is `viewerMode()`, which is exactly
+    `!isOwner()` off the ownership verdict channel, so it cannot drift from who
     actually drives the pty, and neither promotion nor demotion needs a
     transition to be written: a take-over bounces the socket and its first frame
     fits and claims through the existing path (a blipped owner's self-succession
@@ -388,16 +388,14 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     `onViewerLayout`, `runFit`, `applyViewerGrid`, `noteRemoteGrid`,
     `refitForFonts`), `src/components/terminal/useTerminalLifecycle.ts` (the
     coordinator deps, the adopt in `onPtyGrid`, the `viewerRegridRef` /
-    `viewerRelayoutRef` ports), `src/components/terminal/liveValues.ts`
-    (`watcherFaithful`).
+    `viewerRelayoutRef` ports).
     Pinned: `src/components/terminal/resizeCoordinator.test.ts` "the resize
     coordinator in VIEWER mode" (never fits, never sends, adopts on seed and on
     change, idempotent, null is not agreement, adopts on demotion, one fit+send
-    on promotion, and the legacy view does none of it);
+    on promotion);
     `components/TerminalPane.test.tsx` "TerminalPane viewer grid divergence":
-    "has nothing to say in the FAITHFUL view", "adopts a grid CHANGE too",
-    "never adopts anything for the OWNER", "adopts on DEMOTION", "keeps fitting
-    its own container in the LEGACY view".
+    "adopts the PTY's grid rather than diverging from it", "adopts a grid CHANGE
+    too", "never adopts anything for the OWNER", "adopts on DEMOTION".
 
 24. **NEW at the faithful-view arc: the presentation is a FONT SHRINK, never a
     CSS transform.** The adopted grid is made to fit by choosing the largest
@@ -437,14 +435,13 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     measures, and the pane's live font-preference effect was folded into it:
     one place decides what font the open terminal wears in both modes. The
     live-settings snapshot is published from a LAYOUT effect ordered before
-    the relayout for the same reason: the coordinator's `viewerMode` must see
-    a `ui.watcher_view` flip in the SAME commit the relayout acts on it, or a
-    flip to faithful shrinks the font without adopting the grid. The reverse
-    flip is its own case: leaving the faithful branch can change neither
-    family nor size, so the relayout fits once on the flip itself, or the
-    terminal would stand at the adopted remote grid forever.
-    Fix: `src/lib/viewerFit.ts` (`viewerFontFit`, `watcherViewMode`,
-    `VIEWER_MIN_FONT_SIZE`, `VIEWER_FONT_STEP`), the relayout layout-effect in
+    the relayout, so the relayout reads THIS commit's values rather than the
+    previous one's. Leaving the faithful branch is its own case: a PROMOTION
+    can change neither family nor size, so the relayout fits once on the
+    transition itself, or the freshly promoted owner would stand at the grid it
+    adopted as a watcher forever.
+    Fix: `src/lib/viewerFit.ts` (`viewerFontFit`, `VIEWER_MIN_FONT_SIZE`,
+    `VIEWER_FONT_STEP`), the relayout layout-effect in
     `src/components/TerminalPane.tsx`, `src/components/terminal/constants.ts`
     (`xtermScrollbarWidth`, shared with the lifecycle so the gutter is measured
     once), `src/lib/terminalFont.ts` (`loadTerminalFontsThenRefit` now takes the
@@ -454,40 +451,45 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     preference below the floor, and every degenerate measurement);
     `components/TerminalPane.test.tsx` "TerminalPane faithful-view overflow
     and live preference flips" (the observer watches the host and a growth
-    un-pins the overflow, a live flip to faithful adopts the grid in the same
-    commit, a live flip to fit_window fits once immediately, a vertical drag
-    is left to the browser while the overflow scrolls vertically and stays
-    intercepted otherwise); `src/components/terminal/constants.test.ts`
+    un-pins the overflow, a promotion out of the faithful branch fits once
+    immediately, a vertical drag is left to the browser while the overflow
+    scrolls vertically and stays intercepted otherwise); `src/components/terminal/constants.test.ts`
     (an explicit 0 scrollbar width is honored, only unset falls back to 8).
 
-25. **NEW at the faithful-view arc: `ui.watcher_view` is a real preference.**
-    Two values: `faithful` (the default) and `fit_window` (the legacy view, with
-    the badge and the polluted scrollback, which is the user's informed choice
-    rather than a fallback). It rides the generic settings machinery end to end
-    with no fork: a string on `[ui]` parsed through `WatcherViewMode` (warn once
-    at load and degrade, the `compose_bar` convention), normalized again in the
-    bootstrap projection, a validated-or-rejected field on `SettingsPatch`, and
-    one row in the web's settings descriptors.
-    Fix: `crates/dux-core/src/config.rs` (`WatcherViewMode`,
-    `UiConfig::watcher_view`, `watcher_view_load_warning`),
+25. **RETIRED at the sticky-demotion arc: `ui.watcher_view` is GONE, and a
+    watcher always renders faithfully.** For one unreleased arc it was a real
+    preference with two values, `faithful` (the default) and `fit_window` (the
+    pre-faithful behavior, with the badge and the polluted scrollback), riding
+    the generic settings machinery end to end. It is removed because the
+    full-pane take-over card (C17) covers a watcher's terminal in every ordinary
+    state, so the only difference the two modes produced was hidden behind it,
+    and the faithful buffer is strictly better in the states that are visible: a
+    clean scrollback and an instantly clean take-over. Keeping a setting whose
+    effect nobody can see is a way to accumulate untested states.
+    NEVER SHIPPED, so nothing migrates: the key was added on `server-mode` and is
+    not in `main` (the check-shipped rule). `UiConfig` has no
+    `deny_unknown_fields`, so a config file still carrying a `watcher_view` line
+    loads exactly as it did and the key is ignored; `toml_edit` saves leave the
+    stale line in place, and `dux config regenerate` is the way to tidy it away.
+    Removed from: `crates/dux-core/src/config.rs` (`WatcherViewMode`,
+    `UiConfig::watcher_view`, `watcher_view_load_warning` and its load site),
     `crates/dux-core/src/config_write.rs`, `crates/dux-core/src/viewmodel.rs`
-    (`BootstrapView::watcher_view`), `crates/dux-core/src/wire.rs`
-    (`SettingsPatch::watcher_view`), `crates/dux-web/src/config_routes.rs`,
-    `crates/dux-tui/src/config.rs` (the canonical commented template),
-    `src/lib/bootstrapApi.ts`, `src/lib/settingsDescriptors.ts`.
+    (`BootstrapView::watcher_view` and its projection),
+    `crates/dux-core/src/wire.rs` (`SettingsPatch::watcher_view`, its validation
+    and its settings row, count 23 down to 22),
+    `crates/dux-web/src/config_routes.rs`, `crates/dux-tui/src/config.rs` (the
+    canonical commented template), `src/lib/bootstrapApi.ts`,
+    `src/lib/settingsDescriptors.ts`, `src/lib/viewerFit.ts` (`WatcherView`,
+    `watcherViewMode`), `src/components/terminal/liveValues.ts`
+    (`watcherFaithful`), the coordinator's `viewerMode` dep and the pane's
+    `faithfulWatcher` derivation.
     Pinned: `crates/dux-core/src/config.rs`
-    `watcher_view_mode_parses_both_modes_case_and_space_insensitively`,
-    `watcher_view_mode_round_trips_through_as_str`,
-    `watcher_view_defaults_to_faithful_and_an_unknown_value_warns_then_degrades`;
-    `crates/dux-core/src/viewmodel.rs`
-    `watcher_view_is_projected_from_config_and_normalizes_an_unknown_mode`;
-    `crates/dux-core/src/wire.rs` `settings_field_rows` (its own row) and
-    `set_settings_round_trips_every_field_into_the_running_config`;
-    `crates/dux-web/src/config_routes.rs`
-    `set_settings_accepts_every_key_the_modal_can_send`;
-    `src/lib/settingsDescriptors.test.ts` (the exposed key set and the
-    cross-language PATCH key pin); `src/lib/viewerFit.test.ts`
-    `watcherViewMode`.
+    `a_leftover_watcher_view_line_is_ignored_rather_than_failing_the_load`;
+    `crates/dux-core/src/wire.rs` `set_settings_applies_every_field_when_sent_alone`
+    (the row count); `src/lib/settingsDescriptors.test.ts` (the exposed key set
+    and the cross-language PATCH key pin);
+    `components/CustomizeWebappDialog.test.tsx` "renders a select for enum
+    settings" (three rows, not four).
 
 ## B. Attach, replay, freshness
 
@@ -904,8 +906,8 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     fresh attach (C8). Same three titles, same second description sentence
     ("Take over to drive this agent from here", or its terminal variant), same
     single confirm-free Take over action.
-    Fix: `src/components/TerminalPane.tsx` (the `Card` overlay; the badge
-    stays top-right and sits back under the card's z-20, A21).
+    Fix: `src/components/TerminalPane.tsx` (the `Card` overlay; the badge that
+    used to sit under its z-20 is gone entirely, A21).
     Pinned: `components/TerminalPane.test.tsx` "TerminalPane take-over card"
     (full-pane solid backdrop with the terminal still mounted underneath, the
     three titles, the second sentence and the one action, and nothing at all

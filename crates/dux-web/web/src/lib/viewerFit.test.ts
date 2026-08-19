@@ -4,7 +4,6 @@ import {
   VIEWER_FONT_STEP,
   VIEWER_MIN_FONT_SIZE,
   viewerFontFit,
-  watcherViewMode,
 } from "./viewerFit"
 
 // A 14px reference where one cell is 8x17 CSS px, close to the bundled face's
@@ -14,19 +13,6 @@ const base = {
   referenceFontSize: 14,
   maxFontSize: 14,
 }
-
-describe("watcherViewMode", () => {
-  it("reads the two modes, and everything else as the faithful default", () => {
-    expect(watcherViewMode("faithful")).toBe("faithful")
-    expect(watcherViewMode("fit_window")).toBe("fit_window")
-    // An older server omits the field; a typo is one the server already warned
-    // about and normalized. Neither may invent a third behavior here.
-    expect(watcherViewMode(undefined)).toBe("faithful")
-    expect(watcherViewMode(null)).toBe("faithful")
-    expect(watcherViewMode("")).toBe("faithful")
-    expect(watcherViewMode("Fit_Window")).toBe("faithful")
-  })
-})
 
 describe("viewerFontFit", () => {
   it("keeps the user's own size when the grid already fits", () => {

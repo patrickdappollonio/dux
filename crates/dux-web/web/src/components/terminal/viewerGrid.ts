@@ -57,13 +57,18 @@ import { VIEWER_HEAL_DEBOUNCE_MS } from "./constants"
 
 export type Grid = { rows: number; cols: number }
 
-/// Whether a viewer is rendering at a geometry the child is not drawing for.
+/// Whether two grids disagree.
 ///
 /// Pure, and deliberately conservative in both unknown directions: an unknown
 /// remote grid (an old server, or a pty the server could not read) and an
 /// unknown local one are both "nothing to claim", never "they disagree". A
-/// badge shown on a guess is worse than no badge, because it is unfalsifiable
+/// claim made on a guess is worse than no claim, because it is unfalsifiable
 /// from the user's side.
+///
+/// Nothing renders this any more (the "sized for another device" badge is
+/// gone; see TERMINAL.md A21), but it is still the one definition of
+/// divergence: the heal's "is this announcement actually a change" check runs
+/// through it, so the predicate and the behavior cannot drift apart.
 export function gridsDiverge(local: Grid | null, remote: Grid | null): boolean {
   if (!local || !remote) return false
   return local.rows !== remote.rows || local.cols !== remote.cols
@@ -151,10 +156,7 @@ export function useViewerGrid(deps: ViewerGridDeps): ViewerGrid {
         // what stops a re-announcement from re-arming the timer forever.
         const previous = remoteRef.current
         const changed =
-          grid !== null &&
-          (previous === null ||
-            previous.rows !== grid.rows ||
-            previous.cols !== grid.cols)
+          grid !== null && (previous === null || gridsDiverge(previous, grid))
         remoteRef.current = grid
         setRemoteGrid(grid)
         const heal = shouldHealByReattaching({

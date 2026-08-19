@@ -710,11 +710,6 @@ pub struct SettingsPatch {
     /// unrecognized value REJECTS the whole command rather than being coerced.
     /// A plain field write with no side effects otherwise.
     pub compose_bar: Option<String>,
-    /// `ui.watcher_view`: HOW the web renders a PTY another device drives.
-    /// One of `"faithful"` or `"fit_window"`; validated against that set like
-    /// `compose_bar`, so an unrecognized value REJECTS the whole command
-    /// rather than being coerced. A plain field write with no side effects.
-    pub watcher_view: Option<String>,
     /// `ui.mobile_top_bar`: the web mobile terminal screens' top bar (the
     /// back/branch header plus the agent tab strip). A plain field write with
     /// no side effects (a pure render gate), so it rides the generic settings
@@ -1605,7 +1600,6 @@ impl Engine {
             quiet: _,
             copy_on_select,
             compose_bar,
-            watcher_view,
             mobile_top_bar,
             mobile_accessory_bar,
             upload_write_gitignore,
@@ -1647,16 +1641,6 @@ impl Engine {
                     .ok_or_else(|| anyhow::anyhow!("unknown compose bar mode \"{raw}\""))
             })
             .transpose()?;
-        // Same rule as `compose_bar` above: a client-supplied string is
-        // rejected rather than degraded, because a 400 is more useful than
-        // silently saving a mode the user did not choose.
-        let watcher_view = watcher_view
-            .map(|raw| {
-                crate::config::WatcherViewMode::parse(&raw)
-                    .map(|mode| mode.as_str().to_string())
-                    .ok_or_else(|| anyhow::anyhow!("unknown watcher view mode \"{raw}\""))
-            })
-            .transpose()?;
         // Validate against the configured provider list, the same source
         // `BootstrapView::available_providers` is built from, so a forged or
         // stale provider name from the client is rejected rather than silently
@@ -1675,9 +1659,6 @@ impl Engine {
         }
         if let Some(v) = compose_bar {
             candidate.ui.compose_bar = v;
-        }
-        if let Some(v) = watcher_view {
-            candidate.ui.watcher_view = v;
         }
         if let Some(v) = mobile_top_bar {
             candidate.ui.mobile_top_bar = v;
@@ -9916,13 +9897,6 @@ mod tests {
                 expect: "never",
             },
             SettingsFieldRow {
-                key: "watcher_view",
-                seed: |c| c.ui.watcher_view = "faithful".to_string(),
-                sent: serde_json::json!("fit_window"),
-                read: |c| c.ui.watcher_view.clone(),
-                expect: "fit_window",
-            },
-            SettingsFieldRow {
                 key: "mobile_top_bar",
                 seed: |c| c.ui.mobile_top_bar = true,
                 sent: serde_json::json!(false),
@@ -10080,7 +10054,7 @@ mod tests {
         let rows = settings_field_rows();
         assert_eq!(
             rows.len(),
-            23,
+            22,
             "add a row when you add a field to SettingsPatch"
         );
         for row in rows {
@@ -10127,11 +10101,6 @@ mod tests {
                 "always".to_string()
             } else {
                 "never".to_string()
-            }),
-            watcher_view: Some(if before.ui.watcher_view == "fit_window" {
-                "faithful".to_string()
-            } else {
-                "fit_window".to_string()
             }),
             mobile_top_bar: Some(!before.ui.mobile_top_bar),
             mobile_accessory_bar: Some(!before.ui.mobile_accessory_bar),

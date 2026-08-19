@@ -167,10 +167,9 @@ describe("CustomizeWebappDialog", () => {
     seed()
     render(<CustomizeWebappDialog />)
 
-    // Four select rows: pr_banner_position, compose_bar and watcher_view
-    // (static enums), and defaults.provider (enum-dynamic, sourced from
-    // available_providers).
-    expect(screen.getAllByRole("combobox").length).toBe(4)
+    // Three select rows: pr_banner_position and compose_bar (static enums),
+    // and defaults.provider (enum-dynamic, sourced from available_providers).
+    expect(screen.getAllByRole("combobox").length).toBe(3)
   })
 
   it("shows the documented default for each row", () => {

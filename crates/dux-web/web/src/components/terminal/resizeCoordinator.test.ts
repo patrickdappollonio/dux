@@ -73,7 +73,7 @@ function settleFirstFrame(
 }
 
 function setup(
-  opts: { owner?: boolean; wire?: boolean; faithful?: boolean } = {},
+  opts: { owner?: boolean; wire?: boolean } = {},
 ) {
   const term = new TermFake()
   const fit = new FitFake(term)
@@ -81,10 +81,6 @@ function setup(
   const relayouts: number[] = []
   let owner = opts.owner ?? true
   let wire = opts.wire ?? true
-  // The `ui.watcher_view` preference. Faithful by default, exactly as the
-  // config is; VIEWER mode is that AND not being the owner, which is how the
-  // pane wires it.
-  let faithful = opts.faithful ?? true
   const coord = createResizeCoordinator({
     term: term as unknown as Terminal,
     fit: fit as unknown as FitAddon,
@@ -94,7 +90,6 @@ function setup(
       return true
     },
     isOwner: () => owner,
-    viewerMode: () => !owner && faithful,
     onViewerLayout: () => relayouts.push(1),
   })
   return {
@@ -105,9 +100,6 @@ function setup(
     relayouts,
     setOwner: (v: boolean) => {
       owner = v
-    },
-    setFaithful: (v: boolean) => {
-      faithful = v
     },
     setWire: (v: boolean) => {
       wire = v
@@ -464,8 +456,9 @@ describe("the resize coordinator's teardown", () => {
 // a watcher stops deciding its own geometry: it never fits to its container,
 // never sends, and re-grids to whatever the wire says the pty is.
 describe("the resize coordinator in VIEWER mode", () => {
-  /// A watcher with the faithful preference: not the owner, faithful on.
-  const watcher = () => setup({ owner: false, faithful: true })
+  /// A watcher: anybody who is not the driver. There is no preference behind
+  /// the mode any more, so this is the whole of it.
+  const watcher = () => setup({ owner: false })
 
   it("never fits to its container, and recomputes the shrink instead", () => {
     const { fit, coord, relayouts } = watcher()
@@ -543,25 +536,5 @@ describe("the resize coordinator in VIEWER mode", () => {
     coord.firstFrameLanded()
     expect(fit.fits).toBe(1)
     expect(sent).toEqual([{ rows: term.rows, cols: term.cols }])
-  })
-
-  it("does none of it in the LEGACY fit-my-window view", () => {
-    // The preference is the whole difference: a watcher who asked to fit their
-    // own window still fits it, still adopts nothing, and still sends nothing
-    // (the owner gate, unchanged).
-    const { coord, fit, term, sent, relayouts } = setup({
-      owner: false,
-      faithful: false,
-    })
-    coord.start(document.createElement("div"))
-    settleFirstFrame(coord, sent)
-    const before = fit.fits
-    observers[0].fire()
-    vi.advanceTimersByTime(500)
-    expect(fit.fits).toBeGreaterThan(before)
-    expect(relayouts).toEqual([])
-    coord.noteRemoteGrid({ rows: 40, cols: 120 })
-    expect({ rows: term.rows, cols: term.cols }).toEqual({ rows: 24, cols: 80 })
-    expect(sent).toEqual([])
   })
 })

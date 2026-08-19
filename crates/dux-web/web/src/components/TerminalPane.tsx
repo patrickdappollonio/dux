@@ -68,11 +68,10 @@ import {
 import { useTerminalLifecycle } from "@/components/terminal/useTerminalLifecycle"
 import { useTerminalOwnership } from "@/components/terminal/ownership"
 import {
-  gridsDiverge,
   useViewerGrid,
 } from "@/components/terminal/viewerGrid"
 import { xtermScrollbarWidth } from "@/components/terminal/constants"
-import { viewerFontFit, watcherViewMode } from "@/lib/viewerFit"
+import { viewerFontFit } from "@/lib/viewerFit"
 import {
   focusTypingSurfaceIn,
   useInputSurface,
@@ -286,7 +285,6 @@ export function TerminalPane(props: TerminalPaneProps) {
     configuredDropPaste: bootstrap?.provider_drop_paste,
     launchedDropPaste: focusedTab?.drop_paste,
     sessionTabs: session?.tabs,
-    watcherFaithful: watcherViewMode(bootstrap?.watcher_view) === "faithful",
     viewerOverflow,
     // Deliberately the RENDERED value, published one commit later like every
     // other field: see the field's doc for why both mismatch directions are
@@ -347,30 +345,11 @@ export function TerminalPane(props: TerminalPaneProps) {
     takeoverIntent,
     setReconnecting,
   })
-  // A statement of fact about THIS pane, and only ever about a non-owner: the
-  // owner defines the grid, so it cannot disagree with it. Unknown on either
-  // side reads as "nothing to claim", so a server that does not report the grid
-  // shows no badge rather than a guess.
-  //
-  // IN THE FAITHFUL VIEW THIS RETIRES ITSELF, and that is the point: the
-  // coordinator adopts the PTY's grid, the two sides come into agreement, and
-  // the badge disappears without anything here knowing why. It is left on the
-  // live divergence rather than gated on the preference on purpose, so the
-  // sentence stays true in every state: it says what is, and the only state
-  // that keeps it standing is the legacy fit-my-window view, where the
-  // divergence is the user's informed choice.
-  const sizedForAnotherDevice =
-    !isOwner && gridsDiverge(viewerGrid.localGrid, viewerGrid.remoteGrid)
-
-  // THE FAITHFUL VIEW, presentation half. `watcherFaithful` is the preference,
-  // `faithfulWatcher` is the preference actually in force on THIS pane right
-  // now: a watcher, and the user has not asked for the legacy view. The
-  // coordinator derives the same answer for itself off the verdict channel and
-  // the live-settings container, because it must be right synchronously; this
-  // is the render's copy of it.
-  const watcherFaithful =
-    watcherViewMode(bootstrap?.watcher_view) === "faithful"
-  const faithfulWatcher = !isOwner && watcherFaithful
+  // THE FAITHFUL VIEW, presentation half. A watcher renders at the PTY's grid,
+  // full stop: there is no preference behind this any more. The coordinator
+  // derives the same answer for itself off the verdict channel, because it must
+  // be right synchronously; this is the render's copy of it.
+  const faithfulWatcher = !isOwner
   // The grid to render, broken out so the relayout effect depends on the
   // NUMBERS rather than on the object identity the machine hands back.
   const remoteRows = viewerGrid.remoteGrid?.rows ?? 0
@@ -381,11 +360,11 @@ export function TerminalPane(props: TerminalPaneProps) {
   // ResizeObserver calls in place of the fit it does not run.
   const viewerRegridRef = useRef<(() => void) | null>(null)
   const viewerRelayoutRef = useRef<(() => void) | null>(null)
-  // Whether the LAST relayout ran the faithful branch. A live flip out of it
-  // (to the legacy view, or by promotion) can change neither the family nor
-  // the size, and the else branch below fits only on those, so the flip
-  // itself has to be a third reason to fit; without it the terminal stays at
-  // the adopted remote grid forever.
+  // Whether the LAST relayout ran the faithful branch. A PROMOTION out of it (a
+  // take-over, or self-succeeding after a blip) can change neither the family
+  // nor the size, and the else branch below fits only on those, so leaving the
+  // branch has to be a third reason to fit; without it the freshly promoted
+  // owner stays at the grid it adopted as a watcher forever.
   const lastRelayoutFaithfulRef = useRef(false)
 
   // THE INPUT SURFACE: the compose Send, the accessory sends, the sticky
@@ -536,10 +515,10 @@ export function TerminalPane(props: TerminalPaneProps) {
         // The stated font exception to "only the coordinator fits" (see its
         // module doc): the metrics have moved and the canvas would otherwise
         // be wrong. `wasFaithful` covers the one leaving-the-faithful-branch
-        // case the other two miss: a live flip to the legacy view (or a
-        // promotion) with the shrunk size equal to the preference and the
-        // family untouched still leaves the terminal standing at the adopted
-        // remote grid, and only a fit brings it back to this container's.
+        // case the other two miss: a promotion whose shrunk size already equals
+        // the preference, with the family untouched, still leaves the terminal
+        // standing at the adopted remote grid, and only a fit brings it back to
+        // this container's.
         fitAddonRef.current?.fit()
       }
       if (familyChanged) {
@@ -1020,29 +999,6 @@ export function TerminalPane(props: TerminalPaneProps) {
           unchanged: the terminal screen's header icon button (MobileShell).
           Focus still returns to this pane's typing surface on close, through the
           `terminalFocus` registration above rather than a prop. */}
-      {/* THE HONEST VIEWER BADGE. One PTY has one grid, the owner's, and this
-          pane is rendering that byte stream at a different one, so what is on
-          screen is wrapped and clamped. It says so rather than letting the user
-          read mangled output as the agent's actual work.
-
-          A statement, never a control: no button, no menu, and therefore
-          pointer-events-none so it cannot swallow a click meant for the
-          terminal underneath. It renders only on real divergence (this client
-          is not the driver AND the two grids actually differ) and disappears
-          the moment either side moves, because both are live values.
-
-          Under the take-over card's z-20 on purpose: when that card is up it is
-          the fuller answer to the same question, and two answers stacked is
-          worse than one. In the faithful view this badge is normally absent
-          altogether: the grids agree. */}
-      {sizedForAnotherDevice ? (
-        <div
-          data-testid="viewer-grid-badge"
-          className="pointer-events-none absolute top-2 right-2 z-10 rounded-md border bg-card/90 px-2 py-1 text-xs text-muted-foreground"
-        >
-          Sized for another device
-        </div>
-      ) : null}
       {/* Readiness / reconnect overlay. Non-blocking (pointer-events-none) so it
           never steals input. Shows while the PTY is still starting up (before its
           first output latches `everReady`) OR whenever the socket has dropped and

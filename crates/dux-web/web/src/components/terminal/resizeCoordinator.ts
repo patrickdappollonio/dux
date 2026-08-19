@@ -41,9 +41,12 @@
 // container and NEVER sends; it re-grids this terminal to the PTY's own rows
 // and columns instead, so a watcher's emulator is geometry-identical to the
 // driver's and the live view is faithful rather than wrapped and clamped. The
-// mode is not a latch to be switched: it is `viewerMode()`, read live off the
-// ownership verdict and the user's `ui.watcher_view` preference, so it can
-// never drift from who actually drives the pty. Promotion needs nothing new
+// mode is not a latch to be switched and it has no preference behind it any
+// more: it is exactly `!isOwner()`, read live at every decision point, so it
+// can never drift from who actually drives the pty. (`ui.watcher_view` bought
+// the pre-faithful fit-my-window behavior back for one unreleased arc; it is
+// gone, because the full-pane take-over card covers the only difference a
+// watcher could ever have seen between the two.) Promotion needs nothing new
 // here (a take-over bounces the socket, whose first frame fits and sends, and
 // so does a blipped owner's self-succession, which is a take-over against its
 // own ghost), and demotion needs nothing but the next `applyViewerGrid`.
@@ -101,12 +104,6 @@ export type ResizeCoordinatorDeps = {
   /// The ownership verdict, read live: a resize frame IS a claim server-side,
   /// so a read-only observer (and a backgrounded tab) drives nothing.
   isOwner: () => boolean
-  /// Whether this pane is rendering somebody else's pty FAITHFULLY (not the
-  /// owner, and `ui.watcher_view` is "faithful"). Read live at every decision
-  /// point rather than latched, so it cannot disagree with `isOwner` above.
-  /// False is the legacy behavior in full: fit this container, diverge, and
-  /// let the badge say so.
-  viewerMode: () => boolean
   /// The observed layout (the pane's HOST; see `start`) moved while in VIEWER
   /// mode. There is no fit to run, but the font shrink is computed from that
   /// box, so the pane recomputes it here. Called from the same ResizeObserver
@@ -173,7 +170,13 @@ export type ResizeCoordinator = {
 export function createResizeCoordinator(
   deps: ResizeCoordinatorDeps,
 ): ResizeCoordinator {
-  const { term, fit, sendResize, isOwner, viewerMode, onViewerLayout } = deps
+  const { term, fit, sendResize, isOwner, onViewerLayout } = deps
+
+  // VIEWER MODE, derived and never latched: anybody who is not the driver.
+  // Written as its own name because it is asked at six decision points and
+  // "not the owner" is the reason at every one of them, not an accident of
+  // this expression.
+  const viewerMode = () => !isOwner()
 
   let lastRows = 0
   let lastCols = 0

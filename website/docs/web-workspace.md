@@ -156,9 +156,8 @@ a moment (you will see "Reconnecting…") and it is deliberate, because a fresh
 attach is what guarantees you start from a clean picture rather than someone
 else's leftovers. Behind the card, dux keeps a watcher's copy of the terminal
 at the driver's true size, shrinking the text until it fits, so nothing
-mangled ever piles up in the scrollback. **Watcher view** in Preferences has a
-**Fit my window** setting that keeps that hidden copy at your own size
-instead, wrapping and all.
+mangled ever piles up in the scrollback and the screen you take over is clean
+from the first frame.
 
 If the driving device disconnects, everyone watching is told: every card
 switches to **Nobody is driving** rather than naming a browser that has gone.

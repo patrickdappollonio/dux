@@ -77,14 +77,6 @@ export interface Bootstrap {
    * the mode existed; an older server omits the field entirely, and both that
    * and an unrecognized value read as `"auto"` through `composeBarMode`. */
   compose_bar?: string
-  /** Mirrors `config.ui.watcher_view`: HOW this browser draws a terminal
-   * another device is driving. `"faithful"` (the default) re-grids the
-   * emulator to the PTY's own rows and columns and shrinks the font until
-   * they fit, so the picture is exactly the driver's; `"fit_window"` is the
-   * legacy behavior, fitting the container and living with the wrapped,
-   * clamped view (and the badge that says so). Older servers omit the field,
-   * which reads as the default through `watcherViewMode`. */
-  watcher_view?: string
   /** Mirrors `config.ui.mobile_top_bar`: whether the mobile terminal screens
    * show the top bar (the back/branch header plus the agent tab strip). A
    * pure render gate; hidden bars are restored from the input ⋯ menu below

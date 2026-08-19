@@ -17,7 +17,6 @@ const sampleBootstrap: Bootstrap = {
   terminal_font_family: "Fira Code",
   terminal_font_size: 18,
   compose_bar: "never",
-  watcher_view: "fit_window",
   mobile_top_bar: false,
   mobile_accessory_bar: false,
   upload_write_gitignore: false,
@@ -67,7 +66,6 @@ describe("settingsDescriptors", () => {
         "ui.terminal_font_family",
         "ui.terminal_font_size",
         "ui.compose_bar",
-        "ui.watcher_view",
         "ui.mobile_top_bar",
         "ui.mobile_accessory_bar",
         "ui.upload_write_gitignore",
@@ -133,7 +131,6 @@ describe("settingsDescriptors", () => {
     expect(byKey["ui.terminal_font_family"]).toBe("Fira Code")
     expect(byKey["ui.terminal_font_size"]).toBe(18)
     expect(byKey["ui.compose_bar"]).toBe("never")
-    expect(byKey["ui.watcher_view"]).toBe("fit_window")
     expect(byKey["ui.mobile_top_bar"]).toBe(false)
     expect(byKey["ui.mobile_accessory_bar"]).toBe(false)
     expect(byKey["ui.auto_reopen_agents"]).toBe(true)
@@ -285,7 +282,6 @@ describe("settingsDescriptors", () => {
       "ui.terminal_font_size",
       "ui.upload_pasted_text_chars",
       "ui.upload_write_gitignore",
-      "ui.watcher_view",
     ])
   })
 
