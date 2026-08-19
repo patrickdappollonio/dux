@@ -332,6 +332,7 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
         config.ui.terminal_font_size,
     );
     patch_table_str(doc, "ui", "compose_bar", &config.ui.compose_bar);
+    patch_table_str(doc, "ui", "watcher_view", &config.ui.watcher_view);
     patch_table_bool(doc, "ui", "mobile_top_bar", config.ui.mobile_top_bar);
     patch_table_bool(
         doc,

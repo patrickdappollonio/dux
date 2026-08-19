@@ -2,7 +2,6 @@
 // stay unit-testable without mounting a Terminal (see terminalFont.test.ts) and
 // so other modules (settingsDescriptors.ts) can import the constants below
 // with no cycle risk.
-import type { FitAddon } from "@xterm/addon-fit"
 import type { Terminal } from "@xterm/xterm"
 
 // The three bundled font-family names, matching the `@font-face` declarations
@@ -146,10 +145,16 @@ export function clampTerminalFontSize(value: unknown): number {
 // against fallback metrics for one frame, then refits once the bundled font
 // arrives (a standard FOUT). On a warm cache `document.fonts.load` resolves
 // near-instantly, so there is no visible reflow.
+//
+// The REFIT ITSELF is the caller's, passed in rather than performed here,
+// because there are two right answers and this module cannot tell them apart:
+// an owner refits to its container, while a watcher rendering faithfully must
+// never do that (its grid is the PTY's) and instead recomputes its shrink
+// font. Both callers pass the mode-correct closure.
 export function loadTerminalFontsThenRefit(
   term: Terminal,
   termRef: { current: Terminal | null },
-  fitAddonRef: { current: FitAddon | null },
+  refitNow: () => void,
   size: number,
   family: string,
 ): void {
@@ -176,7 +181,7 @@ export function loadTerminalFontsThenRefit(
   // characters to "Dux Mono Symbols", which leads the stack and really
   // carries them, so the fill face is never selected and never fetched.
   const refit = () => {
-    if (termRef.current === term) fitAddonRef.current?.fit()
+    if (termRef.current === term) refitNow()
   }
   void Promise.race([
     Promise.all([

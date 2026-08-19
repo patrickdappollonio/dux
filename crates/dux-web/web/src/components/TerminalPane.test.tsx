@@ -11,6 +11,7 @@ import type { DuxState } from "@/lib/store"
 import type { ConnState } from "@/lib/types"
 import { notifyPtyOwner, resetPtyOwnerEpochs } from "@/lib/ptyOwnership"
 import { installXtermMouseModel } from "@/lib/xtermMouseModel"
+import { VIEWER_MIN_FONT_SIZE } from "@/lib/viewerFit"
 import { stubCoarsePointer, type MatchMediaStub } from "@/test/matchMedia"
 
 // TerminalPane embeds xterm.js, whose canvas rendering jsdom cannot back (see the
@@ -664,6 +665,18 @@ describe("TerminalPane viewer grid divergence", () => {
 
   const badge = () => screen.queryByTestId("viewer-grid-badge")
 
+  /// The LEGACY watcher view (`ui.watcher_view = "fit_window"`): fit this
+  /// container and live with the divergence. It is the only mode in which the
+  /// badge has anything lasting to say, because the FAITHFUL view (the
+  /// default, exercised below) adopts the PTY's grid and the two sides agree.
+  /// Call before mounting.
+  const legacyWatcherView = () => {
+    const state = makeState()
+    ;(state.bootstrap as unknown as { watcher_view?: string }).watcher_view =
+      "fit_window"
+    mockState = state
+  }
+
   /// Mount, settle the deferred first-frame resize, and make this pane a
   /// WATCHER by answering the handshake with somebody else's connection id.
   const mountWatcher = () => {
@@ -679,10 +692,70 @@ describe("TerminalPane viewer grid divergence", () => {
   }
 
   it("says so when this viewer's grid differs from the PTY's", () => {
+    legacyWatcherView()
     const pty = mountWatcher()
     expect(badge()).toBeNull()
     act(() => pty.onPtyGrid({ rows: 40, cols: 120 }, true))
     expect(badge()?.textContent).toBe("Sized for another device")
+  })
+
+  it("has nothing to say in the FAITHFUL view: the grid is adopted instead", () => {
+    // The structural fix, pinned from the outside. The same handshake that
+    // makes the legacy watcher above light the badge makes this one re-grid to
+    // the PTY's own geometry, so there is no divergence left to report.
+    const pty = mountWatcher()
+    const term = TermStub.instances.at(-1)!
+    act(() => pty.onPtyGrid({ rows: 40, cols: 120 }, true))
+    expect({ rows: term.rows, cols: term.cols }).toEqual({ rows: 40, cols: 120 })
+    expect(badge()).toBeNull()
+  })
+
+  it("adopts a grid CHANGE too, not just the handshake's", () => {
+    const pty = mountWatcher()
+    const term = TermStub.instances.at(-1)!
+    act(() => pty.onPtyGrid({ rows: 40, cols: 120 }, true))
+    act(() => pty.onPtyGrid({ rows: 50, cols: 132 }, false))
+    expect({ rows: term.rows, cols: term.cols }).toEqual({ rows: 50, cols: 132 })
+    expect(badge()).toBeNull()
+  })
+
+  it("never adopts anything for the OWNER, whose container defines the grid", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const pty = last()
+    act(() => pty.onOpen())
+    act(() => {
+      vi.advanceTimersByTime(400)
+    })
+    // An UNOWNED pty, so this foregrounded pane is the driver.
+    act(() => pty.onConnected("conn-self", null))
+    const term = TermStub.instances.at(-1)!
+    act(() => pty.onPtyGrid({ rows: 40, cols: 120 }, false))
+    expect({ rows: term.rows, cols: term.cols }).toEqual({ rows: 24, cols: 80 })
+  })
+
+  it("adopts on DEMOTION, without waiting for the next size event", () => {
+    // The owner-defined grid is recorded in both modes precisely so a handover
+    // has something to adopt at once.
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const pty = last()
+    act(() => pty.onOpen())
+    act(() => {
+      vi.advanceTimersByTime(400)
+    })
+    act(() => pty.onConnected("conn-self", null))
+    const term = TermStub.instances.at(-1)!
+    act(() => pty.onPtyGrid({ rows: 40, cols: 120 }, false))
+    expect(term.cols).toBe(80)
+    act(() => notifyPtyOwner("s1", "conn-other"))
+    expect({ rows: term.rows, cols: term.cols }).toEqual({ rows: 40, cols: 120 })
+  })
+
+  it("keeps fitting its own container in the LEGACY view", () => {
+    legacyWatcherView()
+    const pty = mountWatcher()
+    const term = TermStub.instances.at(-1)!
+    act(() => pty.onPtyGrid({ rows: 40, cols: 120 }, true))
+    expect({ rows: term.rows, cols: term.cols }).toEqual({ rows: 24, cols: 80 })
   })
 
   it("never says it to the OWNER, who is the one defining the grid", () => {
@@ -705,6 +778,7 @@ describe("TerminalPane viewer grid divergence", () => {
   })
 
   it("retires itself the moment the PTY's grid comes back to this viewer's", () => {
+    legacyWatcherView()
     const pty = mountWatcher()
     act(() => pty.onPtyGrid({ rows: 40, cols: 120 }, true))
     expect(badge()).toBeTruthy()
@@ -742,10 +816,27 @@ describe("TerminalPane viewer grid divergence", () => {
     // `onReconnecting` of its own, so the cue is raised by hand exactly as the
     // take-over bounce raises it.
     expect(screen.getByText("Reconnecting…")).toBeTruthy()
-    // AND THE BADGE STAYS, which is correct: the reattach rebuilds this
-    // viewer's buffer cleanly, but it does not change either grid, so this
-    // pane is still rendering at a size the child is not drawing for. The badge
-    // goes when the geometry agrees, not when the buffer is clean.
+    // AND NO BADGE, in the faithful view: each announcement was ADOPTED before
+    // it armed the heal, so by the time the bounce fires this pane is already
+    // rendering at the child's geometry and there is nothing left to report.
+    // The bounce is still worth taking, because adopting the grid does not
+    // clean the scrollback the pre-adoption view recorded; only a fresh attach
+    // does.
+    expect(badge()).toBeNull()
+  })
+
+  it("keeps the badge across the heal in the LEGACY view", () => {
+    // The other half of the same story: with no adoption the reattach rebuilds
+    // the buffer cleanly and moves neither grid, so the pane is still
+    // rendering at a size the child is not drawing for and still says so.
+    legacyWatcherView()
+    const pty = mountWatcher()
+    act(() => pty.onPtyGrid({ rows: 40, cols: 120 }, true))
+    act(() => pty.onPtyGrid({ rows: 41, cols: 121 }, false))
+    act(() => {
+      vi.advanceTimersByTime(600)
+    })
+    expect(pty.connect).toHaveBeenCalledTimes(1)
     expect(badge()).toBeTruthy()
   })
 
@@ -786,6 +877,44 @@ describe("TerminalPane viewer grid divergence", () => {
       vi.advanceTimersByTime(1000)
     })
     expect(pty.connect).toHaveBeenCalledTimes(1)
+  })
+})
+
+// THE WATCHER'S BANNER. It used to be a solid card over the whole pane, which
+// was right while a watcher's picture was garbage. With the faithful view the
+// picture underneath is the agent's own screen, so the same content and the
+// same action now ride a compact bottom-anchored banner that occludes nothing.
+describe("TerminalPane watcher banner", () => {
+  const banner = () => screen.getByText("Take over").closest("div")
+
+  it("renders compact and non-occluding, with no full-pane backdrop", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    act(() => notifyPtyOwner("s1", "conn-other"))
+    // The strip the card sits in must not swallow clicks meant for the
+    // terminal, and it must not cover it: bottom-anchored, not inset-0.
+    const strip = screen.getByText("Active on another device").closest(
+      ".pointer-events-none",
+    )
+    expect(strip).toBeTruthy()
+    expect(strip!.className).toContain("bottom-0")
+    expect(strip!.className).not.toContain("inset-0")
+    // And the terminal is still mounted and still on screen underneath it.
+    expect(screen.getByTestId("terminal-container")).toBeTruthy()
+  })
+
+  it("keeps the three titles and the one action", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    act(() => notifyPtyOwner("s1", "conn-other"))
+    expect(screen.getByText("Active on another device")).toBeTruthy()
+    expect(screen.getByText("Take over")).toBeTruthy()
+    expect(banner()).toBeTruthy()
+  })
+
+  it("is not rendered for the owner at all", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    act(() => last().onConnected("conn-self", null))
+    expect(screen.queryByText("Take over")).toBeNull()
+    expect(screen.queryByText("Active on another device")).toBeNull()
   })
 })
 
@@ -3772,5 +3901,252 @@ describe("TerminalPane long-press text selection", () => {
     fireEvent.pointerDown(container(), { pointerType: "touch" })
     const menu = fireEvent.contextMenu(container())
     expect(menu).toBe(false)
+  })
+})
+
+// THE FAITHFUL VIEW'S OVERFLOW STATE AND THE LIVE PREFERENCE FLIPS. Three
+// regressions pinned from the outside:
+//  1. The coordinator's ResizeObserver must watch the HOST, because the
+//     overflow branch pins the CONTAINER to the grid's pixel size; observing
+//     the pinned box left the below-floor state deaf to every window resize
+//     and stuck in pan mode forever.
+//  2. A live `ui.watcher_view` flip must land whole in ONE commit: the flip to
+//     faithful adopts the grid (the live-settings snapshot is published from a
+//     layout effect ordered before the relayout, so the coordinator's
+//     viewerMode sees it in time), and the flip to fit_window runs one fit
+//     even when neither the family nor the size moved.
+//  3. While the overflow can scroll vertically, a vertical touch drag is left
+//     to the browser (the host is the scroller); everywhere else the drag
+//     keeps moving xterm's scrollback.
+describe("TerminalPane faithful-view overflow and live preference flips", () => {
+  let roCallbacks: (() => void)[]
+  let roObserved: Element[]
+  const installCapturingRO = () => {
+    roCallbacks = []
+    roObserved = []
+    const cbs = roCallbacks
+    const seen = roObserved
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        constructor(cb: () => void) {
+          cbs.push(cb)
+        }
+        observe(el: Element) {
+          seen.push(el)
+        }
+        unobserve() {}
+        disconnect() {}
+      },
+    )
+  }
+
+  beforeEach(() => {
+    // Fake timers fake requestAnimationFrame too, so `advanceTimersByTime`
+    // drives the coordinator's one-frame observer deferral.
+    vi.useFakeTimers()
+    installCapturingRO()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  const container = () => screen.getByTestId("terminal-container")
+  const host = () => container().parentElement as HTMLElement
+  const badge = () => screen.queryByTestId("viewer-grid-badge")
+  const term = () => {
+    const t = TermStub.instances.at(-1)
+    if (!t) throw new Error("no terminal constructed")
+    return t
+  }
+
+  // jsdom lays nothing out, so the measured boxes are stubbed per element.
+  const setBox = (el: HTMLElement, width: number, height: number) => {
+    Object.defineProperty(el, "clientWidth", {
+      value: width,
+      configurable: true,
+    })
+    Object.defineProperty(el, "clientHeight", {
+      value: height,
+      configurable: true,
+    })
+  }
+
+  /// Mount as a WATCHER in the (default) faithful view and settle the
+  /// deferred first-frame plumbing.
+  const mountWatcher = () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const pty = last()
+    act(() => pty.onOpen())
+    act(() => {
+      vi.advanceTimersByTime(400)
+    })
+    act(() => pty.onConnected("conn-self", "conn-other"))
+    return pty
+  }
+
+  /// Drive the watcher below the floor: a small measurable host and a big
+  /// remote grid, so even the 7px floor cannot fit it and the relayout pins
+  /// the container and flips the pane pannable.
+  const mountOverflowed = () => {
+    const pty = mountWatcher()
+    setBox(host(), 200, 200)
+    act(() => pty.onPtyGrid({ rows: 40, cols: 120 }, true))
+    expect(term().options.fontSize).toBe(VIEWER_MIN_FONT_SIZE)
+    expect(host().className).toContain("overflow-auto")
+    expect(container().style.width).not.toBe("")
+    return pty
+  }
+
+  it("observes the HOST, so a window resize still reaches the overflow state", () => {
+    mountOverflowed()
+    // The mechanism itself: the observed element is the host, never the
+    // container the overflow branch just pinned.
+    expect(roObserved).toContain(host())
+    expect(roObserved).not.toContain(container())
+    // The window grows enough for the grid to fit at the user's own size. The
+    // pinned container does not move (that is the point), the host does.
+    setBox(host(), 2000, 2000)
+    act(() => {
+      roCallbacks.forEach((cb) => cb())
+      vi.advanceTimersByTime(50)
+    })
+    // The relayout ran off the observer: the font leaves the floor, the pin
+    // is cleared, and the pane is no longer pannable.
+    expect(term().options.fontSize).toBe(14)
+    expect(container().style.width).toBe("")
+    expect(container().style.height).toBe("")
+    expect(host().className).not.toContain("overflow-auto")
+  })
+
+  it("adopts the grid in the SAME commit on a live flip to faithful", () => {
+    // Start in the LEGACY view: the watcher fits its own container, diverges,
+    // and says so.
+    const state = makeState()
+    ;(state.bootstrap as unknown as { watcher_view?: string }).watcher_view =
+      "fit_window"
+    mockState = state
+    const { rerender } = render(
+      <TerminalPane kind="agent" id="s1" sessionId="s1" />,
+    )
+    const pty = last()
+    act(() => pty.onOpen())
+    act(() => {
+      vi.advanceTimersByTime(400)
+    })
+    act(() => pty.onConnected("conn-self", "conn-other"))
+    act(() => pty.onPtyGrid({ rows: 40, cols: 120 }, true))
+    expect({ rows: term().rows, cols: term().cols }).toEqual({
+      rows: 24,
+      cols: 80,
+    })
+    expect(badge()).toBeTruthy()
+    // The live preference flip. One commit later the watcher must be at the
+    // PTY's grid with the badge retired; a relayout that read the previous
+    // commit's snapshot shrank the font and adopted nothing.
+    mockState = makeState()
+    act(() => rerender(<TerminalPane kind="agent" id="s1" sessionId="s1" />))
+    expect({ rows: term().rows, cols: term().cols }).toEqual({
+      rows: 40,
+      cols: 120,
+    })
+    expect(badge()).toBeNull()
+  })
+
+  it("runs one fit immediately on a live flip to fit_window", () => {
+    const { rerender } = render(
+      <TerminalPane kind="agent" id="s1" sessionId="s1" />,
+    )
+    const pty = last()
+    act(() => pty.onOpen())
+    act(() => {
+      vi.advanceTimersByTime(400)
+    })
+    act(() => pty.onConnected("conn-self", "conn-other"))
+    // Adopted grid, and (jsdom's unmeasurable host) a font equal to the
+    // preference: neither the family nor the size changes on the flip, so
+    // only the flip itself can force the fit.
+    act(() => pty.onPtyGrid({ rows: 40, cols: 120 }, true))
+    expect({ rows: term().rows, cols: term().cols }).toEqual({
+      rows: 40,
+      cols: 120,
+    })
+    expect(term().options.fontSize).toBe(14)
+    const fitsBefore = FitStub.fits
+    FitStub.nextDims = { rows: 24, cols: 80 }
+    const state = makeState()
+    ;(state.bootstrap as unknown as { watcher_view?: string }).watcher_view =
+      "fit_window"
+    mockState = state
+    act(() => rerender(<TerminalPane kind="agent" id="s1" sessionId="s1" />))
+    expect(FitStub.fits).toBe(fitsBefore + 1)
+    expect({ rows: term().rows, cols: term().cols }).toEqual({
+      rows: 24,
+      cols: 80,
+    })
+  })
+
+  it("paces the touch scrollback off the rendered screen, not the host-sized container", () => {
+    // The letterboxed watcher: the container stays host-sized while the grid
+    // renders smaller inside it. A row is what the FINGER sees, so the cadence
+    // divides the screen's height by the rows; dividing the container's
+    // overestimated the row and scrolled fewer lines than the drag covered.
+    mountWatcher()
+    const screenEl = term().element?.querySelector(
+      ".xterm-screen",
+    ) as HTMLElement
+    Object.defineProperty(screenEl, "clientHeight", {
+      value: 240,
+      configurable: true,
+    })
+    setBox(container(), 480, 480)
+    // 24 rows over 240px: a 10px row. A 20px upward drag is two whole rows;
+    // the container formula (480 / 24 = 20px rows) would have scrolled one.
+    fireEvent.touchStart(container(), {
+      touches: [{ clientX: 10, clientY: 300 }],
+    })
+    fireEvent.touchMove(container(), {
+      touches: [{ clientX: 10, clientY: 280 }],
+    })
+    expect(term().scrollLineCalls).toEqual([2])
+  })
+
+  it("leaves a vertical drag to the browser while the overflow scrolls vertically, and keeps intercepting otherwise", () => {
+    mountOverflowed()
+    // The host really can scroll vertically: content taller than the box.
+    Object.defineProperty(host(), "scrollHeight", {
+      value: 400,
+      configurable: true,
+    })
+    fireEvent.touchStart(container(), {
+      touches: [{ clientX: 10, clientY: 300 }],
+    })
+    fireEvent.touchMove(container(), {
+      touches: [{ clientX: 10, clientY: 280 }],
+    })
+    fireEvent.touchEnd(container(), { touches: [], changedTouches: [] })
+    // Not intercepted: no local scrollback motion, nothing forwarded, the
+    // browser pans the host natively.
+    expect(term().scrollLineCalls).toEqual([])
+    // The overflow retires (the window grows), and the same drag scrolls
+    // xterm's scrollback again.
+    setBox(host(), 2000, 2000)
+    Object.defineProperty(host(), "scrollHeight", {
+      value: 240,
+      configurable: true,
+    })
+    act(() => {
+      roCallbacks.forEach((cb) => cb())
+      vi.advanceTimersByTime(50)
+    })
+    expect(host().className).not.toContain("overflow-auto")
+    fireEvent.touchStart(container(), {
+      touches: [{ clientX: 10, clientY: 300 }],
+    })
+    fireEvent.touchMove(container(), {
+      touches: [{ clientX: 10, clientY: 280 }],
+    })
+    fireEvent.touchEnd(container(), { touches: [], changedTouches: [] })
+    expect(term().scrollLineCalls.length).toBeGreaterThan(0)
   })
 })

@@ -546,6 +546,13 @@ fn config_schema() -> Vec<ConfigEntry> {
             value_fn: |c| FieldValue::Str(c.ui.compose_bar.clone()),
         },
         ConfigEntry::Field {
+            key: "watcher_view",
+            comment: Some(CommentSource::Static(
+                "# Web UI only: how a browser that is WATCHING a terminal another device\n# is driving draws it. Only one device types at a time, but every one of\n# them renders the same output, and a terminal has one true size: the\n# driver's.\n#\n#   \"faithful\"   draw the watcher at the agent's real size and shrink the\n#                text until it fits your window. What you see is exactly\n#                what the driver sees. The default.\n#   \"fit_window\" draw at whatever size your own window holds, keeping the\n#                text big. The picture wraps and clips, dux marks it as\n#                sized for another device, and the scrollback it records\n#                while you watch is mangled until you take over.\n#\n# Change it at runtime from the web UI's Preferences dialog.",
+            )),
+            value_fn: |c| FieldValue::Str(c.ui.watcher_view.clone()),
+        },
+        ConfigEntry::Field {
             key: "mobile_top_bar",
             comment: Some(CommentSource::Static(
                 "# Web UI only: on a phone, show the terminal screen's top bar (the back\n# chevron, branch crumb and actions, plus the agent tab strip below it).\n# Set to false to hide it and give those rows back to the terminal. Bring\n# hidden bars back with the show-bars button below the terminal, or from\n# the web UI's Preferences dialog. The hub and Changes screens are unaffected.",

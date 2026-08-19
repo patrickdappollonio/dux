@@ -22,12 +22,19 @@
 //   thing from a preference it reads, and collapsing the two is how the mirrors
 //   became indistinguishable from smuggled state in the first place.
 //
-// The container's own freshness contract: the snapshot is published in an
-// effect with no dependency list, so it lands after EVERY commit, exactly as
-// the sixteen effects did between them. The initial value is the mount render's
-// snapshot, so the lifecycle effect (declared after this hook, and therefore
-// run after its synchronisation on every commit) never reads an unset field.
-import { useEffect, useRef } from "react"
+// The container's own freshness contract: the snapshot is published in a
+// LAYOUT effect with no dependency list, so it lands in EVERY commit's layout
+// phase, before the pane's relayout (declared after this hook, so ordered
+// after it) and before every passive effect. The old passive publish was one
+// phase too late for exactly one reader: the relayout is itself a layout
+// effect, and a live preference flip it acted on (the watcher-view mode) read
+// the PREVIOUS commit's snapshot through the coordinator, shrinking the font
+// for a view whose grid it then refused to adopt. Every other reader is an
+// event-time closure (socket callbacks, gestures, timers), all of which run
+// after layout anyway, so publishing earlier only narrows their stale window.
+// The initial value is the mount render's snapshot, so no effect ever reads an
+// unset field.
+import { useLayoutEffect, useRef } from "react"
 
 import type { AgentTabView } from "@/lib/types"
 import type { ConfiguredDropPaste, DropPasteProfile } from "@/lib/fileDrop"
@@ -78,6 +85,21 @@ export type TerminalLiveSettings = {
   /// The owning session's tabs, for the tab-gone check. A dependency of the
   /// lifecycle effect would rebuild the socket on every spine refresh.
   sessionTabs: AgentTabView[] | undefined
+  /// `ui.watcher_view` resolved to a boolean: whether a NON-OWNER renders at
+  /// the PTY's own grid (shrinking the font to fit) rather than fitting this
+  /// container. Read by the resize coordinator's `viewerMode`, which ANDs it
+  /// with the live ownership verdict. The layout-phase publish above is what
+  /// keeps it in step with the relayout: a preference flip must be visible to
+  /// the coordinator in the SAME commit the relayout acts on it, or the flip
+  /// shrinks the font without ever adopting the grid.
+  watcherFaithful: boolean
+  /// Whether the faithful watcher is OVERFLOWING on purpose: even the floor
+  /// font could not fit the adopted grid, so the terminal stands at its true
+  /// size and the host scrolls to the rest of it. Read by the touch gesture's
+  /// `scrollAllowed`, which leaves vertical drags to the browser while the
+  /// host is the scroller. Always false for an owner and in every non-overflow
+  /// state, so those paths never even look at it.
+  viewerOverflow: boolean
   /// Whether the compose bar is the typing surface. Deliberately a MIRROR that
   /// lags the rendered value by one commit, and both mismatch directions
   /// degrade gracefully: a stale `false` falls through to `term.focus()`, a
@@ -105,7 +127,10 @@ export function useTerminalLiveSettings(
   // synchronisation, and enumerating the fields here would reintroduce exactly
   // the per-field bookkeeping the container exists to delete. Writing a ref is
   // not a render effect, so running it on every commit costs one assignment.
-  useEffect(() => {
+  // A LAYOUT effect, not a passive one: the pane's relayout is a layout effect
+  // that reaches this container through the coordinator's `viewerMode`, and it
+  // must read THIS commit's snapshot (see the module doc).
+  useLayoutEffect(() => {
     ref.current = values
   })
   return ref

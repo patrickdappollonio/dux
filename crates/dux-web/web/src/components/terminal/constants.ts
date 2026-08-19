@@ -42,6 +42,24 @@ export const RESIZE_SEND_DEBOUNCE_MS = 200
 /// it strictly must.
 export const VIEWER_HEAL_DEBOUNCE_MS = 500
 
+/// The xterm scrollbar's width in CSS pixels, from the one
+/// `--xterm-scrollbar-width` CSS variable index.css also reserves the button
+/// overlay's gutter from. Read here rather than at each call site so the
+/// terminal's own scrollbar option and the watcher view's available-width
+/// arithmetic cannot disagree about how much room it takes. Falls back to 8,
+/// the value in index.css, ONLY when the variable is missing or unparsable:
+/// an explicit 0 is a real answer (a scrollbar deliberately hidden), so the
+/// check is for NaN, never for falsiness.
+export function xtermScrollbarWidth(): number {
+  const parsed = parseInt(
+    getComputedStyle(document.documentElement).getPropertyValue(
+      "--xterm-scrollbar-width",
+    ),
+    10,
+  )
+  return Number.isNaN(parsed) ? 8 : parsed
+}
+
 /// Bytes written straight to the PTY (bypassing xterm's data pipeline), plus
 /// the view side effects a typed key would get through that pipeline: snap to
 /// the live edge and drop any stale selection so the user sees where the input

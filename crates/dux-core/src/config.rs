@@ -803,6 +803,81 @@ where
     deserializer.deserialize_any(ComposeBarVisitor)
 }
 
+/// How the web UI renders a PTY somebody ELSE is driving
+/// ([`UiConfig::watcher_view`]).
+///
+/// ONE PTY HAS ONE GRID, the owner's. A watcher renders the same byte stream
+/// into its own xterm, so if that xterm is a different size the picture is
+/// wrapped and clamped, and every repaint the child makes scrolls mangled rows
+/// into the watcher's local scrollback, where they stay until a fresh attach.
+/// The divergence is the whole problem, so [`Self::Faithful`] removes it
+/// structurally: the watcher's emulator is re-gridded to the PTY's true size
+/// and the FONT is shrunk until that grid fits the window.
+///
+/// [`Self::FitWindow`] is the old behavior, kept because a watcher on a small
+/// screen may genuinely prefer readable text to a faithful picture. It is an
+/// informed trade, not a fallback: the "sized for another device" badge and
+/// the polluted scrollback come back with it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WatcherViewMode {
+    /// Render at the agent's real grid, shrinking the font to fit. The default.
+    #[default]
+    Faithful,
+    /// Render at whatever grid this window fits, as dux did before the
+    /// faithful view existed.
+    FitWindow,
+}
+
+impl WatcherViewMode {
+    /// Parse a config string into a mode, returning `None` for an unrecognized
+    /// value so the caller decides whether to warn. Never warns itself.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "faithful" => Some(Self::Faithful),
+            "fit_window" => Some(Self::FitWindow),
+            _ => None,
+        }
+    }
+
+    /// The warning text for one unrecognized value, or `None` when the value is
+    /// a mode dux knows.
+    pub fn unknown_value_warning(s: &str) -> Option<String> {
+        if Self::parse(s).is_some() {
+            return None;
+        }
+        Some(format!(
+            "unknown ui.watcher_view value {s:?}; falling back to \"faithful\" \
+             (valid: faithful, fit_window)"
+        ))
+    }
+
+    /// Parse a config string, falling back to [`WatcherViewMode::Faithful`]
+    /// with a logged warning on an unrecognized value. Call this at config load
+    /// (once), not per render.
+    pub fn from_config_str(s: &str) -> Self {
+        if let Some(warning) = Self::unknown_value_warning(s) {
+            crate::logger::warn(&warning);
+        }
+        Self::parse(s).unwrap_or(Self::Faithful)
+    }
+
+    /// The canonical lowercase name. This is what goes in `config.toml` and
+    /// what is projected into the web bootstrap document, so both surfaces
+    /// agree.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Faithful => "faithful",
+            Self::FitWindow => "fit_window",
+        }
+    }
+}
+
+/// The one-line warning to log when `ui.watcher_view` names a mode dux does not
+/// know, or `None` when it is fine.
+pub fn watcher_view_load_warning(config: &Config) -> Option<String> {
+    WatcherViewMode::unknown_value_warning(&config.ui.watcher_view)
+}
+
 /// The one-line warning to log when `ui.compose_bar` names a mode dux does not
 /// know, or `None` when it is fine.
 ///
@@ -911,6 +986,17 @@ pub struct UiConfig {
     /// dialog persists the new value here. Web-only behavior.
     #[serde(deserialize_with = "deserialize_compose_bar")]
     pub compose_bar: String,
+    /// HOW the web UI renders a terminal another device is driving: at the
+    /// agent's real grid with the font shrunk to fit (`"faithful"`, the
+    /// default), or fitted to this window like any other pane
+    /// (`"fit_window"`).
+    ///
+    /// The raw config string, parsed at use through [`WatcherViewMode`] so a
+    /// typo degrades gracefully (warn once at load and fall back) instead of
+    /// failing the whole config load, the `compose_bar` convention. Changing
+    /// it from the web's Preferences dialog persists the new value here.
+    /// Web-only behavior: the TUI never watches somebody else's PTY.
+    pub watcher_view: String,
     /// Whether the web UI's mobile terminal screens show the top bar (the
     /// back-chevron header with the branch crumb and actions, plus the agent
     /// tab strip below it). Set to false to hide it and give those rows back
@@ -1500,6 +1586,7 @@ impl Default for UiConfig {
             terminal_font_family: String::new(),
             terminal_font_size: DEFAULT_TERMINAL_FONT_SIZE,
             compose_bar: ComposeBarMode::Auto.as_str().to_string(),
+            watcher_view: WatcherViewMode::Faithful.as_str().to_string(),
             mobile_top_bar: true,
             mobile_accessory_bar: true,
             upload_directory: DEFAULT_UPLOAD_DIRECTORY.to_string(),
@@ -2054,6 +2141,7 @@ impl Default for Config {
                 terminal_font_family: String::new(),
                 terminal_font_size: DEFAULT_TERMINAL_FONT_SIZE,
                 compose_bar: ComposeBarMode::Auto.as_str().to_string(),
+                watcher_view: WatcherViewMode::Faithful.as_str().to_string(),
                 mobile_top_bar: true,
                 mobile_accessory_bar: true,
                 upload_directory: DEFAULT_UPLOAD_DIRECTORY.to_string(),
@@ -2286,6 +2374,13 @@ pub fn load_config(paths: &DuxPaths) -> Config {
     if let Some(warning) = compose_bar_load_warning(&config) {
         crate::logger::warn(&warning);
         config.ui.compose_bar = ComposeBarMode::Auto.as_str().to_string();
+    }
+    // And for a `ui.watcher_view` naming a mode dux does not know, for the
+    // same reason: the bootstrap projection must publish a mode the browser
+    // can act on rather than passing the typo through to it.
+    if let Some(warning) = watcher_view_load_warning(&config) {
+        crate::logger::warn(&warning);
+        config.ui.watcher_view = WatcherViewMode::Faithful.as_str().to_string();
     }
     config
 }
@@ -4139,6 +4234,47 @@ mod agent_tabs_cap_tests {
             ComposeBarMode::from_config_str(&parsed.ui.compose_bar),
             ComposeBarMode::Auto
         );
+    }
+
+    #[test]
+    fn watcher_view_mode_parses_both_modes_case_and_space_insensitively() {
+        for (raw, expected) in [
+            ("faithful", WatcherViewMode::Faithful),
+            ("  FAITHFUL ", WatcherViewMode::Faithful),
+            ("fit_window", WatcherViewMode::FitWindow),
+            ("Fit_Window", WatcherViewMode::FitWindow),
+        ] {
+            assert_eq!(WatcherViewMode::parse(raw), Some(expected), "{raw:?}");
+        }
+        assert_eq!(WatcherViewMode::parse("fit-window"), None);
+        assert_eq!(WatcherViewMode::parse(""), None);
+    }
+
+    #[test]
+    fn watcher_view_mode_round_trips_through_as_str() {
+        for mode in [WatcherViewMode::Faithful, WatcherViewMode::FitWindow] {
+            assert_eq!(WatcherViewMode::parse(mode.as_str()), Some(mode));
+        }
+    }
+
+    #[test]
+    fn watcher_view_defaults_to_faithful_and_an_unknown_value_warns_then_degrades() {
+        let default = UiConfig::default();
+        assert_eq!(default.watcher_view, "faithful");
+
+        let parsed: Config = toml::from_str("[ui]\nwatcher_view = \"shrunk\"\n")
+            .expect("a typo must not fail the whole config load");
+        assert_eq!(parsed.ui.watcher_view, "shrunk");
+        let warning = watcher_view_load_warning(&parsed).expect("an unknown mode warns");
+        assert!(
+            warning.contains("faithful") && warning.contains("fit_window"),
+            "the warning must say what is valid: {warning}"
+        );
+        assert_eq!(
+            WatcherViewMode::from_config_str(&parsed.ui.watcher_view),
+            WatcherViewMode::Faithful
+        );
+        assert!(watcher_view_load_warning(&Config::default()).is_none());
     }
 
     #[test]

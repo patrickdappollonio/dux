@@ -230,6 +230,23 @@ export const SETTING_GROUPS: SettingGroup[] = [
         read: (b) => b.compose_bar ?? "auto",
       },
       {
+        key: "ui.watcher_view",
+        label: "Watcher view",
+        description:
+          "How this browser draws a terminal another device is driving. A terminal has one true size, the driver's, and every other browser renders the same output. Faithful redraws at that size and shrinks the text until it fits your window, so you see exactly what the driver sees. Fit my window keeps the text big and draws at whatever size your window holds, which wraps and clips the picture and leaves mangled lines in the scrollback you scroll up through.",
+        surface: "web",
+        control: {
+          kind: "enum",
+          options: [
+            { value: "faithful", label: "Faithful" },
+            { value: "fit_window", label: "Fit my window" },
+          ],
+        },
+        default: "faithful",
+        writeTarget: "settings",
+        read: (b) => b.watcher_view ?? "faithful",
+      },
+      {
         key: "ui.mobile_top_bar",
         // "Mobile" is accurate here and deliberately kept: the top bar is the
         // phone shell's own chrome (MobileShell renders it and nothing else

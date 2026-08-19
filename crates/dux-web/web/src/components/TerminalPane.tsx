@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useLayoutEffect, useRef, useState } from "react"
 import type { Terminal } from "@xterm/xterm"
 import type { FitAddon } from "@xterm/addon-fit"
 import { MonitorSmartphone } from "lucide-react"
@@ -26,13 +26,6 @@ import {
   setTerminalFocusTarget,
 } from "@/lib/terminalFocus"
 import { Button } from "@/components/ui/button"
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { useIsCoarsePointer } from "@/hooks/use-coarse-pointer"
 import { useTypingSurface } from "@/hooks/use-typing-surface"
@@ -71,6 +64,8 @@ import {
   gridsDiverge,
   useViewerGrid,
 } from "@/components/terminal/viewerGrid"
+import { xtermScrollbarWidth } from "@/components/terminal/constants"
+import { viewerFontFit, watcherViewMode } from "@/lib/viewerFit"
 import {
   focusTypingSurfaceIn,
   useInputSurface,
@@ -254,6 +249,11 @@ export function TerminalPane(props: TerminalPaneProps) {
   // tap-to-focus redirect and the scroll-gesture keyboard dismissal both need
   // to focus/blur it from outside the component.
   const composeInputRef = useRef<HTMLTextAreaElement | null>(null)
+  // True when even the floor font cannot fit the agent's grid in this window.
+  // The terminal then overflows deliberately and the host becomes pannable;
+  // see the relayout effect. Declared before the live-settings container
+  // because the touch gesture's scroll gate reads it through there.
+  const [viewerOverflow, setViewerOverflow] = useState(false)
   // THE LIVE-SETTINGS CONTAINER. One snapshot, one synchronising effect, read
   // at call time by every long-lived closure the lifecycle creates. It replaces
   // the sixteen individual ref mirrors (and their sixteen effects) this pane
@@ -279,6 +279,8 @@ export function TerminalPane(props: TerminalPaneProps) {
     configuredDropPaste: bootstrap?.provider_drop_paste,
     launchedDropPaste: focusedTab?.drop_paste,
     sessionTabs: session?.tabs,
+    watcherFaithful: watcherViewMode(bootstrap?.watcher_view) === "faithful",
+    viewerOverflow,
     // Deliberately the RENDERED value, published one commit later like every
     // other field: see the field's doc for why both mismatch directions are
     // harmless.
@@ -346,8 +348,42 @@ export function TerminalPane(props: TerminalPaneProps) {
   // owner defines the grid, so it cannot disagree with it. Unknown on either
   // side reads as "nothing to claim", so a server that does not report the grid
   // shows no badge rather than a guess.
+  //
+  // IN THE FAITHFUL VIEW THIS RETIRES ITSELF, and that is the point: the
+  // coordinator adopts the PTY's grid, the two sides come into agreement, and
+  // the badge disappears without anything here knowing why. It is left on the
+  // live divergence rather than gated on the preference on purpose, so the
+  // sentence stays true in every state: it says what is, and the only state
+  // that keeps it standing is the legacy fit-my-window view, where the
+  // divergence is the user's informed choice.
   const sizedForAnotherDevice =
     !isOwner && gridsDiverge(viewerGrid.localGrid, viewerGrid.remoteGrid)
+
+  // THE FAITHFUL VIEW, presentation half. `watcherFaithful` is the preference,
+  // `faithfulWatcher` is the preference actually in force on THIS pane right
+  // now: a watcher, and the user has not asked for the legacy view. The
+  // coordinator derives the same answer for itself off the verdict channel and
+  // the live-settings container, because it must be right synchronously; this
+  // is the render's copy of it.
+  const watcherFaithful =
+    watcherViewMode(bootstrap?.watcher_view) === "faithful"
+  const faithfulWatcher = !isOwner && watcherFaithful
+  // The grid to render, broken out so the relayout effect depends on the
+  // NUMBERS rather than on the object identity the machine hands back.
+  const remoteRows = viewerGrid.remoteGrid?.rows ?? 0
+  const remoteCols = viewerGrid.remoteGrid?.cols ?? 0
+  // The mount-scoped port onto the coordinator's grid adoption, installed by
+  // the lifecycle (a viewer re-grid is a coordinator act, never a side effect
+  // of a font change), and the pane's own relayout, which the coordinator's
+  // ResizeObserver calls in place of the fit it does not run.
+  const viewerRegridRef = useRef<(() => void) | null>(null)
+  const viewerRelayoutRef = useRef<(() => void) | null>(null)
+  // Whether the LAST relayout ran the faithful branch. A live flip out of it
+  // (to the legacy view, or by promotion) can change neither the family nor
+  // the size, and the else branch below fits only on those, so the flip
+  // itself has to be a third reason to fit; without it the terminal stays at
+  // the adopted remote grid forever.
+  const lastRelayoutFaithfulRef = useRef(false)
 
   // THE INPUT SURFACE: the compose Send, the accessory sends, the sticky
   // modifier latches and the draft splice.
@@ -378,28 +414,157 @@ export function TerminalPane(props: TerminalPaneProps) {
     fileDropEnabled,
   })
 
-  // Live-apply a font preference change to the OPEN terminal: set the xterm
-  // options in place and refit so rows/cols track the new cell metrics (the
-  // refit flows through the pane's existing resize plumbing to the PTY). The
-  // lifecycle reads the same two settings out of the container at mount, so
-  // this effect only ever has to touch an already-open terminal; before mount
-  // finishes, termRef is null and this is a no-op. A user-named family may not
-  // be loaded yet when the option is set, so after the browser fetches it,
-  // refit once more against the real metrics; the guard keeps that late refit
-  // from touching a successor terminal after a remount.
-  useEffect(() => {
-    const term = termRef.current
-    if (!term) return
-    const family = terminalFontFamily(terminalFontFamilySetting)
-    const size = clampTerminalFontSize(terminalFontSizeSetting)
-    if (term.options.fontFamily === family && term.options.fontSize === size) {
-      return
+  // THE RELAYOUT: the one place that decides what font the OPEN terminal wears
+  // and how the picture is presented, in both modes.
+  //
+  // OWNER (and the legacy fit-my-window watcher): the job of the live
+  // font-preference effect this replaced, with two deliberate improvements
+  // over it: the font load below is kicked off only when the FAMILY actually
+  // changed (a size change moves no faces, so fetching on it bought nothing),
+  // and the whole thing runs as a layout effect (measured, see below) where
+  // the old effect ran after paint. Live-apply a font preference change by
+  // setting the xterm options in place and refitting, so rows/cols track the
+  // new cell metrics and the re-grid flows to the PTY through xterm's own
+  // resize event. A user-named family may not have loaded when the option is
+  // set, so refit once more after the browser fetches it; the guard inside
+  // `loadTerminalFontsThenRefit` keeps that late refit off a successor
+  // terminal after a remount.
+  //
+  // FAITHFUL WATCHER: the grid is the PTY's, not this window's, so there is no
+  // fit at all. The font shrinks instead, to the largest half-pixel size at
+  // which the agent's own rows and columns fit here (`lib/viewerFit.ts` owns
+  // that arithmetic and its floor), and the grid is re-asserted through the
+  // coordinator afterwards. Below the floor the terminal is left overflowing
+  // and the host is made pannable, which keeps the picture correct where
+  // shrinking further would only make it illegible.
+  //
+  // A LAYOUT EFFECT because it MEASURES: it reads the host's box and the
+  // rendered cell, and doing that after paint would show one frame of the
+  // agent's full-size grid every time a watcher adopts a new one. On mount it
+  // runs before the lifecycle has created the terminal and is a no-op, exactly
+  // as the font effect it replaced was.
+  useLayoutEffect(() => {
+    const relayout = () => {
+      const term = termRef.current
+      const container = containerRef.current
+      const host = hostRef.current
+      if (!term || !container || !host) return
+      const family = terminalFontFamily(terminalFontFamilySetting)
+      const prefSize = clampTerminalFontSize(terminalFontSizeSetting)
+      // The pannable-overflow styles belong to the faithful branch alone;
+      // clearing them here means a promotion or a preference flip cannot leave
+      // a stale pixel size pinned on the container.
+      const clearOverflow = () => {
+        setViewerOverflow(false)
+        container.style.removeProperty("width")
+        container.style.removeProperty("height")
+      }
+      // Nothing to be faithful TO until the wire has reported a grid, so an
+      // older server (or a pty it could not read) keeps the old behavior
+      // rather than rendering at a guess.
+      const faithful = faithfulWatcher && remoteRows > 0 && remoteCols > 0
+      // Which branch the LAST relayout ran, updated on every run so a flip is
+      // seen exactly once whichever caller (the effect, the coordinator's
+      // observer, the font load) runs next.
+      const wasFaithful = lastRelayoutFaithfulRef.current
+      lastRelayoutFaithfulRef.current = faithful
+      let size = prefSize
+      if (faithful) {
+        // The cell, measured at whatever font is on screen right now. Cell
+        // metrics are font-relative, so one measurement answers for every
+        // candidate size. `.xterm-screen` rather than the container, for the
+        // reason the selection machine measures it too: the container is wider
+        // by the scrollbar gutter. If a grid adoption in this same pass has
+        // not reached the DOM yet the ratio is momentarily off by that grid's
+        // change, which the next layout signal corrects; it can only ever be a
+        // slightly wrong font, never a wrong grid.
+        const screen = term.element?.querySelector(".xterm-screen")
+        const rect = screen?.getBoundingClientRect()
+        const cell =
+          rect && term.cols > 0 && term.rows > 0
+            ? { width: rect.width / term.cols, height: rect.height / term.rows }
+            : { width: 0, height: 0 }
+        const style = getComputedStyle(host)
+        const padX =
+          parseFloat(style.paddingLeft) + parseFloat(style.paddingRight)
+        const padY =
+          parseFloat(style.paddingTop) + parseFloat(style.paddingBottom)
+        const gutter = xtermScrollbarWidth()
+        const fitted = viewerFontFit({
+          // Measured off the HOST, never off the container: the container is
+          // what this effect resizes in the overflow case, and measuring it
+          // would feed its own output back in.
+          available: {
+            width: host.clientWidth - padX - gutter,
+            height: host.clientHeight - padY,
+          },
+          grid: { rows: remoteRows, cols: remoteCols },
+          cell,
+          referenceFontSize:
+            typeof term.options.fontSize === "number"
+              ? term.options.fontSize
+              : prefSize,
+          maxFontSize: prefSize,
+        })
+        size = fitted.fontSize
+        if (fitted.overflows) {
+          setViewerOverflow(true)
+          // Give the overflow a real scroll area rather than hoping one
+          // appears: the container is sized to the grid, the host scrolls it.
+          container.style.width = `${fitted.width + gutter}px`
+          container.style.height = `${fitted.height}px`
+        } else {
+          clearOverflow()
+        }
+      } else {
+        clearOverflow()
+      }
+      const familyChanged = term.options.fontFamily !== family
+      const sizeChanged = term.options.fontSize !== size
+      if (familyChanged) term.options.fontFamily = family
+      if (sizeChanged) term.options.fontSize = size
+      if (faithful) {
+        // The cell metrics just moved, so re-assert the adopted grid: xterm
+        // leaves rows/cols alone across a font change, but a fit anywhere else
+        // could have moved them and this is the cheap idempotent guard against
+        // ever rendering a watcher at the wrong grid.
+        viewerRegridRef.current?.()
+      } else if (familyChanged || sizeChanged || wasFaithful) {
+        // The stated font exception to "only the coordinator fits" (see its
+        // module doc): the metrics have moved and the canvas would otherwise
+        // be wrong. `wasFaithful` covers the one leaving-the-faithful-branch
+        // case the other two miss: a live flip to the legacy view (or a
+        // promotion) with the shrunk size equal to the preference and the
+        // family untouched still leaves the terminal standing at the adopted
+        // remote grid, and only a fit brings it back to this container's.
+        fitAddonRef.current?.fit()
+      }
+      if (familyChanged) {
+        loadTerminalFontsThenRefit(
+          term,
+          termRef,
+          // Late-bound on purpose: the faces can land after another relayout
+          // has replaced this closure, and the refit must run the CURRENT
+          // rules, not the ones in force when the fetch started.
+          () => viewerRelayoutRef.current?.(),
+          size,
+          family,
+        )
+      }
     }
-    term.options.fontFamily = family
-    term.options.fontSize = size
-    fitAddonRef.current?.fit()
-    loadTerminalFontsThenRefit(term, termRef, fitAddonRef, size, family)
-  }, [terminalFontFamilySetting, terminalFontSizeSetting])
+    viewerRelayoutRef.current = relayout
+    relayout()
+    return () => {
+      // Only retire our own registration, the pane's standard guard.
+      if (viewerRelayoutRef.current === relayout) viewerRelayoutRef.current = null
+    }
+  }, [
+    terminalFontFamilySetting,
+    terminalFontSizeSetting,
+    faithfulWatcher,
+    remoteRows,
+    remoteCols,
+  ])
 
   // Retire any in-flight drag the moment the feature stops being available.
   // The gate refuses events for a disabled feature, so once it closes there is
@@ -546,6 +711,8 @@ export function TerminalPane(props: TerminalPaneProps) {
     prevVisibleRef,
     takeoverIntent,
     claimFreedPtyRef,
+    viewerRegridRef,
+    viewerRelayoutRef,
     live,
     mods: input.mods,
     ownership,
@@ -792,7 +959,15 @@ export function TerminalPane(props: TerminalPaneProps) {
           suppressed instead. See `pointerTypeRef`. */}
       <div
         ref={hostRef}
-        className="h-full w-full p-2"
+        // PANNABLE ONLY WHEN IT HAS TO BE. A faithful watcher whose window
+        // cannot hold the agent's grid even at the floor font gets the
+        // terminal at its true size and scrolls to the rest of it, which is
+        // the honest answer where shrinking further would be an illegible one.
+        // In every other state this is the same fixed, unscrollable host it
+        // has always been, and the pane above it stays the clip boundary.
+        className={
+          viewerOverflow ? "h-full w-full overflow-auto p-2" : "h-full w-full p-2"
+        }
         onPointerDown={(e) => {
           pointerTypeRef.current = e.pointerType
         }}
@@ -854,13 +1029,15 @@ export function TerminalPane(props: TerminalPaneProps) {
           is not the driver AND the two grids actually differ) and disappears
           the moment either side moves, because both are live values.
 
-          Under the take-over card's z-20 on purpose: when that card is up it is
-          the fuller answer to the same question, and two answers stacked is
-          worse than one. */}
+          TOP-RIGHT, because the take-over banner now lives along the bottom
+          edge and no longer paints over the pane. The two used to be stacked
+          answers to one question; they are now two statements that must not
+          overlap, so they sit at opposite ends. In the faithful view this
+          badge is normally absent altogether: the grids agree. */}
       {sizedForAnotherDevice ? (
         <div
           data-testid="viewer-grid-badge"
-          className="pointer-events-none absolute right-2 bottom-2 z-10 rounded-md border bg-card/90 px-2 py-1 text-xs text-muted-foreground"
+          className="pointer-events-none absolute top-2 right-2 z-10 rounded-md border bg-card/90 px-2 py-1 text-xs text-muted-foreground"
         >
           Sized for another device
         </div>
@@ -915,57 +1092,62 @@ export function TerminalPane(props: TerminalPaneProps) {
           </div>
         </div>
       ) : null}
-      {/* Read-only secondary view. When another device has taken over this PTY we
-          replace the editable terminal with a take-over placeholder (the xterm
-          stays mounted underneath, still receiving output, so reclaiming is
-          instant — but it is covered and its input is gated off). A solid
-          bg-background overlay so it reads as "instead of" the terminal rather
-          than a banner over it.
+      {/* THE WATCHER'S BANNER, and it is a banner rather than a placeholder
+          on purpose. It used to be a solid card painted over the WHOLE pane,
+          which was right while a watcher's picture was garbage: there was
+          nothing underneath worth looking at. With the faithful view the
+          picture underneath IS the agent's screen, exactly as its driver sees
+          it, so covering it would be hiding the thing the user came to watch.
 
-          It yields to the connection-lost affordance above. This card paints
-          solid over the whole pane and renders AFTER those overlays, so a
-          non-owner whose socket has died would otherwise see only "Take over"
-          and never the Reconnect button: the health of the connection would be
-          invisible behind exactly the surface that needs it. Suppressing the
-          card here (rather than lifting the overlays' z-order) keeps one state
-          on screen at a time; raising the overlays instead would leave this
-          solid card painted underneath a floating Reconnect box, reading as two
-          stacked answers to one question. The condition mirrors the overlay's
-          own `connectionLost && !offline`, so when the app-wide offline overlay
-          owns the signal the card stays exactly as it was. */}
+          Compact, bottom-anchored, and NON-OCCLUDING: the outer strip is
+          `pointer-events-none` so a click anywhere outside the card itself
+          reaches the terminal (a watcher cannot type, but selection, links and
+          scrolling are all still theirs), and only the card re-enables
+          pointer events for its own bounds.
+
+          It yields to the connection-lost affordance exactly as the card did.
+          That overlay is the health of the connection, and a watcher whose
+          socket has died needs Reconnect rather than a Take over that cannot
+          reach the server. The condition mirrors the overlay's own
+          `connectionLost && !offline`, so when the app-wide offline overlay
+          owns the signal this is unchanged.
+
+          The xterm underneath stays mounted and still receives output in every
+          state, so reclaiming is instant; input is gated by the ownership
+          verdict, not by this. */}
       {!isOwner && !(connectionLost && !offline) ? (
-        <div className="absolute inset-0 z-20 flex items-center justify-center bg-background p-4">
-          <Card className="w-full max-w-sm text-center">
-            <CardHeader className="items-center gap-3">
-              <MonitorSmartphone className="size-8 text-muted-foreground" />
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 flex justify-center p-2">
+          <div className="pointer-events-auto flex w-full max-w-md items-center gap-3 rounded-lg border bg-card/95 px-3 py-2 text-left text-card-foreground shadow-lg">
+            <MonitorSmartphone className="size-5 shrink-0 text-muted-foreground" />
+            <div className="min-w-0 flex-1">
               {/* THREE TITLES, because there are three truths and the card used
                   to tell only two of them. "Nobody is driving" is the one the
                   owner-cleared broadcast made reachable: the device that was
                   driving has disconnected, and this pane is backgrounded, so it
                   did not auto-claim. Saying "Active on another device" there
                   would name a browser tab that has closed. */}
-              <CardTitle>
+              <p className="truncate text-sm font-medium">
                 {takeoverLabel
                   ? `Open on ${takeoverLabel}`
                   : ownerPresent
                     ? "Active on another device"
                     : "Nobody is driving"}
-              </CardTitle>
-              <CardDescription>
+              </p>
+              <p className="text-xs text-muted-foreground">
                 {ownerPresent
                   ? "Only one device can type at a time."
-                  : "Whoever was driving has disconnected."}{" "}
-                Take over to drive this{" "}
-                {kind === "agent" ? "agent" : "terminal"} from here.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <Button onClick={takeOver} className="w-full max-md:min-h-11">
-                <MonitorSmartphone />
-                Take over
-              </Button>
-            </CardContent>
-          </Card>
+                  : "Whoever was driving has disconnected."}
+              </p>
+            </div>
+            {/* The 40px touch floor, kept on both axes (`min-h-10` and
+                `min-w-10`; the icon-plus-label content already renders wider,
+                so the width floor is a backstop, not a change), and `shrink-0`
+                so a long device name can never squeeze it below that. */}
+            <Button onClick={takeOver} className="min-h-10 min-w-10 shrink-0">
+              <MonitorSmartphone />
+              Take over
+            </Button>
+          </div>
         </div>
       ) : null}
     </div>

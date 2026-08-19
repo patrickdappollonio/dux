@@ -35,6 +35,24 @@
 // plan (jiggle or single resize, including the jiggle's held continuation), the
 // foreground re-assert, and the gesture hold.
 //
+// TWO MODES, and the second one is the point of the whole viewer-geometry arc.
+// In OWNER mode everything above applies: the grid follows this container and
+// the child is told about it. In VIEWER mode the coordinator NEVER fits to the
+// container and NEVER sends; it re-grids this terminal to the PTY's own rows
+// and columns instead, so a watcher's emulator is geometry-identical to the
+// driver's and the live view is faithful rather than wrapped and clamped. The
+// mode is not a latch to be switched: it is `viewerMode()`, read live off the
+// ownership verdict and the user's `ui.watcher_view` preference, so it can
+// never drift from who actually drives the pty. Promotion needs nothing new
+// here (a take-over bounces the socket, whose first frame fits and sends; the
+// freed-pty claim comes through `directSend`), and demotion needs nothing but
+// the next `applyViewerGrid`.
+//
+// The presentation half of the faithful view, shrinking the FONT until the
+// adopted grid fits the window, is not here: it is the pane's, over the pure
+// arithmetic in `lib/viewerFit.ts`. This module owns the grid; nothing else
+// re-grids a viewer.
+//
 // THERE IS NO LONGER AN EXCEPTION TO "no other call site sends". The take-over
 // button used to be one: it called the socket's `sendResize` directly for the
 // synchronous did-it-go-out boolean that told it whether to reopen a dead
@@ -44,16 +62,19 @@
 // the `sendResize` the lifecycle hands this machine, which is the one confirmed
 // write; this machine does not know the flag exists.
 //
-// ONE STATED EXCEPTION REMAINS, to "no other call site fits": the two FONT-driven
-// refits, in `lib/terminalFont.ts` (the late refit once the bundled faces land)
-// and in the pane's live font-preference effect. Both re-grid the terminal
-// without asking this machine, and both are pre-existing and deliberate,
-// because the metrics have moved and the canvas would otherwise be wrong. They
-// are safe for the PTY half of the pair for the reason A4 exists: the grid
-// change reaches the child through xterm's own `onResize`, which this machine
-// subscribes to and debounces. They are NOT covered by the gesture hold, which
-// is accepted: a font landing mid-touch-scroll is not a reachable sequence in
-// the way a keyboard collapse is.
+// ONE STATED EXCEPTION REMAINS, to "no other call site fits": the FONT-driven
+// refit in the pane's relayout. Its sibling, the late refit once the bundled
+// faces land, is no longer one: `lib/terminalFont.ts` now takes the refit as a
+// closure and the lifecycle passes `refitForFonts` from here, because that
+// refit has two right answers (fit the container, or recompute the watcher's
+// shrink) and only this machine knows which. The relayout re-grids the
+// terminal without asking, and it is pre-existing and deliberate, because the
+// metrics have moved and the canvas would otherwise be wrong. It is safe for
+// the PTY half of the pair for the reason A4 exists: the grid change reaches
+// the child through xterm's own `onResize`, which this machine subscribes to
+// and debounces. It is NOT covered by the gesture hold, which is accepted: a
+// font landing mid-touch-scroll is not a reachable sequence in the way a
+// keyboard collapse is.
 import type { Terminal } from "@xterm/xterm"
 import type { FitAddon } from "@xterm/addon-fit"
 
@@ -80,6 +101,18 @@ export type ResizeCoordinatorDeps = {
   /// The ownership verdict, read live: a resize frame IS a claim server-side,
   /// so a read-only observer (and a backgrounded tab) drives nothing.
   isOwner: () => boolean
+  /// Whether this pane is rendering somebody else's pty FAITHFULLY (not the
+  /// owner, and `ui.watcher_view` is "faithful"). Read live at every decision
+  /// point rather than latched, so it cannot disagree with `isOwner` above.
+  /// False is the legacy behavior in full: fit this container, diverge, and
+  /// let the badge say so.
+  viewerMode: () => boolean
+  /// The observed layout (the pane's HOST; see `start`) moved while in VIEWER
+  /// mode. There is no fit to run, but the font shrink is computed from that
+  /// box, so the pane recomputes it here. Called from the same ResizeObserver
+  /// callback the fit would have used, so the two modes react to a layout
+  /// change in one place.
+  onViewerLayout: () => void
 }
 
 export type ResizeCoordinator = {
@@ -88,9 +121,15 @@ export type ResizeCoordinator = {
   /// that "every fit goes through the coordinator" is literally true; there is
   /// no gesture and no socket yet, so it can never be held.
   fitAfterOpen: () => void
-  /// Start observing the container and subscribe to xterm's own resize event,
-  /// then take the mount-time fit and seed the dedupe from it.
-  start: (container: Element) => void
+  /// Start observing the given element and subscribe to xterm's own resize
+  /// event, then take the mount-time fit and seed the dedupe from it. The
+  /// pane passes the HOST, never the container xterm opened into: the
+  /// relayout's below-floor overflow branch pins the container to the adopted
+  /// grid's pixel size, and a pinned box never moves with the window, so an
+  /// observer on it goes deaf exactly when the watcher needs a way out of pan
+  /// mode. The host is never pinned, and in every other state the two boxes
+  /// resize together, so nothing else changes.
+  start: (observed: Element) => void
   /// A (re)open landed. `firstOpen` decides the first-frame plan: the very
   /// first open jiggles, every reconnect sends a single plain resize.
   noteOpen: (firstOpen: boolean) => void
@@ -117,13 +156,28 @@ export type ResizeCoordinator = {
   /// The owner-gated, dedupe-recording send, for the first-frame plan's own use
   /// and for the foreground re-assert.
   sendOwned: (rows: number, cols: number) => boolean
+  /// The one FONT-driven refit that belongs to this module: the late refit
+  /// once the bundled faces land, whose right answer differs by mode (fit the
+  /// container, or recompute the watcher's shrink). The pane's relayout does
+  /// the same job for itself; see the module doc's stated font exception.
+  refitForFonts: () => void
+  /// Record the PTY's own grid as the wire last reported it (the `connected`
+  /// handshake, then every `size` event) and, in VIEWER mode, adopt it. Null
+  /// means the server could not say, which is never read as agreement: the
+  /// last grid it DID report stands.
+  noteRemoteGrid: (grid: { rows: number; cols: number } | null) => void
+  /// Re-assert the recorded remote grid. Idempotent (a same-size
+  /// `term.resize` is skipped) and a no-op outside viewer mode, so the pane
+  /// may call it after anything that could have disturbed the grid: a
+  /// demotion, a font change, a relayout.
+  applyViewerGrid: () => void
   dispose: () => void
 }
 
 export function createResizeCoordinator(
   deps: ResizeCoordinatorDeps,
 ): ResizeCoordinator {
-  const { term, fit, sendResize, isOwner } = deps
+  const { term, fit, sendResize, isOwner, viewerMode, onViewerLayout } = deps
 
   let lastRows = 0
   let lastCols = 0
@@ -157,6 +211,33 @@ export function createResizeCoordinator(
   let heldResizeSend: (() => void) | null = null
   // Mirrors "a touch scroll is in flight", written by the touch machine.
   let holding = false
+  // The PTY's own grid as the wire last reported it, or null while nothing
+  // has. Recorded in BOTH modes (an owner is told its own applied grid too),
+  // so a demotion has something to adopt immediately rather than waiting for
+  // the next `size` event.
+  let remoteGrid: { rows: number; cols: number } | null = null
+
+  // EVERY local refit goes through here, because VIEWER mode has none. A
+  // watcher's grid is the PTY's, adopted from the wire; fitting it to this
+  // container is precisely the divergence the faithful view exists to remove,
+  // and a single stray `fit.fit()` would re-introduce it (and, through xterm's
+  // own resize event, tell the badge the grids agree when they no longer do).
+  const runFit = () => {
+    if (viewerMode()) return
+    fit.fit()
+  }
+
+  // Adopt the recorded grid. Idempotent: xterm fires `onResize` only on a real
+  // change, and the guard here keeps even the call off the hot path. A no-op
+  // outside viewer mode, so callers never have to ask which mode they are in.
+  const applyViewerGrid = () => {
+    if (!viewerMode()) return
+    const grid = remoteGrid
+    if (!grid) return
+    if (grid.rows <= 0 || grid.cols <= 0) return
+    if (term.rows === grid.rows && term.cols === grid.cols) return
+    term.resize(grid.cols, grid.rows)
+  }
 
   // It records what the PTY has been told, and it records only what actually
   // went out. TWO things can swallow a resize and neither raises anything: the
@@ -214,7 +295,7 @@ export function createResizeCoordinator(
       // however many observer callbacks were parked, this is one fit at the
       // size the drag ended on. It re-enters `armDebounce` through xterm's own
       // resize event, which is a no-op send one window later.
-      fit.fit()
+      runFit()
     }
     if (term.rows !== lastRows || term.cols !== lastCols) {
       sendOwned(term.rows, term.cols)
@@ -238,7 +319,7 @@ export function createResizeCoordinator(
       fitHeldByDebounce = true
       return
     }
-    fit.fit()
+    runFit()
   }
 
   // A direct resize request (the first-frame jiggle, the reconnect resize, the
@@ -261,7 +342,7 @@ export function createResizeCoordinator(
     // window had parked; leaving the flag set would fit a second time at the
     // settle for no reason.
     fitHeldByDebounce = false
-    fit.fit()
+    runFit()
     send()
   }
 
@@ -325,9 +406,9 @@ export function createResizeCoordinator(
 
   return {
     fitAfterOpen() {
-      fit.fit()
+      runFit()
     },
-    start(container) {
+    start(observed) {
       // Geometry is reported to the PTY from exactly one place: xterm's own
       // resize event. A local re-grid has more causes than the ResizeObserver,
       // and every one of them has to reach the child or it draws for a geometry
@@ -349,7 +430,7 @@ export function createResizeCoordinator(
       // dedupe so the ResizeObserver's initial observe callback does NOT send a
       // (racing) resize before the first paint. The initial PTY resize is
       // deferred to the first-frame handler.
-      fit.fit()
+      runFit()
       lastRows = term.rows
       lastCols = term.cols
       // Fallback for a session that emits no first frame (e.g. an idle freshly
@@ -364,12 +445,23 @@ export function createResizeCoordinator(
       // to a no-op; the foreground resync is the designed recovery.)
       ro = new ResizeObserver(() => {
         cancelAnimationFrame(fitFrame)
+        // VIEWER mode: the observed box's size decides nothing about the
+        // grid, so there is no fit to run and nothing to tell the child. What
+        // it DOES decide is how small the font has to be for the PTY's grid
+        // to fit, so the pane recomputes that instead. Deliberately in the
+        // same callback the fit would have used: one layout signal, two
+        // answers, never two observers that could disagree about when a
+        // resize happened.
+        if (viewerMode()) {
+          fitFrame = requestAnimationFrame(() => onViewerLayout())
+          return
+        }
         // Through the hold, never a bare fit: a refit landing mid-touch-gesture
         // resets the child's scrolling region under it.
         fitFrame = requestAnimationFrame(() => fitOrHold())
         armDebounce()
       })
-      ro.observe(container)
+      ro.observe(observed)
     },
     noteOpen(firstOpen) {
       initialResizeDone = false
@@ -415,7 +507,7 @@ export function createResizeCoordinator(
       if (fitHeldByGesture || fitHeldByDebounce) {
         fitHeldByGesture = false
         fitHeldByDebounce = false
-        fit.fit()
+        runFit()
       }
       pendingSend?.()
       // A debounced send the gesture held back: the wheel-report stream ends
@@ -427,6 +519,20 @@ export function createResizeCoordinator(
       }
     },
     sendOwned,
+    refitForFonts() {
+      if (viewerMode()) {
+        onViewerLayout()
+        return
+      }
+      fit.fit()
+    },
+    noteRemoteGrid(grid) {
+      // Null is "the server could not say", never "it matches": the last grid
+      // it DID report stands, which is the same rule `gridsDiverge` applies.
+      if (grid) remoteGrid = grid
+      applyViewerGrid()
+    },
+    applyViewerGrid,
     dispose() {
       cancelAnimationFrame(fitFrame)
       resizeSub?.dispose()

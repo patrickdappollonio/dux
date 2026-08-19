@@ -90,6 +90,7 @@ import {
   DRAG_THRESHOLD_PX,
   WHEEL_SCROLL_SENSITIVITY,
   writeSoftNewline,
+  xtermScrollbarWidth,
 } from "./constants"
 import { createResizeCoordinator } from "./resizeCoordinator"
 import { createAttachReplay } from "./attachReplay"
@@ -128,6 +129,19 @@ export type TerminalLifecyclePorts = {
   /// The lifecycle installs a closure over THIS mount's coordinator and clears
   /// it on teardown, so the claim can never fire into a disposed terminal.
   claimFreedPtyRef: RefObject<(() => void) | null>
+  /// THE TWO VIEWER-VIEW PORTS, the same mount-scoped idiom as the claim above
+  /// and pointing in opposite directions.
+  ///
+  /// `viewerRegridRef` is INSTALLED here over this mount's coordinator: the
+  /// pane calls it to re-assert the adopted grid after anything that could
+  /// have disturbed it (a demotion, a font change), so a viewer re-grid stays
+  /// a coordinator act rather than a lifecycle side effect.
+  viewerRegridRef: RefObject<(() => void) | null>
+  /// `viewerRelayoutRef` is installed by the PANE and read here: the
+  /// coordinator's own ResizeObserver calls it instead of fitting while a
+  /// watcher renders faithfully, because the host's size decides the shrink
+  /// font and nothing else.
+  viewerRelayoutRef: RefObject<(() => void) | null>
   live: LiveSettings
   mods: ModifierLatch
   ownership: OwnershipVerdict
@@ -193,6 +207,8 @@ export function useTerminalLifecycle(
     prevVisibleRef,
     takeoverIntent,
     claimFreedPtyRef,
+    viewerRegridRef,
+    viewerRelayoutRef,
     live,
     mods,
     ownership,
@@ -247,13 +263,7 @@ export function useTerminalLifecycle(
     // and the reserved space always agree (single source). Setting the option
     // also instantiates an overview-ruler canvas; index.css hides it (dux uses no
     // decorations, so it's always empty).
-    const scrollbarWidth =
-      parseInt(
-        getComputedStyle(document.documentElement).getPropertyValue(
-          "--xterm-scrollbar-width"
-        ),
-        10
-      ) || 8
+    const scrollbarWidth = xtermScrollbarWidth()
 
     // Stable for this mount, and read by the link machine as well as the key
     // handler further down: it decides which chord is the force-forward hatch
@@ -384,7 +394,14 @@ export function useTerminalLifecycle(
         return sent
       },
       isOwner: () => ownership.read(),
+      // VIEWER MODE, derived and never latched: not the driver, and the user
+      // has not asked for the legacy fit-my-window view. Both halves are read
+      // live, so the coordinator's answer cannot lag a handover.
+      viewerMode: () => !ownership.read() && live.current.watcherFaithful,
+      onViewerLayout: () => viewerRelayoutRef.current?.(),
     })
+    // The pane's handle on this mount's grid adoption (see the port's doc).
+    viewerRegridRef.current = () => resize.applyViewerGrid()
     // The freed-pty claim's send port (ownership site 5). Through the
     // coordinator's direct-send path like every other non-debounced resize, so
     // it takes the gesture hold and refits before it notifies.
@@ -425,7 +442,13 @@ export function useTerminalLifecycle(
     // before it: awaiting fonts before opening would delay the PTY connection
     // on every mount for a benefit (correct first-frame metrics) that only
     // matters on a cold font cache.
-    loadTerminalFontsThenRefit(term, termRef, fitAddonRef, fontSize, fontFamily)
+    loadTerminalFontsThenRefit(
+      term,
+      termRef,
+      () => resize.refitForFonts(),
+      fontSize,
+      fontFamily,
+    )
 
     // Record this socket's connection id (the socket's first `connected` frame, and
     // again on every reconnect since the server allocates a fresh id per open) so
@@ -459,6 +482,13 @@ export function useTerminalLifecycle(
     // things: an attach is already sized against the handshake's answer, while a
     // change after it is what a diverged viewer heals from.
     pty.onPtyGrid = (grid, fromHandshake) => {
+      // ADOPT BEFORE ARMING. In viewer mode this re-grids the terminal to the
+      // PTY's geometry, and it must happen before `noteRemotePtyGrid` schedules
+      // the heal bounce, so the replay that bounce brings back is parsed at the
+      // child's own geometry rather than at the one this window happened to
+      // have. (The reconnect's handshake re-reports the same grid, which is why
+      // the adopt is idempotent.)
+      resize.noteRemoteGrid(grid)
       noteRemotePtyGrid(grid, fromHandshake)
     }
 
@@ -713,8 +743,24 @@ export function useTerminalLifecycle(
     const gesture = createTouchGesture({
       // On the alt-screen dux can only act if the app takes mouse input and we
       // own the PTY; otherwise leave the touch alone.
-      scrollAllowed: () =>
-        term.buffer.active.type === "normal" || forwardWheelNow(),
+      scrollAllowed: () => {
+        // A below-floor faithful watcher overflows the host on purpose, and
+        // the host is the scroller. While it can actually scroll vertically,
+        // leave the vertical drag to the browser (the same answer the
+        // no-forward alt-screen case below gets): intercepting it would move
+        // xterm's scrollback while the grid's rows below the fold stayed
+        // unreachable by touch. Width-only overflow keeps the interception,
+        // because the host has nothing vertical to scroll there. Owner mode
+        // and every non-overflow state never set the flag, so this gate reads
+        // as false everywhere else and the behavior is exactly the old one.
+        if (
+          live.current.viewerOverflow &&
+          host.scrollHeight > host.clientHeight
+        ) {
+          return false
+        }
+        return term.buffer.active.type === "normal" || forwardWheelNow()
+      },
       onGestureReset: () => {
         selection.end()
         resize.setHolding(false)
@@ -732,7 +778,20 @@ export function useTerminalLifecycle(
         composeInputRef.current?.blur()
       },
       onScrollMove: (accumPx, touch) => {
-        const rowHeight = container.clientHeight / term.rows
+        // The row the FINGER sees: the rendered screen's height over the grid.
+        // In the faithful view the grid can be smaller than the host-sized
+        // container (the letterboxed watcher), and dividing the container by
+        // the grid's rows overestimates the row, so the scroll ran ahead of
+        // the finger. Owner and legacy paths are unchanged in value: there
+        // the screen fills the container. When the screen is unmeasurable (a
+        // pane mid-mount) the old container formula is the fallback, and
+        // `dragScrollLines` has its own floor below that.
+        const screen = term.element?.querySelector(".xterm-screen")
+        const screenHeight =
+          screen instanceof HTMLElement && screen.clientHeight > 0
+            ? screen.clientHeight
+            : container.clientHeight
+        const rowHeight = screenHeight / term.rows
         const { scrollLines, remainderPx } = dragScrollLines(accumPx, rowHeight)
         if (scrollLines === 0) return accumPx
         if (forwardWheelNow()) {
@@ -907,8 +966,18 @@ export function useTerminalLifecycle(
     // THE SIZING PLUMBING, all of it, is the resize coordinator's: it
     // subscribes to xterm's own resize event (the ONE place geometry reaches
     // the PTY), takes the mount fit, seeds its dedupe from it, arms the
-    // no-first-frame fallback, and starts observing the container.
-    resize.start(container)
+    // no-first-frame fallback, and starts observing the layout.
+    //
+    // It observes the HOST, not the container. The relayout's below-floor
+    // overflow branch pins the CONTAINER to the adopted grid's pixel size, and
+    // a pinned box never moves with the window, so observing it left the
+    // overflow state deaf to every host and window resize: a watcher could
+    // never leave pan mode until some unrelated event ran the relayout again.
+    // The host's box is set by the pane layout and is never pinned. The owner
+    // path is unchanged by this: the owner never pins the container, which is
+    // `h-full w-full` of the host, so the two boxes resize together and the
+    // observer fires for exactly the same layout changes it always did.
+    resize.start(host)
     // THE ATTACH-AND-REPLAY MACHINE owns the (re)open's repaint: the
     // generation dedupe, the reset, the drain and its held chunks, and the
     // focus-report suppression window. See its module doc for each.
@@ -1098,6 +1167,9 @@ export function useTerminalLifecycle(
       // BEFORE the terminal is disposed, so a `pty.owner` arriving during
       // teardown cannot fit a dead terminal.
       if (claimFreedPtyRef.current !== null) claimFreedPtyRef.current = null
+      // Same reason, same moment: the pane must not re-grid a disposed
+      // terminal through a port still pointing at this mount's coordinator.
+      if (viewerRegridRef.current !== null) viewerRegridRef.current = null
       clearTimeout(graceTimer)
       clearInterval(viewedTimer)
       container.removeEventListener("mousedown", onMouseDown)

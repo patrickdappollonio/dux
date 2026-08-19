@@ -28,6 +28,14 @@ class TermFake {
   write(_data: unknown, cb?: () => void) {
     if (cb) cb()
   }
+  /// How many times `resize` was called, so idempotence is checkable.
+  resizes = 0
+  /// xterm's own signature is resize(columns, rows).
+  resize(cols: number, rows: number) {
+    this.resizes++
+    if (this.cols === cols && this.rows === rows) return
+    this.regrid(rows, cols)
+  }
   regrid(rows: number, cols: number) {
     this.rows = rows
     this.cols = cols
@@ -64,12 +72,19 @@ function settleFirstFrame(
   sent.length = 0
 }
 
-function setup(opts: { owner?: boolean; wire?: boolean } = {}) {
+function setup(
+  opts: { owner?: boolean; wire?: boolean; faithful?: boolean } = {},
+) {
   const term = new TermFake()
   const fit = new FitFake(term)
   const sent: { rows: number; cols: number }[] = []
+  const relayouts: number[] = []
   let owner = opts.owner ?? true
   let wire = opts.wire ?? true
+  // The `ui.watcher_view` preference. Faithful by default, exactly as the
+  // config is; VIEWER mode is that AND not being the owner, which is how the
+  // pane wires it.
+  let faithful = opts.faithful ?? true
   const coord = createResizeCoordinator({
     term: term as unknown as Terminal,
     fit: fit as unknown as FitAddon,
@@ -79,14 +94,20 @@ function setup(opts: { owner?: boolean; wire?: boolean } = {}) {
       return true
     },
     isOwner: () => owner,
+    viewerMode: () => !owner && faithful,
+    onViewerLayout: () => relayouts.push(1),
   })
   return {
     term,
     fit,
     sent,
     coord,
+    relayouts,
     setOwner: (v: boolean) => {
       owner = v
+    },
+    setFaithful: (v: boolean) => {
+      faithful = v
     },
     setWire: (v: boolean) => {
       wire = v
@@ -417,5 +438,113 @@ describe("the resize coordinator's teardown", () => {
     vi.advanceTimersByTime(1000)
     expect(sent).toEqual([])
     expect(term.resizeListeners).toEqual([])
+  })
+})
+
+// VIEWER MODE: the whole point of the faithful watcher view. One pty has one
+// grid, the owner's, and a watcher rendering the same bytes at a different one
+// is rendering wrapped, clamped output into a scrollback nothing cleans up. So
+// a watcher stops deciding its own geometry: it never fits to its container,
+// never sends, and re-grids to whatever the wire says the pty is.
+describe("the resize coordinator in VIEWER mode", () => {
+  /// A watcher with the faithful preference: not the owner, faithful on.
+  const watcher = () => setup({ owner: false, faithful: true })
+
+  it("never fits to its container, and recomputes the shrink instead", () => {
+    const { fit, coord, relayouts } = watcher()
+    coord.start(document.createElement("div"))
+    expect(fit.fits).toBe(0)
+    observers[0].fire()
+    vi.advanceTimersByTime(500)
+    expect(fit.fits).toBe(0)
+    // The layout signal is not dropped: it is answered by the pane's font
+    // shrink, which is what the container's size decides in this mode.
+    expect(relayouts.length).toBeGreaterThan(0)
+  })
+
+  it("never sends, on any path", () => {
+    const { coord, sent, term } = watcher()
+    coord.start(document.createElement("div"))
+    coord.noteOpen(true)
+    coord.firstFrameLanded()
+    coord.resyncToForeground()
+    coord.noteRemoteGrid({ rows: 40, cols: 120 })
+    term.regrid(40, 120)
+    vi.advanceTimersByTime(1000)
+    expect(sent).toEqual([])
+  })
+
+  it("adopts the grid the wire reports, on the handshake seed and on a change", () => {
+    const { coord, term } = watcher()
+    coord.start(document.createElement("div"))
+    coord.noteRemoteGrid({ rows: 40, cols: 120 })
+    expect({ rows: term.rows, cols: term.cols }).toEqual({ rows: 40, cols: 120 })
+    coord.noteRemoteGrid({ rows: 50, cols: 132 })
+    expect({ rows: term.rows, cols: term.cols }).toEqual({ rows: 50, cols: 132 })
+  })
+
+  it("is idempotent: re-adopting the same grid re-grids nothing", () => {
+    const { coord, term } = watcher()
+    coord.start(document.createElement("div"))
+    coord.noteRemoteGrid({ rows: 40, cols: 120 })
+    const resizes = term.resizes
+    coord.noteRemoteGrid({ rows: 40, cols: 120 })
+    coord.applyViewerGrid()
+    expect(term.resizes).toBe(resizes)
+  })
+
+  it("reads a null grid as 'nothing known', never as agreement", () => {
+    const { coord, term } = watcher()
+    coord.start(document.createElement("div"))
+    coord.noteRemoteGrid({ rows: 40, cols: 120 })
+    coord.noteRemoteGrid(null)
+    expect({ rows: term.rows, cols: term.cols }).toEqual({ rows: 40, cols: 120 })
+  })
+
+  it("adopts on DEMOTION, from the grid it recorded while it was the owner", () => {
+    const { coord, term, setOwner } = setup({ owner: true })
+    coord.start(document.createElement("div"))
+    // The owner is told its own applied grid too, and records it without
+    // adopting anything.
+    coord.noteRemoteGrid({ rows: 40, cols: 120 })
+    expect(term.cols).toBe(80)
+    setOwner(false)
+    coord.applyViewerGrid()
+    expect({ rows: term.rows, cols: term.cols }).toEqual({ rows: 40, cols: 120 })
+  })
+
+  it("returns to fitting and sending on PROMOTION, through the existing path", () => {
+    // A take-over bounces the socket; the new connection's first frame is what
+    // fits and claims. Nothing new was added for promotion, so this pins that
+    // the existing path still produces exactly one fit and one send.
+    const { coord, fit, sent, term, setOwner } = watcher()
+    coord.start(document.createElement("div"))
+    coord.noteRemoteGrid({ rows: 40, cols: 120 })
+    expect(fit.fits).toBe(0)
+    setOwner(true)
+    coord.noteOpen(false)
+    coord.firstFrameLanded()
+    expect(fit.fits).toBe(1)
+    expect(sent).toEqual([{ rows: term.rows, cols: term.cols }])
+  })
+
+  it("does none of it in the LEGACY fit-my-window view", () => {
+    // The preference is the whole difference: a watcher who asked to fit their
+    // own window still fits it, still adopts nothing, and still sends nothing
+    // (the owner gate, unchanged).
+    const { coord, fit, term, sent, relayouts } = setup({
+      owner: false,
+      faithful: false,
+    })
+    coord.start(document.createElement("div"))
+    settleFirstFrame(coord, sent)
+    const before = fit.fits
+    observers[0].fire()
+    vi.advanceTimersByTime(500)
+    expect(fit.fits).toBeGreaterThan(before)
+    expect(relayouts).toEqual([])
+    coord.noteRemoteGrid({ rows: 40, cols: 120 })
+    expect({ rows: term.rows, cols: term.cols }).toEqual({ rows: 24, cols: 80 })
+    expect(sent).toEqual([])
   })
 })
