@@ -127,9 +127,14 @@ vi.mock("sonner", () => ({
     dismiss: vi.fn(),
   }),
 }))
-vi.mock("@/lib/suppressViewerReports", () => ({
-  suppressViewerReports: () => {},
-}))
+// Only the parser-handler installer is stubbed out (it needs a real xterm
+// parser); `isFocusReport` is a pure helper the pane's onData gate calls, so it
+// comes from the real module.
+vi.mock("@/lib/suppressViewerReports", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@/lib/suppressViewerReports")>()
+  return { ...actual, suppressViewerReports: () => {} }
+})
 vi.mock("@/components/MacroPopover", () => ({ MacroPopover: () => null }))
 vi.mock("@/lib/ptySocket", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/ptySocket")>()

@@ -149,7 +149,10 @@ import {
   visibleSinceAfterTransition,
 } from "@/lib/viewedPing"
 import { DEFAULT_SCROLLBACK_LINES } from "@/lib/types"
-import { suppressViewerReports } from "@/lib/suppressViewerReports"
+import {
+  isFocusReport,
+  suppressViewerReports,
+} from "@/lib/suppressViewerReports"
 import { registerAgentNotifications } from "@/lib/agentNotifications"
 import { BrailleSpinner } from "@/components/BrailleSpinner"
 
@@ -1105,8 +1108,16 @@ export function TerminalPane(props: TerminalPaneProps) {
       // `pty.owner` carries an id we recognise as ours.
       if (pendingClaimRef.current) {
         pendingClaimRef.current = false
-        const term = termRef.current
-        if (term) pty.sendResize(term.rows, term.cols)
+        // Through the gesture hold like every other resize path (see
+        // fitAndSend, declared below and only ever called from a socket event
+        // or a timer, long after this effect body has run): a claim that lands
+        // mid-touch-gesture waits for the lift rather than refitting under the
+        // finger. The size is read when the send actually runs, so a claim
+        // deferred across a keyboard collapse claims at the FINAL size.
+        fitAndSend(() => {
+          const t = termRef.current
+          if (t) pty.sendResize(t.rows, t.cols)
+        })
       }
     }
 
@@ -1117,11 +1128,25 @@ export function TerminalPane(props: TerminalPaneProps) {
     // any latch. `modsRef` is read live so this once-created closure sees the
     // current latch rather than a stale capture.
     const encoder = new TextEncoder()
+    // Non-zero while a REPLAY chunk is being applied to xterm. Parsing the
+    // replay's mode-restore tail makes xterm volunteer a focus report of its
+    // own, which is the viewer answering for state dux-core already owns (see
+    // `isFocusReport` for the measured mechanism); those reports are dropped
+    // for the duration of the write instead of being typed at the child. A
+    // counter, not a flag, so overlapping replay writes cannot close the window
+    // early. Bounded by the write CALLBACK, never a timer: xterm tells us
+    // exactly when it has finished parsing the chunk.
+    let replayWritesInFlight = 0
     const dataSub = term.onData((s) => {
       // Read-only when we are not the owner: a secondary viewer's keystrokes are
       // dropped client-side (and the server drops them too) so it can never
       // disrupt the active device's typing. The take-over button reclaims input.
       if (!isOwnerRef.current) return
+      // A focus report raised by the replay we are applying right now is the
+      // viewer volunteering state, not a real focus change: drop it. Real
+      // transitions (the user clicking into or away from the pane) happen
+      // outside this window and still reach the PTY.
+      if (replayWritesInFlight > 0 && isFocusReport(s)) return
       const mods = modsRef.current
       const out =
         mods.ctrl || mods.alt ? applyModifiers(s, mods) : s
@@ -1570,6 +1595,54 @@ export function TerminalPane(props: TerminalPaneProps) {
     // through the same debounce once the finger lifts — after the last wheel
     // report, coalescing however many container resizes the collapse produced.
     let resizeHeldByGesture = false
+    // The LOCAL refit and the child's resize notification are one atomic pair:
+    // a gesture that holds one holds both, and gesture end releases both
+    // together, refit first. Holding only the SIGWINCH (which is all the hold
+    // above originally did) is not enough, and the reason is a measured
+    // property of xterm 6.0.0: `Buffer.resize` sets `scrollBottom = newRows - 1`
+    // unconditionally and `scrollTop = 0` for any non-empty buffer, and
+    // `BufferSet.resize` runs it over the normal AND the alt buffer. So EVERY
+    // local `fit.fit()` that changes the grid silently resets the scrolling
+    // region (DECSTBM) to full screen on both buffers. Refitting mid-gesture
+    // therefore hands a region-relative, mouse-tracking pager a viewer whose
+    // margins are gone while the child still paints for the old geometry, and
+    // its repaint stamps one line per forwarded wheel notch: the repeated-line
+    // bug on phones, where the touch scroll blurs the compose bar, the soft
+    // keyboard collapses, `interactive-widget=resizes-content` grows the pane
+    // under the finger, and the ResizeObserver refits every frame.
+    let fitHeldByGesture = false
+    // The one deferred direct (non-debounced) resize request, if any. Later
+    // requests overwrite earlier ones because each re-reads the geometry when it
+    // finally runs, so the flush always uses the FINAL size: last one wins.
+    let heldResizeSend: (() => void) | null = null
+    // The ResizeObserver's local refit: do it now, or mark it held for the
+    // gesture-end flush. Never fit while the pair is held.
+    const fitOrHold = () => {
+      if (touchScrolling) {
+        fitHeldByGesture = true
+        return
+      }
+      fit.fit()
+    }
+    // A direct resize request (the first-frame jiggle, the reconnect resize, the
+    // deferred ownership claim, the foreground resync): refit and notify the
+    // child now, or defer BOTH halves to gesture end. These paths bypass the
+    // debounced `sendSize` on purpose (see their own comments), so each has to
+    // route through the hold explicitly or the pair comes apart again.
+    const fitAndSend = (send: () => void) => {
+      if (touchScrolling) {
+        fitHeldByGesture = true
+        // FIRST one wins while held: plain resize sends are interchangeable
+        // (each re-reads the live geometry when it finally runs), but the
+        // first-open jiggle closure is not, and a later plain resize
+        // overwriting a parked jiggle would silently skip the redraw nudge
+        // for that open (initialResizeDone is already latched by then).
+        heldResizeSend = heldResizeSend ?? send
+        return
+      }
+      fit.fit()
+      send()
+    }
     let longPressTimer: ReturnType<typeof setTimeout> | undefined
 
     // ---- Long-press text selection -------------------------------------
@@ -1850,7 +1923,19 @@ export function TerminalPane(props: TerminalPaneProps) {
       touchScrolling = false
       touchSelecting = false
       endTouchSelection()
-      // Flush a resize the gesture held back (see resizeHeldByGesture above):
+      // Release the resize pair the gesture held back (see fitHeldByGesture
+      // above): the local refit runs exactly once, at the final container size,
+      // and the child's notification follows it immediately. Exactly one fit,
+      // whichever halves were held: a direct-send path no longer fits for
+      // itself while held, precisely so the flush cannot double-fit.
+      const pendingSend = heldResizeSend
+      heldResizeSend = null
+      if (fitHeldByGesture) {
+        fitHeldByGesture = false
+        fit.fit()
+      }
+      pendingSend?.()
+      // A debounced send the gesture held back (see resizeHeldByGesture above):
       // the wheel-report stream ends with the finger, so re-arming the normal
       // debounce here sends one resize, at the final size, after the stream.
       if (resizeHeldByGesture) {
@@ -2128,35 +2213,41 @@ export function TerminalPane(props: TerminalPaneProps) {
     const sendInitialResize = () => {
       if (initialResizeDone) return
       initialResizeDone = true
-      fit.fit()
-      // Attaching while foregrounded claims ownership by sending our size. The
-      // server broadcasts a `pty.owner` carrying our connection id; the handover
-      // handler recognises it as ours by id, so no echo bookkeeping is needed here.
-      // A backgrounded observer is not the owner, so the sends below no-op.
-      if (firstFrameResizePlan(firstFrameIsFirstOpen) === "jiggle") {
-        // FIRST open only: force the agent to FULLY redraw at our size now that the
-        // first paint has landed. A same-size resize is a kernel no-op (no
-        // SIGWINCH), so when the PTY already matches this viewport the agent never
-        // repaints and the initial snapshot (imperfect for a tall buffer with a
-        // bottom-anchored prompt) stays on screen with the cursor and input box
-        // misplaced. Nudge the width down one column and back: each step is a real
-        // winsize change, so the kernel raises SIGWINCH and the agent redraws its
-        // true UI, ending at the correct size. This automates the manual
-        // divider-nudge that reliably fixed it.
-        sendOwnedResize(term.rows, Math.max(1, term.cols - 1))
-        jiggleTimer = setTimeout(() => {
+      // Fit and notify as one pair, deferred whole if a touch gesture is in
+      // flight (see fitAndSend).
+      fitAndSend(() => {
+        // Attaching while foregrounded claims ownership by sending our size. The
+        // server broadcasts a `pty.owner` carrying our connection id; the handover
+        // handler recognises it as ours by id, so no echo bookkeeping is needed here.
+        // A backgrounded observer is not the owner, so the sends below no-op.
+        if (firstFrameResizePlan(firstFrameIsFirstOpen) === "jiggle") {
+          // FIRST open only: force the agent to FULLY redraw at our size now that the
+          // first paint has landed. A same-size resize is a kernel no-op (no
+          // SIGWINCH), so when the PTY already matches this viewport the agent never
+          // repaints and the initial snapshot (imperfect for a tall buffer with a
+          // bottom-anchored prompt) stays on screen with the cursor and input box
+          // misplaced. Nudge the width down one column and back: each step is a real
+          // winsize change, so the kernel raises SIGWINCH and the agent redraws its
+          // true UI, ending at the correct size. This automates the manual
+          // divider-nudge that reliably fixed it.
+          sendOwnedResize(term.rows, Math.max(1, term.cols - 1))
+          jiggleTimer = setTimeout(() => {
+            // The 60ms continuation is its own direct send, so it takes the
+            // same hold: a gesture that started inside the window would
+            // otherwise catch this SIGWINCH mid-stream.
+            fitAndSend(() => sendOwnedResize(term.rows, term.cols))
+          }, 60)
+        } else {
+          // RECONNECT: the server kept the PTY alive at its prior size and replays a
+          // fresh repaint as this first frame. Jiggling here would force TWO
+          // full-screen agent repaints (at two widths) on EVERY reconnect, and mobile
+          // reconnects constantly. Send a SINGLE resize to our true size instead: it
+          // still re-asserts ownership, it is a kernel no-op (no repaint) when the
+          // size is unchanged, and it raises exactly one natural SIGWINCH (one
+          // repaint) only when the viewport genuinely changed while disconnected.
           sendOwnedResize(term.rows, term.cols)
-        }, 60)
-      } else {
-        // RECONNECT: the server kept the PTY alive at its prior size and replays a
-        // fresh repaint as this first frame. Jiggling here would force TWO
-        // full-screen agent repaints (at two widths) on EVERY reconnect, and mobile
-        // reconnects constantly. Send a SINGLE resize to our true size instead: it
-        // still re-asserts ownership, it is a kernel no-op (no repaint) when the
-        // size is unchanged, and it raises exactly one natural SIGWINCH (one
-        // repaint) only when the viewport genuinely changed while disconnected.
-        sendOwnedResize(term.rows, term.cols)
-      }
+        }
+      })
     }
     // On a RECONNECT the server replays the FULL scrollback as the first binary
     // frame. xterm still holds the buffer from before the drop, so writing the
@@ -2206,6 +2297,25 @@ export function TerminalPane(props: TerminalPaneProps) {
         term.write(bytes)
       }
     }
+    // The replay chunk specifically: the same write, wrapped in the focus-report
+    // suppression window (see `replayWritesInFlight`). The window opens before
+    // the bytes go in and closes in the write's own completion callback, so it
+    // covers exactly the parse of this chunk, mode-restore tail included, and
+    // not a millisecond of real user focus activity either side of it.
+    const writeReplayChunk = (bytes: Uint8Array) => {
+      replayWritesInFlight++
+      const done = () => {
+        replayWritesInFlight = Math.max(0, replayWritesInFlight - 1)
+      }
+      if (!initialResizeDone) {
+        term.write(bytes, () => {
+          done()
+          sendInitialResize()
+        })
+      } else {
+        term.write(bytes, done)
+      }
+    }
     pty.onBytes((bytes) => {
       // Mid-drain: hold everything (the repaint plus any live bytes that raced in)
       // so it lands in order after reset(), never ahead of the fresh replay.
@@ -2232,12 +2342,18 @@ export function TerminalPane(props: TerminalPaneProps) {
             const chunks = heldChunks
             heldChunks = []
             draining = false
-            for (const c of chunks) writeChunk(c)
+            // The FIRST held chunk is the replay itself (it seeded the array
+            // above); anything after it is live output that raced in, so only
+            // the first gets the focus-report suppression window.
+            chunks.forEach((c, i) => {
+              if (i === 0) writeReplayChunk(c)
+              else writeChunk(c)
+            })
           })
         } else {
           // Very first open: the buffer is already empty, so no reset or drain is
           // needed — write the repaint straight through.
-          writeChunk(bytes)
+          writeReplayChunk(bytes)
         }
         return
       }
@@ -2334,7 +2450,9 @@ export function TerminalPane(props: TerminalPaneProps) {
     // a no-op — the visibilitychange handler below re-syncs the PTY on return.)
     const ro = new ResizeObserver(() => {
       cancelAnimationFrame(fitFrame)
-      fitFrame = requestAnimationFrame(() => fit.fit())
+      // `fitOrHold`, not a bare fit: a refit landing mid-touch-gesture resets
+      // the child's scrolling region under it (see fitHeldByGesture).
+      fitFrame = requestAnimationFrame(() => fitOrHold())
       clearTimeout(sendTimer)
       sendTimer = setTimeout(sendSize, RESIZE_SEND_DEBOUNCE_MS)
     })
@@ -2425,8 +2543,9 @@ export function TerminalPane(props: TerminalPaneProps) {
       clearTimeout(resyncTimer)
       resyncTimer = setTimeout(() => {
         term.write("", () => {
-          fit.fit()
-          sendOwnedResize(term.rows, term.cols)
+          // The pair again: a foreground return that lands mid-gesture defers
+          // both halves to the lift rather than refitting under the finger.
+          fitAndSend(() => sendOwnedResize(term.rows, term.cols))
         })
       }, 150)
     }

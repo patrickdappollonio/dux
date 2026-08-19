@@ -78,3 +78,32 @@ export function suppressViewerReports(term: Terminal): void {
   term.parser.registerOscHandler(11, isColorQuery)
   term.parser.registerOscHandler(12, isColorQuery)
 }
+
+// The focus reports xterm emits when the app turns focus reporting on:
+// FocusIn is `CSI I`, FocusOut is `CSI O`.
+export const FOCUS_IN_REPORT = "\x1b[I"
+export const FOCUS_OUT_REPORT = "\x1b[O"
+
+// True for a bare focus report and nothing else.
+//
+// The same "dux-core is authoritative, the viewer must not volunteer state"
+// rule as the query suppressions above, but it cannot be a parser handler,
+// because the report is not a reply to a sequence xterm parses on the way in:
+// it is xterm VOLUNTEERING its own focus state. Measured in xterm 6.0.0:
+// `InputHandler`'s DECSET 1004 arm (`case 1004`) sets `sendFocus` and fires
+// `_onRequestSendFocus`, which `CoreBrowserTerminal` answers immediately with
+// `_reportFocus()`, pushing `ESC [ I` (element has the `focus` class) or
+// `ESC [ O` (it does not) straight through `triggerDataEvent`, i.e. `onData`,
+// the same path as a keystroke. (DECRST 1004 fires nothing.)
+//
+// dux replays a mode-restore tail on EVERY (re)open, and that tail carries
+// `?1004h` whenever the child had focus reporting on (see
+// `dux_core::pty::mode_restore_sequence`), so every replay applied to a pane
+// whose terminal element is not focused types a spurious focus-OUT at the
+// child. The claude CLI reacts to focus state internally, so this is not
+// cosmetic. Callers bound a suppression window around applying a replay chunk
+// and drop the reports raised inside it; a real focus transition outside that
+// window is genuine user state and still goes to the PTY.
+export function isFocusReport(data: string): boolean {
+  return data === FOCUS_IN_REPORT || data === FOCUS_OUT_REPORT
+}

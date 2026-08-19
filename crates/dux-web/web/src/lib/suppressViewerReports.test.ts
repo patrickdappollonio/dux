@@ -2,7 +2,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { Terminal } from "@xterm/xterm"
 
-import { isColorQuery, suppressViewerReports } from "./suppressViewerReports"
+import {
+  FOCUS_IN_REPORT,
+  FOCUS_OUT_REPORT,
+  isColorQuery,
+  isFocusReport,
+  suppressViewerReports,
+} from "./suppressViewerReports"
 
 // Query sequences a child program / shell prompt emits to probe the terminal.
 const OSC_FG_QUERY = "\x1b]10;?\x07"
@@ -156,5 +162,64 @@ describe("suppressViewerReports", () => {
     // for a set must not disarm suppression of the query form).
     await writeAndDrain(term, OSC_BG_QUERY)
     expect(out.join("")).toBe("")
+  })
+})
+
+// THE FOCUS REPORT. Same philosophy as the query suppressions above (dux-core
+// is authoritative, the viewer must not volunteer state) but a different
+// mechanism, so it gets its own coverage: the pure predicate, and the measured
+// xterm behavior the predicate exists for.
+describe("isFocusReport", () => {
+  it("matches the two focus reports and nothing else", () => {
+    expect(isFocusReport(FOCUS_IN_REPORT)).toBe(true)
+    expect(isFocusReport(FOCUS_OUT_REPORT)).toBe(true)
+    // Not a report, just a keystroke that happens to start with ESC.
+    expect(isFocusReport("\x1b[A")).toBe(false)
+    expect(isFocusReport("\x1b")).toBe(false)
+    expect(isFocusReport("O")).toBe(false)
+    expect(isFocusReport("")).toBe(false)
+    // A report with anything else riding along is NOT one: dropping a chunk
+    // that also carried real input would eat the input.
+    expect(isFocusReport("\x1b[Ols")).toBe(false)
+  })
+})
+
+describe("a mode restore that turns focus reporting on", () => {
+  let terms: Terminal[] = []
+  const make = () => {
+    const t = new Terminal()
+    terms.push(t)
+    return t
+  }
+  afterEach(() => {
+    for (const t of terms) t.dispose()
+    terms = []
+  })
+
+  // The measured fact the whole replay-window mitigation rests on. dux's replay
+  // tail carries `?1004h` for any child that had focus reporting on
+  // (`dux_core::pty::mode_restore_sequence`), and xterm answers a DECSET 1004 by
+  // volunteering its CURRENT focus state immediately, through `onData`, the same
+  // path as a keystroke. Unfocused (which every replay applied to a background
+  // pane is) that is a focus-OUT typed straight at the child.
+  it("makes xterm volunteer a focus report through onData", async () => {
+    const term = make()
+    suppressViewerReports(term)
+    const out: string[] = []
+    term.onData((d) => out.push(d))
+
+    await writeAndDrain(term, "\x1b[?1004h")
+    expect(out).toEqual([FOCUS_OUT_REPORT])
+    expect(out.every(isFocusReport)).toBe(true)
+  })
+
+  it("volunteers nothing when the restore turns focus reporting OFF", async () => {
+    const term = make()
+    suppressViewerReports(term)
+    const out: string[] = []
+    term.onData((d) => out.push(d))
+
+    await writeAndDrain(term, "\x1b[?1004l")
+    expect(out).toEqual([])
   })
 })

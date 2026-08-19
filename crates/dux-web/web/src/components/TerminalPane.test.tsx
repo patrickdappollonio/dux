@@ -350,7 +350,14 @@ vi.mock("@/lib/clipboard", () => ({
     return true
   },
 }))
-vi.mock("@/lib/suppressViewerReports", () => ({ suppressViewerReports: () => {} }))
+// Only the parser-handler installer is stubbed out (it needs a real xterm
+// parser); `isFocusReport` is a pure helper the pane's onData gate calls, so it
+// comes from the real module.
+vi.mock("@/lib/suppressViewerReports", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@/lib/suppressViewerReports")>()
+  return { ...actual, suppressViewerReports: () => {} }
+})
 const notifyRegistrations: { title: () => string }[] = []
 vi.mock("@/lib/agentNotifications", () => ({
   registerAgentNotifications: (_term: unknown, opts: { title: () => string }) => {
@@ -1921,6 +1928,194 @@ describe("TerminalPane holds the PTY resize while a touch-scroll gesture is acti
     })
     expect(pty.sendResize).toHaveBeenCalledTimes(1)
     expect(pty.sendResize).toHaveBeenCalledWith(40, 80)
+  })
+
+  // THE OTHER HALF OF THE PAIR. Holding only the SIGWINCH still let the
+  // ResizeObserver's local `fit()` run every frame under the finger, and a local
+  // fit is not free: xterm's buffer resize resets the scrolling region to full
+  // screen on both buffers, so the mouse-tracking pager on the other end keeps
+  // painting region-relative into a viewer that no longer has the region.
+  it("performs NO local refit while the gesture holds the pair", () => {
+    mountSettled()
+    const term = TermStub.instances.at(-1)
+    if (!term) throw new Error("no terminal constructed")
+    FitStub.fits = 0
+    startScroll()
+    term.rows = 40
+    act(() => {
+      // Several observer rounds, the way a keyboard collapse really arrives.
+      roCallbacks.forEach((cb) => cb())
+      roCallbacks.forEach((cb) => cb())
+      vi.advanceTimersByTime(250)
+    })
+    expect(FitStub.fits).toBe(0)
+  })
+
+  it("refits exactly once at the lift, together with the one send", () => {
+    const pty = mountSettled()
+    const term = TermStub.instances.at(-1)
+    if (!term) throw new Error("no terminal constructed")
+    FitStub.fits = 0
+    startScroll()
+    term.rows = 40
+    act(() => {
+      roCallbacks.forEach((cb) => cb())
+      vi.advanceTimersByTime(250)
+    })
+    expect(FitStub.fits).toBe(0)
+    fireEvent.touchEnd(container(), { touches: [], changedTouches: [] })
+    // The refit is the first thing the lift does, before the debounce runs out.
+    expect(FitStub.fits).toBe(1)
+    act(() => {
+      vi.advanceTimersByTime(250)
+    })
+    expect(FitStub.fits).toBe(1)
+    expect(pty.sendResize).toHaveBeenCalledTimes(1)
+    expect(pty.sendResize).toHaveBeenCalledWith(40, 80)
+  })
+
+  // A BYPASS PATH. The foreground resync sends directly rather than through the
+  // debounced `sendSize`, so it needs its own route into the hold or the pair
+  // comes apart exactly where a phone reconnect meets a finger.
+  it("defers the foreground-resync resize (a direct send) to the lift", () => {
+    const pty = mountSettled()
+    const term = TermStub.instances.at(-1)
+    if (!term) throw new Error("no terminal constructed")
+    FitStub.fits = 0
+    startScroll()
+    act(() => {
+      window.dispatchEvent(new Event("focus"))
+      vi.advanceTimersByTime(200)
+    })
+    expect(FitStub.fits).toBe(0)
+    expect(pty.sendResize).not.toHaveBeenCalled()
+    // The container settles at a new size while the request is parked: the
+    // deferred send reads the geometry when it runs, so the final size wins.
+    term.rows = 40
+    fireEvent.touchEnd(container(), { touches: [], changedTouches: [] })
+    act(() => {
+      vi.advanceTimersByTime(250)
+    })
+    expect(FitStub.fits).toBe(1)
+    expect(pty.sendResize).toHaveBeenCalledTimes(1)
+    expect(pty.sendResize).toHaveBeenCalledWith(40, 80)
+  })
+})
+
+// MITIGATION B: the viewer must not volunteer focus state while a replay is
+// being applied. Parsing the replay's `?1004h` mode-restore tail makes xterm
+// emit a focus report of its own through `onData` (measured against xterm
+// 6.0.0; see `lib/suppressViewerReports.ts` for the exact call chain), so every
+// replay applied to a pane that does not hold DOM focus used to type a spurious
+// focus-OUT at the child. The claude CLI acts on focus state, so that is a real
+// input, not a cosmetic one.
+describe("TerminalPane focus reports raised by a replay", () => {
+  const FOCUS_OUT = "\x1b[O"
+  const encoded = new TextEncoder().encode(FOCUS_OUT)
+
+  const term = () => {
+    const t = TermStub.instances.at(-1)
+    if (!t) throw new Error("no terminal constructed")
+    return t
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  // Mount and take the pane past its own first-frame plumbing, then arm the
+  // socket for the (re)open whose replay the test delivers.
+  const mountAwaitingReplay = () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const pty = last()
+    act(() => {
+      vi.advanceTimersByTime(400)
+    })
+    act(() => pty.onOpen())
+    pty.sendInput.mockClear()
+    return pty
+  }
+
+  it("drops a focus report the replay chunk provokes", () => {
+    const pty = mountAwaitingReplay()
+    const t = term()
+    // Model xterm: the report comes out of the parser DURING the write, before
+    // the write's completion callback.
+    t.write = (data: unknown, cb?: () => void) => {
+      if (data instanceof Uint8Array) t.dataHandler?.(FOCUS_OUT)
+      cb?.()
+    }
+    act(() => pty.bytesCb?.(new Uint8Array([1])))
+    expect(pty.sendInput).not.toHaveBeenCalled()
+  })
+
+  it("still forwards a genuine focus report once the replay has landed", () => {
+    const pty = mountAwaitingReplay()
+    const t = term()
+    act(() => pty.bytesCb?.(new Uint8Array([1])))
+    // The user really did click away from the pane.
+    act(() => t.dataHandler?.(FOCUS_OUT))
+    expect(pty.sendInput).toHaveBeenCalledTimes(1)
+    expect(pty.sendInput).toHaveBeenCalledWith(encoded)
+  })
+
+  it("suppresses the focus report on the RECONNECT drain path too", () => {
+    // The reconnect replay takes the other branch: reset + drain, then the
+    // FIRST held chunk (the repaint) through the suppression window. Reverting
+    // that branch to a plain write must fail here.
+    const pty = mountAwaitingReplay()
+    const t = term()
+    // First open's replay lands normally.
+    act(() => pty.bytesCb?.(new Uint8Array([1])))
+    pty.sendInput.mockClear()
+    // The socket drops and reopens: the next binary frame is a reconnect
+    // replay, which resets and drains before writing.
+    act(() => pty.onReconnecting())
+    act(() => pty.onOpen())
+    let drainCb: (() => void) | undefined
+    t.write = (data: unknown, cb?: () => void) => {
+      if (typeof data === "string" && data === "") {
+        drainCb = cb
+        return
+      }
+      // The replay chunk parses `?1004h` and xterm volunteers a focus report
+      // mid-write, before the completion callback.
+      if (data instanceof Uint8Array) t.dataHandler?.(FOCUS_OUT)
+      cb?.()
+    }
+    act(() => pty.bytesCb?.(new Uint8Array([2])))
+    expect(drainCb).toBeDefined()
+    act(() => drainCb?.())
+    expect(pty.sendInput).not.toHaveBeenCalled()
+    // The window closed with the replay write: a real focus change forwards.
+    act(() => t.dataHandler?.(FOCUS_OUT))
+    expect(pty.sendInput).toHaveBeenCalledTimes(1)
+  })
+
+  it("closes the window on the write CALLBACK, not on a timer", () => {
+    const pty = mountAwaitingReplay()
+    const t = term()
+    // A write whose completion the test controls, the way a real (async) xterm
+    // write behaves: the window must stay open for as long as the parse does,
+    // however many timers tick meanwhile.
+    const pending: { finish?: () => void } = {}
+    t.write = (data: unknown, cb?: () => void) => {
+      if (data instanceof Uint8Array) pending.finish = cb
+      else cb?.()
+    }
+    act(() => pty.bytesCb?.(new Uint8Array([1])))
+    act(() => {
+      vi.advanceTimersByTime(5000)
+      t.dataHandler?.(FOCUS_OUT)
+    })
+    expect(pty.sendInput).not.toHaveBeenCalled()
+    act(() => pending.finish?.())
+    act(() => t.dataHandler?.(FOCUS_OUT))
+    expect(pty.sendInput).toHaveBeenCalledTimes(1)
+    expect(pty.sendInput).toHaveBeenCalledWith(encoded)
   })
 })
 
