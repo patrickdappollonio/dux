@@ -5,7 +5,7 @@ import { agentRoot } from "@/lib/editorRoot"
 // Exercises the editor-tabs store slice end to end: `editorOpenFile` seeding
 // and preview-replacing, `openEditor`'s tab-seeding extension, pin/dirty
 // mutation, close + neighbor-activation, and session-scoped clearing. The pure
-// reducer rules themselves are covered by `editorTabs["agent:test"].ts`; this file only
+// reducer rules themselves are covered by `editorTabs.test.ts`; this file only
 // checks the store's thin wrapping (keys by session id, wires `openEditor`,
 // exposes the close-confirm target).
 
@@ -304,7 +304,7 @@ describe("editor tabs store slice", () => {
 
   // Finding 8: `editorRenameTabPaths`/`editorCloseTabsUnderPath` had no direct
   // store-level coverage; the pure reducers (`renameTabPaths`/
-  // `closeTabsUnderPath`) are covered by editorTabs["agent:test"].ts, but the store's
+  // `closeTabsUnderPath`) are covered by editorTabs.test.ts, but the store's
   // thin wrapping (keying by session id, and the ref-equal no-op short-
   // circuit `setEditorTabsFor` relies on to skip a store-wide re-render) was
   // untested at this layer.

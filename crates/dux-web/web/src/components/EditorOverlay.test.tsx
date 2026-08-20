@@ -485,6 +485,26 @@ const TERMINAL_ROOT = {
 }
 
 async function mountTerminalRootedTab(path = "notes.md") {
+  // `clearAllMocks` clears calls and KEEPS implementations, and earlier
+  // describes leave `readMock` and `infoMock` answering their own scenarios.
+  // Set both explicitly so this describe is order-independent (the same trap
+  // the language-picker describe documents).
+  readMock.mockResolvedValue({
+    path,
+    content: ON_DISK,
+    binary: false,
+    read_only: false,
+  })
+  infoMock.mockResolvedValue({
+    path,
+    kind: "file" as const,
+    size: ON_DISK.length,
+    modified: "2026-01-01T00:00:00+00:00",
+    mode: "644",
+    permissions: "rw-r--r--",
+    symlink_target: null,
+    git: { state: "clean" as const },
+  })
   const { EditorOverlay } = await import("@/components/EditorOverlay")
   const { getSnapshot } = await import("@/lib/store")
   mockState = {
@@ -905,7 +925,7 @@ describe("a deleted file in the editor", () => {
   it("preview-replacing a diff tab onto another path loads the new diff", async () => {
     // The Changes-pane flow that reuses a tab id: open file A in diff mode,
     // then the store preview-replaces the SAME tab onto path B (rule 2 in
-    // lib/editorTabs["agent:ts"]). The tab's cached buffer still carries A's path, and
+    // lib/editorTabs.ts). The tab's cached buffer still carries A's path, and
     // the diff fetch for B must not be dropped on that stale buffer — that
     // drop is a permanent spinner (nothing re-triggers the load effect).
     diffMock.mockResolvedValue({

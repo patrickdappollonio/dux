@@ -243,7 +243,7 @@ describe("FileTree", () => {
   // A real browser double-click fires click, click, THEN dblclick, in that
   // order, not just a single doubleclick event. The comment above FileTree's
   // `onOpen` prop claims the two preceding `onClick`s are "harmless" because
-  // `openFile` (lib/editorTabs["agent:ts"]) is idempotent for an already-open path; this
+  // `openFile` (lib/editorTabs.ts) is idempotent for an already-open path; this
   // exercises that actual three-event sequence rather than only the synthetic
   // `fireEvent.doubleClick` shortcut used above, so a regression that makes the
   // preceding clicks NOT harmless (e.g. clobbering the pin) would be caught.

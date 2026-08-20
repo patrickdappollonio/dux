@@ -448,6 +448,12 @@ async fn list_files<R: EditorRoot>(State(state): State<AppState>, root: R) -> Re
 /// unit of background work, not a long-lived connection like the
 /// `ws_*_semaphore` classes, which 503 on exhaustion instead. `None` means the
 /// config value is 0 (unlimited) and no permit is taken at all.
+///
+/// One config edge: the permit also serializes `list_files`, whose walk is
+/// bounded by `[server] search_index_max_files`, and with that cap set to 0
+/// (disabled) a `/`-rooted terminal editor can hold a permit for a very long
+/// walk; the default cap bounds the hold, and an operator who disables it has
+/// chosen unbounded work.
 async fn tree_list_permit(
     state: &AppState,
 ) -> Result<Option<tokio::sync::OwnedSemaphorePermit>, Response> {
@@ -680,6 +686,10 @@ fn mime_for_path(path: &str) -> &'static str {
     }
 }
 
+/// The root extractor runs before the body is read, so an address problem (an
+/// unknown or malformed id) answers 404 before any body diagnostic, oversize
+/// included; that extractor-first ordering is deliberate and pinned by
+/// `a_bad_id_beats_the_body_diagnostic` below.
 async fn write_file<R: EditorRoot>(
     State(state): State<AppState>,
     root: R,
@@ -1750,6 +1760,24 @@ mod tests {
                 !wt.join("huge.txt").exists(),
                 "a refused save must write nothing"
             );
+        }
+
+        /// The root extractor runs before the body is read, so a request that
+        /// is wrong in BOTH ways (unknown id and an over-limit body) answers
+        /// for the address first: 404, never the body diagnostic. This pins
+        /// the extractor-first ordering the `write_file` doc comment names.
+        #[tokio::test]
+        async fn a_bad_id_beats_the_body_diagnostic() {
+            let (_tmp, _wt, app) = router_with_session().await;
+            let content = "a".repeat(crate::file_routes::MAX_EDIT_WRITE_BYTES + 1);
+            let resp = app
+                .oneshot(json_req(
+                    "/api/v1/sessions/ghost/files/write",
+                    serde_json::json!({ "path": "huge.txt", "content": content }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         }
     }
 }
