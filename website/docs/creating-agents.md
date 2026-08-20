@@ -46,9 +46,14 @@ hooks, and local config all behave exactly as they do in the main checkout.
 
 ## Naming an agent
 
-Every creation path ends at a naming prompt. dux uses the branch name as the
-agent name: it becomes a git branch, so only ASCII letters, digits, `-`, `_`,
-and `/` are accepted. Spaces are transparently converted to dashes.
+Every creation path that makes a branch ends at a naming prompt, and there the
+name IS the branch name: it becomes a git ref, so only ASCII letters, digits,
+`-`, `_`, and `/` are accepted, and spaces are transparently converted to dashes.
+
+A standalone agent is the exception, because it has no branch. Its name is a
+label, taken exactly as you type it (spaces, dots and punctuation included), and
+if you leave it empty dux names it after the folder rather than inventing a pet
+name.
 
 If you leave the field empty and the `enable_randomized_pet_name_by_default`
 setting is on, dux generates a two-word Docker-style pet name (for example,
@@ -353,18 +358,26 @@ What a standalone agent does NOT have:
 - **No branch and no worktree.** dux creates nothing on disk for it.
 - **No project.** It sits among your other agents in the sidebar, told apart by
   its folder on the row's second line, and it belongs to no project group.
-- **No branch features.** Pushing, pulling, forking, pull requests, branch
-  renaming and startup commands are about a branch dux manages, and there is
-  none, so those actions are absent rather than offered and refused.
+- **No branch features.** Pushing, pulling, forking, pull requests and branch
+  renaming are about a branch dux manages, and there is none, so those actions
+  are absent rather than offered and refused.
+- **No startup command and no project environment.** Both are project-scoped, so
+  the four startup-command and environment entries are absent too. A standalone
+  agent gets your global environment and nothing layered on top.
 
 What it does have: the embedded terminal, agent tabs, companion terminals, the
 in-browser editor, file drops, renaming, the resource monitor and auto-reopen,
-all exactly as any other agent.
+all exactly as any other agent. Renaming is worth one note: the name is a label
+rather than a branch, so it is taken exactly as you type it, and clearing it
+falls back to the folder's own name.
 
-### dux never touches the folder
+### dux never creates, moves or removes the folder
 
-This is the rule the whole feature rests on. dux does not create, move or remove
-a standalone agent's folder, ever. Deleting the agent removes dux's own record of
+This is the rule the whole feature rests on, and it is about the folder itself
+rather than its contents: things do get written in there (the agent works in it,
+a dropped file lands in it, a commit writes to its repository), but the folder's
+existence and location are yours alone. dux does not create it, move it or remove
+it, ever. Deleting the agent removes dux's own record of
 it and nothing else, and the delete dialog says so: there is no
 "also remove the worktree" checkbox, because there is no worktree. A factory
 reset skips it too, on the same principle that dux resets only what dux made.

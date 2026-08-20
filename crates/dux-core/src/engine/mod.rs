@@ -3625,6 +3625,15 @@ impl Engine {
         //
         // Canonical paths, so a symlink is not a way around it.
         //
+        // This canonicalizes ON THE ENGINE THREAD, which the folder probe's own
+        // doc forbids for itself, and the difference is deliberate: the probe
+        // runs on a poll and would repeat that cost forever, while this runs
+        // once per create, on a folder the user just picked in a browser that
+        // had to stat it to list it. The accepted cost is that a create aimed at
+        // a stalled mount blocks the actor for that one call; the alternative is
+        // a two-phase create, where the occupancy refusal would have to be
+        // re-checked after the worker returns anyway.
+        //
         // The refusal is a SIGNPOST, not a wall: adding the folder as a project
         // is the multi-agent shape dux is built for, and it brings tabs along.
         if let Some(existing) = self.sessions.iter().find(|session| {

@@ -76,8 +76,11 @@ Yes, when the `gh` CLI is installed and authenticated. See
 
 ### Do agents step on each other?
 
-No. Each agent gets its own git worktree on its own branch, so two agents on the
-same project run in complete isolation. See [Creating agents](/docs/creating-agents).
+No. Each agent in a project gets its own git worktree on its own branch, so two
+agents on the same project run in complete isolation. A standalone agent runs in a
+folder you picked, and dux refuses to put a second agent in a directory one is
+already working in, for the same reason: coding CLIs resume their conversation per
+directory. See [Creating agents](/docs/creating-agents).
 
 ### Can I branch off a running agent?
 

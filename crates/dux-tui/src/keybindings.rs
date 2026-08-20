@@ -231,7 +231,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[BindingScope::Left],
         help: Some(HelpEntry {
             section: "Projects pane",
-            description: "Filter agents and terminals by name, branch, project, or provider",
+            description: "Filter agents and terminals by name, branch, project, or folder",
         }),
         hint_contexts: &[
             (HintContext::LeftProject, "Filter"),

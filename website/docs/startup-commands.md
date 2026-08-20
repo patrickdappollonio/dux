@@ -89,7 +89,8 @@ you do not have to leave the app to manage them:
   agent*, and *read startup command logs*.
 - **Web UI (server mode):** each agent's actions (`⋯`) menu carries
   *Configure startup command*, *Configure environment variables*, *Rerun
-  startup command*, and *Startup command logs*. A project's `⋯` menu carries
+  startup command*, and *Startup command logs*. None of the four appear for a
+  standalone agent: they are project-scoped, and it belongs to no project. A project's `⋯` menu carries
   *Startup command logs for all agents*, the same viewer widened to every run in
   the project. Because env and startup commands
   are project-scoped, the first two edit the agent's whole project (and the

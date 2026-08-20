@@ -5,7 +5,8 @@ group: Getting started
 order: 1
 ---
 
-`dux` runs multiple AI coding agents in parallel, one git worktree each. It spawns
+`dux` runs multiple AI coding agents in parallel, usually one git worktree each
+(and, when you want it, straight in a folder you already have). It spawns
 the real CLI for each agent (Claude Code, Codex, Copilot, OpenCode, or anything
 else you can run in a terminal) inside an embedded pseudo-terminal. No protocol
 layer, no adapters, no JSON-RPC. Just the tools you already use, side by side,
@@ -40,9 +41,12 @@ dux has three nouns. Once they click, the whole app makes sense.
 
 - **Projects** are git repositories you've added to dux. A project points at a
   checkout on disk and remembers your preferences for it.
-- **Agents** are sessions running inside a project. Each agent gets its own git
+- **Agents** are sessions running inside a project. Each one gets its own git
   worktree on its own branch, so two agents working on the same repo never step on
-  each other.
+  each other. A **standalone agent** is the exception you ask for by name: it runs
+  in a folder you already have, with no branch and no worktree of dux's, and dux
+  never creates, moves or removes that folder. See
+  [Creating agents](/docs/creating-agents).
 - **Providers** are the CLIs that power agents. Claude, Codex, OpenCode, and Copilot
   ship configured out of the box, and you can wire up any other command yourself.
 

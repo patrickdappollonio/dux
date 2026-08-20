@@ -6,10 +6,10 @@ order: 64
 ---
 
 The whole agent lifecycle runs from the browser: spin one up, fork it, adopt an
-orphaned worktree, retarget its provider, and tear it down. Every agent is a real
-git worktree on its own branch, exactly as it is anywhere else in dux, so a browser
-where you have no terminal at all is still a full workspace and not a dashboard over
-one. This page is the click-by-click version; the concepts behind projects, agents,
+orphaned worktree, retarget its provider, and tear it down. An agent here is the same
+thing it is anywhere else in dux, worktree and branch and all (or, for a standalone
+agent, the folder you pointed it at), so a browser where you have no terminal at all
+is still a full workspace and not a dashboard over one. This page is the click-by-click version; the concepts behind projects, agents,
 and providers are laid out in [Creating agents](/docs/creating-agents).
 
 ## Adding a project
@@ -36,8 +36,8 @@ agent, and it is the only thing that changes with your workspace: on a brand-new
 dux with no project yet it reads **Add project**, because an agent has nowhere to
 go until one exists. The `⋯` never changes. It groups everything else you can
 create from nothing, under **Agents** (from a pull request, from an existing
-worktree), **Terminals** (a standalone shell, for when what you want is not an
-agent at all) and **Projects**. This is the door to use when you have not picked
+worktree, or standalone in a folder you already have), **Terminals** (a standalone
+shell, for when what you want is not an agent at all) and **Projects**. This is the door to use when you have not picked
 a project yet, and it is the only place the reference-first flow lives.
 
 The Agents header just above the list carries a **+** too, for when the thought

@@ -99,7 +99,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
         action: Action::FilterAgents,
         name: "filter-agents",
-        description: "Filter the agent list by name, branch, project, or provider",
+        description: "Filter the agent list by name, branch, project, or folder",
         // GLOBAL (display-only): a live filter over the flat agent list, mirroring
         // the web sidebar/hub search box. It never mutates or persists sessions.
     },
