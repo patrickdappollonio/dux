@@ -760,6 +760,204 @@ async fn a_half_done_delete_reports_a_sticky_error_to_the_watching_connection() 
     );
 }
 
+/// THE WHOLE JOURNEY for a standalone agent, over the real HTTP surface: create
+/// it in a plain folder, see it on the wire as a folder workspace, watch every
+/// branch-identity route refuse it, and delete it without the folder being
+/// touched.
+///
+/// End to end deliberately. Each half is unit-tested, but the thing a user
+/// actually does crosses the REST layer, the engine actor, the create worker and
+/// the spine projection, and the failure this guards against (an empty branch
+/// field arriving at a screen, or a delete removing the folder) only shows up
+/// once those are joined.
+#[tokio::test]
+async fn a_standalone_agent_runs_in_a_plain_folder_and_survives_delete_untouched() {
+    let (addr, _tmp) = boot_for_create_agent().await;
+    // A PLAIN folder: no repository anywhere near it. That is the ordinary case
+    // and the one the add-project validator would have rejected.
+    let folder = tempfile::tempdir().expect("folder");
+    std::fs::write(folder.path().join("notes.txt"), "mine\n").expect("seed a file");
+    let folder_path = folder.path().to_string_lossy().to_string();
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{addr}/api/v1/sessions"))
+        .json(&serde_json::json!({
+            "kind": "standalone",
+            "folder": folder_path,
+            "name": "notes",
+        }))
+        .send()
+        .await
+        .expect("POST create");
+    assert_eq!(
+        resp.status().as_u16(),
+        201,
+        "a plain folder is the ordinary case for a standalone agent"
+    );
+    let body: serde_json::Value = resp.json().await.expect("created session json");
+    let id = body["id"].as_str().expect("created session id").to_string();
+
+    // THE WIRE SHAPE: a folder workspace, and NO git fields to be mistaken for
+    // a branch. This is the guarantee the tagged union exists for.
+    assert_eq!(body["workspace"]["kind"].as_str(), Some("folder"));
+    assert_eq!(
+        body["workspace"]["folder_path"].as_str(),
+        Some(folder_path.as_str())
+    );
+    for absent in [
+        "branch_name",
+        "initial_branch",
+        "source_branch",
+        "project_id",
+    ] {
+        assert!(
+            body["workspace"][absent].is_null(),
+            "{absent} must not exist on a folder workspace, got {body}"
+        );
+    }
+    assert_eq!(body["title"].as_str(), Some("notes"));
+
+    // It joins the ordinary flat agent list, and no sidebar group claims it.
+    assert!(
+        wait_for_workspace(addr, |v| {
+            let listed = v["sessions"]
+                .as_array()
+                .is_some_and(|s| s.iter().any(|s| s["id"].as_str() == Some(id.as_str())));
+            let grouped = v["sidebar"]["groups"].as_array().is_some_and(|groups| {
+                groups.iter().any(|g| {
+                    g["session_ids"]
+                        .as_array()
+                        .is_some_and(|ids| ids.iter().any(|i| i.as_str() == Some(id.as_str())))
+                })
+            });
+            listed && !grouped
+        })
+        .await,
+        "a standalone agent belongs to no project group, and must still be listed"
+    );
+
+    // EVERY branch-identity route refuses it on the server. Hiding the buttons
+    // is not an answer when each of these is reachable from a command line.
+    for (method, path) in [
+        ("POST", format!("/api/v1/sessions/{id}/git/push")),
+        ("POST", format!("/api/v1/sessions/{id}/git/pull")),
+    ] {
+        let resp = client
+            .request(method.parse().unwrap(), format!("http://{addr}{path}"))
+            .send()
+            .await
+            .expect("git route");
+        let status = resp.status().as_u16();
+        let text = resp.text().await.unwrap_or_default();
+        assert!(
+            (400..500).contains(&status),
+            "{path} must refuse a standalone agent, got {status}: {text}"
+        );
+        assert!(
+            text.contains("standalone agent"),
+            "{path} must say what this agent is, got {text}"
+        );
+    }
+
+    // A worktree-removing delete is refused OUT LOUD rather than quietly
+    // downgraded: silent success theater about a destructive request is how a
+    // user comes to believe dux cleaned something up.
+    let resp = client
+        .delete(format!(
+            "http://{addr}/api/v1/sessions/{id}?delete_worktree=true"
+        ))
+        .send()
+        .await
+        .expect("DELETE with removal");
+    assert!(
+        (400..500).contains(&resp.status().as_u16()),
+        "asking dux to remove the user's folder must be refused"
+    );
+    assert!(
+        folder.path().exists(),
+        "and the folder must still be there afterwards"
+    );
+
+    // The ordinary delete removes dux's record and nothing else.
+    let resp = client
+        .delete(format!("http://{addr}/api/v1/sessions/{id}"))
+        .send()
+        .await
+        .expect("DELETE session");
+    assert_eq!(resp.status().as_u16(), 204);
+    assert!(
+        wait_for_workspace(addr, |v| {
+            v["sessions"]
+                .as_array()
+                .is_some_and(|s| s.iter().all(|s| s["id"].as_str() != Some(id.as_str())))
+        })
+        .await,
+        "the agent record must be gone"
+    );
+    // THE PIN: the folder and its contents are exactly as they were.
+    assert!(folder.path().exists(), "the folder must survive the delete");
+    assert_eq!(
+        std::fs::read_to_string(folder.path().join("notes.txt")).expect("the file survives"),
+        "mine\n",
+        "and so must everything in it"
+    );
+}
+
+/// A second standalone agent in a folder that already has one is refused, with a
+/// message that points at the shape dux is built for. Coding CLIs resume their
+/// conversation history per directory, so the second agent would silently pick
+/// up the first one's conversation.
+#[tokio::test]
+async fn a_second_standalone_agent_in_one_folder_is_refused_over_http() {
+    let (addr, _tmp) = boot_for_create_agent().await;
+    let folder = tempfile::tempdir().expect("folder");
+    let folder_path = folder.path().to_string_lossy().to_string();
+    let client = reqwest::Client::new();
+
+    let first = client
+        .post(format!("http://{addr}/api/v1/sessions"))
+        .json(&serde_json::json!({"kind":"standalone","folder":folder_path}))
+        .send()
+        .await
+        .expect("POST create");
+    assert_eq!(first.status().as_u16(), 201);
+    let id = first.json::<serde_json::Value>().await.expect("json")["id"]
+        .as_str()
+        .expect("id")
+        .to_string();
+    assert!(
+        wait_for_workspace(addr, |v| {
+            v["sessions"]
+                .as_array()
+                .is_some_and(|s| s.iter().any(|s| s["id"].as_str() == Some(id.as_str())))
+        })
+        .await,
+        "the first agent has to be registered before the refusal can see it"
+    );
+
+    let second = client
+        .post(format!("http://{addr}/api/v1/sessions"))
+        .json(&serde_json::json!({"kind":"standalone","folder":folder_path}))
+        .send()
+        .await
+        .expect("POST create");
+    let status = second.status().as_u16();
+    let text = second.text().await.unwrap_or_default();
+    assert!(
+        (400..500).contains(&status),
+        "a second agent in the same folder must be refused, got {status}: {text}"
+    );
+    assert!(
+        text.contains("conversation"),
+        "the refusal must say why it matters, got {text}"
+    );
+    assert!(
+        text.contains("as a project"),
+        "and point at the multi-agent shape, got {text}"
+    );
+}
+
 /// `POST /api/v1/sessions` (kind=new) creates a session and returns 201 + the new
 /// session object, and its status toasts are scoped to the originating connection
 /// (`X-Connection-Id`): the originating `/ws/events` sees the create status, a
