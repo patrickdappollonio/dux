@@ -14,6 +14,7 @@ import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import { envToText, parseEnv } from "@/lib/env"
 import { closeAgentEnv, updateProjectSettings, useDux } from "@/lib/store"
 import type { ProjectView, SessionView } from "@/lib/types"
+import { sessionLabel, workspaceProjectId } from "@/lib/agentWorkspace"
 
 // Edit environment variables from an agent's menu. Env is project-scoped in dux
 // (there is no per-agent env), so this edits the agent's PROJECT env — applied to
@@ -29,7 +30,7 @@ function AgentEnvForm({
   project: ProjectView
 }) {
   const [text, setText] = useState(() => envToText(project.env))
-  const agentName = session.title || session.branch_name
+  const agentName = sessionLabel(session)
 
   async function handleSave() {
     const env = parseEnv(text)
@@ -69,7 +70,10 @@ function AgentEnvForm({
 export function AgentEnvDialog() {
   const { spine, agentEnvTarget } = useDux()
   const session = spine?.sessions.find((s) => s.id === agentEnvTarget)
-  const project = spine?.projects.find((p) => p.id === session?.project_id)
+  const project = spine?.projects.find(
+    (p) =>
+      session !== undefined && p.id === workspaceProjectId(session.workspace),
+  )
   // Closes the dialog when the agent or its project vanishes from the
   // ViewModel; see the hook.
   const open = useVanishedTargetGuard(

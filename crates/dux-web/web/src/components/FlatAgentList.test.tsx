@@ -103,15 +103,25 @@ installStubs()
 const { FlatAgentList } = await import("./FlatAgentList")
 const { resetQuietTailManualChoiceForTests } = await import("@/lib/quietTailChoice")
 
-function makeSession(over: Partial<SessionView> & { id: string }): SessionView {
+function makeSession(
+  over: Omit<Partial<SessionView>, "workspace"> & {
+    id: string
+    project_id?: string
+    branch_name?: string
+  },
+): SessionView {
   return {
-    project_id: "p1",
+    workspace: {
+      kind: "managed",
+      project_id: over.project_id ?? "p1",
+      branch_name: over.branch_name ?? over.id,
+      initial_branch: over.branch_name ?? over.id,
+      branch_provenance: "created",
+      source_branch: "main",
+      worktree_path: `/tmp/${over.id}`,
+    },
     title: over.id,
     provider: "claude",
-    branch_name: over.id,
-    initial_branch: over.id,
-    source_branch: "main",
-    worktree_path: `/tmp/${over.id}`,
     status: "active",
     auto_reopen_enabled: false,
     tabs: [],
@@ -923,7 +933,9 @@ describe("FlatAgentList Terminals divider", () => {
   it("keeps the + outside the collapse toggle", () => {
     render(<FlatAgentList handlers={handlers} />)
     const toggle = screen.getByText("Terminals").closest("button")!
-    const plus = screen.getByRole("button", { name: "New standalone terminal" })
+    const plus = screen.getByRole("button", {
+      name: "New standalone terminal",
+    })
     expect(toggle.contains(plus)).toBe(false)
     expect(plus.contains(toggle)).toBe(false)
     // Misclick-safe spacing between the two, and the word stays in the toggle

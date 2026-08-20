@@ -108,6 +108,7 @@ import type {
   StartupLogEntry,
   TerminalView,
 } from "./types"
+import { workspaceProjectId } from "@/lib/agentWorkspace"
 
 // Who a companion terminal belongs to. The type now lives in
 // `lib/terminalOwner.ts` alongside the exhaustive switches that consume it, and
@@ -1665,7 +1666,7 @@ function reconcilePendingSessionOrder(
 ): PendingSessionOrder | null {
   if (!pending) return null
   const serverIds = spine.sessions
-    .filter((s) => s.project_id === pending.projectId)
+    .filter((s) => workspaceProjectId(s.workspace) === pending.projectId)
     .map((s) => s.id)
   return ordersMatch(serverIds, pending.ids) ? null : pending
 }
@@ -1822,7 +1823,9 @@ const CREATE_FOCUS_TTL_MS = 90_000
 
 function armCreateFocus(projectId: string): void {
   const knownIds = (state.spine?.sessions ?? []).map((s) => s.id)
-  setState({ pendingCreateFocus: { knownIds, projectId, armedAt: Date.now() } })
+  setState({
+    pendingCreateFocus: { knownIds, projectId, armedAt: Date.now() },
+  })
 }
 
 // Focus the agent THIS client just created, the instant it shows up. With a
@@ -1844,7 +1847,8 @@ function focusNewlyCreatedSession(spine: Spine): void {
   }
   const known = new Set(pending.knownIds)
   const created = spine.sessions.find(
-    (s) => !known.has(s.id) && s.project_id === pending.projectId,
+    (s) =>
+      !known.has(s.id) && workspaceProjectId(s.workspace) === pending.projectId,
   )
   if (!created) return
   // Consume the token before selecting so a later spine can't re-fire.
@@ -1852,7 +1856,9 @@ function focusNewlyCreatedSession(spine: Spine): void {
   // Force the owning project open so the new agent is actually visible — a
   // project the user had collapsed would otherwise hide the row we just
   // selected.
-  setProjectOpen(created.project_id, true)
+  // A standalone agent has no project group to open; it is a top-level row.
+  const createdProjectId = workspaceProjectId(created.workspace)
+  if (createdProjectId) setProjectOpen(createdProjectId, true)
   selectSession(created.id)
 }
 
@@ -5155,9 +5161,12 @@ export function submitNameDialog(name: string): void {
     // focus diff is scoped to that project. If the source vanished from the
     // ViewModel, skip auto-focus rather than arming an unscoped token that could
     // grab any project's next new session.
-    const projectId = state.spine?.sessions.find(
+    const forkSource = state.spine?.sessions.find(
       (s) => s.id === target.sessionId,
-    )?.project_id
+    )
+    const projectId = forkSource
+      ? workspaceProjectId(forkSource.workspace)
+      : null
     if (projectId) armCreateFocus(projectId)
     forkAgent(target.sessionId, name)
   } else if (target.projectId === null) {
@@ -5248,7 +5257,9 @@ export function sortAgents(by: SortKey): void {
   // it (the overlay only retires on match/error/disconnect).
   setState(clearPendingOrders())
   for (const project of projects) {
-    const projectSessions = sessions.filter((s) => s.project_id === project.id)
+    const projectSessions = sessions.filter(
+      (s) => workspaceProjectId(s.workspace) === project.id,
+    )
     if (projectSessions.length < 2) continue
     const orderedIds = sortedSessionIds(projectSessions, by)
     sessionsApi

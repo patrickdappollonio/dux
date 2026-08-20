@@ -4,6 +4,7 @@
 
 import { groupTerminalsByOwner } from "./terminals"
 import type { SessionView, TerminalView } from "./types"
+import { workspaceProjectId } from "@/lib/agentWorkspace"
 
 // Live agent + terminal counts for a project, derived from the current sessions
 // list plus the workspace's flat terminal collection. `agents` is the number of
@@ -23,7 +24,7 @@ export function projectLiveCounts(
   let agents = 0
   let terminals = byProject.get(projectId)?.length ?? 0
   for (const session of sessions) {
-    if (session.project_id !== projectId) continue
+    if (workspaceProjectId(session.workspace) !== projectId) continue
     agents += 1
     terminals += bySession.get(session.id)?.length ?? 0
   }

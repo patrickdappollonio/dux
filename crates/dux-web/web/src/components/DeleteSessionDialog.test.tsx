@@ -36,8 +36,28 @@ const store = await import("@/lib/store")
 const deleteSession = vi.mocked(store.deleteSession)
 const closeDelete = vi.mocked(store.closeDelete)
 
-const session1 = { id: "s1", title: "quacky-mallard", branch_name: "dux/s1" }
-const session2 = { id: "s2", title: "wobbly-duckling", branch_name: "dux/s2" }
+function managed(branch: string) {
+  return {
+    kind: "managed" as const,
+    project_id: "p1",
+    branch_name: branch,
+    initial_branch: branch,
+    branch_provenance: "created" as const,
+    source_branch: "main",
+    worktree_path: "/tmp/" + branch,
+  }
+}
+
+const session1 = {
+  id: "s1",
+  title: "quacky-mallard",
+  workspace: managed("dux/s1"),
+}
+const session2 = {
+  id: "s2",
+  title: "wobbly-duckling",
+  workspace: managed("dux/s2"),
+}
 
 function seed(target: string | null, sessions: unknown[]) {
   mockState = {
@@ -79,6 +99,53 @@ describe("DeleteSessionDialog", () => {
     ).toBeTruthy()
   })
 
+  // THE PIN. There is no worktree to remove and no branch to delete, so the
+  // checkbox is not merely unchecked, it does not exist: the offer cannot be
+  // rendered, so it cannot be ticked. The copy says the folder is untouched,
+  // because "removes the agent from dux" alone reads as though something on
+  // disk went with it.
+  it("offers no worktree checkbox for a standalone agent, and says the folder is untouched", () => {
+    seed("sa1", [
+      {
+        id: "sa1",
+        title: "notes",
+        workspace: {
+          kind: "folder",
+          folder_path: "/home/someone/notes",
+          folder_label: "~/notes",
+          repo_status: "no_repo",
+          quiet_reason: "This folder has no git repository.",
+        },
+      },
+    ])
+    render(<DeleteSessionDialog />)
+    expect(screen.queryByRole("checkbox")).toBeNull()
+    expect(screen.getByText(/left untouched/i)).toBeTruthy()
+    expect(screen.getByText(/~\/notes/)).toBeTruthy()
+  })
+
+  // And the request that reaches the server must never ask for the removal:
+  // the default is false, and with no control to flip it there is no way for
+  // it to become true.
+  it("never asks the server to remove a standalone agent's folder", () => {
+    seed("sa1", [
+      {
+        id: "sa1",
+        title: "notes",
+        workspace: {
+          kind: "folder",
+          folder_path: "/home/someone/notes",
+          folder_label: "~/notes",
+          repo_status: "working_repo",
+          quiet_reason: "",
+        },
+      },
+    ])
+    render(<DeleteSessionDialog />)
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }))
+    expect(deleteSession).toHaveBeenCalledWith("sa1", false)
+  })
+
   it("says the branch is kept when the agent attached to one it did not create", () => {
     // Promising to delete a branch dux will deliberately keep is the same class
     // of bug from the other direction: the dialog has to describe what happens.
@@ -86,9 +153,15 @@ describe("DeleteSessionDialog", () => {
       {
         id: "s3",
         title: "attached",
-        branch_name: "develop",
-        initial_branch: "develop",
-        branch_provenance: "attached",
+        workspace: {
+          kind: "managed",
+          project_id: "",
+          branch_name: "develop",
+          initial_branch: "develop",
+          branch_provenance: "attached",
+          source_branch: "",
+          worktree_path: "",
+        },
       },
     ])
     render(<DeleteSessionDialog />)
@@ -107,9 +180,15 @@ describe("DeleteSessionDialog", () => {
       {
         id: "s4",
         title: "adopted",
-        branch_name: "main",
-        initial_branch: "main",
-        branch_provenance: "adopted",
+        workspace: {
+          kind: "managed",
+          project_id: "",
+          branch_name: "main",
+          initial_branch: "main",
+          branch_provenance: "adopted",
+          source_branch: "",
+          worktree_path: "",
+        },
       },
     ])
     render(<DeleteSessionDialog />)
@@ -128,9 +207,15 @@ describe("DeleteSessionDialog", () => {
       {
         id: "s5",
         title: "from the future",
-        branch_name: "mystery",
-        initial_branch: "mystery",
-        branch_provenance: "unknown",
+        workspace: {
+          kind: "managed",
+          project_id: "",
+          branch_name: "mystery",
+          initial_branch: "mystery",
+          branch_provenance: "unknown",
+          source_branch: "",
+          worktree_path: "",
+        },
       },
     ])
     render(<DeleteSessionDialog />)

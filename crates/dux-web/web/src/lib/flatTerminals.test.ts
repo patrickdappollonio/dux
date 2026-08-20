@@ -39,16 +39,23 @@ function flat(t: TerminalView): FlatTerminal {
 }
 
 function session(
-  over: Partial<SessionView> & { id: string },
+  over: Omit<Partial<SessionView>, "workspace"> & {
+    id: string
+    project_id?: string
+  },
 ): SessionView {
   return {
-    project_id: "p1",
+    workspace: {
+      kind: "managed",
+      project_id: over.project_id ?? "p1",
+      branch_name: `${over.id}-branch`,
+      initial_branch: `${over.id}-branch`,
+      branch_provenance: "created",
+      source_branch: "main",
+      worktree_path: `/tmp/${over.id}`,
+    },
     title: null,
     provider: "claude",
-    branch_name: `${over.id}-branch`,
-    initial_branch: `${over.id}-branch`,
-    source_branch: "main",
-    worktree_path: `/tmp/${over.id}`,
     status: "active",
     auto_reopen_enabled: false,
     tabs: [],

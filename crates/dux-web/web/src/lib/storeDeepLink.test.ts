@@ -13,7 +13,15 @@ import type { Spine } from "./workspaceApi"
 function makeSpine(
   sessions: {
     id: string
-    project_id: string
+    workspace: {
+      kind: "managed"
+      project_id: string
+      branch_name: ""
+      initial_branch: ""
+      branch_provenance: "created"
+      source_branch: ""
+      worktree_path: ""
+    }
     terminals?: string[]
     tabs?: string[]
   }[],
@@ -26,7 +34,15 @@ function makeSpine(
     })) as unknown as Spine["projects"],
     sessions: sessions.map((s) => ({
       id: s.id,
-      project_id: s.project_id,
+      workspace: {
+        kind: "managed",
+        project_id: s.project_id,
+        branch_name: "",
+        initial_branch: "",
+        branch_provenance: "created",
+        source_branch: "",
+        worktree_path: "",
+      },
       // The session-slot tab's id always equals the session id; any extra ids are
       // extra tabs.
       tabs: [{ id: s.id }, ...(s.tabs ?? []).map((id) => ({ id }))],

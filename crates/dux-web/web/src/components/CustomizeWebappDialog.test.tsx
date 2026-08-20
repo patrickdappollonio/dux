@@ -467,7 +467,10 @@ describe("CustomizeWebappDialog", () => {
     fireEvent.click(screen.getAllByRole("button", { name: /Reset section to defaults/i })[0])
 
     await waitFor(() => expect(setInstanceIdentity).toHaveBeenCalled())
-    expect(setInstanceIdentity).toHaveBeenCalledWith({ title: "", favicon: "" })
+    expect(setInstanceIdentity).toHaveBeenCalledWith({
+      title: "",
+      favicon: "",
+    })
     expect(saveSettings).toHaveBeenCalledTimes(1)
     const [patch] = saveSettings.mock.calls[0]
     // Only `copy_on_select` differed from its default in this seed. Every

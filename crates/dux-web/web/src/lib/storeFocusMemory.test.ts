@@ -12,7 +12,15 @@ import type { Spine } from "./workspaceApi"
 function makeSpine(
   sessions: {
     id: string
-    project_id: string
+    workspace: {
+      kind: "managed"
+      project_id: string
+      branch_name: ""
+      initial_branch: ""
+      branch_provenance: "created"
+      source_branch: ""
+      worktree_path: ""
+    }
     tabs?: string[]
     last_focused_tab?: string | null
   }[],
@@ -21,7 +29,15 @@ function makeSpine(
     projects: [],
     sessions: sessions.map((s) => ({
       id: s.id,
-      project_id: s.project_id,
+      workspace: {
+        kind: "managed",
+        project_id: s.project_id,
+        branch_name: "",
+        initial_branch: "",
+        branch_provenance: "created",
+        source_branch: "",
+        worktree_path: "",
+      },
       terminals: [],
       // The session-slot tab's id always equals the session id; any extra ids
       // are extra tabs.
@@ -118,7 +134,15 @@ async function loadStore(
   hash: string,
   sessions: {
     id: string
-    project_id: string
+    workspace: {
+      kind: "managed"
+      project_id: string
+      branch_name: ""
+      initial_branch: ""
+      branch_provenance: "created"
+      source_branch: ""
+      worktree_path: ""
+    }
     tabs?: string[]
     last_focused_tab?: string | null
   }[],
@@ -159,7 +183,15 @@ describe("selectSession restores the remembered tab", () => {
     const mod = await loadStore("", [
       {
         id: "s1",
-        project_id: "p1",
+        workspace: {
+          kind: "managed",
+          project_id: "p1",
+          branch_name: "",
+          initial_branch: "",
+          branch_provenance: "created",
+          source_branch: "",
+          worktree_path: "",
+        },
         tabs: ["t-other"],
         last_focused_tab: "gone",
       },
@@ -195,7 +227,15 @@ describe("selectSession restores the remembered tab", () => {
     const mod = await loadStore("#/agent/s1/tab/t3", [
       {
         id: "s1",
-        project_id: "p1",
+        workspace: {
+          kind: "managed",
+          project_id: "p1",
+          branch_name: "",
+          initial_branch: "",
+          branch_provenance: "created",
+          source_branch: "",
+          worktree_path: "",
+        },
         tabs: ["t2", "t3"],
         last_focused_tab: "t2",
       },

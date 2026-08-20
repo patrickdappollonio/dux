@@ -35,7 +35,15 @@ const { AgentTabsStrip } = await import("./AgentTabsStrip")
 function session(): SessionView {
   return {
     id: "s1",
-    project_id: "p1",
+    workspace: {
+      kind: "managed",
+      project_id: "p1",
+      branch_name: "",
+      initial_branch: "",
+      branch_provenance: "created",
+      source_branch: "",
+      worktree_path: "",
+    },
     provider: "claude",
     tabs: [
       { id: "s1", provider: "claude", order: 0, working: false, has_output: false, has_live_process: true },

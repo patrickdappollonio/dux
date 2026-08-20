@@ -283,7 +283,11 @@ export function useUploadPipeline(deps: UploadPipelineDeps): UploadPipeline {
       // drop: ownership can move and the socket can close between two files.
       const unavailable = sink.unavailable()
       if (unavailable !== null) {
-        outcomes.push({ kind: "saved-not-sent", ...where, reason: unavailable })
+        outcomes.push({
+          kind: "saved-not-sent",
+          ...where,
+          reason: unavailable,
+        })
         continue
       }
 

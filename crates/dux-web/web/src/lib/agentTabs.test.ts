@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest"
 
 import {
-  branchDrift,
   defaultProviderForSession,
   isExtraTabDormant,
   isTabGone,
@@ -10,6 +9,7 @@ import {
   shouldShowTabStrip,
   tabLabels,
 } from "./agentTabs"
+import { branchDriftOf } from "@/lib/agentWorkspace"
 import type { Spine } from "./workspaceApi"
 import type { SelectedTarget } from "./store"
 import type { AgentTabView, SessionView } from "./types"
@@ -37,22 +37,46 @@ function extraTab(id: string, live: boolean): AgentTabView {
 // SHARED VECTORS with dux-core `agent_tabs.rs` `branch_drifted`: these cases are
 // mirrored there. A change to the drift rule in one language that is not mirrored
 // fails a test on the other side.
-describe("branchDrift", () => {
+describe("branchDriftOf", () => {
   it("flags drift when the current branch differs from the original", () => {
     expect(
-      branchDrift({ branch_name: "agent-tabs", initial_branch: "server-mode" }),
+      branchDriftOf({
+        kind: "managed" as const,
+        project_id: "",
+        branch_name: "agent-tabs",
+        initial_branch: "server-mode",
+        branch_provenance: "created" as const,
+        source_branch: "",
+        worktree_path: "",
+      }),
     ).toEqual({ drifted: true, initial: "server-mode" })
   })
 
   it("does not flag drift when current matches the original", () => {
     expect(
-      branchDrift({ branch_name: "server-mode", initial_branch: "server-mode" }),
+      branchDriftOf({
+        kind: "managed" as const,
+        project_id: "",
+        branch_name: "server-mode",
+        initial_branch: "server-mode",
+        branch_provenance: "created" as const,
+        source_branch: "",
+        worktree_path: "",
+      }),
     ).toEqual({ drifted: false, initial: "server-mode" })
   })
 
   it("does not flag drift when the original branch is missing (older server)", () => {
     expect(
-      branchDrift({ branch_name: "server-mode", initial_branch: "" }),
+      branchDriftOf({
+        kind: "managed" as const,
+        project_id: "",
+        branch_name: "server-mode",
+        initial_branch: "",
+        branch_provenance: "created" as const,
+        source_branch: "",
+        worktree_path: "",
+      }),
     ).toEqual({ drifted: false, initial: "" })
   })
 })
@@ -122,11 +146,18 @@ describe("isTabGone", () => {
 // A minimal SessionView for defaultProviderForSession (only `project_id` and
 // `provider` matter here).
 function session(projectId: string, provider: string): SessionView {
-  return { project_id: projectId, provider } as unknown as SessionView
+  return {
+    workspace: { kind: "managed", project_id: projectId },
+    provider,
+  } as unknown as SessionView
 }
 
 function spine(projects: { id: string; default_provider: string }[]): Spine {
-  return { projects, sessions: [], sidebar: { groups: [] } } as unknown as Spine
+  return {
+    projects,
+    sessions: [],
+    sidebar: { groups: [] },
+  } as unknown as Spine
 }
 
 describe("defaultProviderForSession", () => {

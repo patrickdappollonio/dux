@@ -104,11 +104,17 @@ function makeSessionSpine(tabCount: number): DuxState["spine"] {
     sessions: [
       {
         id: "s1",
-        project_id: "p1",
+        workspace: {
+          kind: "managed",
+          project_id: "p1",
+          branch_name: "main",
+          initial_branch: "",
+          branch_provenance: "created",
+          source_branch: "",
+          worktree_path: "/tmp/p1",
+        },
         title: null,
         provider: "claude",
-        branch_name: "main",
-        worktree_path: "/tmp/p1",
         status: "active",
         auto_reopen_enabled: false,
         tabs,
@@ -446,7 +452,9 @@ describe("MobileShell up navigation never steps history", () => {
     // Arriving at not-found is a correction of a bad URL, not a position worth
     // keeping: pushing home from here would put the user's next Back straight
     // back onto the dead end they just left.
-    mockState = makeState({ routeNotFound: { kind: "agent", sessionId: "s9" } })
+    mockState = makeState({
+      routeNotFound: { kind: "agent", sessionId: "s9" },
+    })
     render(<MobileShell />)
     fireEvent.click(screen.getByText("Back to agents"))
     expect(navigateUpMock).toHaveBeenCalledTimes(1)
@@ -458,7 +466,9 @@ describe("MobileShell not-found screen", () => {
     // A URL naming a deleted agent: the route has no target, so without this
     // branch the shell would fall through to the hub while the address bar
     // still named an agent that is not on screen.
-    mockState = makeState({ routeNotFound: { kind: "agent", sessionId: "s9" } })
+    mockState = makeState({
+      routeNotFound: { kind: "agent", sessionId: "s9" },
+    })
     render(<MobileShell />)
     expect(screen.getByText("Agent not found")).toBeTruthy()
     expect(screen.getByText("s9")).toBeTruthy()

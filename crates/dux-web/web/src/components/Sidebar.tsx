@@ -48,6 +48,7 @@ import {
 import type { SelectedTarget } from "@/lib/store"
 import { cn } from "@/lib/utils"
 import type { SessionView } from "@/lib/types"
+import { sessionLabel } from "@/lib/agentWorkspace"
 
 // The icon rail replaces the flat agent list when the sidebar collapses to
 // `collapsible="icon"` mode. It renders every AGENT across all projects, flattened
@@ -62,7 +63,7 @@ function CollapsedAgentIcon({
   projectName: string
   selected: boolean
 }) {
-  const label = session.title || session.branch_name
+  const label = sessionLabel(session)
   const { shimmer, dimmed, attention, typing } = agentRowVisual(
     session.status,
     session.working,

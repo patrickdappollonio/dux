@@ -5,6 +5,7 @@
 import type { Spine } from "./workspaceApi"
 import type { AgentTabView, SessionView } from "./types"
 import type { SelectedTarget } from "./store"
+import { workspaceProjectId } from "@/lib/agentWorkspace"
 
 // Whether the focused target is an extra tab that is currently DORMANT (reopened
 // after a restart with no live process, and not yet explicitly started this
@@ -65,26 +66,10 @@ export function tabLabels(tabs: AgentTabView[]): string[] {
   })
 }
 
-// Whether a session's current branch has drifted from the immutable branch the
-// agent was created on. `drifted` is true only when `initial_branch` is present
-// (an older server omits it, coerced to `""` at ingestion) and truly differs from
-// the current `branch_name`. `initial` is passed through so callers that surface
-// the original branch don't re-read it. Shared by the header drift crumb and the
-// agent info dialog so the two never disagree.
-//
-// The `drifted` boolean is the TWIN of dux-core `agent_tabs::branch_drifted`
-// (the core-owned rule); pinned by shared vectors (see `agentTabs.test.ts` /
-// `agent_tabs.rs`). Keep the empty-initial guard identical in both.
-export function branchDrift(
-  session: Pick<SessionView, "branch_name" | "initial_branch">,
-): { drifted: boolean; initial: string } {
-  return {
-    drifted:
-      !!session.initial_branch &&
-      session.initial_branch !== session.branch_name,
-    initial: session.initial_branch,
-  }
-}
+// Branch drift moved to `branchDriftOf` in `lib/agentWorkspace.ts`, beside the
+// rest of the workspace questions: the two branches it compares now live inside
+// the managed shape, and a standalone agent has neither, so the answer belongs
+// with the matcher that can say so.
 
 // Resolve the tab id a session should focus when the user navigates to it via
 // the sidebar or the bare `#/agent/:id` route (an explicit `#/agent/:id/tab/:t`
@@ -137,6 +122,8 @@ export function defaultProviderForSession(
   spine: Spine | null,
   session: SessionView,
 ): string {
-  const project = spine?.projects.find((p) => p.id === session.project_id)
+  const project = spine?.projects.find(
+    (p) => p.id === workspaceProjectId(session.workspace),
+  )
   return project?.default_provider ?? session.provider
 }

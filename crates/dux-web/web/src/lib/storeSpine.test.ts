@@ -28,7 +28,15 @@ function makeSpine(overrides: Partial<Spine> = {}): Spine {
 function session(id: string, projectId: string): Spine["sessions"][number] {
   return {
     id,
-    project_id: projectId,
+    workspace: {
+      kind: "managed",
+      project_id: projectId,
+      branch_name: "",
+      initial_branch: "",
+      branch_provenance: "created",
+      source_branch: "",
+      worktree_path: "",
+    },
   } as unknown as Spine["sessions"][number]
 }
 
@@ -216,7 +224,15 @@ describe("spine slice", () => {
         sessions: [
           {
             id: "s1",
-            project_id: "p1",
+            workspace: {
+              kind: "managed",
+              project_id: "p1",
+              branch_name: "",
+              initial_branch: "",
+              branch_provenance: "created",
+              source_branch: "",
+              worktree_path: "",
+            },
             provider,
             tabs: [
               {

@@ -52,6 +52,40 @@ describe("agentHeaderChips field order", () => {
   })
 })
 
+describe("a standalone agent's header", () => {
+  // The header shows the same FOLDER chip a standalone terminal already uses,
+  // in the slot a project would occupy: it is the coarsest fact about where
+  // this agent is, and reusing the chip is what keeps the two idioms one idiom.
+  it("carries a folder chip where a managed agent carries a project", () => {
+    const chips = agentHeaderChips({
+      name: "notes",
+      provider: "claude",
+      folderLabel: "~/work/notes",
+      branchName: null,
+    })
+    const kinds = chips.map((c) => c.kind)
+    expect(kinds).toEqual(["directory", "agent", "assistant"])
+    expect(chips[0]).toEqual({
+      kind: "directory",
+      label: "Directory",
+      value: "~/work/notes",
+    })
+  })
+
+  // And no branch chip, ever: there is no branch, and an empty one would draw
+  // a glyph with nothing after it.
+  it("never draws a branch chip", () => {
+    const chips = agentHeaderChips({
+      name: "notes",
+      provider: "claude",
+      folderLabel: "~/work/notes",
+      branchName: null,
+      initialBranch: null,
+    })
+    expect(chips.some((c) => c.kind === "branch")).toBe(false)
+  })
+})
+
 describe("agentHeaderChips values", () => {
   it("gives every field a glyph kind and its value", () => {
     const all = agentHeaderChips({

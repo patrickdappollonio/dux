@@ -6,11 +6,22 @@ import type { SessionView } from "./types"
 // Minimal fixture: sortedSessionIds only reads id/title/branch_name/created_at/
 // updated_at, so cast a partial like reorder.test.ts does.
 function session(
-  fields: Partial<SessionView> & { id: string },
+  fields: Omit<Partial<SessionView>, "workspace"> & {
+    id: string
+    branch_name?: string
+  },
 ): SessionView {
   return {
     title: null,
-    branch_name: fields.id,
+    workspace: {
+      kind: "managed",
+      project_id: "",
+      branch_name: fields.branch_name ?? fields.id,
+      initial_branch: "",
+      branch_provenance: "created",
+      source_branch: "",
+      worktree_path: "",
+    },
     created_at: "2026-01-01T00:00:00+00:00",
     updated_at: "2026-01-01T00:00:00+00:00",
     ...fields,

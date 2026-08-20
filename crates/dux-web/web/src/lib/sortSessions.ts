@@ -6,12 +6,15 @@
 // React-free so it's trivially unit-testable.
 
 import type { SessionView } from "./types"
+import { sessionLabel } from "@/lib/agentWorkspace"
 
 export type SortKey = "updated" | "created" | "name" | "name_desc"
 
-// The TUI's name key: title.as_deref().unwrap_or(&branch_name), lowercased.
+// The TUI's name key: the agent's display label, lowercased. Shared with the
+// Rust twin through `sessionLabel`, which falls back to the branch for a
+// managed agent and to the folder's name for a standalone one.
 function nameKey(s: SessionView): string {
-  return (s.title ?? s.branch_name).toLowerCase()
+  return sessionLabel(s).toLowerCase()
 }
 
 // Parse an RFC 3339 / ISO 8601 timestamp to epoch milliseconds. The server

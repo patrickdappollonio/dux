@@ -17,7 +17,9 @@ async function postGit(
   body: Record<string, unknown>,
   opts?: { scopeToConnection?: boolean },
 ): Promise<void> {
-  const headers: Record<string, string> = { "content-type": "application/json" }
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+  }
   // The async git operations (push/pull/checkout) report progress on the status
   // stream; stamp this connection's id so the server can scope those toasts back
   // to this client. Omitted until the `connected` frame has set the id.

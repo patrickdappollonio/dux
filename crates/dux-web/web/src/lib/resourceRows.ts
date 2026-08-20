@@ -22,6 +22,7 @@ import type { ResourceStatsView } from "./resourcesApi"
 import { matchWireOwner, ownerKey } from "./terminalOwner"
 import { groupTerminalsByOwnerKey, terminalTitle } from "./terminals"
 import type { ProjectView, SessionView, TerminalView } from "./types"
+import { sessionLabel } from "@/lib/agentWorkspace"
 
 export type TaskRowKind = "dux" | "agent" | "terminal" | "total"
 
@@ -81,9 +82,7 @@ export function taskManagerRows(
 
   const rows: TaskRow[] = []
 
-  const sessionLabels = new Map(
-    sessions.map((s) => [s.id, s.title ?? s.branch_name] as const),
-  )
+  const labels = new Map(sessions.map((s) => [s.id, sessionLabel(s)] as const))
   const projectNames = new Map(projects.map((p) => [p.id, p.name] as const))
 
   // One terminal's row. What it says about its owner is decided by an EXHAUSTIVE
@@ -102,7 +101,7 @@ export function taskManagerRows(
       projectId: string | null
     }>(terminal.owner, {
       session: (o) => ({
-        detail: sessionLabels.get(o.session_id) ?? null,
+        detail: labels.get(o.session_id) ?? null,
         sessionId: o.session_id,
         projectId: null,
       }),
@@ -166,7 +165,7 @@ export function taskManagerRows(
   })
 
   for (const session of sessions) {
-    const sessionLabel = session.title ?? session.branch_name
+    const label = sessionLabel(session)
 
     // Only agent TABS gate on liveness: a detached/exited agent's tabs have no
     // live PTY, so they are not a running task (matching the modal this
@@ -193,15 +192,15 @@ export function taskManagerRows(
           kind: "agent",
           // The slot tab carries the agent's identity; an extra tab is
           // identified by the provider running in it.
-          name: isSlot ? sessionLabel : tab.provider,
+          name: isSlot ? label : tab.provider,
           detail: isSlot ? tab.provider : null,
           nested: !isSlot,
           // A dormant tab has no process but is still closeable, so it keeps
           // its Stop control.
           stoppable: true,
           stopLabel: isSlot
-            ? `Stop ${sessionLabel}`
-            : `Stop ${tab.provider} tab ${nestedIndex} in ${sessionLabel}`,
+            ? `Stop ${label}`
+            : `Stop ${tab.provider} tab ${nestedIndex} in ${label}`,
           sessionId: session.id,
           projectId: null,
           targetId: tab.id,

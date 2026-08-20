@@ -83,13 +83,17 @@ function tab(over: Partial<AgentTabView> & { id: string }): AgentTabView {
 
 function session(over: Partial<SessionView> & { id: string }): SessionView {
   return {
-    project_id: "p1",
+    workspace: {
+      kind: "managed",
+      project_id: "p1",
+      branch_name: "feat",
+      initial_branch: "feat",
+      branch_provenance: "created",
+      source_branch: "main",
+      worktree_path: "/wt",
+    },
     title: null,
     provider: "claude",
-    branch_name: "feat",
-    initial_branch: "feat",
-    source_branch: "main",
-    worktree_path: "/wt",
     status: "active",
     auto_reopen_enabled: false,
     tabs: [tab({ id: over.id })],
@@ -144,7 +148,14 @@ function proc(
   pid: number,
   over: Partial<ProcessInfoView> = {},
 ): ProcessInfoView {
-  return { name, pid, cpu_percent: 1, rss_bytes: 1024, is_root: false, ...over }
+  return {
+    name,
+    pid,
+    cpu_percent: 1,
+    rss_bytes: 1024,
+    is_root: false,
+    ...over,
+  }
 }
 
 // The root entry every real breakdown carries: `aggregate_tree` always includes

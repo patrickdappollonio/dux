@@ -9,6 +9,7 @@ import {
 } from "@/components/ui/dialog"
 import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import { closeDeleteProject, deleteProject, useDux } from "@/lib/store"
+import { workspaceProjectId } from "@/lib/agentWorkspace"
 
 // The destructive cascade counterpart to RemoveProjectDialog: this variant also
 // deletes every agent's worktree from disk, so its copy spells that out. Unlike
@@ -27,8 +28,9 @@ export function DeleteProjectDialog() {
   )
   const name = project?.name ?? "this project"
   const agentCount =
-    spine?.sessions.filter((s) => s.project_id === deleteProjectTarget).length ??
-    0
+    spine?.sessions.filter(
+      (s) => workspaceProjectId(s.workspace) === deleteProjectTarget,
+    ).length ?? 0
   // Name the agents and their worktrees only when there are any; a project with
   // no agents has no worktrees to mention.
   const cascadeClause =

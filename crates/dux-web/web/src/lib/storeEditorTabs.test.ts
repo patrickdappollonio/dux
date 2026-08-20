@@ -32,7 +32,15 @@ function makeSpine(sessionIds: string[] = ["s1"]) {
     projects: [{ id: "p1", name: "Repo" }],
     sessions: sessionIds.map((id) => ({
       id,
-      project_id: "p1",
+      workspace: {
+        kind: "managed",
+        project_id: "p1",
+        branch_name: "",
+        initial_branch: "",
+        branch_provenance: "created",
+        source_branch: "",
+        worktree_path: "",
+      },
       terminals: [],
       tabs: [{ id }],
     })),

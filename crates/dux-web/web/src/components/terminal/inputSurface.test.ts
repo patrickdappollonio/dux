@@ -153,7 +153,10 @@ describe("the sticky modifier latches", () => {
     act(() => view.result.current.toggleAlt())
     act(() => view.result.current.sendSeq("\x1b[A"))
     expect(sent).toEqual([ESC + "\x1b[A"])
-    expect(view.result.current.mods.read()).toEqual({ ctrl: false, alt: false })
+    expect(view.result.current.mods.read()).toEqual({
+      ctrl: false,
+      alt: false,
+    })
   })
 
   it("are CONSUMED by the accessory newline, which never combines with them", () => {

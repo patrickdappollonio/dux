@@ -43,9 +43,16 @@ const { AgentInfoDialog } = await import("./AgentInfoDialog")
 
 const base = {
   id: "s1",
-  project_id: "p1",
+  workspace: {
+    kind: "managed",
+    project_id: "p1",
+    branch_name: "",
+    initial_branch: "",
+    branch_provenance: "created",
+    source_branch: "",
+    worktree_path: "/tmp/s1",
+  },
   provider: "claude",
-  worktree_path: "/tmp/s1",
   status: "active",
   created_at: "2026-07-01T00:00:00Z",
   updated_at: "2026-07-02T00:00:00Z",
@@ -87,9 +94,15 @@ describe("AgentInfoDialog", () => {
   it("shows current, original, and fork branches and flags drift", () => {
     renderDialogOpenFor({
       title: "server-mode",
-      branch_name: "agent-tabs",
-      initial_branch: "server-mode",
-      source_branch: "main",
+      workspace: {
+        kind: "managed",
+        project_id: "",
+        branch_name: "agent-tabs",
+        initial_branch: "server-mode",
+        branch_provenance: "created",
+        source_branch: "main",
+        worktree_path: "",
+      },
     })
     // Current branch.
     expect(screen.getByText("agent-tabs")).toBeTruthy()
@@ -101,12 +114,44 @@ describe("AgentInfoDialog", () => {
     expect(screen.getByText(/changed since creation/i)).toBeTruthy()
   })
 
+  // A standalone agent says what it is and where it runs, and says nothing
+  // about branches: it has none, and a row reading "Current branch" with
+  // nothing after it is worse than no row at all.
+  it("shows a standalone agent's folder instead of branch rows", () => {
+    renderDialogOpenFor({
+      title: "notes",
+      workspace: {
+        kind: "folder",
+        folder_path: "/home/someone/notes",
+        folder_label: "~/notes",
+        repo_status: "no_repo",
+        quiet_reason: "This folder has no git repository.",
+      },
+    })
+    expect(screen.getByText("Standalone agent")).toBeTruthy()
+    expect(screen.getByText("~/notes")).toBeTruthy()
+    for (const absent of [
+      "Current branch",
+      "Original branch",
+      "Forked from",
+      "Worktree",
+    ]) {
+      expect(screen.queryByText(absent)).toBeNull()
+    }
+  })
+
   it("omits the drift note when the current branch matches the original", () => {
     renderDialogOpenFor({
       title: "server-mode",
-      branch_name: "server-mode",
-      initial_branch: "server-mode",
-      source_branch: "main",
+      workspace: {
+        kind: "managed",
+        project_id: "",
+        branch_name: "server-mode",
+        initial_branch: "server-mode",
+        branch_provenance: "created",
+        source_branch: "main",
+        worktree_path: "",
+      },
     })
     expect(screen.queryByText(/changed since creation/i)).toBeNull()
   })
@@ -116,9 +161,15 @@ describe("AgentInfoDialog", () => {
     // pin says it is one (matching the TUI's Agent Info line).
     renderDialogOpenFor({
       title: "server-mode",
-      branch_name: "feat",
-      initial_branch: "feat",
-      source_branch: "main",
+      workspace: {
+        kind: "managed",
+        project_id: "",
+        branch_name: "feat",
+        initial_branch: "feat",
+        branch_provenance: "created",
+        source_branch: "main",
+        worktree_path: "",
+      },
       pr: {
         number: 12,
         state: "open",
@@ -134,9 +185,15 @@ describe("AgentInfoDialog", () => {
   it("shows a detected pull request without the manual cue", () => {
     renderDialogOpenFor({
       title: "server-mode",
-      branch_name: "feat",
-      initial_branch: "feat",
-      source_branch: "main",
+      workspace: {
+        kind: "managed",
+        project_id: "",
+        branch_name: "feat",
+        initial_branch: "feat",
+        branch_provenance: "created",
+        source_branch: "main",
+        worktree_path: "",
+      },
       pr: {
         number: 12,
         state: "merged",
@@ -152,9 +209,15 @@ describe("AgentInfoDialog", () => {
   it("omits the pull request row when the session has none", () => {
     renderDialogOpenFor({
       title: "server-mode",
-      branch_name: "feat",
-      initial_branch: "feat",
-      source_branch: "main",
+      workspace: {
+        kind: "managed",
+        project_id: "",
+        branch_name: "feat",
+        initial_branch: "feat",
+        branch_provenance: "created",
+        source_branch: "main",
+        worktree_path: "",
+      },
     })
     expect(screen.queryByText(/Pull request/)).toBeNull()
   })
@@ -178,9 +241,15 @@ describe("AgentInfoDialog", () => {
     // An older server omits the branch fields (coerced to "" at ingestion).
     renderDialogOpenFor({
       title: "server-mode",
-      branch_name: "server-mode",
-      initial_branch: "",
-      source_branch: "",
+      workspace: {
+        kind: "managed",
+        project_id: "",
+        branch_name: "server-mode",
+        initial_branch: "",
+        branch_provenance: "created",
+        source_branch: "",
+        worktree_path: "",
+      },
     })
     // Both the Original branch and Forked from rows fall back to "Unknown".
     expect(screen.getAllByText("Unknown").length).toBe(2)

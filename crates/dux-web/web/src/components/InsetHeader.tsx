@@ -23,6 +23,11 @@ import {
 import { matchOwner } from "@/lib/terminalOwner"
 import { terminalsForOwner, terminalTitle } from "@/lib/terminals"
 import type { SessionView, TerminalView } from "@/lib/types"
+import {
+  managedWorkspace,
+  sessionLabel,
+  workspaceLocation,
+} from "@/lib/agentWorkspace"
 
 // The desktop center-pane top bar: ONE ROW OF CHIPS naming what you are looking
 // at, each a glyph followed by its value, then the pane's controls on the right.
@@ -81,13 +86,21 @@ export function InsetHeader() {
     terminalCount: number,
     primary: "agent" | "none",
   ): AgentChipsInput => {
-    const owningProject = spine?.projects.find((p) => p.id === agent.project_id)
+    // A standalone agent has no project; it names its FOLDER in the same slot
+    // instead, through the chip a standalone terminal already uses.
+    const location = workspaceLocation(agent.workspace)
+    const owningProject =
+      location.kind === "project"
+        ? spine?.projects.find((p) => p.id === location.projectId)
+        : undefined
+    const managed = managedWorkspace(agent.workspace)
     return {
-      name: agent.title || agent.branch_name,
+      name: sessionLabel(agent),
       provider: provider ?? agent.provider,
       projectName: owningProject?.name,
-      branchName: agent.branch_name,
-      initialBranch: agent.initial_branch,
+      folderLabel: location.kind === "folder" ? location.label : undefined,
+      branchName: managed?.branch_name ?? null,
+      initialBranch: managed?.initial_branch ?? null,
       terminalCount,
       primary,
     }
@@ -101,56 +114,61 @@ export function InsetHeader() {
   // `terminalTitle` disambiguates against, and the set the sibling count counts.
   const ownerContext: { chips: HeaderChip[]; siblings: TerminalView[] } | null =
     focusedTerminal
-      ? matchOwner(focusedTerminal.owner, {
-          session: (owner) => {
-            const agent = spine?.sessions.find((s) => s.id === owner.sessionId)
-            const siblings = terminalsForOwner(allTerminals, owner)
-            // The agent is no longer the primary chip here, and its terminal
-            // COUNT is suppressed: the focused terminal's own chip carries that
-            // count in its hover clause, and two terminal glyphs in one row
-            // would read as two different terminals.
-            return {
-              chips: agent
-                ? agentHeaderChips(agentFacts(agent, undefined, 0, "none"))
-                : [],
-              siblings,
-            }
+      ? matchOwner<{ chips: HeaderChip[]; siblings: TerminalView[] }>(
+          focusedTerminal.owner,
+          {
+            session: (owner) => {
+              const agent = spine?.sessions.find(
+                (s) => s.id === owner.sessionId,
+              )
+              const siblings = terminalsForOwner(allTerminals, owner)
+              // The agent is no longer the primary chip here, and its terminal
+              // COUNT is suppressed: the focused terminal's own chip carries that
+              // count in its hover clause, and two terminal glyphs in one row
+              // would read as two different terminals.
+              return {
+                chips: agent
+                  ? agentHeaderChips(agentFacts(agent, undefined, 0, "none"))
+                  : [],
+                siblings,
+              }
+            },
+            project: (owner) => {
+              const owningProject = spine?.projects.find(
+                (p) => p.id === owner.projectId,
+              )
+              return {
+                chips: owningProject
+                  ? [
+                      {
+                        kind: "project" as const,
+                        label: "Project",
+                        value: owningProject.name,
+                      },
+                    ]
+                  : [],
+                siblings: terminalsForOwner(allTerminals, owner),
+              }
+            },
+            // No owner to name, so the context names WHERE the terminal is. The
+            // label is read off this terminal's own wire owner rather than the
+            // client-side reference, which carries no id and no label precisely
+            // because there is no owner: every standalone terminal shares one
+            // reference, and only the terminal itself knows its directory.
+            standalone: (owner) => {
+              const siblings = terminalsForOwner(allTerminals, owner)
+              const self = siblings.find(
+                (t) => t.id === focusedTerminal.terminalId,
+              )
+              const cwd =
+                self?.owner.kind === "standalone" ? self.owner.cwd_label : null
+              return {
+                chips: cwd ? [directoryChip(cwd)] : [],
+                siblings,
+              }
+            },
           },
-          project: (owner) => {
-            const owningProject = spine?.projects.find(
-              (p) => p.id === owner.projectId,
-            )
-            return {
-              chips: owningProject
-                ? [
-                    {
-                      kind: "project" as const,
-                      label: "Project",
-                      value: owningProject.name,
-                    },
-                  ]
-                : [],
-              siblings: terminalsForOwner(allTerminals, owner),
-            }
-          },
-          // No owner to name, so the context names WHERE the terminal is. The
-          // label is read off this terminal's own wire owner rather than the
-          // client-side reference, which carries no id and no label precisely
-          // because there is no owner: every standalone terminal shares one
-          // reference, and only the terminal itself knows its directory.
-          standalone: (owner) => {
-            const siblings = terminalsForOwner(allTerminals, owner)
-            const self = siblings.find(
-              (t) => t.id === focusedTerminal.terminalId,
-            )
-            const cwd =
-              self?.owner.kind === "standalone" ? self.owner.cwd_label : null
-            return {
-              chips: cwd ? [directoryChip(cwd)] : [],
-              siblings,
-            }
-          },
-        })
+        )
       : null
 
   // When an agent tab is focused, the assistant chip reflects the FOCUSED TAB

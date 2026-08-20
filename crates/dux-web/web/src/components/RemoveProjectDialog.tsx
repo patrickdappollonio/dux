@@ -8,6 +8,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { closeRemoveProject, removeProject, useDux } from "@/lib/store"
+import { workspaceProjectId } from "@/lib/agentWorkspace"
 
 export function RemoveProjectDialog() {
   const { removeProjectTarget, spine } = useDux()
@@ -24,8 +25,9 @@ export function RemoveProjectDialog() {
   )?.name
   const name = project?.name ?? orphanName ?? "this project"
   const agentCount =
-    spine?.sessions.filter((s) => s.project_id === removeProjectTarget)
-      .length ?? 0
+    spine?.sessions.filter(
+      (s) => workspaceProjectId(s.workspace) === removeProjectTarget,
+    ).length ?? 0
 
   function handleConfirm() {
     if (!removeProjectTarget) return

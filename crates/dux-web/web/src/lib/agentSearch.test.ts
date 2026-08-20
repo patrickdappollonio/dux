@@ -5,13 +5,17 @@ import type { SessionView, TerminalView } from "@/lib/types"
 
 function makeSession(over: Partial<SessionView> & { id: string }): SessionView {
   return {
-    project_id: "p1",
+    workspace: {
+      kind: "managed",
+      project_id: "p1",
+      branch_name: "main",
+      initial_branch: "main",
+      branch_provenance: "created",
+      source_branch: "main",
+      worktree_path: "/tmp/x",
+    },
     title: null,
     provider: "claude",
-    branch_name: "main",
-    initial_branch: "main",
-    source_branch: "main",
-    worktree_path: "/tmp/x",
     status: "active",
     auto_reopen_enabled: false,
     terminals: [],
@@ -44,7 +48,15 @@ describe("matchesSessionQuery", () => {
   const session = makeSession({
     id: "s1",
     title: "Auth refactor",
-    branch_name: "feat/auth-v2",
+    workspace: {
+      kind: "managed",
+      project_id: "",
+      branch_name: "feat/auth-v2",
+      initial_branch: "",
+      branch_provenance: "created",
+      source_branch: "",
+      worktree_path: "",
+    },
     provider: "claude",
     tabs: [
       { id: "s1", provider: "claude", order: 0, working: false, needs_attention: false, has_output: false, has_live_process: true },
@@ -62,7 +74,19 @@ describe("matchesSessionQuery", () => {
   })
 
   it("falls back to the branch name when there is no title", () => {
-    const noTitle = makeSession({ id: "s2", title: null, branch_name: "og-images" })
+    const noTitle = makeSession({
+      id: "s2",
+      title: null,
+      workspace: {
+        kind: "managed",
+        project_id: "",
+        branch_name: "og-images",
+        initial_branch: "",
+        branch_provenance: "created",
+        source_branch: "",
+        worktree_path: "",
+      },
+    })
     expect(matchesSessionQuery(noTitle, "website", "og-im")).toBe(true)
   })
 
@@ -128,6 +152,9 @@ describe("matchCharRange", () => {
     // code-point index 2 (emoji + space).
     expect(matchCharRange("🦆 duck", "duck")).toEqual({ start: 2, end: 6 })
     expect(matchCharRange("höhe-fix", "fix")).toEqual({ start: 5, end: 8 })
-    expect(matchCharRange("日本語テスト", "語テ")).toEqual({ start: 2, end: 4 })
+    expect(matchCharRange("日本語テスト", "語テ")).toEqual({
+      start: 2,
+      end: 4,
+    })
   })
 })

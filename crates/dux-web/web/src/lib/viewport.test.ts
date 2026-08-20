@@ -39,11 +39,17 @@ describe("dragScrollLines", () => {
   })
 
   it("does not scroll for a sub-row drag, carrying the remainder", () => {
-    expect(dragScrollLines(10, 16)).toEqual({ scrollLines: 0, remainderPx: 10 })
+    expect(dragScrollLines(10, 16)).toEqual({
+      scrollLines: 0,
+      remainderPx: 10,
+    })
   })
 
   it("dragging DOWN scrolls toward OLDER output (negative scrollLines)", () => {
-    expect(dragScrollLines(20, 16)).toEqual({ scrollLines: -1, remainderPx: 4 })
+    expect(dragScrollLines(20, 16)).toEqual({
+      scrollLines: -1,
+      remainderPx: 4,
+    })
   })
 
   it("dragging UP scrolls toward NEWER output (positive scrollLines)", () => {
@@ -51,12 +57,21 @@ describe("dragScrollLines", () => {
   })
 
   it("scrolls multiple lines at once and keeps the sub-row remainder", () => {
-    expect(dragScrollLines(35, 16)).toEqual({ scrollLines: -2, remainderPx: 3 })
+    expect(dragScrollLines(35, 16)).toEqual({
+      scrollLines: -2,
+      remainderPx: 3,
+    })
   })
 
   it("scrolls exact row multiples with no remainder (fencepost)", () => {
-    expect(dragScrollLines(16, 16)).toEqual({ scrollLines: -1, remainderPx: 0 })
-    expect(dragScrollLines(-32, 16)).toEqual({ scrollLines: 2, remainderPx: 0 })
+    expect(dragScrollLines(16, 16)).toEqual({
+      scrollLines: -1,
+      remainderPx: 0,
+    })
+    expect(dragScrollLines(-32, 16)).toEqual({
+      scrollLines: 2,
+      remainderPx: 0,
+    })
   })
 
   it("falls back to a safe row height when given zero (no divide-by-zero)", () => {
@@ -64,7 +79,10 @@ describe("dragScrollLines", () => {
   })
 
   it("falls back to a safe row height when given a negative height", () => {
-    expect(dragScrollLines(32, -5)).toEqual({ scrollLines: -2, remainderPx: 0 })
+    expect(dragScrollLines(32, -5)).toEqual({
+      scrollLines: -2,
+      remainderPx: 0,
+    })
   })
 })
 

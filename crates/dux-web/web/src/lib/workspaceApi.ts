@@ -18,6 +18,7 @@
 // types on both sides would be churn without user value, so the two languages
 // keep the same internal word deliberately rather than by omission.
 
+import type { AgentWorkspaceWire } from "@/lib/agentWorkspace"
 import type {
   AgentTabView,
   ProjectView,
@@ -99,22 +100,65 @@ export type RawWorkspace = Omit<
   sessions: Array<
     Omit<
       SessionView,
-      | "tabs"
-      | "initial_branch"
-      | "source_branch"
-      | "needs_attention"
-      | "typing"
-      | "last_focused_tab"
+      "tabs" | "needs_attention" | "typing" | "last_focused_tab" | "workspace"
     > & {
       tabs?: RawTab[]
-      initial_branch?: string
-      source_branch?: string
       needs_attention?: boolean
       typing?: boolean
       last_focused_tab?: string | null
       terminals?: LegacyTerminal[]
+      /** The tagged workspace. Absent from a server that predates the
+       * standalone agent, which sent the git fields flat beside the session
+       * instead; `normalizeWorkspace` synthesizes the managed shape from
+       * those, which is exactly right, because every agent such a server can
+       * have IS managed. */
+      workspace?: AgentWorkspaceWire
+      /** The legacy FLAT git fields. Present only from a server that predates
+       * the tagged workspace, and read only by the synthesis below. Nothing
+       * downstream may reach for them: an agent with no branch has no honest
+       * value to put here, which is why they moved inside the tag. */
+      project_id?: string
+      branch_name?: string
+      initial_branch?: string
+      source_branch?: string
+      worktree_path?: string
+      branch_provenance?: "created" | "attached" | "adopted" | "unknown"
     }
   >
+}
+
+/** THE ONE NORMALIZATION POINT for an agent's workspace.
+ *
+ * Forward compatibility is the matcher's job (`lib/agentWorkspace.ts` throws on
+ * a kind it has never heard of rather than guessing). BACKWARD compatibility is
+ * this function's: an older server sends the git fields flat, so the managed
+ * shape is synthesized from them. That synthesis is safe precisely because a
+ * server old enough to send them is one where every agent is managed, so there
+ * is no folder case to get wrong.
+ *
+ * The absent-and-not-legacy case (neither a workspace nor a branch name, which
+ * no real server produces) still yields a managed shape with empty fields
+ * rather than a folder: reading an unclassifiable agent as a folder would tell
+ * the delete dialog its directory is the user's and must be kept, which is the
+ * wrong direction to be wrong in for a worktree dux may actually own. */
+function normalizeSessionWorkspace(
+  raw: RawWorkspace["sessions"][number],
+): AgentWorkspaceWire {
+  if (raw.workspace) {
+    return raw.workspace
+  }
+  return {
+    kind: "managed",
+    project_id: raw.project_id ?? "",
+    branch_name: raw.branch_name ?? "",
+    initial_branch: raw.initial_branch ?? "",
+    // An older server is one that deletes the branch either way, so a missing
+    // provenance reads as "created": the copy must describe what the server it
+    // is talking to will actually do.
+    branch_provenance: raw.branch_provenance ?? "created",
+    source_branch: raw.source_branch ?? "",
+    worktree_path: raw.worktree_path ?? "",
+  }
 }
 
 // Turn a wire document into the shape every consumer downstream assumes.
@@ -141,21 +185,35 @@ export function normalizeWorkspace(raw: RawWorkspace): Spine {
     // flat collection, and leaving a second, staler copy behind invites a
     // consumer to read it.
     projects: raw.projects.map(({ terminals: _nested, ...p }) => p),
-    sessions: raw.sessions.map(({ terminals: _nested, ...s }) => ({
-      ...s,
-      tabs: (s.tabs ?? []).map(normalizeTab),
-      initial_branch: s.initial_branch ?? "",
-      source_branch: s.source_branch ?? "",
-      // An older server that predates attention omits the field; treat missing
-      // as "no attention" so the dot/count/favicon stay quiet.
-      needs_attention: s.needs_attention ?? false,
-      // An older server that predates the finer "typing" cue omits it; treat
-      // missing as "not typing" so the row stays on the working/idle words.
-      typing: s.typing ?? false,
-      // An older server that predates tab-focus memory omits the field; treat
-      // missing the same as an explicit null ("no memory recorded").
-      last_focused_tab: s.last_focused_tab ?? null,
-    })),
+    sessions: raw.sessions.map((rawSession) => {
+      const {
+        terminals: _nested,
+        // The legacy flat git fields are DROPPED here, not merely superseded:
+        // they have been folded into the tagged workspace above, and leaving a
+        // second, flatter copy behind is an invitation to read it.
+        project_id: _projectId,
+        branch_name: _branchName,
+        initial_branch: _initialBranch,
+        source_branch: _sourceBranch,
+        worktree_path: _worktreePath,
+        branch_provenance: _branchProvenance,
+        ...s
+      } = rawSession
+      return {
+        ...s,
+        workspace: normalizeSessionWorkspace(rawSession),
+        tabs: (s.tabs ?? []).map(normalizeTab),
+        // An older server that predates attention omits the field; treat missing
+        // as "no attention" so the dot/count/favicon stay quiet.
+        needs_attention: s.needs_attention ?? false,
+        // An older server that predates the finer "typing" cue omits it; treat
+        // missing as "not typing" so the row stays on the working/idle words.
+        typing: s.typing ?? false,
+        // An older server that predates tab-focus memory omits the field; treat
+        // missing the same as an explicit null ("no memory recorded").
+        last_focused_tab: s.last_focused_tab ?? null,
+      }
+    }),
   }
 }
 

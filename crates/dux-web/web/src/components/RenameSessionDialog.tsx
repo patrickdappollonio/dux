@@ -16,6 +16,7 @@ import {
   submitRename,
   useDux,
 } from "@/lib/store"
+import { workspaceBranchName } from "@/lib/agentWorkspace"
 
 // Rename a session's display title. The input pre-fills the current custom title
 // (empty when none), with the branch name as the placeholder so clearing the
@@ -26,7 +27,13 @@ import {
 export function RenameSessionDialog() {
   const { renameTarget, renameDraft, spine } = useDux()
   const session = spine?.sessions.find((s) => s.id === renameTarget)
-  const branchName = session?.branch_name ?? ""
+  // A standalone agent has no branch, so a rename is a title change and
+  // nothing more: the "also rename the branch" affordance has nothing to
+  // rename. An empty string is the existing "no branch here" signal this
+  // dialog already understands.
+  const branchName = session
+    ? (workspaceBranchName(session.workspace) ?? "")
+    : ""
   // Closes the dialog when the agent vanishes from the ViewModel: renaming a
   // deleted agent is moot, and the draft lives in the store so the store's
   // close already handles it. See the hook.

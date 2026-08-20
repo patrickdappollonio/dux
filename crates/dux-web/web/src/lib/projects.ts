@@ -1,4 +1,5 @@
 import type { ProjectView, SessionView, SidebarModel } from "@/lib/types"
+import { workspaceProjectId } from "@/lib/agentWorkspace"
 
 // The shape both the desktop sidebar and the mobile home screen render from.
 export interface PartitionedProjects {
@@ -50,7 +51,10 @@ export function partitionProjects(
   const grouped = new Map<string, SessionView[]>()
   for (const id of names.keys()) grouped.set(id, [])
   for (const session of sessions) {
-    grouped.get(session.project_id)?.push(session)
+    // A standalone agent belongs to no project, so it joins no group. It is
+    // still in the flat list; it simply has no project row to sit under.
+    const projectId = workspaceProjectId(session.workspace)
+    if (projectId) grouped.get(projectId)?.push(session)
   }
 
   // Real projects in display order, partitioned by core's agent-less set; orphan

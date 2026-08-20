@@ -58,7 +58,9 @@ describe("AccessoryBar key activation", () => {
 
   it("every key row honors the same contract (arrows and page scroll included)", () => {
     const props = renderBar()
-    fireEvent.click(screen.getByRole("button", { name: "Left" }), { detail: 0 })
+    fireEvent.click(screen.getByRole("button", { name: "Left" }), {
+      detail: 0,
+    })
     expect(props.onArrow).toHaveBeenCalledWith("left")
     fireEvent.click(screen.getByRole("button", { name: "Page down" }), {
       detail: 0,

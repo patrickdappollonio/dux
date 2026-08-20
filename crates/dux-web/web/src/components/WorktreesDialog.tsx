@@ -33,6 +33,7 @@ import {
   useDux,
 } from "@/lib/store"
 import type { ProjectWorktreeEntryView } from "@/lib/types"
+import { sessionLabel } from "@/lib/agentWorkspace"
 
 // The last path segment (the worktree directory's name) — what the TUI shows
 // as the entry label. Falls back to the full path for a root-level path.
@@ -246,7 +247,7 @@ function WorktreesBody({ projectId }: { projectId: string }) {
   function agentName(entry: ProjectWorktreeEntryView): string | undefined {
     const session = spine?.sessions.find((s) => s.id === entry.agent_id)
     if (!session) return undefined
-    return session.title || session.branch_name
+    return sessionLabel(session)
   }
 
   // The display name mirrors the TUI prompt: empty is rejected (a worktree

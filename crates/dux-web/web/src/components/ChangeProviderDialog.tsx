@@ -23,6 +23,7 @@ import {
   useDux,
 } from "@/lib/store"
 import type { SessionView } from "@/lib/types"
+import { sessionLabel } from "@/lib/agentWorkspace"
 
 // The form body is mounted only while the dialog is open and a session resolves.
 // `provider` seeds from the session prop via a lazy initializer so there is no
@@ -35,7 +36,7 @@ function ChangeProviderForm({
   providers: string[]
 }) {
   const [provider, setProvider] = useState<string>(() => session.provider)
-  const label = session.title ?? session.branch_name
+  const label = sessionLabel(session)
 
   async function handleSave() {
     // No change → just close. Otherwise close only once the change is accepted, so

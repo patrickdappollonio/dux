@@ -17,6 +17,7 @@ import {
   useDux,
 } from "@/lib/store"
 import type { ProjectView, SessionView } from "@/lib/types"
+import { sessionLabel, workspaceProjectId } from "@/lib/agentWorkspace"
 
 // Edit the startup command from an agent's menu. Startup command is
 // project-scoped in dux (there is no per-agent startup command), so this edits
@@ -31,7 +32,7 @@ function AgentStartupCommandForm({
   project: ProjectView
 }) {
   const [startup, setStartup] = useState(() => project.startup_command ?? "")
-  const agentName = session.title || session.branch_name
+  const agentName = sessionLabel(session)
 
   async function handleSave() {
     const next = startup.trim() === "" ? null : startup
@@ -80,7 +81,12 @@ function AgentStartupCommandForm({
 export function AgentStartupCommandDialog() {
   const { spine, agentStartupCommandTarget } = useDux()
   const session = spine?.sessions.find((s) => s.id === agentStartupCommandTarget)
-  const project = spine?.projects.find((p) => p.id === session?.project_id)
+  // A standalone agent belongs to no project, so the lookup must not happen at
+  // all for one rather than miss.
+  const project = spine?.projects.find(
+    (p) =>
+      session !== undefined && p.id === workspaceProjectId(session.workspace),
+  )
   // Closes the dialog when the agent or its project vanishes from the
   // ViewModel; see the hook.
   const open = useVanishedTargetGuard(

@@ -7,7 +7,10 @@ import type { ProjectView, SessionView, SidebarModel } from "@/lib/types"
 // are irrelevant here, so build minimal fixtures.
 const project = (id: string) => ({ id }) as unknown as ProjectView
 const session = (id: string, project_id: string) =>
-  ({ id, project_id }) as unknown as SessionView
+  ({
+    id,
+    workspace: { kind: "managed", project_id },
+  }) as unknown as SessionView
 
 describe("partitionProjects", () => {
   it("excludes orphan ids from the reorder payload while still rendering them", () => {

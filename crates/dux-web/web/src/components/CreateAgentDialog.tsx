@@ -21,6 +21,7 @@ import {
   toggleCreateAgentRandomize,
   useDux,
 } from "@/lib/store"
+import { sessionLabel } from "@/lib/agentWorkspace"
 
 // The name dialog mirrors the TUI prompt and serves three modes — creating a
 // fresh agent, forking an existing session, and creating an agent from a GitHub
@@ -66,7 +67,7 @@ export function CreateAgentDialog() {
       ? spine?.sessions.find((s) => s.id === createAgentTarget.sessionId)
       : undefined
   const projectName = project?.name ?? "project"
-  const sourceLabel = forkSession?.title || forkSession?.branch_name || "agent"
+  const sourceLabel = forkSession ? sessionLabel(forkSession) : "agent"
 
   // A generation request is in flight: show the spinner and disable the input
   // so a late reply can never clobber text typed in the meantime. Tracked

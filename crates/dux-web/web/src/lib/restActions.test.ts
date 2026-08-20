@@ -95,7 +95,9 @@ describe("sessionsApi", () => {
   })
 
   it("patch PATCHes the session with the title/provider/auto_reopen body", async () => {
-    const fetchMock = stubOkFetch(200, { provider_change: "pending_reconnect" })
+    const fetchMock = stubOkFetch(200, {
+      provider_change: "pending_reconnect",
+    })
     await sessionsApi.patch("s1", { provider: "codex" })
     const c = lastCall(fetchMock)
     expect(c.url).toBe("/api/v1/sessions/s1")

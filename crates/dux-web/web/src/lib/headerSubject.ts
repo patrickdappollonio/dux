@@ -81,12 +81,24 @@ export function terminalCountCaption(count: number): string | null {
 }
 
 export interface AgentChipsInput {
-  // The agent's display name (its title, falling back to its branch).
+  // The agent's display name (its title, falling back to its branch, or to its
+  // folder's name for a standalone agent).
   name: string
   provider: string
   projectName?: string | null
-  branchName: string
-  // The immutable branch the agent was created on. Absent on an older server.
+  // A STANDALONE agent's folder, home-collapsed. Mutually exclusive with
+  // `projectName` in practice: a standalone agent belongs to no project, and a
+  // managed one has no folder of its own to name. It takes the same leading
+  // slot, because it is the same fact ("which thing am I in") for the other
+  // kind of agent, and it renders through the same `directoryChip` a standalone
+  // TERMINAL already uses, so the two idioms stay one idiom.
+  folderLabel?: string | null
+  // The branch this agent tracks, or `null` when it has none (a standalone
+  // agent). Null rather than an empty string so a missing branch cannot be
+  // mistaken for a branch named "".
+  branchName: string | null
+  // The immutable branch the agent was created on. Absent on an older server,
+  // and always absent for a standalone agent.
   initialBranch?: string | null
   // How many terminals this agent owns. Zero renders no terminal chip.
   terminalCount?: number
@@ -99,7 +111,11 @@ export interface AgentChipsInput {
 // on `initialBranch` being present, so an older server that omits the field
 // never renders "originally undefined".
 function branchDrifted(input: AgentChipsInput): boolean {
-  return !!input.initialBranch && input.initialBranch !== input.branchName
+  return (
+    !!input.branchName &&
+    !!input.initialBranch &&
+    input.initialBranch !== input.branchName
+  )
 }
 
 // The branch chip, or null.
@@ -115,6 +131,9 @@ function branchDrifted(input: AgentChipsInput): boolean {
 // note has no chip to live on and the fact would be silently dropped, which is
 // worse than one extra chip in a rare case.
 export function branchChip(input: AgentChipsInput): HeaderChip | null {
+  // A standalone agent has no branch, so there is no chip: an empty one would
+  // draw a glyph with nothing after it.
+  if (!input.branchName) return null
   const drifted = branchDrifted(input)
   if (input.branchName === input.name && !drifted) return null
   return {
@@ -135,6 +154,10 @@ export function agentHeaderChips(input: AgentChipsInput): HeaderChip[] {
   const chips: HeaderChip[] = []
   if (input.projectName) {
     chips.push({ kind: "project", label: "Project", value: input.projectName })
+  } else if (input.folderLabel) {
+    // The standalone agent's answer to the same question, through the very
+    // chip a standalone terminal uses for it.
+    chips.push(directoryChip(input.folderLabel))
   }
   chips.push({
     kind: "agent",

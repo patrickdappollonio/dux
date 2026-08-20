@@ -418,11 +418,17 @@ function makeState(offline = false, conn: ConnState = "open"): DuxState {
       sessions: [
         {
           id: "s1",
-          project_id: "p1",
+          workspace: {
+            kind: "managed",
+            project_id: "p1",
+            branch_name: "main",
+            initial_branch: "",
+            branch_provenance: "created",
+            source_branch: "",
+            worktree_path: "/tmp/p1",
+          },
           title: null,
           provider: "claude",
-          branch_name: "main",
-          worktree_path: "/tmp/p1",
           status: "active",
           auto_reopen_enabled: false,
           tabs: [
@@ -744,7 +750,10 @@ describe("TerminalPane viewer grid divergence", () => {
     act(() => pty.onConnected("conn-self", null))
     const term = TermStub.instances.at(-1)!
     act(() => pty.onPtyGrid({ rows: 40, cols: 120 }, false))
-    expect({ rows: term.rows, cols: term.cols }).toEqual({ rows: 24, cols: 80 })
+    expect({ rows: term.rows, cols: term.cols }).toEqual({
+      rows: 24,
+      cols: 80,
+    })
   })
 
   it("adopts on DEMOTION, without waiting for the next size event", () => {
@@ -1521,7 +1530,9 @@ describe("TerminalPane mobile compose bar", () => {
     const { rerender } = render(
       <TerminalPane kind="agent" id="s1" sessionId="s1" />,
     )
-    fireEvent.change(composeTextarea(), { target: { value: "draft survives" } })
+    fireEvent.change(composeTextarea(), {
+      target: { value: "draft survives" },
+    })
     // The preference flips off: the bar unmounts. The buffer lives in
     // TerminalPane state, not the bar, so it must survive the round trip.
     const off = makeState()

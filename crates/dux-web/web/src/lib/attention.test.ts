@@ -9,13 +9,17 @@ import type { SessionView } from "./types"
 function session(id: string, needs_attention: boolean): SessionView {
   return {
     id,
-    project_id: "p1",
+    workspace: {
+      kind: "managed",
+      project_id: "p1",
+      branch_name: "b",
+      initial_branch: "b",
+      branch_provenance: "created",
+      source_branch: "main",
+      worktree_path: "/tmp/w",
+    },
     title: null,
     provider: "claude",
-    branch_name: "b",
-    initial_branch: "b",
-    source_branch: "main",
-    worktree_path: "/tmp/w",
     status: "active",
     auto_reopen_enabled: false,
     terminals: [],

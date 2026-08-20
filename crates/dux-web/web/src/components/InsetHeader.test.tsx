@@ -58,13 +58,17 @@ function stateFor(branchName: string, initialBranch: string): DuxState {
       sessions: [
         {
           id: "s1",
-          project_id: "p1",
+          workspace: {
+            kind: "managed",
+            project_id: "p1",
+            branch_name: branchName,
+            initial_branch: initialBranch,
+            branch_provenance: "created",
+            source_branch: "main",
+            worktree_path: "/tmp/s1",
+          },
           title: null,
           provider: "claude",
-          branch_name: branchName,
-          initial_branch: initialBranch,
-          source_branch: "main",
-          worktree_path: "/tmp/s1",
           status: "active",
           tabs: [
             {

@@ -16,10 +16,17 @@ const SPINE = {
   sessions: [
     {
       id: "s1",
-      project_id: "p1",
+      workspace: {
+        kind: "managed",
+        project_id: "p1",
+        branch_name: "s1",
+        initial_branch: "",
+        branch_provenance: "created",
+        source_branch: "",
+        worktree_path: "",
+      },
       status: "active",
       title: "s1",
-      branch_name: "s1",
       working: false,
       needs_attention: false,
       created_at: "2026-01-01T00:00:00Z",

@@ -32,7 +32,15 @@ function makeSpine() {
     sessions: [
       {
         id: "s1",
-        project_id: "p1",
+        workspace: {
+          kind: "managed",
+          project_id: "p1",
+          branch_name: "",
+          initial_branch: "",
+          branch_provenance: "created",
+          source_branch: "",
+          worktree_path: "",
+        },
         terminals: [],
         tabs: [{ id: "s1" }, { id: "b2" }],
       },
@@ -146,7 +154,15 @@ function spineWithExtraTab(b2Live: boolean) {
     sessions: [
       {
         id: "s1",
-        project_id: "p1",
+        workspace: {
+          kind: "managed",
+          project_id: "p1",
+          branch_name: "",
+          initial_branch: "",
+          branch_provenance: "created",
+          source_branch: "",
+          worktree_path: "",
+        },
         terminals: [],
         tabs: [
           { id: "s1", has_live_process: true },
@@ -268,7 +284,15 @@ describe("store agent-tab lifecycle", () => {
       sessions: [
         {
           id: "s1",
-          project_id: "p1",
+          workspace: {
+            kind: "managed",
+            project_id: "p1",
+            branch_name: "",
+            initial_branch: "",
+            branch_provenance: "created",
+            source_branch: "",
+            worktree_path: "",
+          },
           terminals: [],
           tabs: [{ id: "s1" }, { id: "b2" }],
           last_focused_tab: "b2",

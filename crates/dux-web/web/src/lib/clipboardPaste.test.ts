@@ -38,7 +38,9 @@ const OWNER = {
 
 describe("clipboardPasteAction", () => {
   it("leaves an empty clipboard alone", () => {
-    expect(clipboardPasteAction([], "", OWNER, NOW)).toEqual({ kind: "ignore" })
+    expect(clipboardPasteAction([], "", OWNER, NOW)).toEqual({
+      kind: "ignore",
+    })
   })
 
   it("leaves an ordinary text paste to xterm", () => {

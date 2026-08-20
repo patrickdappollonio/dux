@@ -5,11 +5,15 @@ import type { SessionView, TerminalView } from "./types"
 
 // Minimal fixture: projectLiveCounts only reads project_id off a session.
 function session(
-  fields: Partial<SessionView> & { id: string; project_id: string },
+  fields: Omit<Partial<SessionView>, "workspace"> & {
+    id: string
+    project_id: string
+  },
 ): SessionView {
   return {
     title: null,
     ...fields,
+    workspace: { kind: "managed", project_id: fields.project_id },
   } as unknown as SessionView
 }
 

@@ -93,7 +93,15 @@ vi.mock("./notify", async (importOriginal) => {
 // so a caller never has to remember it.
 interface SessionSpec {
   id: string
-  project_id: string
+  workspace: {
+    kind: "managed"
+    project_id: string
+    branch_name: ""
+    initial_branch: ""
+    branch_provenance: "created"
+    source_branch: ""
+    worktree_path: ""
+  }
   status?: string
   tabs?: string[]
   terminals?: string[]
@@ -117,10 +125,17 @@ function makeSpine(
     })) as unknown as Spine["projects"],
     sessions: sessions.map((s) => ({
       id: s.id,
-      project_id: s.project_id,
+      workspace: {
+        kind: "managed",
+        project_id: s.project_id,
+        branch_name: s.id,
+        initial_branch: "",
+        branch_provenance: "created",
+        source_branch: "",
+        worktree_path: "",
+      },
       status: s.status ?? "active",
       title: s.id,
-      branch_name: s.id,
       created_at: "2026-01-01T00:00:00Z",
       updated_at: "2026-01-01T00:00:00Z",
       working: s.working ?? false,

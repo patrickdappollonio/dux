@@ -24,6 +24,7 @@ import {
   useDux,
 } from "@/lib/store"
 import { DUX_TERMINAL_FONT_STACK } from "@/lib/terminalFont"
+import { sessionLabel } from "@/lib/agentWorkspace"
 
 // View startup-command logs (the web counterpart to the TUI's
 // `read-startup-command-logs`). Each run of the project startup command writes a
@@ -56,7 +57,7 @@ function StartupLogsBody({
   const isProject = scope === "project"
   const title = isProject
     ? `Startup command logs: ${project?.name || "project"} (all agents)`
-    : `Startup command logs: ${session?.title || session?.branch_name || "agent"}`
+    : `Startup command logs: ${session ? sessionLabel(session) : "agent"}`
   const description = isProject
     ? "Output from each run of the project startup command across every agent in this project, newest first."
     : "Output from each run of the project startup command in this agent's worktree, newest first."

@@ -119,11 +119,17 @@ function makeSessionSpine(tabCount: number): DuxState["spine"] {
     sessions: [
       {
         id: "s1",
-        project_id: "p1",
+        workspace: {
+          kind: "managed",
+          project_id: "p1",
+          branch_name: "main",
+          initial_branch: "",
+          branch_provenance: "created",
+          source_branch: "",
+          worktree_path: "/tmp/p1",
+        },
         title: null,
         provider: "claude",
-        branch_name: "main",
-        worktree_path: "/tmp/p1",
         status: "active",
         auto_reopen_enabled: false,
         tabs,
@@ -285,11 +291,17 @@ describe("AppSidebar flat Terminals section", () => {
       sessions: [
         {
           id: "s1",
-          project_id: "p1",
+          workspace: {
+            kind: "managed",
+            project_id: "p1",
+            branch_name: "feature/login",
+            initial_branch: "",
+            branch_provenance: "created",
+            source_branch: "",
+            worktree_path: "/tmp/p1",
+          },
           title: "Login flow",
           provider: "claude",
-          branch_name: "feature/login",
-          worktree_path: "/tmp/p1",
           status: "active",
           auto_reopen_enabled: false,
           tabs: [],
@@ -435,11 +447,17 @@ describe("AppSidebar project terminals", () => {
         sessions: [
           {
             id: "s1",
-            project_id: "ghost",
+            workspace: {
+              kind: "managed",
+              project_id: "ghost",
+              branch_name: "main",
+              initial_branch: "",
+              branch_provenance: "created",
+              source_branch: "",
+              worktree_path: "/tmp/x",
+            },
             title: null,
             provider: "claude",
-            branch_name: "main",
-            worktree_path: "/tmp/x",
             status: "active",
             auto_reopen_enabled: false,
             tabs: [
@@ -996,7 +1014,7 @@ function makeTwoProjectSpine(): DuxState["spine"] {
     projects: unknown[]
     sessions: {
       id: string
-      project_id: string
+      workspace: { kind: "managed"; project_id: string }
       status: string
       working: boolean
       needs_attention: boolean
@@ -1014,7 +1032,7 @@ function makeTwoProjectSpine(): DuxState["spine"] {
   const secondSession = {
     ...base.sessions[0],
     id: "s2",
-    project_id: "p2",
+    workspace: { ...base.sessions[0].workspace, project_id: "p2" },
     status: "detached",
     working: false,
     needs_attention: false,

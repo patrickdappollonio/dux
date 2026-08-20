@@ -77,6 +77,7 @@ import {
   useInputSurface,
 } from "@/components/terminal/inputSurface"
 import { useUploadPipeline } from "@/components/terminal/uploadPipeline"
+import { sessionLabel } from "@/lib/agentWorkspace"
 
 type TerminalPaneProps =
   // The streamed target: an agent tab, or a companion terminal of either owner.
@@ -230,12 +231,14 @@ export function TerminalPane(props: TerminalPaneProps) {
       ? matchOwner(props.owner, {
           // A session-owned terminal is named after its AGENT, exactly as
           // before; the generic fallback stays "Agent" for the same reason.
-          session: () => session?.title || session?.branch_name || "Agent",
+          session: () => (session ? sessionLabel(session) : "Agent"),
           project: () => project?.name || "Terminal",
           // No owner to be named after, so the generic noun is the whole name.
           standalone: () => "Terminal",
         })
-      : session?.title || session?.branch_name || "Agent"
+      : session
+        ? sessionLabel(session)
+        : "Agent"
   const isSessionSlotTab = kind === "agent" && id === sessionId
   // A terminal's siblings: the terminals sharing its owner, selected out of the
   // spine's flat collection rather than read off whichever parent it used to be

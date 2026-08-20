@@ -98,7 +98,11 @@ function FileRow({ file, action, sessionId, onOpenDiff }: FileRowProps) {
   // the TUI which blocks discarding staged files. An untracked file ("?") will be
   // deleted; a tracked one is restored — the dialog distinguishes them.
   function runDiscard() {
-    openDiscard({ sessionId, path: file.path, untracked: kind === "untracked" })
+    openDiscard({
+      sessionId,
+      path: file.path,
+      untracked: kind === "untracked",
+    })
   }
 
   return (

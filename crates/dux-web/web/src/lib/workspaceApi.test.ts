@@ -45,13 +45,19 @@ describe("fetchWorkspace", () => {
       sessions: [
         {
           id: "s1",
-          project_id: "p1",
+          workspace: {
+            kind: "managed",
+            project_id: "p1",
+            branch_name: "",
+            initial_branch: "",
+            branch_provenance: "created",
+            source_branch: "",
+            worktree_path: "",
+          },
           tabs: [],
           // A session that omits `typing` (an older server) is coerced to
           // `typing: false`.
           typing: false,
-          initial_branch: "",
-          source_branch: "",
           needs_attention: false,
           last_focused_tab: null,
         },
@@ -81,7 +87,15 @@ describe("fetchWorkspace", () => {
       sessions: [
         {
           id: "s1",
-          project_id: "p1",
+          workspace: {
+            kind: "managed",
+            project_id: "p1",
+            branch_name: "",
+            initial_branch: "",
+            branch_provenance: "created",
+            source_branch: "",
+            worktree_path: "",
+          },
           terminals: [
             { id: "t-s1a", label: "Terminal 1", sort_order: 1 },
             { id: "t-s1b", label: "Terminal 3", sort_order: 3 },
@@ -197,10 +211,16 @@ describe("fetchWorkspace", () => {
     const result = await fetchWorkspace()
     expect(result.sessions[0]).toMatchObject({
       id: "s1",
-      project_id: "p1",
+      workspace: {
+        kind: "managed",
+        project_id: "p1",
+        branch_name: "",
+        initial_branch: "",
+        branch_provenance: "created",
+        source_branch: "",
+        worktree_path: "",
+      },
       tabs: [],
-      initial_branch: "",
-      source_branch: "",
     })
   })
 

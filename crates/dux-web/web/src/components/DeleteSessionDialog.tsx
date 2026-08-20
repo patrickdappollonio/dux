@@ -9,6 +9,11 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
+import {
+  folderWorkspace,
+  managedWorkspace,
+  sessionLabel,
+} from "@/lib/agentWorkspace"
 import { closeDelete, deleteSession, useDux } from "@/lib/store"
 
 export function DeleteSessionDialog() {
@@ -16,13 +21,17 @@ export function DeleteSessionDialog() {
   const [deleteWorktree, setDeleteWorktree] = useState(false)
 
   const session = spine?.sessions.find((s) => s.id === deleteTarget)
-  const name = session?.title || session?.branch_name
+  const name = session ? sessionLabel(session) : undefined
+  // The MANAGED identity, when there is one. A standalone agent has none, and
+  // every worktree affordance below hangs off this: there is no worktree to
+  // remove and no branch to delete, so the checkbox is not merely unchecked,
+  // it does not exist. The offer cannot be rendered, so it cannot be ticked.
+  const managed = session ? managedWorkspace(session.workspace) : null
+  const folder = session ? folderWorkspace(session.workspace) : null
   // dux force-deletes the branch only when dux created it. An agent attached to
   // an existing branch, or adopted along with an existing worktree, gives up its
   // worktree and keeps its branch, so the checkbox must not promise otherwise.
-  // A server too old to send the field is a server that deletes the branch, so
-  // the absent case takes the branch-deleting copy.
-  const provenance = session?.branch_provenance ?? "created"
+  const provenance = managed?.branch_provenance ?? "created"
   const branchIsKept = provenance !== "created"
   // The component stays mounted across opens, so a vanish-close must also
   // reset the checkbox, otherwise the NEXT delete confirm opens pre-checked
@@ -61,29 +70,43 @@ export function DeleteSessionDialog() {
         <p className="text-sm text-muted-foreground">
           This removes the agent session &ldquo;{name}&rdquo; from dux.
         </p>
-        <div className="flex items-center gap-2">
-          <Checkbox
-            id="delete-worktree"
-            checked={deleteWorktree}
-            onCheckedChange={setDeleteWorktree}
-          />
-          <label htmlFor="delete-worktree" className="text-sm">
-            {/* Two labels, because the checkbox means two different things.
-               When dux created the branch it goes with the worktree, and the
-               label says so; when the branch is the user's, dux keeps it and
-               the label must not promise a deletion that will not happen. The
-               TUI's checkbox makes the same distinction, from the same
-               provenance. */}
-            {branchIsKept
-              ? "Also delete the git worktree, keeping its branch (irreversible)"
-              : "Also delete the git worktree and its branch (irreversible)"}
-          </label>
-        </div>
-        {branchIsKept && (
+        {folder && (
+          // A standalone agent: dux's record of it goes and the user's folder
+          // is exactly as it was. Said out loud, because the sentence above on
+          // its own reads as though something on disk went with it.
+          <p className="text-sm text-muted-foreground">
+            Its folder &ldquo;
+            <span className="break-all font-mono">{folder.folder_label}</span>
+            &rdquo; is left untouched: dux never creates, moves or removes a
+            standalone agent&rsquo;s folder. Anything the agent wrote there is
+            still there.
+          </p>
+        )}
+        {managed && (
+          <div className="flex items-center gap-2">
+            <Checkbox
+              id="delete-worktree"
+              checked={deleteWorktree}
+              onCheckedChange={setDeleteWorktree}
+            />
+            <label htmlFor="delete-worktree" className="text-sm">
+              {/* Two labels, because the checkbox means two different things.
+                 When dux created the branch it goes with the worktree, and the
+                 label says so; when the branch is the user's, dux keeps it and
+                 the label must not promise a deletion that will not happen. The
+                 TUI's checkbox makes the same distinction, from the same
+                 provenance. */}
+              {branchIsKept
+                ? "Also delete the git worktree, keeping its branch (irreversible)"
+                : "Also delete the git worktree and its branch (irreversible)"}
+            </label>
+          </div>
+        )}
+        {managed && branchIsKept && (
           <p className="text-sm text-muted-foreground">
             The branch &ldquo;
             <span className="break-all">
-              {session?.initial_branch || session?.branch_name}
+              {managed.initial_branch || managed.branch_name}
             </span>
             &rdquo;{" "}
             {/* One clause per provenance, and the unrecognized one gets its

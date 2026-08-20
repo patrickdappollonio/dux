@@ -80,6 +80,7 @@ import { useIsMobile } from "@/hooks/use-mobile"
 import { agentRowVisual } from "@/lib/agentRow"
 import { defaultProviderForSession } from "@/lib/agentTabs"
 import {
+  agentSearchLocation,
   matchCharRange,
   matchesSessionQuery,
   matchesTerminalQuery,
@@ -114,6 +115,11 @@ import { launcherVerb } from "@/lib/launcherVerb"
 import { partitionProjects } from "@/lib/projects"
 import { moveItem, ordersMatch, reorderById } from "@/lib/reorder"
 import { agentRoot, editorRootForTarget } from "@/lib/editorRoot"
+import {
+  sessionLabel,
+  workspaceDirectory,
+  workspaceProjectId,
+} from "@/lib/agentWorkspace"
 import {
   addTab,
   agentSortValue,
@@ -191,9 +197,9 @@ export function AgentActionsMenu({
   // name is the row's own display idiom (title ?? branch); the Project
   // submenu names the PROJECT, because its actions affect the whole project,
   // not just this agent.
-  const agentName = session.title ?? session.branch_name
+  const agentName = sessionLabel(session)
   const projectName = spine?.projects.find(
-    (p) => p.id === session.project_id,
+    (p) => p.id === workspaceProjectId(session.workspace),
   )?.name
   const ghAvailable = bootstrap?.gh_available ?? false
   const prOverridden = session.pr?.overridden ?? false
@@ -315,7 +321,9 @@ export function AgentActionsMenu({
           </span>
         </DropdownMenuSubTrigger>
         <DropdownMenuSubContent>
-          <ProjectMenuItems id={session.project_id} />
+          {/* A standalone agent belongs to no project, so there is no project
+              submenu for it; the trigger above is gated on the same answer. */}
+          <ProjectMenuItems id={workspaceProjectId(session.workspace) ?? ""} />
         </DropdownMenuSubContent>
       </DropdownMenuSub>
       <DropdownMenuSeparator />
@@ -445,7 +453,9 @@ export function AgentActionsMenu({
         <SquareTerminal />
         New terminal
       </DropdownMenuItem>
-      <DropdownMenuItem onClick={() => clipboardWorktree(session.worktree_path)}>
+      <DropdownMenuItem
+        onClick={() => clipboardWorktree(workspaceDirectory(session.workspace))}
+      >
         <ClipboardCopy />
         Copy local path
       </DropdownMenuItem>
@@ -541,7 +551,7 @@ function AgentFlatRow({
   // The live search query, for the match highlight ("" renders plain).
   query: string
 }) {
-  const label = session.title || session.branch_name
+  const label = sessionLabel(session)
   const agentSelected =
     selectedTarget?.kind === "agent" && selectedTarget.sessionId === session.id
   const { shimmer, dimmed, attention, typing } = agentRowVisual(
@@ -1151,7 +1161,9 @@ function QuietTail({
             <AgentFlatRow
               key={session.id}
               session={session}
-              projectName={projectName(session.project_id)}
+              projectName={projectName(
+                workspaceProjectId(session.workspace) ?? "",
+              )}
               selectedTarget={selectedTarget}
               handlers={handlers}
               sortable={false}
@@ -1283,10 +1295,10 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
 
   const query = agentSearch
   const visibleMain = sortedMain.filter((s) =>
-    matchesSessionQuery(s, projectName(s.project_id), query),
+    matchesSessionQuery(s, agentSearchLocation(s, projectName), query),
   )
   const visibleQuiet = sortedQuiet.filter((s) =>
-    matchesSessionQuery(s, projectName(s.project_id), query),
+    matchesSessionQuery(s, agentSearchLocation(s, projectName), query),
   )
 
   // The flat Terminals section: EVERY terminal, companion (session-owned) and
@@ -1515,7 +1527,9 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
                     <AgentFlatRow
                       key={session.id}
                       session={session}
-                      projectName={projectName(session.project_id)}
+                      projectName={projectName(
+                        workspaceProjectId(session.workspace) ?? "",
+                      )}
                       selectedTarget={selectedTarget}
                       handlers={handlers}
                       sortable

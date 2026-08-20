@@ -17,6 +17,7 @@ import {
   type TerminalOwnerRef,
 } from "@/lib/terminalOwner"
 import type { ProjectView, SessionView, TerminalView } from "@/lib/types"
+import { sessionLabel, workspaceProjectId } from "@/lib/agentWorkspace"
 
 // One entry in the flat Terminals section: the terminal, its owner reference (so
 // a tap selects/streams it), the owner's display label (the agent name, or the
@@ -80,8 +81,12 @@ export function assembleFlatTerminals(
       case "session": {
         const session = sessionsById.get(wire.session_id)
         if (session) {
-          proj = projectName(session.project_id)
-          ownerLabel = `${session.title || session.branch_name}@${proj}`
+          // A standalone agent belongs to no project, so there is nothing to
+          // qualify the label with and the owner is just the agent's name.
+          const projectId = workspaceProjectId(session.workspace)
+          proj = projectId ? projectName(projectId) : ""
+          const label = sessionLabel(session)
+          ownerLabel = proj ? `${label}@${proj}` : label
         } else {
           proj = ""
           ownerLabel = wire.session_id

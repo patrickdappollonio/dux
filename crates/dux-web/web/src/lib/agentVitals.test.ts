@@ -19,13 +19,17 @@ function tab(overrides: Partial<AgentTabView> = {}): AgentTabView {
 function session(overrides: Partial<SessionView> = {}): SessionView {
   return {
     id: "s1",
-    project_id: "p1",
+    workspace: {
+      kind: "managed",
+      project_id: "p1",
+      branch_name: "feature/foo",
+      initial_branch: "feature/foo",
+      branch_provenance: "created",
+      source_branch: "main",
+      worktree_path: "/home/user/worktrees/feature-foo",
+    },
     title: null,
     provider: "claude",
-    branch_name: "feature/foo",
-    initial_branch: "feature/foo",
-    source_branch: "main",
-    worktree_path: "/home/user/worktrees/feature-foo",
     status: "active",
     auto_reopen_enabled: true,
     terminals: [],
@@ -48,7 +52,17 @@ describe("buildAgentVitals", () => {
 
   it("renders 'initial -> current' drift form when branches differ", () => {
     const model = buildAgentVitals(
-      session({ initial_branch: "main", branch_name: "feature/foo" }),
+      session({
+        workspace: {
+          kind: "managed",
+          project_id: "p1",
+          branch_name: "feature/foo",
+          initial_branch: "main",
+          branch_provenance: "created",
+          source_branch: "main",
+          worktree_path: "/home/user/worktrees/feature-foo",
+        },
+      }),
       "myproject",
       null,
     )
@@ -147,19 +161,67 @@ describe("buildAgentVitals", () => {
     expect(model.rows.find((r) => r.key === "worktree")).toBeUndefined()
   })
 
+  // A managed agent needs no directory row, because its worktree is named
+  // after its branch and the branch row already identifies it. That reasoning
+  // does not hold for a standalone agent: its folder is the user's own, named
+  // nothing in particular, and it is the single most useful fact about the
+  // agent. So it gets the row the managed shape deliberately does without.
+  it("names a standalone agent's folder, and shows no branch rows at all", () => {
+    const model = buildAgentVitals(
+      session({
+        title: "notes",
+        workspace: {
+          kind: "folder",
+          folder_path: "/home/someone/work/notes",
+          folder_label: "~/work/notes",
+          repo_status: "no_repo",
+          quiet_reason: "This folder has no git repository.",
+        },
+      }),
+      "",
+      null,
+    )
+    expect(model.rows.find((r) => r.key === "folder")?.value).toBe(
+      "~/work/notes",
+    )
+    expect(model.rows.find((r) => r.key === "branch")).toBeUndefined()
+    expect(model.rows.find((r) => r.key === "source")).toBeUndefined()
+    expect(model.name).toBe("notes")
+  })
+
   it("shows the source branch, skipping it when it matches the current branch", () => {
     const forked = buildAgentVitals(session(), "myproject", null)
     expect(forked.rows.find((r) => r.key === "source")?.value).toBe("main")
 
     const onSource = buildAgentVitals(
-      session({ source_branch: "feature/foo" }),
+      session({
+        workspace: {
+          kind: "managed",
+          project_id: "p1",
+          branch_name: "feature/foo",
+          initial_branch: "feature/foo",
+          branch_provenance: "created",
+          source_branch: "feature/foo",
+          worktree_path: "/home/user/worktrees/feature-foo",
+        },
+      }),
       "myproject",
       null,
     )
     expect(onSource.rows.find((r) => r.key === "source")).toBeUndefined()
 
     const noSource = buildAgentVitals(
-      session({ source_branch: "" }),
+      session({
+        workspace: {
+          kind: "managed",
+          project_id: "p1",
+          branch_name: "feature/foo",
+          initial_branch: "feature/foo",
+          branch_provenance: "created",
+          source_branch: "",
+          worktree_path: "/home/user/worktrees/feature-foo",
+        },
+      }),
       "myproject",
       null,
     )

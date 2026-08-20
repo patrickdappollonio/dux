@@ -36,13 +36,17 @@ function projectTerminal(
 
 function session(over: Partial<SessionView> & { id: string }): SessionView {
   return {
-    project_id: "p1",
+    workspace: {
+      kind: "managed",
+      project_id: "p1",
+      branch_name: "feat",
+      initial_branch: "feat",
+      branch_provenance: "created",
+      source_branch: "main",
+      worktree_path: "/wt",
+    },
     title: null,
     provider: "claude",
-    branch_name: "feat",
-    initial_branch: "feat",
-    source_branch: "main",
-    worktree_path: "/wt",
     status: "active",
     auto_reopen_enabled: false,
     tabs: [tab({ id: over.id })],

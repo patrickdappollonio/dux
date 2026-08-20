@@ -111,11 +111,17 @@ function dormantSpine(): DuxState["spine"] {
     sessions: [
       {
         id: "s1",
-        project_id: "p1",
+        workspace: {
+          kind: "managed",
+          project_id: "p1",
+          branch_name: "main",
+          initial_branch: "",
+          branch_provenance: "created",
+          source_branch: "",
+          worktree_path: "/tmp/p1",
+        },
         title: null,
         provider: "claude",
-        branch_name: "main",
-        worktree_path: "/tmp/p1",
         status: "active",
         auto_reopen_enabled: false,
         terminals: [],

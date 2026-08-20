@@ -7,6 +7,11 @@
 import { statusDotColorClass } from "@/lib/agentRow"
 import type { ChangesSlice } from "@/lib/store"
 import type { SessionView } from "@/lib/types"
+import {
+  folderWorkspace,
+  managedWorkspace,
+  sessionLabel,
+} from "@/lib/agentWorkspace"
 
 export interface AgentVitalsRow {
   key: string
@@ -64,15 +69,18 @@ export function providersSummary(session: SessionView): string {
 }
 
 // Branch row value: plain current branch, or an "initial → current" drift form
-// when the worktree has moved off the branch the agent was created on.
-function branchValue(session: SessionView): string {
+// when the worktree has moved off the branch the agent was created on. `null`
+// for a standalone agent, which has no branch and therefore no row.
+function branchValue(session: SessionView): string | null {
+  const managed = managedWorkspace(session.workspace)
+  if (!managed) return null
   if (
-    session.initial_branch &&
-    session.initial_branch !== session.branch_name
+    managed.initial_branch &&
+    managed.initial_branch !== managed.branch_name
   ) {
-    return `${session.initial_branch} → ${session.branch_name}`
+    return `${managed.initial_branch} → ${managed.branch_name}`
   }
-  return session.branch_name
+  return managed.branch_name
 }
 
 // The changed-files store slice only ever holds data for the currently
@@ -106,13 +114,33 @@ export function buildAgentVitals(
   const branch = branchValue(session)
   if (branch) rows.push({ key: "branch", label: "Branch", value: branch, mono: true })
 
+  const managed = managedWorkspace(session.workspace)
   // The branch this agent was forked from. Skipped when it matches the current
   // branch, where it would say nothing the branch row doesn't.
-  if (session.source_branch && session.source_branch !== session.branch_name) {
+  if (
+    managed &&
+    managed.source_branch &&
+    managed.source_branch !== managed.branch_name
+  ) {
     rows.push({
       key: "source",
       label: "Source",
-      value: session.source_branch,
+      value: managed.source_branch,
+      mono: true,
+    })
+  }
+
+  // A STANDALONE agent's folder. The managed shape deliberately has no
+  // directory row, because a worktree is named after its branch and the branch
+  // row already identifies it. That reasoning does not carry over: this folder
+  // is the user's own, named nothing in particular, and it is the single most
+  // useful fact about the agent.
+  const folder = folderWorkspace(session.workspace)
+  if (folder) {
+    rows.push({
+      key: "folder",
+      label: "Folder",
+      value: folder.folder_label,
       mono: true,
     })
   }
@@ -140,7 +168,7 @@ export function buildAgentVitals(
   // branch row above already identifies it without repeating a long path.
 
   return {
-    name: session.title || session.branch_name,
+    name: sessionLabel(session),
     provider: providersSummary(session),
     statusLabel: vitalsStatusLabel(session),
     statusColorClass: statusDotColorClass(

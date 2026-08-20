@@ -5,6 +5,7 @@
 // query matches everything (the list is shown unfiltered).
 
 import type { SessionView, TerminalView } from "@/lib/types"
+import { workspaceBranchName, workspaceLocation } from "@/lib/agentWorkspace"
 
 export function normalizeQuery(query: string): string {
   return query.trim().toLowerCase()
@@ -22,12 +23,21 @@ function haystackHas(query: string, ...fields: (string | null | undefined)[]): b
 // Rust `matches_session` in dux-core's agent_search.rs (shared vectors).
 export function matchesSessionQuery(
   session: SessionView,
-  projectName: string,
+  location: string,
   query: string,
 ): boolean {
   const q = normalizeQuery(query)
   if (q === "") return true
-  return haystackHas(q, session.title, session.branch_name, projectName)
+  // `location` is whatever the row's second line actually shows: the project
+  // name for a managed agent, the FOLDER for a standalone one. Typing part of a
+  // path must find a standalone agent, exactly as terminal searching works, and
+  // the field that appears on the row is the field that should match.
+  return haystackHas(
+    q,
+    session.title,
+    workspaceBranchName(session.workspace),
+    location,
+  )
 }
 
 // Match a terminal row against a raw query. Fields: the terminal title (its
@@ -88,4 +98,21 @@ export function matchCharRange(
     }
   }
   return null
+}
+
+/** The LOCATION field an agent row shows, and therefore the one its search
+ * matches: the project's name for a managed agent, the home-collapsed folder
+ * for a standalone one.
+ *
+ * One helper for the filter and the highlight, so a query can never match a
+ * field the row does not display, or highlight one it did not match on. The
+ * Rust twin is `agent_search_location` in the terminal UI. */
+export function agentSearchLocation(
+  session: SessionView,
+  projectName: (id: string) => string,
+): string {
+  const location = workspaceLocation(session.workspace)
+  return location.kind === "project"
+    ? projectName(location.projectId)
+    : location.label
 }

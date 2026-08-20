@@ -27,6 +27,7 @@ import {
 } from "@/lib/store"
 import { cn } from "@/lib/utils"
 import type { ProjectView } from "@/lib/types"
+import { workspaceProjectId } from "@/lib/agentWorkspace"
 
 // The New-agent picker: the home for agent creation AND every project action now
 // that the flat list has no project headers. A searchable list of ALL projects
@@ -112,7 +113,12 @@ function PickerBody() {
   const agentCounts = useMemo(() => {
     const counts = new Map<string, number>()
     for (const session of sessions) {
-      counts.set(session.project_id, (counts.get(session.project_id) ?? 0) + 1)
+      // A standalone agent belongs to no project, so it is counted against
+      // none: adding it to some bucket would inflate a project's agent count
+      // with an agent that has nothing to do with it.
+      const projectId = workspaceProjectId(session.workspace)
+      if (!projectId) continue
+      counts.set(projectId, (counts.get(projectId) ?? 0) + 1)
     }
     return counts
   }, [sessions])

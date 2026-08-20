@@ -15,13 +15,17 @@ import type { SessionView } from "@/lib/types"
 
 function makeSession(over: Partial<SessionView> & { id: string }): SessionView {
   return {
-    project_id: "p1",
+    workspace: {
+      kind: "managed",
+      project_id: "p1",
+      branch_name: over.id,
+      initial_branch: over.id,
+      branch_provenance: "created",
+      source_branch: "main",
+      worktree_path: `/tmp/${over.id}`,
+    },
     title: over.id,
     provider: "claude",
-    branch_name: over.id,
-    initial_branch: over.id,
-    source_branch: "main",
-    worktree_path: `/tmp/${over.id}`,
     status: "active",
     auto_reopen_enabled: false,
     terminals: [],

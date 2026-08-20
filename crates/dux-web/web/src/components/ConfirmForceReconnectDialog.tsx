@@ -13,6 +13,7 @@ import {
   reconnectSession,
   useDux,
 } from "@/lib/store"
+import { sessionLabel } from "@/lib/agentWorkspace"
 
 // Confirmation before force-recreating an agent ("Force recreate agent…" in the
 // agent ⋯ menus). A forced reconnect relaunches the provider WITHOUT resume
@@ -33,7 +34,7 @@ export function ConfirmForceReconnectDialog() {
     session !== undefined,
     closeForceReconnect,
   )
-  const name = session ? session.title || session.branch_name : ""
+  const name = session ? sessionLabel(session) : ""
 
   function handleConfirm() {
     if (!forceReconnectTarget) return

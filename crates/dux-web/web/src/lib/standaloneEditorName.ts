@@ -7,6 +7,7 @@
 // the home-collapsed directory it opened in.
 
 import { matchWireOwner } from "./terminalOwner"
+import { sessionLabel } from "./agentWorkspace"
 import { terminalTitle } from "./terminals"
 import type { EditorRoot } from "./editorRoot"
 import type { Spine } from "./workspaceApi"
@@ -32,7 +33,9 @@ export function standaloneEditorName(
       glyph: "agent",
       // Falling back to the raw id rather than to nothing: an id is poor but
       // truthful, and an empty header says the tab is broken when it is not.
-      name: session ? session.title || session.branch_name : root.sessionId,
+      // sessionLabel is workspace-aware: a standalone agent has no branch to
+      // fall back to, so its label falls through to its folder's name.
+      name: session ? sessionLabel(session) : root.sessionId,
       detail: null,
     }
   }
@@ -44,7 +47,7 @@ export function standaloneEditorName(
   const detail = matchWireOwner<string | null>(terminal.owner, {
     session: (owner) => {
       const session = spine?.sessions.find((s) => s.id === owner.session_id)
-      return session ? session.title || session.branch_name : owner.session_id
+      return session ? sessionLabel(session) : owner.session_id
     },
     project: (owner) => {
       const project = spine?.projects.find((p) => p.id === owner.project_id)

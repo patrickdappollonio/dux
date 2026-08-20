@@ -68,8 +68,8 @@ function entry(
   overrides: Partial<ProjectWorktreeEntryView> = {},
 ): ProjectWorktreeEntryView {
   return {
-    worktree_path: LONG_PATH,
     branch_name: LONG_BRANCH,
+    worktree_path: LONG_PATH,
     branch: LONG_BRANCH,
     adoptable: true,
     reason: null,
@@ -145,8 +145,8 @@ describe("WorktreesDialog", () => {
     seed([
       entry({ worktree_path: "/wt/free", branch_name: "free" }),
       entry({
-        worktree_path: "/wt/held",
         branch_name: "held",
+        worktree_path: "/wt/held",
         adoptable: false,
         agent_id: "s1",
         reason: "Already has an agent.",

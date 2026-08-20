@@ -288,7 +288,9 @@ describe("the standalone editor shell", () => {
     fireEvent.click(
       screen.getByRole("button", { name: /more editor actions/i }),
     )
-    const fileItem = await screen.findByRole("menuitem", { name: /file view/i })
+    const fileItem = await screen.findByRole("menuitem", {
+      name: /file view/i,
+    })
     expect(fileItem.getAttribute("aria-current")).toBe("true")
     const diffItem = screen.getByRole("menuitem", { name: /diff view/i })
     expect(diffItem.getAttribute("aria-current")).toBeNull()

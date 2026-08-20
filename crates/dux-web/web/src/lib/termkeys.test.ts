@@ -688,7 +688,10 @@ describe("linkPressAction", () => {
   })
 
   it("swallows a plain primary press on a link and opens it", () => {
-    expect(linkPressAction(ev(), ctx())).toEqual({ suppress: true, open: true })
+    expect(linkPressAction(ev(), ctx())).toEqual({
+      suppress: true,
+      open: true,
+    })
   })
 
   // The whole point: with tracking off there is no report to suppress, and

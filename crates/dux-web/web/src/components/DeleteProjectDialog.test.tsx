@@ -37,8 +37,30 @@ const deleteProject = vi.mocked(store.deleteProject)
 const closeDeleteProject = vi.mocked(store.closeDeleteProject)
 
 const project1 = { id: "p1", name: "duck-pond" }
-const sessionA = { id: "s1", project_id: "p1" }
-const sessionB = { id: "s2", project_id: "p1" }
+const sessionA = {
+  id: "s1",
+  workspace: {
+    kind: "managed",
+    project_id: "p1",
+    branch_name: "",
+    initial_branch: "",
+    branch_provenance: "created",
+    source_branch: "",
+    worktree_path: "",
+  },
+}
+const sessionB = {
+  id: "s2",
+  workspace: {
+    kind: "managed",
+    project_id: "p1",
+    branch_name: "",
+    initial_branch: "",
+    branch_provenance: "created",
+    source_branch: "",
+    worktree_path: "",
+  },
+}
 
 function seed(target: string | null, projects: unknown[], sessions: unknown[]) {
   mockState = {

@@ -51,6 +51,11 @@ import { editorRootForTarget } from "@/lib/editorRoot"
 import { matchOwner } from "@/lib/terminalOwner"
 import { terminalsForOwner, terminalTitle } from "@/lib/terminals"
 import { cn } from "@/lib/utils"
+import {
+  sessionLabel,
+  workspaceBranchName,
+  workspaceProjectId,
+} from "@/lib/agentWorkspace"
 
 // Tapping a session on the hub focuses it, and focusing something IS the
 // terminal screen: the screen is derived from the URL the selection writes, so
@@ -317,10 +322,10 @@ function MobileHeaderLanes({
   projectName?: string | null
 }) {
   const { lead, rest } = mobileHeaderLanes({
-    name: session.title || session.branch_name,
+    name: sessionLabel(session),
     provider,
     projectName,
-    branchName: session.branch_name,
+    branchName: workspaceBranchName(session.workspace),
   })
   const LeadGlyph = CHIP_GLYPHS[lead.kind]
   return (
@@ -479,7 +484,9 @@ function TerminalScreen() {
                 session={session}
                 provider={focusedTab?.provider ?? session.provider}
                 projectName={
-                  spine?.projects.find((p) => p.id === session.project_id)?.name
+                  spine?.projects.find(
+                    (p) => p.id === workspaceProjectId(session.workspace),
+                  )?.name
                 }
               />
             </div>

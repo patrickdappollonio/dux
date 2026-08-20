@@ -395,7 +395,9 @@ describe("FirstLoadDialog", () => {
   it("stacks the buttons full width on phones and keeps them in a row on desktop", () => {
     seed({ screen: "welcome" })
     render(<FirstLoadDialog />)
-    const add = within(footer()).getByRole("button", { name: /add a project/i })
+    const add = within(footer()).getByRole("button", {
+      name: /add a project/i,
+    })
     expect(add.className).toContain("max-md:w-full")
     // The footer keeps the destination URL opposite the buttons on desktop.
     expect(footer().className).toContain("sm:justify-between")

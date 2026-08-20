@@ -34,7 +34,19 @@ const { AgentEnvDialog } = await import("./AgentEnvDialog")
 const store = await import("@/lib/store")
 const closeAgentEnv = vi.mocked(store.closeAgentEnv)
 
-const session = { id: "s1", title: "quacky-mallard", branch_name: "dux/s1", project_id: "p1" }
+const session = {
+  id: "s1",
+  title: "quacky-mallard",
+  workspace: {
+    kind: "managed",
+    project_id: "p1",
+    branch_name: "dux/s1",
+    initial_branch: "dux/s1",
+    branch_provenance: "created",
+    source_branch: "",
+    worktree_path: "",
+  },
+}
 const project = { id: "p1", name: "acme", env: {} }
 
 function seed(target: string | null, sessions: unknown[], projects: unknown[]) {

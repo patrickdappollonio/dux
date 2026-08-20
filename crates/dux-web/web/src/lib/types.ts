@@ -8,6 +8,7 @@
 // `/ws/sessions/:id/terminals/:tid/pty`) — see `lib/ptySocket.ts`.
 
 import type { DropPasteProfile } from "@/lib/fileDrop"
+import type { AgentWorkspaceWire } from "@/lib/agentWorkspace"
 import type { TerminalOwnerWire } from "@/lib/terminalOwner"
 
 export type SessionStatus = "active" | "detached" | "exited"
@@ -151,28 +152,17 @@ export interface TerminalView {
 
 export interface SessionView {
   id: string
-  project_id: string
   title: string | null
   provider: string
-  branch_name: string
-  /** The branch the agent was created on, immutable. Unlike `branch_name` (which
-   * the branch-sync poller updates to follow the worktree's current git branch),
-   * this never changes after creation, so the UI can flag when the current branch
-   * has drifted from the original. */
-  initial_branch: string
-  /** Where the branch came from, which decides whether deleting the agent may
-   * delete the branch: dux created it, the agent attached to a branch that
-   * already existed, or it was adopted along with an existing worktree. An older
-   * server omits it, and an older server is one that deletes the branch either
-   * way, so a missing value reads as "created": the copy must describe what the
-   * server it is talking to will actually do. */
-  // "unknown" is what a server sends for a provenance IT could not recognize
-  // either (a value written by a newer dux). Absent means a server too old to
-  // have the field at all, which is a server that deletes the branch.
-  branch_provenance?: "created" | "attached" | "adopted" | "unknown"
-  /** The branch this agent was forked from (the leading branch at creation). */
-  source_branch: string
-  worktree_path: string
+  /** Where this agent lives and what dux may do there: a working copy dux
+   * created and owns, or a folder the user already had. TAGGED, so every git
+   * field lives inside the managed shape and a standalone agent carries no
+   * empty strings a screen could mistake for a branch.
+   *
+   * Every decision it drives goes through `lib/agentWorkspace.ts`, whose
+   * switches end in `assertNever`. `normalizeWorkspace` synthesizes the managed
+   * shape for an older server that still sends the flat git fields. */
+  workspace: AgentWorkspaceWire
   status: SessionStatus
   auto_reopen_enabled: boolean
   pr?: PrView
