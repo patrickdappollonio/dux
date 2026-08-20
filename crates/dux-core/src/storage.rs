@@ -209,10 +209,14 @@ impl SessionStore {
             // lost to prior drift, so freeze the current branch as the recorded
             // initial (best available).
             //
-            // GATED ON THE KIND COLUMN: a standalone row has an empty
-            // `initial_branch` and an empty `branch_name` permanently, by
-            // design. Healing it would write a branch identity onto an agent
-            // that has none, and freeze '' as its recorded birth branch.
+            // GATED ON THE KIND COLUMN. Note what the gate does and does not
+            // buy: a standalone row has an empty `initial_branch` AND an empty
+            // `branch_name` permanently by design, so the assignment itself
+            // would be '' to '', a no-op. The gate is here so the statement can
+            // never START mattering for folder rows: it says out loud that this
+            // heal is about branch identity, which they have none of, and it
+            // keeps a future change to either side (a default branch name, a
+            // non-empty placeholder) from quietly writing one onto them.
             tx.execute(
                 "update agent_sessions set initial_branch = branch_name \
                  where workspace_kind = 'managed' \
@@ -1127,7 +1131,18 @@ impl SessionStore {
         // positions are relative, only their ordering matters). The engine is
         // single-threaded over this connection, so the UPDATE-miss → INSERT
         // sequence cannot race.
-        let new_sort_order = self.min_session_sort_order(project_id)?.unwrap_or(1) - 1;
+        // A standalone agent belongs to no project, so "the top of its
+        // project's order" is not a question with an answer for it. Its row
+        // stores an empty project id, and taking the minimum over that group
+        // would only put it above the other standalone agents, landing it in the
+        // middle of a flat list ordered globally. The minimum over EVERY row is
+        // the honest reading of "the top" for an agent whose group is the whole
+        // list.
+        let new_sort_order = if workspace_kind == "folder" {
+            self.min_session_sort_order_overall()?.unwrap_or(1) - 1
+        } else {
+            self.min_session_sort_order(project_id)?.unwrap_or(1) - 1
+        };
         self.conn.execute(
             r#"
             insert into agent_sessions
@@ -1158,6 +1173,17 @@ impl SessionStore {
             ],
         )?;
         Ok(())
+    }
+
+    /// The smallest `sort_order` assigned to ANY session, or `None` when there
+    /// are none. The placement rule for a standalone agent, which has no project
+    /// whose top it could be placed at.
+    pub fn min_session_sort_order_overall(&self) -> Result<Option<i64>> {
+        self.conn
+            .query_row("select min(sort_order) from agent_sessions", [], |row| {
+                row.get::<_, Option<i64>>(0)
+            })
+            .context("failed to compute the overall min session sort order")
     }
 
     /// The smallest `sort_order` currently assigned to any session in
@@ -1323,12 +1349,32 @@ impl SessionStore {
                     })
                 }
                 crate::model::AgentWorkspaceKind::Folder => {
+                    // A folder row's whole identity is its path, so a NULL or
+                    // empty one is not an agent dux can load. It is UNREACHABLE
+                    // from anything dux writes; the population it exists for is
+                    // the same one the kind column itself exists for, a row from
+                    // a newer dux or a hand-edited database. The row is skipped,
+                    // loudly, rather than admitted as an agent whose directory
+                    // is "": that empty string is what a PTY would be spawned
+                    // in, and what `Path::new("").exists()` would be asked
+                    // about.
+                    let folder_path = row
+                        .get::<_, Option<String>>(18)?
+                        .filter(|path| !path.trim().is_empty());
+                    let Some(folder_path) = folder_path else {
+                        let id: String = row.get(0)?;
+                        crate::logger::error(&format!(
+                            "skipping session {id}: it is recorded as running in a folder \
+                             but the row names no folder, so there is no directory to run it in"
+                        ));
+                        return Ok(None);
+                    };
                     crate::model::AgentWorkspace::Folder(crate::model::FolderWorkspace {
-                        folder_path: row.get::<_, Option<String>>(18)?.unwrap_or_default(),
+                        folder_path,
                     })
                 }
             };
-            Ok(AgentSession {
+            Ok(Some(AgentSession {
                 id: row.get(0)?,
                 provider: crate::model::ProviderKind::from_str(row.get::<_, String>(2)?.as_str()),
                 workspace,
@@ -1340,12 +1386,16 @@ impl SessionStore {
                 created_at: parse_time(&created_at).unwrap_or_else(Utc::now),
                 updated_at: parse_time(&updated_at).unwrap_or_else(Utc::now),
                 last_focused_tab: row.get(15)?,
-            })
+            }))
         })?;
 
         let mut sessions = Vec::new();
         for row in rows {
-            sessions.push(row?);
+            // `None` is a row this loader deliberately refused; the reason was
+            // logged where it was decided.
+            if let Some(session) = row? {
+                sessions.push(session);
+            }
         }
         Ok(sessions)
     }
@@ -1591,6 +1641,125 @@ mod tests {
         assert_eq!(session.directory(), "/home/someone/notes");
     }
 
+    /// The git COLUMNS of a standalone row are empty on disk, read straight from
+    /// the database rather than through the accessors.
+    ///
+    /// The accessors answer `None` for a folder workspace unconditionally, so
+    /// asserting through them would pass even if the writer had put a real
+    /// branch name in the row. This reads the raw values, because "the row holds
+    /// no branch identity" is the claim.
+    #[test]
+    fn a_standalone_rows_git_columns_are_empty_on_disk() {
+        let (dir, store) = temp_store();
+        store
+            .upsert_session(&standalone_session("sa1", "/home/someone/notes"))
+            .unwrap();
+        drop(store);
+
+        let conn = Connection::open(dir.path().join("sessions.sqlite3")).unwrap();
+        let (kind, project_id, branch, initial, source, worktree, folder): (
+            String,
+            String,
+            String,
+            Option<String>,
+            String,
+            String,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "select workspace_kind, project_id, branch_name, initial_branch, \
+                 source_branch, worktree_path, folder_path from agent_sessions where id = 'sa1'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(kind, "folder");
+        assert_eq!(folder.as_deref(), Some("/home/someone/notes"));
+        assert_eq!(project_id, "");
+        assert_eq!(branch, "");
+        assert_eq!(initial.unwrap_or_default(), "");
+        assert_eq!(source, "");
+        assert_eq!(worktree, "");
+    }
+
+    /// A folder row that names no folder is not an agent dux can load, so it is
+    /// skipped rather than admitted with a directory of "" that a PTY would be
+    /// spawned in. Only reachable from a row a newer dux or a person wrote.
+    #[test]
+    fn a_folder_row_with_no_folder_is_refused_rather_than_loaded_empty() {
+        let (_dir, store) = temp_store();
+        store
+            .upsert_session(&standalone_session("sa1", "/home/someone/notes"))
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "update agent_sessions set folder_path = null where id = 'sa1'",
+                [],
+            )
+            .unwrap();
+
+        let loaded = store.load_sessions().unwrap();
+        assert!(
+            loaded.iter().all(|s| s.id != "sa1"),
+            "a row with no directory to run in must not load as an agent"
+        );
+
+        // An empty string is the same fact spelled differently.
+        store
+            .conn
+            .execute(
+                "update agent_sessions set folder_path = '' where id = 'sa1'",
+                [],
+            )
+            .unwrap();
+        assert!(store.load_sessions().unwrap().iter().all(|s| s.id != "sa1"));
+    }
+
+    /// A new standalone agent lands at the TOP of the list.
+    ///
+    /// Its row stores an empty project id, so taking the minimum over "its
+    /// project" would only place it above the other standalone agents, which in
+    /// a flat, globally ordered list means somewhere in the middle.
+    #[test]
+    fn a_new_standalone_agent_lands_above_every_other_agent() {
+        let (_dir, store) = temp_store();
+        let now = Utc::now();
+        store
+            .upsert_session(&test_session_in("a", "p1", now, now))
+            .unwrap();
+        store
+            .upsert_session(&test_session_in("b", "p2", now, now))
+            .unwrap();
+        let top_before = store.min_session_sort_order_overall().unwrap().unwrap();
+
+        store
+            .upsert_session(&standalone_session("sa1", "/home/someone/notes"))
+            .unwrap();
+        let placed: i64 = store
+            .conn
+            .query_row(
+                "select sort_order from agent_sessions where id = 'sa1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            placed < top_before,
+            "a new standalone agent goes above every other agent, got {placed} against {top_before}"
+        );
+    }
+
     #[test]
     fn an_update_of_a_standalone_row_keeps_it_a_folder() {
         let (_dir, store) = temp_store();
@@ -1624,22 +1793,71 @@ mod tests {
         assert_eq!(session.initial_branch(), None);
     }
 
-    /// The one-time title freeze writes `title = branch_name` for NULL titles.
-    /// A standalone agent always has a title, but the gate must hold anyway:
-    /// an empty branch name frozen into a title would render a nameless row.
+    /// The one-time title freeze writes `title = branch_name` for NULL titles,
+    /// and it must skip a folder row: freezing an empty branch name into a title
+    /// would leave the row with no label at all.
+    ///
+    /// Built on a store where the freeze REALLY RUNS. The arm is gated on
+    /// `initial_branch` being added by this very migration, which `temp_store`
+    /// (already migrated) never triggers, so a test written against that fixture
+    /// would pass with the gate deleted. Here the table is created with the kind
+    /// and folder columns but WITHOUT `initial_branch`, so migrating adds it and
+    /// the one-time freeze fires with a standalone row present.
     #[test]
     fn the_title_freeze_never_gives_a_standalone_row_an_empty_name() {
-        let (_dir, store) = temp_store();
-        let mut session = standalone_session("sa1", "/home/someone/notes");
-        session.title = None;
-        store.upsert_session(&session).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            create table agent_sessions (
+                id text primary key,
+                project_id text not null,
+                provider text not null,
+                source_branch text not null,
+                branch_name text not null,
+                worktree_path text not null,
+                title text,
+                project_path text,
+                status text not null,
+                created_at text not null,
+                updated_at text not null,
+                workspace_kind text not null default 'managed',
+                folder_path text
+            );
+            "#,
+        )
+        .unwrap();
+        // A folder row and a managed row side by side, both with a NULL title.
+        conn.execute(
+            "insert into agent_sessions (id, project_id, provider, source_branch, \
+             branch_name, worktree_path, title, project_path, status, created_at, \
+             updated_at, workspace_kind, folder_path) values \
+             ('sa1', '', 'claude', '', '', '', null, null, 'detached', '2026-01-01T00:00:00Z', \
+             '2026-01-01T00:00:00Z', 'folder', '/home/someone/notes')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "insert into agent_sessions (id, project_id, provider, source_branch, \
+             branch_name, worktree_path, title, project_path, status, created_at, \
+             updated_at, workspace_kind, folder_path) values \
+             ('s1', 'p1', 'claude', 'main', 'feat', '/tmp/wt', null, null, 'detached', \
+             '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'managed', null)",
+            [],
+        )
+        .unwrap();
+        let store = SessionStore { conn };
         store.migrate().unwrap();
 
+        // Proof the freeze really ran in this fixture: the managed row's NULL
+        // title was frozen to its branch name. Without this the assertions below
+        // would hold for a migration that did nothing at all.
         let loaded = store.load_sessions().unwrap();
+        let managed = loaded.iter().find(|s| s.id == "s1").expect("managed row");
+        assert_eq!(managed.title.as_deref(), Some("feat"));
+
         let session = loaded.iter().find(|s| s.id == "sa1").expect("row");
-        assert_ne!(
-            session.title.as_deref(),
-            Some(""),
+        assert_eq!(
+            session.title, None,
             "a frozen empty branch name would leave the row with no label at all"
         );
         assert!(!session.display_label().is_empty());

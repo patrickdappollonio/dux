@@ -129,7 +129,9 @@ pub enum Action {
     /// Palette-only: open the folder browser to pick a directory the user
     /// already has, and run an agent in it. Distinct from `NewAgent`, which
     /// creates a branch and a worktree inside a project: this one belongs to no
-    /// project, makes nothing, and never modifies the folder it is pointed at.
+    /// project, makes nothing, and never creates, moves or removes the folder it
+    /// is pointed at. (The agent works IN that folder, of course; what dux never
+    /// touches is the folder's own existence and location.)
     /// No default keybinding, like the standalone terminal beside it.
     NewStandaloneAgent,
     RenameSession,
@@ -360,12 +362,15 @@ impl Action {
                 "Focus the selected agent's pane. With the pane focused, this key types into a live agent and launches a dormant one."
             }
             Action::OpenProjectBrowser => "Open the project browser.",
-            Action::CopyPath => "Copy the selected agent's worktree path.",
+            // "Directory" rather than "worktree": these act on the agent's
+            // working directory, which is a worktree dux made for a managed
+            // agent and the user's own folder for a standalone one. Both work.
+            Action::CopyPath => "Copy the selected agent's directory.",
             Action::OpenWorktreeInEditor => {
-                "Open the selected agent worktree in the configured editor."
+                "Open the selected agent's directory in the configured editor."
             }
             Action::ChooseWorktreeEditor => {
-                "Open a picker and choose which editor should open the selected agent worktree."
+                "Open a picker and choose which editor should open the selected agent's directory."
             }
             Action::RefreshProject => "Git pull the selected project checkout.",
             Action::CheckoutProjectDefaultBranch => {
@@ -401,7 +406,7 @@ impl Action {
                 "Open a standalone terminal in your home directory, belonging to no project or agent."
             }
             Action::NewStandaloneAgent => {
-                "Run an agent in a folder you already have. It belongs to no project, gets no branch and no worktree, and dux never modifies the folder."
+                "Run an agent in a folder you already have. It belongs to no project, gets no branch and no worktree, and dux never creates, moves or removes the folder."
             }
             Action::OpenMacroBar => {
                 "Open the macro command bar to send text macros. Works over the windowed agent pane and in fullscreen."

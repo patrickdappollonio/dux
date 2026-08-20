@@ -162,7 +162,8 @@ fn run_create_standalone_agent_job(
         };
     let status_message = format!(
         "Created standalone agent \"{title}\" running {} in \"{folder_label}\". \
-         dux does not manage a branch or a worktree for it, and never modifies that folder.",
+         dux does not manage a branch or a worktree for it, and never creates, moves \
+         or removes that folder.",
         provider.as_str()
     );
     let _ = worker_tx.send(WorkerEvent::CreateAgentProgress {

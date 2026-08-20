@@ -32,7 +32,9 @@
 //! (`agent_sessions` alone) and the commit that introduced `projects`.
 
 use chrono::Utc;
-use dux_core::model::{AgentSession, AgentTab, ProviderKind, SessionStatus};
+use dux_core::model::{
+    AgentSession, AgentTab, AgentWorkspace, FolderWorkspace, ProviderKind, SessionStatus,
+};
 use dux_core::storage::{SessionStore, StoredPr};
 use rusqlite::Connection;
 
@@ -627,6 +629,27 @@ fn old_state_survives_a_write_a_close_and_a_reopen() {
         store
             .set_last_focused_tab("sess-1", Some("tab-x"))
             .expect("focused tab");
+        // A STANDALONE agent created after the upgrade. The second open runs
+        // both healing backfills again, and both are gated on the kind column,
+        // so this row is the one that proves the gates hold across a reopen and
+        // not merely within one.
+        store
+            .upsert_session(&AgentSession {
+                id: "sess-folder".to_string(),
+                provider: ProviderKind::from_str("claude"),
+                title: Some("My Notes".to_string()),
+                started_providers: Vec::new(),
+                desired_running: false,
+                auto_reopen_enabled: true,
+                status: SessionStatus::Detached,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                last_focused_tab: None,
+                workspace: AgentWorkspace::Folder(FolderWorkspace {
+                    folder_path: "/home/someone/My Notes".to_string(),
+                }),
+            })
+            .expect("create a standalone agent");
         sessions.sort_by(|a, b| a.id.cmp(&b.id));
         sessions
     };
@@ -635,7 +658,16 @@ fn old_state_survives_a_write_a_close_and_a_reopen() {
     let store = SessionStore::open(&path).expect("reopen");
     let mut sessions = store.load_sessions().expect("reload");
     sessions.sort_by(|a, b| a.id.cmp(&b.id));
-    assert_eq!(sessions.len(), 3);
+    assert_eq!(sessions.len(), 4);
+
+    // The standalone row came back a folder, with no branch identity invented
+    // for it by either backfill and its title left exactly as written.
+    let folder = session(&sessions, "sess-folder");
+    assert_eq!(folder.folder_path(), Some("/home/someone/My Notes"));
+    assert_eq!(folder.branch_name(), None);
+    assert_eq!(folder.initial_branch(), None);
+    assert_eq!(folder.project_id(), None);
+    assert_eq!(folder.title.as_deref(), Some("My Notes"));
 
     // The untouched rows are byte-for-byte what the first open produced: the
     // second `migrate()` must not re-backfill anything.

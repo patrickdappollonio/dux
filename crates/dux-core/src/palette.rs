@@ -233,7 +233,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
         action: Action::CopyPath,
         name: "copy-path",
-        description: "Copy the selected agent's worktree path",
+        description: "Copy the selected agent's directory",
         // Per-session: the web has it as "Copy local path" in the agent's ⋯ menu
         // (`FlatAgentList.tsx`), copying `session.worktree_path` off the spine.
         // The older "TUI-only, a server-side path is meaningless in a remote
@@ -244,7 +244,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
         action: Action::OpenWorktreeInEditor,
         name: "open-worktree",
-        description: "Open the selected agent worktree in the configured editor",
+        description: "Open the selected agent's directory in the configured editor",
         // NEAR-EQUIVALENT, not absent: the web DOES spawn an editor on the server
         // host, from the code editor's "Open editor" control
         // (`EditorOverlay.tsx` -> `POST /api/v1/sessions/:id/files/open-in-editor`
@@ -260,7 +260,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
         action: Action::ChooseWorktreeEditor,
         name: "open-worktree-with",
-        description: "Choose which editor should open the selected agent worktree",
+        description: "Choose which editor should open the selected agent's directory",
         // NEAR-EQUIVALENT, same shape as `open-worktree` above: the web's "Open
         // editor" control IS an editor picker (`lib/editors.ts` lists the
         // choices, and the handler honors an explicit pick or falls back to the

@@ -51,7 +51,8 @@ impl App {
         .resolve_in_handler(move |o: &WorktreesFinalOutcome| match o {
             WorktreesFinalOutcome::Loaded => dux_core::engine::Final::info(
                 "Choose a worktree to remove. Worktrees an agent holds are listed but cannot be \
-                 removed here; delete the agent instead.",
+                 removed here; delete that agent first. Deleting a standalone agent leaves its \
+                 directory in place, so remove that one yourself.",
             ),
             WorktreesFinalOutcome::Failed(error) => dux_core::engine::Final::error(format!(
                 "Failed to list worktrees for project \"{project_name}\": {error}"
@@ -83,7 +84,9 @@ impl App {
         };
         if !entry.is_removable() {
             self.set_error(
-                "An agent is attached to that worktree; delete the agent instead of the worktree.",
+                "An agent is working in that directory; delete that agent first. If it is a \
+                 standalone agent, deleting it leaves the directory in place, so remove that one \
+                 yourself.",
             );
             return Ok(());
         }
@@ -281,7 +284,7 @@ mod tests {
             "the manager stays open"
         );
         assert!(
-            app.status.message().contains("delete the agent instead"),
+            app.status.message().contains("delete that agent first"),
             "got {:?}",
             app.status.message()
         );

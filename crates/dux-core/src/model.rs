@@ -290,10 +290,13 @@ impl AgentWorkspaceKind {
     /// takes, and deliberately so. The danger here is the reverse one: reading
     /// an unknown kind as a folder would hand a path dux does not understand to
     /// the folder rules, where the delete flow believes the directory is the
-    /// user's and every git question answers "none". A managed row's git
-    /// columns are all present and non-empty in the table already, so the
-    /// managed reading is the one that stays truthful about a row this binary
-    /// cannot classify. Only rows written by a newer dux can reach this arm.
+    /// user's and every git question answers "none". Reading it as managed
+    /// keeps every guard that protects a directory dux might own, which is the
+    /// side to be wrong on for a row this binary cannot classify. What such a
+    /// row's git columns actually contain is unknown, so the surfaces render
+    /// whatever is there rather than anything trustworthy; that is the accepted
+    /// cost. The arm is reachable only from a row written by a newer dux, or one
+    /// edited by hand.
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(value: &str) -> Self {
         match value {
@@ -472,9 +475,9 @@ impl AgentWorkspace {
 
     /// Whether deleting this agent may remove the directory it occupies.
     ///
-    /// The absolute rule of the standalone agent: dux never deletes or modifies
-    /// the user's folder. Deleting a standalone agent deletes only dux's own
-    /// record of it.
+    /// The absolute rule of the standalone agent: dux never creates, moves or
+    /// removes the user's folder. Deleting a standalone agent deletes only dux's
+    /// own record of it.
     pub fn deletion_may_remove_directory(&self) -> bool {
         match self {
             Self::Managed(_) => true,
@@ -584,21 +587,16 @@ impl AgentSession {
         self.workspace.supports_branch_git()
     }
 
-    /// Whether this is a standalone agent, for the presentation sites that
-    /// genuinely only need the label and the glyph. Every DECISION goes
-    /// through a named question on [`AgentWorkspace`] instead.
-    pub fn is_standalone(&self) -> bool {
-        self.workspace.folder_path().is_some()
-    }
-
     /// The name to show for this agent: its durable title when it has one, the
     /// branch it tracks otherwise.
     ///
-    /// A standalone agent always has a title (creation enforces a non-empty
-    /// sanitized one, precisely because every row label used to fall through
-    /// the branch name, which does not exist here). The folder-name fallback
-    /// below is therefore belt and braces, not a path users reach, and it is
-    /// still better than an empty label if a row ever arrives without one.
+    /// Creation always gives a standalone agent a title, but the folder-name
+    /// fallback below is genuinely reachable: the web's rename CLEARS the title
+    /// when it is submitted empty (deliberately, so a managed agent's row goes
+    /// back to tracking its branch), and for a standalone agent the folder's own
+    /// name is what the row falls back to. That fallback is the reason clearing
+    /// a standalone title is allowed at all rather than being a way to make an
+    /// agent nameless.
     pub fn display_label(&self) -> String {
         if let Some(title) = self.title.clone() {
             return title;

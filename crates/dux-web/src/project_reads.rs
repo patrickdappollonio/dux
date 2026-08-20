@@ -326,7 +326,8 @@ async fn delete_worktree(
         // session, and deleting the agent is the supported route.
         Ok(Ok(dux_core::worktree_manager::RemovalOutcome::Attached)) => (
             StatusCode::CONFLICT,
-            "an agent is attached to that worktree; delete the agent instead",
+            "an agent is working in that directory; delete that agent first (deleting a \
+             standalone agent leaves its directory in place)",
         )
             .into_response(),
         // 200 with a body rather than the old bare 204: the client has to be

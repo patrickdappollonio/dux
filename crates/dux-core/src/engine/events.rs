@@ -551,7 +551,7 @@ pub enum RemovedBranches {
 pub fn standalone_delete_directory_refusal(agent_name: &str, folder: &str) -> String {
     format!(
         "Agent \"{agent_name}\" is a standalone agent: it runs in \"{}\", a folder you already \
-         had, and dux never deletes or modifies it. Delete the agent on its own to remove dux's \
+         had, and dux never removes it. Delete the agent on its own to remove dux's \
          record of it, and remove the folder yourself if you no longer want it.",
         crate::home_path::shorten_home(std::path::Path::new(folder))
     )

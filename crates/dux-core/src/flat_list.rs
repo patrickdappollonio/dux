@@ -173,6 +173,33 @@ mod tests {
         assert_eq!(order.inactive, vec![0, 1, 2]);
     }
 
+    /// A standalone agent sorts by the same key as any other: its display label.
+    ///
+    /// The key is `display_label`, which for a standalone agent with no title
+    /// falls back to its folder's own name rather than through a branch it does
+    /// not have. Pinned because the flat list is a single global order with no
+    /// project grouping, so an agent with no project is not a special case here
+    /// and must not become one.
+    #[test]
+    fn a_standalone_agent_sorts_by_its_label_like_any_other() {
+        let mut untitled = session("sa1", SessionStatus::Active, 12, "ignored");
+        untitled.title = None;
+        untitled.workspace = crate::model::AgentWorkspace::Folder(crate::model::FolderWorkspace {
+            folder_path: "/home/someone/beta".to_string(),
+        });
+        let sessions = vec![
+            session("z", SessionStatus::Active, 12, "zulu"),
+            untitled,
+            session("a", SessionStatus::Active, 12, "alpha"),
+        ];
+        let order = order_sessions(&sessions, FlatSortMode::NameAsc, &|_| false, &|_| true);
+        // alpha, beta (the folder's name), zulu.
+        assert_eq!(order.active, vec![2, 1, 0]);
+
+        let order = order_sessions(&sessions, FlatSortMode::NameDesc, &|_| false, &|_| true);
+        assert_eq!(order.active, vec![0, 1, 2]);
+    }
+
     #[test]
     fn name_mode_sorts_the_main_bucket_only() {
         let sessions = vec![

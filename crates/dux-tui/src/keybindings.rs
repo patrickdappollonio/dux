@@ -375,7 +375,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[BindingScope::Left],
         help: Some(HelpEntry {
             section: "Projects pane",
-            description: "Copy agent worktree path",
+            description: "Copy agent directory",
         }),
         hint_contexts: &[
             (HintContext::LeftProject, "Copy path"),
@@ -388,7 +388,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[BindingScope::Left],
         help: Some(HelpEntry {
             section: "Projects pane",
-            description: "Open selected agent worktree in the default editor",
+            description: "Open selected agent's directory in the default editor",
         }),
         hint_contexts: &[(HintContext::LeftSession, "Open")],
     },
