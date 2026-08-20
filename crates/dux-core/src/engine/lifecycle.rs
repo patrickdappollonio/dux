@@ -709,6 +709,31 @@ impl Engine {
             };
             self.mark_session_status(&id, status);
         }
+        // Classify every restored STANDALONE agent's folder now, off-thread, so
+        // the first frame already knows whether each one's changes panel works
+        // rather than starting at "dux has not looked yet".
+        //
+        // It matters beyond the panel: an unprobed folder reads as
+        // Indeterminate, which fails CLOSED for mutations and for the upload
+        // directory's gitignore seed. Waiting for the panel to open would leave
+        // a file dropped before then unseeded in a folder git can see.
+        self.probe_standalone_folders();
+    }
+
+    /// Ask git about every standalone agent's folder, one off-thread probe each.
+    ///
+    /// A no-op when there are none, which is the ordinary case, so this costs
+    /// nothing for a workspace of project agents.
+    pub fn probe_standalone_folders(&self) {
+        let ids: Vec<String> = self
+            .sessions
+            .iter()
+            .filter(|s| s.folder_path().is_some())
+            .map(|s| s.id.clone())
+            .collect();
+        for id in ids {
+            self.spawn_folder_repo_probe(&id);
+        }
     }
 
     /// The sessions eligible for a startup auto-reopen relaunch, the CORE-owned
@@ -1824,6 +1849,72 @@ mod tests {
         // design, see the tabs tenet), so it can never auto-reopen.
         engine.sessions[0].provider = crate::model::ProviderKind::new("copilot");
         assert!(candidate_ids(&engine).is_empty());
+    }
+
+    /// A restored standalone agent's folder is classified at STARTUP, not only
+    /// when its changes panel opens.
+    ///
+    /// The reason is not the panel: an unprobed folder reads as Indeterminate,
+    /// which fails CLOSED for mutations and for the upload directory's
+    /// gitignore seed. Waiting for the panel would leave a file dropped before
+    /// then unseeded in a folder git can see, and dux never goes back to clean
+    /// a folder up.
+    #[test]
+    fn restoring_sessions_classifies_every_standalone_folder() {
+        let (mut engine, _tmp) = test_engine();
+        let repo = tempfile::tempdir().expect("repo");
+        init_repo_at(repo.path());
+        let plain = tempfile::tempdir().expect("plain");
+        engine
+            .sessions
+            .push(crate::engine::test_support::sample_standalone_session(
+                "sa-repo",
+                repo.path().to_string_lossy().as_ref(),
+            ));
+        engine
+            .sessions
+            .push(crate::engine::test_support::sample_standalone_session(
+                "sa-plain",
+                plain.path().to_string_lossy().as_ref(),
+            ));
+        // A managed agent is never probed: its worktree is a repository by
+        // construction, so there is nothing to ask git about.
+        engine.sessions.push(sample_session("s1", "p1", "b1"));
+
+        engine.normalize_restored_sessions();
+
+        let mut seen = 0;
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while seen < 2 && Instant::now() < deadline {
+            let Ok(event) = engine.worker_rx.recv_timeout(Duration::from_millis(500)) else {
+                continue;
+            };
+            if matches!(
+                event,
+                crate::worker::WorkerEvent::FolderRepoStatusReady { .. }
+            ) {
+                seen += 1;
+            }
+            let _ = engine.process_worker_event(event);
+        }
+        assert_eq!(seen, 2, "one probe per standalone agent, and no others");
+        assert_eq!(
+            engine.folder_repo_status("sa-repo"),
+            crate::git::FolderRepoStatus::WorkingRepo
+        );
+        assert_eq!(
+            engine.folder_repo_status("sa-plain"),
+            crate::git::FolderRepoStatus::NoRepo
+        );
+    }
+
+    fn init_repo_at(path: &std::path::Path) {
+        let out = crate::git::test_support::git_command()
+            .args(["init"])
+            .current_dir(path)
+            .output()
+            .expect("git init");
+        assert!(out.status.success(), "git init failed");
     }
 
     /// A standalone agent belongs to no project, so the project consult must

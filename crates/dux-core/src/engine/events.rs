@@ -868,6 +868,11 @@ impl Engine {
             // resolves its exact session without a racy set-difference scan.
             self.record_created_session(status_op_id.clone(), session.id.clone());
             self.mark_session_provider_started(&session.id, &session.provider);
+            // A brand-new STANDALONE agent's folder is classified now, so its
+            // changes panel, its mutation gate and its upload seed all know the
+            // truth from the first frame instead of starting at "not looked
+            // yet" (which fails closed). A no-op for every other kind.
+            self.spawn_folder_repo_probe(&session.id);
             if request.resume {
                 self.resume_fallback_candidates
                     .insert(tab_id.clone(), Instant::now());
