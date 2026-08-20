@@ -470,11 +470,10 @@ impl Engine {
                 // Refuse while one of the project's agents has an in-flight async
                 // worktree removal: proceeding could race `git::remove_worktree`
                 // and delete a worktree we promised to keep.
-                if self
-                    .sessions
-                    .iter()
-                    .any(|s| s.project_id == project_id && self.pending_deletions.contains(&s.id))
-                {
+                if self.sessions.iter().any(|s| {
+                    s.project_id() == Some(project_id.as_str())
+                        && self.pending_deletions.contains(&s.id)
+                }) {
                     return Ok(EventReaction::Status(StatusUpdate::error(format!(
                         "An agent in \"{project_name}\" is still being removed — try again in a moment."
                     ))));
@@ -536,17 +535,16 @@ impl Engine {
                 // (Ok(None)) per session on either condition, but the loop below
                 // would then report success while silently leaving that session and
                 // its worktree behind, so refuse the entire delete instead.
-                if self
-                    .sessions
-                    .iter()
-                    .any(|s| s.project_id == project_id && self.pending_deletions.contains(&s.id))
-                {
+                if self.sessions.iter().any(|s| {
+                    s.project_id() == Some(project_id.as_str())
+                        && self.pending_deletions.contains(&s.id)
+                }) {
                     return Ok(EventReaction::Status(StatusUpdate::error(format!(
                         "Cannot delete project \"{project_name}\" while agent worktree removals are in progress. Wait for them to finish, then try again."
                     ))));
                 }
                 if self.sessions.iter().any(|s| {
-                    s.project_id == project_id
+                    s.project_id() == Some(project_id.as_str())
                         && self
                             .tab_ids_for_session(&s.id)
                             .iter()
@@ -566,7 +564,7 @@ impl Engine {
                 let session_ids: Vec<String> = self
                     .sessions
                     .iter()
-                    .filter(|s| s.project_id == project_id)
+                    .filter(|s| s.project_id() == Some(project_id.as_str()))
                     .map(|s| s.id.clone())
                     .collect();
                 let mut removed = 0usize;
@@ -702,7 +700,7 @@ impl Engine {
             }
 
             Command::DispatchAgentLaunch { request } => {
-                let branch_name = request.session.branch_name.clone();
+                let branch_name = request.session.display_label();
                 let session_id = request.session.id.clone();
                 // The in-flight launch lock is keyed by tab id (one lock per tab),
                 // so two tabs of the same session can launch concurrently. The
@@ -1216,7 +1214,7 @@ impl Engine {
         let current: Vec<String> = self
             .sessions
             .iter()
-            .filter(|s| s.project_id == project_id)
+            .filter(|s| s.project_id() == Some(project_id))
             .map(|s| s.id.clone())
             .collect();
         validate_reorder(&current, session_ids, "agent")?;
@@ -1235,7 +1233,7 @@ impl Engine {
             .map(|(i, id)| (id.as_str(), i))
             .collect();
         reorder_in_place(&mut self.sessions, |s| {
-            if s.project_id == project_id {
+            if s.project_id() == Some(project_id) {
                 new_pos.get(s.id.as_str()).copied()
             } else {
                 None
@@ -1435,7 +1433,7 @@ mod tests {
         engine
             .sessions
             .iter()
-            .filter(|s| s.project_id == project_id)
+            .filter(|s| s.project_id() == Some(project_id))
             .map(|s| s.id.clone())
             .collect()
     }
@@ -1509,7 +1507,11 @@ mod tests {
             .projects
             .push(sample_project("p1", proj.to_str().unwrap()));
         let mut session = sample_session("s1", "p1", "feat/x");
-        session.worktree_path = tmp.path().join("wt-gone").to_str().unwrap().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = tmp.path().join("wt-gone").to_str().unwrap().to_string();
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
 
@@ -1663,7 +1665,7 @@ mod tests {
             .load_sessions()
             .unwrap()
             .into_iter()
-            .filter(|s| s.project_id == "p1")
+            .filter(|s| s.project_id().expect("managed test session") == "p1")
             .map(|s| s.id)
             .collect();
         assert_eq!(reloaded, vec!["c", "a", "b"]);
@@ -1905,7 +1907,7 @@ mod tests {
             .load_sessions()
             .unwrap()
             .into_iter()
-            .filter(|s| s.project_id == "p1")
+            .filter(|s| s.project_id().expect("managed test session") == "p1")
             .map(|s| s.id)
             .collect();
         assert_eq!(reloaded, vec!["c", "b", "a"]);
@@ -2375,7 +2377,11 @@ mod tests {
 
     fn session_in_repo(id: &str, repo: &std::path::Path) -> crate::model::AgentSession {
         let mut session = sample_session(id, "p1", id);
-        session.worktree_path = repo.to_string_lossy().into_owned();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = repo.to_string_lossy().into_owned();
         session
     }
 

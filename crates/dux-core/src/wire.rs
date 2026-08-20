@@ -1128,12 +1128,19 @@ pub fn delete_session_status_message(
     outcome: &FinishDeleteSessionOutcome,
     removal: &WorktreeRemoval,
 ) -> String {
-    let name = outcome
-        .session
-        .title
-        .clone()
-        .unwrap_or_else(|| outcome.session.branch_name.clone());
+    let name = outcome.session.display_label();
     match removal {
+        // A standalone agent: dux's record of it is gone and the user's folder
+        // is exactly as it was. Said explicitly rather than left implied,
+        // because "Deleted agent X." on its own reads as though something on
+        // disk went with it.
+        WorktreeRemoval::NothingToRemove { folder_label } => {
+            format!(
+                "Deleted agent \"{name}\". Its folder \"{folder_label}\" was left untouched: \
+                 dux never creates, moves or removes a standalone agent's folder. Anything \
+                 the agent wrote there is still there."
+            )
+        }
         // The worktree went and the branches stayed, because they were not
         // dux's to delete. The wording names every kept branch with its own
         // reason (drift makes them differ) and how to remove one by hand: once
@@ -1144,15 +1151,15 @@ pub fn delete_session_status_message(
             format!(
                 "Deleted agent \"{name}\" and removed its worktree. {}",
                 provenance.kept_branches_note(
-                    &outcome.session.branch_name,
-                    &outcome.session.initial_branch,
+                    outcome.session.branch_name().unwrap_or_default(),
+                    outcome.session.initial_branch().unwrap_or_default(),
                 )
             )
         }
         WorktreeRemoval::Performed {
             branches: crate::engine::RemovedBranches::Deleted(branches),
         } => {
-            let branch = &outcome.session.branch_name;
+            let branch = outcome.session.branch_name().unwrap_or_default();
             let mut message = match &branches.branch {
                 crate::git::BranchDeletion::Deleted => format!(
                     "Deleted agent \"{name}\", removed its worktree and deleted its branch \"{branch}\"."
@@ -1172,7 +1179,9 @@ pub fn delete_session_status_message(
             // Said only when the agent DRIFTED off the branch it was born on,
             // so the ordinary case still reads as one branch and the drifted
             // case never leaves the user guessing what became of the other.
-            if let Some(note) = branches.initial_branch_note(&outcome.session.initial_branch) {
+            if let Some(note) =
+                branches.initial_branch_note(outcome.session.initial_branch().unwrap_or_default())
+            {
                 message.push(' ');
                 message.push_str(&note);
             }
@@ -1958,7 +1967,7 @@ impl Engine {
             return Ok((
                 WireStatus::new(
                     "info",
-                    format!("Agent \"{}\" is not running.", session.branch_name),
+                    format!("Agent \"{}\" is not running.", session.display_label()),
                 ),
                 detached,
             ));
@@ -1971,7 +1980,7 @@ impl Engine {
                     "info",
                     format!(
                         "Closed a tab for agent \"{}\". Its other tabs are still running.",
-                        session.branch_name
+                        session.display_label()
                     ),
                 ),
                 false,
@@ -1982,7 +1991,7 @@ impl Engine {
                 "info",
                 format!(
                     "Closed the last tab for agent \"{}\". It is now detached — reconnect it from the agent menu.",
-                    session.branch_name
+                    session.display_label()
                 ),
             ),
             true,
@@ -2016,7 +2025,7 @@ impl Engine {
         if stopped == 0 {
             return Ok(WireStatus::new(
                 "info",
-                format!("Agent \"{}\" is not running.", session.branch_name),
+                format!("Agent \"{}\" is not running.", session.display_label()),
             ));
         }
         self.mark_session_status(&session.id, crate::model::SessionStatus::Detached);
@@ -2025,7 +2034,7 @@ impl Engine {
             "info",
             format!(
                 "Detached agent \"{}\" and stopped {} tab{}. It stays in Projects — reconnect it from the agent menu.",
-                session.branch_name,
+                session.display_label(),
                 stopped,
                 if stopped == 1 { "" } else { "s" },
             ),
@@ -2071,13 +2080,23 @@ impl Engine {
         let message = match &new_title {
             Some(name) => format!("Renamed agent to \"{name}\"."),
             None => {
-                let branch = self
-                    .sessions
-                    .iter()
-                    .find(|s| s.id == session_id)
-                    .map(|s| s.branch_name.clone())
-                    .unwrap_or_default();
-                format!("Cleared the custom name. Agent shows its branch name \"{branch}\" again.")
+                // A standalone agent has no branch to fall back to; its label
+                // falls back to its folder's name instead, so the sentence has
+                // to name whichever one it actually landed on.
+                let session = self.sessions.iter().find(|s| s.id == session_id);
+                match session.and_then(|s| s.branch_name().map(str::to_string)) {
+                    Some(branch) => format!(
+                        "Cleared the custom name. Agent shows its branch name \"{branch}\" again."
+                    ),
+                    None => {
+                        let label = session
+                            .map(|s| s.display_label())
+                            .unwrap_or_else(|| session_id.to_string());
+                        format!(
+                            "Cleared the custom name. Agent shows its folder's name \"{label}\" again."
+                        )
+                    }
+                }
             }
         };
         Ok(WireStatus::new("info", message))
@@ -2104,10 +2123,7 @@ impl Engine {
             .iter()
             .find(|s| s.id == session_id)
             .ok_or_else(|| anyhow::anyhow!("unknown session: {session_id}"))?;
-        let label = session
-            .title
-            .clone()
-            .unwrap_or_else(|| session.branch_name.clone());
+        let label = session.display_label();
         let current = session.provider.clone();
 
         // Validate against the configured provider list — the same source the
@@ -2324,10 +2340,22 @@ impl Engine {
             .find(|s| s.id == session_id)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("unknown session: {session_id}"))?;
+        // A startup command is a project's worktree-provisioning step, so a
+        // standalone agent has neither a project to take one from nor a
+        // worktree to provision. Refused with the shape of the thing rather
+        // than "could not find the project", which would suggest a missing
+        // record instead of a feature that does not apply.
+        let managed = self
+            .branch_git_workspace(
+                session_id,
+                "run a startup command for",
+                "A startup command provisions a new worktree, and this agent runs in a folder that already exists. Add its folder as a project if you want dux to provision worktrees for it.",
+            )?
+            .clone();
         let project = self
             .projects
             .iter()
-            .find(|p| p.id == session.project_id)
+            .find(|p| p.id == managed.project_id)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("Could not find the selected agent's project."))?;
         let command = project
@@ -2347,7 +2375,7 @@ impl Engine {
         let terminal = self.config.startup_command_terminal.clone();
         let env =
             crate::config::resolve_agent_env(&self.config.env, &project.env).unwrap_or_default();
-        let branch = session.branch_name.clone();
+        let branch = managed.branch_name.clone();
         let success_name = project.name.clone();
         let failure_name = project.name.clone();
         let op = crate::engine::status_op(format!(
@@ -2370,6 +2398,7 @@ impl Engine {
         let run = crate::startup::StartupCommandRun {
             project,
             session,
+            managed,
             command,
             terminal,
             env,
@@ -3286,6 +3315,13 @@ impl Engine {
                         "A tab is still launching for this agent. Try again in a moment.",
                     )],
                     BeginDeleteSessionOutcome::NotFound => vec![],
+                    // The delete did not happen: the caller asked dux to remove
+                    // a standalone agent's folder, which it never does. An
+                    // error, not an info, because the request was refused
+                    // rather than quietly reinterpreted.
+                    BeginDeleteSessionOutcome::Refused { message } => {
+                        vec![WireStatus::new("error", message.clone())]
+                    }
                     BeginDeleteSessionOutcome::AsyncStarted { busy_message } => {
                         // Mint a keyed HandlerStatusOp whose opaque id correlates
                         // this busy to the final resolved when the git-removal
@@ -3458,23 +3494,23 @@ impl Engine {
             EventReaction::AgentLaunchFailedView(outcome) => match outcome.as_ref() {
                 AgentLaunchFailedOutcome::Reconnect {
                     session_id,
-                    branch_name,
+                    agent_label,
                     message,
                 } => self.resolve_web_launch_op_or(
                     session_id,
                     crate::engine::LaunchOutcome::ReconnectFailed {
-                        branch_name: branch_name.clone(),
+                        branch_name: agent_label.clone(),
                         message: message.clone(),
                     },
                 ),
                 AgentLaunchFailedOutcome::ForceReconnect {
                     session_id,
-                    branch_name,
+                    agent_label,
                     message,
                 } => self.resolve_web_launch_op_or(
                     session_id,
                     crate::engine::LaunchOutcome::ForceReconnectFailed {
-                        branch_name: branch_name.clone(),
+                        branch_name: agent_label.clone(),
                         message: message.clone(),
                     },
                 ),
@@ -3482,13 +3518,13 @@ impl Engine {
                 // precedes it, as it never goes through `reconnect_session`), and
                 // resume-fallback failure is silent — both mirror the TUI.
                 AgentLaunchFailedOutcome::StartupAutoReopen {
-                    branch_name,
+                    agent_label,
                     message,
                     ..
                 } => WebFollowupStatuses {
                     statuses: vec![WireStatus::new(
                         "warning",
-                        format!("Couldn't auto-reopen agent \"{branch_name}\": {message}"),
+                        format!("Couldn't auto-reopen agent \"{agent_label}\": {message}"),
                     )],
                     clear_keys: Vec::new(),
                 },
@@ -3497,7 +3533,7 @@ impl Engine {
                 // tells the user why nothing came up (never a "can't resume" note).
                 AgentLaunchFailedOutcome::Tab {
                     tab_id,
-                    branch_name,
+                    agent_label,
                     message,
                     ..
                 } => WebFollowupStatuses {
@@ -3508,7 +3544,7 @@ impl Engine {
                     statuses: vec![
                         WireStatus::new(
                             "warning",
-                            format!("Tab launch failed for \"{branch_name}\": {message}"),
+                            format!("Tab launch failed for \"{agent_label}\": {message}"),
                         )
                         .with_key(format!("tab-launch-{tab_id}")),
                     ],
@@ -3682,8 +3718,7 @@ impl Engine {
                     .iter()
                     .find(|s| s.id == session_id)
                     .ok_or_else(|| anyhow::anyhow!("unknown session: {session_id}"))?
-                    .branch_name
-                    .clone();
+                    .display_label();
                 Command::ToggleAgentAutoReopen {
                     session_id,
                     branch_name,
@@ -3909,6 +3944,17 @@ impl Engine {
                 }
             }
             WireCommand::ForkSession { session_id, name } => {
+                // THE FORK REFUSAL, at the ForkSession arm: forking copies a
+                // managed worktree onto a new branch, and a standalone agent
+                // has neither. There is deliberately no fork for standalone
+                // agents, so this is a refusal and not a fallback.
+                let managed = self
+                    .branch_git_workspace(
+                        &session_id,
+                        "fork",
+                        crate::engine::STANDALONE_ADD_AS_PROJECT_REMEDY,
+                    )?
+                    .clone();
                 let source_session = self
                     .sessions
                     .iter()
@@ -3918,17 +3964,14 @@ impl Engine {
                 let project = self
                     .projects
                     .iter()
-                    .find(|p| p.id == source_session.project_id)
+                    .find(|p| p.id == managed.project_id)
                     .cloned()
                     .ok_or_else(|| {
-                        anyhow::anyhow!("unknown project: {}", source_session.project_id)
+                        anyhow::anyhow!("unknown project: {}", managed.project_id)
                     })?;
                 // `source_label` mirrors the TUI's `session_label`: the custom
                 // title if set, otherwise the branch name.
-                let source_label = source_session
-                    .title
-                    .clone()
-                    .unwrap_or_else(|| source_session.branch_name.clone());
+                let source_label = source_session.display_label();
                 let trimmed = name.trim();
                 // Unlike CreateAgent, a fork REQUIRES a name: the create-agent
                 // worker rejects a `None` custom_name with "Forking an agent
@@ -4147,13 +4190,19 @@ impl Engine {
             .ok_or_else(|| anyhow::anyhow!("unknown project: {project_id}"))
     }
 
+    /// The directory an agent's file operations are rooted at: its managed
+    /// worktree, or a standalone agent's folder. This is deliberately
+    /// [`crate::model::AgentSession::directory`] and not the managed-only
+    /// accessor: the editor's tree, read, write and search routes are pure
+    /// filesystem work and are exactly as correct in a plain folder. The GIT
+    /// routes go through `branch_git_workspace` instead.
     fn session_worktree(&self, session_id: &str) -> anyhow::Result<PathBuf> {
         let session = self
             .sessions
             .iter()
             .find(|s| s.id == session_id)
             .ok_or_else(|| anyhow::anyhow!("unknown session: {session_id}"))?;
-        Ok(PathBuf::from(&session.worktree_path))
+        Ok(PathBuf::from(session.directory()))
     }
 
     /// List the project's managed worktrees that are currently adoptable as a
@@ -4184,13 +4233,80 @@ impl Engine {
 mod tests {
     use super::*;
     use crate::engine::test_support::{
-        sample_project, sample_session, settle_gh_probe, test_engine,
+        sample_project, sample_session, sample_standalone_session, settle_gh_probe, test_engine,
     };
     use crate::engine::{DeleteTerminalView, InFlightKey};
     use crate::model::AgentSession;
     use crate::statusline::StatusTone;
     use crate::worker::WorkerEvent;
     use std::path::Path;
+
+    /// THE PIN. Deleting a standalone agent removes dux's record of it and
+    /// nothing else, and the message says so in as many words. Nothing about
+    /// worktrees, nothing about branches, and above all no claim that anything
+    /// on disk was removed.
+    #[test]
+    fn deleting_a_standalone_agent_says_the_folder_was_left_alone() {
+        let (mut engine, _tmp) = test_engine();
+        let folder = tempfile::tempdir().unwrap();
+        let folder_path = folder.path().to_string_lossy().to_string();
+        engine
+            .sessions
+            .push(sample_standalone_session("sa1", &folder_path));
+
+        let outcome = match engine.do_delete_session("sa1", false) {
+            Ok(Some(outcome)) => outcome,
+            Ok(None) => panic!("the session existed"),
+            Err(err) => panic!("delete must succeed: {err}"),
+        };
+        let message = delete_session_status_message(&outcome.finish, &outcome.removal);
+
+        assert!(
+            message.contains("folder"),
+            "the message must name what was left alone, got {message:?}"
+        );
+        assert!(
+            !message.to_lowercase().contains("worktree"),
+            "a standalone agent has no worktree to mention, got {message:?}"
+        );
+        assert!(
+            !message.to_lowercase().contains("branch"),
+            "nor a branch, got {message:?}"
+        );
+        assert!(
+            folder.path().exists(),
+            "and the folder itself must still be there"
+        );
+    }
+
+    /// Asking for the worktree to be removed on a standalone id is refused out
+    /// loud. It is never quietly ignored: silent success theater about a
+    /// destructive request is how a user comes to believe dux cleaned
+    /// something up.
+    #[test]
+    fn asking_to_delete_a_standalone_agents_folder_is_refused_not_ignored() {
+        let (mut engine, _tmp) = test_engine();
+        let folder = tempfile::tempdir().unwrap();
+        let folder_path = folder.path().to_string_lossy().to_string();
+        engine
+            .sessions
+            .push(sample_standalone_session("sa1", &folder_path));
+
+        let message = match engine.do_delete_session("sa1", true) {
+            Err(err) => err.to_string(),
+            Ok(_) => panic!("a destructive request dux will not honour must be refused"),
+        };
+        assert!(message.contains("standalone agent"), "got {message:?}");
+        assert!(
+            message.contains("never"),
+            "the refusal must state the rule, got {message:?}"
+        );
+        assert!(
+            engine.sessions.iter().any(|s| s.id == "sa1"),
+            "and change nothing"
+        );
+        assert!(folder.path().exists());
+    }
 
     /// The web's delete line must account for BOTH branches the removal
     /// targets. It used to say only "removed its worktree", which is true and
@@ -4201,7 +4317,11 @@ mod tests {
         fn message(branch: &str, initial: &str, branches: crate::git::RemoveResult) -> String {
             let mut session = sample_session("s1", "p1", branch);
             session.title = Some("agent-one".to_string());
-            session.initial_branch = initial.to_string();
+            session
+                .workspace
+                .as_managed_mut()
+                .expect("managed test session")
+                .initial_branch = initial.to_string();
             let outcome = FinishDeleteSessionOutcome {
                 session,
                 project: None,
@@ -4262,7 +4382,11 @@ mod tests {
         ) -> String {
             let mut session = sample_session("s1", "p1", branch);
             session.title = Some("agent-one".to_string());
-            session.initial_branch = initial.to_string();
+            session
+                .workspace
+                .as_managed_mut()
+                .expect("managed test session")
+                .initial_branch = initial.to_string();
             let outcome = FinishDeleteSessionOutcome {
                 session,
                 project: None,
@@ -4408,7 +4532,10 @@ mod tests {
     /// discard classifier can run `git status` against it.
     fn session_in_repo(id: &str, repo: &Path) -> AgentSession {
         let mut s = sample_session(id, "p1", "feat");
-        s.worktree_path = repo.to_string_lossy().into_owned();
+        s.workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = repo.to_string_lossy().into_owned();
         s
     }
 
@@ -4605,7 +4732,11 @@ mod tests {
         project.startup_command = Some("printf hi".to_string());
         engine.projects.push(project);
         let mut session = sample_session("s1", "p1", "feat");
-        session.worktree_path = worktree.path().to_string_lossy().into_owned();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().into_owned();
         engine.sessions.push(session);
 
         // The dispatch returns the pending Busy immediately.
@@ -5405,7 +5536,11 @@ mod tests {
             worktree.path().to_string_lossy().as_ref(),
         ));
         let mut session = sample_session("s1", "p1", "feat");
-        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
 
@@ -5478,7 +5613,11 @@ mod tests {
             worktree.path().to_string_lossy().as_ref(),
         ));
         let mut session = sample_session("s1", "p1", "feat");
-        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
 
@@ -5523,7 +5662,11 @@ mod tests {
         let mut session = sample_session("s1", "p1", "feat");
         let wt = tmp.path().join("wt-s1");
         std::fs::create_dir_all(&wt).unwrap();
-        session.worktree_path = wt.to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = wt.to_string_lossy().to_string();
         engine.sessions.push(session);
         // Simulate a stale in-flight marker left behind by a prior launch.
         engine.mark_in_flight(crate::engine::InFlightKey::AgentLaunch("s1".to_string()));
@@ -5545,7 +5688,7 @@ mod tests {
             status.message
         );
         assert!(
-            status.message.contains("Starting fresh agent \"feat\""),
+            status.message.contains("Starting fresh agent \"s1-title\""),
             "msg: {}",
             status.message
         );
@@ -5560,7 +5703,11 @@ mod tests {
             worktree.path().to_string_lossy().as_ref(),
         ));
         let mut session = sample_session("s1", "p1", "feat");
-        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
 
@@ -7349,7 +7496,7 @@ mod tests {
         let r =
             EventReaction::AgentLaunchFailedView(Box::new(AgentLaunchFailedOutcome::Reconnect {
                 session_id: "s1".to_string(),
-                branch_name: "feat".to_string(),
+                agent_label: "feat".to_string(),
                 message: "nope".to_string(),
             }));
         assert!(wire_statuses_from_reaction(&r).is_empty());
@@ -7420,7 +7567,11 @@ mod tests {
         let repo = init_repo();
         let (mut engine, _tmp) = test_engine();
         let mut session = sample_session("s1", "p1", "feat");
-        session.worktree_path = repo.path().to_string_lossy().into_owned();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = repo.path().to_string_lossy().into_owned();
         engine.sessions.push(session);
 
         let outcome = engine
@@ -7545,7 +7696,11 @@ mod tests {
         let repo = init_repo();
         let (mut engine, _tmp) = test_engine();
         let mut session = sample_session("s1", "p1", "feat");
-        session.worktree_path = repo.path().to_string_lossy().into_owned();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = repo.path().to_string_lossy().into_owned();
         engine.sessions.push(session);
 
         // Empty before the watch (the regression).
@@ -7584,7 +7739,11 @@ mod tests {
         let repo = init_repo();
         let (mut engine, _tmp) = test_engine();
         let mut session = sample_session("s1", "p1", "feat");
-        session.worktree_path = repo.path().to_string_lossy().into_owned();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = repo.path().to_string_lossy().into_owned();
         engine.sessions.push(session);
 
         engine
@@ -8158,7 +8317,11 @@ mod tests {
         use crate::engine::AgentLaunchReadyOutcome;
         let (mut engine, _tmp) = test_engine();
         let mut session = sample_session("s1", "p1", "feat");
-        session.project_id = "p1".into();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .project_id = "p1".into();
 
         // Mint the web launch op as `reconnect_session` would: its opaque id keys
         // the busy and the eventual final.
@@ -8192,7 +8355,11 @@ mod tests {
         use crate::engine::AgentLaunchReadyOutcome;
         let (mut engine, _tmp) = test_engine();
         let mut session = sample_session("s1", "p1", "feat");
-        session.project_id = "p1".into();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .project_id = "p1".into();
 
         let op = crate::engine::status_op("Launching agent \"feat\"...").resolve_in_handler(
             |o: &crate::engine::LaunchOutcome| crate::engine::launch_outcome_final(o),
@@ -8227,7 +8394,7 @@ mod tests {
         let reaction =
             EventReaction::AgentLaunchFailedView(Box::new(AgentLaunchFailedOutcome::Reconnect {
                 session_id: "s1".into(),
-                branch_name: "feat".into(),
+                agent_label: "feat".into(),
                 message: "nope".into(),
             }));
         let followup = engine.drive_web_launch_followup(&reaction);
@@ -8249,7 +8416,7 @@ mod tests {
         let reaction = EventReaction::AgentLaunchFailedView(Box::new(
             AgentLaunchFailedOutcome::StartupAutoReopen {
                 session_id: "s1".into(),
-                branch_name: "feat".into(),
+                agent_label: "feat".into(),
                 message: "boom".into(),
             },
         ));
@@ -8687,7 +8854,11 @@ mod tests {
         // worktree-exists pre-check passes.
         let wt = tmp.path().join("wt-s1");
         std::fs::create_dir_all(&wt).unwrap();
-        session.worktree_path = wt.to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = wt.to_string_lossy().to_string();
         engine.sessions.push(session);
 
         let outcome = engine
@@ -8705,7 +8876,7 @@ mod tests {
         let status = outcome.status.expect("reconnect surfaces a busy status");
         assert_eq!(status.tone, "busy");
         assert!(
-            status.message.contains("Launching agent \"feat\""),
+            status.message.contains("Launching agent \"s1-title\""),
             "msg: {}",
             status.message
         );
@@ -8718,7 +8889,11 @@ mod tests {
         let mut session = sample_session("s1", "p1", "feat");
         let wt = tmp.path().join("wt-s1");
         std::fs::create_dir_all(&wt).unwrap();
-        session.worktree_path = wt.to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = wt.to_string_lossy().to_string();
         engine.sessions.push(session);
 
         let outcome = engine
@@ -8734,7 +8909,7 @@ mod tests {
         // Force reconnect uses the "Starting fresh agent" copy, distinct from
         // the normal reconnect's "Launching agent".
         assert!(
-            status.message.contains("Starting fresh agent \"feat\""),
+            status.message.contains("Starting fresh agent \"s1-title\""),
             "msg: {}",
             status.message
         );
@@ -8751,7 +8926,11 @@ mod tests {
         let mut session = sample_session("s1", "p1", "feat");
         let wt = tmp.path().join("wt-s1-keyed");
         std::fs::create_dir_all(&wt).unwrap();
-        session.worktree_path = wt.to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = wt.to_string_lossy().to_string();
         engine.sessions.push(session);
 
         let outcome = engine
@@ -8891,7 +9070,11 @@ mod tests {
             worktree.path().to_string_lossy().as_ref(),
         ));
         let mut session = sample_session("s1", "p1", "feat"); // provider "claude"
-        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
 
@@ -9090,7 +9273,11 @@ mod tests {
         // Seed a session on the managed worktree so classification marks it
         // not-selectable.
         let mut session = sample_session("s1", "p1", "orphan");
-        session.worktree_path = managed.to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = managed.to_string_lossy().to_string();
         engine.sessions.push(session);
 
         let err = engine
@@ -10941,21 +11128,21 @@ mod tests {
         for outcome in [
             AgentLaunchFailedOutcome::Reconnect {
                 session_id: "s1".to_string(),
-                branch_name: "feat".to_string(),
+                agent_label: "feat".to_string(),
                 message: "nope".to_string(),
             },
             AgentLaunchFailedOutcome::ForceReconnect {
                 session_id: "s2".to_string(),
-                branch_name: "feat".to_string(),
+                agent_label: "feat".to_string(),
                 message: "nope".to_string(),
             },
             AgentLaunchFailedOutcome::StartupAutoReopen {
                 session_id: "s3".to_string(),
-                branch_name: "feat".to_string(),
+                agent_label: "feat".to_string(),
                 message: "nope".to_string(),
             },
             AgentLaunchFailedOutcome::Create {
-                project_id: "p1".to_string(),
+                project_id: Some("p1".to_string()),
                 message: "boom".to_string(),
             },
             AgentLaunchFailedOutcome::ResumeFallback,

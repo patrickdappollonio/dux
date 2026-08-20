@@ -330,14 +330,7 @@ mod tests {
     fn session(worktree: &Path) -> AgentSession {
         AgentSession {
             id: "session-1".to_string(),
-            project_id: "project-1".to_string(),
-            project_path: None,
             provider: ProviderKind::new("codex"),
-            source_branch: "main".to_string(),
-            branch_name: "held".to_string(),
-            initial_branch: "held".to_string(),
-            branch_provenance: crate::model::BranchProvenance::CreatedByDux,
-            worktree_path: worktree.to_string_lossy().to_string(),
             title: None,
             started_providers: Vec::new(),
             desired_running: false,
@@ -346,6 +339,15 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             last_focused_tab: None,
+            workspace: crate::model::AgentWorkspace::Managed(crate::model::ManagedWorkspace {
+                project_id: "project-1".to_string(),
+                project_path: None,
+                source_branch: "main".to_string(),
+                branch_name: "held".to_string(),
+                initial_branch: "held".to_string(),
+                branch_provenance: crate::model::BranchProvenance::CreatedByDux,
+                worktree_path: worktree.to_string_lossy().to_string(),
+            }),
         }
     }
 

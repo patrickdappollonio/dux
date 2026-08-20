@@ -799,14 +799,7 @@ mod tests {
         let n = now();
         dux_core::model::AgentSession {
             id: id.to_string(),
-            project_id: "p1".to_string(),
-            project_path: None,
             provider: dux_core::model::ProviderKind::new("claude"),
-            source_branch: "main".to_string(),
-            branch_name: "feat".to_string(),
-            initial_branch: "feat".to_string(),
-            branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
-            worktree_path: worktree.to_string(),
             title: None,
             started_providers: Vec::new(),
             desired_running: true,
@@ -815,6 +808,17 @@ mod tests {
             created_at: n,
             updated_at: n,
             last_focused_tab: None,
+            workspace: dux_core::model::AgentWorkspace::Managed(
+                dux_core::model::ManagedWorkspace {
+                    project_id: "p1".to_string(),
+                    project_path: None,
+                    source_branch: "main".to_string(),
+                    branch_name: "feat".to_string(),
+                    initial_branch: "feat".to_string(),
+                    branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
+                    worktree_path: worktree.to_string(),
+                },
+            ),
         }
     }
 

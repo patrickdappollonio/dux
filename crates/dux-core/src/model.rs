@@ -266,12 +266,49 @@ pub enum SessionSurface {
     Terminal,
 }
 
-#[derive(Clone, Debug)]
-pub struct AgentSession {
-    pub id: String,
+/// Which of the two shapes an [`AgentWorkspace`] is, as a bare tag. Persisted
+/// in its own additive SQLite column and carried on the wire, so a reader can
+/// decide how to read the rest of the row BEFORE believing any git field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentWorkspaceKind {
+    /// A working copy dux created and owns.
+    Managed,
+    /// A folder the user already had, which dux only visits.
+    Folder,
+}
+
+impl AgentWorkspaceKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Managed => "managed",
+            Self::Folder => "folder",
+        }
+    }
+
+    /// Parse the stored kind. **An unrecognized value reads as managed**, which
+    /// is the opposite of the safety direction [`BranchProvenance::from_str`]
+    /// takes, and deliberately so. The danger here is the reverse one: reading
+    /// an unknown kind as a folder would hand a path dux does not understand to
+    /// the folder rules, where the delete flow believes the directory is the
+    /// user's and every git question answers "none". A managed row's git
+    /// columns are all present and non-empty in the table already, so the
+    /// managed reading is the one that stays truthful about a row this binary
+    /// cannot classify. Only rows written by a newer dux can reach this arm.
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(value: &str) -> Self {
+        match value {
+            "folder" => Self::Folder,
+            _ => Self::Managed,
+        }
+    }
+}
+
+/// Everything a managed working copy carries: the project it belongs to and the
+/// full git identity of the branch dux minted or attached for it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ManagedWorkspace {
     pub project_id: String,
     pub project_path: Option<String>,
-    pub provider: ProviderKind,
     pub source_branch: String,
     pub branch_name: String,
     /// The branch this agent was created on. Immutable identity: unlike
@@ -285,6 +322,201 @@ pub struct AgentSession {
     /// storage layer writes it on INSERT only). See [`BranchProvenance`].
     pub branch_provenance: BranchProvenance,
     pub worktree_path: String,
+}
+
+/// Everything a standalone agent carries: a folder the user chose, and nothing
+/// else. No project, no branch, no provenance, because there are none.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FolderWorkspace {
+    /// The directory the user pointed the agent at. dux runs the provider here
+    /// and never creates, moves or removes it.
+    pub folder_path: String,
+}
+
+/// Where an agent lives, and therefore what dux is allowed to do there: a
+/// working copy dux created and owns, or a folder the user already had.
+///
+/// Faking the git fields with empty strings for the folder case would be a lie
+/// that some screen eventually believes, so the two shapes are exclusive by
+/// construction and every git field lives inside the managed one.
+///
+/// **A comment is not a guard, so the decisions live on the type.** This is the
+/// same discipline [`TerminalOwner`] enforces for terminal ownership: every
+/// question code asks about an agent's home is answered by a method here whose
+/// body is an EXHAUSTIVE match, never by a `matches!` at the call site. A
+/// `matches!` keeps compiling when a variant is added and silently answers "no"
+/// for it, which is how a folder the user owns ends up in a code path written
+/// for a directory dux may delete. The families of decision are:
+///
+/// - **Location** ([`AgentWorkspace::directory`],
+///   [`AgentWorkspace::managed_worktree`]): where does this agent run, and is
+///   that directory a git working copy dux owns?
+/// - **Capability** ([`AgentWorkspace::supports_branch_git`]): may the
+///   branch-identity git features (push, pull, fork, pull requests, branch
+///   rename, provenance, the worktree manager) run against this agent at all?
+/// - **Teardown** ([`AgentWorkspace::deletion_may_remove_directory`],
+///   [`AgentWorkspace::dux_may_delete_branch`]): what may deleting this agent
+///   remove?
+/// - **Association** ([`AgentWorkspace::project_id`],
+///   [`AgentWorkspace::project_path`]): which project owns this agent, if any?
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AgentWorkspace {
+    /// A working copy dux created for this agent, inside dux's managed area,
+    /// on a branch dux minted, attached or adopted.
+    Managed(ManagedWorkspace),
+    /// A folder the user already had. dux runs the provider in it and touches
+    /// nothing else, ever.
+    Folder(FolderWorkspace),
+}
+
+impl AgentWorkspace {
+    /// The bare kind tag, for persistence and the wire.
+    pub fn kind(&self) -> AgentWorkspaceKind {
+        match self {
+            Self::Managed(_) => AgentWorkspaceKind::Managed,
+            Self::Folder(_) => AgentWorkspaceKind::Folder,
+        }
+    }
+
+    /// The directory this agent occupies: where the provider is spawned, where
+    /// the editor is rooted, where uploads land. Both shapes have one, so this
+    /// is what every consumer that only needs a working directory should ask
+    /// for. It is NOT a promise that git can run here.
+    pub fn directory(&self) -> &str {
+        match self {
+            Self::Managed(managed) => managed.worktree_path.as_str(),
+            Self::Folder(folder) => folder.folder_path.as_str(),
+        }
+    }
+
+    /// The directory as a git working copy dux owns, or `None` when it is the
+    /// user's folder. Ask this, not [`Self::directory`], whenever the answer
+    /// feeds a git command that assumes dux minted the checkout.
+    pub fn managed_worktree(&self) -> Option<&str> {
+        match self {
+            Self::Managed(managed) => Some(managed.worktree_path.as_str()),
+            Self::Folder(_) => None,
+        }
+    }
+
+    /// The user's folder, or `None` for a managed working copy.
+    pub fn folder_path(&self) -> Option<&str> {
+        match self {
+            Self::Managed(_) => None,
+            Self::Folder(folder) => Some(folder.folder_path.as_str()),
+        }
+    }
+
+    pub fn project_id(&self) -> Option<&str> {
+        match self {
+            Self::Managed(managed) => Some(managed.project_id.as_str()),
+            // Structurally project-less, forever. The review proved a faked
+            // empty project id would let the sidebar drop the row, collapse
+            // per-agent logs into one directory, and let a project removal
+            // mass-delete every standalone agent.
+            Self::Folder(_) => None,
+        }
+    }
+
+    pub fn project_path(&self) -> Option<&str> {
+        match self {
+            Self::Managed(managed) => managed.project_path.as_deref(),
+            Self::Folder(_) => None,
+        }
+    }
+
+    pub fn branch_name(&self) -> Option<&str> {
+        match self {
+            Self::Managed(managed) => Some(managed.branch_name.as_str()),
+            Self::Folder(_) => None,
+        }
+    }
+
+    pub fn source_branch(&self) -> Option<&str> {
+        match self {
+            Self::Managed(managed) => Some(managed.source_branch.as_str()),
+            Self::Folder(_) => None,
+        }
+    }
+
+    pub fn initial_branch(&self) -> Option<&str> {
+        match self {
+            Self::Managed(managed) => Some(managed.initial_branch.as_str()),
+            Self::Folder(_) => None,
+        }
+    }
+
+    pub fn branch_provenance(&self) -> Option<BranchProvenance> {
+        match self {
+            Self::Managed(managed) => Some(managed.branch_provenance),
+            // There is no provenance to consult, which is stronger than
+            // "provenance says no": the question cannot be asked.
+            Self::Folder(_) => None,
+        }
+    }
+
+    /// Whether the branch-identity git features exist for this agent at all:
+    /// push, pull, fork, pull requests, branch rename and display, provenance,
+    /// the worktree manager. These are about a branch dux manages, and a
+    /// standalone agent has none whatever its folder contains.
+    ///
+    /// This is NOT the question the changes panel asks. That one is folder
+    /// driven and answered live by repository detection, because a standalone
+    /// agent pointed at a repository gets a real changes panel.
+    pub fn supports_branch_git(&self) -> bool {
+        match self {
+            Self::Managed(_) => true,
+            Self::Folder(_) => false,
+        }
+    }
+
+    /// Whether deleting this agent may remove the directory it occupies.
+    ///
+    /// The absolute rule of the standalone agent: dux never deletes or modifies
+    /// the user's folder. Deleting a standalone agent deletes only dux's own
+    /// record of it.
+    pub fn deletion_may_remove_directory(&self) -> bool {
+        match self {
+            Self::Managed(_) => true,
+            Self::Folder(_) => false,
+        }
+    }
+
+    /// Whether deleting this agent may delete a branch. Delegates to the
+    /// provenance for a managed working copy, and is unconditionally false for
+    /// a folder, which has no branch of dux's to delete.
+    pub fn dux_may_delete_branch(&self) -> bool {
+        match self {
+            Self::Managed(managed) => managed.branch_provenance.dux_may_delete_branch(),
+            Self::Folder(_) => false,
+        }
+    }
+
+    /// The managed payload, for the few sites that legitimately need several
+    /// git fields at once and have already established the agent is managed.
+    pub fn as_managed(&self) -> Option<&ManagedWorkspace> {
+        match self {
+            Self::Managed(managed) => Some(managed),
+            Self::Folder(_) => None,
+        }
+    }
+
+    /// Mutable managed payload, for the branch-sync poller and the rename path,
+    /// which are the only writers of a branch name after creation.
+    pub fn as_managed_mut(&mut self) -> Option<&mut ManagedWorkspace> {
+        match self {
+            Self::Managed(managed) => Some(managed),
+            Self::Folder(_) => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct AgentSession {
+    pub id: String,
+    pub provider: ProviderKind,
+    /// Where this agent lives and what dux may do there. See [`AgentWorkspace`].
+    pub workspace: AgentWorkspace,
     pub title: Option<String>,
     pub started_providers: Vec<String>,
     pub desired_running: bool,
@@ -305,6 +537,81 @@ pub struct AgentSession {
 }
 
 impl AgentSession {
+    /// Where this agent runs. Both kinds of workspace have a directory; this
+    /// one is NOT a promise that git can run in it. See
+    /// [`AgentWorkspace::directory`].
+    pub fn directory(&self) -> &str {
+        self.workspace.directory()
+    }
+
+    /// The agent's directory as a git working copy dux owns, or `None` for a
+    /// standalone agent's folder. See [`AgentWorkspace::managed_worktree`].
+    pub fn managed_worktree(&self) -> Option<&str> {
+        self.workspace.managed_worktree()
+    }
+
+    pub fn folder_path(&self) -> Option<&str> {
+        self.workspace.folder_path()
+    }
+
+    pub fn project_id(&self) -> Option<&str> {
+        self.workspace.project_id()
+    }
+
+    pub fn project_path(&self) -> Option<&str> {
+        self.workspace.project_path()
+    }
+
+    pub fn branch_name(&self) -> Option<&str> {
+        self.workspace.branch_name()
+    }
+
+    pub fn source_branch(&self) -> Option<&str> {
+        self.workspace.source_branch()
+    }
+
+    pub fn initial_branch(&self) -> Option<&str> {
+        self.workspace.initial_branch()
+    }
+
+    pub fn branch_provenance(&self) -> Option<BranchProvenance> {
+        self.workspace.branch_provenance()
+    }
+
+    /// Whether the branch-identity git features exist for this agent. See
+    /// [`AgentWorkspace::supports_branch_git`].
+    pub fn supports_branch_git(&self) -> bool {
+        self.workspace.supports_branch_git()
+    }
+
+    /// Whether this is a standalone agent, for the presentation sites that
+    /// genuinely only need the label and the glyph. Every DECISION goes
+    /// through a named question on [`AgentWorkspace`] instead.
+    pub fn is_standalone(&self) -> bool {
+        self.workspace.folder_path().is_some()
+    }
+
+    /// The name to show for this agent: its durable title when it has one, the
+    /// branch it tracks otherwise.
+    ///
+    /// A standalone agent always has a title (creation enforces a non-empty
+    /// sanitized one, precisely because every row label used to fall through
+    /// the branch name, which does not exist here). The folder-name fallback
+    /// below is therefore belt and braces, not a path users reach, and it is
+    /// still better than an empty label if a row ever arrives without one.
+    pub fn display_label(&self) -> String {
+        if let Some(title) = self.title.clone() {
+            return title;
+        }
+        match &self.workspace {
+            AgentWorkspace::Managed(managed) => managed.branch_name.clone(),
+            AgentWorkspace::Folder(folder) => std::path::Path::new(&folder.folder_path)
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| folder.folder_path.clone()),
+        }
+    }
+
     pub fn has_started_provider(&self, provider: &ProviderKind) -> bool {
         self.started_providers
             .iter()
@@ -596,14 +903,16 @@ mod tests {
         let now = Utc::now();
         AgentSession {
             id: "s1".to_string(),
-            project_id: "p1".to_string(),
-            project_path: None,
             provider: ProviderKind::new("claude"),
-            source_branch: "main".to_string(),
-            branch_name: "s1".to_string(),
-            initial_branch: "s1".to_string(),
-            branch_provenance: crate::model::BranchProvenance::CreatedByDux,
-            worktree_path: "/tmp/s1".to_string(),
+            workspace: crate::model::AgentWorkspace::Managed(crate::model::ManagedWorkspace {
+                project_id: "p1".to_string(),
+                project_path: None,
+                source_branch: "main".to_string(),
+                branch_name: "s1".to_string(),
+                initial_branch: "s1".to_string(),
+                branch_provenance: crate::model::BranchProvenance::CreatedByDux,
+                worktree_path: "/tmp/s1".to_string(),
+            }),
             title: None,
             started_providers: Vec::new(),
             desired_running: true,
@@ -668,5 +977,106 @@ mod tests {
         let session = session_with_focus(Some("t1"));
         let empty: Vec<&str> = Vec::new();
         assert_eq!(session.resolved_focused_tab(empty), "s1");
+    }
+
+    fn managed() -> AgentWorkspace {
+        crate::model::AgentWorkspace::Managed(crate::model::ManagedWorkspace {
+            project_id: "p1".to_string(),
+            project_path: Some("/repo".to_string()),
+            source_branch: "main".to_string(),
+            branch_name: "s1".to_string(),
+            initial_branch: "s1".to_string(),
+            branch_provenance: BranchProvenance::CreatedByDux,
+            worktree_path: "/tmp/s1".to_string(),
+        })
+    }
+
+    fn folder() -> AgentWorkspace {
+        AgentWorkspace::Folder(FolderWorkspace {
+            folder_path: "/home/someone/notes".to_string(),
+        })
+    }
+
+    /// The whole point of the either/or: a standalone agent has no branch, and
+    /// asking for one gets an honest "there is none" rather than an empty
+    /// string some screen believes.
+    #[test]
+    fn a_folder_workspace_has_no_branch_identity_at_all() {
+        let workspace = folder();
+        assert_eq!(workspace.branch_name(), None);
+        assert_eq!(workspace.source_branch(), None);
+        assert_eq!(workspace.initial_branch(), None);
+        assert_eq!(workspace.branch_provenance(), None);
+        assert_eq!(workspace.project_id(), None);
+        assert_eq!(workspace.project_path(), None);
+        assert!(!workspace.supports_branch_git());
+    }
+
+    #[test]
+    fn a_managed_workspace_answers_every_git_question() {
+        let workspace = managed();
+        assert_eq!(workspace.branch_name(), Some("s1"));
+        assert_eq!(workspace.source_branch(), Some("main"));
+        assert_eq!(workspace.initial_branch(), Some("s1"));
+        assert_eq!(
+            workspace.branch_provenance(),
+            Some(BranchProvenance::CreatedByDux)
+        );
+        assert_eq!(workspace.project_id(), Some("p1"));
+        assert_eq!(workspace.project_path(), Some("/repo"));
+        assert!(workspace.supports_branch_git());
+    }
+
+    /// Both variants occupy a directory, and every consumer that only needs
+    /// "where do I run" gets it without asking which kind this is.
+    #[test]
+    fn both_workspaces_name_the_directory_the_agent_occupies() {
+        assert_eq!(managed().directory(), "/tmp/s1");
+        assert_eq!(folder().directory(), "/home/someone/notes");
+    }
+
+    /// Nothing deletes the folder. This is the pin the whole feature rests on.
+    #[test]
+    fn deleting_a_standalone_agent_may_never_remove_its_folder() {
+        assert!(
+            !folder().deletion_may_remove_directory(),
+            "the folder is the user's, and dux never created it"
+        );
+        assert!(
+            managed().deletion_may_remove_directory(),
+            "a managed worktree is dux's own and is removed as always"
+        );
+    }
+
+    /// A folder workspace has no provenance to consult, so branch deletion is
+    /// not merely refused, it is unaskable.
+    #[test]
+    fn a_folder_workspace_never_lets_dux_delete_a_branch() {
+        assert!(!folder().dux_may_delete_branch());
+        assert!(managed().dux_may_delete_branch());
+    }
+
+    #[test]
+    fn the_workspace_kind_round_trips_through_its_stored_text() {
+        assert_eq!(
+            AgentWorkspaceKind::from_str(AgentWorkspaceKind::Managed.as_str()),
+            AgentWorkspaceKind::Managed
+        );
+        assert_eq!(
+            AgentWorkspaceKind::from_str(AgentWorkspaceKind::Folder.as_str()),
+            AgentWorkspaceKind::Folder
+        );
+    }
+
+    /// An unrecognized kind is a variant a newer dux wrote. Reading it as a
+    /// folder would hand the user's directory to code that believes it may
+    /// delete it, so the safe guess is the shape whose git fields are all
+    /// present in the row already.
+    #[test]
+    fn an_unknown_workspace_kind_reads_as_managed() {
+        assert_eq!(
+            AgentWorkspaceKind::from_str("something-a-newer-dux-writes"),
+            AgentWorkspaceKind::Managed
+        );
     }
 }

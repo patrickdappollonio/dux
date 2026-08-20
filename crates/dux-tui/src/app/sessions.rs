@@ -3954,10 +3954,7 @@ impl App {
     }
 
     pub(crate) fn session_label(&self, session: &AgentSession) -> String {
-        session
-            .title
-            .clone()
-            .unwrap_or_else(|| session.branch_name.clone())
+        session.display_label()
     }
 
     /// Palette action: tear down the TUI and serve the web UI in the same
@@ -4300,14 +4297,7 @@ mod tests {
         let now = Utc::now();
         AgentSession {
             id: id.to_string(),
-            project_id: "project-1".to_string(),
-            project_path: Some("/tmp/project".to_string()),
             provider: ProviderKind::from_str(provider),
-            source_branch: "main".to_string(),
-            branch_name: format!("branch-{id}"),
-            initial_branch: format!("branch-{id}"),
-            branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
-            worktree_path: worktree.to_string(),
             title: None,
             started_providers: Vec::new(),
             desired_running: false,
@@ -4316,6 +4306,17 @@ mod tests {
             created_at: now,
             updated_at: now,
             last_focused_tab: None,
+            workspace: dux_core::model::AgentWorkspace::Managed(
+                dux_core::model::ManagedWorkspace {
+                    project_id: "project-1".to_string(),
+                    project_path: Some("/tmp/project".to_string()),
+                    source_branch: "main".to_string(),
+                    branch_name: format!("branch-{id}"),
+                    initial_branch: format!("branch-{id}"),
+                    branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
+                    worktree_path: worktree.to_string(),
+                },
+            ),
         }
     }
 
@@ -5472,7 +5473,10 @@ mod tests {
         let mut sessions = Vec::new();
         for id in ["s1", "s2", "s3"] {
             let mut s = make_session(id, "codex", &format!("/tmp/worktree-{id}"));
-            s.project_id = "project-1".to_string();
+            s.workspace
+                .as_managed_mut()
+                .expect("managed test session")
+                .project_id = "project-1".to_string();
             s.status = SessionStatus::Active;
             sessions.push(s);
         }
@@ -5517,7 +5521,10 @@ mod tests {
         let mut sessions = Vec::new();
         for id in ["s1", "s2", "s3"] {
             let mut s = make_session(id, "codex", &format!("/tmp/worktree-{id}"));
-            s.project_id = "project-1".to_string();
+            s.workspace
+                .as_managed_mut()
+                .expect("managed test session")
+                .project_id = "project-1".to_string();
             s.status = SessionStatus::Active;
             sessions.push(s);
         }
@@ -5565,13 +5572,20 @@ mod tests {
         let mut sessions = Vec::new();
         // One active agent (excluded from the inactive tail regardless).
         let mut active = make_session("keep-active", "codex", "/tmp/worktree-a");
-        active.project_id = "project-1".to_string();
+        active
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .project_id = "project-1".to_string();
         active.status = SessionStatus::Active;
         sessions.push(active);
         // Three inactive agents: two match the "keep" query, one does not.
         for id in ["keep-1", "keep-2", "drop-1"] {
             let mut s = make_session(id, "codex", &format!("/tmp/worktree-{id}"));
-            s.project_id = "project-1".to_string();
+            s.workspace
+                .as_managed_mut()
+                .expect("managed test session")
+                .project_id = "project-1".to_string();
             s.status = SessionStatus::Detached;
             sessions.push(s);
         }
@@ -5600,7 +5614,10 @@ mod tests {
         let mut sessions = Vec::new();
         for id in ["s1", "s2"] {
             let mut s = make_session(id, "codex", &format!("/tmp/worktree-{id}"));
-            s.project_id = "project-1".to_string();
+            s.workspace
+                .as_managed_mut()
+                .expect("managed test session")
+                .project_id = "project-1".to_string();
             s.status = SessionStatus::Active;
             sessions.push(s);
         }
@@ -5777,11 +5794,9 @@ mod tests {
         // Deleting s1 should preserve the worktree because s2 still uses it.
         // We can't call do_delete_session directly because git::remove_worktree
         // would fail on a non-existent repo, but we can verify the guard logic.
-        let has_sibling = app
-            .engine
-            .sessions
-            .iter()
-            .any(|s| s.id != "s1" && s.worktree_path == "/tmp/wt/a");
+        let has_sibling = app.engine.sessions.iter().any(|s| {
+            s.id != "s1" && s.managed_worktree().expect("managed test session") == "/tmp/wt/a"
+        });
         assert!(has_sibling, "sibling session should exist");
     }
 
@@ -5791,11 +5806,9 @@ mod tests {
         let project = make_project("project-1", "claude");
         let app = test_app_with_sessions(vec![s1], vec![project]);
 
-        let has_sibling = app
-            .engine
-            .sessions
-            .iter()
-            .any(|s| s.id != "s1" && s.worktree_path == "/tmp/wt/a");
+        let has_sibling = app.engine.sessions.iter().any(|s| {
+            s.id != "s1" && s.managed_worktree().expect("managed test session") == "/tmp/wt/a"
+        });
         assert!(!has_sibling, "no sibling session should exist");
     }
 
@@ -5871,7 +5884,10 @@ mod tests {
         let worktree_path = worktree_dir.path().to_string_lossy().to_string();
 
         let mut s1 = make_session("s1", "claude", &worktree_path);
-        s1.project_id = "project-1".to_string();
+        s1.workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .project_id = "project-1".to_string();
         let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
 
@@ -5898,7 +5914,10 @@ mod tests {
         let mut sessions = Vec::new();
         for id in ["s1", "s2", "s3"] {
             let mut s = make_session(id, "codex", &format!("/tmp/worktree-{id}"));
-            s.project_id = "project-1".to_string();
+            s.workspace
+                .as_managed_mut()
+                .expect("managed test session")
+                .project_id = "project-1".to_string();
             s.status = SessionStatus::Active;
             sessions.push(s);
         }
@@ -5928,7 +5947,10 @@ mod tests {
         let mut sessions = Vec::new();
         for id in ["s1", "s2", "s3"] {
             let mut s = make_session(id, "codex", &format!("/tmp/worktree-{id}"));
-            s.project_id = "project-1".to_string();
+            s.workspace
+                .as_managed_mut()
+                .expect("managed test session")
+                .project_id = "project-1".to_string();
             s.status = SessionStatus::Active;
             sessions.push(s);
         }
@@ -5959,8 +5981,14 @@ mod tests {
 
         let mut s1 = make_session("s1", "claude", &worktree_path);
         let mut s2 = make_session("s2", "codex", &worktree_path);
-        s1.project_id = "project-1".to_string();
-        s2.project_id = "project-1".to_string();
+        s1.workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .project_id = "project-1".to_string();
+        s2.workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .project_id = "project-1".to_string();
         let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
         let mut app = test_app_with_sessions(vec![s1, s2], vec![project]);
 
@@ -5994,7 +6022,10 @@ mod tests {
         let worktree_path = worktree_dir.path().to_string_lossy().to_string();
 
         let mut s1 = make_session("s1", "claude", &worktree_path);
-        s1.project_id = "project-1".to_string();
+        s1.workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .project_id = "project-1".to_string();
         let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
 
@@ -6028,7 +6059,10 @@ mod tests {
         let worktree_path = worktree_dir.path().to_string_lossy().to_string();
 
         let mut s1 = make_session("s1", "claude", &worktree_path);
-        s1.project_id = "project-1".to_string();
+        s1.workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .project_id = "project-1".to_string();
         let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
 
@@ -6050,7 +6084,10 @@ mod tests {
         let worktree_path = worktree_dir.path().to_string_lossy().to_string();
 
         let mut s1 = make_session("s1", "claude", &worktree_path);
-        s1.project_id = "project-1".to_string();
+        s1.workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .project_id = "project-1".to_string();
         let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
 
@@ -6072,7 +6109,10 @@ mod tests {
     #[test]
     fn finish_delete_session_is_idempotent() {
         let mut s1 = make_session("s1", "claude", "/tmp/wt/a");
-        s1.project_id = "project-1".to_string();
+        s1.workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .project_id = "project-1".to_string();
         let project = make_project("project-1", "claude");
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
 
@@ -6088,7 +6128,10 @@ mod tests {
     #[test]
     fn finish_delete_session_clears_pty_activity_entry() {
         let mut s1 = make_session("s1", "claude", "/tmp/wt/a");
-        s1.project_id = "project-1".to_string();
+        s1.workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .project_id = "project-1".to_string();
         let project = make_project("project-1", "claude");
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
 
@@ -6123,7 +6166,10 @@ mod tests {
         let worktree_path = worktree_dir.path().to_string_lossy().to_string();
 
         let mut s1 = make_session("s1", "claude", &worktree_path);
-        s1.project_id = "project-1".to_string();
+        s1.workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .project_id = "project-1".to_string();
         let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
 
@@ -6144,7 +6190,10 @@ mod tests {
         let worktree_path = worktree_dir.path().to_string_lossy().to_string();
 
         let mut s1 = make_session("s1", "claude", &worktree_path);
-        s1.project_id = "project-1".to_string();
+        s1.workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .project_id = "project-1".to_string();
         let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
 
@@ -6166,7 +6215,10 @@ mod tests {
         let worktree_path = worktree_dir.path().to_string_lossy().to_string();
 
         let mut s1 = make_session("s1", "claude", &worktree_path);
-        s1.project_id = "project-1".to_string();
+        s1.workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .project_id = "project-1".to_string();
         let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
 
@@ -6195,7 +6247,10 @@ mod tests {
         let worktree_path = worktree_dir.path().to_string_lossy().to_string();
 
         let mut s1 = make_session("s1", "claude", &worktree_path);
-        s1.project_id = "project-1".to_string();
+        s1.workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .project_id = "project-1".to_string();
         let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
 
@@ -6244,7 +6299,10 @@ mod tests {
         let worktree_path = worktree_dir.path().to_string_lossy().to_string();
 
         let mut s1 = make_session("s1", "claude", &worktree_path);
-        s1.project_id = "project-1".to_string();
+        s1.workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .project_id = "project-1".to_string();
         let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
 
@@ -6290,7 +6348,10 @@ mod tests {
         let worktree_path = worktree_dir.path().to_string_lossy().to_string();
 
         let mut s1 = make_session("s1", "claude", &worktree_path);
-        s1.project_id = "project-1".to_string();
+        s1.workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .project_id = "project-1".to_string();
         let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
 
@@ -6342,7 +6403,10 @@ mod tests {
         let worktree_path = worktree_dir.path().to_string_lossy().to_string();
 
         let mut s1 = make_session("s1", "claude", &worktree_path);
-        s1.project_id = "project-1".to_string();
+        s1.workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .project_id = "project-1".to_string();
         let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
 
@@ -6378,7 +6442,10 @@ mod tests {
         let worktree_path = worktree_dir.path().to_string_lossy().to_string();
 
         let mut s1 = make_session("s1", "claude", &worktree_path);
-        s1.project_id = "project-1".to_string();
+        s1.workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .project_id = "project-1".to_string();
         let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
 
@@ -6412,7 +6479,10 @@ mod tests {
         let worktree_path = worktree_dir.path().to_string_lossy().to_string();
 
         let mut s1 = make_session("s1", "claude", &worktree_path);
-        s1.project_id = "project-1".to_string();
+        s1.workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .project_id = "project-1".to_string();
         let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
 
@@ -6460,7 +6530,10 @@ mod tests {
             ),
         ] {
             let mut s1 = make_session("s1", "claude", "/tmp/wt");
-            s1.project_id = "project-1".to_string();
+            s1.workspace
+                .as_managed_mut()
+                .expect("managed test session")
+                .project_id = "project-1".to_string();
             let project = make_project("project-1", "claude");
             let mut app = test_app_with_sessions(vec![s1], vec![project]);
 
@@ -6560,7 +6633,11 @@ mod tests {
     #[test]
     fn delete_status_names_the_branch_the_agent_was_born_on_when_it_drifted() {
         let mut session = make_session("s1", "claude", "/tmp/wt");
-        session.initial_branch = "born-here".to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .initial_branch = "born-here".to_string();
         let project = make_project("project-1", "claude");
         let mut app = test_app_with_sessions(vec![session.clone()], vec![project.clone()]);
         let outcome = FinishDeleteSessionOutcome {
@@ -6595,8 +6672,16 @@ mod tests {
     #[test]
     fn delete_status_says_which_branches_were_kept_and_why() {
         let mut session = make_session("s1", "claude", "/tmp/wt");
-        session.initial_branch = "develop".to_string();
-        session.branch_provenance = dux_core::model::BranchProvenance::AttachedExisting;
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .initial_branch = "develop".to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .branch_provenance = dux_core::model::BranchProvenance::AttachedExisting;
         let project = make_project("project-1", "claude");
         let mut app = test_app_with_sessions(vec![session.clone()], vec![project.clone()]);
         let outcome = FinishDeleteSessionOutcome {
@@ -6632,7 +6717,11 @@ mod tests {
     #[test]
     fn the_async_delete_op_reports_kept_branches_too() {
         let mut session = make_session("s1", "claude", "/tmp/wt");
-        session.branch_provenance = dux_core::model::BranchProvenance::Adopted;
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .branch_provenance = dux_core::model::BranchProvenance::Adopted;
         let project = make_project("project-1", "claude");
         let app = test_app_with_sessions(vec![session], vec![project]);
 
@@ -6732,7 +6821,11 @@ mod tests {
         // `clear_tab_runtime`, so the relaunch proceeds.
         let mut session = make_session("s1", "claude", "");
         let wt = tempdir().expect("worktree tempdir");
-        session.worktree_path = wt.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = wt.path().to_string_lossy().to_string();
         let project = make_project("project-1", "claude");
         let mut app = test_app_with_sessions(vec![session], vec![project]);
         app.rebuild_left_items();

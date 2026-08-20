@@ -138,14 +138,10 @@ impl Engine {
         // Resume is decided per-provider in one place; see `tab_resume_decision`.
         let resume = self.tab_resume_decision(&session, &tab_id, &provider, resume);
         let provider_config = crate::config::provider_config(&self.config, &provider);
-        let env = self
-            .projects
-            .iter()
-            .find(|project| project.id == session.project_id)
-            .and_then(|project| {
-                crate::config::resolve_agent_env(&self.config.env, &project.env).ok()
-            })
-            .unwrap_or_default();
+        // A standalone agent has no project to overlay, so it gets the
+        // GLOBAL environment rather than the empty one a missed project lookup
+        // would fall through to.
+        let env = self.session_env(&session);
         AgentLaunchRequest {
             session,
             tab_id,
@@ -358,19 +354,19 @@ impl Engine {
                 timeout_ms,
                 started_at.elapsed(),
             );
-            let proj_name = self.project_name_for_session(&session);
+            let location = self.session_location_phrase(&session);
             let status_message = match decision {
                 ResumeFallbackDecision::RetryExitedMinimal => format!(
-                    "No prior session to resume for agent \"{}\". Started a fresh {} session in project \"{}\".",
-                    session.branch_name,
+                    "No prior session to resume for agent \"{}\". Started a fresh {} session in {}.",
+                    session.display_label(),
                     provider.as_str(),
-                    proj_name,
+                    location,
                 ),
                 ResumeFallbackDecision::RetryHungTimeout => format!(
-                    "Resume timed out for agent \"{}\" with no visible output. Started a fresh {} session in project \"{}\".",
-                    session.branch_name,
+                    "Resume timed out for agent \"{}\" with no visible output. Started a fresh {} session in {}.",
+                    session.display_label(),
                     provider.as_str(),
-                    proj_name,
+                    location,
                 ),
                 ResumeFallbackDecision::DropNonMinimalExit => {
                     // A real conversation ended: drop the candidate, let the
@@ -382,7 +378,7 @@ impl Engine {
             };
             crate::logger::info(&format!(
                 "resume fallback for agent \"{}\": {}",
-                session.branch_name,
+                session.display_label(),
                 match decision {
                     ResumeFallbackDecision::RetryExitedMinimal =>
                         "resume exited without output, retrying fresh",
@@ -511,7 +507,11 @@ mod tests {
 
         let (mut engine, tmp) = test_engine();
         let mut session = sample_session("s1", "p1", "feat");
-        session.worktree_path = tmp.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = tmp.path().to_string_lossy().to_string();
         engine.sessions.push(session);
         // A clean-exiting provider with minimal output (prints one short line).
         let client = PtyClient::spawn(
@@ -561,7 +561,11 @@ mod tests {
 
         let (mut engine, tmp) = test_engine();
         let mut session = sample_session("s1", "p1", "feat");
-        session.worktree_path = tmp.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = tmp.path().to_string_lossy().to_string();
         engine.sessions.push(session);
         // A long-lived provider (cat blocks on stdin, stays running, no output).
         let client = PtyClient::spawn("cat", &[], Path::new("."), 10, 40, 100).expect("spawn");
@@ -664,7 +668,11 @@ mod tests {
         // launch failure instead of `providers` gaining a live entry.
         let (mut engine, tmp) = test_engine();
         let mut session = sample_session("s1", "p1", "feat/x");
-        session.worktree_path = tmp.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = tmp.path().to_string_lossy().to_string();
         engine.sessions.push(session);
         let tab = crate::model::AgentTab {
             id: "tab-1".to_string(),
@@ -783,7 +791,11 @@ mod tests {
         // relaunch released its own key.
         let (mut engine, tmp) = test_engine();
         let mut session = sample_session("s1", "p1", "feat/x");
-        session.worktree_path = tmp.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = tmp.path().to_string_lossy().to_string();
         session.provider = ProviderKind::new("dux-test-nonexistent-provider-zzz");
         engine.sessions.push(session);
 

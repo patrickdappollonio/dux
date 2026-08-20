@@ -198,12 +198,25 @@ fn an_old_database_opens_and_every_session_row_survives_intact() {
     assert_eq!(sessions.len(), 3, "{sessions:#?}");
 
     let one = session(&sessions, "sess-1");
-    assert_eq!(one.project_id, "proj-widget");
-    assert_eq!(one.provider.as_str(), "claude");
-    assert_eq!(one.source_branch, "main");
-    assert_eq!(one.branch_name, "dux/lively-otter");
     assert_eq!(
-        one.worktree_path,
+        one.project_id()
+            .expect("an upgraded row is a managed agent"),
+        "proj-widget"
+    );
+    assert_eq!(one.provider.as_str(), "claude");
+    assert_eq!(
+        one.source_branch()
+            .expect("an upgraded row is a managed agent"),
+        "main"
+    );
+    assert_eq!(
+        one.branch_name()
+            .expect("an upgraded row is a managed agent"),
+        "dux/lively-otter"
+    );
+    assert_eq!(
+        one.managed_worktree()
+            .expect("an upgraded row is a managed agent"),
         "/home/ada/.config/dux/worktrees/lively-otter"
     );
     assert_eq!(one.status, SessionStatus::Active);
@@ -214,7 +227,12 @@ fn an_old_database_opens_and_every_session_row_survives_intact() {
     assert_eq!(session(&sessions, "sess-2").provider.as_str(), "codex");
     assert_eq!(session(&sessions, "sess-2").status, SessionStatus::Detached);
     assert_eq!(session(&sessions, "sess-3").provider.as_str(), "opencode");
-    assert_eq!(session(&sessions, "sess-3").source_branch, "develop");
+    assert_eq!(
+        session(&sessions, "sess-3")
+            .source_branch()
+            .expect("an upgraded row is a managed agent"),
+        "develop"
+    );
 }
 
 #[test]
@@ -228,9 +246,14 @@ fn a_first_release_database_with_no_projects_table_at_all_opens_and_keeps_its_se
 
     let sessions = store.load_sessions().expect("load sessions");
     assert_eq!(sessions.len(), 3, "{sessions:#?}");
-    assert_eq!(session(&sessions, "sess-1").project_id, "proj-widget");
     assert_eq!(
-        session(&sessions, "sess-1").project_path.as_deref(),
+        session(&sessions, "sess-1")
+            .project_id()
+            .expect("an upgraded row is a managed agent"),
+        "proj-widget"
+    );
+    assert_eq!(
+        session(&sessions, "sess-1").project_path(),
         Some("/home/ada/code/widget"),
         "`project_path` existed in the first release and must survive"
     );
@@ -245,11 +268,16 @@ fn a_first_release_database_with_no_projects_table_at_all_opens_and_keeps_its_se
 
     // Both one-time backfills still run against a table this old.
     for s in &sessions {
-        assert_eq!(s.initial_branch, s.branch_name, "{}", s.id);
+        assert_eq!(
+            s.initial_branch().expect("managed test session"),
+            s.branch_name().expect("managed test session"),
+            "{}",
+            s.id
+        );
         // Rows written before provenance existed behave exactly as they always
         // did: dux still cleans their branches up on delete.
         assert_eq!(
-            s.branch_provenance,
+            s.branch_provenance().expect("managed test session"),
             dux_core::model::BranchProvenance::CreatedByDux,
             "{}",
             s.id
@@ -355,7 +383,7 @@ fn columns_added_since_arrive_at_their_documented_defaults() {
     // era: both already existed and both were written, so the upgrade has to read
     // them back rather than default them away.
     assert_eq!(
-        session(&sessions, "sess-1").project_path.as_deref(),
+        session(&sessions, "sess-1").project_path(),
         Some("/home/ada/code/widget")
     );
     assert_eq!(
@@ -378,11 +406,16 @@ fn the_one_time_backfills_run_on_the_first_open_after_the_upgrade() {
         // `initial_branch` freezes the branch lineage. The true original is lost
         // to the old schema, so the current branch is the best available answer,
         // and it must not be left empty.
-        assert_eq!(s.initial_branch, s.branch_name, "{}", s.id);
+        assert_eq!(
+            s.initial_branch().expect("managed test session"),
+            s.branch_name().expect("managed test session"),
+            "{}",
+            s.id
+        );
         // `branch_provenance` has no backfill at all: its column default is the
         // whole migration, and it must land on 'created'.
         assert_eq!(
-            s.branch_provenance,
+            s.branch_provenance().expect("managed test session"),
             dux_core::model::BranchProvenance::CreatedByDux,
             "{}",
             s.id
@@ -614,14 +647,49 @@ fn old_state_survives_a_write_a_close_and_a_reopen() {
         // fields is the point anyway (a new field added without a thought about
         // reopen stability shows up here as a compile error, not a silent pass).
         assert_eq!(before.id, after.id);
-        assert_eq!(before.project_id, after.project_id);
+        assert_eq!(
+            before
+                .project_id()
+                .expect("an upgraded row is a managed agent"),
+            after
+                .project_id()
+                .expect("an upgraded row is a managed agent")
+        );
         assert_eq!(before.provider.as_str(), after.provider.as_str());
-        assert_eq!(before.source_branch, after.source_branch);
-        assert_eq!(before.branch_name, after.branch_name);
-        assert_eq!(before.initial_branch, after.initial_branch);
-        assert_eq!(before.worktree_path, after.worktree_path);
+        assert_eq!(
+            before
+                .source_branch()
+                .expect("an upgraded row is a managed agent"),
+            after
+                .source_branch()
+                .expect("an upgraded row is a managed agent")
+        );
+        assert_eq!(
+            before
+                .branch_name()
+                .expect("an upgraded row is a managed agent"),
+            after
+                .branch_name()
+                .expect("an upgraded row is a managed agent")
+        );
+        assert_eq!(
+            before
+                .initial_branch()
+                .expect("an upgraded row is a managed agent"),
+            after
+                .initial_branch()
+                .expect("an upgraded row is a managed agent")
+        );
+        assert_eq!(
+            before
+                .managed_worktree()
+                .expect("an upgraded row is a managed agent"),
+            after
+                .managed_worktree()
+                .expect("an upgraded row is a managed agent")
+        );
         assert_eq!(before.title, after.title);
-        assert_eq!(before.project_path, after.project_path);
+        assert_eq!(before.project_path(), after.project_path());
         assert_eq!(before.started_providers, after.started_providers);
         assert_eq!(before.desired_running, after.desired_running);
         assert_eq!(before.auto_reopen_enabled, after.auto_reopen_enabled);
@@ -642,7 +710,12 @@ fn old_state_survives_a_write_a_close_and_a_reopen() {
         Some("v0.7.0".to_string())
     );
     // The original rows kept their identity through both opens.
-    assert_eq!(session(&sessions, "sess-3").branch_name, "dux/quiet-moose");
+    assert_eq!(
+        session(&sessions, "sess-3")
+            .branch_name()
+            .expect("an upgraded row is a managed agent"),
+        "dux/quiet-moose"
+    );
     assert_eq!(store.load_projects().expect("projects").len(), 2);
 }
 
@@ -658,14 +731,7 @@ fn a_migrated_title_is_not_re_frozen_when_a_later_agent_leaves_it_null() {
     store
         .upsert_session(&AgentSession {
             id: "sess-new".to_string(),
-            project_id: "proj-widget".to_string(),
-            project_path: None,
             provider: ProviderKind::new("claude"),
-            source_branch: "main".to_string(),
-            branch_name: "dux/post-upgrade".to_string(),
-            initial_branch: "dux/post-upgrade".to_string(),
-            branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
-            worktree_path: "/tmp/post-upgrade".to_string(),
             title: None,
             started_providers: Vec::new(),
             desired_running: false,
@@ -674,6 +740,17 @@ fn a_migrated_title_is_not_re_frozen_when_a_later_agent_leaves_it_null() {
             created_at: now,
             updated_at: now,
             last_focused_tab: None,
+            workspace: dux_core::model::AgentWorkspace::Managed(
+                dux_core::model::ManagedWorkspace {
+                    project_id: "proj-widget".to_string(),
+                    project_path: None,
+                    source_branch: "main".to_string(),
+                    branch_name: "dux/post-upgrade".to_string(),
+                    initial_branch: "dux/post-upgrade".to_string(),
+                    branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
+                    worktree_path: "/tmp/post-upgrade".to_string(),
+                },
+            ),
         })
         .expect("insert a post-upgrade agent");
     drop(store);
@@ -782,13 +859,17 @@ fn every_column_added_since_is_nullable_or_defaulted_so_an_older_binary_can_stil
     let store = SessionStore::open(&path).expect("reopen through the store");
     let sessions = store.load_sessions().expect("load");
     assert_eq!(
-        session(&sessions, "sess-legacy-insert").branch_name,
+        session(&sessions, "sess-legacy-insert")
+            .branch_name()
+            .expect("an upgraded row is a managed agent"),
         "dux/old-writer"
     );
     // The ungated `initial_branch` self-heal covers the row the old writer left
     // empty, so nothing is stranded without a lineage.
     assert_eq!(
-        session(&sessions, "sess-legacy-insert").initial_branch,
+        session(&sessions, "sess-legacy-insert")
+            .initial_branch()
+            .expect("an upgraded row is a managed agent"),
         "dux/old-writer"
     );
 }
@@ -817,14 +898,7 @@ fn opening_a_database_this_build_created_is_a_no_op_the_second_time() {
         store
             .upsert_session(&AgentSession {
                 id: "s1".to_string(),
-                project_id: "p1".to_string(),
-                project_path: Some("/home/ada/code/fresh".to_string()),
                 provider: ProviderKind::new("codex"),
-                source_branch: "main".to_string(),
-                branch_name: "dux/fresh".to_string(),
-                initial_branch: "dux/fresh".to_string(),
-                branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
-                worktree_path: "/tmp/fresh".to_string(),
                 title: Some("fresh".to_string()),
                 started_providers: vec!["codex".to_string()],
                 desired_running: true,
@@ -833,6 +907,17 @@ fn opening_a_database_this_build_created_is_a_no_op_the_second_time() {
                 created_at: now,
                 updated_at: now,
                 last_focused_tab: None,
+                workspace: dux_core::model::AgentWorkspace::Managed(
+                    dux_core::model::ManagedWorkspace {
+                        project_id: "p1".to_string(),
+                        project_path: Some("/home/ada/code/fresh".to_string()),
+                        source_branch: "main".to_string(),
+                        branch_name: "dux/fresh".to_string(),
+                        initial_branch: "dux/fresh".to_string(),
+                        branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
+                        worktree_path: "/tmp/fresh".to_string(),
+                    },
+                ),
             })
             .expect("upsert session");
     }

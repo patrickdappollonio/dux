@@ -1447,7 +1447,7 @@ impl App {
             }
             AgentLaunchFailedOutcome::Reconnect {
                 session_id,
-                branch_name,
+                agent_label,
                 message,
             } => {
                 // Resolve the keyed reconnect op so its error replaces exactly the
@@ -1463,7 +1463,7 @@ impl App {
             }
             AgentLaunchFailedOutcome::ForceReconnect {
                 session_id,
-                branch_name,
+                agent_label,
                 message,
             } => {
                 self.resolve_reconnect_op_or(
@@ -1478,7 +1478,7 @@ impl App {
                 // Engine logged + marked Detached; nothing for the view.
             }
             AgentLaunchFailedOutcome::StartupAutoReopen {
-                branch_name,
+                agent_label,
                 message,
                 ..
             } => {
@@ -1487,7 +1487,7 @@ impl App {
                 ));
             }
             AgentLaunchFailedOutcome::Tab {
-                branch_name,
+                agent_label,
                 message,
                 ..
             } => {
@@ -1652,14 +1652,7 @@ mod tests {
     fn test_session(worktree: &Path) -> AgentSession {
         AgentSession {
             id: "session-1".to_string(),
-            project_id: "project-1".to_string(),
-            project_path: Some(worktree.to_string_lossy().to_string()),
             provider: ProviderKind::from_str("custom"),
-            source_branch: "main".to_string(),
-            branch_name: "agent-branch".to_string(),
-            initial_branch: "agent-branch".to_string(),
-            branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
-            worktree_path: worktree.to_string_lossy().to_string(),
             title: None,
             started_providers: Vec::new(),
             desired_running: true,
@@ -1668,6 +1661,17 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             last_focused_tab: None,
+            workspace: dux_core::model::AgentWorkspace::Managed(
+                dux_core::model::ManagedWorkspace {
+                    project_id: "project-1".to_string(),
+                    project_path: Some(worktree.to_string_lossy().to_string()),
+                    source_branch: "main".to_string(),
+                    branch_name: "agent-branch".to_string(),
+                    initial_branch: "agent-branch".to_string(),
+                    branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
+                    worktree_path: worktree.to_string_lossy().to_string(),
+                },
+            ),
         }
     }
 
@@ -2102,8 +2106,10 @@ mod tests {
         let session = app.engine.sessions[0].clone();
 
         // Mirror the dispatch site: mint the op, show its pending busy, stash it.
-        let op = app
-            .build_reconnect_status_op(format!("Launching agent \"{}\"...", session.branch_name));
+        let op = app.build_reconnect_status_op(format!(
+            "Launching agent \"{}\"...",
+            session.branch_name().expect("managed test session")
+        ));
         let op_key = op.id().to_string();
         app.apply_reaction(dux_core::engine::EventReaction::Status(op.pending_status()));
         app.pending_reconnect_ops.insert(session.id.clone(), op);
@@ -2158,15 +2164,17 @@ mod tests {
             crate::app::test_support::test_app(crate::app::test_support::default_bindings());
         let session = app.engine.sessions[0].clone();
 
-        let op = app
-            .build_reconnect_status_op(format!("Launching agent \"{}\"...", session.branch_name));
+        let op = app.build_reconnect_status_op(format!(
+            "Launching agent \"{}\"...",
+            session.branch_name().expect("managed test session")
+        ));
         let op_key = op.id().to_string();
         app.apply_reaction(dux_core::engine::EventReaction::Status(op.pending_status()));
         app.pending_reconnect_ops.insert(session.id.clone(), op);
 
         app.apply_agent_launch_failed_view(AgentLaunchFailedOutcome::Reconnect {
             session_id: session.id.clone(),
-            branch_name: "feat".to_string(),
+            agent_label: "feat".to_string(),
             message: "nope".to_string(),
         });
 
@@ -2191,7 +2199,7 @@ mod tests {
 
         app.apply_agent_launch_failed_view(AgentLaunchFailedOutcome::ForceReconnect {
             session_id: session.id.clone(),
-            branch_name: "feat".to_string(),
+            agent_label: "feat".to_string(),
             message: "boom".to_string(),
         });
 
@@ -2297,14 +2305,7 @@ mod tests {
         let now = Utc::now();
         let source_session = AgentSession {
             id: "session-1".to_string(),
-            project_id: project.id.clone(),
-            project_path: Some(project.path.clone()),
             provider: ProviderKind::from_str("codex"),
-            source_branch: "main".to_string(),
-            branch_name: "agent-branch".to_string(),
-            initial_branch: "agent-branch".to_string(),
-            branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
-            worktree_path: tmp.path().join("source").to_string_lossy().to_string(),
             title: None,
             started_providers: Vec::new(),
             desired_running: false,
@@ -2313,6 +2314,17 @@ mod tests {
             created_at: now,
             updated_at: now,
             last_focused_tab: None,
+            workspace: dux_core::model::AgentWorkspace::Managed(
+                dux_core::model::ManagedWorkspace {
+                    project_id: project.id.clone(),
+                    project_path: Some(project.path.clone()),
+                    source_branch: "main".to_string(),
+                    branch_name: "agent-branch".to_string(),
+                    initial_branch: "agent-branch".to_string(),
+                    branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
+                    worktree_path: tmp.path().join("source").to_string_lossy().to_string(),
+                },
+            ),
         };
         let (worker_tx, worker_rx) = mpsc::channel();
 

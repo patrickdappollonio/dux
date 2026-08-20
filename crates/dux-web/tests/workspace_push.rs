@@ -24,14 +24,7 @@ fn sample_session(id: &str, project_id: &str, worktree: &str) -> dux_core::model
     let now = chrono::Utc::now();
     dux_core::model::AgentSession {
         id: id.to_string(),
-        project_id: project_id.to_string(),
-        project_path: None,
         provider: dux_core::model::ProviderKind::new("claude"),
-        source_branch: "main".to_string(),
-        branch_name: format!("{id}-branch"),
-        initial_branch: format!("{id}-branch"),
-        branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
-        worktree_path: worktree.to_string(),
         title: Some(format!("{id}-title")),
         started_providers: Vec::new(),
         desired_running: true,
@@ -40,6 +33,15 @@ fn sample_session(id: &str, project_id: &str, worktree: &str) -> dux_core::model
         created_at: now,
         updated_at: now,
         last_focused_tab: None,
+        workspace: dux_core::model::AgentWorkspace::Managed(dux_core::model::ManagedWorkspace {
+            project_id: project_id.to_string(),
+            project_path: None,
+            source_branch: "main".to_string(),
+            branch_name: format!("{id}-branch"),
+            initial_branch: format!("{id}-branch"),
+            branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
+            worktree_path: worktree.to_string(),
+        }),
     }
 }
 

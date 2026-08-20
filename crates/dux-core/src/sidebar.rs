@@ -61,10 +61,18 @@ pub fn build_sidebar(
     // Bucket sessions by project id in one O(sessions) pass, preserving engine
     // order within each project, so the per-project lookups below are O(1) and
     // the whole function is O(projects + sessions).
+    // A STANDALONE agent belongs to no project, so it is bucketed under
+    // nothing: it joins no project group and, crucially, mints no orphan group
+    // below either. The orphan arm exists for a session whose project record
+    // vanished; a project-less agent falling into it would put a phantom
+    // project in the sidebar named after an id that never existed.
     let mut by_project: HashMap<&str, Vec<String>> = HashMap::new();
     for session in sessions {
+        let Some(project_id) = session.project_id() else {
+            continue;
+        };
         by_project
-            .entry(session.project_id.as_str())
+            .entry(project_id)
             .or_default()
             .push(session.id.clone());
     }
@@ -98,10 +106,12 @@ pub fn build_sidebar(
     // in first-seen order, appended after the agent-bearing projects.
     let mut seen: HashSet<&str> = HashSet::new();
     for session in sessions {
-        let id = session.project_id.as_str();
+        let Some(id) = session.project_id() else {
+            continue;
+        };
         if !known.contains(id) && seen.insert(id) {
             groups.push(SidebarGroup {
-                project_id: session.project_id.clone(),
+                project_id: id.to_string(),
                 name: short_project_id(id),
                 orphaned: true,
                 path_missing: false,
@@ -130,7 +140,25 @@ pub fn build_sidebar(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::test_support::{sample_project, sample_session};
+    use crate::engine::test_support::{sample_project, sample_session, sample_standalone_session};
+
+    /// A standalone agent belongs to no project, so it appears in no project
+    /// group AND mints no orphan group. The orphan arm is the dangerous one:
+    /// it exists for a session whose project record vanished, and a
+    /// project-less agent falling into it would put a phantom project in the
+    /// sidebar named after an empty id.
+    #[test]
+    fn a_standalone_agent_joins_no_project_group_and_mints_no_orphan() {
+        let projects = vec![sample_project("p1", "/tmp/p1")];
+        let sessions = vec![
+            sample_session("s1", "p1", "b1"),
+            sample_standalone_session("sa1", "/home/someone/notes"),
+        ];
+        let model = build_sidebar(&projects, &sessions, &Default::default(), 0);
+        assert_eq!(model.groups.len(), 1, "no orphan group may appear");
+        assert_eq!(model.groups[0].project_id, "p1");
+        assert_eq!(model.groups[0].session_ids, vec!["s1".to_string()]);
+    }
 
     #[test]
     fn groups_projects_in_order_without_split_below_threshold() {

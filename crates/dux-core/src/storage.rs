@@ -168,6 +168,30 @@ impl SessionStore {
             "branch_provenance",
             "text not null default 'created'",
         )?;
+        // WHICH SHAPE THIS ROW IS: a managed working copy dux owns, or a
+        // folder the user already had. Additive column, same autocommit ALTER
+        // rationale as `initial_branch` above.
+        //
+        // The default is 'managed' for existing rows because every row that
+        // predates this column IS one: there was no other kind of agent. No
+        // backfill beyond the default is needed or possible.
+        //
+        // This column is read FIRST, before any git column is believed,
+        // because a standalone row stores empty text under `project_id`,
+        // `branch_name`, `source_branch`, `initial_branch` and
+        // `worktree_path` (they are NOT NULL, or predate this feature). Read
+        // in the other order those empties become facts: a branch named "", a
+        // worktree path of "" that a delete path would try to remove.
+        ensure_column(
+            &self.conn,
+            "agent_sessions",
+            "workspace_kind",
+            "text not null default 'managed'",
+        )?;
+        // The folder a standalone agent runs in. NULL for a managed row, which
+        // is the honest spelling: there is no folder, as opposed to an empty
+        // one.
+        ensure_column(&self.conn, "agent_sessions", "folder_path", "text")?;
         // Only the backfill UPDATEs run in a transaction so a crash mid-backfill
         // rolls them back and the step is retried cleanly on the next boot (the
         // idempotent/ungated portion below self-heals a partially-applied run).
@@ -184,9 +208,15 @@ impl SessionStore {
             // or a downgrade→re-upgrade window. The true original may already be
             // lost to prior drift, so freeze the current branch as the recorded
             // initial (best available).
+            //
+            // GATED ON THE KIND COLUMN: a standalone row has an empty
+            // `initial_branch` and an empty `branch_name` permanently, by
+            // design. Healing it would write a branch identity onto an agent
+            // that has none, and freeze '' as its recorded birth branch.
             tx.execute(
                 "update agent_sessions set initial_branch = branch_name \
-                 where initial_branch = '' or initial_branch is null",
+                 where workspace_kind = 'managed' \
+                   and (initial_branch = '' or initial_branch is null)",
                 [],
             )?;
             // ONE-TIME backfill, gated on the FIRST appearance of the
@@ -207,8 +237,15 @@ impl SessionStore {
             // `initial_branch`). A future reader seeing this split should know it
             // is the deliberate freeze tradeoff, not an oversight.
             let frozen = if initial_branch_added {
+                //
+                // Gated on the kind column for the same reason as the backfill
+                // above: freezing a standalone row's empty branch name into its
+                // title would leave the row with no label at all. A standalone
+                // agent always has a title anyway (creation enforces one), so
+                // this arm has nothing to do for one.
                 Some(tx.execute(
-                    "update agent_sessions set title = branch_name where title is null",
+                    "update agent_sessions set title = branch_name \
+                     where workspace_kind = 'managed' and title is null",
                     [],
                 )?)
             } else {
@@ -758,26 +795,32 @@ impl SessionStore {
     /// the project row surviving to reappear on restart). Deleting a project row
     /// that does not exist (a ghost id) is a harmless no-op within the same
     /// transaction.
+    /// EVERY statement below scopes on `workspace_kind = 'managed'` as well as
+    /// the project id, and that is not belt and braces. A standalone agent
+    /// stores EMPTY TEXT under `project_id` (the column is NOT NULL), so a
+    /// project whose id is the empty string would otherwise sweep up every
+    /// standalone agent the user has. The kind column, not the project id, is
+    /// what says who owns a row.
     pub fn remove_project_records(&self, project_id: &str) -> Result<Vec<String>> {
         let tx = self.conn.unchecked_transaction()?;
         let ids: Vec<String> = {
-            let mut stmt = tx.prepare("select id from agent_sessions where project_id = ?1")?;
+            let mut stmt = tx.prepare("select id from agent_sessions where project_id = ?1 and workspace_kind = 'managed'")?;
             let rows = stmt.query_map(params![project_id], |row| row.get::<_, String>(0))?;
             rows.collect::<rusqlite::Result<Vec<String>>>()?
         };
         tx.execute(
             "delete from session_prs where session_id in \
-             (select id from agent_sessions where project_id = ?1)",
+             (select id from agent_sessions where project_id = ?1 and workspace_kind = 'managed')",
             params![project_id],
         )?;
         tx.execute(
             "delete from session_pr_overrides where session_id in \
-             (select id from agent_sessions where project_id = ?1)",
+             (select id from agent_sessions where project_id = ?1 and workspace_kind = 'managed')",
             params![project_id],
         )?;
         tx.execute(
             "delete from session_pr_suppressions where session_id in \
-             (select id from agent_sessions where project_id = ?1)",
+             (select id from agent_sessions where project_id = ?1 and workspace_kind = 'managed')",
             params![project_id],
         )?;
         // Drop the per-session changed-files rev counters BEFORE the sessions
@@ -785,7 +828,7 @@ impl SessionStore {
         // so a project removal cannot leave orphaned `changes_rev` rows behind.
         tx.execute(
             "delete from changes_rev where session_id in \
-             (select id from agent_sessions where project_id = ?1)",
+             (select id from agent_sessions where project_id = ?1 and workspace_kind = 'managed')",
             params![project_id],
         )?;
         // Drop the sessions' extra tabs BEFORE the sessions themselves (the
@@ -793,11 +836,11 @@ impl SessionStore {
         // project removal cannot leave orphaned `agent_tabs` rows behind.
         tx.execute(
             "delete from agent_tabs where session_id in \
-             (select id from agent_sessions where project_id = ?1)",
+             (select id from agent_sessions where project_id = ?1 and workspace_kind = 'managed')",
             params![project_id],
         )?;
         tx.execute(
-            "delete from agent_sessions where project_id = ?1",
+            "delete from agent_sessions where project_id = ?1 and workspace_kind = 'managed'",
             params![project_id],
         )?;
         tx.execute("delete from projects where id = ?1", params![project_id])?;
@@ -999,6 +1042,33 @@ impl SessionStore {
     }
 
     pub fn upsert_session(&self, session: &AgentSession) -> Result<()> {
+        // Flatten the workspace into the row's columns ONCE, here, so no SQL
+        // below reaches into the enum. A folder row writes empty text into the
+        // git columns (`project_id` is NOT NULL, and the rest predate the
+        // workspace split); `workspace_kind` is what tells the read path not to
+        // believe them. See the column's migration comment.
+        let managed = session.workspace.as_managed();
+        let workspace_kind = session.workspace.kind().as_str();
+        let folder_path = session.workspace.folder_path();
+        let project_id = managed.map(|m| m.project_id.as_str()).unwrap_or_default();
+        let project_path = managed.and_then(|m| m.project_path.as_deref());
+        let source_branch = managed
+            .map(|m| m.source_branch.as_str())
+            .unwrap_or_default();
+        let branch_name = managed.map(|m| m.branch_name.as_str()).unwrap_or_default();
+        let initial_branch = managed
+            .map(|m| m.initial_branch.as_str())
+            .unwrap_or_default();
+        let worktree_path = managed
+            .map(|m| m.worktree_path.as_str())
+            .unwrap_or_default();
+        let branch_provenance = managed
+            .map(|m| m.branch_provenance.as_str())
+            // Never read back: the read path decides on `workspace_kind`
+            // first, and a folder row has no provenance to parse. Written as
+            // the safe word anyway, so a row inspected by hand cannot suggest
+            // dux may delete a branch here.
+            .unwrap_or("unknown");
         // UPDATE first: existing sessions are re-upserted constantly (status
         // changes, provider starts), and that hot path must not pay the
         // min(sort_order) placement query below. The SET list deliberately
@@ -1026,23 +1096,27 @@ impl SessionStore {
                 auto_reopen_enabled=?10,
                 status=?11,
                 updated_at=?12,
-                initial_branch=?13
+                initial_branch=?13,
+                workspace_kind=?14,
+                folder_path=?15
             where id = ?1
             "#,
             params![
                 session.id,
-                session.project_path,
+                project_path,
                 session.provider.as_str(),
-                session.source_branch,
-                session.branch_name,
-                session.worktree_path,
+                source_branch,
+                branch_name,
+                worktree_path,
                 session.title,
                 serialize_started_providers(&session.started_providers),
                 session.desired_running,
                 session.auto_reopen_enabled,
                 session.status.as_str(),
                 session.updated_at.to_rfc3339(),
-                session.initial_branch,
+                initial_branch,
+                workspace_kind,
+                folder_path,
             ],
         )?;
         if updated > 0 {
@@ -1053,25 +1127,22 @@ impl SessionStore {
         // positions are relative, only their ordering matters). The engine is
         // single-threaded over this connection, so the UPDATE-miss → INSERT
         // sequence cannot race.
-        let new_sort_order = self
-            .min_session_sort_order(&session.project_id)?
-            .unwrap_or(1)
-            - 1;
+        let new_sort_order = self.min_session_sort_order(project_id)?.unwrap_or(1) - 1;
         self.conn.execute(
             r#"
             insert into agent_sessions
-                (id, project_id, project_path, provider, source_branch, branch_name, worktree_path, title, started_providers, desired_running, auto_reopen_enabled, status, sort_order, created_at, updated_at, initial_branch, branch_provenance)
+                (id, project_id, project_path, provider, source_branch, branch_name, worktree_path, title, started_providers, desired_running, auto_reopen_enabled, status, sort_order, created_at, updated_at, initial_branch, branch_provenance, workspace_kind, folder_path)
             values
-                (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+                (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
             "#,
             params![
                 session.id,
-                session.project_id,
-                session.project_path,
+                project_id,
+                project_path,
                 session.provider.as_str(),
-                session.source_branch,
-                session.branch_name,
-                session.worktree_path,
+                source_branch,
+                branch_name,
+                worktree_path,
                 session.title,
                 serialize_started_providers(&session.started_providers),
                 session.desired_running,
@@ -1080,8 +1151,10 @@ impl SessionStore {
                 new_sort_order,
                 session.created_at.to_rfc3339(),
                 session.updated_at.to_rfc3339(),
-                session.initial_branch,
-                session.branch_provenance.as_str(),
+                initial_branch,
+                branch_provenance,
+                workspace_kind,
+                folder_path,
             ],
         )?;
         Ok(())
@@ -1219,7 +1292,7 @@ impl SessionStore {
     pub fn load_sessions(&self) -> Result<Vec<AgentSession>> {
         let mut stmt = self.conn.prepare(
             r#"
-            select id, project_id, provider, source_branch, branch_name, worktree_path, title, project_path, started_providers, desired_running, auto_reopen_enabled, status, created_at, updated_at, initial_branch, last_focused_tab, branch_provenance
+            select id, project_id, provider, source_branch, branch_name, worktree_path, title, project_path, started_providers, desired_running, auto_reopen_enabled, status, created_at, updated_at, initial_branch, last_focused_tab, branch_provenance, workspace_kind, folder_path
             from agent_sessions
             order by sort_order asc, updated_at desc
             "#,
@@ -1228,26 +1301,45 @@ impl SessionStore {
             let started_providers: String = row.get(8)?;
             let created_at: String = row.get(12)?;
             let updated_at: String = row.get(13)?;
+            // THE KIND COLUMN IS READ FIRST, before any git column is
+            // believed. A folder row stores empty text in all of them, and
+            // reading them in the other order would turn those empties into
+            // facts about a branch, a project and a worktree that do not exist.
+            let kind = crate::model::AgentWorkspaceKind::from_str(
+                row.get::<_, String>(17).unwrap_or_default().as_str(),
+            );
+            let workspace = match kind {
+                crate::model::AgentWorkspaceKind::Managed => {
+                    crate::model::AgentWorkspace::Managed(crate::model::ManagedWorkspace {
+                        project_id: row.get::<_, String>(1).unwrap_or_default(),
+                        project_path: row.get(7)?,
+                        source_branch: row.get(3)?,
+                        branch_name: row.get(4)?,
+                        initial_branch: row.get(14)?,
+                        branch_provenance: crate::model::BranchProvenance::from_str(
+                            row.get::<_, String>(16)?.as_str(),
+                        ),
+                        worktree_path: row.get(5)?,
+                    })
+                }
+                crate::model::AgentWorkspaceKind::Folder => {
+                    crate::model::AgentWorkspace::Folder(crate::model::FolderWorkspace {
+                        folder_path: row.get::<_, Option<String>>(18)?.unwrap_or_default(),
+                    })
+                }
+            };
             Ok(AgentSession {
                 id: row.get(0)?,
-                project_id: row.get::<_, String>(1).unwrap_or_default(),
                 provider: crate::model::ProviderKind::from_str(row.get::<_, String>(2)?.as_str()),
-                source_branch: row.get(3)?,
-                branch_name: row.get(4)?,
-                worktree_path: row.get(5)?,
+                workspace,
                 title: row.get(6)?,
-                project_path: row.get(7)?,
                 started_providers: parse_started_providers(&started_providers),
                 desired_running: row.get(9)?,
                 auto_reopen_enabled: row.get(10)?,
                 status: SessionStatus::from_str(row.get::<_, String>(11)?.as_str()),
                 created_at: parse_time(&created_at).unwrap_or_else(Utc::now),
                 updated_at: parse_time(&updated_at).unwrap_or_else(Utc::now),
-                initial_branch: row.get(14)?,
                 last_focused_tab: row.get(15)?,
-                branch_provenance: crate::model::BranchProvenance::from_str(
-                    row.get::<_, String>(16)?.as_str(),
-                ),
             })
         })?;
 
@@ -1381,14 +1473,7 @@ fn test_session(
 ) -> crate::model::AgentSession {
     crate::model::AgentSession {
         id: id.to_string(),
-        project_id: "proj".to_string(),
-        project_path: None,
         provider: crate::model::ProviderKind::new("claude"),
-        source_branch: "main".to_string(),
-        branch_name: format!("branch-{id}"),
-        initial_branch: format!("branch-{id}"),
-        branch_provenance: crate::model::BranchProvenance::CreatedByDux,
-        worktree_path: format!("/tmp/{id}"),
         title: None,
         started_providers: Vec::new(),
         desired_running: false,
@@ -1397,6 +1482,15 @@ fn test_session(
         created_at,
         updated_at,
         last_focused_tab: None,
+        workspace: crate::model::AgentWorkspace::Managed(crate::model::ManagedWorkspace {
+            project_id: "proj".to_string(),
+            project_path: None,
+            source_branch: "main".to_string(),
+            branch_name: format!("branch-{id}"),
+            initial_branch: format!("branch-{id}"),
+            branch_provenance: crate::model::BranchProvenance::CreatedByDux,
+            worktree_path: format!("/tmp/{id}"),
+        }),
     }
 }
 
@@ -1409,10 +1503,13 @@ fn test_session_in(
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 ) -> crate::model::AgentSession {
-    crate::model::AgentSession {
-        project_id: project_id.to_string(),
-        ..test_session(id, created_at, updated_at)
-    }
+    let mut session = test_session(id, created_at, updated_at);
+    session
+        .workspace
+        .as_managed_mut()
+        .expect("test_session builds a managed agent")
+        .project_id = project_id.to_string();
+    session
 }
 
 /// Builds an extra-tab row owned by `session_id`.
@@ -1430,7 +1527,166 @@ fn test_tab(id: &str, session_id: &str, sort_order: i64) -> crate::model::AgentT
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{AgentWorkspace, FolderWorkspace};
     use chrono::Duration;
+
+    fn standalone_session(id: &str, folder: &str) -> AgentSession {
+        let now = Utc::now();
+        AgentSession {
+            id: id.to_string(),
+            provider: crate::model::ProviderKind::new("claude"),
+            workspace: AgentWorkspace::Folder(FolderWorkspace {
+                folder_path: folder.to_string(),
+            }),
+            title: Some(format!("{id} title")),
+            started_providers: Vec::new(),
+            desired_running: true,
+            auto_reopen_enabled: true,
+            status: SessionStatus::Active,
+            created_at: now,
+            updated_at: now,
+            last_focused_tab: None,
+        }
+    }
+
+    fn sample_project_row(id: &str, path: &str) -> ProjectConfig {
+        ProjectConfig {
+            id: id.to_string(),
+            path: path.to_string(),
+            name: Some(id.to_string()),
+            default_provider: None,
+            leading_branch: None,
+            auto_reopen_agents: None,
+            startup_command: None,
+            env: Default::default(),
+        }
+    }
+
+    fn temp_store() -> (tempfile::TempDir, SessionStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(&dir.path().join("sessions.sqlite3")).unwrap();
+        (dir, store)
+    }
+
+    /// The row's git columns hold empty text for a standalone agent (the
+    /// schema's `project_id` is NOT NULL and the rest predate this feature), so
+    /// the load path must decide the SHAPE off the kind column BEFORE any git
+    /// field is believed. If it did not, the empties would come back as facts:
+    /// a branch named "", a project id that matches nothing, and a worktree
+    /// path of "" that some delete path would try to remove.
+    #[test]
+    fn a_standalone_row_round_trips_as_a_folder_and_never_as_empty_git_fields() {
+        let (_dir, store) = temp_store();
+        store
+            .upsert_session(&standalone_session("sa1", "/home/someone/notes"))
+            .unwrap();
+
+        let loaded = store.load_sessions().unwrap();
+        let session = loaded.iter().find(|s| s.id == "sa1").expect("row");
+        assert_eq!(session.folder_path(), Some("/home/someone/notes"));
+        assert_eq!(session.branch_name(), None);
+        assert_eq!(session.project_id(), None);
+        assert_eq!(session.managed_worktree(), None);
+        assert_eq!(session.branch_provenance(), None);
+        assert_eq!(session.directory(), "/home/someone/notes");
+    }
+
+    #[test]
+    fn an_update_of_a_standalone_row_keeps_it_a_folder() {
+        let (_dir, store) = temp_store();
+        let mut session = standalone_session("sa1", "/home/someone/notes");
+        store.upsert_session(&session).unwrap();
+        session.title = Some("renamed".to_string());
+        store.upsert_session(&session).unwrap();
+
+        let loaded = store.load_sessions().unwrap();
+        let session = loaded.iter().find(|s| s.id == "sa1").expect("row");
+        assert_eq!(session.title.as_deref(), Some("renamed"));
+        assert_eq!(session.folder_path(), Some("/home/someone/notes"));
+        assert_eq!(session.branch_name(), None);
+    }
+
+    /// The self-healing backfill freezes an empty `initial_branch` to
+    /// `branch_name`. A standalone row has both empty and must be left alone:
+    /// healing it would write a branch identity onto an agent that has none,
+    /// and the kind column is what makes that gate possible.
+    #[test]
+    fn the_initial_branch_healing_never_touches_a_standalone_row() {
+        let (_dir, store) = temp_store();
+        store
+            .upsert_session(&standalone_session("sa1", "/home/someone/notes"))
+            .unwrap();
+        store.migrate().unwrap();
+
+        let loaded = store.load_sessions().unwrap();
+        let session = loaded.iter().find(|s| s.id == "sa1").expect("row");
+        assert_eq!(session.branch_name(), None);
+        assert_eq!(session.initial_branch(), None);
+    }
+
+    /// The one-time title freeze writes `title = branch_name` for NULL titles.
+    /// A standalone agent always has a title, but the gate must hold anyway:
+    /// an empty branch name frozen into a title would render a nameless row.
+    #[test]
+    fn the_title_freeze_never_gives_a_standalone_row_an_empty_name() {
+        let (_dir, store) = temp_store();
+        let mut session = standalone_session("sa1", "/home/someone/notes");
+        session.title = None;
+        store.upsert_session(&session).unwrap();
+        store.migrate().unwrap();
+
+        let loaded = store.load_sessions().unwrap();
+        let session = loaded.iter().find(|s| s.id == "sa1").expect("row");
+        assert_ne!(
+            session.title.as_deref(),
+            Some(""),
+            "a frozen empty branch name would leave the row with no label at all"
+        );
+        assert!(!session.display_label().is_empty());
+    }
+
+    /// A standalone row stores empty text under `project_id` (the column is NOT
+    /// NULL). `remove_project_records` scopes by a project-id subquery, so an
+    /// empty id can never match a real project's cascade. Pinned anyway,
+    /// because this is the difference between removing one project and
+    /// mass-deleting every standalone agent the user has.
+    #[test]
+    fn removing_a_project_never_cascades_into_standalone_agents() {
+        let (_dir, store) = temp_store();
+        store
+            .upsert_project(&sample_project_row("p1", "/tmp/p1"))
+            .unwrap();
+        store
+            .upsert_session(&standalone_session("sa1", "/home/someone/notes"))
+            .unwrap();
+
+        store.remove_project_records("p1").unwrap();
+
+        let loaded = store.load_sessions().unwrap();
+        assert!(
+            loaded.iter().any(|s| s.id == "sa1"),
+            "a standalone agent belongs to no project and must survive every project removal"
+        );
+    }
+
+    /// And the pathological spelling of the same thing: a project whose id is
+    /// literally the empty string must not sweep up the standalone rows whose
+    /// stored project id is also empty.
+    #[test]
+    fn even_a_project_with_an_empty_id_cannot_cascade_into_standalone_agents() {
+        let (_dir, store) = temp_store();
+        store
+            .upsert_session(&standalone_session("sa1", "/home/someone/notes"))
+            .unwrap();
+
+        store.remove_project_records("").unwrap();
+
+        let loaded = store.load_sessions().unwrap();
+        assert!(
+            loaded.iter().any(|s| s.id == "sa1"),
+            "the kind column, not the project id, is what says who owns a row"
+        );
+    }
 
     /// The database mirrors the same per-project `env` map that made
     /// `config.toml` `0600`, and SQLite's `-wal`/`-shm` sidecars carry the same
@@ -2156,14 +2412,23 @@ mod tests {
         let store = test_store();
         let now = Utc::now();
         let mut s = test_session("id1", now, now);
-        s.branch_name = "renamed".into();
-        s.initial_branch = "born-on".into();
+        s.workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .branch_name = "renamed".into();
+        s.workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .initial_branch = "born-on".into();
         store.upsert_session(&s).unwrap();
 
         let loaded = store.load_sessions().unwrap();
         let got = loaded.iter().find(|s| s.id == "id1").expect("stored id1");
-        assert_eq!(got.initial_branch, "born-on");
-        assert_eq!(got.branch_name, "renamed");
+        assert_eq!(
+            got.initial_branch().expect("managed test session"),
+            "born-on"
+        );
+        assert_eq!(got.branch_name().expect("managed test session"), "renamed");
     }
 
     #[test]
@@ -2177,14 +2442,20 @@ mod tests {
         ];
         for (id, provenance) in cases {
             let mut s = test_session(id, now, now);
-            s.branch_provenance = provenance;
+            s.workspace
+                .as_managed_mut()
+                .expect("managed test session")
+                .branch_provenance = provenance;
             store.upsert_session(&s).unwrap();
         }
 
         let loaded = store.load_sessions().unwrap();
         for (id, provenance) in cases {
             let got = loaded.iter().find(|s| s.id == id).expect("stored row");
-            assert_eq!(got.branch_provenance, provenance);
+            assert_eq!(
+                got.branch_provenance().expect("managed test session"),
+                provenance
+            );
         }
     }
 
@@ -2197,18 +2468,24 @@ mod tests {
         let store = test_store();
         let now = Utc::now();
         let mut s = test_session("id1", now, now);
-        s.branch_provenance = crate::model::BranchProvenance::AttachedExisting;
+        s.workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .branch_provenance = crate::model::BranchProvenance::AttachedExisting;
         store.upsert_session(&s).unwrap();
 
         // A later status-churn upsert claiming the branch is dux's must not stick.
-        s.branch_provenance = crate::model::BranchProvenance::CreatedByDux;
+        s.workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .branch_provenance = crate::model::BranchProvenance::CreatedByDux;
         s.status = SessionStatus::Detached;
         store.upsert_session(&s).unwrap();
 
         let loaded = store.load_sessions().unwrap();
         let got = loaded.iter().find(|s| s.id == "id1").expect("stored id1");
         assert_eq!(
-            got.branch_provenance,
+            got.branch_provenance().expect("managed test session"),
             crate::model::BranchProvenance::AttachedExisting,
             "re-upserting a session must never rewrite its recorded provenance"
         );
@@ -2227,7 +2504,7 @@ mod tests {
         let loaded = store.load_sessions().unwrap();
         let s = loaded.iter().find(|s| s.id == "feat-x").expect("row");
         assert_eq!(
-            s.branch_provenance,
+            s.branch_provenance().expect("managed test session"),
             crate::model::BranchProvenance::CreatedByDux
         );
     }
@@ -2268,7 +2545,7 @@ mod tests {
 
         let loaded = store.load_sessions().unwrap();
         assert!(
-            !loaded[0].branch_provenance.dux_may_delete_branch(),
+            !loaded[0].workspace.dux_may_delete_branch(),
             "an unrecognized provenance must keep the branch"
         );
     }
@@ -2291,7 +2568,7 @@ mod tests {
         let store = legacy_store_with_sessions(&[("feat-x", "p1", "2026-01-01T00:00:00Z")]);
         let loaded = store.load_sessions().unwrap();
         let s = loaded.iter().find(|s| s.id == "feat-x").expect("row");
-        assert_eq!(s.initial_branch, "feat-x");
+        assert_eq!(s.initial_branch().expect("managed test session"), "feat-x");
     }
 
     #[test]
@@ -2305,8 +2582,16 @@ mod tests {
         // second migration must NOT re-run the backfill and freeze the NULL title.
         let store = legacy_store_with_sessions(&[("feat-x", "p1", "2026-01-01T00:00:00Z")]);
         let mut fresh = test_session("auto-named", Utc::now(), Utc::now());
-        fresh.project_id = "p1".into();
-        fresh.branch_name = "pet-name".into();
+        fresh
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .project_id = "p1".into();
+        fresh
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .branch_name = "pet-name".into();
         fresh.title = None;
         store.upsert_session(&fresh).unwrap();
 
@@ -2341,7 +2626,8 @@ mod tests {
         let loaded = store.load_sessions().unwrap();
         let s = loaded.iter().find(|s| s.id == "feat-x").expect("row");
         assert_eq!(
-            s.initial_branch, "feat-x",
+            s.initial_branch().expect("managed test session"),
+            "feat-x",
             "an empty initial_branch must be self-healed to branch_name on migrate()"
         );
     }
@@ -2603,7 +2889,7 @@ mod tests {
         let loaded = store.load_sessions().unwrap();
         let ordered: Vec<(&str, &str)> = loaded
             .iter()
-            .map(|s| (s.project_id.as_str(), s.id.as_str()))
+            .map(|s| (s.project_id().expect("managed test session"), s.id.as_str()))
             .collect();
 
         // Group the loaded ids by project and assert each project's internal
@@ -2708,7 +2994,7 @@ mod tests {
             .load_sessions()
             .unwrap()
             .into_iter()
-            .filter(|s| s.project_id == "p2")
+            .filter(|s| s.project_id().expect("managed test session") == "p2")
             .map(|s| s.id)
             .collect();
         assert_eq!(p2_ids, vec!["b"]);

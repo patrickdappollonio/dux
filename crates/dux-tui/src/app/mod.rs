@@ -5943,14 +5943,7 @@ mod tests {
         let now = Utc::now() + chrono::Duration::seconds(created_offset);
         AgentSession {
             id: id.to_string(),
-            project_id: project_id.to_string(),
-            project_path: Some(format!("/tmp/{project_id}")),
             provider: ProviderKind::from_str("codex"),
-            source_branch: "main".to_string(),
-            branch_name: id.to_string(),
-            initial_branch: id.to_string(),
-            branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
-            worktree_path: format!("/tmp/worktrees/{id}"),
             title: None,
             started_providers: Vec::new(),
             desired_running: false,
@@ -5959,6 +5952,17 @@ mod tests {
             created_at: now,
             updated_at: now,
             last_focused_tab: None,
+            workspace: dux_core::model::AgentWorkspace::Managed(
+                dux_core::model::ManagedWorkspace {
+                    project_id: project_id.to_string(),
+                    project_path: Some(format!("/tmp/{project_id}")),
+                    source_branch: "main".to_string(),
+                    branch_name: id.to_string(),
+                    initial_branch: id.to_string(),
+                    branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
+                    worktree_path: format!("/tmp/worktrees/{id}"),
+                },
+            ),
         }
     }
 
@@ -5966,9 +5970,18 @@ mod tests {
     fn agent_info_lines_include_lineage_and_drift() {
         let mut s = test_session("s1", "p1", 0);
         s.title = Some("server-mode".into());
-        s.branch_name = "agent-tabs".into();
-        s.initial_branch = "server-mode".into();
-        s.source_branch = "main".into();
+        s.workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .branch_name = "agent-tabs".into();
+        s.workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .initial_branch = "server-mode".into();
+        s.workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .source_branch = "main".into();
 
         let lines = agent_info_lines(&s, None, None);
         assert!(lines.iter().any(|(l, _)| l.contains("agent-tabs"))); // current branch
@@ -5993,8 +6006,14 @@ mod tests {
     #[test]
     fn agent_info_lines_omit_drift_line_when_no_drift() {
         let mut s = test_session("s1", "p1", 0);
-        s.branch_name = "main".into();
-        s.initial_branch = "main".into();
+        s.workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .branch_name = "main".into();
+        s.workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .initial_branch = "main".into();
         let lines = agent_info_lines(&s, None, None);
         // Both checks below are shaped so they would pass on an EMPTY list, so
         // pin that there is something to check first. Without this the test
@@ -6019,8 +6038,14 @@ mod tests {
     #[test]
     fn agent_info_lines_omit_drift_line_when_initial_empty() {
         let mut s = test_session("s1", "p1", 0);
-        s.branch_name = "main".into();
-        s.initial_branch = String::new();
+        s.workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .branch_name = "main".into();
+        s.workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .initial_branch = String::new();
         let lines = agent_info_lines(&s, None, None);
         assert!(
             !lines
@@ -6355,7 +6380,10 @@ mod tests {
         let mk = |id: &str, name: &str| {
             let mut s = test_session(id, "p", 0);
             s.status = SessionStatus::Active;
-            s.branch_name = name.to_string();
+            s.workspace
+                .as_managed_mut()
+                .expect("managed test session")
+                .branch_name = name.to_string();
             s.title = None;
             s
         };
@@ -6402,7 +6430,10 @@ mod tests {
         let mk = |id: &str, name: &str| {
             let mut s = test_session(id, "p", 0);
             s.status = SessionStatus::Active;
-            s.branch_name = name.to_string();
+            s.workspace
+                .as_managed_mut()
+                .expect("managed test session")
+                .branch_name = name.to_string();
             s
         };
         let sessions = vec![mk("s0", "charlie"), mk("s1", "alpha"), mk("s2", "bravo")];
@@ -6426,7 +6457,10 @@ mod tests {
         let mk = |id: &str, name: &str, status: SessionStatus| {
             let mut s = test_session(id, "p", 0);
             s.status = status;
-            s.branch_name = name.to_string();
+            s.workspace
+                .as_managed_mut()
+                .expect("managed test session")
+                .branch_name = name.to_string();
             s.title = None;
             s
         };
@@ -6535,7 +6569,10 @@ mod tests {
         let mk = |id: &str| {
             let mut s = test_session(id, "p", 0);
             s.status = SessionStatus::Active;
-            s.branch_name = "same".to_string();
+            s.workspace
+                .as_managed_mut()
+                .expect("managed test session")
+                .branch_name = "same".to_string();
             s.title = None;
             s.updated_at = t;
             s.created_at = t;
@@ -6621,8 +6658,16 @@ mod tests {
         app.engine.sessions[0].status = SessionStatus::Active;
         let mut quiet = app.engine.sessions[0].clone();
         quiet.id = "session-quiet".to_string();
-        quiet.branch_name = "quiet-fox".to_string();
-        quiet.initial_branch = "quiet-fox".to_string();
+        quiet
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .branch_name = "quiet-fox".to_string();
+        quiet
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .initial_branch = "quiet-fox".to_string();
         quiet.title = None;
         quiet.status = SessionStatus::Exited;
         app.engine.sessions.push(quiet);

@@ -233,6 +233,106 @@ pub enum RepoPathKind {
     Indeterminate,
 }
 
+/// What a standalone agent's folder is, as far as a changes panel is
+/// concerned. Derived from [`repo_path_kind`]; there is deliberately no second
+/// detector, because two of them would drift and this is the decision that
+/// keeps dux from staging into somebody else's repository.
+///
+/// The distinction that matters: git answers questions by walking UP parent
+/// directories, so a folder INSIDE a repository would happily report, stage and
+/// commit to the parent. A "working repository" therefore means the folder is
+/// itself the repository's top level, compared on canonical paths so a symlink
+/// cannot fake it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FolderRepoStatus {
+    /// The folder IS a repository's top level. The changes panel works here
+    /// exactly as it does for a managed worktree.
+    WorkingRepo,
+    /// The folder sits inside a repository rooted somewhere else. Quiet, on
+    /// purpose: everything the panel could show would belong to that other
+    /// repository.
+    InsideRepoRootedElsewhere,
+    /// Git sees no repository here at all. Also the answer for a bare
+    /// repository (no work tree to show) and for git's own internals.
+    NoRepo,
+    /// Git could not be consulted. Honest-quiet: the panel says exactly that,
+    /// and every mutation is refused, matching the `CommitState` doctrine of
+    /// failing closed on an unknown answer.
+    Indeterminate,
+}
+
+impl FolderRepoStatus {
+    /// Whether the changes panel shows a real repository view here.
+    pub fn changes_panel_works(self) -> bool {
+        match self {
+            Self::WorkingRepo => true,
+            Self::InsideRepoRootedElsewhere | Self::NoRepo | Self::Indeterminate => false,
+        }
+    }
+
+    /// Whether staging, unstaging, discarding and committing are allowed.
+    /// Fails closed on [`Self::Indeterminate`]: a mutation on a guess is how a
+    /// folder dux does not understand gets written to.
+    pub fn mutations_allowed(self) -> bool {
+        match self {
+            Self::WorkingRepo => true,
+            Self::InsideRepoRootedElsewhere | Self::NoRepo | Self::Indeterminate => false,
+        }
+    }
+
+    /// Whether git can see files written at this path, which is a DIFFERENT
+    /// question from whether the changes panel works. A folder inside somebody
+    /// else's repository is exactly where an unignored upload directory would
+    /// pollute their `git status`, so it gets the self-gitignoring seed even
+    /// though its own panel stays quiet. A plain folder gets no junk written
+    /// into it, and an unconsultable git also gets nothing.
+    pub fn git_can_see_path(self) -> bool {
+        match self {
+            Self::WorkingRepo | Self::InsideRepoRootedElsewhere => true,
+            Self::NoRepo | Self::Indeterminate => false,
+        }
+    }
+
+    /// Why the changes region is quiet, in one sentence the user can act on.
+    /// Never "the repository is busy", which is what the non-repo error path
+    /// would otherwise misreport once per poll.
+    pub fn quiet_reason(self) -> &'static str {
+        match self {
+            // Never rendered (the panel works), answered so the match stays
+            // exhaustive and a future caller cannot get a panic.
+            Self::WorkingRepo => "This folder is a git repository.",
+            Self::InsideRepoRootedElsewhere => {
+                "This folder sits inside a repository rooted elsewhere, so dux shows no changes for it. \
+                 Point an agent at that repository's top level, or add it as a project, to work with its changes."
+            }
+            Self::NoRepo => {
+                "This folder has no git repository, so there are no changes to show. \
+                 Run git init in it and reopen this panel if you want dux to track its changes."
+            }
+            Self::Indeterminate => {
+                "dux could not consult git about this folder, so it cannot say whether it has changes. \
+                 Check that git is installed and that the folder is readable, then reopen this panel."
+            }
+        }
+    }
+}
+
+/// Classify a standalone agent's folder per [`FolderRepoStatus`].
+///
+/// A bare repository and git's own internals both answer [`FolderRepoStatus::NoRepo`]
+/// rather than getting variants of their own: from the changes panel's point of
+/// view they are the same fact, that there is no work tree here to show.
+pub fn folder_repo_status(path: &Path) -> FolderRepoStatus {
+    match repo_path_kind(path) {
+        RepoPathKind::WorkTreeRoot => FolderRepoStatus::WorkingRepo,
+        RepoPathKind::InsideWorkTree { .. } => FolderRepoStatus::InsideRepoRootedElsewhere,
+        RepoPathKind::BareRoot | RepoPathKind::InsideGitDir { .. } | RepoPathKind::NotARepo => {
+            FolderRepoStatus::NoRepo
+        }
+        RepoPathKind::Indeterminate => FolderRepoStatus::Indeterminate,
+    }
+}
+
 /// Classify `path` per [`RepoPathKind`] using plumbing only.
 ///
 /// The `--is-inside-git-dir` rung exists because inside a normal repo's
@@ -7684,6 +7784,112 @@ mod tests {
         // A non-repo path can't be classified — Indeterminate, never Unborn.
         let tmp = tempfile::tempdir().unwrap();
         assert_eq!(repo_commit_state(tmp.path()), CommitState::Indeterminate);
+    }
+
+    /// The plan's worst hazard: git answers questions by walking UP parent
+    /// directories, so a folder inside somebody else's repository would happily
+    /// report, stage and commit to the parent. Only the repository's own top
+    /// level counts as a working repository.
+    #[test]
+    fn a_folder_is_a_working_repo_only_when_it_is_the_repositorys_top_level() {
+        let repo = init_test_repo();
+        assert_eq!(
+            folder_repo_status(repo.path()),
+            FolderRepoStatus::WorkingRepo
+        );
+
+        let sub = repo.path().join("src");
+        std::fs::create_dir(&sub).unwrap();
+        assert_eq!(
+            folder_repo_status(&sub),
+            FolderRepoStatus::InsideRepoRootedElsewhere,
+            "a folder inside a repository must never drive the parent's changes panel"
+        );
+
+        let plain = tempfile::tempdir().unwrap();
+        assert_eq!(folder_repo_status(plain.path()), FolderRepoStatus::NoRepo);
+
+        let bare = tempfile::tempdir().unwrap();
+        let out = test_support::git_command()
+            .args(["init", "--bare"])
+            .current_dir(bare.path())
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        assert_eq!(
+            folder_repo_status(bare.path()),
+            FolderRepoStatus::NoRepo,
+            "a bare repository has no work tree, so there is nothing for a changes panel to show"
+        );
+
+        let git_dir = repo.path().join(".git");
+        assert_eq!(
+            folder_repo_status(&git_dir),
+            FolderRepoStatus::NoRepo,
+            "git's own internals are the quiet case, not a working repository"
+        );
+    }
+
+    /// Symlinks must not be able to fake a top level: the comparison is on
+    /// canonical paths, which is what `repo_path_kind` already does.
+    #[test]
+    fn a_symlink_to_a_repository_root_still_reads_as_that_root() {
+        let repo = init_test_repo();
+        let holder = tempfile::tempdir().unwrap();
+        let link = holder.path().join("link-to-repo");
+        std::os::unix::fs::symlink(repo.path(), &link).unwrap();
+        assert_eq!(folder_repo_status(&link), FolderRepoStatus::WorkingRepo);
+    }
+
+    #[test]
+    fn only_a_working_repo_lets_the_changes_panel_mutate_anything() {
+        assert!(FolderRepoStatus::WorkingRepo.changes_panel_works());
+        assert!(FolderRepoStatus::WorkingRepo.mutations_allowed());
+        for quiet in [
+            FolderRepoStatus::InsideRepoRootedElsewhere,
+            FolderRepoStatus::NoRepo,
+            FolderRepoStatus::Indeterminate,
+        ] {
+            assert!(!quiet.changes_panel_works(), "{quiet:?}");
+            assert!(!quiet.mutations_allowed(), "{quiet:?}");
+        }
+    }
+
+    /// The upload seed follows "can git see this path", which is a DIFFERENT
+    /// question from "does the changes panel work here": a folder inside
+    /// somebody's repository is exactly where an unignored upload directory
+    /// would pollute their status.
+    #[test]
+    fn the_upload_seed_follows_git_visibility_and_fails_closed_when_unsure() {
+        assert!(FolderRepoStatus::WorkingRepo.git_can_see_path());
+        assert!(FolderRepoStatus::InsideRepoRootedElsewhere.git_can_see_path());
+        assert!(!FolderRepoStatus::NoRepo.git_can_see_path());
+        assert!(
+            !FolderRepoStatus::Indeterminate.git_can_see_path(),
+            "when git cannot be consulted, dux writes nothing into the user's folder"
+        );
+    }
+
+    /// Each quiet case says why it is quiet, and never says "git is busy",
+    /// which is what today's non-repo error path would misreport.
+    #[test]
+    fn every_quiet_folder_says_why_in_its_own_words() {
+        let inside = FolderRepoStatus::InsideRepoRootedElsewhere.quiet_reason();
+        assert!(inside.contains("rooted elsewhere"), "got {inside:?}");
+        let none = FolderRepoStatus::NoRepo.quiet_reason();
+        assert!(none.contains("no git repository"), "got {none:?}");
+        let unsure = FolderRepoStatus::Indeterminate.quiet_reason();
+        assert!(unsure.contains("could not consult git"), "got {unsure:?}");
+        for status in [
+            FolderRepoStatus::InsideRepoRootedElsewhere,
+            FolderRepoStatus::NoRepo,
+            FolderRepoStatus::Indeterminate,
+        ] {
+            assert!(
+                !status.quiet_reason().to_lowercase().contains("busy"),
+                "a quiet folder is never a busy repository: {status:?}"
+            );
+        }
     }
 
     #[test]

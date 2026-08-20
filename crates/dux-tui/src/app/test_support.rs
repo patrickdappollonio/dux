@@ -104,14 +104,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         .expect("seed project");
     let session = AgentSession {
         id: "session-1".to_string(),
-        project_id: project.id.clone(),
-        project_path: Some(project.path.clone()),
         provider: ProviderKind::from_str("codex"),
-        source_branch: "main".to_string(),
-        branch_name: "agent-branch".to_string(),
-        initial_branch: "agent-branch".to_string(),
-        branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
-        worktree_path: paths.worktrees_root.to_string_lossy().to_string(),
         title: None,
         started_providers: Vec::new(),
         desired_running: false,
@@ -120,6 +113,15 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         created_at: now,
         updated_at: now,
         last_focused_tab: None,
+        workspace: dux_core::model::AgentWorkspace::Managed(dux_core::model::ManagedWorkspace {
+            project_id: project.id.clone(),
+            project_path: Some(project.path.clone()),
+            source_branch: "main".to_string(),
+            branch_name: "agent-branch".to_string(),
+            initial_branch: "agent-branch".to_string(),
+            branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
+            worktree_path: paths.worktrees_root.to_string_lossy().to_string(),
+        }),
     };
     let (worker_tx, worker_rx) = mpsc::channel();
     let single_instance_lock = crate::lockfile::SingleInstanceLock::acquire(&paths.lock_path)

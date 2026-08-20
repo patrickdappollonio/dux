@@ -11157,8 +11157,16 @@ mod tests {
         let project_branch = app.engine.projects[0].current_branch.clone();
         {
             let session = &mut app.engine.sessions[0];
-            session.branch_name = project_branch.clone();
-            session.initial_branch = "server-mode".to_string();
+            session
+                .workspace
+                .as_managed_mut()
+                .expect("managed test session")
+                .branch_name = project_branch.clone();
+            session
+                .workspace
+                .as_managed_mut()
+                .expect("managed test session")
+                .initial_branch = "server-mode".to_string();
         }
 
         let backend = TestBackend::new(120, 40);
@@ -12396,7 +12404,11 @@ mod tests {
         let first_id = app.engine.sessions[0].id.clone();
         let mut second = app.engine.sessions[0].clone();
         second.id = "session-two".to_string();
-        second.branch_name = "second".to_string();
+        second
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .branch_name = "second".to_string();
         let second_id = second.id.clone();
         app.engine.sessions.push(second);
         app.rebuild_left_items();

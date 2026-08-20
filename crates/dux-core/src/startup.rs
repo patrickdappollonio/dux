@@ -15,6 +15,14 @@ pub const LOG_ROOT: &str = "startup-command-logs";
 pub struct StartupCommandRun {
     pub project: Project,
     pub session: AgentSession,
+    /// The agent's managed working copy, carried beside the session rather than
+    /// read back out of it.
+    ///
+    /// A startup command is a WORKTREE PROVISIONING step belonging to a
+    /// project, so it only ever runs for a managed agent. Requiring the managed
+    /// payload here is what makes that structural: a standalone agent has no
+    /// value of this type to offer, so no caller can build a run for one.
+    pub managed: crate::model::ManagedWorkspace,
     pub command: String,
     pub terminal: StartupCommandTerminalConfig,
     pub env: Vec<(String, String)>,
@@ -211,7 +219,7 @@ pub fn run_startup_command(paths: &DuxPaths, run: StartupCommandRun) -> StartupC
     let log_dir = agent_log_dir(paths, &run.project.id, &run.session.id);
     let timestamp = Utc::now();
     let file_stamp = timestamp.format("%Y%m%dT%H%M%SZ");
-    let safe_branch = sanitize_file_component(&run.session.branch_name);
+    let safe_branch = sanitize_file_component(&run.managed.branch_name);
     let log_path = log_dir.join(format!("{file_stamp}-{safe_branch}.log"));
     let result = (|| -> Result<CommandOutcome> {
         fs::create_dir_all(&log_dir)
@@ -224,11 +232,11 @@ pub fn run_startup_command(paths: &DuxPaths, run: StartupCommandRun) -> StartupC
         command
             .args(&shell_args)
             .arg(&run.command)
-            .current_dir(&run.session.worktree_path)
+            .current_dir(&run.managed.worktree_path)
             .env("DUX_PROJECT_PATH", &run.project.path)
-            .env("DUX_WORKTREE_PATH", &run.session.worktree_path)
+            .env("DUX_WORKTREE_PATH", &run.managed.worktree_path)
             .env("DUX_AGENT_ID", &run.session.id)
-            .env("DUX_AGENT_BRANCH", &run.session.branch_name)
+            .env("DUX_AGENT_BRANCH", &run.managed.branch_name)
             .env("DUX_PROVIDER", run.session.provider.as_str())
             .env("DUX_STARTUP_COMMAND_LOG", &log_path);
         for (name, value) in &run.env {
@@ -332,8 +340,8 @@ fn write_log(path: &Path, run: &StartupCommandRun, outcome: &CommandOutcome) -> 
     body.push_str(&format!("project_name = {}\n", run.project.name));
     body.push_str(&format!("project_path = {}\n", run.project.path));
     body.push_str(&format!("agent_id = {}\n", run.session.id));
-    body.push_str(&format!("agent_branch = {}\n", run.session.branch_name));
-    body.push_str(&format!("worktree_path = {}\n", run.session.worktree_path));
+    body.push_str(&format!("agent_branch = {}\n", run.managed.branch_name));
+    body.push_str(&format!("worktree_path = {}\n", run.managed.worktree_path));
     body.push_str(&format!("provider = {}\n", run.session.provider.as_str()));
     body.push_str(&format!("shell = {}\n", outcome.shell));
     body.push_str(&format!("shell_args = {:?}\n", outcome.shell_args));
@@ -416,14 +424,7 @@ mod tests {
         let now = Utc::now();
         AgentSession {
             id: "session-1".to_string(),
-            project_id: "project-1".to_string(),
-            project_path: Some(worktree.to_string_lossy().to_string()),
             provider: ProviderKind::from_str("codex"),
-            source_branch: "main".to_string(),
-            branch_name: "feature/setup".to_string(),
-            initial_branch: "feature/setup".to_string(),
-            branch_provenance: crate::model::BranchProvenance::CreatedByDux,
-            worktree_path: worktree.to_string_lossy().to_string(),
             title: None,
             started_providers: Vec::new(),
             desired_running: true,
@@ -432,6 +433,15 @@ mod tests {
             created_at: now,
             updated_at: now,
             last_focused_tab: None,
+            workspace: crate::model::AgentWorkspace::Managed(crate::model::ManagedWorkspace {
+                project_id: "project-1".to_string(),
+                project_path: Some(worktree.to_string_lossy().to_string()),
+                source_branch: "main".to_string(),
+                branch_name: "feature/setup".to_string(),
+                initial_branch: "feature/setup".to_string(),
+                branch_provenance: crate::model::BranchProvenance::CreatedByDux,
+                worktree_path: worktree.to_string_lossy().to_string(),
+            }),
         }
     }
 
@@ -445,6 +455,11 @@ mod tests {
             &paths,
             StartupCommandRun {
                 project,
+                managed: session
+                    .workspace
+                    .as_managed()
+                    .expect("test_session builds a managed agent")
+                    .clone(),
                 session,
                 command: "printf hello".to_string(),
                 terminal: StartupCommandTerminalConfig {
@@ -486,6 +501,11 @@ mod tests {
             &paths,
             StartupCommandRun {
                 project,
+                managed: session
+                    .workspace
+                    .as_managed()
+                    .expect("test_session builds a managed agent")
+                    .clone(),
                 session,
                 command: "printf nope >&2; exit 7".to_string(),
                 terminal: StartupCommandTerminalConfig {
@@ -514,6 +534,11 @@ mod tests {
             &paths,
             StartupCommandRun {
                 project,
+                managed: session
+                    .workspace
+                    .as_managed()
+                    .expect("test_session builds a managed agent")
+                    .clone(),
                 session,
                 command: "printf \"$EDITOR:$API_KEY\"".to_string(),
                 terminal: StartupCommandTerminalConfig {

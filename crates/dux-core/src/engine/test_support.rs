@@ -78,6 +78,7 @@ pub(crate) fn test_engine() -> (Engine, TempDir) {
         refs_watch_paths: HashMap::new(),
         resume_fallback_candidates: HashMap::new(),
         pending_deletions: HashSet::new(),
+        folder_repo_statuses: HashMap::new(),
         closing_sessions: HashSet::new(),
         deletion_busy_messages: HashMap::new(),
         watched_worktree: Arc::new(Mutex::new(None::<PathBuf>)),
@@ -142,14 +143,37 @@ pub(crate) fn sample_session(id: &str, project_id: &str, branch: &str) -> AgentS
     let now = Utc::now();
     AgentSession {
         id: id.to_string(),
-        project_id: project_id.to_string(),
-        project_path: None,
         provider: ProviderKind::new("claude"),
-        source_branch: "main".to_string(),
-        branch_name: branch.to_string(),
-        initial_branch: branch.to_string(),
-        branch_provenance: crate::model::BranchProvenance::CreatedByDux,
-        worktree_path: format!("/tmp/{id}-worktree"),
+        workspace: crate::model::AgentWorkspace::Managed(crate::model::ManagedWorkspace {
+            project_id: project_id.to_string(),
+            project_path: None,
+            source_branch: "main".to_string(),
+            branch_name: branch.to_string(),
+            initial_branch: branch.to_string(),
+            branch_provenance: crate::model::BranchProvenance::CreatedByDux,
+            worktree_path: format!("/tmp/{id}-worktree"),
+        }),
+        title: Some(format!("{id}-title")),
+        started_providers: Vec::new(),
+        desired_running: true,
+        auto_reopen_enabled: false,
+        status: SessionStatus::Detached,
+        created_at: now,
+        updated_at: now,
+        last_focused_tab: None,
+    }
+}
+
+/// A STANDALONE agent: a folder the user already had, no project, no branch,
+/// no worktree dux owns. The title is always set, as creation guarantees.
+pub(crate) fn sample_standalone_session(id: &str, folder: &str) -> AgentSession {
+    let now = Utc::now();
+    AgentSession {
+        id: id.to_string(),
+        provider: ProviderKind::new("claude"),
+        workspace: crate::model::AgentWorkspace::Folder(crate::model::FolderWorkspace {
+            folder_path: folder.to_string(),
+        }),
         title: Some(format!("{id}-title")),
         started_providers: Vec::new(),
         desired_running: true,

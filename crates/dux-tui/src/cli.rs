@@ -1540,14 +1540,7 @@ mod tests {
             store
                 .upsert_session(&AgentSession {
                     id: id.to_string(),
-                    project_id: "proj".to_string(),
-                    project_path: None,
                     provider: ProviderKind::new("claude"),
-                    source_branch: "main".to_string(),
-                    branch_name: format!("branch-{id}"),
-                    initial_branch: format!("branch-{id}"),
-                    branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
-                    worktree_path: worktree.to_string_lossy().to_string(),
                     title: None,
                     started_providers: Vec::new(),
                     desired_running: false,
@@ -1556,6 +1549,17 @@ mod tests {
                     created_at: now,
                     updated_at: now,
                     last_focused_tab: None,
+                    workspace: dux_core::model::AgentWorkspace::Managed(
+                        dux_core::model::ManagedWorkspace {
+                            project_id: "proj".to_string(),
+                            project_path: None,
+                            source_branch: "main".to_string(),
+                            branch_name: format!("branch-{id}"),
+                            initial_branch: format!("branch-{id}"),
+                            branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
+                            worktree_path: worktree.to_string_lossy().to_string(),
+                        },
+                    ),
                 })
                 .expect("session");
             worktree
@@ -1606,14 +1610,7 @@ mod tests {
         let now = Utc::now();
         let session = AgentSession {
             id: "wt".to_string(),
-            project_id: "proj".to_string(),
-            project_path: Some(repo.to_string_lossy().to_string()),
             provider: ProviderKind::new("claude"),
-            source_branch: "main".to_string(),
-            branch_name: "develop".to_string(),
-            initial_branch: "develop".to_string(),
-            branch_provenance: dux_core::model::BranchProvenance::AttachedExisting,
-            worktree_path: worktree.to_string_lossy().to_string(),
             title: None,
             started_providers: Vec::new(),
             desired_running: false,
@@ -1622,6 +1619,17 @@ mod tests {
             created_at: now,
             updated_at: now,
             last_focused_tab: None,
+            workspace: dux_core::model::AgentWorkspace::Managed(
+                dux_core::model::ManagedWorkspace {
+                    project_id: "proj".to_string(),
+                    project_path: Some(repo.to_string_lossy().to_string()),
+                    source_branch: "main".to_string(),
+                    branch_name: "develop".to_string(),
+                    initial_branch: "develop".to_string(),
+                    branch_provenance: dux_core::model::BranchProvenance::AttachedExisting,
+                    worktree_path: worktree.to_string_lossy().to_string(),
+                },
+            ),
         };
 
         remove_session_worktree(&paths, &session);
@@ -1689,14 +1697,7 @@ mod tests {
         let now = Utc::now();
         let session = AgentSession {
             id: "wt".to_string(),
-            project_id: "proj".to_string(),
-            project_path: Some(repo.to_string_lossy().to_string()),
             provider: ProviderKind::new("claude"),
-            source_branch: "main".to_string(),
-            branch_name: "branch-wt".to_string(),
-            initial_branch: "branch-wt".to_string(),
-            branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
-            worktree_path: worktree.to_string_lossy().to_string(),
             title: None,
             started_providers: Vec::new(),
             desired_running: false,
@@ -1705,6 +1706,17 @@ mod tests {
             created_at: now,
             updated_at: now,
             last_focused_tab: None,
+            workspace: dux_core::model::AgentWorkspace::Managed(
+                dux_core::model::ManagedWorkspace {
+                    project_id: "proj".to_string(),
+                    project_path: Some(repo.to_string_lossy().to_string()),
+                    source_branch: "main".to_string(),
+                    branch_name: "branch-wt".to_string(),
+                    initial_branch: "branch-wt".to_string(),
+                    branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
+                    worktree_path: worktree.to_string_lossy().to_string(),
+                },
+            ),
         };
 
         remove_session_worktree(&paths, &session);

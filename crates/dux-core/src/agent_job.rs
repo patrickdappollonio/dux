@@ -10,7 +10,9 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use crate::config::{Config, DuxPaths, check_provider_available, provider_config};
-use crate::model::{AgentSession, BranchProvenance, SessionStatus};
+use crate::model::{
+    AgentSession, AgentWorkspace, BranchProvenance, ManagedWorkspace, SessionStatus,
+};
 use crate::startup::{StartupCommandRun, run_startup_command};
 use crate::worker::{
     AgentLaunchFailedData, AgentLaunchKind, AgentLaunchReadyData, AgentLaunchRequest,
@@ -44,14 +46,16 @@ enum HeadMismatch {
 ///
 /// No drifted birth branch is ever passed: the agent was born moments ago and
 /// cannot have moved.
-fn rollback_created_worktree(
-    repo_path: &Path,
-    worktree_path: &Path,
-    branch_name: &str,
-    branch_provenance: BranchProvenance,
-) {
-    if branch_provenance.dux_may_delete_branch() {
-        let _ = git::remove_worktree(repo_path, worktree_path, branch_name, None);
+///
+/// It takes a [`ManagedWorkspace`], not a session, so a standalone agent's
+/// folder can never be handed to it: there is no worktree to remove and no
+/// branch to delete, and the user's folder must survive a failed create
+/// untouched. A caller holding a folder workspace cannot even name the
+/// argument.
+fn rollback_created_worktree(repo_path: &Path, managed: &ManagedWorkspace) {
+    let worktree_path = Path::new(&managed.worktree_path);
+    if managed.branch_provenance.dux_may_delete_branch() {
+        let _ = git::remove_worktree(repo_path, worktree_path, &managed.branch_name, None);
     } else {
         let _ = git::remove_worktree_keep_branch(repo_path, worktree_path);
     }
@@ -464,7 +468,24 @@ pub fn run_create_agent_job(
                 });
                 return;
             };
-            let source_worktree = PathBuf::from(&source_session.worktree_path);
+            // Forking copies a managed worktree onto a new branch, so a
+            // standalone agent has nothing to fork. The wire's ForkSession arm
+            // already refuses one with a purposeful message; this is the
+            // structural restatement, so no folder path can reach the branch
+            // machinery below even if a future caller forgets that gate.
+            let (Some(source_worktree), Some(source_branch_name)) = (
+                source_session.managed_worktree().map(PathBuf::from),
+                source_session.branch_name().map(str::to_string),
+            ) else {
+                let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
+                    status_op_id: create_key.clone(),
+                    message: format!(
+                        "Agent \"{source_label}\" is a standalone agent, so there is no branch or managed worktree to fork. \
+                         Add its folder as a project if you want several agents working on it, and fork one of those instead."
+                    ),
+                });
+                return;
+            };
             let _ = worker_tx.send(WorkerEvent::CreateAgentProgress {
                 status_op_id: create_key.clone(),
                 message: format!("Creating a forked worktree from agent \"{source_label}\"..."),
@@ -474,7 +495,7 @@ pub fn run_create_agent_job(
                 Err(err) => {
                     logger::error(&format!(
                         "failed to resolve HEAD for {}: {err}",
-                        source_session.worktree_path
+                        source_worktree.display()
                     ));
                     let _ = worker_tx.send(WorkerEvent::CreateAgentFailed { status_op_id: create_key.clone(), message: format!(
                         "Failed to inspect the source worktree for agent \"{source_label}\": {err}",
@@ -519,7 +540,7 @@ pub fn run_create_agent_job(
             (
                 project,
                 source_session.provider,
-                source_session.branch_name,
+                source_branch_name,
                 status_message,
                 branch_name,
                 worktree_path,
@@ -671,19 +692,26 @@ pub fn run_create_agent_job(
     } else {
         Vec::new()
     };
-    let session = AgentSession {
-        id: Uuid::new_v4().to_string(),
+    // Hoisted so the startup command below can be handed a ManagedWorkspace
+    // without unwrapping one back out of the session. Every arm of this
+    // function provisions a worktree, so the managed shape is the only one this
+    // tail can produce; the standalone path never reaches here at all.
+    let managed = ManagedWorkspace {
         project_id: project.id.clone(),
         project_path: Some(project.path.clone()),
-        provider,
         source_branch,
         // The agent is born on `branch_name`; record that as its immutable
-        // original branch. The branch-sync poller and intentional renames update
-        // `branch_name` later but must never touch `initial_branch`.
+        // original branch. The branch-sync poller and intentional renames
+        // update `branch_name` later but must never touch `initial_branch`.
         initial_branch: branch_name.clone(),
         branch_provenance,
         branch_name,
         worktree_path: worktree_path.to_string_lossy().to_string(),
+    };
+    let session = AgentSession {
+        id: Uuid::new_v4().to_string(),
+        provider,
+        workspace: AgentWorkspace::Managed(managed.clone()),
         title,
         started_providers,
         desired_running: true,
@@ -697,12 +725,9 @@ pub fn run_create_agent_job(
     if let Err(hint) = check_provider_available(&provider_cfg) {
         logger::error(&format!("provider not found for {}: {hint}", session.id));
         if owns_worktree {
-            rollback_created_worktree(
-                &repo_path,
-                Path::new(&session.worktree_path),
-                &session.branch_name,
-                session.branch_provenance,
-            );
+            if let Some(managed) = session.workspace.as_managed() {
+                rollback_created_worktree(&repo_path, managed);
+            }
         }
         let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
             status_op_id: create_key.clone(),
@@ -721,7 +746,7 @@ pub fn run_create_agent_job(
                 copy.source_desc
             ),
         });
-        let worktree = Path::new(&session.worktree_path);
+        let worktree = Path::new(session.directory());
         // Porcelain status is relative to the HEAD commit's tree, so the copy
         // is only faithful when both sides sit on the same commit. A failed
         // `head_commit` is NOT a branch mismatch: it is reported as its own
@@ -745,15 +770,12 @@ pub fn run_create_agent_job(
                     logger::error(&format!(
                         "failed to copy uncommitted changes from {} into {}: {err}",
                         copy.source.display(),
-                        session.worktree_path
+                        session.directory()
                     ));
                     if owns_worktree {
-                        rollback_created_worktree(
-                            &repo_path,
-                            Path::new(&session.worktree_path),
-                            &session.branch_name,
-                            session.branch_provenance,
-                        );
+                        if let Some(managed) = session.workspace.as_managed() {
+                            rollback_created_worktree(&repo_path, managed);
+                        }
                     }
                     let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
                         status_op_id: create_key.clone(),
@@ -771,7 +793,7 @@ pub fn run_create_agent_job(
                         logger::error(&format!(
                             "uncommitted-changes copy: could not resolve HEAD for {} or {}: {err}",
                             copy.source.display(),
-                            session.worktree_path
+                            session.directory()
                         ));
                         Some(err)
                     }
@@ -793,16 +815,13 @@ pub fn run_create_agent_job(
                             logger::error(&format!(
                                 "uncommitted-changes copy aborted: {} is no longer on the commit {} was created from",
                                 copy.source.display(),
-                                session.worktree_path
+                                session.directory()
                             ));
                         }
                         if owns_worktree {
-                            rollback_created_worktree(
-                                &repo_path,
-                                Path::new(&session.worktree_path),
-                                &session.branch_name,
-                                session.branch_provenance,
-                            );
+                            if let Some(managed) = session.workspace.as_managed() {
+                                rollback_created_worktree(&repo_path, managed);
+                            }
                         }
                         let message = match &check_error {
                             Some(err) => format!(
@@ -854,7 +873,7 @@ pub fn run_create_agent_job(
                 status_op_id: create_key.clone(),
                 message: format!(
                     "Running startup command for agent \"{}\"...",
-                    session.branch_name
+                    session.display_label()
                 ),
             });
             run_startup_command(
@@ -862,6 +881,7 @@ pub fn run_create_agent_job(
                 StartupCommandRun {
                     project: project.clone(),
                     session: session.clone(),
+                    managed: managed.clone(),
                     command: command.to_string(),
                     terminal: config.startup_command_terminal.clone(),
                     env: env.clone(),
@@ -932,7 +952,7 @@ pub fn run_agent_launch_job(request: AgentLaunchRequest, worker_tx: Sender<Worke
         "spawning PTY {:?} {:?} in {} ({}x{}, resume_supported={})",
         request.provider_config.command,
         launch_args,
-        request.session.worktree_path,
+        request.session.directory(),
         cols,
         rows,
         request.provider_config.supports_session_resume()
@@ -950,12 +970,9 @@ pub fn run_agent_launch_job(request: AgentLaunchRequest, worker_tx: Sender<Worke
         } = &request.kind
             && *owns_worktree
         {
-            rollback_created_worktree(
-                Path::new(repo_path),
-                Path::new(&request.session.worktree_path),
-                &request.session.branch_name,
-                request.session.branch_provenance,
-            );
+            if let Some(managed) = request.session.workspace.as_managed() {
+                rollback_created_worktree(Path::new(repo_path), managed);
+            }
         }
         let _ = worker_tx.send(WorkerEvent::AgentLaunchFailed(Box::new(
             AgentLaunchFailedData { request, message },
@@ -966,7 +983,7 @@ pub fn run_agent_launch_job(request: AgentLaunchRequest, worker_tx: Sender<Worke
     let client = match crate::pty::PtyClient::spawn_with_env_opts(
         &request.provider_config.command,
         &launch_args,
-        Path::new(&request.session.worktree_path),
+        Path::new(request.session.directory()),
         rows,
         cols,
         request.scrollback_lines,
@@ -989,12 +1006,9 @@ pub fn run_agent_launch_job(request: AgentLaunchRequest, worker_tx: Sender<Worke
             } = &request.kind
                 && *owns_worktree
             {
-                rollback_created_worktree(
-                    Path::new(repo_path),
-                    Path::new(&request.session.worktree_path),
-                    &request.session.branch_name,
-                    request.session.branch_provenance,
-                );
+                if let Some(managed) = request.session.workspace.as_managed() {
+                    rollback_created_worktree(Path::new(repo_path), managed);
+                }
             }
             let message = if matches!(request.kind, AgentLaunchKind::Create { .. }) {
                 format!("Failed to start {}: {err}", request.provider_config.command)
@@ -1179,14 +1193,7 @@ mod tests {
     fn fork_source_session(worktree: &Path) -> AgentSession {
         AgentSession {
             id: "src-1".to_string(),
-            project_id: "proj-1".to_string(),
-            project_path: None,
             provider: ProviderKind::new("cat"),
-            source_branch: "main".to_string(),
-            branch_name: "src-branch".to_string(),
-            initial_branch: "src-branch".to_string(),
-            branch_provenance: crate::model::BranchProvenance::CreatedByDux,
-            worktree_path: worktree.to_string_lossy().to_string(),
             title: None,
             started_providers: Vec::new(),
             desired_running: false,
@@ -1195,6 +1202,15 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             last_focused_tab: None,
+            workspace: crate::model::AgentWorkspace::Managed(crate::model::ManagedWorkspace {
+                project_id: "proj-1".to_string(),
+                project_path: None,
+                source_branch: "main".to_string(),
+                branch_name: "src-branch".to_string(),
+                initial_branch: "src-branch".to_string(),
+                branch_provenance: crate::model::BranchProvenance::CreatedByDux,
+                worktree_path: worktree.to_string_lossy().to_string(),
+            }),
         }
     }
 
@@ -1218,8 +1234,8 @@ mod tests {
         // The typed name is durable identity (title) and names the branch; the
         // birth branch is recorded immutably and equals the created branch.
         assert_eq!(session.title.as_deref(), Some("pr-agent"));
-        assert_eq!(session.branch_name, "pr-agent");
-        assert_eq!(session.initial_branch, "pr-agent");
+        assert_eq!(session.branch_name().unwrap(), "pr-agent");
+        assert_eq!(session.initial_branch().unwrap(), "pr-agent");
     }
 
     #[test]
@@ -1235,8 +1251,8 @@ mod tests {
         };
         let session = drive_create_job(repo.path(), request);
         assert_eq!(session.title.as_deref(), Some("forked-agent"));
-        assert_eq!(session.branch_name, "forked-agent");
-        assert_eq!(session.initial_branch, "forked-agent");
+        assert_eq!(session.branch_name().unwrap(), "forked-agent");
+        assert_eq!(session.initial_branch().unwrap(), "forked-agent");
     }
 
     #[test]
@@ -1251,8 +1267,8 @@ mod tests {
         };
         let session = drive_create_job(repo.path(), request);
         assert_eq!(session.title.as_deref(), Some("external-agent"));
-        assert_eq!(session.branch_name, "external-agent");
-        assert_eq!(session.initial_branch, "external-agent");
+        assert_eq!(session.branch_name().unwrap(), "external-agent");
+        assert_eq!(session.initial_branch().unwrap(), "external-agent");
     }
 
     #[test]
@@ -1269,8 +1285,8 @@ mod tests {
         // No typed name: title stays None, but the auto-derived branch is still
         // recorded as the immutable initial branch.
         assert_eq!(session.title, None);
-        assert_eq!(session.initial_branch, session.branch_name);
-        assert!(!session.branch_name.is_empty());
+        assert_eq!(session.initial_branch(), session.branch_name());
+        assert!(!session.branch_name().unwrap().is_empty());
     }
 
     #[test]
@@ -1278,9 +1294,9 @@ mod tests {
         let session = create_session_for(Some("server-mode".to_string()));
         // The typed name is durable identity (title), and it also names the branch.
         assert_eq!(session.title.as_deref(), Some("server-mode"));
-        assert_eq!(session.branch_name, "server-mode");
+        assert_eq!(session.branch_name().unwrap(), "server-mode");
         // The birth branch is recorded immutably and equals the created branch.
-        assert_eq!(session.initial_branch, "server-mode");
+        assert_eq!(session.initial_branch().unwrap(), "server-mode");
     }
 
     #[test]
@@ -1289,8 +1305,8 @@ mod tests {
         // An auto pet-name leaves title empty so the display keeps tracking the
         // branch, but the pet name still becomes the immutable initial branch.
         assert_eq!(session.title, None);
-        assert_eq!(session.initial_branch, session.branch_name);
-        assert!(!session.branch_name.is_empty());
+        assert_eq!(session.initial_branch(), session.branch_name());
+        assert!(!session.branch_name().unwrap().is_empty());
     }
 
     // ── branch provenance ────────────────────────────────────────
@@ -1303,7 +1319,7 @@ mod tests {
     fn a_fresh_agent_owns_the_branch_dux_minted_for_it() {
         let session = create_session_for(Some("fresh".to_string()));
         assert_eq!(
-            session.branch_provenance,
+            session.branch_provenance().unwrap(),
             crate::model::BranchProvenance::CreatedByDux
         );
     }
@@ -1321,7 +1337,7 @@ mod tests {
         };
         let session = drive_create_job(repo.path(), request);
         assert_eq!(
-            session.branch_provenance,
+            session.branch_provenance().unwrap(),
             crate::model::BranchProvenance::AttachedExisting,
             "the user's branch existed first, so deleting the agent must keep it"
         );
@@ -1344,7 +1360,7 @@ mod tests {
         };
         let session = drive_create_job(repo.path(), request);
         assert_eq!(
-            session.branch_provenance,
+            session.branch_provenance().unwrap(),
             crate::model::BranchProvenance::AttachedExisting
         );
     }
@@ -1366,7 +1382,7 @@ mod tests {
         };
         let session = drive_create_job(repo.path(), request);
         assert_eq!(
-            session.branch_provenance,
+            session.branch_provenance().unwrap(),
             crate::model::BranchProvenance::AttachedExisting
         );
     }
@@ -1378,9 +1394,9 @@ mod tests {
         // collide). Simulated with a local "remote" so no network is needed.
         let (_origin, repo) = pr_repo_with_fake_origin();
         let session = drive_create_job(repo.path(), pull_request_request(repo.path(), None, false));
-        assert_eq!(session.branch_name, "pr-head");
+        assert_eq!(session.branch_name().unwrap(), "pr-head");
         assert_eq!(
-            session.branch_provenance,
+            session.branch_provenance().unwrap(),
             crate::model::BranchProvenance::CreatedByDux,
             "dux minted this local branch from the PR head"
         );
@@ -1499,7 +1515,7 @@ mod tests {
         };
         let session = drive_create_job(repo.path(), request);
         assert_eq!(
-            session.branch_provenance,
+            session.branch_provenance().unwrap(),
             crate::model::BranchProvenance::CreatedByDux
         );
     }
@@ -1516,7 +1532,7 @@ mod tests {
         };
         let session = drive_create_job(repo.path(), request);
         assert_eq!(
-            session.branch_provenance,
+            session.branch_provenance().unwrap(),
             crate::model::BranchProvenance::CreatedByDux
         );
     }
@@ -1532,7 +1548,7 @@ mod tests {
         };
         let session = drive_create_job(repo.path(), request);
         assert_eq!(
-            session.branch_provenance,
+            session.branch_provenance().unwrap(),
             crate::model::BranchProvenance::Adopted,
             "the adopted worktree's branch predates the agent"
         );
@@ -1659,7 +1675,7 @@ mod tests {
 
         let run = drive_create_job_run(repo.path(), new_project_request(repo.path(), false, true));
         assert!(run.failure.is_none(), "creation must succeed");
-        let worktree = PathBuf::from(&run.session.as_ref().unwrap().worktree_path);
+        let worktree = PathBuf::from(run.session.as_ref().unwrap().directory());
         assert_eq!(
             std::fs::read_to_string(worktree.join("tracked.txt")).unwrap(),
             "dirty\n"
@@ -1700,7 +1716,7 @@ mod tests {
         let run = drive_create_job_run(repo.path(), request);
         assert!(run.failure.is_none(), "creation must succeed");
         let session = run.session.unwrap();
-        let worktree = PathBuf::from(&session.worktree_path);
+        let worktree = PathBuf::from(session.directory());
         assert!(
             worktree.join("keep.txt").exists(),
             "the uncommitted rm must NOT be applied across different commits"
@@ -1748,7 +1764,7 @@ mod tests {
 
         let run = drive_create_job_run(repo.path(), new_project_request(repo.path(), false, false));
         assert!(run.failure.is_none(), "creation must succeed");
-        let worktree = PathBuf::from(&run.session.as_ref().unwrap().worktree_path);
+        let worktree = PathBuf::from(run.session.as_ref().unwrap().directory());
         assert!(!worktree.join("note.txt").exists());
     }
 
@@ -1810,7 +1826,7 @@ mod tests {
             run.failure
         );
         let session = run.session.unwrap();
-        let worktree = PathBuf::from(&session.worktree_path);
+        let worktree = PathBuf::from(session.directory());
         assert!(
             worktree.join("upstream.txt").exists(),
             "the pull must have fast-forwarded"
@@ -1832,7 +1848,7 @@ mod tests {
         let run = drive_create_job_run(repo.path(), new_project_request(repo.path(), true, true));
         assert!(run.failure.is_none());
         let session = run.session.unwrap();
-        let worktree = PathBuf::from(&session.worktree_path);
+        let worktree = PathBuf::from(session.directory());
         assert_eq!(
             std::fs::read_to_string(worktree.join("note.txt")).unwrap(),
             "untracked\n"
@@ -1862,7 +1878,7 @@ mod tests {
         };
         let run = drive_create_job_run(repo.path(), request);
         assert!(run.failure.is_none());
-        let worktree = PathBuf::from(&run.session.unwrap().worktree_path);
+        let worktree = PathBuf::from(run.session.unwrap().directory());
         assert_eq!(
             std::fs::read_to_string(worktree.join("note.txt")).unwrap(),
             "untracked\n"
@@ -1882,7 +1898,7 @@ mod tests {
         };
         let run = drive_create_job_run(repo.path(), request);
         assert!(run.failure.is_none());
-        let worktree = PathBuf::from(&run.session.unwrap().worktree_path);
+        let worktree = PathBuf::from(run.session.unwrap().directory());
         assert!(!worktree.join("note.txt").exists());
         let status = run.status_message.unwrap();
         assert!(
@@ -1914,7 +1930,7 @@ mod tests {
             "the fork must succeed: {:?}",
             run.failure
         );
-        let worktree = PathBuf::from(&run.session.as_ref().unwrap().worktree_path);
+        let worktree = PathBuf::from(run.session.as_ref().unwrap().directory());
         assert_eq!(
             std::fs::read_to_string(worktree.join("note.txt")).unwrap(),
             "untracked\n"

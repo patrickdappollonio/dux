@@ -435,24 +435,105 @@ pub struct ProjectView {
     pub created_at: String,
 }
 
+/// The serialized workspace of an agent: a TAGGED union, one variant per
+/// [`crate::model::AgentWorkspace`] variant, mirroring [`TerminalOwnerView`]'s
+/// shape exactly. Because the client receives the tag it can switch on it
+/// exhaustively (see `crates/dux-web/web/src/lib/agentWorkspace.ts`, whose
+/// switches end in `assertNever`) instead of inferring an agent's kind from
+/// whether some string happened to be empty.
+///
+/// The git fields live INSIDE the managed variant, so there is no shape in
+/// which a standalone agent carries a branch name at all. That is the wire
+/// half of the same either/or the Rust model enforces: an empty string on the
+/// wire is a lie some screen eventually renders.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AgentWorkspaceView {
+    Managed {
+        project_id: String,
+        branch_name: String,
+        /// The branch this agent was created on, immutable. Distinct from
+        /// `branch_name` (the current branch, which tracks the worktree). When
+        /// they differ the current branch has drifted since creation.
+        initial_branch: String,
+        /// Where the agent's branch came from ("created" | "attached" |
+        /// "adopted" | "unknown"), which decides whether deleting the agent may
+        /// delete the branch. The delete dialog's copy turns on it.
+        branch_provenance: String,
+        /// The branch this agent was forked from (its fork point / leading
+        /// branch).
+        source_branch: String,
+        worktree_path: String,
+    },
+    Folder {
+        /// The folder as it exists on the SERVER's filesystem.
+        folder_path: String,
+        /// The same folder shortened against the server's home directory, for
+        /// display. Computed here because the browser may not be on the
+        /// server's machine and so cannot shorten it correctly itself.
+        folder_label: String,
+        /// The live repository verdict for the folder: "working_repo" |
+        /// "inside_repo_rooted_elsewhere" | "no_repo" | "indeterminate". The
+        /// changes region renders a real repository view for the first and its
+        /// quiet copy otherwise. Decided on the server so both surfaces show
+        /// the same answer the server acted on.
+        repo_status: String,
+        /// The sentence explaining why the changes region is quiet, when it is.
+        /// Carried rather than re-authored client-side so the TUI and the web
+        /// say the same thing.
+        quiet_reason: String,
+    },
+}
+
+impl AgentWorkspaceView {
+    /// Project the model workspace, folding in the live repository verdict a
+    /// folder needs (the model does not carry it: it is engine state, refreshed
+    /// by a probe).
+    pub fn from_workspace(
+        workspace: &crate::model::AgentWorkspace,
+        repo_status: crate::git::FolderRepoStatus,
+    ) -> Self {
+        match workspace {
+            crate::model::AgentWorkspace::Managed(managed) => Self::Managed {
+                project_id: managed.project_id.clone(),
+                branch_name: managed.branch_name.clone(),
+                initial_branch: managed.initial_branch.clone(),
+                branch_provenance: managed.branch_provenance.as_str().to_string(),
+                source_branch: managed.source_branch.clone(),
+                worktree_path: managed.worktree_path.clone(),
+            },
+            crate::model::AgentWorkspace::Folder(folder) => Self::Folder {
+                folder_path: folder.folder_path.clone(),
+                folder_label: crate::home_path::shorten_home(std::path::Path::new(
+                    &folder.folder_path,
+                )),
+                repo_status: folder_repo_status_wire(repo_status).to_string(),
+                quiet_reason: repo_status.quiet_reason().to_string(),
+            },
+        }
+    }
+}
+
+/// The wire spelling of a [`crate::git::FolderRepoStatus`]. Its own function
+/// rather than a method on the enum, because the enum lives in `git` and the
+/// wire vocabulary belongs here with the rest of the projections.
+fn folder_repo_status_wire(status: crate::git::FolderRepoStatus) -> &'static str {
+    match status {
+        crate::git::FolderRepoStatus::WorkingRepo => "working_repo",
+        crate::git::FolderRepoStatus::InsideRepoRootedElsewhere => "inside_repo_rooted_elsewhere",
+        crate::git::FolderRepoStatus::NoRepo => "no_repo",
+        crate::git::FolderRepoStatus::Indeterminate => "indeterminate",
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SessionView {
     pub id: String,
-    pub project_id: String,
     pub title: Option<String>,
     pub provider: String,
-    pub branch_name: String,
-    /// The branch this agent was created on, immutable. Distinct from
-    /// `branch_name` (the current branch, which tracks the worktree). When they
-    /// differ the current branch has drifted since creation.
-    pub initial_branch: String,
-    /// Where the agent's branch came from ("created" | "attached" | "adopted"),
-    /// which decides whether deleting the agent may delete the branch. The
-    /// delete dialog's copy turns on it.
-    pub branch_provenance: String,
-    /// The branch this agent was forked from (its fork point / leading branch).
-    pub source_branch: String,
-    pub worktree_path: String,
+    /// Where this agent lives and what dux may do there. See
+    /// [`AgentWorkspaceView`].
+    pub workspace: AgentWorkspaceView,
     /// "active" | "detached" | "exited"
     pub status: String,
     pub auto_reopen_enabled: bool,
@@ -871,17 +952,13 @@ impl SessionView {
         working: bool,
         typing: bool,
         needs_attention: bool,
+        repo_status: crate::git::FolderRepoStatus,
     ) -> Self {
         Self {
             id: s.id.clone(),
-            project_id: s.project_id.clone(),
             title: s.title.clone(),
             provider: s.provider.as_str().to_string(),
-            branch_name: s.branch_name.clone(),
-            initial_branch: s.initial_branch.clone(),
-            branch_provenance: s.branch_provenance.as_str().to_string(),
-            source_branch: s.source_branch.clone(),
-            worktree_path: s.worktree_path.clone(),
+            workspace: AgentWorkspaceView::from_workspace(&s.workspace, repo_status),
             status: s.status.as_str().to_string(),
             auto_reopen_enabled: s.auto_reopen_enabled,
             pr: pr.map(|pr| PrView::from_pr(pr, pr_overridden)),
@@ -1125,6 +1202,7 @@ impl Engine {
             working,
             typing,
             needs_attention,
+            self.folder_repo_status(&s.id),
         )
     }
 
@@ -1318,7 +1396,17 @@ mod tests {
         assert_eq!(spine.projects[0].branch_status, "leading");
         assert_eq!(spine.sessions.len(), 1);
         assert_eq!(spine.sessions[0].id, "s1");
-        assert_eq!(spine.sessions[0].branch_name, "feature");
+        assert_eq!(
+            spine.sessions[0].workspace,
+            AgentWorkspaceView::Managed {
+                project_id: "p1".to_string(),
+                branch_name: "feature".to_string(),
+                initial_branch: "feature".to_string(),
+                branch_provenance: "created".to_string(),
+                source_branch: "main".to_string(),
+                worktree_path: "/tmp/s1-worktree".to_string(),
+            }
+        );
         assert_eq!(spine.sessions[0].status, "detached");
     }
 
@@ -1387,14 +1475,29 @@ mod tests {
         let (mut engine, _tmp) = test_engine();
         engine.projects.push(sample_project("p1", "/repo"));
         let mut s = sample_session("s1", "p1", "cur");
-        s.initial_branch = "orig".into();
-        s.source_branch = "main".into();
+        s.workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .initial_branch = "orig".into();
+        s.workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .source_branch = "main".into();
         engine.sessions.push(s);
 
         let view = &engine.spine().sessions[0];
-        assert_eq!(view.branch_name, "cur");
-        assert_eq!(view.initial_branch, "orig");
-        assert_eq!(view.source_branch, "main");
+        let AgentWorkspaceView::Managed {
+            branch_name,
+            initial_branch,
+            source_branch,
+            ..
+        } = &view.workspace
+        else {
+            panic!("a managed agent must project the managed variant");
+        };
+        assert_eq!(branch_name, "cur");
+        assert_eq!(initial_branch, "orig");
+        assert_eq!(source_branch, "main");
     }
 
     #[test]
@@ -1404,13 +1507,58 @@ mod tests {
         let (mut engine, _tmp) = test_engine();
         engine.projects.push(sample_project("p1", "/repo"));
         let mut s = sample_session("s1", "p1", "develop");
-        s.branch_provenance = crate::model::BranchProvenance::AttachedExisting;
+        s.workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .branch_provenance = crate::model::BranchProvenance::AttachedExisting;
         engine.sessions.push(s);
 
         let view = &engine.spine().sessions[0];
-        assert_eq!(view.branch_provenance, "attached");
         let json = serde_json::to_value(view).expect("serialize");
-        assert_eq!(json["branch_provenance"], "attached");
+        assert_eq!(json["workspace"]["kind"], "managed");
+        assert_eq!(json["workspace"]["branch_provenance"], "attached");
+    }
+
+    /// The wire half of the either/or: a standalone agent's payload carries a
+    /// folder and no branch fields AT ALL, so there is no empty string on the
+    /// wire for a client to mistake for a branch. The tag is what the browser
+    /// switches on, mirroring `TerminalOwnerView`.
+    #[test]
+    fn a_standalone_agent_projects_a_folder_workspace_with_no_git_fields() {
+        let (mut engine, _tmp) = test_engine();
+        engine
+            .sessions
+            .push(crate::engine::test_support::sample_standalone_session(
+                "sa1",
+                "/home/someone/notes",
+            ));
+
+        let view = &engine.spine().sessions[0];
+        let json = serde_json::to_value(view).expect("serialize");
+        assert_eq!(json["workspace"]["kind"], "folder");
+        assert_eq!(json["workspace"]["folder_path"], "/home/someone/notes");
+        for absent in [
+            "branch_name",
+            "initial_branch",
+            "source_branch",
+            "branch_provenance",
+            "project_id",
+            "worktree_path",
+        ] {
+            assert!(
+                json["workspace"][absent].is_null(),
+                "{absent} must not exist on a folder workspace, got {json}"
+            );
+        }
+        // An unprobed folder is honest about not knowing yet, and its quiet
+        // sentence travels with it so both surfaces say the same thing.
+        assert_eq!(json["workspace"]["repo_status"], "indeterminate");
+        assert!(
+            json["workspace"]["quiet_reason"]
+                .as_str()
+                .expect("a quiet reason")
+                .contains("could not consult git")
+        );
     }
 
     #[test]
@@ -1622,7 +1770,11 @@ mod tests {
             worktree.path().to_string_lossy().as_ref(),
         ));
         let mut session = sample_session("s1", "p1", "feature");
-        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
         engine.sessions.push(session);
         engine.config.terminal.command = "cat".to_string();
         engine.config.terminal.args = vec![];
@@ -1804,7 +1956,11 @@ mod tests {
             worktree.path().to_string_lossy().as_ref(),
         ));
         let mut session = sample_session("s1", "p1", "feature");
-        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
         engine.sessions.push(session);
         engine.config.terminal.command = "cat".to_string();
         engine.config.terminal.args = vec![];
@@ -1837,7 +1993,11 @@ mod tests {
             .projects
             .push(sample_project("p1", repo.path().to_string_lossy().as_ref()));
         let mut session = sample_session("s1", "p1", "feature");
-        session.worktree_path = repo.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = repo.path().to_string_lossy().to_string();
         engine.sessions.push(session);
         engine.config.terminal.command = "cat".to_string();
         engine.config.terminal.args = vec![];
@@ -1949,7 +2109,11 @@ mod tests {
             worktree.path().to_string_lossy().as_ref(),
         ));
         let mut session = sample_session("s1", "p1", "feature");
-        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
         engine.sessions.push(session);
         engine.config.terminal.command = "cat".to_string();
         engine.config.terminal.args = vec![];
@@ -2010,7 +2174,11 @@ mod tests {
             worktree.path().to_string_lossy().as_ref(),
         ));
         let mut session = sample_session("s1", "p1", "feature");
-        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
         engine.sessions.push(session);
 
         // Spawn a real `cat` PTY as the session's provider. `cat` echoes input,

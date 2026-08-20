@@ -402,7 +402,11 @@ pub enum AgentLaunchReadyView {
 /// sessions Detached. The App only formats the status message.
 pub enum AgentLaunchFailedOutcome {
     Create {
-        project_id: String,
+        /// The project the failed create belonged to, or `None` when it was a
+        /// standalone agent, which belongs to no project. Carried as an option
+        /// rather than an empty string so a consumer that keys work by project
+        /// cannot silently key it under one that does not exist.
+        project_id: Option<String>,
         message: String,
     },
     /// Reconnect-family failure. `session_id` is the pre-existing session that
@@ -410,14 +414,24 @@ pub enum AgentLaunchFailedOutcome {
     /// so it replaces the corresponding "launching…" busy toast.
     Reconnect {
         session_id: String,
-        branch_name: String,
+        /// The agent's DISPLAY LABEL, not a branch: its title when it has one,
+        /// otherwise the branch it tracks, and for a standalone agent its folder's
+        /// name. Every consumer prints it as the agent's name, and a standalone
+        /// agent has no branch to print, so naming this field for a branch would
+        /// be a lie the surfaces render.
+        agent_label: String,
         message: String,
     },
     /// Force-reconnect failure. `session_id` carries the pre-existing session
     /// id for the same keying purpose as `Reconnect`.
     ForceReconnect {
         session_id: String,
-        branch_name: String,
+        /// The agent's DISPLAY LABEL, not a branch: its title when it has one,
+        /// otherwise the branch it tracks, and for a standalone agent its folder's
+        /// name. Every consumer prints it as the agent's name, and a standalone
+        /// agent has no branch to print, so naming this field for a branch would
+        /// be a lie the surfaces render.
+        agent_label: String,
         message: String,
     },
     /// Engine logged + marked Detached; App has nothing to do.
@@ -426,7 +440,12 @@ pub enum AgentLaunchFailedOutcome {
     /// session id for the same keying purpose as `Reconnect`.
     StartupAutoReopen {
         session_id: String,
-        branch_name: String,
+        /// The agent's DISPLAY LABEL, not a branch: its title when it has one,
+        /// otherwise the branch it tracks, and for a standalone agent its folder's
+        /// name. Every consumer prints it as the agent's name, and a standalone
+        /// agent has no branch to print, so naming this field for a branch would
+        /// be a lie the surfaces render.
+        agent_label: String,
         message: String,
     },
     /// An extra-tab launch failed. `tab_id` keys the failure toast to the
@@ -436,7 +455,12 @@ pub enum AgentLaunchFailedOutcome {
     Tab {
         session_id: String,
         tab_id: String,
-        branch_name: String,
+        /// The agent's DISPLAY LABEL, not a branch: its title when it has one,
+        /// otherwise the branch it tracks, and for a standalone agent its folder's
+        /// name. Every consumer prints it as the agent's name, and a standalone
+        /// agent has no branch to print, so naming this field for a branch would
+        /// be a lie the surfaces render.
+        agent_label: String,
         message: String,
     },
     /// A launch failure for an extra tab whose row was deleted while the
@@ -517,6 +541,22 @@ pub enum RemovedBranches {
     Kept(crate::model::BranchProvenance),
 }
 
+/// The refusal for a delete that asked dux to remove a standalone agent's
+/// folder. Shared by the synchronous and graceful delete paths so the two can
+/// never word the same refusal differently.
+///
+/// It names the folder, because the whole point is to reassure the user that
+/// the directory they pointed dux at is still theirs, and it says what to do
+/// instead rather than only saying no.
+pub fn standalone_delete_directory_refusal(agent_name: &str, folder: &str) -> String {
+    format!(
+        "Agent \"{agent_name}\" is a standalone agent: it runs in \"{}\", a folder you already \
+         had, and dux never deletes or modifies it. Delete the agent on its own to remove dux's \
+         record of it, and remove the folder yourself if you no longer want it.",
+        crate::home_path::shorten_home(std::path::Path::new(folder))
+    )
+}
+
 /// What happened to the session's worktree during deletion. Each variant maps
 /// 1:1 to a user-facing status message; the illegal "delete requested, no
 /// siblings, but no result" state has no representation. Replaces the former
@@ -534,6 +574,13 @@ pub enum WorktreeRemoval {
     /// on and, when the agent drifted, the one it was born on), or that they
     /// were deliberately kept because they were not dux's to delete.
     Performed { branches: RemovedBranches },
+    /// There was no worktree, because this was a STANDALONE agent: it ran in a
+    /// folder the user already had, and deleting the agent removed dux's record
+    /// of it and nothing else. Its own variant rather than one of the
+    /// "preserved" ones above, because those all describe a worktree dux
+    /// decided not to remove, and there was never one here to decide about.
+    /// The folder is carried so the message can name it.
+    NothingToRemove { folder_label: String },
 }
 
 impl WorktreeRemoval {
@@ -543,10 +590,22 @@ impl WorktreeRemoval {
     /// `None` when it was not run. The caller guarantees `performed.is_some()`
     /// exactly when `delete_worktree && !other_sessions`.
     fn from_decision(
+        session: &AgentSession,
         delete_worktree: bool,
         other_sessions_on_worktree: bool,
         performed: Option<RemovedBranches>,
     ) -> Self {
+        // A standalone agent never had a worktree, so none of the worktree
+        // outcomes below can describe what happened. Answered off the workspace
+        // rather than inferred from `performed.is_none()`, which is also true
+        // of every managed delete that merely declined to remove one.
+        if let crate::model::AgentWorkspace::Folder(folder) = &session.workspace {
+            return WorktreeRemoval::NothingToRemove {
+                folder_label: crate::home_path::shorten_home(std::path::Path::new(
+                    &folder.folder_path,
+                )),
+            };
+        }
         match (delete_worktree, other_sessions_on_worktree, performed) {
             (_, _, Some(branches)) => WorktreeRemoval::Performed { branches },
             (true, true, None) => WorktreeRemoval::SkippedForSiblings,
@@ -615,6 +674,11 @@ pub enum BeginDeleteSessionOutcome {
     /// or shared with siblings). App should call the existing
     /// `finish_delete_session` wrapper to complete cleanup + emit status.
     Inline { removal: WorktreeRemoval },
+    /// The caller asked to remove a directory dux may not remove: a standalone
+    /// agent's folder. Nothing was deleted, not even the agent record, and the
+    /// message says why. Distinct from every other arm because it is the one
+    /// where the DELETE ITSELF did not happen.
+    Refused { message: String },
 }
 
 /// View follow-up data for a `Command::FinishDeleteSession`. Wraps the
@@ -670,10 +734,7 @@ pub struct DeleteTerminalView {
 /// (Engine-internal helper; the binary keeps `App::session_label` for the
 /// ~8 view-side callers in `sessions.rs`.)
 fn session_label(session: &AgentSession) -> String {
-    session
-        .title
-        .clone()
-        .unwrap_or_else(|| session.branch_name.clone())
+    session.display_label()
 }
 
 impl Engine {
@@ -695,7 +756,7 @@ impl Engine {
             .iter()
             .find(|s| {
                 s.id != exclude_id
-                    && s.worktree_path == worktree_path
+                    && s.directory() == worktree_path
                     // Tab-aware: a conflicting session may have its session-slot tab dead
                     // while an extra tab is still live in the shared worktree.
                     // `providers` is tab-keyed, so check every tab, not just `s.id`.
@@ -798,7 +859,7 @@ impl Engine {
                 );
             }
             let detached =
-                self.detach_conflicting_worktree_session(&session.worktree_path, &session.id);
+                self.detach_conflicting_worktree_session(session.directory(), &session.id);
             self.providers.insert(tab_id.clone(), client);
             self.record_launched_drop_paste(&tab_id, &request.provider, &request.provider_config);
             self.sessions.insert(0, session.clone());
@@ -828,7 +889,7 @@ impl Engine {
             // create busy with the SAME final (success line or startup-failure).
             let create_outcome = match &startup_result_error {
                 Some(error) => CreateLaunchOutcome::StartupFailed {
-                    branch_name: session.branch_name.clone(),
+                    branch_name: session.display_label(),
                     error: error.clone(),
                 },
                 None => CreateLaunchOutcome::Committed {
@@ -896,8 +957,7 @@ impl Engine {
             );
         }
 
-        let detached =
-            self.detach_conflicting_worktree_session(&session.worktree_path, &session.id);
+        let detached = self.detach_conflicting_worktree_session(session.directory(), &session.id);
         self.providers.insert(tab_id.clone(), client);
         self.record_launched_drop_paste(&tab_id, &request.provider, &request.provider_config);
         if request.resume {
@@ -1199,21 +1259,29 @@ impl Engine {
         // start of its delete (both the async and synchronous delete paths clear it
         // here, in addition to the async worktree-removal-completed path).
         self.closing_sessions.remove(session_id);
-        let project = self
-            .projects
-            .iter()
-            .find(|project| project.id == session.project_id)
-            .cloned();
+        let project = session.project_id().and_then(|project_id| {
+            self.projects
+                .iter()
+                .find(|project| project.id == project_id)
+                .cloned()
+        });
         let other_sessions_on_worktree = self
             .sessions
             .iter()
-            .any(|s| s.id != session.id && s.worktree_path == session.worktree_path);
+            .any(|s| s.id != session.id && s.directory() == session.directory());
 
-        crate::startup::spawn_delete_startup_command_logs(
-            self.paths.clone(),
-            session.project_id.clone(),
-            session.id.clone(),
-        );
+        // Startup-command logs are keyed by project id, and only a managed
+        // agent can ever have run a startup command (it is a worktree
+        // provisioning step). A standalone agent has no project and no logs, so
+        // there is nothing to delete; passing an empty project id would point
+        // the delete at the shared log root instead of one agent's directory.
+        if let Some(project_id) = session.project_id() {
+            crate::startup::spawn_delete_startup_command_logs(
+                self.paths.clone(),
+                project_id.to_string(),
+                session.id.clone(),
+            );
+        }
 
         // Tear down the runtime maps for EVERY tab of this agent (Main + Support),
         // then drop the session, its companion terminals, and its extra-tab
@@ -1248,10 +1316,15 @@ impl Engine {
         self.pr_suppressions.remove(&session.id);
         self.update_branch_sync_sessions();
 
-        let project_still_has_sessions = self
-            .sessions
-            .iter()
-            .any(|candidate| candidate.project_id == session.project_id);
+        // A standalone agent belongs to no project, so "does its project still
+        // have agents" is not a question about it at all. Answering `false`
+        // (which comparing two absent ids would do) would tell the caller a
+        // project just emptied out when no project was involved.
+        let project_still_has_sessions = session.project_id().is_some_and(|project_id| {
+            self.sessions
+                .iter()
+                .any(|candidate| candidate.project_id() == Some(project_id))
+        });
 
         Some(FinishDeleteSessionOutcome {
             session,
@@ -1286,25 +1359,45 @@ impl Engine {
         let Some(session) = self.sessions.iter().find(|s| s.id == session_id).cloned() else {
             return Ok(None);
         };
+        // THE EXPLICIT WIRE CONTRACT for `delete_worktree=true` on a standalone
+        // id: refuse, out loud. Quietly ignoring it would be success theater
+        // about a destructive request, and the user would come away believing
+        // dux had cleaned something up. The default is already false, so only
+        // a caller that asked on purpose can reach this.
+        if delete_worktree && !session.workspace.deletion_may_remove_directory() {
+            anyhow::bail!(standalone_delete_directory_refusal(
+                &session.display_label(),
+                session.directory()
+            ));
+        }
         logger::info(&format!(
             "deleting session {} at {} (delete_worktree={}, sync)",
-            session.id, session.worktree_path, delete_worktree
+            session.id,
+            session.directory(),
+            delete_worktree
         ));
         // The project may be ABSENT for an orphaned session; we can still delete
         // the record but cannot remove its worktree without the project repo, so
         // an orphan always keeps its worktree.
-        let project = self
-            .projects
-            .iter()
-            .find(|project| project.id == session.project_id)
-            .cloned();
+        let project = session.project_id().and_then(|project_id| {
+            self.projects
+                .iter()
+                .find(|project| project.id == project_id)
+                .cloned()
+        });
         let other_sessions_on_worktree = self
             .sessions
             .iter()
-            .any(|s| s.id != session.id && s.worktree_path == session.worktree_path);
+            .any(|s| s.id != session.id && s.directory() == session.directory());
 
-        let should_remove_worktree =
-            delete_worktree && !other_sessions_on_worktree && project.is_some();
+        // A standalone agent's directory is the user's folder, so deletion
+        // removes dux's record of the agent and nothing else, ever. The named
+        // question answers that; the removal payload below cannot even be built
+        // without a managed workspace, so this is a guard and a restatement.
+        let should_remove_worktree = delete_worktree
+            && session.workspace.deletion_may_remove_directory()
+            && !other_sessions_on_worktree
+            && project.is_some();
 
         if self.pending_deletions.contains(session_id) {
             crate::logger::error(&format!(
@@ -1360,6 +1453,13 @@ impl Engine {
             let project = project
                 .as_ref()
                 .expect("should_remove_worktree implies a project");
+            // `deletion_may_remove_directory` above is what makes this hold: a
+            // folder workspace never reaches this branch, so there is no arm
+            // here that could delete a directory dux did not create.
+            let managed = session
+                .workspace
+                .as_managed()
+                .expect("should_remove_worktree implies a managed working copy");
             // Clear `closing_sessions` even if removal fails: the session record
             // survives an `Err` (the `?` aborts the delete), and unlike the async
             // `WorktreeRemoveCompleted` handler nothing else would clear the flag,
@@ -1370,15 +1470,15 @@ impl Engine {
             // the user's before the agent existed. Deciding it HERE means the
             // project-delete cascade (which calls this per agent) inherits it,
             // so removing a project can no longer take `develop` with it.
-            let result = if session.branch_provenance.dux_may_delete_branch() {
+            let result = if managed.branch_provenance.dux_may_delete_branch() {
                 match crate::git::remove_worktree(
                     std::path::Path::new(&project.path),
-                    std::path::Path::new(&session.worktree_path),
-                    &session.branch_name,
+                    std::path::Path::new(&managed.worktree_path),
+                    &managed.branch_name,
                     // The BIRTH branch too: `branch_name` tracks whatever the
                     // worktree drifted onto, so deleting only that leaves the
                     // original behind and recreating the agent collides with it.
-                    Some(session.initial_branch.as_str()),
+                    Some(managed.initial_branch.as_str()),
                 ) {
                     Ok(result) => RemovedBranches::Deleted(result),
                     Err(err) => {
@@ -1389,9 +1489,9 @@ impl Engine {
             } else {
                 match crate::git::remove_worktree_keep_branch(
                     std::path::Path::new(&project.path),
-                    std::path::Path::new(&session.worktree_path),
+                    std::path::Path::new(&managed.worktree_path),
                 ) {
-                    Ok(()) => RemovedBranches::Kept(session.branch_provenance),
+                    Ok(()) => RemovedBranches::Kept(managed.branch_provenance),
                     Err(err) => {
                         self.closing_sessions.remove(session_id);
                         return Err(err);
@@ -1410,6 +1510,7 @@ impl Engine {
         };
         Ok(Some(DoDeleteSessionOutcome {
             removal: WorktreeRemoval::from_decision(
+                &finish.session,
                 delete_worktree,
                 finish.other_sessions_on_worktree,
                 remove_outcome,
@@ -1435,6 +1536,17 @@ impl Engine {
         let Some(session) = self.sessions.iter().find(|s| s.id == session_id).cloned() else {
             return BeginDeleteSessionOutcome::NotFound;
         };
+        // Same explicit contract as the synchronous path: a worktree-removing
+        // delete of a standalone agent is refused rather than silently
+        // downgraded to an ordinary one.
+        if delete_worktree && !session.workspace.deletion_may_remove_directory() {
+            return BeginDeleteSessionOutcome::Refused {
+                message: standalone_delete_directory_refusal(
+                    &session.display_label(),
+                    session.directory(),
+                ),
+            };
+        }
         // Blanket precondition: refuse while ANY tab of this session has a launch
         // in flight. Such a tab is marked in-flight but not yet in `providers`, so
         // it is invisible to the `live_tabs` check below — a worktree-removing
@@ -1452,17 +1564,24 @@ impl Engine {
         // removed but the session record outlived it). We can still delete the
         // session record; we just cannot run `git worktree remove` without the
         // project repo, so an orphan keeps its worktree and takes the inline path.
-        let project = self
-            .projects
-            .iter()
-            .find(|project| project.id == session.project_id)
-            .cloned();
+        let project = session.project_id().and_then(|project_id| {
+            self.projects
+                .iter()
+                .find(|project| project.id == project_id)
+                .cloned()
+        });
         let other_sessions_on_worktree = self
             .sessions
             .iter()
-            .any(|s| s.id != session.id && s.worktree_path == session.worktree_path);
-        let should_remove_worktree =
-            delete_worktree && !other_sessions_on_worktree && project.is_some();
+            .any(|s| s.id != session.id && s.directory() == session.directory());
+        // A standalone agent's directory is the user's folder, so deletion
+        // removes dux's record of the agent and nothing else, ever. The named
+        // question answers that; the removal payload below cannot even be built
+        // without a managed workspace, so this is a guard and a restatement.
+        let should_remove_worktree = delete_worktree
+            && session.workspace.deletion_may_remove_directory()
+            && !other_sessions_on_worktree
+            && project.is_some();
 
         // Mark the session "closing" synchronously, for the whole grace window
         // (until `WorktreeRemoveCompleted`). While set, `create_tab`/`launch_agent`
@@ -1482,25 +1601,27 @@ impl Engine {
         // the agent's terminating entry and dispatched by `reap_terminating_ptys`
         // only AFTER the agent has actually exited — files are never deleted out
         // from under a live process (which also avoids git-lock failures).
-        let worktree_removal = should_remove_worktree.then(|| {
-            let project = project
-                .as_ref()
-                .expect("should_remove_worktree implies a project");
-            super::DeferredWorktreeRemoval {
+        // The payload carries the MANAGED workspace itself rather than four
+        // loose git fields, so a standalone agent cannot produce one: there is
+        // no value of the right type to put in it. That is the structural half
+        // of "nothing deletes the folder"; `should_remove_worktree` above is
+        // the readable half, and the two cannot drift apart.
+        let worktree_removal = match (
+            should_remove_worktree,
+            session.workspace.as_managed(),
+            project.as_ref(),
+        ) {
+            (true, Some(managed), Some(project)) => Some(super::DeferredWorktreeRemoval {
                 session_id: session.id.clone(),
                 project_path: project.path.clone(),
-                worktree_path: session.worktree_path.clone(),
-                branch_name: session.branch_name.clone(),
-                initial_branch: session.initial_branch.clone(),
-                // Carried to the worker so the deferred removal applies the same
-                // gate the synchronous path does; see `do_delete_session`.
-                branch_provenance: session.branch_provenance,
+                managed: managed.clone(),
                 busy_message: format!(
                     "Removing worktree for agent \"{}\"\u{2026}",
-                    session.branch_name
+                    session.display_label()
                 ),
-            }
-        });
+            }),
+            _ => None,
+        };
         let busy_message = worktree_removal.as_ref().map(|r| r.busy_message.clone());
 
         // Gracefully close EVERY live tab PTY of this agent (the session-slot tab and any
@@ -1540,7 +1661,7 @@ impl Engine {
             Some(removal) if live_tabs.len() == 1 && already_terminating.is_empty() => {
                 let unhandled = self.begin_close_provider(
                     &live_tabs[0],
-                    session.branch_name.clone(),
+                    session.display_label(),
                     Some(removal),
                 );
                 if let Some(req) = unhandled {
@@ -1555,7 +1676,7 @@ impl Engine {
             // still-running sibling or straggler tab.
             Some(removal) => {
                 for id in &live_tabs {
-                    let _ = self.begin_close_provider(id, session.branch_name.clone(), None);
+                    let _ = self.begin_close_provider(id, session.display_label(), None);
                 }
                 let pending_ids: std::collections::HashSet<String> = live_tabs
                     .iter()
@@ -1571,7 +1692,7 @@ impl Engine {
             // Keep-worktree delete: gracefully close every live tab, nothing deferred.
             None => {
                 for id in &live_tabs {
-                    let _ = self.begin_close_provider(id, session.branch_name.clone(), None);
+                    let _ = self.begin_close_provider(id, session.display_label(), None);
                 }
             }
         }
@@ -1581,7 +1702,8 @@ impl Engine {
             Some(busy_message) => {
                 logger::info(&format!(
                     "deleting session {} at {} (delete_worktree=true; worktree removal deferred until the agent exits)",
-                    session.id, session.worktree_path
+                    session.id,
+                    session.directory()
                 ));
                 // The caller vanishes the session now and mints a keyed op from
                 // `busy_message`; the reaper spawns the worktree worker once the
@@ -1592,10 +1714,13 @@ impl Engine {
             None => {
                 logger::info(&format!(
                     "deleting session {} at {} (delete_worktree={}, no worktree removal)",
-                    session.id, session.worktree_path, delete_worktree
+                    session.id,
+                    session.directory(),
+                    delete_worktree
                 ));
                 BeginDeleteSessionOutcome::Inline {
                     removal: WorktreeRemoval::from_decision(
+                        &session,
                         delete_worktree,
                         other_sessions_on_worktree,
                         None,
@@ -1620,12 +1745,16 @@ impl Engine {
         let super::DeferredWorktreeRemoval {
             session_id,
             project_path,
+            managed,
+            busy_message,
+        } = req;
+        let crate::model::ManagedWorkspace {
             worktree_path,
             branch_name,
             initial_branch,
             branch_provenance,
-            busy_message,
-        } = req;
+            ..
+        } = managed;
         // Guard against a duplicate worker (e.g. a project delete racing the
         // reap); the completion handler clears it.
         self.pending_deletions.insert(session_id.clone());
@@ -1693,7 +1822,7 @@ impl Engine {
                 );
                 (
                     AgentLaunchFailedOutcome::Create {
-                        project_id: session.project_id.clone(),
+                        project_id: session.project_id().map(str::to_string),
                         message,
                     },
                     create_final,
@@ -1701,16 +1830,16 @@ impl Engine {
             }
             AgentLaunchKind::Reconnect { .. } => (
                 AgentLaunchFailedOutcome::Reconnect {
+                    agent_label: session.display_label(),
                     session_id: session.id,
-                    branch_name: session.branch_name,
                     message,
                 },
                 None,
             ),
             AgentLaunchKind::ForceReconnect { .. } => (
                 AgentLaunchFailedOutcome::ForceReconnect {
+                    agent_label: session.display_label(),
                     session_id: session.id,
-                    branch_name: session.branch_name,
                     message,
                 },
                 None,
@@ -1726,12 +1855,13 @@ impl Engine {
             AgentLaunchKind::StartupAutoReopen => {
                 logger::error(&format!(
                     "startup auto-reopen failed for agent \"{}\": {}",
-                    session.branch_name, message,
+                    session.display_label(),
+                    message,
                 ));
                 (
                     AgentLaunchFailedOutcome::StartupAutoReopen {
+                        agent_label: session.display_label(),
                         session_id: session.id,
-                        branch_name: session.branch_name,
                         message,
                     },
                     None,
@@ -1758,7 +1888,8 @@ impl Engine {
                 }
                 logger::error(&format!(
                     "extra tab {tab_id} launch failed for agent \"{}\": {}",
-                    session.branch_name, message,
+                    session.display_label(),
+                    message,
                 ));
                 // A brand-new tab whose very first spawn failed never had a
                 // conversation — remove its row so it does not linger as a
@@ -1781,9 +1912,9 @@ impl Engine {
                 }
                 (
                     AgentLaunchFailedOutcome::Tab {
+                        agent_label: session.display_label(),
                         session_id: session.id,
                         tab_id,
-                        branch_name: session.branch_name,
                         message,
                     },
                     None,
@@ -2009,6 +2140,29 @@ impl Engine {
                     EventReaction::Nothing
                 }
             }
+            WorkerEvent::FolderRepoStatusReady { session_id, status } => {
+                // A verdict for an agent that has since been deleted is
+                // dropped rather than stored: the map is keyed by session id
+                // and a stale entry would be inherited by a later session
+                // reusing it.
+                if !self.sessions.iter().any(|s| s.id == session_id) {
+                    return EventReaction::Nothing;
+                }
+                let changed =
+                    self.folder_repo_statuses.insert(session_id.clone(), status) != Some(status);
+                // Re-enrol (or drop) the changed-files watch when the verdict
+                // for the agent currently on screen actually moved. A folder
+                // that just became a repository gets its panel; one that
+                // stopped being one goes quiet, instead of the poller running
+                // git in it every cycle and reporting "the repository is busy".
+                if changed && self.watched_session_id.as_deref() == Some(session_id.as_str()) {
+                    if let Some(worktree) = self.set_watched_session(Some(&session_id)) {
+                        self.spawn_changed_files_refresh(worktree);
+                    }
+                    return EventReaction::ClampFilesCursor;
+                }
+                EventReaction::Nothing
+            }
             WorkerEvent::StatusOpCompleted { resolved } => resolved.into_reaction(),
             WorkerEvent::PullCompleted {
                 repo_path,
@@ -2068,22 +2222,29 @@ impl Engine {
                 // resolved at dispatch by the StatusOp and rides in `status`.
                 match &result {
                     Ok(()) => {
+                        // A standalone agent has no branch to rename, so a
+                        // rename can never have been dispatched for one, and
+                        // asking the workspace is the structural restatement:
+                        // this arm has no field to write when there is no
+                        // branch.
                         if let Some(session) = self.sessions.iter_mut().find(|s| s.id == session_id)
                         {
-                            // Log lineage before mutating: new, previous, and the
-                            // immutable original branch. `initial_branch` is never
-                            // touched here.
-                            let previous = session.branch_name.clone();
-                            let original = session.initial_branch.clone();
-                            let label = session_label(session);
-                            logger::info(&branch_rename_log_line(
-                                &session.id,
-                                &label,
-                                &new_branch,
-                                &previous,
-                                &original,
-                            ));
-                            session.branch_name = new_branch.clone();
+                            let label = session.display_label();
+                            if let Some(managed) = session.workspace.as_managed_mut() {
+                                // Log lineage before mutating: new, previous, and
+                                // the immutable original branch. `initial_branch`
+                                // is never touched here.
+                                let previous = managed.branch_name.clone();
+                                let original = managed.initial_branch.clone();
+                                logger::info(&branch_rename_log_line(
+                                    &session.id,
+                                    &label,
+                                    &new_branch,
+                                    &previous,
+                                    &original,
+                                ));
+                                managed.branch_name = new_branch.clone();
+                            }
                             session.updated_at = Utc::now();
                             if let Err(err) = self.session_store.upsert_session(session) {
                                 logger::error(&format!(
@@ -2158,17 +2319,24 @@ impl Engine {
                         }
                         continue;
                     }
+                    // Standalone agents are never enrolled in branch sync (no
+                    // branch, nothing to watch), so no result can name one.
+                    // Asking the workspace keeps this arm unreachable for them
+                    // rather than merely unused.
                     if let Some(session) = self.sessions.iter_mut().find(|s| s.id == session_id)
-                        && session.branch_name != actual_branch
+                        && session.branch_name() != Some(actual_branch.as_str())
                     {
+                        let label = session.display_label();
+                        let Some(managed) = session.workspace.as_managed_mut() else {
+                            continue;
+                        };
                         // External drift: the worktree's current branch changed
                         // out from under us. Update the current branch label
                         // (correct — the label should track reality) but never
                         // `title` or `initial_branch`. Warn so the exact
                         // name-vs-branch scenario is greppable in the log.
-                        let previous = session.branch_name.clone();
-                        let original = session.initial_branch.clone();
-                        let label = session_label(session);
+                        let previous = managed.branch_name.clone();
+                        let original = managed.initial_branch.clone();
                         logger::warn(&branch_drift_log_line(
                             &session.id,
                             &label,
@@ -2176,12 +2344,13 @@ impl Engine {
                             &previous,
                             &original,
                         ));
-                        session.branch_name = actual_branch;
+                        managed.branch_name = actual_branch;
                         session.updated_at = Utc::now();
                         if let Err(err) = self.session_store.upsert_session(session) {
                             logger::error(&format!(
-                                "failed to persist branch-sync update for {} (new branch: {}): {err}",
-                                session.id, session.branch_name,
+                                "failed to persist branch-sync update for {} (new branch: {:?}): {err}",
+                                session.id,
+                                session.branch_name(),
                             ));
                         }
                         changed = true;
@@ -2985,7 +3154,11 @@ mod tests {
             .projects
             .push(sample_project("p1", proj.to_str().unwrap()));
         let mut session = sample_session("s1", "p1", "feat/x");
-        session.worktree_path = worktree.to_str().unwrap().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.to_str().unwrap().to_string();
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
 
@@ -3052,8 +3225,16 @@ mod tests {
             .projects
             .push(sample_project("p1", repo.to_str().unwrap()));
         let mut session = sample_session("s1", "p1", "drifted");
-        session.initial_branch = "born-here".to_string();
-        session.worktree_path = worktree.to_str().unwrap().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .initial_branch = "born-here".to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.to_str().unwrap().to_string();
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
 
@@ -3156,8 +3337,16 @@ mod tests {
             .projects
             .push(sample_project("p1", repo.to_str().unwrap()));
         let mut session = sample_session("s1", "p1", "develop");
-        session.branch_provenance = crate::model::BranchProvenance::AttachedExisting;
-        session.worktree_path = worktree.to_str().unwrap().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .branch_provenance = crate::model::BranchProvenance::AttachedExisting;
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.to_str().unwrap().to_string();
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
 
@@ -3200,9 +3389,21 @@ mod tests {
             .push(sample_project("p1", repo.to_str().unwrap()));
         // The branch-sync poller has already followed the drift.
         let mut session = sample_session("s1", "p1", "feature-x");
-        session.initial_branch = "develop".to_string();
-        session.branch_provenance = crate::model::BranchProvenance::AttachedExisting;
-        session.worktree_path = worktree.to_str().unwrap().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .initial_branch = "develop".to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .branch_provenance = crate::model::BranchProvenance::AttachedExisting;
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.to_str().unwrap().to_string();
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
 
@@ -3236,13 +3437,25 @@ mod tests {
             .projects
             .push(sample_project("p1", repo.to_str().unwrap()));
         let mut a = sample_session("s1", "p1", "develop");
-        a.branch_provenance = crate::model::BranchProvenance::AttachedExisting;
-        a.worktree_path = attached.to_str().unwrap().to_string();
+        a.workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .branch_provenance = crate::model::BranchProvenance::AttachedExisting;
+        a.workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = attached.to_str().unwrap().to_string();
         engine.session_store.upsert_session(&a).unwrap();
         engine.sessions.push(a);
         let mut b = sample_session("s2", "p1", "dux-made");
-        b.branch_provenance = crate::model::BranchProvenance::CreatedByDux;
-        b.worktree_path = owned.to_str().unwrap().to_string();
+        b.workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .branch_provenance = crate::model::BranchProvenance::CreatedByDux;
+        b.workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = owned.to_str().unwrap().to_string();
         engine.session_store.upsert_session(&b).unwrap();
         engine.sessions.push(b);
 
@@ -3280,8 +3493,16 @@ mod tests {
             .projects
             .push(sample_project("p1", repo.to_str().unwrap()));
         let mut first = sample_session("s1", "p1", "dux-made");
-        first.branch_provenance = crate::model::BranchProvenance::CreatedByDux;
-        first.worktree_path = worktree.to_str().unwrap().to_string();
+        first
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .branch_provenance = crate::model::BranchProvenance::CreatedByDux;
+        first
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.to_str().unwrap().to_string();
         engine.session_store.upsert_session(&first).unwrap();
         engine.sessions.push(first);
 
@@ -3291,8 +3512,16 @@ mod tests {
 
         // Re-adopt the orphan.
         let mut second = sample_session("s2", "p1", "dux-made");
-        second.branch_provenance = crate::model::BranchProvenance::Adopted;
-        second.worktree_path = worktree.to_str().unwrap().to_string();
+        second
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .branch_provenance = crate::model::BranchProvenance::Adopted;
+        second
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.to_str().unwrap().to_string();
         engine.session_store.upsert_session(&second).unwrap();
         engine.sessions.push(second);
 
@@ -3346,7 +3575,11 @@ mod tests {
         // The conflicting ("victim") session that holds the shared worktree's live
         // PTY, plus an extra tab with runtime state.
         let mut victim = sample_session("victim", "p1", "feat");
-        victim.worktree_path = worktree.clone();
+        victim
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.clone();
         engine.sessions.push(victim);
         engine.agent_tabs.insert(
             "v-tab".to_string(),
@@ -3365,7 +3598,11 @@ mod tests {
 
         // A second session sharing the same worktree requests it.
         let mut requester = sample_session("req", "p1", "feat2");
-        requester.worktree_path = worktree.clone();
+        requester
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.clone();
         engine.sessions.push(requester);
 
         let detached = engine.detach_conflicting_worktree_session(&worktree, "req");
@@ -3389,7 +3626,11 @@ mod tests {
         // Victim whose SESSION-SLOT tab is dead (absent from `providers`) but a Support
         // tab is still live in the shared worktree.
         let mut victim = sample_session("victim", "p1", "feat");
-        victim.worktree_path = worktree.clone();
+        victim
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.clone();
         engine.sessions.push(victim);
         engine.agent_tabs.insert(
             "v-tab".to_string(),
@@ -3402,7 +3643,11 @@ mod tests {
         );
 
         let mut requester = sample_session("req", "p1", "feat2");
-        requester.worktree_path = worktree.clone();
+        requester
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.clone();
         engine.sessions.push(requester);
 
         // A Main-only check would MISS this (no "victim" key in `providers`); the
@@ -3423,7 +3668,11 @@ mod tests {
             worktree.path().to_string_lossy().as_ref(),
         ));
         let mut session = sample_session("s1", "p1", "feat/x");
-        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
 
@@ -3463,7 +3712,11 @@ mod tests {
             .projects
             .push(sample_project("p1", repo.path().to_string_lossy().as_ref()));
         let mut session = sample_session("s1", "p1", "feat/x");
-        session.worktree_path = repo.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = repo.path().to_string_lossy().to_string();
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
 
@@ -3501,8 +3754,16 @@ mod tests {
         let mut sibling = sample_session("s1", "p1", "feat/x");
         let mut deleted = sample_session("s2", "p1", "feat/y");
         // Force both to share a worktree path.
-        sibling.worktree_path = "/tmp/wt/shared".to_string();
-        deleted.worktree_path = "/tmp/wt/shared".to_string();
+        sibling
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = "/tmp/wt/shared".to_string();
+        deleted
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = "/tmp/wt/shared".to_string();
         engine.session_store.upsert_session(&sibling).unwrap();
         engine.session_store.upsert_session(&deleted).unwrap();
         engine.sessions.push(sibling);
@@ -3689,13 +3950,13 @@ mod tests {
 
         assert!(matches!(reaction, EventReaction::RebuildLeftItems));
         let s = &engine.sessions[0];
-        assert_eq!(s.branch_name, "new");
+        assert_eq!(s.branch_name().expect("managed test session"), "new");
         assert!(s.updated_at >= before_updated_at);
 
         // Verify the upsert hit the session store.
         let loaded = engine.session_store.load_sessions().expect("load");
         let stored = loaded.iter().find(|s| s.id == "s1").expect("stored s1");
-        assert_eq!(stored.branch_name, "new");
+        assert_eq!(stored.branch_name(), Some("new"));
     }
 
     #[test]
@@ -3719,7 +3980,11 @@ mod tests {
         let (mut engine, _tmp) = test_engine();
         let mut session = sample_session("s1", "p1", "server-mode");
         session.title = Some("server-mode".into());
-        session.initial_branch = "server-mode".into();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .initial_branch = "server-mode".into();
         engine.sessions.push(session);
 
         engine.process_worker_event(WorkerEvent::BranchSyncReady(vec![(
@@ -3729,10 +3994,13 @@ mod tests {
 
         let s = engine.sessions.iter().find(|s| s.id == "s1").unwrap();
         // The current branch follows git...
-        assert_eq!(s.branch_name, "agent-tabs");
+        assert_eq!(s.branch_name().expect("managed test session"), "agent-tabs");
         // ...but the human name and the original branch are durable/immutable.
         assert_eq!(s.title.as_deref(), Some("server-mode"));
-        assert_eq!(s.initial_branch, "server-mode");
+        assert_eq!(
+            s.initial_branch().expect("managed test session"),
+            "server-mode"
+        );
     }
 
     #[test]
@@ -3774,7 +4042,11 @@ mod tests {
         // external drift by the branch-sync poller — no mutation, no warn.
         let (mut engine, _tmp) = test_engine();
         let mut session = sample_session("s1", "p1", "server-mode");
-        session.initial_branch = "server-mode".into();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .initial_branch = "server-mode".into();
         engine.sessions.push(session);
         // Simulate the dispatch marker set by `apply_rename_session`.
         engine.mark_in_flight(InFlightKey::BranchRename("s1".into()));
@@ -3789,7 +4061,8 @@ mod tests {
         assert!(matches!(reaction, EventReaction::Nothing));
         let s = engine.sessions.iter().find(|s| s.id == "s1").unwrap();
         assert_eq!(
-            s.branch_name, "server-mode",
+            s.branch_name().expect("managed test session"),
+            "server-mode",
             "the mid-rename session's branch must not be mutated by branch-sync"
         );
         // The session store was never upserted for s1 (no drift persisted).
@@ -3804,7 +4077,11 @@ mod tests {
         // skipped without mutating the session.
         let (mut engine, _tmp) = test_engine();
         let mut session = sample_session("s1", "p1", "old-branch");
-        session.initial_branch = "old-branch".into();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .initial_branch = "old-branch".into();
         engine.sessions.push(session);
         engine.mark_in_flight(InFlightKey::BranchRename("s1".into()));
         engine.rename_expected.insert(
@@ -3830,7 +4107,8 @@ mod tests {
 
         let s = engine.sessions.iter().find(|s| s.id == "s1").unwrap();
         assert_eq!(
-            s.branch_name, "old-branch",
+            s.branch_name().expect("managed test session"),
+            "old-branch",
             "expected rename branches must never mutate the session mid-rename"
         );
     }
@@ -3843,7 +4121,11 @@ mod tests {
         // mid-rename — that would race `BranchRenameCompleted`).
         let (mut engine, _tmp) = test_engine();
         let mut session = sample_session("s1", "p1", "old-branch");
-        session.initial_branch = "old-branch".into();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .initial_branch = "old-branch".into();
         engine.sessions.push(session);
         engine.mark_in_flight(InFlightKey::BranchRename("s1".into()));
         engine.rename_expected.insert(
@@ -3862,7 +4144,8 @@ mod tests {
         assert!(matches!(r, EventReaction::Nothing));
         let s = engine.sessions.iter().find(|s| s.id == "s1").unwrap();
         assert_eq!(
-            s.branch_name, "old-branch",
+            s.branch_name().expect("managed test session"),
+            "old-branch",
             "an unexpected mid-rename branch must not mutate the session"
         );
         // Nothing was persisted for s1 (no drift written).
@@ -4855,8 +5138,8 @@ mod tests {
         let (outcome, _create_final) = engine.process_agent_launch_failed(data);
         assert!(matches!(
             outcome,
-            AgentLaunchFailedOutcome::Reconnect { session_id, branch_name, message }
-                if session_id == "s1" && branch_name == "feat/x" && message == "boom"
+            AgentLaunchFailedOutcome::Reconnect { session_id, agent_label, message }
+                if session_id == "s1" && agent_label == "s1-title" && message == "boom"
         ));
     }
 
@@ -4867,8 +5150,8 @@ mod tests {
         let (outcome, _create_final) = engine.process_agent_launch_failed(data);
         assert!(matches!(
             outcome,
-            AgentLaunchFailedOutcome::StartupAutoReopen { session_id, branch_name, message }
-                if session_id == "s1" && branch_name == "feat/x" && message == "boom"
+            AgentLaunchFailedOutcome::StartupAutoReopen { session_id, agent_label, message }
+                if session_id == "s1" && agent_label == "s1-title" && message == "boom"
         ));
     }
 
@@ -4923,8 +5206,8 @@ mod tests {
 
         assert!(matches!(
             outcome,
-            AgentLaunchFailedOutcome::Tab { tab_id, branch_name, message, .. }
-                if tab_id == "tab-1" && branch_name == "feat/x" && message == "boom"
+            AgentLaunchFailedOutcome::Tab { tab_id, agent_label, message, .. }
+                if tab_id == "tab-1" && agent_label == "s1-title" && message == "boom"
         ));
         // G-T1: a brand-new tab's very first spawn failure (`is_fresh: true`)
         // must delete the row so it doesn't linger as a permanently-broken
@@ -4969,8 +5252,8 @@ mod tests {
 
         assert!(matches!(
             outcome,
-            AgentLaunchFailedOutcome::Tab { tab_id, branch_name, message, .. }
-                if tab_id == "tab-1" && branch_name == "feat/x" && message == "boom"
+            AgentLaunchFailedOutcome::Tab { tab_id, agent_label, message, .. }
+                if tab_id == "tab-1" && agent_label == "s1-title" && message == "boom"
         ));
         assert!(
             engine.agent_tabs.contains_key("tab-1"),
@@ -5422,8 +5705,14 @@ mod tests {
         engine.projects.push(sample_project("p1", "/tmp/p1"));
         let mut a = sample_session("s1", "p1", "feat/x");
         let mut b = sample_session("s2", "p1", "feat/y");
-        a.worktree_path = "/tmp/shared".to_string();
-        b.worktree_path = "/tmp/shared".to_string();
+        a.workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = "/tmp/shared".to_string();
+        b.workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = "/tmp/shared".to_string();
         engine.session_store.upsert_session(&a).unwrap();
         engine.session_store.upsert_session(&b).unwrap();
         engine.sessions.push(a);
@@ -5444,8 +5733,14 @@ mod tests {
         engine.projects.push(sample_project("p1", "/tmp/p1"));
         let mut a = sample_session("s1", "p1", "feat/x");
         let mut b = sample_session("s2", "p1", "feat/y");
-        a.worktree_path = "/tmp/shared".to_string();
-        b.worktree_path = "/tmp/shared".to_string();
+        a.workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = "/tmp/shared".to_string();
+        b.workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = "/tmp/shared".to_string();
         engine.session_store.upsert_session(&a).unwrap();
         engine.session_store.upsert_session(&b).unwrap();
         engine.sessions.push(a);
@@ -6592,10 +6887,15 @@ mod tests {
         engine.dispatch_deferred_worktree_removal(crate::engine::DeferredWorktreeRemoval {
             session_id: "s1".to_string(),
             project_path: repo.to_string_lossy().to_string(),
-            worktree_path: worktree.to_string_lossy().to_string(),
-            branch_name: "develop".to_string(),
-            initial_branch: "develop".to_string(),
-            branch_provenance: crate::model::BranchProvenance::AttachedExisting,
+            managed: crate::model::ManagedWorkspace {
+                project_id: "p1".to_string(),
+                project_path: None,
+                source_branch: "main".to_string(),
+                branch_name: "develop".to_string(),
+                initial_branch: "develop".to_string(),
+                branch_provenance: crate::model::BranchProvenance::AttachedExisting,
+                worktree_path: worktree.to_string_lossy().to_string(),
+            },
             busy_message: "Removing worktree\u{2026}".to_string(),
         });
 

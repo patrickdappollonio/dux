@@ -99,16 +99,19 @@ pub enum PrunedPtyKind {
 pub struct DeferredWorktreeRemoval {
     pub session_id: String,
     pub project_path: String,
-    pub worktree_path: String,
-    pub branch_name: String,
-    /// The branch the agent was BORN on, captured at delete time. Deleted too
-    /// when it differs from `branch_name`, or an agent whose branch drifted
-    /// leaves its birth branch behind (see `git::remove_worktree`).
-    pub initial_branch: String,
-    /// Where the branch came from, captured at delete time. Decides whether the
-    /// removal may delete the branches at all: dux deletes only what it created
-    /// (see `Engine::do_delete_session`).
-    pub branch_provenance: crate::model::BranchProvenance,
+    /// The managed working copy to remove, captured whole at delete time: the
+    /// worktree path, the current branch, the branch the agent was BORN on
+    /// (deleted too when it differs, or a drifted agent leaves its birth branch
+    /// behind, see `git::remove_worktree`), and where the branch came from
+    /// (which decides whether the removal may delete branches at all, because
+    /// dux deletes only what it created; see `Engine::do_delete_session`).
+    ///
+    /// Carried as the whole [`crate::model::ManagedWorkspace`] rather than as
+    /// loose fields SO THAT A STANDALONE AGENT CANNOT PRODUCE ONE. A folder
+    /// workspace has no value of this type to offer, so no delete of a
+    /// standalone agent can construct a removal for the user's folder. That is
+    /// the structural spelling of "dux never touches the folder".
+    pub managed: crate::model::ManagedWorkspace,
     /// The Busy status message to show while the removal runs (set when the
     /// worker is finally spawned, after the PTY is reaped).
     pub busy_message: String,
@@ -354,7 +357,7 @@ impl Engine {
                         .sessions
                         .iter()
                         .find(|s| &s.id == sid)
-                        .map(|s| s.branch_name.clone())
+                        .map(|s| s.display_label())
                         .unwrap_or_else(|| sid.clone());
                     let label = if is_session_slot {
                         branch
@@ -696,12 +699,7 @@ impl Engine {
         let ids: Vec<(String, bool)> = self
             .sessions
             .iter()
-            .map(|s| {
-                (
-                    s.id.clone(),
-                    std::path::Path::new(&s.worktree_path).exists(),
-                )
-            })
+            .map(|s| (s.id.clone(), std::path::Path::new(s.directory()).exists()))
             .collect();
         for (id, exists) in ids {
             let status = if exists {
@@ -722,12 +720,19 @@ impl Engine {
     /// - the session recorded reopen intent (`desired_running`: it was still
     ///   running when dux last exited),
     /// - the per-agent `auto_reopen_enabled` opt-in is on,
-    /// - its worktree still exists on disk (a vanished worktree cannot host a
-    ///   provider),
-    /// - its project has not opted out (`project_allows_auto_reopen`), and
+    /// - the directory it runs in still exists on disk (a vanished directory
+    ///   cannot host a provider),
+    /// - for a MANAGED agent, its project has not opted out
+    ///   (`project_allows_auto_reopen`), and
     /// - its provider can actually resume a conversation
     ///   (`supports_session_resume`; reopening a provider that starts from
     ///   scratch would silently discard the conversation the intent was about).
+    ///
+    /// The project consult is a STRUCTURAL switch on the workspace, not a
+    /// lookup that happens to miss. `project_allows_auto_reopen` fails OPEN on
+    /// an unknown project, so a standalone agent passed through it would sail
+    /// past a question nobody ever answered for it; here the question is simply
+    /// not asked, and the fail-open helper is unreachable from that arm.
     ///
     /// Only the DECISION lives here; each surface keeps its own launch dispatch
     /// (`build_agent_launch_request` with `AgentLaunchKind::StartupAutoReopen`).
@@ -738,10 +743,17 @@ impl Engine {
         self.sessions
             .iter()
             .filter(|session| {
+                let owner_allows = match &session.workspace {
+                    crate::model::AgentWorkspace::Managed(managed) => {
+                        self.project_allows_auto_reopen(&managed.project_id)
+                    }
+                    // No project, so nothing to consult and nobody to veto.
+                    crate::model::AgentWorkspace::Folder(_) => true,
+                };
                 session.desired_running
                     && session.auto_reopen_enabled
-                    && std::path::Path::new(&session.worktree_path).exists()
-                    && self.project_allows_auto_reopen(&session.project_id)
+                    && std::path::Path::new(session.directory()).exists()
+                    && owner_allows
                     && crate::config::provider_config(&self.config, &session.provider)
                         .supports_session_resume()
             })
@@ -911,7 +923,11 @@ mod tests {
             worktree.path().to_string_lossy().as_ref(),
         ));
         let mut session = sample_session("s1", "p1", "feat");
-        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
         engine.sessions.push(session);
         engine.agent_tabs.insert(
             "tab-clean".into(),
@@ -1012,7 +1028,11 @@ mod tests {
             worktree.path().to_string_lossy().as_ref(),
         ));
         let mut session = sample_session("s1", "p1", "feat");
-        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
 
@@ -1076,7 +1096,11 @@ mod tests {
             .projects
             .push(sample_project("p1", worktree.to_string_lossy().as_ref()));
         let mut session = sample_session("s1", "p1", "feat");
-        session.worktree_path = worktree.to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.to_string_lossy().to_string();
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
 
@@ -1215,7 +1239,11 @@ mod tests {
             .projects
             .push(sample_project("p1", worktree.to_string_lossy().as_ref()));
         let mut session = sample_session("s1", "p1", "feat");
-        session.worktree_path = worktree.to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.to_string_lossy().to_string();
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
 
@@ -1423,7 +1451,11 @@ mod tests {
             worktree.path().to_string_lossy().as_ref(),
         ));
         let mut session = sample_session("s1", "p1", "feat");
-        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
         engine.config.terminal.command = "cat".to_string();
@@ -1490,7 +1522,11 @@ mod tests {
             worktree.path().to_string_lossy().as_ref(),
         ));
         let mut session = sample_session("s1", "p1", "feat");
-        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
         engine.sessions.push(session);
 
         // `cat` echoes stdin and exits on EOF — a safe stand-in terminal.
@@ -1548,7 +1584,11 @@ mod tests {
             worktree.path().to_string_lossy().as_ref(),
         ));
         let mut session = sample_session("s1", "p1", "feat");
-        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
         session.desired_running = true;
         // Store the session so `mark_*` persists cleanly.
         engine.session_store.upsert_session(&session).unwrap();
@@ -1612,7 +1652,11 @@ mod tests {
             worktree.path().to_string_lossy().as_ref(),
         ));
         let mut session = sample_session("s1", "p1", "feat");
-        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
 
@@ -1651,7 +1695,11 @@ mod tests {
             worktree.path().to_string_lossy().as_ref(),
         ));
         let mut session = sample_session("s1", "p1", "feat");
-        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
         session.desired_running = true;
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
@@ -1701,7 +1749,11 @@ mod tests {
             worktree.path().to_string_lossy().as_ref(),
         ));
         let mut session = sample_session("s1", "p1", "b1");
-        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
         session.desired_running = true;
         session.auto_reopen_enabled = true;
         engine.sessions.push(session);
@@ -1746,7 +1798,11 @@ mod tests {
     #[test]
     fn auto_reopen_candidates_skip_a_session_whose_worktree_vanished() {
         let (mut engine, _tmp, worktree) = auto_reopen_fixture();
-        engine.sessions[0].worktree_path = worktree
+        engine.sessions[0]
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree
             .path()
             .join("does-not-exist")
             .to_string_lossy()
@@ -1770,6 +1826,63 @@ mod tests {
         assert!(candidate_ids(&engine).is_empty());
     }
 
+    /// A standalone agent belongs to no project, so the project consult must
+    /// not happen at all for it. `project_allows_auto_reopen` fails OPEN on an
+    /// unknown project, so a faked empty project id would sail through and hide
+    /// the fact that the question was never answered deliberately. The
+    /// structural switch is what this pins: folder exists, provider can resume,
+    /// no project consult.
+    fn standalone_auto_reopen_fixture() -> (Engine, TempDir, tempfile::TempDir) {
+        let (mut engine, tmp) = test_engine();
+        engine.config.ui.auto_reopen_agents = true;
+        let folder = tempfile::tempdir().expect("folder");
+        let mut session = crate::engine::test_support::sample_standalone_session(
+            "sa1",
+            &folder.path().to_string_lossy(),
+        );
+        session.desired_running = true;
+        session.auto_reopen_enabled = true;
+        engine.sessions.push(session);
+        (engine, tmp, folder)
+    }
+
+    #[test]
+    fn a_standalone_agent_auto_reopens_without_consulting_any_project() {
+        let (engine, _tmp, _folder) = standalone_auto_reopen_fixture();
+        assert_eq!(candidate_ids(&engine), vec!["sa1".to_string()]);
+    }
+
+    /// The one project-shaped opt-out that could plausibly leak in: a project
+    /// that opted out must not silence an agent that has nothing to do with it.
+    #[test]
+    fn a_project_opt_out_cannot_silence_a_standalone_agent() {
+        let (mut engine, _tmp, folder) = standalone_auto_reopen_fixture();
+        engine.projects.push(sample_project(
+            "p1",
+            folder.path().to_string_lossy().as_ref(),
+        ));
+        engine.projects[0].auto_reopen_agents = Some(false);
+        assert_eq!(candidate_ids(&engine), vec!["sa1".to_string()]);
+    }
+
+    #[test]
+    fn a_standalone_agent_whose_folder_vanished_is_not_a_candidate() {
+        let (mut engine, _tmp, folder) = standalone_auto_reopen_fixture();
+        let gone = folder.path().join("no-such-directory");
+        engine.sessions[0].workspace =
+            crate::model::AgentWorkspace::Folder(crate::model::FolderWorkspace {
+                folder_path: gone.to_string_lossy().to_string(),
+            });
+        assert!(candidate_ids(&engine).is_empty());
+    }
+
+    #[test]
+    fn a_standalone_agent_on_a_provider_that_cannot_resume_is_not_a_candidate() {
+        let (mut engine, _tmp, _folder) = standalone_auto_reopen_fixture();
+        engine.sessions[0].provider = crate::model::ProviderKind::new("copilot");
+        assert!(candidate_ids(&engine).is_empty());
+    }
+
     /// The user-initiated kill teardown must clear `desired_running` when the
     /// kill detaches the agent (its last live tab is gone), so the startup
     /// auto-reopen pass does NOT relaunch an agent the user deliberately
@@ -1780,7 +1893,7 @@ mod tests {
         let (mut engine, _tmp, _worktree) = auto_reopen_fixture();
         // Give the eligible session a live provider on its session-slot tab so
         // there is something to kill.
-        let worktree = engine.sessions[0].worktree_path.clone();
+        let worktree = engine.sessions[0].directory().to_string();
         let client = spawn_cat(Path::new(&worktree));
         engine.providers.insert("s1".to_string(), client);
         assert_eq!(candidate_ids(&engine), vec!["s1".to_string()]);
@@ -1811,7 +1924,7 @@ mod tests {
     #[test]
     fn kill_tab_runtime_keeps_desired_running_when_a_sibling_stays_live() {
         let (mut engine, _tmp, _worktree) = auto_reopen_fixture();
-        let worktree = engine.sessions[0].worktree_path.clone();
+        let worktree = engine.sessions[0].directory().to_string();
         engine
             .providers
             .insert("s1".to_string(), spawn_cat(Path::new(&worktree)));
@@ -1911,13 +2024,20 @@ mod tests {
         ));
 
         let mut present = sample_session("present", "p1", "here");
-        present.worktree_path = worktree.path().to_string_lossy().to_string();
+        present
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
         present.status = SessionStatus::Active;
         engine.session_store.upsert_session(&present).unwrap();
         engine.sessions.push(present);
 
         let mut gone = sample_session("gone", "p1", "gone");
-        gone.worktree_path = worktree
+        gone.workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree
             .path()
             .join("does-not-exist")
             .to_string_lossy()
@@ -1944,7 +2064,11 @@ mod tests {
             worktree.path().to_string_lossy().as_ref(),
         ));
         let mut session = sample_session("s1", "p1", "feat");
-        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
 
@@ -1973,7 +2097,11 @@ mod tests {
             worktree.path().to_string_lossy().as_ref(),
         ));
         let mut session = sample_session("s1", "p1", "feat");
-        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
         engine.sessions.push(session);
 
         // A `cat`-backed companion terminal that won't exit on its own; it must
@@ -2046,7 +2174,11 @@ mod tests {
             worktree.path().to_string_lossy().as_ref(),
         ));
         let mut session = sample_session("s1", "p1", "feat");
-        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
 
@@ -2080,7 +2212,11 @@ mod tests {
             worktree.path().to_string_lossy().as_ref(),
         ));
         let mut session = sample_session("s1", "p1", "feat");
-        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
 
@@ -2130,7 +2266,11 @@ mod tests {
             worktree.path().to_string_lossy().as_ref(),
         ));
         let mut session = sample_session("s1", "p1", "feat");
-        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
 
@@ -2190,7 +2330,11 @@ mod tests {
             worktree.path().to_string_lossy().as_ref(),
         ));
         let mut session = sample_session("s1", "p1", "feat");
-        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
         engine.sessions.push(session);
 
         // A companion terminal backed by the SIGTERM-ignorer instead of `cat`.
@@ -2256,7 +2400,11 @@ mod tests {
         ));
         for id in ["clean", "straggler"] {
             let mut session = sample_session(id, "p1", "feat");
-            session.worktree_path = worktree.path().to_string_lossy().to_string();
+            session
+                .workspace
+                .as_managed_mut()
+                .expect("managed test session")
+                .worktree_path = worktree.path().to_string_lossy().to_string();
             engine.session_store.upsert_session(&session).unwrap();
             engine.sessions.push(session);
         }
@@ -2297,7 +2445,11 @@ mod tests {
             worktree.path().to_string_lossy().as_ref(),
         ));
         let mut session = sample_session("s1", "p1", "feat");
-        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
 
@@ -2340,7 +2492,11 @@ mod tests {
             worktree.path().to_string_lossy().as_ref(),
         ));
         let mut session = sample_session("s1", "p1", "feat");
-        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
         engine.sessions.push(session);
         engine.config.terminal.command = "cat".to_string();
         engine.config.terminal.args = vec![];
@@ -2379,7 +2535,11 @@ mod tests {
             worktree.path().to_string_lossy().as_ref(),
         ));
         let mut session = sample_session("s1", "p1", "feat");
-        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
         engine.sessions.push(session);
         // `cat` echoes stdin as a visible grid change, which sets `received_data`.
         engine.config.terminal.command = "cat".to_string();
@@ -2426,7 +2586,11 @@ mod tests {
             worktree.path().to_string_lossy().as_ref(),
         ));
         let mut session = sample_session("s1", "p1", "feat");
-        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
         engine.sessions.push(session);
         engine.config.terminal.command = "cat".to_string();
         engine.config.terminal.args = vec![];
@@ -2468,7 +2632,11 @@ mod tests {
             .projects
             .push(sample_project("p1", repo.path().to_string_lossy().as_ref()));
         let mut session = sample_session("s1", "p1", "feat");
-        session.worktree_path = repo.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = repo.path().to_string_lossy().to_string();
         engine.sessions.push(session);
         engine.config.terminal.command = "cat".to_string();
         engine.config.terminal.args = vec![];
@@ -2499,7 +2667,11 @@ mod tests {
             .projects
             .push(sample_project("p1", repo.path().to_string_lossy().as_ref()));
         let mut session = sample_session("s1", "p1", "feat");
-        session.worktree_path = repo.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = repo.path().to_string_lossy().to_string();
         engine.sessions.push(session);
         engine.config.terminal.command = "cat".to_string();
         engine.config.terminal.args = vec![];
@@ -2534,7 +2706,11 @@ mod tests {
             .projects
             .push(sample_project("p1", repo.path().to_string_lossy().as_ref()));
         let mut session = sample_session("s1", "p1", "feat");
-        session.worktree_path = repo.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = repo.path().to_string_lossy().to_string();
         engine.sessions.push(session);
         engine.config.terminal.command = "cat".to_string();
         engine.config.terminal.args = vec![];
@@ -2578,7 +2754,11 @@ mod tests {
             .projects
             .push(sample_project("p1", repo.path().to_string_lossy().as_ref()));
         let mut session = sample_session("s1", "p1", "feat");
-        session.worktree_path = repo.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = repo.path().to_string_lossy().to_string();
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
         engine.mark_session_status("s1", SessionStatus::Active);
@@ -2681,7 +2861,11 @@ mod tests {
             worktree.path().to_string_lossy().as_ref(),
         ));
         let mut session = sample_session("s1", "p1", "feat");
-        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
         engine.sessions.push(session);
         // A live agent PTY that exits on SIGTERM.
         engine
@@ -2703,7 +2887,7 @@ mod tests {
             .as_ref()
             .expect("worktree removal deferred onto the terminating agent");
         assert_eq!(req.session_id, "s1");
-        assert_eq!(req.worktree_path, worktree.path().to_string_lossy());
+        assert_eq!(req.managed.worktree_path, worktree.path().to_string_lossy());
 
         // Once the agent exits (SIGTERM), the reaper hands the removal back to be
         // dispatched — never before.
@@ -2730,7 +2914,11 @@ mod tests {
             worktree.path().to_string_lossy().as_ref(),
         ));
         let mut session = sample_session("s1", "p1", "feat");
-        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
         engine.sessions.push(session);
         // No provider inserted: the agent already exited.
 
@@ -2757,7 +2945,11 @@ mod tests {
             worktree.path().to_string_lossy().as_ref(),
         ));
         let mut session = sample_session("s1", "p1", "feat");
-        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
         engine.sessions.push(session);
         engine.mark_session_status("s1", crate::model::SessionStatus::Active);
         // The session-slot tab is live (keyed by the session id) AND an extra tab
@@ -2802,8 +2994,11 @@ mod tests {
             Some(crate::model::TerminalOwner::Session("s1".to_string())),
             "resolves the owning session"
         );
+        // The label names the AGENT, which is its title when it has one, not
+        // the branch underneath. A standalone agent has no branch to fall back
+        // to, so every label site now goes through the one display rule.
         assert!(
-            p.label.contains("feat") && p.label.contains("codex"),
+            p.label.contains("s1-title") && p.label.contains("codex"),
             "label names the agent + provider, not a raw UUID: {}",
             p.label
         );
@@ -2829,7 +3024,11 @@ mod tests {
             worktree.path().to_string_lossy().as_ref(),
         ));
         let mut session = sample_session("s1", "p1", "feat");
-        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
         engine.sessions.push(session);
         engine.mark_session_status("s1", crate::model::SessionStatus::Active);
         // Only an extra tab is live (the session-slot tab is dormant). When it
@@ -2878,7 +3077,11 @@ mod tests {
             worktree.path().to_string_lossy().as_ref(),
         ));
         let mut session = sample_session("s1", "p1", "feat");
-        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
         engine.sessions.push(session);
         engine
             .agent_tabs
@@ -2925,7 +3128,11 @@ mod tests {
             worktree.path().to_string_lossy().as_ref(),
         ));
         let mut session = sample_session("s1", "p1", "feat");
-        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
         engine.sessions.push(session);
         engine
             .agent_tabs
@@ -2978,7 +3185,11 @@ mod tests {
             worktree.path().to_string_lossy().as_ref(),
         ));
         let mut session = sample_session("s1", "p1", "feat");
-        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
         engine.sessions.push(session);
         engine
             .agent_tabs
@@ -3048,10 +3259,15 @@ mod tests {
             removal: DeferredWorktreeRemoval {
                 session_id: "s1".to_string(),
                 project_path: "/tmp/p".to_string(),
-                worktree_path: worktree.path().to_string_lossy().to_string(),
-                branch_name: "feat".to_string(),
-                initial_branch: "feat".to_string(),
-                branch_provenance: crate::model::BranchProvenance::CreatedByDux,
+                managed: crate::model::ManagedWorkspace {
+                    project_id: "p1".to_string(),
+                    project_path: None,
+                    source_branch: "main".to_string(),
+                    branch_name: "feat".to_string(),
+                    initial_branch: "feat".to_string(),
+                    branch_provenance: crate::model::BranchProvenance::CreatedByDux,
+                    worktree_path: worktree.path().to_string_lossy().to_string(),
+                },
                 busy_message: "removing".to_string(),
             },
         });

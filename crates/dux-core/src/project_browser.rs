@@ -186,7 +186,13 @@ pub fn classify_project_worktrees(
         .iter()
         .map(|session| {
             (
-                canonical_or_original(Path::new(&session.worktree_path)),
+                // "The directory this agent occupies", which for a
+                // STANDALONE agent is the user's folder. That is the whole
+                // guard: a standalone agent pointed at a directory under dux's
+                // managed area must show up here as occupied, or the worktree
+                // manager would offer to force-remove the ground out from
+                // under it. Compared canonically so a symlink cannot hide it.
+                canonical_or_original(Path::new(session.directory())),
                 session.id.clone(),
             )
         })
@@ -619,14 +625,7 @@ mod tests {
         };
         let sessions = vec![AgentSession {
             id: "session-1".to_string(),
-            project_id: project.id.clone(),
-            project_path: Some(project.path.clone()),
             provider: ProviderKind::new("codex"),
-            source_branch: "main".to_string(),
-            branch_name: "existing".to_string(),
-            initial_branch: "existing".to_string(),
-            branch_provenance: crate::model::BranchProvenance::CreatedByDux,
-            worktree_path: existing.to_string_lossy().to_string(),
             title: None,
             started_providers: Vec::new(),
             desired_running: false,
@@ -635,6 +634,15 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             last_focused_tab: None,
+            workspace: crate::model::AgentWorkspace::Managed(crate::model::ManagedWorkspace {
+                project_id: project.id.clone(),
+                project_path: Some(project.path.clone()),
+                source_branch: "main".to_string(),
+                branch_name: "existing".to_string(),
+                initial_branch: "existing".to_string(),
+                branch_provenance: crate::model::BranchProvenance::CreatedByDux,
+                worktree_path: existing.to_string_lossy().to_string(),
+            }),
         }];
         let worktrees = vec![
             git::GitWorktree {

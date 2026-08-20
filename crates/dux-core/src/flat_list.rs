@@ -77,7 +77,7 @@ pub fn order_sessions(
     // `sortSessions.ts` (UTF-8 byte order equals code-point order).
     let name_key = |index: usize| -> String {
         let s = &sessions[index];
-        s.title.as_deref().unwrap_or(&s.branch_name).to_lowercase()
+        s.display_label().to_lowercase()
     };
     // Comparator-based ordering for the MAIN bucket in the non-Active modes.
     // `sort_by_key` is stable, so equal keys keep incoming order.

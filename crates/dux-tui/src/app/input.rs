@@ -11523,20 +11523,7 @@ not_a_real_action = ["x"]
         let now = Utc::now();
         app.engine.sessions.push(AgentSession {
             id: "session-2".to_string(),
-            project_id: app.engine.projects[0].id.clone(),
-            project_path: Some(app.engine.projects[0].path.clone()),
             provider: ProviderKind::from_str("claude"),
-            source_branch: "main".to_string(),
-            branch_name: "beta-agent".to_string(),
-            initial_branch: "beta-agent".to_string(),
-            branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
-            worktree_path: app
-                .engine
-                .paths
-                .worktrees_root
-                .join("other")
-                .display()
-                .to_string(),
             title: None,
             started_providers: Vec::new(),
             desired_running: false,
@@ -11545,6 +11532,23 @@ not_a_real_action = ["x"]
             created_at: now,
             updated_at: now,
             last_focused_tab: None,
+            workspace: dux_core::model::AgentWorkspace::Managed(
+                dux_core::model::ManagedWorkspace {
+                    project_id: app.engine.projects[0].id.clone(),
+                    project_path: Some(app.engine.projects[0].path.clone()),
+                    source_branch: "main".to_string(),
+                    branch_name: "beta-agent".to_string(),
+                    initial_branch: "beta-agent".to_string(),
+                    branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
+                    worktree_path: app
+                        .engine
+                        .paths
+                        .worktrees_root
+                        .join("other")
+                        .display()
+                        .to_string(),
+                },
+            ),
         });
         let args = vec!["-c".to_string(), "sleep 5".to_string()];
         app.engine.providers.insert(
@@ -11590,20 +11594,7 @@ not_a_real_action = ["x"]
         for name in ["charlie", "alpha", "bravo"] {
             let session = AgentSession {
                 id: format!("session-{name}"),
-                project_id: project_id.clone(),
-                project_path: Some(project_path.clone()),
                 provider: ProviderKind::from_str("codex"),
-                source_branch: "main".to_string(),
-                branch_name: name.to_string(),
-                initial_branch: name.to_string(),
-                branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
-                worktree_path: app
-                    .engine
-                    .paths
-                    .worktrees_root
-                    .join(name)
-                    .display()
-                    .to_string(),
                 title: None,
                 started_providers: Vec::new(),
                 desired_running: false,
@@ -11612,6 +11603,23 @@ not_a_real_action = ["x"]
                 created_at: now,
                 updated_at: now,
                 last_focused_tab: None,
+                workspace: dux_core::model::AgentWorkspace::Managed(
+                    dux_core::model::ManagedWorkspace {
+                        project_id: project_id.clone(),
+                        project_path: Some(project_path.clone()),
+                        source_branch: "main".to_string(),
+                        branch_name: name.to_string(),
+                        initial_branch: name.to_string(),
+                        branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
+                        worktree_path: app
+                            .engine
+                            .paths
+                            .worktrees_root
+                            .join(name)
+                            .display()
+                            .to_string(),
+                    },
+                ),
             };
             app.engine.session_store.upsert_session(&session).unwrap();
             app.engine.sessions.push(session);
@@ -11637,7 +11645,7 @@ not_a_real_action = ["x"]
             .engine
             .sessions
             .iter()
-            .map(|s| s.branch_name.clone())
+            .map(|s| s.branch_name().expect("managed test session").clone())
             .collect();
         assert_eq!(in_memory, vec!["charlie", "alpha", "bravo"]);
     }
@@ -11653,14 +11661,7 @@ not_a_real_action = ["x"]
     ) -> AgentSession {
         AgentSession {
             id: id.to_string(),
-            project_id: project_id.to_string(),
-            project_path: Some(format!("/tmp/does-not-exist/{project_id}")),
             provider: ProviderKind::from_str("codex"),
-            source_branch: "main".to_string(),
-            branch_name: branch.to_string(),
-            initial_branch: branch.to_string(),
-            branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
-            worktree_path: format!("/tmp/does-not-exist/{id}"),
             title: None,
             started_providers: Vec::new(),
             desired_running: false,
@@ -11669,6 +11670,17 @@ not_a_real_action = ["x"]
             created_at: now,
             updated_at: now,
             last_focused_tab: None,
+            workspace: dux_core::model::AgentWorkspace::Managed(
+                dux_core::model::ManagedWorkspace {
+                    project_id: project_id.to_string(),
+                    project_path: Some(format!("/tmp/does-not-exist/{project_id}")),
+                    source_branch: "main".to_string(),
+                    branch_name: branch.to_string(),
+                    initial_branch: branch.to_string(),
+                    branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
+                    worktree_path: format!("/tmp/does-not-exist/{id}"),
+                },
+            ),
         }
     }
 
@@ -11960,20 +11972,7 @@ not_a_real_action = ["x"]
         for name in ["charlie", "alpha", "bravo"] {
             let session = AgentSession {
                 id: format!("session-{name}"),
-                project_id: project_id.clone(),
-                project_path: Some(project_path.clone()),
                 provider: ProviderKind::from_str("codex"),
-                source_branch: "main".to_string(),
-                branch_name: name.to_string(),
-                initial_branch: name.to_string(),
-                branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
-                worktree_path: app
-                    .engine
-                    .paths
-                    .worktrees_root
-                    .join(name)
-                    .display()
-                    .to_string(),
                 title: None,
                 started_providers: Vec::new(),
                 desired_running: false,
@@ -11982,6 +11981,23 @@ not_a_real_action = ["x"]
                 created_at: now,
                 updated_at: now,
                 last_focused_tab: None,
+                workspace: dux_core::model::AgentWorkspace::Managed(
+                    dux_core::model::ManagedWorkspace {
+                        project_id: project_id.clone(),
+                        project_path: Some(project_path.clone()),
+                        source_branch: "main".to_string(),
+                        branch_name: name.to_string(),
+                        initial_branch: name.to_string(),
+                        branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
+                        worktree_path: app
+                            .engine
+                            .paths
+                            .worktrees_root
+                            .join(name)
+                            .display()
+                            .to_string(),
+                    },
+                ),
             };
             app.engine.sessions.push(session);
         }
@@ -12942,20 +12958,7 @@ not_a_real_action = ["x"]
         for name in ["alpha", "bravo"] {
             app.engine.sessions.push(AgentSession {
                 id: format!("session-{name}"),
-                project_id: project_id.clone(),
-                project_path: Some(project_path.clone()),
                 provider: ProviderKind::from_str("codex"),
-                source_branch: "main".to_string(),
-                branch_name: name.to_string(),
-                initial_branch: name.to_string(),
-                branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
-                worktree_path: app
-                    .engine
-                    .paths
-                    .worktrees_root
-                    .join(name)
-                    .display()
-                    .to_string(),
                 title: None,
                 started_providers: Vec::new(),
                 desired_running: false,
@@ -12964,6 +12967,23 @@ not_a_real_action = ["x"]
                 created_at: now,
                 updated_at: now,
                 last_focused_tab: None,
+                workspace: dux_core::model::AgentWorkspace::Managed(
+                    dux_core::model::ManagedWorkspace {
+                        project_id: project_id.clone(),
+                        project_path: Some(project_path.clone()),
+                        source_branch: "main".to_string(),
+                        branch_name: name.to_string(),
+                        initial_branch: name.to_string(),
+                        branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
+                        worktree_path: app
+                            .engine
+                            .paths
+                            .worktrees_root
+                            .join(name)
+                            .display()
+                            .to_string(),
+                    },
+                ),
             });
         }
         app.rebuild_left_items();
@@ -13132,14 +13152,7 @@ not_a_real_action = ["x"]
         std::fs::create_dir_all(&worktree).expect("imported worktree");
         let session = AgentSession {
             id: "imported-session".to_string(),
-            project_id: app.engine.projects[0].id.clone(),
-            project_path: Some(app.engine.projects[0].path.clone()),
             provider: ProviderKind::from_str("codex"),
-            source_branch: "main".to_string(),
-            branch_name: "main".to_string(),
-            initial_branch: "main".to_string(),
-            branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
-            worktree_path: worktree.to_string_lossy().to_string(),
             title: Some("imported".to_string()),
             started_providers: vec!["codex".to_string()],
             desired_running: true,
@@ -13148,6 +13161,17 @@ not_a_real_action = ["x"]
             created_at: Utc::now(),
             updated_at: Utc::now(),
             last_focused_tab: None,
+            workspace: dux_core::model::AgentWorkspace::Managed(
+                dux_core::model::ManagedWorkspace {
+                    project_id: app.engine.projects[0].id.clone(),
+                    project_path: Some(app.engine.projects[0].path.clone()),
+                    source_branch: "main".to_string(),
+                    branch_name: "main".to_string(),
+                    initial_branch: "main".to_string(),
+                    branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
+                    worktree_path: worktree.to_string_lossy().to_string(),
+                },
+            ),
         };
         let args = vec!["-c".to_string(), "sleep 1".to_string()];
         let client = PtyClient::spawn("/bin/sh", &args, &worktree, 24, 80, 1_000)
@@ -13971,7 +13995,11 @@ not_a_real_action = ["x"]
         // tail, no scroll.
         let mut second = app.engine.sessions[0].clone();
         second.id = "session-2".to_string();
-        second.branch_name = "second-branch".to_string();
+        second
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .branch_name = "second-branch".to_string();
         second.title = None;
         app.engine.sessions.push(second);
         let ids: Vec<String> = app.engine.sessions.iter().map(|s| s.id.clone()).collect();
@@ -14070,7 +14098,11 @@ not_a_real_action = ["x"]
         let mut app = test_app(default_bindings());
         let mut second = app.engine.sessions[0].clone();
         second.id = "session-2".to_string();
-        second.branch_name = "second-branch".to_string();
+        second
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .branch_name = "second-branch".to_string();
         app.engine.sessions.push(second);
         for id in app
             .engine
@@ -14419,7 +14451,11 @@ not_a_real_action = ["x"]
         let mut app = test_app(default_bindings());
         let mut second = app.engine.sessions[0].clone();
         second.id = "session-2".to_string();
-        second.branch_name = "second-branch".to_string();
+        second
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .branch_name = "second-branch".to_string();
         app.engine.sessions.push(second);
         for id in app
             .engine
@@ -16408,19 +16444,7 @@ not_a_real_action = ["x"]
         let now = Utc::now();
         app.engine.sessions.push(AgentSession {
             id: "session-2".to_string(),
-            project_id: app.engine.projects[0].id.clone(),
-            project_path: Some(app.engine.projects[0].path.clone()),
             provider: ProviderKind::from_str("codex"),
-            source_branch: "main".to_string(),
-            branch_name: "agent-branch-2".to_string(),
-            initial_branch: "agent-branch-2".to_string(),
-            branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
-            worktree_path: app
-                .engine
-                .paths
-                .worktrees_root
-                .to_string_lossy()
-                .to_string(),
             title: None,
             started_providers: Vec::new(),
             desired_running: false,
@@ -16429,6 +16453,22 @@ not_a_real_action = ["x"]
             created_at: now,
             updated_at: now,
             last_focused_tab: None,
+            workspace: dux_core::model::AgentWorkspace::Managed(
+                dux_core::model::ManagedWorkspace {
+                    project_id: app.engine.projects[0].id.clone(),
+                    project_path: Some(app.engine.projects[0].path.clone()),
+                    source_branch: "main".to_string(),
+                    branch_name: "agent-branch-2".to_string(),
+                    initial_branch: "agent-branch-2".to_string(),
+                    branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
+                    worktree_path: app
+                        .engine
+                        .paths
+                        .worktrees_root
+                        .to_string_lossy()
+                        .to_string(),
+                },
+            ),
         });
         app.rebuild_left_items();
         app.selected_left = 1;

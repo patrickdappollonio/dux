@@ -301,6 +301,22 @@ pub struct Engine {
     /// visual cue on the left pane row so the user can see the in-flight
     /// state.
     pub pending_deletions: HashSet<String>,
+    /// The live repository verdict for each STANDALONE agent's folder, keyed by
+    /// session id. A managed agent never has an entry: its worktree is a
+    /// repository by construction.
+    ///
+    /// The verdict is decided here, on the engine, rather than re-derived by
+    /// each surface, because it shells out to git and both surfaces would
+    /// otherwise ask the same question at different moments and disagree. It is
+    /// filled by a background probe (never on the engine thread) at load and at
+    /// creation, refreshed when the changes panel opens, and carried on the
+    /// wire so the browser renders the same answer the server acted on.
+    ///
+    /// An absent entry means "not probed yet", which every reader must treat as
+    /// [`crate::git::FolderRepoStatus::Indeterminate`]: quiet, honest, and no
+    /// mutations. Read it through [`Engine::folder_repo_status`], never
+    /// directly, so that default can never be forgotten.
+    pub folder_repo_statuses: HashMap<String, crate::git::FolderRepoStatus>,
     /// Session IDs whose worktree-removing delete has committed to tearing down
     /// but whose worktree has not yet been removed (the whole grace window from
     /// `begin_delete_session` through `WorktreeRemoveCompleted`). Unlike
@@ -863,6 +879,27 @@ pub(crate) fn pr_attach_in_flight_message(agent_name: &str) -> String {
          that attach to finish or fail, then try again."
     )
 }
+
+/// The refusal every branch-identity git feature gives for a standalone agent.
+///
+/// Purposeful, not accidental: hiding a button is not an answer when the same
+/// action is an HTTP route and a palette command, so the refusal has to be a
+/// sentence that explains the shape of the thing rather than a git error about
+/// a repository nobody named. `feature` names the action in the user's terms
+/// ("push", "attach a pull request", "fork"), and `remedy` says what to do
+/// instead, because "no" with no way forward is where a user gets stuck.
+pub fn standalone_agent_refusal(agent_name: &str, feature: &str, remedy: &str) -> String {
+    format!(
+        "Agent \"{agent_name}\" is a standalone agent: it runs in a folder you chose and has \
+         no branch of its own, so there is nothing to {feature}. {remedy}"
+    )
+}
+
+/// The remedy sentence shared by the branch-identity refusals: adding the
+/// folder as a project is the shape dux is built for, and it brings the branch
+/// features (and tabs) along.
+pub const STANDALONE_ADD_AS_PROJECT_REMEDY: &str =
+    "Add its folder as a project if you want dux to manage branches and worktrees for it.";
 
 /// Minimum spacing between per-session PR checks for the background triggers
 /// (refs watcher, agent exit). Guards against a burst of triggers spawning
@@ -1805,7 +1842,14 @@ impl Engine {
                 // Populate the path map and start watching existing sessions.
                 let mut paths = HashMap::new();
                 for session in &self.sessions {
-                    let refs_dir = PathBuf::from(&session.worktree_path)
+                    // The watch exists to notice the AGENT's branch moving, and
+                    // a standalone agent has no agent branch. Skipped even when
+                    // its folder happens to be a repository: watching it would
+                    // fire pull-request checks for a branch that is not dux's.
+                    let Some(managed) = session.workspace.as_managed() else {
+                        continue;
+                    };
+                    let refs_dir = PathBuf::from(&managed.worktree_path)
                         .join(".git")
                         .join("refs")
                         .join("heads");
@@ -1965,25 +2009,107 @@ impl Engine {
     /// - `None` (or an UNKNOWN id) → clear the watch and the lists, return `None`.
     /// - `Some(id)` for a known session → watch its worktree, record the id, empty
     ///   the lists, and return `Some(worktree)` to compute changed files for.
+    ///
+    /// For a STANDALONE agent the watch is folder-driven: it is enrolled only
+    /// while the folder is itself a repository, so nothing ever polls a plain
+    /// folder (which would answer with an error every cycle and surface as
+    /// "the repository is busy"). Opening the panel is also the moment the
+    /// folder verdict is refreshed, so a folder that became a repository since
+    /// the last look starts working here.
     #[must_use]
     pub fn set_watched_session(&mut self, session_id: Option<&str>) -> Option<PathBuf> {
+        // Refresh first: the probe is off-thread, so this call still uses the
+        // previous verdict and `FolderRepoStatusReady` re-enrols the watch when
+        // the answer changes. That is the whole "noticed when the panel opens"
+        // behavior, without a git subprocess on the engine thread.
+        if let Some(id) = session_id {
+            self.spawn_folder_repo_probe(id);
+        }
         let resolved = session_id.and_then(|id| {
-            self.sessions
-                .iter()
-                .find(|s| s.id == id)
-                .map(|s| (id.to_string(), PathBuf::from(&s.worktree_path)))
+            let session = self.sessions.iter().find(|s| s.id == id)?;
+            match &session.workspace {
+                crate::model::AgentWorkspace::Managed(managed) => {
+                    Some((id.to_string(), PathBuf::from(&managed.worktree_path)))
+                }
+                crate::model::AgentWorkspace::Folder(folder) => self
+                    .folder_repo_status(id)
+                    .changes_panel_works()
+                    .then(|| (id.to_string(), PathBuf::from(&folder.folder_path))),
+            }
         });
         let worktree = resolved.as_ref().map(|(_, path)| path.clone());
         // Keep the background poller in sync with the watched worktree.
         if let Ok(mut guard) = self.watched_worktree.lock() {
             *guard = worktree.clone();
         }
-        self.watched_session_id = resolved.map(|(id, _)| id);
+        // The WATCHED SESSION is whichever session the panel is showing, even
+        // when there is no repository to poll in it. Dropping the id here
+        // instead would leave the previous session's id in place and let its
+        // files render under a standalone agent's panel, which is the exact
+        // cross-tab confusion this field exists to prevent.
+        self.watched_session_id = session_id
+            .filter(|id| self.sessions.iter().any(|s| &s.id == id))
+            .map(str::to_string);
         // Always clear so the pane shows "no changes yet" (never the previous
         // watch's stale files) until the off-thread/inline compute lands.
         self.staged_files = Vec::new();
         self.unstaged_files = Vec::new();
         worktree
+    }
+
+    /// The live repository verdict for a standalone agent's folder.
+    ///
+    /// A MANAGED agent answers [`crate::git::FolderRepoStatus::WorkingRepo`]:
+    /// its worktree is a repository by construction, so callers that only want
+    /// "may the changes panel work here" can ask this for any session without
+    /// first sorting out which kind it is.
+    ///
+    /// An unprobed standalone folder answers
+    /// [`crate::git::FolderRepoStatus::Indeterminate`], not "no repository":
+    /// dux has not looked yet, and saying anything more definite would let a
+    /// mutation through on a guess.
+    pub fn folder_repo_status(&self, session_id: &str) -> crate::git::FolderRepoStatus {
+        let Some(session) = self.sessions.iter().find(|s| s.id == session_id) else {
+            return crate::git::FolderRepoStatus::Indeterminate;
+        };
+        match &session.workspace {
+            crate::model::AgentWorkspace::Managed(_) => crate::git::FolderRepoStatus::WorkingRepo,
+            crate::model::AgentWorkspace::Folder(_) => self
+                .folder_repo_statuses
+                .get(session_id)
+                .copied()
+                .unwrap_or(crate::git::FolderRepoStatus::Indeterminate),
+        }
+    }
+
+    /// Ask git, OFF the engine thread, what a standalone agent's folder is, and
+    /// post the answer back as [`WorkerEvent::FolderRepoStatusReady`].
+    ///
+    /// A no-op for a managed agent and for an unknown id: neither has a folder
+    /// whose repository-ness can change under dux. `repo_path_kind` runs up to
+    /// four git subprocesses, so this must never run inline; a folder on a
+    /// stalled network mount would otherwise freeze every web client.
+    pub fn spawn_folder_repo_probe(&self, session_id: &str) {
+        let Some(folder) = self
+            .sessions
+            .iter()
+            .find(|s| s.id == session_id)
+            .and_then(|s| s.folder_path())
+            .map(PathBuf::from)
+        else {
+            return;
+        };
+        let session_id = session_id.to_string();
+        let label = format!("folder-repo-probe:{session_id}");
+        self.spawn_loop_worker(LoopWorkerSpec { label }, move |tx| {
+            let status = crate::git::folder_repo_status(&folder);
+            let _ = tx.send(WorkerEvent::FolderRepoStatusReady {
+                session_id: session_id.clone(),
+                status,
+            });
+            // One-shot: the panel reopening is what asks again.
+            LoopControl::Break
+        });
     }
 
     /// How many runtime PTYs are alive: one per launched provider tab plus one
@@ -2496,7 +2622,7 @@ impl Engine {
             };
             if let Some(session) = self.sessions.iter().find(|s| s.id == *tab_id) {
                 // session-slot tab.
-                let title = session.title.as_deref().unwrap_or(&session.branch_name);
+                let title = session.display_label();
                 let provider = self.running_provider_for(session);
                 targets.push(ResourceTarget {
                     id: tab_id.clone(),
@@ -2510,7 +2636,7 @@ impl Engine {
                     .sessions
                     .iter()
                     .find(|s| s.id == tab.session_id)
-                    .map(|s| s.title.as_deref().unwrap_or(&s.branch_name).to_string())
+                    .map(|s| s.display_label())
                     .unwrap_or_else(|| tab.session_id.clone());
                 let provider = self
                     .running_provider_pins
@@ -2677,6 +2803,18 @@ impl Engine {
         if self.pr_suppressions.contains(session_id) {
             return;
         }
+        // A standalone agent has no branch, so there is no pull request to
+        // check for. Refused HERE rather than only in the batched enumerator
+        // because the refs-watcher event routes straight into this one-shot,
+        // and refused BEFORE the debounce stamp below so a skipped agent never
+        // records a check that did not happen.
+        if !self
+            .sessions
+            .iter()
+            .any(|s| s.id == session_id && s.supports_branch_git())
+        {
+            return;
+        }
         // Rate-limit: skip if checked more recently than `min_interval` ago.
         if let Some(last) = self.pr_last_checked.get(session_id)
             && last.elapsed() < min_interval
@@ -2701,10 +2839,16 @@ impl Engine {
                 .ok()
                 .and_then(|prs| prs.into_iter().next())
         });
+        // The workspace gate above already refused a standalone id, so a
+        // managed workspace is guaranteed here; reading it is what keeps the
+        // entry from being built with an empty branch name.
+        let Some(managed) = session.workspace.as_managed() else {
+            return;
+        };
         let entry = PrSyncEntry {
             session_id: session.id.clone(),
-            branch_name: session.branch_name.clone(),
-            worktree_path: session.worktree_path.clone(),
+            branch_name: managed.branch_name.clone(),
+            worktree_path: managed.worktree_path.clone(),
             known_pr,
             agent_exited: !self.providers.contains_key(session_id),
             pinned: pinned_row.as_ref().map(pinned_pr_from_stored),
@@ -2817,13 +2961,21 @@ impl Engine {
     /// worker.
     pub fn update_branch_sync_sessions(&self) {
         if let Ok(mut guard) = self.branch_sync_sessions.lock() {
+            // A standalone agent has no branch to keep in step with, and
+            // its folder may not be a repository at all, so it is never
+            // enrolled: `filter_map` over the branch identity is the gate and
+            // the projection in one, so there is no arm that could enrol one
+            // with an empty branch name.
             *guard = self
                 .sessions
                 .iter()
-                .map(|s| BranchSyncEntry {
-                    session_id: s.id.clone(),
-                    worktree_path: s.worktree_path.clone(),
-                    branch_name: s.branch_name.clone(),
+                .filter_map(|s| {
+                    let managed = s.workspace.as_managed()?;
+                    Some(BranchSyncEntry {
+                        session_id: s.id.clone(),
+                        worktree_path: managed.worktree_path.clone(),
+                        branch_name: managed.branch_name.clone(),
+                    })
                 })
                 .collect();
         }
@@ -2899,7 +3051,16 @@ impl Engine {
             // optimistic write above also found nothing). Nothing to dispatch.
             return BranchRenamePlan::Noop;
         };
-        let old_branch = session.branch_name.clone();
+        // A standalone agent has no branch, so renaming it is a title
+        // change and nothing more. The caller already wrote the title
+        // optimistically above, so there is simply nothing to dispatch.
+        let Some(managed) = session.workspace.as_managed() else {
+            return BranchRenamePlan::TitleWritten {
+                name,
+                sync_branches: false,
+            };
+        };
+        let old_branch = managed.branch_name.clone();
         if name == old_branch {
             // The branch already carries this name: only the title changed, and
             // there is nothing to sync.
@@ -2908,7 +3069,7 @@ impl Engine {
                 sync_branches: false,
             };
         }
-        let worktree_path = session.worktree_path.clone();
+        let worktree_path = managed.worktree_path.clone();
 
         // Stash the expected branches so `BranchSyncReady` can distinguish our
         // own in-progress rename (silently skip) from an unrelated external
@@ -2974,22 +3135,26 @@ impl Engine {
                 // told there is no pull request here, so it neither asks
                 // GitHub nor has anything to answer with.
                 .filter(|s| !self.pr_suppressions.contains(&s.id))
-                .map(|s| {
+                // A standalone agent has no branch to open a pull request
+                // from, so it is never enrolled. Reading the branch identity
+                // out of the workspace is the gate and the projection at once.
+                .filter_map(|s| {
+                    let managed = s.workspace.as_managed()?;
                     // A pinned session syncs against its PIN: the override row
                     // is the known PR (the `session_prs` latest can be a
                     // different, autodetected PR) and the pin identity rides
                     // along so the planner queries the pinned repo only.
                     let pinned_row = self.pr_overrides.get(&s.id);
-                    PrSyncEntry {
+                    Some(PrSyncEntry {
                         session_id: s.id.clone(),
-                        branch_name: s.branch_name.clone(),
-                        worktree_path: s.worktree_path.clone(),
+                        branch_name: managed.branch_name.clone(),
+                        worktree_path: managed.worktree_path.clone(),
                         known_pr: pinned_row
                             .cloned()
                             .or_else(|| known_map.get(&s.id).cloned()),
                         agent_exited: !self.providers.contains_key(&s.id),
                         pinned: pinned_row.map(pinned_pr_from_stored),
-                    }
+                    })
                 })
                 .collect();
         }
@@ -3023,10 +3188,7 @@ impl Engine {
                  (expected OPEN, MERGED or CLOSED)."
             );
         }
-        let agent_name = session
-            .title
-            .clone()
-            .unwrap_or_else(|| session.branch_name.clone());
+        let agent_name = session.display_label();
         // Store the host exactly as the sync planner would derive it (empty
         // means github.com, lowercased): a raw wire command can carry any
         // spelling, and an unnormalized stored pin would never match the
@@ -3077,10 +3239,17 @@ impl Engine {
         let Some(session) = self.sessions.iter().find(|s| s.id == session_id) else {
             anyhow::bail!("unknown session: {session_id}");
         };
-        let agent_name = session
-            .title
-            .clone()
-            .unwrap_or_else(|| session.branch_name.clone());
+        let agent_name = session.display_label();
+        // A standalone agent has no branch, so it has no pull request and
+        // never can. Refused HERE, immediately after the existence check and
+        // BEFORE the one-attach-at-a-time mutual block below, so the answer is
+        // "this agent has no pull requests" rather than "wait for the attach
+        // to finish" about a feature it does not have.
+        let _ = self.branch_git_workspace(
+            session_id,
+            "attach, detach or track a pull request for",
+            STANDALONE_ADD_AS_PROJECT_REMEDY,
+        )?;
         // A manual attach for this agent is mid-flight, so its outcome is
         // still to come: detaching now would be undone (or half-undone) by the
         // attach landing a moment later. Refuse instead of racing it. The
@@ -3124,10 +3293,17 @@ impl Engine {
         let Some(session) = self.sessions.iter().find(|s| s.id == session_id) else {
             anyhow::bail!("unknown session: {session_id}");
         };
-        let agent_name = session
-            .title
-            .clone()
-            .unwrap_or_else(|| session.branch_name.clone());
+        let agent_name = session.display_label();
+        // A standalone agent has no branch, so it has no pull request and
+        // never can. Refused HERE, immediately after the existence check and
+        // BEFORE the one-attach-at-a-time mutual block below, so the answer is
+        // "this agent has no pull requests" rather than "wait for the attach
+        // to finish" about a feature it does not have.
+        let _ = self.branch_git_workspace(
+            session_id,
+            "attach, detach or track a pull request for",
+            STANDALONE_ADD_AS_PROJECT_REMEDY,
+        )?;
         // Same mutual block as the detach beside it: an attach that is still
         // resolving owns this agent's pull-request state until it lands or
         // fails. `PrCheck` is deliberately not consulted here either.
@@ -3183,10 +3359,17 @@ impl Engine {
         let Some(session) = self.sessions.iter().find(|s| s.id == session_id) else {
             anyhow::bail!("unknown session: {session_id}");
         };
-        let agent_name = session
-            .title
-            .clone()
-            .unwrap_or_else(|| session.branch_name.clone());
+        let agent_name = session.display_label();
+        // A standalone agent has no branch, so it has no pull request and
+        // never can. Refused HERE, immediately after the existence check and
+        // BEFORE the one-attach-at-a-time mutual block below, so the answer is
+        // "this agent has no pull requests" rather than "wait for the attach
+        // to finish" about a feature it does not have.
+        let _ = self.branch_git_workspace(
+            session_id,
+            "attach, detach or track a pull request for",
+            STANDALONE_ADD_AS_PROJECT_REMEDY,
+        )?;
         // One attach at a time per agent: a second one would resolve against
         // the same session and the arrival order would decide which pin wins.
         // After the existence check, so an unknown session still 404s. Only
@@ -3195,10 +3378,9 @@ impl Engine {
         if self.is_in_flight(&InFlightKey::PrAttach(session_id.to_string())) {
             anyhow::bail!(pr_attach_in_flight_message(&agent_name));
         }
-        let Some(project) = self
-            .projects
-            .iter()
-            .find(|p| p.id == session.project_id)
+        let Some(project) = session
+            .project_id()
+            .and_then(|project_id| self.projects.iter().find(|p| p.id == project_id))
             .cloned()
         else {
             anyhow::bail!(
@@ -3295,11 +3477,94 @@ impl Engine {
     }
 
     pub fn project_name_for_session(&self, session: &AgentSession) -> String {
-        self.projects
-            .iter()
-            .find(|p| p.id == session.project_id)
+        session
+            .project_id()
+            .and_then(|project_id| self.projects.iter().find(|p| p.id == project_id))
             .map(|p| p.name.clone())
             .unwrap_or_else(|| "unknown".to_string())
+    }
+
+    /// THE CHOKEPOINT. Resolve a session id to the managed working copy a
+    /// branch-identity git feature may run in, or an error saying why it may
+    /// not.
+    ///
+    /// Every git action that is about the AGENT's branch goes through here:
+    /// push, pull, fork, the pull-request routes, branch rename, provenance,
+    /// the worktree manager. Hiding the buttons is not an answer, because each
+    /// of those is also an HTTP route and a palette command, so the id of a
+    /// standalone agent could otherwise reach a real push in the user's folder
+    /// from a command line.
+    ///
+    /// This is deliberately NOT the question the changes panel asks. That one
+    /// is folder-driven and answered live by repository detection, because a
+    /// standalone agent pointed at a repository gets a real changes panel; see
+    /// [`Self::folder_repo_status`].
+    ///
+    /// `feature` and `remedy` are the two halves of the refusal sentence; see
+    /// [`standalone_agent_refusal`].
+    pub fn branch_git_workspace(
+        &self,
+        session_id: &str,
+        feature: &str,
+        remedy: &str,
+    ) -> anyhow::Result<&crate::model::ManagedWorkspace> {
+        let Some(session) = self.sessions.iter().find(|s| s.id == session_id) else {
+            anyhow::bail!("unknown session: {session_id}");
+        };
+        match session.workspace.as_managed() {
+            Some(managed) => Ok(managed),
+            None => anyhow::bail!(standalone_agent_refusal(
+                &session.display_label(),
+                feature,
+                remedy
+            )),
+        }
+    }
+
+    /// The resolved environment an agent's processes run with.
+    ///
+    /// A MANAGED agent gets the global environment merged with its project's,
+    /// as always. A STANDALONE agent gets the global environment with NO
+    /// project overlay, exactly like a standalone terminal
+    /// (`create_standalone_terminal`), because there is no project to overlay
+    /// it with.
+    ///
+    /// This is a named, tested answer rather than an inherited code path on
+    /// purpose: every site that looked a project up and fell through
+    /// `unwrap_or_default` would silently hand a project-less agent an EMPTY
+    /// environment, which is a very different thing from the global one.
+    pub fn session_env(&self, session: &AgentSession) -> Vec<(String, String)> {
+        let project_env = match &session.workspace {
+            crate::model::AgentWorkspace::Managed(managed) => self
+                .projects
+                .iter()
+                .find(|project| project.id == managed.project_id)
+                .map(|project| project.env.clone())
+                .unwrap_or_default(),
+            crate::model::AgentWorkspace::Folder(_) => std::collections::BTreeMap::new(),
+        };
+        crate::config::resolve_agent_env(&self.config.env, &project_env).unwrap_or_default()
+    }
+
+    /// Where an agent lives, as a phrase a status line can drop into a
+    /// sentence: `project "web"` for a managed agent, `folder "~/notes"` for a
+    /// standalone one (shortened against the server's home directory, because
+    /// the browser may not be on the server's machine).
+    ///
+    /// Every status message that used to say "in project \"{}\"" goes through
+    /// this, because a standalone agent has no project and the old phrasing
+    /// resolved to "in project \"unknown\"", which is not a true sentence about
+    /// an agent that never had one.
+    pub fn session_location_phrase(&self, session: &AgentSession) -> String {
+        match &session.workspace {
+            crate::model::AgentWorkspace::Managed(_) => {
+                format!("project \"{}\"", self.project_name_for_session(session))
+            }
+            crate::model::AgentWorkspace::Folder(folder) => format!(
+                "folder \"{}\"",
+                crate::home_path::shorten_home(Path::new(&folder.folder_path))
+            ),
+        }
     }
 
     /// The status message shown when an existing agent's provider becomes ready
@@ -3309,20 +3574,20 @@ impl Engine {
     /// [`should_resume_session`]. Callers may append extra context (e.g. a
     /// detached-worktree note) to the returned string.
     pub fn agent_reconnect_status_message(&self, session: &AgentSession, resume: bool) -> String {
-        let proj_name = self.project_name_for_session(session);
+        let location = self.session_location_phrase(session);
         if resume {
             format!(
-                "Resumed {} agent \"{}\" in project \"{}\".",
+                "Resumed {} agent \"{}\" in {}.",
                 session.provider.as_str(),
-                session.branch_name,
-                proj_name
+                session.display_label(),
+                location
             )
         } else {
             format!(
-                "Started fresh {} session for agent \"{}\" in project \"{}\". Use /sessions inside the agent to restore a prior conversation.",
+                "Started fresh {} session for agent \"{}\" in {}. Use /sessions inside the agent to restore a prior conversation.",
                 session.provider.as_str(),
-                session.branch_name,
-                proj_name
+                session.display_label(),
+                location
             )
         }
     }
@@ -3359,16 +3624,28 @@ impl Engine {
         // guard the worktree.
         if !force && self.providers.contains_key(&session.id) {
             return Ok(ReconnectPlan::AlreadyConnected {
-                message: format!("Agent \"{}\" is already connected.", session.branch_name),
-            });
-        }
-        if !std::path::Path::new(&session.worktree_path).exists() {
-            return Ok(ReconnectPlan::WorktreeMissing {
                 message: format!(
-                    "Worktree for agent \"{}\" no longer exists. Delete and re-create the agent.",
-                    session.branch_name
+                    "Agent \"{}\" is already connected.",
+                    session.display_label()
                 ),
             });
+        }
+        // Both kinds have a directory to reconnect into, and both must
+        // exist; only the sentence differs, because a standalone agent's
+        // directory is the user's folder and dux cannot re-create it.
+        if !std::path::Path::new(session.directory()).exists() {
+            let message = match &session.workspace {
+                crate::model::AgentWorkspace::Managed(_) => format!(
+                    "Worktree for agent \"{}\" no longer exists. Delete and re-create the agent.",
+                    session.display_label()
+                ),
+                crate::model::AgentWorkspace::Folder(folder) => format!(
+                    "The folder agent \"{}\" runs in ({}) no longer exists. Restore the folder, or delete this agent and create a new one pointing at the folder you want.",
+                    session.display_label(),
+                    crate::home_path::shorten_home(Path::new(&folder.folder_path))
+                ),
+            };
+            return Ok(ReconnectPlan::WorktreeMissing { message });
         }
 
         if force {
@@ -3379,7 +3656,7 @@ impl Engine {
         }
         // Detach any other session holding the same worktree's live PTY.
         let detached_label = self
-            .detach_conflicting_worktree_session(&session.worktree_path, &session.id)
+            .detach_conflicting_worktree_session(session.directory(), &session.id)
             .map(|detached| detached.label);
 
         // The one resume decision: collision-aware, used for BOTH the request and
@@ -3396,7 +3673,11 @@ impl Engine {
                 detached,
             ));
         }
-        if let Some(project) = self.projects.iter().find(|p| p.id == session.project_id)
+        // A standalone agent has no project whose default provider it could
+        // be diverging from, so the note is simply not written for one.
+        if let Some(project) = session
+            .project_id()
+            .and_then(|project_id| self.projects.iter().find(|p| p.id == project_id))
             && project.default_provider != session.provider
         {
             let provider_label = if self.project_uses_explicit_default_provider(&project.id) {
@@ -3411,7 +3692,7 @@ impl Engine {
             ));
         }
 
-        let branch_name = session.branch_name.clone();
+        let branch_name = session.display_label();
         let kind = if force {
             crate::worker::AgentLaunchKind::ForceReconnect {
                 status_message: msg,
@@ -3797,7 +4078,7 @@ impl Engine {
             .sessions
             .iter()
             .find(|s| s.id == session_id)
-            .map(|s| s.title.clone().unwrap_or_else(|| s.branch_name.clone()))
+            .map(|s| s.display_label())
             .unwrap_or_else(|| tab_id.to_string());
         // No worktree removal is deferred on a tab close, so the return is None.
         let _ = self.begin_close_provider(tab_id, label, None);
@@ -4002,7 +4283,147 @@ pub struct ChangeAgentProviderOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::test_support::{sample_project, sample_session, test_engine};
+    use crate::engine::test_support::{
+        sample_project, sample_session, sample_standalone_session, test_engine,
+    };
+
+    /// An engine with one ordinary managed agent and one standalone agent, for
+    /// the background-enumerator gates. Every enumerator must enrol the first
+    /// and skip the second: a plain folder has no branch to watch and no
+    /// repository to ask GitHub about, and enrolling it would burn a git or
+    /// `gh` call per cycle to produce an error nobody can act on.
+    fn engine_with_a_standalone_agent() -> (Engine, tempfile::TempDir, tempfile::TempDir) {
+        let (mut engine, tmp) = test_engine();
+        let folder = tempfile::tempdir().expect("folder");
+        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        engine.sessions.push(sample_session("s1", "p1", "b1"));
+        engine.sessions.push(sample_standalone_session(
+            "sa1",
+            folder.path().to_string_lossy().as_ref(),
+        ));
+        (engine, tmp, folder)
+    }
+
+    /// Every pull-request route refuses a standalone id with a purposeful
+    /// message rather than an accidental error, and refuses it BEFORE the
+    /// one-attach-at-a-time mutual block: the ordering is existence, then
+    /// workspace, then in-flight, so a standalone agent is never told to "wait
+    /// for the attach to finish" about a feature it does not have.
+    #[test]
+    fn every_pull_request_route_refuses_a_standalone_agent_before_the_in_flight_check() {
+        let (mut engine, _tmp, _folder) = engine_with_a_standalone_agent();
+        engine.github_integration_enabled = true;
+        engine.gh_status = crate::model::GhStatus::Available;
+        // Arm the mutual block that the workspace gate must beat.
+        engine.mark_in_flight(InFlightKey::PrAttach("sa1".to_string()));
+
+        let detach = engine.clear_pull_request_override("sa1").unwrap_err();
+        let resume = engine.resume_pr_autodetection("sa1").unwrap_err();
+        let attach = engine
+            .dispatch_attach_pull_request("sa1", "https://github.com/o/r/pull/1")
+            .unwrap_err();
+
+        for (what, err) in [("detach", detach), ("resume", resume), ("attach", attach)] {
+            let message = err.to_string();
+            assert!(
+                message.contains("standalone agent"),
+                "{what} must say what this agent is, got {message:?}"
+            );
+            assert!(
+                message.contains("no branch"),
+                "{what} must say why there is no pull request, got {message:?}"
+            );
+            assert!(
+                !message.contains("still resolving"),
+                "{what} must refuse on the workspace before the in-flight block, got {message:?}"
+            );
+        }
+    }
+
+    /// The same gate for an id that names no agent at all: existence still
+    /// wins, so an unknown id keeps its unknown-session error (the surfaces'
+    /// 404) rather than being told it is standalone.
+    #[test]
+    fn an_unknown_id_still_gets_the_unknown_session_error() {
+        let (mut engine, _tmp, _folder) = engine_with_a_standalone_agent();
+        let err = engine
+            .clear_pull_request_override("nope")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown session"), "got {err:?}");
+    }
+
+    #[test]
+    fn the_branch_watcher_never_enrols_a_standalone_agent() {
+        let (engine, _tmp, _folder) = engine_with_a_standalone_agent();
+        engine.update_branch_sync_sessions();
+        let enrolled: Vec<String> = engine
+            .branch_sync_sessions
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|entry| entry.session_id.clone())
+            .collect();
+        assert_eq!(
+            enrolled,
+            vec!["s1".to_string()],
+            "a folder has no branch to watch"
+        );
+    }
+
+    #[test]
+    fn the_pull_request_watcher_never_enrols_a_standalone_agent() {
+        let (engine, _tmp, _folder) = engine_with_a_standalone_agent();
+        engine.update_pr_sync_sessions();
+        let enrolled: Vec<String> = engine
+            .pr_sync_sessions
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|entry| entry.session_id.clone())
+            .collect();
+        assert_eq!(
+            enrolled,
+            vec!["s1".to_string()],
+            "a folder has no branch to open a pull request from"
+        );
+    }
+
+    /// The refs watcher puts an inotify watch on `.git/refs/heads` per session.
+    /// A standalone agent must not get one even when its folder IS a repository
+    /// (the watch exists to notice the AGENT's branch moving, and there is no
+    /// agent branch here).
+    #[test]
+    fn the_refs_watcher_never_watches_a_standalone_agents_folder() {
+        let (mut engine, _tmp, folder) = engine_with_a_standalone_agent();
+        init_plain_repo(folder.path());
+        std::fs::create_dir_all(folder.path().join(".git").join("refs").join("heads")).unwrap();
+        engine.spawn_refs_watcher();
+        let watched: Vec<String> = engine.refs_watch_paths.values().cloned().collect();
+        assert!(
+            !watched.contains(&"sa1".to_string()),
+            "a standalone agent has no agent branch for a refs watch to be about, got {watched:?}"
+        );
+    }
+
+    /// The one-shot pull-request check is reachable directly (the refs-watcher
+    /// event routes into it), so it refuses a standalone id itself rather than
+    /// relying on the batched enumerator having skipped it.
+    #[test]
+    fn a_one_shot_pull_request_check_refuses_a_standalone_agent() {
+        let (mut engine, _tmp, _folder) = engine_with_a_standalone_agent();
+        engine.github_integration_enabled = true;
+        engine.gh_status = crate::model::GhStatus::Available;
+        engine.spawn_pr_check_for_session("sa1", Duration::from_secs(0));
+        assert!(
+            !engine.is_in_flight(&InFlightKey::PrCheck("sa1".to_string())),
+            "no gh call may be dispatched for an agent with no branch"
+        );
+        assert!(
+            !engine.pr_last_checked.contains_key("sa1"),
+            "and it must not even stamp a debounce, which would imply a check happened"
+        );
+    }
 
     fn init_plain_repo(path: &std::path::Path) {
         let out = crate::git::test_support::git_command()
@@ -4043,7 +4464,7 @@ mod tests {
         // Nothing was mutated by a refused request.
         let s = engine.sessions.iter().find(|s| s.id == "s1").unwrap();
         assert_eq!(s.title.as_deref(), Some("keep-me"));
-        assert_eq!(s.branch_name, "old-branch");
+        assert_eq!(s.branch_name().expect("managed test session"), "old-branch");
         assert!(engine.rename_expected.is_empty());
     }
 
@@ -4086,7 +4507,11 @@ mod tests {
 
         let s = engine.sessions.iter().find(|s| s.id == "s1").unwrap();
         assert_eq!(s.title.as_deref(), Some("after"), "title written");
-        assert_eq!(s.branch_name, "old-branch", "branch untouched");
+        assert_eq!(
+            s.branch_name().expect("managed test session"),
+            "old-branch",
+            "branch untouched"
+        );
         assert!(
             engine.rename_expected.is_empty(),
             "no expectation for a title-only change"
@@ -5137,15 +5562,18 @@ mod tests {
         let session = sample_session("s1", "p1", "feature");
 
         // Resume → a completed-action message naming provider, agent, project.
+        // The AGENT is named by its display label (its title here), not by the
+        // branch: a standalone agent has no branch, so every message that used
+        // to reach for one now goes through the shared label rule.
         assert_eq!(
             engine.agent_reconnect_status_message(&session, true),
-            "Resumed claude agent \"feature\" in project \"p1-name\"."
+            "Resumed claude agent \"s1-title\" in project \"p1-name\"."
         );
 
         // Fresh → the no-resume variant with the /sessions hint.
         assert_eq!(
             engine.agent_reconnect_status_message(&session, false),
-            "Started fresh claude session for agent \"feature\" in project \"p1-name\". \
+            "Started fresh claude session for agent \"s1-title\" in project \"p1-name\". \
              Use /sessions inside the agent to restore a prior conversation."
         );
     }
@@ -5186,7 +5614,11 @@ mod tests {
             worktree.path().to_string_lossy().as_ref(),
         ));
         let mut session = sample_session("s1", "p1", "feature");
-        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
         engine.sessions.push(session);
         engine.config.terminal.command = "cat".to_string();
         engine.config.terminal.args = vec![];
@@ -6575,7 +7007,11 @@ mod tests {
         ));
         let mut session = sample_session("s1", "p1", "feat");
         session.provider = ProviderKind::new("claude");
-        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
 
@@ -6908,7 +7344,11 @@ mod tab_ops_tests {
     fn reconnect_plan_announced_resume_matches_the_dispatched_request() {
         let (mut engine, tmp) = test_engine();
         let mut session = sample_session("s1", "p1", "feat");
-        session.worktree_path = tmp.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = tmp.path().to_string_lossy().to_string();
         session.started_providers = vec!["claude".into()];
         session.provider = ProviderKind::new("claude");
         engine.sessions.push(session.clone());
@@ -6946,7 +7386,11 @@ mod tab_ops_tests {
     fn reconnect_plan_refuses_an_already_connected_normal_reconnect() {
         let (mut engine, tmp) = test_engine();
         let mut session = sample_session("s1", "p1", "feat");
-        session.worktree_path = tmp.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = tmp.path().to_string_lossy().to_string();
         engine.sessions.push(session);
         engine
             .providers
@@ -6964,7 +7408,11 @@ mod tab_ops_tests {
     fn reconnect_plan_reports_a_missing_worktree() {
         let (mut engine, _tmp) = test_engine();
         let mut session = sample_session("s1", "p1", "feat");
-        session.worktree_path = "/nonexistent/worktree/path".to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = "/nonexistent/worktree/path".to_string();
         engine.sessions.push(session);
 
         match engine.reconnect_plan("s1", false, (24, 80)).expect("plan") {
@@ -7153,7 +7601,11 @@ mod tab_ops_tests {
         let (mut engine, _tmp) = test_engine();
         let worktree = tempfile::tempdir().expect("worktree dir");
         let mut session = sample_session("s1", "p1", "feat");
-        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
         session.status = SessionStatus::Active;
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
@@ -7186,7 +7638,11 @@ mod tab_ops_tests {
         let (mut engine, _tmp) = test_engine();
         let worktree = tempfile::tempdir().expect("worktree dir");
         let mut session = sample_session("s1", "p1", "feat");
-        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
         session.status = SessionStatus::Active;
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
@@ -7449,7 +7905,11 @@ mod resource_monitor_targets_tests {
             worktree.path().to_string_lossy().as_ref(),
         ));
         let mut session = sample_session("s1", "p1", "feat");
-        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
         session.title = Some("fix-auth".to_string());
         engine.sessions.push(session);
 

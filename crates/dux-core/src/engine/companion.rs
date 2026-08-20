@@ -39,18 +39,30 @@ impl Engine {
             .cloned()
             .context("unknown session")?;
 
-        let env = self
-            .projects
-            .iter()
-            .find(|project| project.id == session.project_id)
-            .and_then(|project| {
-                crate::config::resolve_agent_env(&self.config.env, &project.env).ok()
-            })
-            .unwrap_or_default();
+        // A standalone agent belongs to no project, so a terminal opened on it
+        // gets the GLOBAL environment with no project overlay, exactly like a
+        // standalone terminal. Reading a project id that is not there and
+        // falling through to `unwrap_or_default` would silently hand it an
+        // EMPTY environment instead, which is a different and much worse thing.
+        let env = match session.project_id() {
+            Some(project_id) => self
+                .projects
+                .iter()
+                .find(|project| project.id == project_id)
+                .and_then(|project| {
+                    crate::config::resolve_agent_env(&self.config.env, &project.env).ok()
+                })
+                .unwrap_or_default(),
+            None => crate::config::resolve_agent_env(
+                &self.config.env,
+                &std::collections::BTreeMap::new(),
+            )
+            .unwrap_or_default(),
+        };
 
         self.spawn_terminal(
             TerminalOwner::Session(session_id.to_string()),
-            Path::new(&session.worktree_path),
+            Path::new(session.directory()),
             &env,
             rows,
             cols,
@@ -212,14 +224,40 @@ impl Engine {
         }
         let session = self.session_behind_pty(pty_id)?;
         Some(crate::file_drop::FileDropDestination::AgentUploads {
-            worktree: session.worktree_path.clone().into(),
+            worktree: session.directory().into(),
             // Normalized on every read rather than trusted: the pure normalizer
             // is the read-path half of the warn-once-at-load pair, so a config
             // that never went through `load_config` (a test, an in-memory
             // Config) still resolves a usable directory.
             relative: crate::config::normalized_upload_directory(&self.config.ui.upload_directory),
-            write_gitignore: self.config.ui.upload_write_gitignore,
+            write_gitignore: self.upload_seed_allowed(&session),
         })
+    }
+
+    /// Whether the hidden upload directory dux creates inside an agent's
+    /// working directory should be seeded with a self-gitignoring `.gitignore`.
+    ///
+    /// A managed worktree keeps today's behavior: the configured preference
+    /// decides, and the directory is always inside a repository anyway.
+    ///
+    /// A STANDALONE agent's folder is the user's, so the preference is ANDed
+    /// with "can git see this path at all". The rule is git visibility rather
+    /// than "is this a working repository", because a folder sitting inside
+    /// somebody else's repository is exactly where untracked uploads would
+    /// pollute their `git status`. A plain folder gets no junk written into it,
+    /// and a folder dux could not classify gets nothing either: writing into
+    /// the user's directory on a guess is the one direction that cannot be
+    /// undone by dux, which never cleans the folder up.
+    fn upload_seed_allowed(&self, session: &crate::model::AgentSession) -> bool {
+        if !self.config.ui.upload_write_gitignore {
+            return false;
+        }
+        match &session.workspace {
+            crate::model::AgentWorkspace::Managed(_) => true,
+            crate::model::AgentWorkspace::Folder(_) => {
+                self.folder_repo_status(&session.id).git_can_see_path()
+            }
+        }
     }
 
     /// Where a file dropped onto the EDITOR'S FILE TREE should be saved: the
@@ -256,7 +294,7 @@ impl Engine {
         }
         let session = self.session_behind_pty(pty_id)?;
         Some(crate::file_drop::FileDropDestination::WorktreeDirectory {
-            worktree: session.worktree_path.clone().into(),
+            worktree: session.directory().into(),
             relative: relative.to_string(),
         })
     }
@@ -283,10 +321,7 @@ impl Engine {
             None => pty_id,
         };
         let session = self.session_behind_pty(session_id)?;
-        Some((
-            session.id.clone(),
-            PathBuf::from(session.worktree_path.clone()),
-        ))
+        Some((session.id.clone(), PathBuf::from(session.directory())))
     }
 
     /// The agent session a pane's pty id belongs to: the session itself, or the
@@ -319,7 +354,11 @@ mod tests {
             worktree.path().to_string_lossy().as_ref(),
         ));
         let mut session = sample_session("s1", "p1", "feature");
-        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
         engine.sessions.push(session);
         engine.agent_tabs.insert(
             "tab-9".to_string(),
@@ -373,7 +412,11 @@ mod tests {
             worktree.path().to_string_lossy().as_ref(),
         ));
         let mut session = sample_session("s1", "p1", "feature");
-        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
         engine.sessions.push(session);
 
         engine.config.ui.upload_directory = "tmp/dropped".to_string();
@@ -416,7 +459,11 @@ mod tests {
             worktree.path().to_string_lossy().as_ref(),
         ));
         let mut session = sample_session("s1", "p1", "feature");
-        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
         engine.sessions.push(session);
         engine.config.terminal.command = "cat".to_string();
         engine.config.terminal.args = vec![];
@@ -451,7 +498,11 @@ mod tests {
             worktree.path().to_string_lossy().as_ref(),
         ));
         let mut session = sample_session("s1", "p1", "feature");
-        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
         engine.sessions.push(session);
         engine.config.terminal.command = "cat".to_string();
         engine.config.terminal.args = vec![];
@@ -524,7 +575,11 @@ mod tests {
             worktree.path().to_string_lossy().as_ref(),
         ));
         let mut session = sample_session("s1", "p1", "feature");
-        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
         engine.sessions.push(session);
         engine.agent_tabs.insert(
             "tab-9".to_string(),
@@ -580,7 +635,11 @@ mod tests {
             worktree.path().to_string_lossy().as_ref(),
         ));
         let mut session = sample_session("s1", "p1", "feature");
-        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
         engine.sessions.push(session);
 
         // `cat` is always on PATH and simply echoes — a safe stand-in terminal.
@@ -614,7 +673,11 @@ mod tests {
             worktree.path().to_string_lossy().as_ref(),
         ));
         let mut session = sample_session("s1", "p1", "feature");
-        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
         engine.sessions.push(session);
 
         engine.config.terminal.command = "cat".to_string();
@@ -653,7 +716,11 @@ mod tests {
             worktree.path().to_string_lossy().as_ref(),
         ));
         let mut session = sample_session("s1", "p1", "feature");
-        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
         engine.sessions.push(session);
         engine.config.terminal.command = "cat".to_string();
         engine.config.terminal.args = vec![];
@@ -723,7 +790,11 @@ mod tests {
             worktree.path().to_string_lossy().as_ref(),
         ));
         let mut session = sample_session("s1", "p1", "feature");
-        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
         engine.sessions.push(session);
         engine.config.terminal.command = "cat".to_string();
         engine.config.terminal.args = vec![];

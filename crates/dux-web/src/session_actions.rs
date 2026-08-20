@@ -1030,14 +1030,7 @@ mod tests {
         store
             .upsert_session(&dux_core::model::AgentSession {
                 id: id.to_string(),
-                project_id: "p1".to_string(),
-                project_path: None,
                 provider: dux_core::model::ProviderKind::new("claude"),
-                source_branch: "main".to_string(),
-                branch_name: "feat".to_string(),
-                initial_branch: "feat".to_string(),
-                branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
-                worktree_path: tmp.path().to_string_lossy().to_string(),
                 title: Some("seeded".to_string()),
                 started_providers: Vec::new(),
                 desired_running: false,
@@ -1046,6 +1039,17 @@ mod tests {
                 created_at: now,
                 updated_at: now,
                 last_focused_tab: None,
+                workspace: dux_core::model::AgentWorkspace::Managed(
+                    dux_core::model::ManagedWorkspace {
+                        project_id: "p1".to_string(),
+                        project_path: None,
+                        source_branch: "main".to_string(),
+                        branch_name: "feat".to_string(),
+                        initial_branch: "feat".to_string(),
+                        branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
+                        worktree_path: tmp.path().to_string_lossy().to_string(),
+                    },
+                ),
             })
             .unwrap();
         drop(store);
@@ -1150,14 +1154,7 @@ mod tests {
         store
             .upsert_session(&dux_core::model::AgentSession {
                 id: id.to_string(),
-                project_id: "p1".to_string(),
-                project_path: None,
                 provider: dux_core::model::ProviderKind::new("claude"),
-                source_branch: "main".to_string(),
-                branch_name: "feat".to_string(),
-                initial_branch: "feat".to_string(),
-                branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
-                worktree_path: project_dir.to_string_lossy().to_string(),
                 title: Some("seeded".to_string()),
                 started_providers: Vec::new(),
                 desired_running: false,
@@ -1166,6 +1163,17 @@ mod tests {
                 created_at: now,
                 updated_at: now,
                 last_focused_tab: None,
+                workspace: dux_core::model::AgentWorkspace::Managed(
+                    dux_core::model::ManagedWorkspace {
+                        project_id: "p1".to_string(),
+                        project_path: None,
+                        source_branch: "main".to_string(),
+                        branch_name: "feat".to_string(),
+                        initial_branch: "feat".to_string(),
+                        branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
+                        worktree_path: project_dir.to_string_lossy().to_string(),
+                    },
+                ),
             })
             .unwrap();
         drop(store);

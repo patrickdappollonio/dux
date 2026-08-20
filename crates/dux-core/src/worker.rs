@@ -403,6 +403,15 @@ pub enum WorkerEvent {
         /// different worktree's contents.
         worktree: PathBuf,
     },
+    /// A standalone agent's folder was classified by
+    /// `Engine::spawn_folder_repo_probe`. The engine stores the verdict and, if
+    /// that agent's changes panel is the one on screen, enrols or drops the
+    /// changed-files watch to match, so a folder that became a repository since
+    /// the last look starts working without the user doing anything else.
+    FolderRepoStatusReady {
+        session_id: String,
+        status: crate::git::FolderRepoStatus,
+    },
     /// A `spawn_status_op` worker finished and carried back its resolved final
     /// (the success/failure message or a clear, already keyed).
     StatusOpCompleted {
