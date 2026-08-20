@@ -1084,6 +1084,53 @@ describe("AppSidebar collapsed icon rail", () => {
     expect(buttons[1].getAttribute("aria-label")).toContain("Other")
   })
 
+  // A standalone agent belongs to no project, so grouping by project loses it.
+  // The rail is the ONLY way to reach an agent at icon width, so a lost agent
+  // there is an agent that cannot be reached without expanding the sidebar.
+  it("includes a standalone agent, which belongs to no project group", () => {
+    const spine = makeTwoProjectSpine() as unknown as {
+      sessions: unknown[]
+    }
+    const standalone = {
+      ...(spine.sessions[0] as Record<string, unknown>),
+      id: "sa1",
+      title: "My Notes",
+      workspace: {
+        kind: "folder",
+        folder_path: "/home/someone/My Notes",
+        folder_label: "~/My Notes",
+        repo_status: "no_repo",
+        quiet_reason: "This folder has no git repository.",
+      },
+    }
+    mockState = makeState({
+      spine: {
+        ...(spine as object),
+        sessions: [...spine.sessions, standalone],
+      } as unknown as DuxState["spine"],
+      bootstrap: {
+        title: "dux",
+        dux_version: "v1",
+        available_providers: ["claude"],
+      },
+      createTabInFlight: [],
+    })
+    render(
+      <SidebarProvider defaultOpen={false}>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+
+    const rail = screen.getByTestId("collapsed-agent-rail")
+    const labels = [...rail.querySelectorAll("button")].map((b) =>
+      b.getAttribute("aria-label"),
+    )
+    expect(labels.length).toBe(3)
+    // Its label is just the agent's name: there is no project to put in
+    // parentheses, and "My Notes ()" would be worse than nothing.
+    expect(labels).toContain("My Notes")
+  })
+
   it("clicking an agent icon selects that agent", () => {
     mockState = makeState({
       spine: makeTwoProjectSpine(),

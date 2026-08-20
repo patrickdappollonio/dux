@@ -3,7 +3,6 @@ import { describe, expect, it } from "vitest"
 import {
   type AgentWorkspaceWire,
   type FolderRepoStatus,
-  changesPanelWorks,
   changesQuietReason,
   folderWorkspace,
   managedWorkspace,
@@ -65,7 +64,7 @@ describe("agent workspace", () => {
   // still no fork, no pull request, no push.
   it("lets the changes panel work in a repository folder while the branch features still do not exist", () => {
     const workspace = folder("working_repo")
-    expect(changesPanelWorks(workspace)).toBe(true)
+    // A null quiet reason IS the working case; there is no second predicate.
     expect(changesQuietReason(workspace)).toBeNull()
     expect(supportsBranchGit(workspace)).toBe(false)
   })
@@ -75,9 +74,10 @@ describe("agent workspace", () => {
       "inside_repo_rooted_elsewhere",
       "no_repo",
       "indeterminate",
+      // Nobody has looked yet: quiet like the rest, with its own sentence.
+      "unprobed",
     ] as const) {
       const workspace = folder(status, `quiet because ${status}`)
-      expect(changesPanelWorks(workspace)).toBe(false)
       expect(changesQuietReason(workspace)).toBe(`quiet because ${status}`)
     }
   })
@@ -103,10 +103,12 @@ describe("agent workspace", () => {
     expect(label(folder("no_repo"))).toBe("folder ~/notes")
   })
 
-  // A workspace kind from a NEWER server. The matcher throws rather than
-  // guessing: guessing "managed" would hand a directory dux does not
-  // understand to code that believes it may delete it, and guessing "folder"
-  // would hide every git affordance from an agent that has them.
+  // A workspace kind from a NEWER server never reaches the matcher: ingestion
+  // degrades it to the managed shape first (see workspaceApi's normalization
+  // and its own test). The throw stays because it is what makes a missing case
+  // a compile error, and it is asserted here as the last line of defence for a
+  // hand-built workspace that skipped ingestion, NOT as the behaviour a real
+  // newer server produces.
   it("refuses to guess at a workspace kind it has never heard of", () => {
     const future = { kind: "something-new" } as unknown as AgentWorkspaceWire
     expect(() =>

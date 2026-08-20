@@ -216,6 +216,10 @@ export function directoryChip(cwdLabel: string): HeaderChip {
 // shows no glyph nobody can interrogate.
 const PHONE_CHIP_KINDS: readonly HeaderChipKind[] = [
   "project",
+  // A standalone agent's answer to the project question, and the single most
+  // useful fact about it. Without this the phone header said only the agent's
+  // name and its assistant, so nothing on screen said WHERE it was working.
+  "directory",
   "agent",
   "assistant",
 ]

@@ -13,15 +13,7 @@ import type { Spine } from "./workspaceApi"
 function makeSpine(
   sessions: {
     id: string
-    workspace: {
-      kind: "managed"
-      project_id: string
-      branch_name: ""
-      initial_branch: ""
-      branch_provenance: "created"
-      source_branch: ""
-      worktree_path: ""
-    }
+    project_id: string
     terminals?: string[]
     tabs?: string[]
   }[],

@@ -12,15 +12,7 @@ import type { Spine } from "./workspaceApi"
 function makeSpine(
   sessions: {
     id: string
-    workspace: {
-      kind: "managed"
-      project_id: string
-      branch_name: ""
-      initial_branch: ""
-      branch_provenance: "created"
-      source_branch: ""
-      worktree_path: ""
-    }
+    project_id: string
     tabs?: string[]
     last_focused_tab?: string | null
   }[],
@@ -134,15 +126,7 @@ async function loadStore(
   hash: string,
   sessions: {
     id: string
-    workspace: {
-      kind: "managed"
-      project_id: string
-      branch_name: ""
-      initial_branch: ""
-      branch_provenance: "created"
-      source_branch: ""
-      worktree_path: ""
-    }
+    project_id: string
     tabs?: string[]
     last_focused_tab?: string | null
   }[],
@@ -183,15 +167,7 @@ describe("selectSession restores the remembered tab", () => {
     const mod = await loadStore("", [
       {
         id: "s1",
-        workspace: {
-          kind: "managed",
-          project_id: "p1",
-          branch_name: "",
-          initial_branch: "",
-          branch_provenance: "created",
-          source_branch: "",
-          worktree_path: "",
-        },
+        project_id: "p1",
         tabs: ["t-other"],
         last_focused_tab: "gone",
       },
@@ -227,15 +203,7 @@ describe("selectSession restores the remembered tab", () => {
     const mod = await loadStore("#/agent/s1/tab/t3", [
       {
         id: "s1",
-        workspace: {
-          kind: "managed",
-          project_id: "p1",
-          branch_name: "",
-          initial_branch: "",
-          branch_provenance: "created",
-          source_branch: "",
-          worktree_path: "",
-        },
+        project_id: "p1",
         tabs: ["t2", "t3"],
         last_focused_tab: "t2",
       },

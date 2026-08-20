@@ -53,6 +53,7 @@ import {
 import {
   changesQuietReason,
   folderWorkspace,
+  supportsBranchGit,
 } from "@/lib/agentWorkspace"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
@@ -291,17 +292,24 @@ export function ChangedFiles() {
   // consulted git, and the terminal UI says the same thing), so the two
   // surfaces cannot describe the same folder differently.
   //
-  // Checked before the slice below, because there is nothing to fetch: the
-  // server does not poll such a folder, so waiting on a phase would leave a
-  // spinner up forever. The old path ran git in it and reported "the repository
-  // is busy" once per poll, which is a lie about a folder that simply has no
-  // repository.
+  // Checked before the slice below, because the answer is already known: the
+  // server never runs git in such a folder and stores an empty-but-successful
+  // result for it, so waiting on the fetch phase would only trade this sentence
+  // for a spinner and then for a bare "No changes". The old path did run git in
+  // it and reported "the repository is busy" once per poll, which is a lie
+  // about a folder that simply has no repository.
   const selectedSession = spine?.sessions.find(
     (s) => s.id === selectedSessionId,
   )
   const quietReason = selectedSession
     ? changesQuietReason(selectedSession.workspace)
     : null
+  // Whether this agent has a branch dux manages, which is what Push and Pull
+  // act on. Defaults to true with no session resolved, so nothing disappears
+  // from an ordinary agent's panel while the spine is still loading.
+  const branchGit = selectedSession
+    ? supportsBranchGit(selectedSession.workspace)
+    : true
   if (quietReason) {
     const folder = selectedSession
       ? folderWorkspace(selectedSession.workspace)
@@ -415,32 +423,41 @@ export function ChangedFiles() {
                   <GitCommitVertical />
                   Commit…
                 </DropdownMenuItem>
-                <DropdownMenuItem
-                  onClick={() => {
-                    if (!selectedSessionId) return
-                    git
-                      .push(selectedSessionId)
-                      .catch((e) =>
-                        notifyError(e instanceof Error ? e.message : "push failed")
-                      )
-                  }}
-                >
-                  <ArrowUpFromLine />
-                  Push
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  onClick={() => {
-                    if (!selectedSessionId) return
-                    git
-                      .pull(selectedSessionId)
-                      .catch((e) =>
-                        notifyError(e instanceof Error ? e.message : "pull failed")
-                      )
-                  }}
-                >
-                  <ArrowDownToLine />
-                  Pull
-                </DropdownMenuItem>
+                {/* Push and Pull publish a BRANCH, which a standalone agent
+                    does not have even when its folder is a real repository.
+                    Absent rather than offered and refused on click, the same
+                    rule the agent row's menu follows. Committing IS offered:
+                    that is folder work, and the server allows it. */}
+                {branchGit && (
+                  <>
+                    <DropdownMenuItem
+                      onClick={() => {
+                        if (!selectedSessionId) return
+                        git
+                          .push(selectedSessionId)
+                          .catch((e) =>
+                            notifyError(e instanceof Error ? e.message : "push failed")
+                          )
+                      }}
+                    >
+                      <ArrowUpFromLine />
+                      Push
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      onClick={() => {
+                        if (!selectedSessionId) return
+                        git
+                          .pull(selectedSessionId)
+                          .catch((e) =>
+                            notifyError(e instanceof Error ? e.message : "pull failed")
+                          )
+                      }}
+                    >
+                      <ArrowDownToLine />
+                      Pull
+                    </DropdownMenuItem>
+                  </>
+                )}
                 {/* Ask git again NOW. dux has no file watcher: it drops its
                     cached answer when one of its own git or editor routes
                     changes a file, or a dropped file lands in the worktree, and
@@ -508,7 +525,11 @@ export function ChangedFiles() {
                       <Check />
                     </EmptyMedia>
                     <EmptyTitle>No changes</EmptyTitle>
-                    <EmptyDescription>This worktree is clean.</EmptyDescription>
+                    <EmptyDescription>
+                      {branchGit
+                        ? "This worktree is clean."
+                        : "This folder is clean."}
+                    </EmptyDescription>
                   </EmptyHeader>
                 </Empty>
               )}

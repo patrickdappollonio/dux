@@ -4417,9 +4417,11 @@ export function openAddProjectForInit(): void {
 }
 
 export function closeAddProject(): void {
+  // Only this dialog's own flag: the standalone-agent picker is a separate
+  // dialog with its own close (`closeStandaloneAgentPicker`), and the two are
+  // never open at once.
   setState({
     addProjectOpen: false,
-  standaloneAgentPickerOpen: false,
     addProjectIntent: "add",
     projectPathInspection: null,
   })

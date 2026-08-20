@@ -45,7 +45,11 @@ function seed(target: string | null, sessions: unknown[]) {
   } as unknown as DuxState
 }
 
-const session = { id: "s1", title: "quacky-mallard", branch_name: "dux/s1" }
+const session = {
+  id: "s1",
+  title: "quacky-mallard",
+  workspace: { kind: "managed", project_id: "p1", branch_name: "dux/s1", initial_branch: "dux/s1", branch_provenance: "created", source_branch: "main", worktree_path: "/wt/s1" },
+}
 
 beforeEach(() => {
   installBootStubs()

@@ -7,8 +7,8 @@
 // sends a TAGGED value rather than a flat record with empty strings in it. An
 // empty string on the wire is a lie some screen eventually renders.
 //
-// This mirrors `lib/terminalOwner.ts` deliberately, down to the two-spelling
-// split and the `assertNever` ending: it is the same guarantee for a second
+// This mirrors `lib/terminalOwner.ts` deliberately, down to the exhaustive
+// matcher-plus-`assertNever` shape: it is the same guarantee for a second
 // either/or. The Rust side is `dux_core::viewmodel::AgentWorkspaceView`, whose
 // own decisions live on `dux_core::model::AgentWorkspace` as exhaustive
 // matches.
@@ -113,21 +113,19 @@ export function folderWorkspace(
  * manager. They are about a branch dux manages, and a standalone agent has none
  * whatever its folder contains.
  *
- * This is NOT the question the changes panel asks; see `changesPanelWorks`. */
+ * This is NOT the question the changes panel asks: that one is FOLDER driven,
+ * answered by `changesQuietReason` below, because a standalone agent pointed at
+ * a repository's top level gets a real changes panel. */
 export function supportsBranchGit(workspace: AgentWorkspaceWire): boolean {
   return managedWorkspace(workspace) !== null
 }
 
-/** Whether the changes region shows a real repository view. Folder-driven: a
- * standalone agent pointed at a repository's top level gets one. */
-export function changesPanelWorks(workspace: AgentWorkspaceWire): boolean {
-  return matchWorkspace(workspace, {
-    managed: () => true,
-    folder: (w) => w.repo_status === "working_repo",
-  })
-}
-
-/** Why the changes region is quiet, or `null` when it is not. */
+/** Why the changes region is quiet, or `null` when it is not.
+ *
+ * This doubles as "does the changes panel work here": a null reason IS the
+ * working case. There is deliberately no separate boolean predicate; the one
+ * that existed had no caller, and a second spelling of the same question is how
+ * the two answers drift. */
 export function changesQuietReason(
   workspace: AgentWorkspaceWire,
 ): string | null {

@@ -109,6 +109,27 @@ afterEach(() => {
 })
 
 describe("the Changes pane's Refresh changes action", () => {
+  it("forces the server to ask git again rather than re-reading its cache", async () => {
+    const menu = await openActionsMenu()
+
+    fireEvent.click(menu.getByText("Refresh changes"))
+
+    expect(forceRefreshChanges).toHaveBeenCalledTimes(1)
+    expect(refreshChanges).not.toHaveBeenCalled()
+  })
+
+  it("keeps the leading icon the menu conventions require, and no ellipsis", async () => {
+    const menu = await openActionsMenu()
+
+    const item = menu.getByText("Refresh changes").closest('[role="menuitem"]')
+    expect(item).toBeTruthy()
+    expect(item!.querySelector("svg")).toBeTruthy()
+    // A trailing "…" marks an item that opens a dialog or needs confirming.
+    // This one does neither.
+    expect(item!.textContent?.endsWith("…")).toBe(false)
+  })
+})
+
 describe("ChangedFiles for a standalone agent", () => {
   function standaloneState(
     repo_status: "working_repo" | "no_repo" | "inside_repo_rooted_elsewhere",
@@ -180,25 +201,17 @@ describe("ChangedFiles for a standalone agent", () => {
     expect(screen.queryByText(/no git repository/)).toBeNull()
     expect(screen.getByLabelText("Changes actions")).toBeTruthy()
   })
-})
 
-  it("forces the server to ask git again rather than re-reading its cache", async () => {
-    const menu = await openActionsMenu()
-
-    fireEvent.click(menu.getByText("Refresh changes"))
-
-    expect(forceRefreshChanges).toHaveBeenCalledTimes(1)
-    expect(refreshChanges).not.toHaveBeenCalled()
-  })
-
-  it("keeps the leading icon the menu conventions require, and no ellipsis", async () => {
-    const menu = await openActionsMenu()
-
-    const item = menu.getByText("Refresh changes").closest('[role="menuitem"]')
-    expect(item).toBeTruthy()
-    expect(item!.querySelector("svg")).toBeTruthy()
-    // A trailing "…" marks an item that opens a dialog or needs confirming.
-    // This one does neither.
-    expect(item!.textContent?.endsWith("…")).toBe(false)
+  // Push and Pull publish a BRANCH, which this agent does not have even in a
+  // real repository. Absent rather than on screen and refused on click by the
+  // server. Committing stays: that is folder work.
+  it("offers Commit but neither Push nor Pull, even in a repository folder", async () => {
+    mockState = standaloneState("working_repo", "")
+    render(<ChangedFiles />)
+    fireEvent.click(screen.getByLabelText("Changes actions"))
+    const menu = within(await screen.findByRole("menu"))
+    expect(menu.getByText("Commit…")).toBeTruthy()
+    expect(menu.queryByText("Push")).toBeNull()
+    expect(menu.queryByText("Pull")).toBeNull()
   })
 })

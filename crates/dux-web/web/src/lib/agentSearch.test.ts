@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest"
 
-import { matchCharRange, matchesSessionQuery, matchesTerminalQuery, normalizeQuery } from "@/lib/agentSearch"
+import {
+  agentSearchLocation,
+  matchCharRange,
+  matchesSessionQuery,
+  matchesTerminalQuery,
+  normalizeQuery,
+} from "@/lib/agentSearch"
 import type { SessionView, TerminalView } from "@/lib/types"
 
 function makeSession(over: Partial<SessionView> & { id: string }): SessionView {
@@ -108,6 +114,35 @@ describe("matchesSessionQuery", () => {
 
   it("does not match unrelated text", () => {
     expect(matchesSessionQuery(session, "dux", "zzz")).toBe(false)
+  })
+
+  // A standalone agent's row shows its FOLDER where an ordinary agent shows its
+  // project, so that is the field the query matches. Its label is the name dux
+  // derived from the folder, and it has no branch to fall back to. In lockstep
+  // with the Rust vectors for `agent_search_location`.
+  it("matches a standalone agent on its folder and its name", () => {
+    const standalone = makeSession({
+      id: "sa1",
+      title: "My Notes",
+      workspace: {
+        kind: "folder",
+        folder_path: "/home/someone/My Notes",
+        folder_label: "~/My Notes",
+        repo_status: "no_repo",
+        quiet_reason: "This folder has no git repository.",
+      },
+    })
+    // The location the row shows for this agent, resolved the way the row
+    // resolves it, so the test cannot match a field the row never displays.
+    const location = agentSearchLocation(standalone, () => "unused-project")
+    expect(location).toBe("~/My Notes")
+    expect(matchesSessionQuery(standalone, location, "notes")).toBe(true)
+    expect(matchesSessionQuery(standalone, location, "~/my")).toBe(true)
+    // It has no branch and no project, so neither is a way to reach it.
+    expect(matchesSessionQuery(standalone, location, "unused-project")).toBe(
+      false,
+    )
+    expect(matchesSessionQuery(standalone, location, "zzz")).toBe(false)
   })
 })
 

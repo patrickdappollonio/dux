@@ -127,14 +127,23 @@ export type RawWorkspace = Omit<
   >
 }
 
-/** THE ONE NORMALIZATION POINT for an agent's workspace.
+/** THE ONE NORMALIZATION POINT for an agent's workspace, in both directions.
  *
- * Forward compatibility is the matcher's job (`lib/agentWorkspace.ts` throws on
- * a kind it has never heard of rather than guessing). BACKWARD compatibility is
- * this function's: an older server sends the git fields flat, so the managed
- * shape is synthesized from them. That synthesis is safe precisely because a
- * server old enough to send them is one where every agent is managed, so there
- * is no folder case to get wrong.
+ * BACKWARD compatibility: an older server sends the git fields flat, so the
+ * managed shape is synthesized from them. That synthesis is safe precisely
+ * because a server old enough to send them is one where every agent is managed,
+ * so there is no folder case to get wrong.
+ *
+ * FORWARD compatibility is also here, and deliberately NOT in the matcher. A
+ * NEWER server could send a third kind, and `matchWorkspace` throws on a kind it
+ * has never heard of; that throw is what keeps a missing case a compile error,
+ * but it runs inside render paths, so an unknown kind reaching a component
+ * unmounts the whole React root. Degrading once, at ingestion, keeps the
+ * matcher's exhaustiveness guarantee and turns "a kind from the future" into one
+ * odd-looking agent instead of a blank page. The direction is the same as the
+ * absent case below: unknown reads as managed, because telling the delete dialog
+ * a directory is the user's own when dux may in fact own that worktree is the
+ * wrong way to be wrong.
  *
  * The absent-and-not-legacy case (neither a workspace nor a branch name, which
  * no real server produces) still yields a managed shape with empty fields
@@ -145,7 +154,23 @@ function normalizeSessionWorkspace(
   raw: RawWorkspace["sessions"][number],
 ): AgentWorkspaceWire {
   if (raw.workspace) {
-    return raw.workspace
+    if (raw.workspace.kind === "managed" || raw.workspace.kind === "folder") {
+      return raw.workspace
+    }
+    // A kind from a newer server. Read as the managed shape it may well be a
+    // superset of, with whatever fields it does carry.
+    const unknown = raw.workspace as Record<string, unknown>
+    const str = (key: string) =>
+      typeof unknown[key] === "string" ? (unknown[key] as string) : ""
+    return {
+      kind: "managed",
+      project_id: str("project_id"),
+      branch_name: str("branch_name"),
+      initial_branch: str("initial_branch"),
+      branch_provenance: "unknown",
+      source_branch: str("source_branch"),
+      worktree_path: str("worktree_path"),
+    }
   }
   return {
     kind: "managed",

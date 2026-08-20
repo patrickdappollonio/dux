@@ -190,7 +190,7 @@ describe("fetchWorkspace", () => {
     expect(result.sessions[0].last_focused_tab).toBe("tab-1")
   })
 
-  it("coerces missing initial_branch/source_branch to empty strings at ingestion", async () => {
+  it("synthesizes the managed workspace from an older server's flat git fields", async () => {
     const body = {
       projects: [],
       // A session from an older server omits the two branch fields (and tabs).
@@ -221,6 +221,79 @@ describe("fetchWorkspace", () => {
         worktree_path: "",
       },
       tabs: [],
+    })
+  })
+
+  // The folder shape must survive ingestion untouched: the delete dialog, the
+  // changes panel and every gate read it, and a normalizer that quietly
+  // rewrote it would hand a standalone agent the managed rules.
+  it("passes a folder workspace through ingestion unchanged", async () => {
+    const workspace = {
+      kind: "folder",
+      folder_path: "/home/someone/notes",
+      folder_label: "~/notes",
+      repo_status: "working_repo",
+      quiet_reason: "This folder is a git repository.",
+    }
+    const body = {
+      projects: [],
+      sessions: [{ id: "sa1", workspace }],
+      sidebar: { groups: [], agentless_start: null },
+    }
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => body,
+        text: async () => "",
+        headers: { get: () => null },
+      })) as unknown as typeof fetch,
+    )
+
+    const result = await fetchWorkspace()
+    expect(result.sessions[0].workspace).toEqual(workspace)
+  })
+
+  // A kind from a NEWER server. The matcher throws on an unknown kind, and it
+  // runs inside render paths, so ingestion degrades it here instead: one
+  // odd-looking agent rather than a blank page. Managed rather than folder,
+  // because telling the delete dialog a directory is the user's own when dux may
+  // own that worktree is the wrong way to be wrong.
+  it("degrades a workspace kind from the future to the managed shape", async () => {
+    const body = {
+      projects: [],
+      sessions: [
+        {
+          id: "s9",
+          workspace: {
+            kind: "something-new",
+            project_id: "p1",
+            branch_name: "feature/x",
+          },
+        },
+      ],
+      sidebar: { groups: [], agentless_start: null },
+    }
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => body,
+        text: async () => "",
+        headers: { get: () => null },
+      })) as unknown as typeof fetch,
+    )
+
+    const result = await fetchWorkspace()
+    expect(result.sessions[0].workspace).toMatchObject({
+      kind: "managed",
+      project_id: "p1",
+      branch_name: "feature/x",
+      // Nothing is known about what such an agent's branch was, so the
+      // provenance that means exactly that.
+      branch_provenance: "unknown",
     })
   })
 

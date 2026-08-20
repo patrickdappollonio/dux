@@ -93,15 +93,7 @@ vi.mock("./notify", async (importOriginal) => {
 // so a caller never has to remember it.
 interface SessionSpec {
   id: string
-  workspace: {
-    kind: "managed"
-    project_id: string
-    branch_name: ""
-    initial_branch: ""
-    branch_provenance: "created"
-    source_branch: ""
-    worktree_path: ""
-  }
+  project_id: string
   status?: string
   tabs?: string[]
   terminals?: string[]

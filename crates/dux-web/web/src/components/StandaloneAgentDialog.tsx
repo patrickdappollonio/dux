@@ -48,10 +48,14 @@ function StandaloneAgentBrowser() {
   return (
     <DialogContent className="sm:max-w-xl" showCloseButton={false}>
       <DialogHeader>
-        <DialogTitle>Run an agent in a folder</DialogTitle>
+        <DialogTitle>New standalone agent</DialogTitle>
+        {/* The words "standalone agent" appear here on purpose: it is the name
+            every other surface uses for this kind of agent (the menu entry, the
+            info panel, every refusal), so the dialog that creates one has to
+            teach it. */}
         <span className="text-xs text-muted-foreground">
-          Pick any folder. The agent runs there directly: no branch, no
-          worktree, and dux never creates, moves or removes the folder.
+          Pick any folder and a standalone agent runs there directly: no branch,
+          no worktree, and dux never creates, moves or removes the folder.
         </span>
       </DialogHeader>
 

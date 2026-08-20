@@ -51,7 +51,13 @@ const { StartupLogsDialog } = await import("./StartupLogsDialog")
 
 const SPINE = {
   projects: [{ id: "p1", name: "Repo" }],
-  sessions: [{ id: "s1", project_id: "p1", title: "Fix login", branch_name: "fix-login" }],
+  sessions: [
+    {
+      id: "s1",
+      title: "Fix login",
+      workspace: { kind: "managed", project_id: "p1", branch_name: "fix-login", initial_branch: "fix-login", branch_provenance: "created", source_branch: "main", worktree_path: "/wt/s1" },
+    },
+  ],
 }
 
 function renderOpen(over: Partial<DuxState>) {

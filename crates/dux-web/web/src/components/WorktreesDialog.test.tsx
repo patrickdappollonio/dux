@@ -91,7 +91,13 @@ function seed(
     deleteWorktreeTarget: null,
     spine: {
       projects: [{ id: "p1", name: "acme" }],
-      sessions: [{ id: "s1", title: "tidy-otter", branch_name: "held" }],
+      sessions: [
+        {
+          id: "s1",
+          title: "tidy-otter",
+          workspace: { kind: "managed", project_id: "p1", branch_name: "held", initial_branch: "held", branch_provenance: "created", source_branch: "main", worktree_path: "/wt/held" },
+        },
+      ],
     },
     ...extra,
   } as unknown as DuxState

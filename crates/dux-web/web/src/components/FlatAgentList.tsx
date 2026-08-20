@@ -201,9 +201,10 @@ export function AgentActionsMenu({
   // submenu names the PROJECT, because its actions affect the whole project,
   // not just this agent.
   const agentName = sessionLabel(session)
-  const projectName = spine?.projects.find(
-    (p) => p.id === workspaceProjectId(session.workspace),
-  )?.name
+  // `null` for a standalone agent, which belongs to no project. Read once so
+  // the submenu's presence and its contents cannot disagree.
+  const projectId = workspaceProjectId(session.workspace)
+  const projectName = spine?.projects.find((p) => p.id === projectId)?.name
   const ghAvailable = bootstrap?.gh_available ?? false
   // Whether the branch-identity features exist for this agent at all: fork,
   // pull requests, startup commands. They are about a branch dux manages, and
@@ -319,20 +320,23 @@ export function AgentActionsMenu({
         </DropdownMenuSubContent>
       </DropdownMenuSub>
       {/* Project actions live here (and in the New-agent picker) now that the
-          flat list has no project header. */}
-      <DropdownMenuSub>
-        <DropdownMenuSubTrigger>
-          <Folder />
-          <span className="min-w-0 truncate">
-            {projectName ? <>Project &quot;{projectName}&quot;…</> : <>Project…</>}
-          </span>
-        </DropdownMenuSubTrigger>
-        <DropdownMenuSubContent>
-          {/* A standalone agent belongs to no project, so there is no project
-              submenu for it; the trigger above is gated on the same answer. */}
-          <ProjectMenuItems id={workspaceProjectId(session.workspace) ?? ""} />
-        </DropdownMenuSubContent>
-      </DropdownMenuSub>
+          flat list has no project header. A standalone agent belongs to no
+          project, so the whole submenu is ABSENT for it: with an empty id its
+          only surviving entry was "Remove project…", opening a destructive
+          dialog whose confirm could not do anything. */}
+      {projectId !== null && (
+        <DropdownMenuSub>
+          <DropdownMenuSubTrigger>
+            <Folder />
+            <span className="min-w-0 truncate">
+              {projectName ? <>Project &quot;{projectName}&quot;…</> : <>Project…</>}
+            </span>
+          </DropdownMenuSubTrigger>
+          <DropdownMenuSubContent>
+            <ProjectMenuItems id={projectId} />
+          </DropdownMenuSubContent>
+        </DropdownMenuSub>
+      )}
       <DropdownMenuSeparator />
       <DropdownMenuItem
         disabled={activeElsewhere}
@@ -429,20 +433,24 @@ export function AgentActionsMenu({
           Configure startup command…
         </DropdownMenuItem>
       )}
-      <DropdownMenuItem onClick={() => openAgentEnv(session.id)}>
-        <Variable />
-        Configure environment variables…
-      </DropdownMenuItem>
+      {branchGit && (
+        <DropdownMenuItem onClick={() => openAgentEnv(session.id)}>
+          <Variable />
+          Configure environment variables…
+        </DropdownMenuItem>
+      )}
       {branchGit && (
         <DropdownMenuItem onClick={() => rerunStartupCommand(session.id)}>
           <Play />
           Rerun startup command
         </DropdownMenuItem>
       )}
-      <DropdownMenuItem onClick={() => openStartupLogs(session.id)}>
-        <ScrollText />
-        Startup command logs…
-      </DropdownMenuItem>
+      {branchGit && (
+        <DropdownMenuItem onClick={() => openStartupLogs(session.id)}>
+          <ScrollText />
+          Startup command logs…
+        </DropdownMenuItem>
+      )}
       <DropdownMenuSeparator />
       {/* Two editor entries, named to distinguish their surfaces. The in-app
           overlay cannot open on a phone (EditorOverlay is desktop-only), so

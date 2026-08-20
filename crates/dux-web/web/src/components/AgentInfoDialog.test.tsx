@@ -69,12 +69,28 @@ const base = {
   ],
 }
 
-function renderDialogOpenFor(session: Partial<SessionView>) {
+/** A workspace override, MERGED into the base workspace rather than replacing
+ * it. A whole-object override silently dropped the base's project id and
+ * worktree path, so the Project row rendered in no test at all and the Worktree
+ * row rendered empty; a test about branches should not have to restate the
+ * fields it is not about. A kind change still replaces wholesale, because the
+ * two shapes share no fields. */
+type WorkspaceOverride = { kind: string } & Record<string, unknown>
+
+function renderDialogOpenFor(
+  session: Omit<Partial<SessionView>, "workspace"> & {
+    workspace?: WorkspaceOverride
+  },
+) {
+  const workspace =
+    session.workspace && session.workspace.kind === base.workspace.kind
+      ? { ...base.workspace, ...session.workspace }
+      : (session.workspace ?? base.workspace)
   mockState = {
     agentInfoTarget: "s1",
     spine: {
       projects: [{ id: "p1", name: "Repo" }],
-      sessions: [{ ...base, ...session } as unknown as SessionView],
+      sessions: [{ ...base, ...session, workspace } as unknown as SessionView],
     },
   } as unknown as DuxState
   render(<AgentInfoDialog />)
@@ -96,12 +112,10 @@ describe("AgentInfoDialog", () => {
       title: "server-mode",
       workspace: {
         kind: "managed",
-        project_id: "",
         branch_name: "agent-tabs",
         initial_branch: "server-mode",
         branch_provenance: "created",
         source_branch: "main",
-        worktree_path: "",
       },
     })
     // Current branch.
@@ -112,6 +126,11 @@ describe("AgentInfoDialog", () => {
     expect(screen.getByText("main")).toBeTruthy()
     // Drift note.
     expect(screen.getByText(/changed since creation/i)).toBeTruthy()
+    // The project and the worktree, which a managed agent always has. Asserted
+    // because they were the fields the whole-object workspace override used to
+    // blank: nothing else in this file noticed the Project row disappearing.
+    expect(screen.getByText("Repo")).toBeTruthy()
+    expect(screen.getByText("/tmp/s1")).toBeTruthy()
   })
 
   // A standalone agent says what it is and where it runs, and says nothing
@@ -145,12 +164,10 @@ describe("AgentInfoDialog", () => {
       title: "server-mode",
       workspace: {
         kind: "managed",
-        project_id: "",
         branch_name: "server-mode",
         initial_branch: "server-mode",
         branch_provenance: "created",
         source_branch: "main",
-        worktree_path: "",
       },
     })
     expect(screen.queryByText(/changed since creation/i)).toBeNull()
@@ -163,12 +180,10 @@ describe("AgentInfoDialog", () => {
       title: "server-mode",
       workspace: {
         kind: "managed",
-        project_id: "",
         branch_name: "feat",
         initial_branch: "feat",
         branch_provenance: "created",
         source_branch: "main",
-        worktree_path: "",
       },
       pr: {
         number: 12,
@@ -187,12 +202,10 @@ describe("AgentInfoDialog", () => {
       title: "server-mode",
       workspace: {
         kind: "managed",
-        project_id: "",
         branch_name: "feat",
         initial_branch: "feat",
         branch_provenance: "created",
         source_branch: "main",
-        worktree_path: "",
       },
       pr: {
         number: 12,
@@ -211,12 +224,10 @@ describe("AgentInfoDialog", () => {
       title: "server-mode",
       workspace: {
         kind: "managed",
-        project_id: "",
         branch_name: "feat",
         initial_branch: "feat",
         branch_provenance: "created",
         source_branch: "main",
-        worktree_path: "",
       },
     })
     expect(screen.queryByText(/Pull request/)).toBeNull()
@@ -243,12 +254,10 @@ describe("AgentInfoDialog", () => {
       title: "server-mode",
       workspace: {
         kind: "managed",
-        project_id: "",
         branch_name: "server-mode",
         initial_branch: "",
         branch_provenance: "created",
         source_branch: "",
-        worktree_path: "",
       },
     })
     // Both the Original branch and Forked from rows fall back to "Unknown".

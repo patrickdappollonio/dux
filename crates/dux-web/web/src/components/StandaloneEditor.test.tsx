@@ -154,7 +154,12 @@ async function seedState(overrides: Partial<DuxState>) {
     spine: {
       projects: [],
       sessions: [
-        { id: SESSION, title: "My agent", branch_name: "feat/x", tabs: [{ id: SESSION }] },
+        {
+          id: SESSION,
+          title: "My agent",
+          workspace: { kind: "managed", project_id: "p1", branch_name: "feat/x", initial_branch: "feat/x", branch_provenance: "created", source_branch: "main", worktree_path: "/wt/s1" },
+          tabs: [{ id: SESSION }],
+        },
       ],
       terminals: [],
       sidebar: { groups: [], agentless_start: null },

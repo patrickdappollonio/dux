@@ -32,6 +32,7 @@ import { useSidebar } from "@/components/ui/sidebar"
 import { changesCountFor } from "@/lib/agentVitals"
 import { resolveInstanceTitle } from "@/lib/instanceTitle"
 import { partitionProjects } from "@/lib/projects"
+import { workspaceProjectId } from "@/lib/agentWorkspace"
 import {
   MAX_SIDEBAR_PX,
   MIN_SIDEBAR_PX,
@@ -87,7 +88,7 @@ function CollapsedAgentIcon({
       >
         <SidebarMenuButton
           isActive={selected}
-          aria-label={`${label} (${projectName})`}
+          aria-label={projectName ? `${label} (${projectName})` : label}
           onClick={() => selectSession(session.id)}
           className={cn("touch-manipulation", dimmed && "opacity-70")}
         >
@@ -122,17 +123,31 @@ function CollapsedAgentIcon({
 function CollapsedAgentRail({
   projectIds,
   grouped,
+  standalone,
   projectName,
   selectedTarget,
 }: {
   projectIds: string[]
   grouped: Map<string, SessionView[]>
+  /** The agents that belong to no project, in list order. They sit under no
+   * project row, so grouping by project loses them, and the rail is the ONLY
+   * way to reach an agent at icon width: without this they were unreachable
+   * without expanding the sidebar. */
+  standalone: SessionView[]
   projectName: (id: string) => string
   selectedTarget: SelectedTarget | null
 }) {
-  const entries = projectIds.flatMap((projectId) =>
-    (grouped.get(projectId) ?? []).map((session) => ({ session, projectId })),
-  )
+  const entries = [
+    ...projectIds.flatMap((projectId) =>
+      (grouped.get(projectId) ?? []).map((session) => ({
+        session,
+        // The tooltip's project line, empty for an agent with no project; the
+        // tooltip drops the separator with it and names the folder instead.
+        projectLabel: projectName(projectId),
+      })),
+    ),
+    ...standalone.map((session) => ({ session, projectLabel: "" })),
+  ]
 
   if (entries.length === 0) return null
 
@@ -146,11 +161,11 @@ function CollapsedAgentRail({
     >
       <SidebarGroupContent>
         <SidebarMenu>
-          {entries.map(({ session, projectId }) => (
+          {entries.map(({ session, projectLabel }) => (
             <CollapsedAgentIcon
               key={session.id}
               session={session}
-              projectName={projectName(projectId)}
+              projectName={projectLabel}
               selected={
                 selectedTarget?.kind === "agent" &&
                 selectedTarget.sessionId === session.id
@@ -282,6 +297,10 @@ export function AppSidebar() {
     projects,
     sessions,
   )
+  // The agents `partitionProjects` groups under no project, kept in list order.
+  const standaloneSessions = sessions.filter(
+    (session) => workspaceProjectId(session.workspace) === null,
+  )
 
   const instanceTitle = resolveInstanceTitle(bootstrap?.title)
 
@@ -348,6 +367,7 @@ export function AppSidebar() {
         <CollapsedAgentRail
           projectIds={withAgents}
           grouped={grouped}
+          standalone={standaloneSessions}
           projectName={projectName}
           selectedTarget={selectedTarget}
         />
