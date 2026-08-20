@@ -1619,6 +1619,24 @@ pub(crate) enum NameNewAgentFocus {
     CopyChangesCheckbox,
 }
 
+/// What the folder browser is picking a directory for.
+///
+/// One prompt with a purpose rather than two prompts, because the browsing
+/// itself (navigation, filtering, path entry, tab completion) is identical and
+/// a second copy of it would drift. The purpose is consulted at exactly one
+/// place, the moment a directory is chosen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BrowsePurpose {
+    /// Add the folder as a project. Runs the add-project validator, which
+    /// rejects anything that is not a repository root (offering to `git init`
+    /// a plain folder instead).
+    AddProject,
+    /// Run a standalone agent in the folder. ACCEPTS ANYTHING: a plain folder
+    /// is the ordinary case here, so the add-project validator is deliberately
+    /// not consulted, and nothing is initialized in the user's directory.
+    StandaloneAgent,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum PromptState {
     None,
@@ -1627,6 +1645,12 @@ pub(crate) enum PromptState {
         selected: usize,
     },
     BrowseProjects {
+        /// What this browse is FOR. The folder listing is the same either way
+        /// (`browser_entries` already lists plain directories); what differs is
+        /// what happens when the user picks one, and the add-project validator
+        /// is exactly what a standalone pick must not go through, since it
+        /// rejects a folder that is not a repository.
+        purpose: BrowsePurpose,
         current_dir: PathBuf,
         entries: Vec<BrowserEntry>,
         loading: bool,
@@ -4171,6 +4195,7 @@ impl App {
             "new-terminal-for-project" => {
                 self.open_project_chooser(ProjectChooserIntent::ProjectTerminal)
             }
+            "new-standalone-agent" => self.open_standalone_agent_browser(),
             "new-standalone-terminal" => self.show_standalone_terminal(),
             "add-project" => self.open_project_browser(),
             "copy-path" => self.copy_selected_path(),

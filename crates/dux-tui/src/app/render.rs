@@ -4183,6 +4183,7 @@ impl App {
                 };
             }
             PromptState::BrowseProjects {
+                purpose,
                 current_dir,
                 entries,
                 loading,
@@ -4283,7 +4284,13 @@ impl App {
                     (None, area)
                 };
                 if let Some(filter_area) = top_areas {
-                    let title = format!("Add Project: {}", current_dir.display());
+                    // The browser is shared; only what a pick DOES differs, so the
+                    // title says which act the user is in the middle of.
+                    let verb = match purpose {
+                        BrowsePurpose::AddProject => "Add Project",
+                        BrowsePurpose::StandaloneAgent => "Standalone Agent In",
+                    };
+                    let title = format!("{verb}: {}", current_dir.display());
                     let (prefix, text, cursor) = if *editing_path {
                         ("go: ", path_input.text.as_str(), path_input.cursor)
                     } else {
@@ -4426,7 +4433,13 @@ impl App {
                         " cancel",
                         Style::default().fg(self.theme.hint_desc_fg),
                     ));
-                    let title = format!("Add Project: {}", current_dir.display());
+                    // The browser is shared; only what a pick DOES differs, so the
+                    // title says which act the user is in the middle of.
+                    let verb = match purpose {
+                        BrowsePurpose::AddProject => "Add Project",
+                        BrowsePurpose::StandaloneAgent => "Standalone Agent In",
+                    };
+                    let title = format!("{verb}: {}", current_dir.display());
                     let list_block = self
                         .themed_overlay_block(&title)
                         .title_bottom(Line::from(bottom_spans));
@@ -15610,6 +15623,7 @@ mod tests {
             input.insert_char(ch);
         }
         app.prompt = PromptState::BrowseProjects {
+            purpose: crate::app::BrowsePurpose::AddProject,
             current_dir: root,
             entries,
             loading: false,

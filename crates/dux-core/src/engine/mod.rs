@@ -3553,6 +3553,78 @@ impl Engine {
             .unwrap_or_else(|| "unknown".to_string())
     }
 
+    /// Plan a standalone-agent create: validate the folder, resolve the title
+    /// and the provider, and hand back the request to dispatch.
+    ///
+    /// THE ONE PLACE the standalone create's refusals live, so the web endpoint
+    /// and the TUI's folder browser cannot answer the same question
+    /// differently. Also returns the Busy message, because a keyed busy and its
+    /// final have to name the same thing.
+    pub fn plan_standalone_agent(
+        &self,
+        folder: &str,
+        name: &str,
+        provider: Option<&str>,
+    ) -> anyhow::Result<(crate::worker::CreateAgentRequest, String)> {
+        let folder = PathBuf::from(folder.trim());
+        if !folder.is_absolute() {
+            anyhow::bail!(
+                "A standalone agent needs an absolute path to the folder it should run in; \
+                 \"{}\" is relative, and dux has no working directory to resolve it against \
+                 on your behalf.",
+                folder.display()
+            );
+        }
+        // THE SAME-FOLDER REFUSAL. Coding CLIs resume their conversation
+        // history PER DIRECTORY, so two standalone agents in one folder would
+        // silently pick up each other's conversation, which is a
+        // data-loss-shaped surprise rather than a mere duplicate. Compared on
+        // canonical paths so a symlink is not a way around it.
+        //
+        // The refusal is a SIGNPOST, not a wall: adding the folder as a project
+        // is the multi-agent shape dux is built for, and it brings tabs along.
+        let canonical = crate::project_browser::canonical_or_original(&folder);
+        if let Some(existing) = self.sessions.iter().find(|session| {
+            session.folder_path().is_some_and(|existing_folder| {
+                crate::project_browser::canonical_or_original(Path::new(existing_folder))
+                    == canonical
+            })
+        }) {
+            anyhow::bail!(
+                "Agent \"{}\" is already running in \"{}\". Coding CLIs resume their \
+                 conversation history per directory, so a second standalone agent there would \
+                 silently pick up the first one's conversation. Add that folder as a project \
+                 instead if you want several agents working on it: agents in a project each \
+                 get their own worktree, and they get tabs too.",
+                existing.display_label(),
+                crate::home_path::shorten_home(&folder)
+            );
+        }
+        // The typed name is used verbatim: no branch is created here, so
+        // `is_valid_agent_name` deliberately does not apply. Folder names
+        // legally contain characters a ref name cannot.
+        let title = crate::git::standalone_agent_title(name, &folder);
+        // The GLOBAL default provider, the same source the config's own default
+        // uses, unless the caller overrode it.
+        let provider = provider
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(crate::model::ProviderKind::new)
+            .unwrap_or_else(|| self.config.default_provider());
+        let busy_message = format!(
+            "Creating a standalone agent in \"{}\"\u{2026}",
+            crate::home_path::shorten_home(&folder)
+        );
+        Ok((
+            crate::worker::CreateAgentRequest::Standalone {
+                folder,
+                title,
+                provider,
+            },
+            busy_message,
+        ))
+    }
+
     /// Resolve what git dux may do for one agent. `None` for an unknown id, so
     /// a route can still answer 404 for one.
     ///

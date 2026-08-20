@@ -3929,64 +3929,13 @@ impl Engine {
                 name,
                 provider,
             } => {
-                let folder = PathBuf::from(folder.trim());
-                if !folder.is_absolute() {
-                    anyhow::bail!(
-                        "A standalone agent needs an absolute path to the folder it should run \
-                         in; \"{}\" is relative, and dux has no working directory to resolve it \
-                         against on your behalf.",
-                        folder.display()
-                    );
-                }
-                // THE SAME-FOLDER REFUSAL. Provider tools resume their
-                // conversation history PER DIRECTORY, so two standalone agents
-                // in one folder would silently resume each other's
-                // conversations, which is a data-loss-shaped surprise rather
-                // than a mere duplicate. Compared on canonical paths so a
-                // symlink is not a way around it.
-                //
-                // The refusal is a SIGNPOST, not a wall: adding the folder as a
-                // project is the multi-agent shape dux is built for, and it
-                // brings tabs along too.
-                let canonical = crate::project_browser::canonical_or_original(&folder);
-                if let Some(existing) = self.sessions.iter().find(|session| {
-                    session.folder_path().is_some_and(|existing_folder| {
-                        crate::project_browser::canonical_or_original(std::path::Path::new(existing_folder))
-                            == canonical
-                    })
-                }) {
-                    anyhow::bail!(
-                        "Agent \"{}\" is already running in \"{}\". Coding CLIs resume their \
-                         conversation history per directory, so a second standalone agent there \
-                         would silently pick up the first one's conversation. Add that folder as \
-                         a project instead if you want several agents working on it: agents in a \
-                         project each get their own worktree, and they get tabs too.",
-                        existing.display_label(),
-                        crate::home_path::shorten_home(&folder)
-                    );
-                }
-                // The typed name is used verbatim: no branch is created here,
-                // so `is_valid_agent_name` deliberately does not apply. Folder
-                // names legally contain characters a ref name cannot.
-                let title = crate::git::standalone_agent_title(&name, &folder);
-                // The GLOBAL default provider, the same source the config's own
-                // default uses, unless the request overrode it.
-                let provider = provider
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .map(crate::model::ProviderKind::new)
-                    .unwrap_or_else(|| self.config.default_provider());
-                let busy_message = format!(
-                    "Creating a standalone agent in \"{}\"\u{2026}",
-                    crate::home_path::shorten_home(&folder)
-                );
+                // Every refusal, the title rule and the provider default live
+                // in one core helper, shared with the TUI's folder-browser
+                // flow, so the two surfaces cannot answer differently.
+                let (request, busy_message) =
+                    self.plan_standalone_agent(&folder, &name, provider.as_deref())?;
                 Command::DispatchCreateAgentRequest {
-                    request: Box::new(crate::worker::CreateAgentRequest::Standalone {
-                        folder,
-                        title,
-                        provider,
-                    }),
+                    request: Box::new(request),
                     busy_message,
                     term_size: (80, 24),
                 }

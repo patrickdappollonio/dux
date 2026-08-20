@@ -5,8 +5,50 @@ use dux_core::engine::{Command, EventReaction, FinishDeleteSessionOutcome, Workt
 
 impl App {
     pub(crate) fn open_project_browser(&mut self) -> Result<()> {
+        self.open_folder_browser(BrowsePurpose::AddProject)
+    }
+
+    /// Palette command (`new-standalone-agent`): pick a folder you already
+    /// have and run a provider in it.
+    ///
+    /// It reuses the same folder browser as adding a project, with the purpose
+    /// switched: the listing already includes plain directories, and the only
+    /// difference is that picking one goes nowhere near the add-project
+    /// validator, which rejects exactly the plain folder that is the ordinary
+    /// case here.
+    pub(crate) fn open_standalone_agent_browser(&mut self) -> Result<()> {
+        self.open_folder_browser(BrowsePurpose::StandaloneAgent)
+    }
+
+    /// Create a standalone agent in the folder the browser is currently in.
+    ///
+    /// Deliberately does NOT go through `validate_project_add_path`: that
+    /// validator rejects a folder which is not a repository root, and a plain
+    /// folder is the ordinary case here. Nothing is initialized in the user's
+    /// directory either; dux just runs the provider in it.
+    ///
+    /// The refusals (a relative path, a folder that already hosts a standalone
+    /// agent) come back from the shared wire arm, so the TUI and the web say
+    /// the same thing for the same reason.
+    pub(crate) fn create_standalone_agent_in(&mut self, path: String) {
+        self.prompt = PromptState::None;
+        // No name typed: the title comes from the folder's own name, and
+        // renaming afterwards is an ordinary rename like any agent's. The
+        // provider is the global default, retargetable afterwards.
+        match self.engine.plan_standalone_agent(&path, "", None) {
+            Ok((request, busy_message)) => {
+                if let Err(err) = self.dispatch_create_agent_request(request, busy_message) {
+                    self.set_error(format!("Could not create the standalone agent: {err:#}"));
+                }
+            }
+            Err(err) => self.set_error(err.to_string()),
+        }
+    }
+
+    fn open_folder_browser(&mut self, purpose: BrowsePurpose) -> Result<()> {
         let start_dir = dux_core::project_browser::resolve_start_dir(&self.engine.config);
         self.prompt = PromptState::BrowseProjects {
+            purpose,
             current_dir: start_dir.clone(),
             entries: Vec::new(),
             loading: true,
@@ -24,8 +66,12 @@ impl App {
             let add = self.bindings.label_for(Action::AddCurrentDir);
             let search = self.bindings.label_for(Action::SearchToggle);
             let goto = self.bindings.label_for(Action::GoToPath);
+            let what = match purpose {
+                BrowsePurpose::AddProject => "adds current dir",
+                BrowsePurpose::StandaloneAgent => "runs an agent in current dir",
+            };
             self.set_info(format!(
-                "Project browser: {open} opens folders, {add} adds current dir, {search} to search, {goto} to go to a path.",
+                "Folder browser: {open} opens folders, {add} {what}, {search} to search, {goto} to go to a path.",
             ));
         }
         Ok(())

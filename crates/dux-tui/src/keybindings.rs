@@ -1171,6 +1171,15 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         hint_contexts: &[],
     },
     BindingDef {
+        // Palette-only: opens the folder browser to pick a directory to run an
+        // agent in. No default key, like the standalone terminal beside it.
+        action: Action::NewStandaloneAgent,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+    },
+    BindingDef {
         // Palette-only: opens a terminal owned by nothing, in the home
         // directory. No default key (like new-terminal-for-project).
         action: Action::NewStandaloneTerminal,
@@ -2676,6 +2685,7 @@ mod tests {
             "new-agent-from-pr",
             "new-agent-from-worktree",
             "new-agent-tab",
+            "new-standalone-agent",
             "new-standalone-terminal",
             "new-terminal-for-agent",
             "new-terminal-for-project",

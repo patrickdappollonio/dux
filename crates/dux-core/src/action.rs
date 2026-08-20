@@ -126,6 +126,12 @@ pub enum Action {
     /// `NewProjectTerminal` (project-scoped): this one needs nothing selected
     /// and no owner to exist. No default keybinding.
     NewStandaloneTerminal,
+    /// Palette-only: open the folder browser to pick a directory the user
+    /// already has, and run an agent in it. Distinct from `NewAgent`, which
+    /// creates a branch and a worktree inside a project: this one belongs to no
+    /// project, makes nothing, and never modifies the folder it is pointed at.
+    /// No default keybinding, like the standalone terminal beside it.
+    NewStandaloneAgent,
     RenameSession,
     DeleteProject,
     RemoveProject,
@@ -279,6 +285,7 @@ impl Action {
             Action::NewTerminal => "new_terminal",
             Action::NewProjectTerminal => "new_project_terminal",
             Action::NewStandaloneTerminal => "new_standalone_terminal",
+            Action::NewStandaloneAgent => "new_standalone_agent",
             Action::RenameSession => "rename_session",
             Action::DeleteProject => "delete_project",
             Action::RemoveProject => "remove_project",
@@ -392,6 +399,9 @@ impl Action {
             Action::NewProjectTerminal => "Open a terminal for a project you pick.",
             Action::NewStandaloneTerminal => {
                 "Open a standalone terminal in your home directory, belonging to no project or agent."
+            }
+            Action::NewStandaloneAgent => {
+                "Run an agent in a folder you already have. It belongs to no project, gets no branch and no worktree, and dux never modifies the folder."
             }
             Action::OpenMacroBar => {
                 "Open the macro command bar to send text macros. Works over the windowed agent pane and in fullscreen."
@@ -638,6 +648,7 @@ impl Action {
             | Action::NewTerminal
             | Action::NewProjectTerminal
             | Action::NewStandaloneTerminal
+            | Action::NewStandaloneAgent
             | Action::RenameSession
             | Action::DeleteProject
             | Action::RemoveProject

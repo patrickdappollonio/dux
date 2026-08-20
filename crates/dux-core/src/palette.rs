@@ -389,6 +389,16 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         // Per-project: web spawns project terminals from the project row menu inline.
     },
     PaletteCommand {
+        action: Action::NewStandaloneAgent,
+        name: "new-standalone-agent",
+        description: "Run an agent in a folder you already have",
+        // Global and parameter-free (it opens a folder browser and needs
+        // nothing selected), so it also earns a row in the web's creation menu
+        // (see `crates/dux-web/web/src/lib/creationMenus.ts`). It sits beside
+        // new-standalone-terminal on purpose: both are the "belongs to nothing"
+        // shape, and naming them alike is how a user finds the second one.
+    },
+    PaletteCommand {
         action: Action::NewStandaloneTerminal,
         name: "new-standalone-terminal",
         description: "Open a standalone terminal in your home directory",

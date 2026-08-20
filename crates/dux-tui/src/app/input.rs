@@ -3772,9 +3772,23 @@ impl App {
                     self.open_selected_browser_entry();
                 }
                 Some(Action::AddCurrentDir) if !is_searching => {
-                    if let PromptState::BrowseProjects { current_dir, .. } = &self.prompt {
+                    // THE ONE PLACE the browse purpose is consulted. Everything
+                    // above this is navigation, identical either way.
+                    if let PromptState::BrowseProjects {
+                        purpose,
+                        current_dir,
+                        ..
+                    } = &self.prompt
+                    {
                         let path = current_dir.to_string_lossy().to_string();
-                        self.add_project_from_browser_path(path);
+                        match purpose {
+                            BrowsePurpose::AddProject => {
+                                self.add_project_from_browser_path(path);
+                            }
+                            BrowsePurpose::StandaloneAgent => {
+                                self.create_standalone_agent_in(path);
+                            }
+                        }
                     }
                 }
                 _ => {
@@ -17853,6 +17867,7 @@ not_a_real_action = ["x"]
         let child = root.join("child");
         std::fs::create_dir_all(&child).expect("child dir");
         app.prompt = PromptState::BrowseProjects {
+            purpose: crate::app::BrowsePurpose::AddProject,
             current_dir: root.clone(),
             entries: vec![crate::app::BrowserEntry {
                 path: child.clone(),
@@ -18115,6 +18130,7 @@ cyan = "#00ffff"
     fn mouse_click_browser_search_input_moves_cursor_and_edits_filter() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::BrowseProjects {
+            purpose: crate::app::BrowsePurpose::AddProject,
             current_dir: PathBuf::from(&app.engine.projects[0].path),
             entries: Vec::new(),
             loading: false,
@@ -18148,6 +18164,7 @@ cyan = "#00ffff"
     fn mouse_click_browser_path_input_moves_cursor_and_edits_path() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::BrowseProjects {
+            purpose: crate::app::BrowsePurpose::AddProject,
             current_dir: PathBuf::from(&app.engine.projects[0].path),
             entries: Vec::new(),
             loading: false,
@@ -18199,6 +18216,7 @@ cyan = "#00ffff"
         let typed = outside.path().join("subdir");
         std::fs::create_dir_all(&typed).expect("typed dir");
         app.prompt = PromptState::BrowseProjects {
+            purpose: crate::app::BrowsePurpose::AddProject,
             current_dir: root,
             entries: Vec::new(),
             loading: false,
@@ -18252,6 +18270,7 @@ cyan = "#00ffff"
         std::fs::create_dir_all(&typed).expect("typed dir");
         std::fs::create_dir_all(typed.join("node_modules")).expect("candidate dir");
         let browser = PromptState::BrowseProjects {
+            purpose: crate::app::BrowsePurpose::AddProject,
             current_dir: root,
             entries: Vec::new(),
             loading: false,
@@ -18323,6 +18342,7 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         let root = PathBuf::from(&app.engine.projects[0].path);
         app.prompt = PromptState::BrowseProjects {
+            purpose: crate::app::BrowsePurpose::AddProject,
             current_dir: root.clone(),
             entries: Vec::new(),
             loading: false,
@@ -18387,6 +18407,7 @@ cyan = "#00ffff"
         std::fs::create_dir_all(alpha.join("child")).expect("child dir");
         let typed = root.join("al").to_string_lossy().to_string();
         app.prompt = PromptState::BrowseProjects {
+            purpose: crate::app::BrowsePurpose::AddProject,
             current_dir: root.clone(),
             entries: Vec::new(),
             loading: false,
@@ -18456,6 +18477,7 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         let root = PathBuf::from(&app.engine.projects[0].path);
         app.prompt = PromptState::BrowseProjects {
+            purpose: crate::app::BrowsePurpose::AddProject,
             current_dir: root,
             entries: Vec::new(),
             loading: false,
@@ -18505,6 +18527,7 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         let root = PathBuf::from(&app.engine.projects[0].path);
         app.prompt = PromptState::BrowseProjects {
+            purpose: crate::app::BrowsePurpose::AddProject,
             current_dir: root,
             entries: Vec::new(),
             loading: false,
@@ -20390,6 +20413,59 @@ cyan = "#00ffff"
             labels,
             vec!["Terminal 1".to_string(), "Terminal 2".to_string()],
             "each terminal must carry the canonical Terminal N identity label",
+        );
+    }
+
+    /// The journey: the user runs `new-standalone-agent` from the palette with
+    /// nothing selected and no project in sight, and lands in the folder
+    /// browser. The browser is the SAME one adding a project uses; what differs
+    /// is that picking a folder here goes nowhere near the add-project
+    /// validator, which rejects exactly the plain folder that is the ordinary
+    /// case for a standalone agent.
+    #[test]
+    fn new_standalone_agent_command_opens_the_folder_browser_in_pick_a_folder_mode() {
+        let mut app = test_app(default_bindings());
+        app.engine.sessions.clear();
+        app.engine.projects.clear();
+
+        app.execute_command("new-standalone-agent".to_string())
+            .expect("should open the folder browser");
+
+        match &app.prompt {
+            PromptState::BrowseProjects { purpose, .. } => {
+                assert_eq!(*purpose, crate::app::BrowsePurpose::StandaloneAgent);
+            }
+            other => panic!("expected the folder browser, got {other:?}"),
+        }
+    }
+
+    /// Picking a plain folder that is not a repository creates the agent: the
+    /// add-project validator would have refused it, and this flow must not
+    /// consult it. Nothing is initialized in the folder either.
+    #[test]
+    fn picking_a_plain_folder_for_a_standalone_agent_is_accepted() {
+        let mut app = test_app(default_bindings());
+        let folder = tempfile::tempdir().expect("folder");
+        let before: Vec<_> = std::fs::read_dir(folder.path())
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.file_name()))
+            .collect();
+
+        app.create_standalone_agent_in(folder.path().to_string_lossy().to_string());
+
+        assert_ne!(
+            app.status.tone(),
+            crate::statusline::StatusTone::Error,
+            "a plain folder is the ordinary case: {}",
+            app.status.text()
+        );
+        let after: Vec<_> = std::fs::read_dir(folder.path())
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.file_name()))
+            .collect();
+        assert_eq!(
+            before, after,
+            "picking a folder must not initialize anything in it"
         );
     }
 
@@ -28531,6 +28607,7 @@ cyan = "#00ffff"
     fn browse_projects_app() -> App {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::BrowseProjects {
+            purpose: crate::app::BrowsePurpose::AddProject,
             current_dir: PathBuf::from("/tmp"),
             entries: ["alpha", "beta-one", "beta-two"]
                 .iter()

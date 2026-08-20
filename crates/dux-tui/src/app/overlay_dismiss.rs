@@ -515,6 +515,7 @@ mod tests {
             (
                 "BrowseProjects",
                 PromptState::BrowseProjects {
+                    purpose: crate::app::BrowsePurpose::AddProject,
                     current_dir: PathBuf::from("/tmp"),
                     entries: Vec::new(),
                     loading: false,
