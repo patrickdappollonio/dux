@@ -1468,9 +1468,7 @@ mod tests {
             // drop on the terminal's own pane does. The shell is walked
             // somewhere else first, so the two answers are visibly different.
             let world = drop_world().await;
-            let terminal = world
-                .create_terminal("/api/v1/projects/p1/terminals")
-                .await;
+            let terminal = world.create_terminal("/api/v1/projects/p1/terminals").await;
             world.cd(&terminal, &world.wt).await;
 
             let resp = world
@@ -1481,7 +1479,10 @@ mod tests {
                 .unwrap();
             assert_eq!(resp.status(), StatusCode::OK, "{}", body_text(resp).await);
 
-            assert_eq!(std::fs::read(world.root.join("notes.md")).unwrap(), b"bytes");
+            assert_eq!(
+                std::fs::read(world.root.join("notes.md")).unwrap(),
+                b"bytes"
+            );
             assert!(
                 !world.wt.join("notes.md").exists(),
                 "the drop followed the shell rather than the pinned root"
@@ -1494,9 +1495,7 @@ mod tests {
             // pane to tell and nothing is broadcast. Silence is the answer, not
             // an omission.
             let world = drop_world().await;
-            let terminal = world
-                .create_terminal("/api/v1/projects/p1/terminals")
-                .await;
+            let terminal = world.create_terminal("/api/v1/projects/p1/terminals").await;
             let (generation, _) = world.refreshes();
 
             let resp = world

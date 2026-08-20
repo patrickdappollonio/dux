@@ -1752,6 +1752,34 @@ describe("when the file changes on disk underneath the editor", () => {
     await waitFor(() => expect(editor().value).toBe(AGENT_TEXT))
   })
 
+  // The terminal-root case, measured rather than assumed: it gets no
+  // changed-files broadcast at all, so if the other two triggers depended on
+  // the slice, a terminal editor would never notice a file moving under it.
+  it("still catches a change on a TERMINAL root, which has no broadcast", async () => {
+    const { getSnapshot } = await import("@/lib/store")
+    const terminalRoot = {
+      kind: "terminal" as const,
+      terminalId: "t1",
+      owner: { kind: "standalone" as const },
+    }
+    mockState = {
+      ...getSnapshot(),
+      editorTarget: { root: terminalRoot, initialPath: PATH },
+      editorTabs: {
+        [rootKey(terminalRoot)]: {
+          tabs: [tab(TAB_ID, PATH)],
+          activeId: TAB_ID,
+        },
+      },
+    } as DuxState
+    render(<Overlay />)
+    await waitFor(() => expect(editor().value).toBe(ON_DISK))
+
+    put(PATH, AGENT_TEXT, "2026-02-02T00:00:00+00:00")
+    fireEvent(window, new Event("focus"))
+    await waitFor(() => expect(editor().value).toBe(AGENT_TEXT))
+  })
+
   it("never silently replaces a buffer with unsaved edits", async () => {
     const view = await mountOne(true)
     fireEvent.change(editor(), { target: { value: TYPED } })

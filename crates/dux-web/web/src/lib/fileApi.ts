@@ -3,7 +3,7 @@
 // show per-file loading/saving state, and surface a real error message.
 //
 // The server validates every request (root resolution + that the path stays
-// inside that root — a path-escape/`.git`/symlink guard — plus a binary/size
+// inside that root, a path-escape/`.git`/symlink guard, plus a binary/size
 // guard), so the UI never has to. There is NO git-tracked/changed gate: any
 // path inside the root is editable, ignored or not. A write against an AGENT
 // root triggers an engine changed-files recompute that reaches every client
