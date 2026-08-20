@@ -359,6 +359,30 @@ pub enum WireCommand {
         #[serde(default)]
         use_existing_branch: bool,
     },
+    /// Create a STANDALONE agent: point a provider at a folder the user already
+    /// has and run it there. No project, no branch, no worktree.
+    ///
+    /// Deliberately its own command rather than a `project_id: Option<String>`
+    /// on [`WireCommand::CreateAgent`]: every field of that one is about a
+    /// project's branch machinery, and an optional project id would make each
+    /// of them separately meaningless.
+    CreateStandaloneAgent {
+        /// The folder to run in, as an absolute path on the SERVER's
+        /// filesystem. Accepted whatever it contains; it does not have to be a
+        /// repository.
+        folder: String,
+        /// The agent's display name. May be empty, in which case a sanitized
+        /// form of the folder's own name is used. Folder names legally contain
+        /// characters a branch name cannot, so the branch validator explicitly
+        /// does NOT apply here.
+        #[serde(default)]
+        name: String,
+        /// Which provider to launch. `None` uses the global default, the same
+        /// source the config's own default uses. Retargetable afterward like
+        /// any agent.
+        #[serde(default)]
+        provider: Option<String>,
+    },
     /// Fork an existing agent session into a fresh worktree branched from the
     /// source session's branch. `name` follows the same rules as `CreateAgent`:
     /// empty auto-generates a branch name (server pet-name path), a non-empty
@@ -3877,6 +3901,73 @@ impl Engine {
                     project_name,
                 }
             }
+            WireCommand::CreateStandaloneAgent {
+                folder,
+                name,
+                provider,
+            } => {
+                let folder = PathBuf::from(folder.trim());
+                if !folder.is_absolute() {
+                    anyhow::bail!(
+                        "A standalone agent needs an absolute path to the folder it should run \
+                         in; \"{}\" is relative, and dux has no working directory to resolve it \
+                         against on your behalf.",
+                        folder.display()
+                    );
+                }
+                // THE SAME-FOLDER REFUSAL. Provider tools resume their
+                // conversation history PER DIRECTORY, so two standalone agents
+                // in one folder would silently resume each other's
+                // conversations, which is a data-loss-shaped surprise rather
+                // than a mere duplicate. Compared on canonical paths so a
+                // symlink is not a way around it.
+                //
+                // The refusal is a SIGNPOST, not a wall: adding the folder as a
+                // project is the multi-agent shape dux is built for, and it
+                // brings tabs along too.
+                let canonical = crate::project_browser::canonical_or_original(&folder);
+                if let Some(existing) = self.sessions.iter().find(|session| {
+                    session.folder_path().is_some_and(|existing_folder| {
+                        crate::project_browser::canonical_or_original(std::path::Path::new(existing_folder))
+                            == canonical
+                    })
+                }) {
+                    anyhow::bail!(
+                        "Agent \"{}\" is already running in \"{}\". Coding CLIs resume their \
+                         conversation history per directory, so a second standalone agent there \
+                         would silently pick up the first one's conversation. Add that folder as \
+                         a project instead if you want several agents working on it: agents in a \
+                         project each get their own worktree, and they get tabs too.",
+                        existing.display_label(),
+                        crate::home_path::shorten_home(&folder)
+                    );
+                }
+                // The typed name is used verbatim: no branch is created here,
+                // so `is_valid_agent_name` deliberately does not apply. Folder
+                // names legally contain characters a ref name cannot.
+                let title = crate::git::standalone_agent_title(&name, &folder);
+                // The GLOBAL default provider, the same source the config's own
+                // default uses, unless the request overrode it.
+                let provider = provider
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(crate::model::ProviderKind::new)
+                    .unwrap_or_else(|| self.config.default_provider());
+                let busy_message = format!(
+                    "Creating a standalone agent in \"{}\"\u{2026}",
+                    crate::home_path::shorten_home(&folder)
+                );
+                Command::DispatchCreateAgentRequest {
+                    request: Box::new(crate::worker::CreateAgentRequest::Standalone {
+                        folder,
+                        title,
+                        provider,
+                    }),
+                    busy_message,
+                    term_size: (80, 24),
+                }
+            }
             WireCommand::CreateAgent {
                 project_id,
                 name,
@@ -4240,6 +4331,132 @@ mod tests {
     use crate::statusline::StatusTone;
     use crate::worker::WorkerEvent;
     use std::path::Path;
+
+    /// The folder is accepted whatever it contains: a plain directory with no
+    /// repository anywhere near it is the ordinary case, and the add-project
+    /// validator (which rejects exactly that) must not be in the way.
+    #[test]
+    fn creating_a_standalone_agent_accepts_a_folder_that_is_not_a_repository() {
+        let (mut engine, _tmp) = test_engine();
+        let folder = tempfile::tempdir().unwrap();
+        let outcome = engine.apply_wire(WireCommand::CreateStandaloneAgent {
+            folder: folder.path().to_string_lossy().to_string(),
+            name: String::new(),
+            provider: None,
+        });
+        assert!(
+            outcome.is_ok(),
+            "a plain folder is the ordinary case, got {:?}",
+            outcome.err().map(|e| e.to_string())
+        );
+    }
+
+    /// Provider tools resume their conversation history PER DIRECTORY, so two
+    /// standalone agents in one folder would silently resume each other's
+    /// conversations. Refused at creation, canonically (a symlink to the same
+    /// folder is the same folder), and the refusal is a signpost rather than a
+    /// wall: it recommends the shape dux is actually built for.
+    #[test]
+    fn a_second_standalone_agent_on_the_same_folder_is_refused_with_a_signpost() {
+        let (mut engine, _tmp) = test_engine();
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().to_string_lossy().to_string();
+        engine
+            .sessions
+            .push(sample_standalone_session("sa1", &path));
+
+        let message = match engine.apply_wire(WireCommand::CreateStandaloneAgent {
+            folder: path.clone(),
+            name: String::new(),
+            provider: None,
+        }) {
+            Err(err) => err.to_string(),
+            Ok(_) => panic!("a second agent in the same folder must be refused"),
+        };
+        assert!(
+            message.contains("already"),
+            "it must say one is already there, got {message:?}"
+        );
+        assert!(
+            message.contains("conversation"),
+            "and why that matters, got {message:?}"
+        );
+        assert!(
+            message.contains("as a project"),
+            "and point at the multi-agent shape, got {message:?}"
+        );
+    }
+
+    #[test]
+    fn the_same_folder_reached_through_a_symlink_is_still_the_same_folder() {
+        let (mut engine, _tmp) = test_engine();
+        let folder = tempfile::tempdir().unwrap();
+        let holder = tempfile::tempdir().unwrap();
+        let link = holder.path().join("link");
+        std::os::unix::fs::symlink(folder.path(), &link).unwrap();
+        engine.sessions.push(sample_standalone_session(
+            "sa1",
+            &folder.path().to_string_lossy(),
+        ));
+
+        let outcome = engine.apply_wire(WireCommand::CreateStandaloneAgent {
+            folder: link.to_string_lossy().to_string(),
+            name: String::new(),
+            provider: None,
+        });
+        assert!(
+            outcome.is_err(),
+            "a symlink must not be a way around the one-agent-per-folder rule"
+        );
+    }
+
+    /// Every row label used to fall through the branch name, which does not
+    /// exist here, so a non-empty title is a hard invariant rather than an
+    /// option. The rule is a pure function so both surfaces derive the same
+    /// name from the same folder.
+    #[test]
+    fn a_standalone_agent_without_a_typed_name_is_named_after_its_folder() {
+        let name = crate::git::standalone_agent_title("", Path::new("/home/ada/My Notes! (2026)"));
+        assert!(!name.is_empty(), "a standalone agent always has a name");
+        assert!(
+            name.contains("Notes"),
+            "and it comes from the folder, got {name:?}"
+        );
+    }
+
+    /// A folder whose name sanitizes away to nothing still yields a name: the
+    /// invariant is non-empty, not "whatever the sanitizer produced".
+    #[test]
+    fn a_folder_whose_name_sanitizes_to_nothing_still_gets_a_name() {
+        for path in ["/home/ada/!!!", "/", "/home/ada/   "] {
+            let name = crate::git::standalone_agent_title("", Path::new(path));
+            assert!(!name.is_empty(), "{path} produced an empty name");
+        }
+    }
+
+    /// Folder names legally contain characters a branch name cannot, and a
+    /// standalone agent has no branch, so the branch validator must not be
+    /// applied to a typed name here.
+    #[test]
+    fn a_typed_name_is_not_held_to_the_branch_naming_rules() {
+        let (mut engine, _tmp) = test_engine();
+        let folder = tempfile::tempdir().unwrap();
+        let outcome = engine.apply_wire(WireCommand::CreateStandaloneAgent {
+            folder: folder.path().to_string_lossy().to_string(),
+            name: "Sort the downloads!".to_string(),
+            provider: None,
+        });
+        assert!(
+            outcome.is_ok(),
+            "no branch is created, so no branch rule applies: {:?}",
+            outcome.err().map(|e| e.to_string())
+        );
+        assert_eq!(
+            crate::git::standalone_agent_title("Sort the downloads!", Path::new("/anywhere")),
+            "Sort the downloads!",
+            "a typed name is used verbatim once trimmed"
+        );
+    }
 
     /// THE PIN. Deleting a standalone agent removes dux's record of it and
     /// nothing else, and the message says so in as many words. Nothing about

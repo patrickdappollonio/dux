@@ -11,7 +11,8 @@ use uuid::Uuid;
 
 use crate::config::{Config, DuxPaths, check_provider_available, provider_config};
 use crate::model::{
-    AgentSession, AgentWorkspace, BranchProvenance, ManagedWorkspace, SessionStatus,
+    AgentSession, AgentWorkspace, BranchProvenance, FolderWorkspace, ManagedWorkspace,
+    SessionStatus,
 };
 use crate::startup::{StartupCommandRun, run_startup_command};
 use crate::worker::{
@@ -72,6 +73,133 @@ struct PendingCopy {
     on_head_mismatch: HeadMismatch,
 }
 
+/// Create a STANDALONE agent: build the record, check the provider is there,
+/// and launch it in the user's folder.
+///
+/// Everything the ordinary create path does is provisioning, and this does none
+/// of it: no branch is minted, no worktree is added, no uncommitted changes are
+/// copied, and no startup command runs (that is a worktree provisioning step,
+/// and there is no worktree). The folder is used exactly as the user gave it.
+///
+/// ROLLBACK IS RECORD-ONLY, and structurally so: nothing here creates anything
+/// on disk, so there is nothing to undo, and `rollback_created_worktree` is
+/// unreachable from this path. The launch request is built with
+/// `owns_worktree: false`, which is the same flag
+/// `CreateAgentRequest::ExistingManagedWorktree` uses for the same reason: dux
+/// did not make the directory, so a failed launch must not remove it.
+///
+/// The environment is the GLOBAL environment with no project overlay, the same
+/// answer `Engine::create_standalone_terminal` gives, because there is no
+/// project to overlay it with. Named and tested rather than inherited: the
+/// project-lookup code paths would silently produce an EMPTY environment for a
+/// project-less agent, which is a different and much worse thing.
+#[allow(clippy::too_many_arguments)]
+fn run_create_standalone_agent_job(
+    folder: PathBuf,
+    title: String,
+    provider: crate::model::ProviderKind,
+    _paths: DuxPaths,
+    config: Config,
+    worker_tx: Sender<WorkerEvent>,
+    term_size: (u16, u16),
+    create_key: String,
+    identity: crate::term_identity::TerminalIdentity,
+) {
+    let folder_label = crate::home_path::shorten_home(&folder);
+    if !folder.is_dir() {
+        let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
+            status_op_id: create_key,
+            message: format!(
+                "Cannot create a standalone agent in \"{folder_label}\": that folder does not \
+                 exist, or is not a directory dux can read. Pick a folder that is already there; \
+                 dux never creates one."
+            ),
+        });
+        return;
+    }
+    let session = AgentSession {
+        id: Uuid::new_v4().to_string(),
+        provider: provider.clone(),
+        workspace: AgentWorkspace::Folder(FolderWorkspace {
+            folder_path: folder.to_string_lossy().to_string(),
+        }),
+        // Always set. Every row label falls back through the branch name when
+        // there is no title, and this agent has no branch, so a title-less
+        // standalone agent would render as a nameless row.
+        title: Some(title.clone()),
+        started_providers: Vec::new(),
+        desired_running: true,
+        auto_reopen_enabled: true,
+        status: SessionStatus::Active,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        last_focused_tab: None,
+    };
+    let provider_cfg = provider_config(&config, &session.provider);
+    if let Err(hint) = check_provider_available(&provider_cfg) {
+        logger::error(&format!("provider not found for {}: {hint}", session.id));
+        // Nothing to roll back: no directory was created, no branch was minted.
+        let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
+            status_op_id: create_key,
+            message: hint,
+        });
+        return;
+    }
+    // The global environment, with no project overlay. See the doc above.
+    let env =
+        match crate::config::resolve_agent_env(&config.env, &std::collections::BTreeMap::new()) {
+            Ok(env) => env,
+            Err(err) => {
+                let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
+                    status_op_id: create_key,
+                    message: format!(
+                        "Invalid global environment variables, so the standalone agent was not \
+                     started: {err:#}"
+                    ),
+                });
+                return;
+            }
+        };
+    let status_message = format!(
+        "Created standalone agent \"{title}\" running {} in \"{folder_label}\". \
+         dux does not manage a branch or a worktree for it, and never modifies that folder.",
+        provider.as_str()
+    );
+    let _ = worker_tx.send(WorkerEvent::CreateAgentProgress {
+        status_op_id: create_key.clone(),
+        message: format!("Launching {} in \"{folder_label}\"...", provider.as_str()),
+    });
+    // crossterm::terminal::size() returns (cols, rows).
+    let (cols, rows) = term_size;
+    let request = AgentLaunchRequest {
+        tab_id: session.id.clone(),
+        provider: session.provider.clone(),
+        // A brand-new standalone agent starts a fresh conversation; the dynamic
+        // per-provider resume rule applies to later launches like any agent's.
+        resume: false,
+        session,
+        provider_config: provider_cfg,
+        env,
+        identity,
+        pty_size: (rows, cols),
+        scrollback_lines: config.ui.agent_scrollback_lines,
+        kind: AgentLaunchKind::Create {
+            status_message,
+            // There is no repository behind this agent. The field is only read
+            // by the rollback, which `owns_worktree: false` switches off.
+            repo_path: String::new(),
+            // dux did not make this directory, so a failed launch must never
+            // remove it. Same flag, same reason, as adopting an existing
+            // managed worktree.
+            owns_worktree: false,
+            startup_result: None,
+            status_op_id: create_key,
+        },
+        wants_fullscreen: false,
+    };
+    run_agent_launch_job(request, worker_tx);
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run_create_agent_job(
     request: CreateAgentRequest,
@@ -90,6 +218,22 @@ pub fn run_create_agent_job(
     // across the job and appended to the create status message, so they ride
     // the keyed create-op final and stay visible.
     let mut creation_notes: Vec<String> = Vec::new();
+    // The standalone arm shares nothing with the common tail below, which is
+    // entirely worktree provisioning: branch creation, the uncommitted-changes
+    // copy, the project's startup command, and the rollbacks that undo them.
+    // A standalone agent provisions NOTHING, so it takes its own short path and
+    // never reaches code that could remove a directory.
+    if let CreateAgentRequest::Standalone {
+        folder,
+        title,
+        provider,
+    } = request
+    {
+        run_create_standalone_agent_job(
+            folder, title, provider, paths, config, worker_tx, term_size, create_key, identity,
+        );
+        return;
+    }
     let (
         project,
         provider,
@@ -106,6 +250,22 @@ pub fn run_create_agent_job(
         // force-delete a branch dux did not create).
         branch_provenance,
     ) = match request {
+        // Handled above, before this match: a standalone agent shares none of
+        // the provisioning this tail does. Answered here anyway so the match
+        // stays exhaustive and a future request kind cannot slip past it.
+        CreateAgentRequest::Standalone { .. } => {
+            crate::logger::error(
+                "standalone create reached the managed provisioning tail; this is a bug",
+            );
+            let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
+                status_op_id: create_key.clone(),
+                message: "Could not create the standalone agent: dux took the wrong internal \
+                          path. Nothing was created and no folder was touched. Please report \
+                          this with the contents of dux.log."
+                    .to_string(),
+            });
+            return;
+        }
         CreateAgentRequest::NewProject {
             project,
             custom_name,
@@ -724,10 +884,8 @@ pub fn run_create_agent_job(
     let provider_cfg = provider_config(&config, &session.provider);
     if let Err(hint) = check_provider_available(&provider_cfg) {
         logger::error(&format!("provider not found for {}: {hint}", session.id));
-        if owns_worktree {
-            if let Some(managed) = session.workspace.as_managed() {
-                rollback_created_worktree(&repo_path, managed);
-            }
+        if owns_worktree && let Some(managed) = session.workspace.as_managed() {
+            rollback_created_worktree(&repo_path, managed);
         }
         let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
             status_op_id: create_key.clone(),
@@ -772,10 +930,8 @@ pub fn run_create_agent_job(
                         copy.source.display(),
                         session.directory()
                     ));
-                    if owns_worktree {
-                        if let Some(managed) = session.workspace.as_managed() {
-                            rollback_created_worktree(&repo_path, managed);
-                        }
+                    if owns_worktree && let Some(managed) = session.workspace.as_managed() {
+                        rollback_created_worktree(&repo_path, managed);
                     }
                     let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
                         status_op_id: create_key.clone(),
@@ -818,10 +974,8 @@ pub fn run_create_agent_job(
                                 session.directory()
                             ));
                         }
-                        if owns_worktree {
-                            if let Some(managed) = session.workspace.as_managed() {
-                                rollback_created_worktree(&repo_path, managed);
-                            }
+                        if owns_worktree && let Some(managed) = session.workspace.as_managed() {
+                            rollback_created_worktree(&repo_path, managed);
                         }
                         let message = match &check_error {
                             Some(err) => format!(
@@ -969,10 +1123,9 @@ pub fn run_agent_launch_job(request: AgentLaunchRequest, worker_tx: Sender<Worke
             ..
         } = &request.kind
             && *owns_worktree
+            && let Some(managed) = request.session.workspace.as_managed()
         {
-            if let Some(managed) = request.session.workspace.as_managed() {
-                rollback_created_worktree(Path::new(repo_path), managed);
-            }
+            rollback_created_worktree(Path::new(repo_path), managed);
         }
         let _ = worker_tx.send(WorkerEvent::AgentLaunchFailed(Box::new(
             AgentLaunchFailedData { request, message },
@@ -1005,10 +1158,9 @@ pub fn run_agent_launch_job(request: AgentLaunchRequest, worker_tx: Sender<Worke
                 ..
             } = &request.kind
                 && *owns_worktree
+                && let Some(managed) = request.session.workspace.as_managed()
             {
-                if let Some(managed) = request.session.workspace.as_managed() {
-                    rollback_created_worktree(Path::new(repo_path), managed);
-                }
+                rollback_created_worktree(Path::new(repo_path), managed);
             }
             let message = if matches!(request.kind, AgentLaunchKind::Create { .. }) {
                 format!("Failed to start {}: {err}", request.provider_config.command)
@@ -1212,6 +1364,147 @@ mod tests {
                 worktree_path: worktree.to_string_lossy().to_string(),
             }),
         }
+    }
+
+    /// THE RECORD-ONLY ROLLBACK PIN. A standalone create that fails must leave
+    /// the user's folder exactly as it found it: nothing removed, nothing
+    /// added, not even the hidden housekeeping dux writes elsewhere.
+    ///
+    /// The failure injected is a provider that does not exist, which is the
+    /// real failure mode (a misconfigured `command`) and the one that reaches
+    /// the rollback in the managed path.
+    #[test]
+    fn a_failed_standalone_create_leaves_the_users_folder_exactly_as_it_was() {
+        let folder = tempfile::tempdir().unwrap();
+        std::fs::write(folder.path().join("notes.txt"), "mine\n").unwrap();
+        let before = folder_snapshot(folder.path());
+
+        let mut config = Config::default();
+        config.providers.commands.insert(
+            "ghost".to_string(),
+            crate::config::ProviderCommandConfig {
+                command: "dux-no-such-provider-binary".to_string(),
+                ..Default::default()
+            },
+        );
+        let run = drive_standalone_job(folder.path(), config);
+
+        assert!(
+            run.failure.is_some(),
+            "the create must fail so the rollback path is the one under test"
+        );
+        assert!(
+            folder.path().is_dir(),
+            "the folder itself must survive a failed create"
+        );
+        assert_eq!(
+            folder_snapshot(folder.path()),
+            before,
+            "a failed standalone create must add and remove nothing in the user's folder"
+        );
+    }
+
+    /// A standalone agent gets the GLOBAL environment, with no project overlay.
+    /// The failure this pins is the quiet one: the project-lookup code paths
+    /// fall through `unwrap_or_default` on a miss, which for a project-less
+    /// agent yields an EMPTY environment rather than the global one.
+    #[test]
+    fn a_standalone_agent_launches_with_the_global_environment() {
+        let folder = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config
+            .env
+            .insert("DUX_TEST_GLOBAL".to_string(), "from-global".to_string());
+        // A real, harmless binary: the launch request is only built once the
+        // provider is found, and it exiting immediately is fine here.
+        config.providers.commands.insert(
+            "ghost".to_string(),
+            crate::config::ProviderCommandConfig {
+                command: "true".to_string(),
+                ..Default::default()
+            },
+        );
+        let run = drive_standalone_job(folder.path(), config);
+
+        let env = run.launch_env.expect("the launch request carries an env");
+        assert!(
+            env.iter()
+                .any(|(k, v)| k == "DUX_TEST_GLOBAL" && v == "from-global"),
+            "the global environment must reach a project-less agent, got {env:?}"
+        );
+    }
+
+    /// Every entry under `path`, recursively, as sorted relative paths. Used to
+    /// prove a failed create touched nothing.
+    fn folder_snapshot(path: &Path) -> Vec<String> {
+        fn walk(dir: &Path, root: &Path, out: &mut Vec<String>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let p = entry.path();
+                out.push(
+                    p.strip_prefix(root)
+                        .unwrap_or(&p)
+                        .to_string_lossy()
+                        .to_string(),
+                );
+                if p.is_dir() {
+                    walk(&p, root, out);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(path, path, &mut out);
+        out.sort();
+        out
+    }
+
+    /// Drive a standalone create to completion and collect what came back.
+    fn drive_standalone_job(folder: &Path, config: Config) -> StandaloneRun {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = DuxPaths {
+            config_path: tmp.path().join("config.toml"),
+            sessions_db_path: tmp.path().join("sessions.sqlite3"),
+            worktrees_root: tmp.path().join("worktrees"),
+            lock_path: tmp.path().join("dux.lock"),
+            root: tmp.path().to_path_buf(),
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        run_create_agent_job(
+            CreateAgentRequest::Standalone {
+                folder: folder.to_path_buf(),
+                title: "notes".to_string(),
+                provider: ProviderKind::new("ghost"),
+            },
+            paths,
+            config,
+            tx,
+            (80, 24),
+            "op-standalone".to_string(),
+            crate::term_identity::TerminalIdentity::default(),
+        );
+        let mut run = StandaloneRun::default();
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                WorkerEvent::CreateAgentFailed { message, .. } => run.failure = Some(message),
+                WorkerEvent::AgentLaunchReady(ready) => {
+                    run.launch_env = Some(ready.request.env.clone());
+                }
+                WorkerEvent::AgentLaunchFailed(failed) => {
+                    run.launch_env = Some(failed.request.env.clone());
+                    run.failure.get_or_insert(failed.message.clone());
+                }
+                _ => {}
+            }
+        }
+        run
+    }
+
+    #[derive(Default)]
+    struct StandaloneRun {
+        failure: Option<String>,
+        launch_env: Option<Vec<(String, String)>>,
     }
 
     #[test]

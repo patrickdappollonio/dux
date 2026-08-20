@@ -104,6 +104,53 @@ pub(crate) fn project_tag_kind(project: Option<&Project>) -> ProjectTagKind {
     }
 }
 
+/// What an agent row's second line says about where the agent lives: its
+/// project, or (for a standalone agent) the folder it runs in.
+///
+/// A standalone agent takes the [`AgentRowOwnerTag::Folder`] arm and can never
+/// take a project arm, which matters most for `Orphan`: that arm means "this
+/// agent's project record is gone", and a standalone agent has not lost a
+/// project, it never had one. Rendering it as a removed project would be a
+/// warning about nothing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum AgentRowOwnerTag {
+    Project(ProjectTagKind, String),
+    /// A standalone agent's folder, already shortened against the server's home
+    /// directory for display.
+    Folder {
+        label: String,
+    },
+}
+
+/// Decide what an agent row's second line names. Pure and unit-tested so the
+/// row and any future consumer cannot drift.
+pub(crate) fn agent_row_owner_tag(
+    session: &AgentSession,
+    project: Option<&Project>,
+) -> AgentRowOwnerTag {
+    match &session.workspace {
+        dux_core::model::AgentWorkspace::Managed(_) => AgentRowOwnerTag::Project(
+            project_tag_kind(project),
+            project.map(|p| p.name.clone()).unwrap_or_default(),
+        ),
+        dux_core::model::AgentWorkspace::Folder(folder) => AgentRowOwnerTag::Folder {
+            label: dux_core::home_path::shorten_home(std::path::Path::new(&folder.folder_path)),
+        },
+    }
+}
+
+/// The branch an agent row's second line shows, or `None` when it shows none.
+///
+/// Two reasons to show none, and they are different: the agent has no branch at
+/// all (a standalone agent), or its branch is already the row's name (no title
+/// is set, so repeating it would be noise). Returning `None` rather than an
+/// empty string keeps the separator logic from drawing a stray divider.
+pub(crate) fn agent_row_branch_segment(session: &AgentSession) -> Option<String> {
+    let branch = session.branch_name()?;
+    let title = session.title.as_deref()?;
+    (title != branch).then(|| branch.to_string())
+}
+
 /// The colored "state word" shown on an agent row's second line, the honest,
 /// field-backed stand-in for an activity string (dux has no such field). It reads
 /// off the same flags that drive the working spinner and the attention pulse, so
@@ -773,6 +820,86 @@ fn sync_macro_text_input_layout(input: &mut TextInput, popup: Rect) {
 }
 
 impl App {
+    /// Render the Delete Agent modal's chrome and its Cancel/Delete pair for a
+    /// dialog with NO checkbox: the standalone case, where there is no removal
+    /// to offer.
+    ///
+    /// Its own path rather than a flag through the managed layout, because the
+    /// managed one sizes itself around a checkbox row that does not exist here
+    /// and would leave a blank band the user reads as a missing control.
+    fn render_delete_agent_frame(
+        &mut self,
+        frame: &mut Frame,
+        dialog_width: u16,
+        inner_width: u16,
+        body_lines: Vec<Line<'static>>,
+        focus: DeleteAgentFocus,
+    ) {
+        let body_height = wrapped_line_count(&body_lines, inner_width, false);
+        let area = centered_rect_exact(dialog_width, 2 + body_height + 1 + 3, frame.area());
+        self.clear_overlay_area(frame, area);
+        let outer = self.themed_overlay_block("Delete Agent");
+        let inner = outer.inner(area);
+        outer.render(area, frame.buffer_mut());
+
+        let [body_area, _, buttons_area] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(body_height),
+                Constraint::Length(1),
+                Constraint::Length(3),
+            ])
+            .areas(inner);
+
+        Paragraph::new(body_lines)
+            .wrap(Wrap { trim: false })
+            .render(body_area, frame.buffer_mut());
+
+        let btn_width = 16u16;
+        let gap = 2u16;
+        let total = btn_width * 2 + gap;
+        let left_offset = buttons_area.width.saturating_sub(total) / 2;
+        let cancel_area = Rect {
+            x: buttons_area.x + left_offset,
+            y: buttons_area.y,
+            width: btn_width,
+            height: 3,
+        };
+        let delete_area = Rect {
+            x: cancel_area.x + btn_width + gap,
+            y: buttons_area.y,
+            width: btn_width,
+            height: 3,
+        };
+
+        Button::new("Cancel")
+            .kind(ButtonKind::Confirm)
+            .state(button_state_for(
+                ButtonPressedTarget::ConfirmDeleteCancel,
+                self.pressed_button,
+                focus == DeleteAgentFocus::Cancel,
+                true,
+            ))
+            .render(frame, cancel_area, &self.theme);
+
+        Button::new("Delete")
+            .kind(ButtonKind::Danger)
+            .state(button_state_for(
+                ButtonPressedTarget::ConfirmDeleteConfirm,
+                self.pressed_button,
+                focus == DeleteAgentFocus::Delete,
+                true,
+            ))
+            .render(frame, delete_area, &self.theme);
+
+        self.overlay_layout.active = OverlayMouseLayout::ConfirmDeleteAgent {
+            cancel_button: cancel_area,
+            delete_button: delete_area,
+            // No checkbox exists, so none can be clicked.
+            checkbox: None,
+        };
+    }
+
     fn render_overlay_checkbox(
         &self,
         frame: &mut Frame,
@@ -947,14 +1074,20 @@ impl App {
                 // The drift note must surface even when the agent happens to be on
                 // the project's current branch, so it is gated on the drift alone —
                 // not nested inside the project-current-branch comparison.
-                let drifted = branch_drifted(&session.branch_name, &session.initial_branch);
-                let differs_from_project = session.branch_name != project.current_branch;
-                if differs_from_project || drifted {
+                //
+                // A STANDALONE agent has no branch, so there is no crumb to
+                // show and the whole block is skipped: the folder chip beside
+                // it already says where this agent lives.
+                if let Some(managed) = session.workspace.as_managed()
+                    && let drifted = branch_drifted(&managed.branch_name, &managed.initial_branch)
+                    && let differs_from_project = managed.branch_name != project.current_branch
+                    && (differs_from_project || drifted)
+                {
                     // The helper appends "(orig: <initial>)" only on drift and
                     // returns the bare value (no label); we keep the themed
                     // "agent: " label and style the value ourselves.
                     let value =
-                        top_bar_branch_suffix(&session.branch_name, &session.initial_branch);
+                        top_bar_branch_suffix(&managed.branch_name, &managed.initial_branch);
                     spans.push(Span::styled(" ╱ ", Style::default().fg(sep_fg).bg(bg)));
                     spans.push(Span::styled(
                         "agent: ",
@@ -1031,10 +1164,7 @@ impl App {
     /// `project · state word · branch (when it diverges from the name) · tabs`.
     /// The working spinner and attention pulse stay on the line-one glyph.
     fn render_agent_row(&self, session: &AgentSession, text_width: u16) -> ListItem<'static> {
-        let label = session
-            .title
-            .clone()
-            .unwrap_or_else(|| session.branch_name.clone());
+        let label = session.display_label();
         // Attention wins over the working spinner (a flagged agent may still be
         // streaming its permission prompt). Both cues are rolled up across the
         // agent's tabs. The attention glyph blinks on wall-clock time.
@@ -1154,30 +1284,35 @@ impl App {
         } else {
             self.theme.provider_label_fg
         };
-        let found = self
-            .engine
-            .projects
-            .iter()
-            .find(|p| p.id == session.project_id);
+        let found = session
+            .project_id()
+            .and_then(|project_id| self.engine.projects.iter().find(|p| p.id == project_id));
         // The project is marked with `※` (a folder stand-in) rather than a word,
         // and the marker sits directly under the agent name (two-space indent, so
         // the glyph column lines up with the name on line one). The marker span
         // includes that indent; the project NAME is a separate, truncatable span.
+        //
+        // A STANDALONE agent names its folder here instead, with the return
+        // arrow the standalone terminal row already uses for the same idea:
+        // "this is where it runs". Same indent, same column.
         let missing_fg = self.theme.project_missing_fg;
-        let project_name = found.map(|p| p.name.clone()).unwrap_or_default();
         let (marker, name_span): (Span<'static>, Option<Span<'static>>) =
-            match project_tag_kind(found) {
-                ProjectTagKind::Healthy => (
+            match agent_row_owner_tag(session, found) {
+                AgentRowOwnerTag::Project(ProjectTagKind::Healthy, project_name) => (
                     Span::styled("  ※ ", Style::default().fg(muted)),
                     Some(Span::styled(project_name, Style::default().fg(muted))),
                 ),
-                ProjectTagKind::PathMissing => (
+                AgentRowOwnerTag::Project(ProjectTagKind::PathMissing, project_name) => (
                     Span::styled("  ⚠ ", Style::default().fg(missing_fg)),
                     Some(Span::styled(project_name, Style::default().fg(missing_fg))),
                 ),
-                ProjectTagKind::Orphan => (
+                AgentRowOwnerTag::Project(ProjectTagKind::Orphan, _) => (
                     Span::styled("  ⚠ removed project", Style::default().fg(missing_fg)),
                     None,
+                ),
+                AgentRowOwnerTag::Folder { label } => (
+                    Span::styled("  ↳ ".to_string(), Style::default().fg(muted)),
+                    Some(Span::styled(label, Style::default().fg(muted))),
                 ),
             };
         let word = agent_state_word(session.status, working, typing, needs_attention);
@@ -1193,13 +1328,10 @@ impl App {
             }
         };
         // Show the branch only when it differs from the displayed name (i.e. a
-        // title is set), so it is not repeated as the name on line one.
-        let branch_diverges = session
-            .title
-            .as_deref()
-            .is_some_and(|t| t != session.branch_name);
-        let branch_span = branch_diverges
-            .then(|| Span::styled(session.branch_name.clone(), Style::default().fg(muted)));
+        // title is set), so it is not repeated as the name on line one, and
+        // never at all for an agent that has no branch.
+        let branch_span = agent_row_branch_segment(session)
+            .map(|branch| Span::styled(branch, Style::default().fg(muted)));
         let tab_count = self.session_tab_ids(&session.id).len();
         let tabs_span = (tab_count > 1)
             .then(|| Span::styled(format!("{tab_count} tabs"), Style::default().fg(muted)));
@@ -1430,13 +1562,20 @@ impl App {
                             };
                         // Surface a warning glyph in the narrow rail too, when the
                         // agent's project has a missing path or its record is gone.
-                        let found = self
-                            .engine
-                            .projects
-                            .iter()
-                            .find(|p| p.id == session.project_id);
+                        // A standalone agent has no project, so no project
+                        // warning can apply to it: `agent_row_owner_tag` takes
+                        // the folder arm and the glyph is skipped.
+                        let found = session.project_id().and_then(|project_id| {
+                            self.engine.projects.iter().find(|p| p.id == project_id)
+                        });
                         let mut spans = vec![Span::styled(dot, Style::default().fg(dot_color))];
-                        if !matches!(project_tag_kind(found), ProjectTagKind::Healthy) {
+                        if matches!(
+                            agent_row_owner_tag(session, found),
+                            AgentRowOwnerTag::Project(
+                                ProjectTagKind::PathMissing | ProjectTagKind::Orphan,
+                                _
+                            )
+                        ) {
                             spans.push(Span::styled(
                                 "⚠",
                                 Style::default().fg(self.theme.project_missing_fg),
@@ -3883,6 +4022,45 @@ impl App {
     }
 
     fn render_prompt(&mut self, frame: &mut Frame) {
+        // The standalone delete dialog is rendered ahead of the main match,
+        // with its content copied out first, because it needs `&mut self` for
+        // the shared frame renderer and the match below borrows `self.prompt`
+        // for the whole arm.
+        if let PromptState::ConfirmDeleteAgent {
+            agent_label,
+            target: DeleteAgentTarget::Folder { folder_label },
+            focus,
+            ..
+        } = &self.prompt
+        {
+            let (agent_label, folder_label, focus) =
+                (agent_label.clone(), folder_label.clone(), *focus);
+            self.render_dim_overlay(frame);
+            let dialog_width = 56.min(frame.area().width.max(1));
+            let inner_width = dialog_width.saturating_sub(2);
+            // Say plainly that the folder is not dux's to remove and is not
+            // being touched, so the user is never left wondering what else went
+            // with the record.
+            let body_lines = vec![
+                Line::from(""),
+                Line::from(vec![
+                    Span::raw(" Are you sure you want to delete "),
+                    Span::styled(agent_label, Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw("?"),
+                ]),
+                Line::from(""),
+                Line::from(Span::styled(
+                    " This removes dux's record of the agent only.",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                )),
+                Line::from(Span::styled(
+                    format!(" Its folder \"{folder_label}\" is left untouched."),
+                    Style::default().fg(self.theme.hint_desc_fg),
+                )),
+            ];
+            self.render_delete_agent_frame(frame, dialog_width, inner_width, body_lines, focus);
+            return;
+        }
         match &self.prompt {
             PromptState::Command { input, selected } => {
                 self.render_dim_overlay(frame);
@@ -6772,26 +6950,46 @@ impl App {
                 };
             }
             PromptState::ConfirmDeleteAgent {
-                branch_name,
-                initial_branch,
-                branch_provenance,
+                agent_label,
+                target,
                 focus,
                 delete_worktree,
-                worktree_shared,
                 ..
             } => {
                 self.render_dim_overlay(frame);
                 let dialog_width = 56.min(frame.area().width.max(1));
                 let inner_width = dialog_width.saturating_sub(2);
-                let checkbox_height = if *worktree_shared {
+                // The managed identity, when there is one. A STANDALONE agent
+                // has none, and every "also remove the worktree" affordance
+                // below hangs off this `Some`: there is no removal to offer, so
+                // there is no checkbox to render and none to tick.
+                let managed = match target {
+                    crate::app::DeleteAgentTarget::Managed {
+                        branch_name,
+                        initial_branch,
+                        branch_provenance,
+                        worktree_shared,
+                    } => Some((
+                        branch_name.as_str(),
+                        initial_branch.as_str(),
+                        *branch_provenance,
+                        *worktree_shared,
+                    )),
+                    crate::app::DeleteAgentTarget::Folder { .. } => None,
+                };
+                let offers_checkbox =
+                    managed.is_some_and(|(_, _, _, worktree_shared)| !worktree_shared);
+                let checkbox_height = if !offers_checkbox {
                     0
                 } else {
+                    let (_, _, branch_provenance, _) =
+                        managed.expect("offers_checkbox implies a managed target");
                     let state = if *focus == DeleteAgentFocus::Checkbox {
                         CheckboxState::Focused
                     } else {
                         CheckboxState::Normal
                     };
-                    let checkbox = Checkbox::new(delete_agent_checkbox_label(*branch_provenance))
+                    let checkbox = Checkbox::new(delete_agent_checkbox_label(branch_provenance))
                         .checked(*delete_worktree)
                         .state(state);
                     checkbox
@@ -6811,14 +7009,23 @@ impl App {
                     Line::from(vec![
                         Span::raw(" Are you sure you want to delete "),
                         Span::styled(
-                            branch_name.as_str(),
+                            agent_label.as_str(),
                             Style::default().add_modifier(Modifier::BOLD),
                         ),
                         Span::raw("?"),
                     ]),
                     Line::from(""),
                 ];
-                if *worktree_shared {
+                // The FOLDER target is handled before this match (it needs
+                // `&mut self` for the shared frame renderer, which the borrow
+                // here would not allow), so only the managed shape reaches this
+                // arm.
+                let Some((branch_name, initial_branch, branch_provenance, worktree_shared)) =
+                    managed
+                else {
+                    return;
+                };
+                if worktree_shared {
                     body_lines.push(Line::from(Span::styled(
                         " Worktree is shared with another agent and will be preserved.",
                         Style::default().fg(self.theme.hint_desc_fg),
@@ -6837,9 +7044,9 @@ impl App {
                     // above is not read as covering the branch too.
                     if !branch_provenance.dux_may_delete_branch() {
                         let kept = if initial_branch.is_empty() {
-                            branch_name.as_str()
+                            branch_name
                         } else {
-                            initial_branch.as_str()
+                            initial_branch
                         };
                         // The shared reason, never a second wording of it:
                         // this dialog had its own shorter copy, which drifted
@@ -6860,8 +7067,8 @@ impl App {
                     )));
                 }
                 let body_height = wrapped_line_count(&body_lines, inner_width, false);
-                let checkbox_spacing = u16::from(!*worktree_shared);
-                let button_spacing = u16::from(!*worktree_shared);
+                let checkbox_spacing = u16::from(!worktree_shared);
+                let button_spacing = u16::from(!worktree_shared);
                 let area = centered_rect_exact(
                     dialog_width,
                     2 + body_height + checkbox_spacing + checkbox_height + button_spacing + 3,
@@ -6887,7 +7094,7 @@ impl App {
                     .wrap(Wrap { trim: false })
                     .render(body_area, frame.buffer_mut());
 
-                let checkbox_rect = if !*worktree_shared {
+                let checkbox_rect = if !worktree_shared {
                     let checkbox_state = if *focus == DeleteAgentFocus::Checkbox {
                         CheckboxState::Focused
                     } else {
@@ -6896,7 +7103,7 @@ impl App {
                     let (rect, _) = self.render_overlay_checkbox(
                         frame,
                         checkbox_area,
-                        delete_agent_checkbox_label(*branch_provenance),
+                        delete_agent_checkbox_label(branch_provenance),
                         *delete_worktree,
                         checkbox_state,
                         None,
@@ -9028,7 +9235,7 @@ impl App {
             Some(session) => {
                 // Reflect the focused tab's provider in the fullscreen title.
                 let provider = capitalize(self.focused_tab_provider(session).as_str());
-                let name = session.title.as_deref().unwrap_or(&session.branch_name);
+                let name = session.display_label();
                 let pr_suffix = self
                     .engine
                     .pr_statuses
@@ -10533,6 +10740,59 @@ mod tests {
         );
 
         assert_eq!(project_tag_kind(None), ProjectTagKind::Orphan);
+    }
+
+    fn standalone_row_session(folder: &str) -> AgentSession {
+        let app = test_app(default_bindings());
+        let mut session = app.engine.sessions[0].clone();
+        session.title = Some("notes".to_string());
+        session.workspace =
+            dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
+                folder_path: folder.to_string(),
+            });
+        session
+    }
+
+    /// A standalone agent's second line names its FOLDER where an ordinary
+    /// agent names its project, shortened against the server's home directory.
+    /// The orphan arm ("removed project") must be unreachable for it: it has no
+    /// project, which is not the same as having lost one.
+    #[test]
+    fn a_standalone_agents_row_names_its_folder_instead_of_a_project() {
+        let session = standalone_row_session("/home/someone/notes");
+        let tag = agent_row_owner_tag(&session, None);
+        match tag {
+            AgentRowOwnerTag::Folder { label } => {
+                assert!(label.contains("notes"), "got {label:?}");
+            }
+            other => panic!("a standalone agent must never take a project arm, got {other:?}"),
+        }
+    }
+
+    /// The branch segment is CONDITIONAL on the row already, so an agent with
+    /// no branch must produce no segment at all rather than an empty one that
+    /// renders as a stray separator.
+    #[test]
+    fn a_standalone_agents_row_has_no_branch_segment_at_all() {
+        let session = standalone_row_session("/home/someone/notes");
+        assert_eq!(agent_row_branch_segment(&session), None);
+    }
+
+    /// And the ordinary case still shows the branch when a title hides it.
+    #[test]
+    fn a_titled_managed_agents_row_still_shows_its_branch() {
+        let app = test_app(default_bindings());
+        let mut session = app.engine.sessions[0].clone();
+        session.title = Some("a nice name".to_string());
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .branch_name = "feature/x".to_string();
+        assert_eq!(
+            agent_row_branch_segment(&session),
+            Some("feature/x".to_string())
+        );
     }
 
     #[test]
@@ -16902,12 +17162,15 @@ mod tests {
         ) -> PromptState {
             PromptState::ConfirmDeleteAgent {
                 session_id: "s1".to_string(),
-                branch_name: branch.to_string(),
-                initial_branch: initial.to_string(),
-                branch_provenance: provenance,
+                agent_label: branch.to_string(),
+                target: crate::app::DeleteAgentTarget::Managed {
+                    branch_name: branch.to_string(),
+                    initial_branch: initial.to_string(),
+                    branch_provenance: provenance,
+                    worktree_shared: false,
+                },
                 focus: super::DeleteAgentFocus::Checkbox,
                 delete_worktree: true,
-                worktree_shared: false,
             }
         }
 
@@ -17094,12 +17357,15 @@ mod tests {
             let mut app = test_app(default_bindings());
             app.prompt = PromptState::ConfirmDeleteAgent {
                 session_id: "s1".to_string(),
-                branch_name: "b".to_string(),
-                initial_branch: "b".to_string(),
-                branch_provenance: provenance,
+                agent_label: "b".to_string(),
+                target: crate::app::DeleteAgentTarget::Managed {
+                    branch_name: "b".to_string(),
+                    initial_branch: "b".to_string(),
+                    branch_provenance: provenance,
+                    worktree_shared: false,
+                },
                 focus: super::DeleteAgentFocus::Checkbox,
                 delete_worktree: false,
-                worktree_shared: false,
             };
             let screen = rendered_screen(&mut app);
             assert!(

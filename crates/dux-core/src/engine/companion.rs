@@ -230,7 +230,7 @@ impl Engine {
             // that never went through `load_config` (a test, an in-memory
             // Config) still resolves a usable directory.
             relative: crate::config::normalized_upload_directory(&self.config.ui.upload_directory),
-            write_gitignore: self.upload_seed_allowed(&session),
+            write_gitignore: self.upload_seed_allowed(session),
         })
     }
 

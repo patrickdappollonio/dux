@@ -595,10 +595,23 @@ fn reset_agent_data(paths: &DuxPaths) -> Result<()> {
         match SessionStore::open(&paths.sessions_db_path) {
             Ok(store) => match store.load_sessions() {
                 Ok(sessions) => {
+                    // A STANDALONE agent's folder is the user's and is never
+                    // removed, not even by a factory reset: dux resets what dux
+                    // made, and it did not make that directory. Its record goes
+                    // with the database below like every other agent's.
+                    //
+                    // The filter is on the workspace, not on the managed-root
+                    // path check inside the removal: a standalone agent pointed
+                    // AT a directory under dux's managed root would sail past
+                    // that check and have the ground deleted from under it.
+                    let mut removed = 0usize;
                     for session in &sessions {
-                        remove_session_worktree(paths, session);
+                        if let Some(managed) = session.workspace.as_managed() {
+                            remove_session_worktree(paths, managed);
+                            removed += 1;
+                        }
                     }
-                    println!("removed {} session worktree(s)", sessions.len());
+                    println!("removed {removed} session worktree(s)");
                 }
                 Err(error) => {
                     eprintln!("warning: could not load sessions from database: {error}");
@@ -615,12 +628,19 @@ fn reset_agent_data(paths: &DuxPaths) -> Result<()> {
     Ok(())
 }
 
-fn remove_session_worktree(paths: &DuxPaths, session: &crate::model::AgentSession) {
-    let worktree = Path::new(&session.worktree_path);
+/// Remove one agent's MANAGED worktree during a factory reset.
+///
+/// It takes a [`ManagedWorkspace`], not a session, and that is the guard: this
+/// function ends in an unconditional `remove_dir_all`, so a standalone agent's
+/// folder must not be nameable here at all. The managed-root path check below
+/// is not enough on its own, because a standalone agent pointed at a directory
+/// under dux's managed root would pass it.
+fn remove_session_worktree(paths: &DuxPaths, managed: &dux_core::model::ManagedWorkspace) {
+    let worktree = Path::new(&managed.worktree_path);
     if !git::is_under(&paths.worktrees_root, worktree) {
         eprintln!(
             "warning: skipping worktree outside of managed root: {}",
-            session.worktree_path
+            managed.worktree_path
         );
         return;
     }
@@ -631,19 +651,19 @@ fn remove_session_worktree(paths: &DuxPaths, session: &crate::model::AgentSessio
     // in the CLI's own cwd (no `-C`), which hit the wrong repo, failed, and left
     // a stale worktree ref that made the branch undeletable. Continue-on-error is
     // preserved: a factory reset must press on past any single failure.
-    if let Some(project_path) = session.project_path.as_deref() {
+    if let Some(project_path) = managed.project_path.as_deref() {
         // The same branch-ownership gate the engine's delete applies, for the
         // same reason. Both halves matter: a reset that left a drifted agent's
         // own original branch behind would not be a reset, and a reset that
         // deleted the user's `develop` because an agent was once attached to it
         // would not be a reset either, it would be data loss. dux resets what
         // dux made.
-        if session.branch_provenance.dux_may_delete_branch() {
+        if managed.branch_provenance.dux_may_delete_branch() {
             let _ = git::remove_worktree(
                 Path::new(project_path),
                 worktree,
-                &session.branch_name,
-                Some(session.initial_branch.as_str()),
+                &managed.branch_name,
+                Some(managed.initial_branch.as_str()),
             );
         } else {
             let _ = git::remove_worktree_keep_branch(Path::new(project_path), worktree);
@@ -1231,7 +1251,12 @@ mod tests {
         let store = SessionStore::open(&harness.paths.sessions_db_path).expect("store");
         let sessions = store.load_sessions().expect("sessions");
         assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].worktree_path, worktree.to_string_lossy());
+        assert_eq!(
+            sessions[0]
+                .managed_worktree()
+                .expect("managed test session"),
+            worktree.to_string_lossy()
+        );
     }
 
     #[test]
@@ -1632,7 +1657,13 @@ mod tests {
             ),
         };
 
-        remove_session_worktree(&paths, &session);
+        remove_session_worktree(
+            &paths,
+            session
+                .workspace
+                .as_managed()
+                .expect("the fixture builds a managed agent"),
+        );
 
         assert!(!worktree.exists(), "the worktree directory must be removed");
         let branches = std::process::Command::new("git")
@@ -1719,7 +1750,13 @@ mod tests {
             ),
         };
 
-        remove_session_worktree(&paths, &session);
+        remove_session_worktree(
+            &paths,
+            session
+                .workspace
+                .as_managed()
+                .expect("the fixture builds a managed agent"),
+        );
 
         assert!(!worktree.exists(), "the worktree directory must be removed");
         let branches = std::process::Command::new("git")

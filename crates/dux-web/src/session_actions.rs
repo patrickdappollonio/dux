@@ -143,6 +143,21 @@ enum CreateSessionBody {
         #[serde(default)]
         name: String,
     },
+    /// A STANDALONE agent: run a provider in a folder the user already has.
+    ///
+    /// It carries no `project_id`, because a standalone agent belongs to no
+    /// project, and it is the only kind that carries a `provider`: the others
+    /// take their project's default, and this one has no project to take one
+    /// from, so it takes the GLOBAL default unless the caller names one.
+    Standalone {
+        /// An absolute path on the SERVER's filesystem. Accepted whatever it
+        /// contains; it does not have to be a repository.
+        folder: String,
+        #[serde(default)]
+        name: String,
+        #[serde(default)]
+        provider: Option<String>,
+    },
 }
 
 impl CreateSessionBody {
@@ -179,6 +194,15 @@ impl CreateSessionBody {
                 project_id,
                 pr,
                 name,
+            },
+            CreateSessionBody::Standalone {
+                folder,
+                name,
+                provider,
+            } => WireCommand::CreateStandaloneAgent {
+                folder,
+                name,
+                provider,
             },
         }
     }

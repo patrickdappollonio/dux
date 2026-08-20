@@ -3738,10 +3738,12 @@ impl Engine {
     /// the "+" quick-add and its picker's "default" marker cannot disagree with
     /// what launches. (The web TS mirror `defaultProviderForSession` reads the
     /// already-resolved `default_provider` off the spine's project.)
-    pub fn default_provider_for_new_tab(&self, project_id: &str) -> ProviderKind {
-        self.projects
-            .iter()
-            .find(|p| p.id == project_id)
+    /// `project_id` is `None` for a STANDALONE agent, which has no project to
+    /// take a default from and so takes the global one, the same source the
+    /// config's own default uses.
+    pub fn default_provider_for_new_tab(&self, project_id: Option<&str>) -> ProviderKind {
+        project_id
+            .and_then(|project_id| self.projects.iter().find(|p| p.id == project_id))
             .map(|p| p.default_provider.clone())
             .unwrap_or_else(|| self.config.default_provider())
     }
@@ -6989,10 +6991,13 @@ mod tests {
         engine.projects.push(project);
 
         // Project present: its default_provider wins.
-        assert_eq!(engine.default_provider_for_new_tab("p1").as_str(), "codex");
+        assert_eq!(
+            engine.default_provider_for_new_tab(Some("p1")).as_str(),
+            "codex"
+        );
         // Project missing: fall back to the global config default.
         assert_eq!(
-            engine.default_provider_for_new_tab("nope").as_str(),
+            engine.default_provider_for_new_tab(Some("nope")).as_str(),
             "claude"
         );
     }

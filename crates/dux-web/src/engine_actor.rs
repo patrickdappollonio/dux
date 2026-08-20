@@ -2785,7 +2785,7 @@ fn handle_request(
                 .sessions
                 .iter()
                 .find(|s| s.id == session_id)
-                .map(|s| s.worktree_path.clone());
+                .map(|s| s.directory().to_string());
             let _ = reply.send(worktree);
         }
         EngineRequest::ProjectPath(project_id, reply) => {
@@ -2876,7 +2876,14 @@ fn handle_request(
                 .sessions
                 .iter()
                 .find(|s| s.id == session_id)
-                .map(|session| (engine.paths.clone(), session.project_id.clone()));
+                // A standalone agent has no project, so it has no startup-command
+                // log directory either: startup commands are a project's
+                // worktree provisioning step.
+                .and_then(|session| {
+                    session
+                        .project_id()
+                        .map(|project_id| (engine.paths.clone(), project_id.to_string()))
+                });
             let _ = reply.send(context);
         }
         EngineRequest::ProjectStartupLogContext(project_id, reply) => {
@@ -3069,7 +3076,7 @@ fn create_agent_tab_inner(
         // The single-source new-tab default: the owning project's provider,
         // else the global config default (`Engine::default_provider_for_new_tab`,
         // shared with the TUI).
-        None => engine.default_provider_for_new_tab(&session.project_id),
+        None => engine.default_provider_for_new_tab(session.project_id()),
     };
     let provider_str = provider.as_str().to_string();
     let tab_id = engine

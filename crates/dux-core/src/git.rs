@@ -2888,6 +2888,45 @@ pub fn rename_branch(worktree_path: &Path, old_name: &str, new_name: &str) -> Re
     Ok(())
 }
 
+/// The display name a STANDALONE agent gets: the typed name when the user gave
+/// one, and otherwise a sanitized form of the folder's own name.
+///
+/// The invariant this exists to hold is that the result is NEVER EMPTY. Every
+/// row label in both surfaces falls back through the branch name when there is
+/// no title, and a standalone agent has no branch, so an empty title would
+/// render a nameless row.
+///
+/// The typed name is used verbatim once trimmed: a standalone agent creates no
+/// branch, so [`is_valid_agent_name`] deliberately does NOT apply. Folder names
+/// legally contain spaces, dots and punctuation that a ref name cannot.
+///
+/// The sanitizer is gentle on purpose, because the result is a label and not a
+/// path or a ref: it only collapses whitespace and trims. When the folder's
+/// name has nothing usable left (the filesystem root, a name of only
+/// whitespace), it falls back to a fixed word rather than an empty string.
+///
+/// Char-based throughout: folder names are arbitrary UTF-8.
+pub fn standalone_agent_title(typed: &str, folder: &Path) -> String {
+    let typed = typed.trim();
+    if !typed.is_empty() {
+        return typed.to_string();
+    }
+    let from_folder = folder
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_default();
+    // Collapse runs of whitespace so a name copied out of a file manager does
+    // not render with a ragged gap in the middle of a row.
+    let collapsed = from_folder.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        // The filesystem root, or a folder whose name is only whitespace. A
+        // fixed word beats an empty label, and the row's second line names the
+        // actual folder anyway.
+        return "Standalone agent".to_string();
+    }
+    collapsed
+}
+
 pub fn docker_style_name() -> String {
     petname::petname(2, "-").expect("petname generation should not fail")
 }

@@ -2391,7 +2391,7 @@ impl App {
             self.set_error("Select a session first.");
             return Ok(());
         };
-        let worktree = PathBuf::from(&session.worktree_path);
+        let worktree = PathBuf::from(session.directory());
         let file = match self.right_section {
             RightSection::Staged => self.engine.staged_files.get(self.files_index),
             RightSection::Unstaged => self.engine.unstaged_files.get(self.files_index),
@@ -2450,7 +2450,7 @@ impl App {
             self.set_error("Select a session first.");
             return Ok(());
         };
-        let worktree = PathBuf::from(&session.worktree_path);
+        let worktree = PathBuf::from(session.directory());
         let message = self.commit_input.text.clone();
         // Route the empty-message / nothing-staged decision through the shared core
         // preflight so the TUI and the web agree, and so the nothing-staged check
@@ -2495,7 +2495,7 @@ impl App {
             self.set_error("Select a session first.");
             return Ok(());
         };
-        let worktree = PathBuf::from(&session.worktree_path);
+        let worktree = PathBuf::from(session.directory());
         let reaction = self.engine.apply(Command::Push {
             worktree_path: worktree,
         })?;
@@ -2508,8 +2508,24 @@ impl App {
             self.set_error("Select a session first.");
             return Ok(());
         };
+        // The same workspace gate the wire's git routes use, so a key-driven
+        // pull and an HTTP pull refuse a standalone agent for the same reason
+        // and in the same words. Pulling publishes into a branch dux manages,
+        // and a standalone agent has none.
+        let session_id = session.id.clone();
+        let managed = match self.engine.branch_git_workspace(
+            &session_id,
+            "pull into",
+            dux_core::engine::STANDALONE_ADD_AS_PROJECT_REMEDY,
+        ) {
+            Ok(managed) => managed.clone(),
+            Err(err) => {
+                self.set_error(err.to_string());
+                return Ok(());
+            }
+        };
         let reaction = self.engine.apply(Command::Pull {
-            repo_path: PathBuf::from(&session.worktree_path),
+            repo_path: PathBuf::from(managed.worktree_path.clone()),
             target: PullTarget::Session,
             busy_message: "Pulling latest changes from remote\u{2026}".to_string(),
             already_running_message:
@@ -4363,14 +4379,16 @@ impl App {
         if let PromptState::ConfirmDeleteAgent {
             focus,
             delete_worktree,
-            worktree_shared,
+            target,
             ..
         } = &mut self.prompt
         {
-            // When the worktree is shared with another session it is always
-            // preserved, so the checkbox is hidden and the focus cycle skips
-            // over it (Cancel ↔ Delete only).
-            let shared = *worktree_shared;
+            // The checkbox is a CONDITIONAL stop: absent when the worktree is
+            // shared (it is preserved whatever the user ticks) and absent for a
+            // standalone agent (there is no worktree to remove at all). One
+            // answer for all three of the renderer, this ring, and the click
+            // handler.
+            let shared = !target.offers_worktree_checkbox();
             // Declared focus order, with the checkbox as a CONDITIONAL stop,
             // exactly the case `next_focus` exists for. Reproduces the previous
             // hand-written cycle arm for arm, including the recovery walk when
@@ -4820,6 +4838,15 @@ impl App {
                             format!(
                                 "Creating a new agent worktree \"{name}\" from PR #{number} for project \"{}\" and launching a fresh session...",
                                 project.name
+                            )
+                        }
+                        // A standalone create never reaches the name prompt:
+                        // it takes its name from the folder browser flow, which
+                        // resolves the title before dispatching.
+                        CreateAgentRequest::Standalone { folder, .. } => {
+                            format!(
+                                "Creating a standalone agent \"{name}\" in \"{}\"...",
+                                dux_core::home_path::shorten_home(folder)
                             )
                         }
                         CreateAgentRequest::ForkSession { source_label, .. } => {
@@ -7111,7 +7138,7 @@ impl App {
         };
         self.prompt = PromptState::None;
         if confirm && let Some(session) = self.selected_session() {
-            let worktree = PathBuf::from(&session.worktree_path);
+            let worktree = PathBuf::from(session.directory());
             // Re-classify against LIVE git status at confirm time, then act on that
             // fresh flag, so the delete-vs-restore decision and the destructive
             // action agree with the worktree as it is NOW (not as it was when the
@@ -7280,9 +7307,13 @@ impl App {
                     project.name
                 )
             }
+            // None of these can reach the existing-branch confirmation: it
+            // is raised only by the two arms above, and a standalone create
+            // makes no branch at all.
             CreateAgentRequest::ForkSession { .. }
             | CreateAgentRequest::ExistingManagedWorktree { .. }
-            | CreateAgentRequest::ForkExternalWorktree { .. } => unreachable!(),
+            | CreateAgentRequest::ForkExternalWorktree { .. }
+            | CreateAgentRequest::Standalone { .. } => unreachable!(),
         };
         if let Err(e) = self.dispatch_create_agent_request(request, msg) {
             self.set_error(format!("{e:#}"));
@@ -7579,10 +7610,10 @@ impl App {
                 if let PromptState::ConfirmDeleteAgent {
                     delete_worktree,
                     focus,
-                    worktree_shared,
+                    target,
                     ..
                 } = &mut self.prompt
-                    && !*worktree_shared
+                    && target.offers_worktree_checkbox()
                 {
                     *delete_worktree = !*delete_worktree;
                     *focus = DeleteAgentFocus::Checkbox;
@@ -9611,6 +9642,13 @@ fn set_create_agent_request_custom_name(request: &mut CreateAgentRequest, name: 
         | CreateAgentRequest::ForkExternalWorktree { custom_name, .. } => {
             *custom_name = Some(name);
         }
+        // A standalone create resolves its title before dispatching (the
+        // folder-browser flow does it), and the field is a plain non-optional
+        // `title` rather than an optional custom name, precisely because a
+        // standalone agent must always have one.
+        CreateAgentRequest::Standalone { title, .. } => {
+            *title = name;
+        }
     }
 }
 
@@ -10169,7 +10207,11 @@ not_a_real_action = ["x"]
         original: &str,
         updated: &str,
     ) {
-        let worktree = std::path::Path::new(&app.engine.sessions[0].worktree_path);
+        let worktree = std::path::Path::new(
+            app.engine.sessions[0]
+                .managed_worktree()
+                .expect("managed test session"),
+        );
         std::fs::create_dir_all(worktree).expect("worktree dir");
 
         Command::new("git")
@@ -10278,7 +10320,10 @@ not_a_real_action = ["x"]
         app.pull_from_remote()
             .expect("repeat pull should not error");
 
-        let repo_path = app.engine.sessions[0].worktree_path.clone();
+        let repo_path = app.engine.sessions[0]
+            .managed_worktree()
+            .expect("managed test session")
+            .to_string();
         assert!(app.engine.is_in_flight(&InFlightKey::Pull(repo_path)));
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Warning);
         assert!(app.status.text().contains("already in progress"));
@@ -10924,7 +10969,10 @@ not_a_real_action = ["x"]
     #[test]
     fn rename_title_only_does_not_change_branch_name() {
         let mut app = test_app(default_bindings());
-        let original_branch = app.engine.sessions[0].branch_name.clone();
+        let original_branch = app.engine.sessions[0]
+            .branch_name()
+            .expect("managed test session")
+            .to_string();
 
         app.apply_rename_session("session-1", "new-title".to_string(), false);
 
@@ -10934,7 +10982,10 @@ not_a_real_action = ["x"]
             "title should be updated"
         );
         assert_eq!(
-            app.engine.sessions[0].branch_name, original_branch,
+            app.engine.sessions[0]
+                .branch_name()
+                .expect("managed test session"),
+            original_branch,
             "branch_name should remain unchanged when rename_branch is false"
         );
     }
@@ -11291,7 +11342,10 @@ not_a_real_action = ["x"]
     #[test]
     fn open_kill_running_snapshots_agents_and_terminals() {
         let mut app = test_app(default_bindings());
-        let worktree_path = app.engine.sessions[0].worktree_path.clone();
+        let worktree_path = app.engine.sessions[0]
+            .managed_worktree()
+            .expect("managed test session")
+            .to_string();
         let worktree = std::path::Path::new(&worktree_path);
         let args = vec!["-c".to_string(), "sleep 5".to_string()];
         app.engine.providers.insert(
@@ -11345,7 +11399,10 @@ not_a_real_action = ["x"]
     #[test]
     fn kill_running_terminal_label_deduplicates_term_prefix() {
         let mut app = test_app(default_bindings());
-        let worktree_path = app.engine.sessions[0].worktree_path.clone();
+        let worktree_path = app.engine.sessions[0]
+            .managed_worktree()
+            .expect("managed test session")
+            .to_string();
         let worktree = std::path::Path::new(&worktree_path);
         let args = vec!["-c".to_string(), "sleep 5".to_string()];
         app.engine.companion_terminals.insert(
@@ -11516,7 +11573,10 @@ not_a_real_action = ["x"]
     #[test]
     fn kill_visible_only_kills_filtered_rows() {
         let mut app = test_app(default_bindings());
-        let worktree_path = app.engine.sessions[0].worktree_path.clone();
+        let worktree_path = app.engine.sessions[0]
+            .managed_worktree()
+            .expect("managed test session")
+            .to_string();
         let worktree = std::path::Path::new(&worktree_path);
         std::fs::create_dir_all(app.engine.paths.worktrees_root.join("other"))
             .expect("other worktree");
@@ -11633,7 +11693,12 @@ not_a_real_action = ["x"]
             .left_items()
             .iter()
             .filter_map(|item| match item {
-                LeftItem::Session(i) => Some(app.engine.sessions[*i].branch_name.clone()),
+                LeftItem::Session(i) => Some(
+                    app.engine.sessions[*i]
+                        .branch_name()
+                        .expect("managed test session")
+                        .to_string(),
+                ),
                 _ => None,
             })
             .collect();
@@ -11645,7 +11710,7 @@ not_a_real_action = ["x"]
             .engine
             .sessions
             .iter()
-            .map(|s| s.branch_name().expect("managed test session").clone())
+            .map(|s| s.branch_name().expect("managed test session").to_string())
             .collect();
         assert_eq!(in_memory, vec!["charlie", "alpha", "bravo"]);
     }
@@ -11688,7 +11753,12 @@ not_a_real_action = ["x"]
         app.left_items()
             .iter()
             .filter_map(|item| match item {
-                LeftItem::Session(i) => Some(app.engine.sessions[*i].branch_name.clone()),
+                LeftItem::Session(i) => Some(
+                    app.engine.sessions[*i]
+                        .branch_name()
+                        .expect("managed test session")
+                        .to_string(),
+                ),
                 _ => None,
             })
             .collect()
@@ -12009,7 +12079,12 @@ not_a_real_action = ["x"]
             .left_items()
             .iter()
             .filter_map(|item| match item {
-                LeftItem::Session(i) => Some(app.engine.sessions[*i].branch_name.clone()),
+                LeftItem::Session(i) => Some(
+                    app.engine.sessions[*i]
+                        .branch_name()
+                        .expect("managed test session")
+                        .to_string(),
+                ),
                 _ => None,
             })
             .collect();
@@ -12019,7 +12094,11 @@ not_a_real_action = ["x"]
     #[test]
     fn kill_selected_removes_running_targets_and_resets_terminal_surface() {
         let mut app = test_app(default_bindings());
-        let worktree = std::path::Path::new(&app.engine.sessions[0].worktree_path);
+        let worktree = std::path::Path::new(
+            app.engine.sessions[0]
+                .managed_worktree()
+                .expect("managed test session"),
+        );
         let args = vec!["-c".to_string(), "sleep 5".to_string()];
         app.engine.providers.insert(
             "session-1".to_string(),
@@ -12905,7 +12984,11 @@ not_a_real_action = ["x"]
             .join("no-such-worktree")
             .to_string_lossy()
             .into_owned();
-        app.engine.sessions[0].worktree_path = missing;
+        app.engine.sessions[0]
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = missing;
 
         app.execute_command("refresh-changes".to_string())
             .expect("refresh changes");
@@ -13527,7 +13610,10 @@ not_a_real_action = ["x"]
     #[test]
     fn copy_path_copies_selected_session_worktree() {
         let mut app = test_app(default_bindings());
-        let _worktree_path = app.engine.sessions[0].worktree_path.clone();
+        let _worktree_path = app.engine.sessions[0]
+            .managed_worktree()
+            .expect("managed test session")
+            .to_string();
         app.clipboard = Clipboard::from_fn(clipboard_ok);
 
         app.copy_selected_path().unwrap();
@@ -18452,10 +18538,18 @@ cyan = "#00ffff"
     #[test]
     fn mouse_click_pick_editor_row_selects_then_double_click_opens_editor() {
         let mut app = test_app(default_bindings());
-        std::fs::create_dir_all(&app.engine.sessions[0].worktree_path).expect("worktree");
+        std::fs::create_dir_all(
+            app.engine.sessions[0]
+                .managed_worktree()
+                .expect("managed test session"),
+        )
+        .expect("worktree");
         app.prompt = PromptState::PickEditor {
             session_label: "agent-branch".to_string(),
-            worktree_path: app.engine.sessions[0].worktree_path.clone(),
+            worktree_path: app.engine.sessions[0]
+                .managed_worktree()
+                .expect("managed test session")
+                .to_string(),
             editors: vec![DetectedEditor {
                 kind: EditorKind::VsCode,
                 label: "VS Code",
@@ -18733,12 +18827,21 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfirmDeleteAgent {
             session_id: app.engine.sessions[0].id.clone(),
-            branch_name: app.engine.sessions[0].branch_name.clone(),
-            initial_branch: "wt-branch".to_string(),
-            branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
+            agent_label: app.engine.sessions[0]
+                .branch_name()
+                .expect("managed test session")
+                .to_string(),
+            target: crate::app::DeleteAgentTarget::Managed {
+                branch_name: app.engine.sessions[0]
+                    .branch_name()
+                    .expect("managed test session")
+                    .to_string(),
+                initial_branch: "wt-branch".to_string(),
+                branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
+                worktree_shared: false,
+            },
             focus: DeleteAgentFocus::Cancel,
             delete_worktree: false,
-            worktree_shared: false,
         };
         install_confirm_delete_overlay(&mut app);
 
@@ -18809,7 +18912,11 @@ cyan = "#00ffff"
     #[test]
     fn quit_prompt_counts_running_companion_terminals_and_agents() {
         let mut app = test_app(default_bindings());
-        let worktree = std::path::Path::new(&app.engine.sessions[0].worktree_path);
+        let worktree = std::path::Path::new(
+            app.engine.sessions[0]
+                .managed_worktree()
+                .expect("managed test session"),
+        );
         let (command, args) = ("/bin/sh", vec!["-c".to_string(), "sleep 5".to_string()]);
         let provider =
             PtyClient::spawn(command, &args, worktree, 24, 80, 1_000).expect("spawn test agent");
@@ -18852,7 +18959,10 @@ cyan = "#00ffff"
     fn change_agent_provider_swaps_in_place_when_stopped() {
         let mut app = test_app(default_bindings());
         let original_session_id = app.engine.sessions[0].id.clone();
-        let original_worktree = app.engine.sessions[0].worktree_path.clone();
+        let original_worktree = app.engine.sessions[0]
+            .managed_worktree()
+            .expect("managed test session")
+            .to_string();
         app.engine.sessions[0].provider = ProviderKind::from_str("codex");
         app.engine.sessions[0].status = SessionStatus::Detached;
         app.engine
@@ -18887,7 +18997,12 @@ cyan = "#00ffff"
         assert_eq!(app.engine.sessions.len(), 1);
         assert_eq!(app.engine.sessions[0].id, original_session_id);
         assert_eq!(app.engine.sessions[0].provider.as_str(), "opencode");
-        assert_eq!(app.engine.sessions[0].worktree_path, original_worktree);
+        assert_eq!(
+            app.engine.sessions[0]
+                .managed_worktree()
+                .expect("managed test session"),
+            original_worktree
+        );
         assert!(matches!(app.prompt, PromptState::None));
 
         let persisted = app
@@ -18908,7 +19023,11 @@ cyan = "#00ffff"
         app.engine.sessions[0].status = SessionStatus::Active;
         let session_id = app.engine.sessions[0].id.clone();
 
-        let worktree = std::path::Path::new(&app.engine.sessions[0].worktree_path);
+        let worktree = std::path::Path::new(
+            app.engine.sessions[0]
+                .managed_worktree()
+                .expect("managed test session"),
+        );
         let provider = PtyClient::spawn(
             "/bin/sh",
             &["-c".to_string(), "sleep 5".to_string()],
@@ -19997,7 +20116,11 @@ cyan = "#00ffff"
         assert_eq!(app.running_companion_terminal_count(), 0);
 
         let session_id = app.engine.sessions[0].id.clone();
-        let worktree = std::path::Path::new(&app.engine.sessions[0].worktree_path);
+        let worktree = std::path::Path::new(
+            app.engine.sessions[0]
+                .managed_worktree()
+                .expect("managed test session"),
+        );
         let (command, args) = ("/bin/sh", vec!["-c".to_string(), "sleep 2".to_string()]);
         let client = PtyClient::spawn(command, &args, worktree, 24, 80, 1_000).expect("spawn");
         app.engine.companion_terminals.insert(
@@ -20588,7 +20711,12 @@ cyan = "#00ffff"
 
         assert!(matches!(app.prompt, PromptState::None));
         let contents = std::fs::read_to_string(
-            PathBuf::from(&app.engine.sessions[0].worktree_path).join("src/main.rs"),
+            PathBuf::from(
+                &app.engine.sessions[0]
+                    .managed_worktree()
+                    .expect("managed test session"),
+            )
+            .join("src/main.rs"),
         )
         .expect("discarded file");
         assert_eq!(contents, "fn main() {}\n");
@@ -20604,7 +20732,12 @@ cyan = "#00ffff"
     #[test]
     fn discard_confirm_reclassifies_live_and_does_not_delete_a_now_tracked_file() {
         let mut app = test_app(default_bindings());
-        let worktree = std::path::Path::new(&app.engine.sessions[0].worktree_path).to_path_buf();
+        let worktree = std::path::Path::new(
+            app.engine.sessions[0]
+                .managed_worktree()
+                .expect("managed test session"),
+        )
+        .to_path_buf();
         std::fs::create_dir_all(&worktree).expect("worktree dir");
         let git = |args: &[&str]| {
             Command::new("git")
@@ -20657,7 +20790,12 @@ cyan = "#00ffff"
     #[test]
     fn execute_commit_refuses_an_empty_message() {
         let mut app = test_app(default_bindings());
-        std::fs::create_dir_all(&app.engine.sessions[0].worktree_path).expect("worktree dir");
+        std::fs::create_dir_all(
+            app.engine.sessions[0]
+                .managed_worktree()
+                .expect("managed test session"),
+        )
+        .expect("worktree dir");
         app.selected_left = 1;
         app.commit_input.text = "   ".to_string();
 
@@ -20673,7 +20811,12 @@ cyan = "#00ffff"
     #[test]
     fn execute_commit_refuses_nothing_staged_from_live_status_not_the_stale_cache() {
         let mut app = test_app(default_bindings());
-        let worktree = std::path::Path::new(&app.engine.sessions[0].worktree_path).to_path_buf();
+        let worktree = std::path::Path::new(
+            app.engine.sessions[0]
+                .managed_worktree()
+                .expect("managed test session"),
+        )
+        .to_path_buf();
         std::fs::create_dir_all(&worktree).expect("worktree dir");
         let git = |args: &[&str]| {
             Command::new("git")
@@ -20715,12 +20858,21 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfirmDeleteAgent {
             session_id: app.engine.sessions[0].id.clone(),
-            branch_name: app.engine.sessions[0].branch_name.clone(),
-            initial_branch: "wt-branch".to_string(),
-            branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
+            agent_label: app.engine.sessions[0]
+                .branch_name()
+                .expect("managed test session")
+                .to_string(),
+            target: crate::app::DeleteAgentTarget::Managed {
+                branch_name: app.engine.sessions[0]
+                    .branch_name()
+                    .expect("managed test session")
+                    .to_string(),
+                initial_branch: "wt-branch".to_string(),
+                branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
+                worktree_shared: false,
+            },
             focus: DeleteAgentFocus::Cancel,
             delete_worktree: false,
-            worktree_shared: false,
         };
         install_confirm_delete_overlay(&mut app);
 
@@ -20736,12 +20888,21 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfirmDeleteAgent {
             session_id: app.engine.sessions[0].id.clone(),
-            branch_name: app.engine.sessions[0].branch_name.clone(),
-            initial_branch: "wt-branch".to_string(),
-            branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
+            agent_label: app.engine.sessions[0]
+                .branch_name()
+                .expect("managed test session")
+                .to_string(),
+            target: crate::app::DeleteAgentTarget::Managed {
+                branch_name: app.engine.sessions[0]
+                    .branch_name()
+                    .expect("managed test session")
+                    .to_string(),
+                initial_branch: "wt-branch".to_string(),
+                branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
+                worktree_shared: false,
+            },
             focus: DeleteAgentFocus::Cancel,
             delete_worktree: false,
-            worktree_shared: false,
         };
         install_confirm_delete_overlay(&mut app);
 
@@ -20768,12 +20929,21 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfirmDeleteAgent {
             session_id: app.engine.sessions[0].id.clone(),
-            branch_name: app.engine.sessions[0].branch_name.clone(),
-            initial_branch: "wt-branch".to_string(),
-            branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
+            agent_label: app.engine.sessions[0]
+                .branch_name()
+                .expect("managed test session")
+                .to_string(),
+            target: crate::app::DeleteAgentTarget::Managed {
+                branch_name: app.engine.sessions[0]
+                    .branch_name()
+                    .expect("managed test session")
+                    .to_string(),
+                initial_branch: "wt-branch".to_string(),
+                branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
+                worktree_shared: false,
+            },
             focus: DeleteAgentFocus::Cancel,
             delete_worktree: false,
-            worktree_shared: false,
         };
 
         let backend = TestBackend::new(120, 24);
@@ -20814,12 +20984,21 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfirmDeleteAgent {
             session_id: app.engine.sessions[0].id.clone(),
-            branch_name: app.engine.sessions[0].branch_name.clone(),
-            initial_branch: "wt-branch".to_string(),
-            branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
+            agent_label: app.engine.sessions[0]
+                .branch_name()
+                .expect("managed test session")
+                .to_string(),
+            target: crate::app::DeleteAgentTarget::Managed {
+                branch_name: app.engine.sessions[0]
+                    .branch_name()
+                    .expect("managed test session")
+                    .to_string(),
+                initial_branch: "wt-branch".to_string(),
+                branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
+                worktree_shared: false,
+            },
             focus: DeleteAgentFocus::Cancel,
             delete_worktree: false,
-            worktree_shared: false,
         };
 
         app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT))
@@ -20856,12 +21035,21 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfirmDeleteAgent {
             session_id: app.engine.sessions[0].id.clone(),
-            branch_name: app.engine.sessions[0].branch_name.clone(),
-            initial_branch: "wt-branch".to_string(),
-            branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
+            agent_label: app.engine.sessions[0]
+                .branch_name()
+                .expect("managed test session")
+                .to_string(),
+            target: crate::app::DeleteAgentTarget::Managed {
+                branch_name: app.engine.sessions[0]
+                    .branch_name()
+                    .expect("managed test session")
+                    .to_string(),
+                initial_branch: "wt-branch".to_string(),
+                branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
+                worktree_shared: false,
+            },
             focus: DeleteAgentFocus::Cancel,
             delete_worktree: false,
-            worktree_shared: false,
         };
 
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT))
@@ -21930,7 +22118,11 @@ cyan = "#00ffff"
             },
         );
         let session_id = app.engine.sessions[0].id.clone();
-        let worktree = std::path::Path::new(&app.engine.sessions[0].worktree_path);
+        let worktree = std::path::Path::new(
+            app.engine.sessions[0]
+                .managed_worktree()
+                .expect("managed test session"),
+        );
         // Spawn a process that exits immediately without producing output.
         let args = vec!["-c".to_string(), "exit 1".to_string()];
         let client =
@@ -21983,7 +22175,11 @@ cyan = "#00ffff"
     fn resume_fallback_skipped_when_pty_had_substantial_output() {
         let mut app = test_app(default_bindings());
         let session_id = app.engine.sessions[0].id.clone();
-        let worktree = std::path::Path::new(&app.engine.sessions[0].worktree_path);
+        let worktree = std::path::Path::new(
+            app.engine.sessions[0]
+                .managed_worktree()
+                .expect("managed test session"),
+        );
         // Spawn a process that produces many lines of output before exiting.
         // This simulates a real agent session that ran and then exited normally.
         let args = vec!["-c".to_string(), "seq 1 30".to_string()];
@@ -22028,7 +22224,11 @@ cyan = "#00ffff"
             },
         );
         let session_id = app.engine.sessions[0].id.clone();
-        let worktree = std::path::Path::new(&app.engine.sessions[0].worktree_path);
+        let worktree = std::path::Path::new(
+            app.engine.sessions[0]
+                .managed_worktree()
+                .expect("managed test session"),
+        );
         // Spawn a process that prints a single line (like a failed --continue)
         // and then exits. The fallback should still trigger because the output
         // is minimal (≤5 lines with no scrollback).
@@ -22075,7 +22275,11 @@ cyan = "#00ffff"
     fn no_fallback_for_non_candidate_sessions() {
         let mut app = test_app(default_bindings());
         let session_id = app.engine.sessions[0].id.clone();
-        let worktree = std::path::Path::new(&app.engine.sessions[0].worktree_path);
+        let worktree = std::path::Path::new(
+            app.engine.sessions[0]
+                .managed_worktree()
+                .expect("managed test session"),
+        );
         // Spawn a process that exits immediately, but do NOT add it as a candidate.
         let args = vec!["-c".to_string(), "exit 1".to_string()];
         let client =
@@ -22104,7 +22308,11 @@ cyan = "#00ffff"
     fn zero_exit_clears_desired_running() {
         let mut app = test_app(default_bindings());
         let session_id = app.engine.sessions[0].id.clone();
-        let worktree = std::path::Path::new(&app.engine.sessions[0].worktree_path);
+        let worktree = std::path::Path::new(
+            app.engine.sessions[0]
+                .managed_worktree()
+                .expect("managed test session"),
+        );
         let args = vec!["-c".to_string(), "exit 0".to_string()];
         let client =
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn zero-exit");
@@ -22131,7 +22339,11 @@ cyan = "#00ffff"
     fn nonzero_exit_keeps_desired_running() {
         let mut app = test_app(default_bindings());
         let session_id = app.engine.sessions[0].id.clone();
-        let worktree = std::path::Path::new(&app.engine.sessions[0].worktree_path);
+        let worktree = std::path::Path::new(
+            app.engine.sessions[0]
+                .managed_worktree()
+                .expect("managed test session"),
+        );
         let args = vec!["-c".to_string(), "exit 1".to_string()];
         let client = PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000)
             .expect("spawn nonzero-exit");
@@ -22158,7 +22370,11 @@ cyan = "#00ffff"
     fn quick_nonzero_exit_reports_minimal_output() {
         let mut app = test_app(default_bindings());
         let session_id = app.engine.sessions[0].id.clone();
-        let worktree = std::path::Path::new(&app.engine.sessions[0].worktree_path);
+        let worktree = std::path::Path::new(
+            app.engine.sessions[0]
+                .managed_worktree()
+                .expect("managed test session"),
+        );
         let args = vec![
             "-c".to_string(),
             "echo 'custom provider failed'; exit 1".to_string(),
@@ -22257,7 +22473,11 @@ cyan = "#00ffff"
         );
         app.engine.sessions[0].provider = ProviderKind::from_str("opencode");
         let session_id = app.engine.sessions[0].id.clone();
-        let worktree = std::path::Path::new(&app.engine.sessions[0].worktree_path);
+        let worktree = std::path::Path::new(
+            app.engine.sessions[0]
+                .managed_worktree()
+                .expect("managed test session"),
+        );
         let args = vec!["-c".to_string(), "sleep 5".to_string()];
         let client =
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn hung resume");
@@ -22312,7 +22532,11 @@ cyan = "#00ffff"
         );
         app.engine.sessions[0].provider = ProviderKind::from_str("opencode");
         let session_id = app.engine.sessions[0].id.clone();
-        let worktree = std::path::Path::new(&app.engine.sessions[0].worktree_path);
+        let worktree = std::path::Path::new(
+            app.engine.sessions[0]
+                .managed_worktree()
+                .expect("managed test session"),
+        );
         let args = vec!["-c".to_string(), "sleep 5".to_string()];
         let client =
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn fresh hang");
@@ -26832,7 +27056,11 @@ cyan = "#00ffff"
         let session_id = app.engine.sessions[0].id.clone();
 
         // Spawn a real PTY so the session looks live.
-        let worktree = std::path::Path::new(&app.engine.sessions[0].worktree_path);
+        let worktree = std::path::Path::new(
+            app.engine.sessions[0]
+                .managed_worktree()
+                .expect("managed test session"),
+        );
         let pty = PtyClient::spawn(
             "/bin/sh",
             &["-c".to_string(), "sleep 5".to_string()],
@@ -26946,7 +27174,11 @@ cyan = "#00ffff"
     fn confirm_close_support_tab_closes_and_refocuses_main() {
         let mut app = test_app(default_bindings());
         let session_id = app.engine.sessions[0].id.clone();
-        let worktree = std::path::PathBuf::from(&app.engine.sessions[0].worktree_path);
+        let worktree = std::path::PathBuf::from(
+            &app.engine.sessions[0]
+                .managed_worktree()
+                .expect("managed test session"),
+        );
         let tab_id = "tab-1".to_string();
         insert_support_tab(&mut app, &session_id, &tab_id);
         app.engine
@@ -26980,7 +27212,11 @@ cyan = "#00ffff"
     fn closing_focused_tab_refocuses_live_sibling_not_dormant_main() {
         let mut app = test_app(default_bindings());
         let session_id = app.engine.sessions[0].id.clone();
-        let worktree = std::path::PathBuf::from(&app.engine.sessions[0].worktree_path);
+        let worktree = std::path::PathBuf::from(
+            &app.engine.sessions[0]
+                .managed_worktree()
+                .expect("managed test session"),
+        );
         // The session-slot tab is dormant (no provider). Two extra tabs, both live.
         insert_support_tab(&mut app, &session_id, "tab-1");
         app.engine
@@ -27015,7 +27251,11 @@ cyan = "#00ffff"
     fn closing_main_tab_refocuses_live_sibling_not_dormant_main() {
         let mut app = test_app(default_bindings());
         let session_id = app.engine.sessions[0].id.clone();
-        let worktree = std::path::PathBuf::from(&app.engine.sessions[0].worktree_path);
+        let worktree = std::path::PathBuf::from(
+            &app.engine.sessions[0]
+                .managed_worktree()
+                .expect("managed test session"),
+        );
         // The session-slot tab is live; one extra tab is also live. Closing
         // the session-slot (main) tab should refocus the live extra tab, not
         // leave focus stuck on the now-dormant session-slot id.
@@ -27051,7 +27291,11 @@ cyan = "#00ffff"
     fn ctrl_g_after_closing_tab_enters_live_sibling_without_relaunch() {
         let mut app = test_app(default_bindings());
         let session_id = app.engine.sessions[0].id.clone();
-        let worktree = std::path::PathBuf::from(&app.engine.sessions[0].worktree_path);
+        let worktree = std::path::PathBuf::from(
+            &app.engine.sessions[0]
+                .managed_worktree()
+                .expect("managed test session"),
+        );
         insert_support_tab(&mut app, &session_id, "tab-1");
         app.engine
             .providers
@@ -27097,7 +27341,11 @@ cyan = "#00ffff"
     fn confirm_close_main_tab_detaches_without_deleting() {
         let mut app = test_app(default_bindings());
         let session_id = app.engine.sessions[0].id.clone();
-        let worktree = std::path::PathBuf::from(&app.engine.sessions[0].worktree_path);
+        let worktree = std::path::PathBuf::from(
+            &app.engine.sessions[0]
+                .managed_worktree()
+                .expect("managed test session"),
+        );
         // An extra tab exists; detaching the session-slot tab must NOT touch it.
         let tab_id = "tab-1".to_string();
         insert_support_tab(&mut app, &session_id, &tab_id);
@@ -27129,7 +27377,11 @@ cyan = "#00ffff"
     fn kill_running_lists_live_support_tab_and_keeps_its_row() {
         let mut app = test_app(default_bindings());
         let session_id = app.engine.sessions[0].id.clone();
-        let worktree = std::path::PathBuf::from(&app.engine.sessions[0].worktree_path);
+        let worktree = std::path::PathBuf::from(
+            &app.engine.sessions[0]
+                .managed_worktree()
+                .expect("managed test session"),
+        );
         let tab_id = "tab-1".to_string();
         insert_support_tab(&mut app, &session_id, &tab_id);
         app.engine
@@ -29077,7 +29329,11 @@ cyan = "#00ffff"
                 app.close_focused_tab_prompt();
             }
             "ConfirmQuit" => {
-                let worktree = PathBuf::from(&app.engine.sessions[0].worktree_path);
+                let worktree = PathBuf::from(
+                    &app.engine.sessions[0]
+                        .managed_worktree()
+                        .expect("managed test session"),
+                );
                 let session_id = app.engine.sessions[0].id.clone();
                 app.engine
                     .providers
@@ -29128,7 +29384,11 @@ cyan = "#00ffff"
                 tap(&mut app, KeyCode::Enter);
             }
             "ConfirmKillRunning" => {
-                let worktree = PathBuf::from(&app.engine.sessions[0].worktree_path);
+                let worktree = PathBuf::from(
+                    &app.engine.sessions[0]
+                        .managed_worktree()
+                        .expect("managed test session"),
+                );
                 let session_id = app.engine.sessions[0].id.clone();
                 app.engine
                     .providers
@@ -29721,12 +29981,15 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfirmDeleteAgent {
             session_id: "s1".to_string(),
-            branch_name: "b".to_string(),
-            initial_branch: "wt-branch".to_string(),
-            branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
+            agent_label: "b".to_string(),
+            target: crate::app::DeleteAgentTarget::Managed {
+                branch_name: "b".to_string(),
+                initial_branch: "wt-branch".to_string(),
+                branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
+                worktree_shared: false,
+            },
             focus: DeleteAgentFocus::Cancel,
             delete_worktree: false,
-            worktree_shared: false,
         };
         app.handle_key(reverse).expect("reverse");
         match &app.prompt {

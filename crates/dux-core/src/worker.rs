@@ -350,18 +350,40 @@ pub enum CreateAgentRequest {
         source_branch: String,
         custom_name: Option<String>,
     },
+    /// A STANDALONE agent: run the provider in a folder the user already has.
+    ///
+    /// It carries NO project, because a standalone agent belongs to none, and
+    /// the job path for it provisions nothing: no branch, no worktree, no
+    /// startup command. On failure there is nothing on disk to roll back, only
+    /// the record, which is why `rollback_created_worktree` is never reachable
+    /// from this arm.
+    Standalone {
+        /// The folder to run in, exactly as the user chose it. Never created,
+        /// moved or removed by dux.
+        folder: PathBuf,
+        /// The agent's display name, already resolved and guaranteed non-empty
+        /// by [`crate::git::standalone_agent_title`].
+        title: String,
+        /// The provider to launch. Resolved at dispatch, from the request's
+        /// optional override or the global default.
+        provider: ProviderKind,
+    },
 }
 
 impl CreateAgentRequest {
-    /// The project id this request belongs to. Used to key the create-agent
-    /// busy→final status pair so the web can dismiss the spinner on completion.
-    pub fn project_id(&self) -> &str {
+    /// The project id this request belongs to, or `None` for a standalone
+    /// agent, which belongs to no project.
+    ///
+    /// Status keying does NOT go through this: the create-agent busy and its
+    /// final share an opaque `status_op_id`, which is already project-free.
+    pub fn project_id(&self) -> Option<&str> {
         match self {
-            Self::NewProject { project, .. } => &project.id,
-            Self::PullRequest { project, .. } => &project.id,
-            Self::ForkSession { project, .. } => &project.id,
-            Self::ExistingManagedWorktree { project, .. } => &project.id,
-            Self::ForkExternalWorktree { project, .. } => &project.id,
+            Self::NewProject { project, .. } => Some(&project.id),
+            Self::PullRequest { project, .. } => Some(&project.id),
+            Self::ForkSession { project, .. } => Some(&project.id),
+            Self::ExistingManagedWorktree { project, .. } => Some(&project.id),
+            Self::ForkExternalWorktree { project, .. } => Some(&project.id),
+            Self::Standalone { .. } => None,
         }
     }
 }

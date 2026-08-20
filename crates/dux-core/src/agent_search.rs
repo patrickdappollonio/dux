@@ -23,21 +23,29 @@ fn haystack_has(query: &str, fields: &[Option<&str>]) -> bool {
         .any(|field| field.unwrap_or("").to_lowercase().contains(query))
 }
 
-/// Match an agent row against a raw query. Fields: the display name (`title`,
-/// falling back to `branch_name`), the project name, and the branch. Provider
-/// names are deliberately NOT searched: "claude"/"codex" are far too generic
-/// as terms, so a provider-only hit would surface almost every agent.
+/// Match an agent row against a raw query. Fields: the display name, the
+/// branch, and the LOCATION.
+///
+/// `branch_name` is `None` for a standalone agent, which has none, and
+/// `location` is whatever the row's second line actually shows: the project
+/// name for a managed agent, the folder label for a standalone one. Typing part
+/// of a path must find a standalone agent, exactly as terminal searching
+/// already works, and the field that appears on the row is the field that
+/// should match.
+///
+/// Provider names are deliberately NOT searched: "claude"/"codex" are far too
+/// generic as terms, so a provider-only hit would surface almost every agent.
 pub fn matches_session(
     title: Option<&str>,
-    branch_name: &str,
-    project_name: &str,
+    branch_name: Option<&str>,
+    location: Option<&str>,
     query: &str,
 ) -> bool {
     let q = normalize_query(query);
     if q.is_empty() {
         return true;
     }
-    haystack_has(&q, &[title, Some(branch_name), Some(project_name)])
+    haystack_has(&q, &[title, branch_name, location])
 }
 
 /// The CHAR range (start inclusive, end exclusive, in char indices, never
@@ -133,8 +141,8 @@ mod tests {
 
     #[test]
     fn empty_query_matches_everything() {
-        assert!(matches_session(Some("api"), "main", "proj", ""));
-        assert!(matches_session(None, "main", "proj", "   "));
+        assert!(matches_session(Some("api"), Some("main"), Some("proj"), ""));
+        assert!(matches_session(None, Some("main"), Some("proj"), "   "));
         assert!(matches_terminal("shell", None, "owner", "proj", ""));
     }
 
@@ -143,16 +151,55 @@ mod tests {
         // Title.
         assert!(matches_session(
             Some("API-Refactor"),
-            "b",
-            "proj",
+            Some("b"),
+            Some("proj"),
             "refactor"
         ));
         // Branch (name falls back to branch, but branch is matched directly too).
-        assert!(matches_session(None, "feature/login", "proj", "LOGIN"));
+        assert!(matches_session(
+            None,
+            Some("feature/login"),
+            Some("proj"),
+            "LOGIN"
+        ));
         // Project name.
-        assert!(matches_session(Some("x"), "b", "demo-web", "web"));
+        assert!(matches_session(
+            Some("x"),
+            Some("b"),
+            Some("demo-web"),
+            "web"
+        ));
         // Non-match.
-        assert!(!matches_session(Some("x"), "b", "proj", "zzz"));
+        assert!(!matches_session(Some("x"), Some("b"), Some("proj"), "zzz"));
+    }
+
+    /// A standalone agent's row shows its FOLDER where an ordinary agent shows
+    /// its project, so the folder joins the haystack: typing part of a path
+    /// must find the agent, exactly as terminal searching already works.
+    ///
+    /// Shared vectors with the web twin in
+    /// `crates/dux-web/web/src/lib/agentSearch.ts`.
+    #[test]
+    fn a_standalone_agents_folder_is_searchable() {
+        // No branch, no project: the folder is the only location field it has.
+        assert!(matches_session(
+            Some("notes"),
+            None,
+            Some("~/work/scratch"),
+            "scratch"
+        ));
+        assert!(matches_session(
+            Some("notes"),
+            None,
+            Some("~/work/scratch"),
+            "WORK"
+        ));
+        assert!(!matches_session(
+            Some("notes"),
+            None,
+            Some("~/work/scratch"),
+            "zzz"
+        ));
     }
 
     #[test]
@@ -161,7 +208,12 @@ mod tests {
         // terms, so an agent named nothing like the query must NOT surface
         // just because it runs that provider. (Providers were once a searched
         // field; this pins the removal.)
-        assert!(!matches_session(Some("api"), "main", "proj", "codex"));
+        assert!(!matches_session(
+            Some("api"),
+            Some("main"),
+            Some("proj"),
+            "codex"
+        ));
     }
 
     #[test]

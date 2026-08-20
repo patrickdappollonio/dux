@@ -221,7 +221,7 @@ impl App {
                     .engine
                     .sessions
                     .iter()
-                    .filter(|session| session.project_id == project.id)
+                    .filter(|session| session.project_id() == Some(project.id.as_str()))
                     .count();
                 ProjectChooserEntry {
                     id: project.id.clone(),
@@ -430,7 +430,7 @@ impl App {
             .engine
             .projects
             .iter()
-            .find(|p| p.id == source_session.project_id)
+            .find(|p| Some(p.id.as_str()) == source_session.project_id())
             .cloned()
         else {
             self.set_error("Select an agent session first to fork.");
@@ -765,6 +765,9 @@ impl App {
             CreateAgentRequest::NewProject { custom_name, .. }
             | CreateAgentRequest::ForkSession { custom_name, .. }
             | CreateAgentRequest::ForkExternalWorktree { custom_name, .. } => custom_name.clone(),
+            // A standalone create already has its title (resolved from the
+            // folder), so the prompt opens pre-filled with it.
+            CreateAgentRequest::Standalone { title, .. } => Some(title.clone()),
             CreateAgentRequest::PullRequest {
                 custom_name,
                 head_branch,
@@ -1250,7 +1253,7 @@ impl App {
         // config default), shared with the web via `default_provider_for_new_tab`.
         let default_provider = self
             .engine
-            .default_provider_for_new_tab(&session.project_id);
+            .default_provider_for_new_tab(session.project_id());
         let selected = options
             .iter()
             .position(|option| option.provider == default_provider)
@@ -1262,7 +1265,7 @@ impl App {
             session_id: session.id.clone(),
             tab_id: session.id.clone(),
             session_label: self.session_label(&session),
-            worktree_path: session.worktree_path.clone(),
+            worktree_path: session.directory().to_string(),
             options,
             selected,
             mode: ChangeAgentProviderMode::NewTab,
@@ -1455,7 +1458,7 @@ impl App {
         self.input_target = InputTarget::Terminal;
         self.set_info(format!(
             "Launched terminal for agent \"{}\".",
-            session.branch_name
+            session.display_label()
         ));
         Ok(())
     }
@@ -1627,7 +1630,7 @@ impl App {
         self.input_target = InputTarget::Terminal;
         self.set_info(format!(
             "Launched new terminal for agent \"{}\".",
-            session.branch_name
+            session.display_label()
         ));
         Ok(())
     }
@@ -1717,19 +1720,34 @@ impl App {
             self.set_error("Select a session first.");
             return Ok(());
         };
-        let worktree_shared = self
-            .engine
-            .sessions
-            .iter()
-            .any(|s| s.id != session.id && s.worktree_path == session.worktree_path);
+        let target = match &session.workspace {
+            dux_core::model::AgentWorkspace::Managed(managed) => {
+                let worktree_shared = self
+                    .engine
+                    .sessions
+                    .iter()
+                    .any(|s| s.id != session.id && s.directory() == session.directory());
+                crate::app::DeleteAgentTarget::Managed {
+                    branch_name: managed.branch_name.clone(),
+                    initial_branch: managed.initial_branch.clone(),
+                    branch_provenance: managed.branch_provenance,
+                    worktree_shared,
+                }
+            }
+            dux_core::model::AgentWorkspace::Folder(folder) => {
+                crate::app::DeleteAgentTarget::Folder {
+                    folder_label: dux_core::home_path::shorten_home(std::path::Path::new(
+                        &folder.folder_path,
+                    )),
+                }
+            }
+        };
         self.prompt = PromptState::ConfirmDeleteAgent {
             session_id: session.id.clone(),
-            branch_name: session.branch_name.clone(),
-            initial_branch: session.initial_branch.clone(),
-            branch_provenance: session.branch_provenance,
+            agent_label: session.display_label(),
+            target,
             focus: DeleteAgentFocus::Cancel, // Cancel is the safe default
             delete_worktree: false,          // Opt-in destructive action
-            worktree_shared,
         };
         Ok(())
     }
@@ -1787,17 +1805,20 @@ impl App {
             .find(|s| s.id == session_id)
             .map(|s| {
                 let provider = s.provider.as_str().to_string();
-                let branch_name = s.branch_name.clone();
+                // A standalone agent has no branch, and none of the
+                // branch-naming arms below can be reached for one: its delete
+                // resolves to the folder outcome, whose copy names the folder
+                // instead. Empty strings here are therefore unreachable
+                // placeholders, not values any sentence renders.
+                let branch_name = s.branch_name().unwrap_or_default().to_string();
                 // Captured here, with the session still present, because the
                 // removal's report can name a SECOND branch (the one the agent
                 // was born on) and the session is gone by the time it lands.
-                let initial_branch = s.initial_branch.clone();
-                let name = s.title.as_deref().unwrap_or(&s.branch_name).to_string();
-                let project_name = self
-                    .engine
-                    .projects
-                    .iter()
-                    .find(|p| p.id == s.project_id)
+                let initial_branch = s.initial_branch().unwrap_or_default().to_string();
+                let name = s.display_label();
+                let project_name = s
+                    .project_id()
+                    .and_then(|project_id| self.engine.projects.iter().find(|p| p.id == project_id))
                     .map(|p| p.name.clone())
                     .unwrap_or_else(|| "<unknown>".to_string());
                 (provider, branch_name, initial_branch, name, project_name)
@@ -1950,27 +1971,45 @@ impl App {
         self.reload_changed_files();
 
         if update_status {
+            // The branch identity these lines name, when there is one. A
+            // standalone agent takes the `NothingToRemove` arm below, which is
+            // the only one that reaches it, so the empty fallbacks here are
+            // unreachable placeholders rather than values any sentence renders.
+            let branch_name = session.branch_name().unwrap_or_default().to_string();
+            let initial_branch = session.initial_branch().unwrap_or_default().to_string();
             match removal {
+                // A standalone agent: dux's record is gone and the user's
+                // folder is exactly as it was. Said out loud, because "Deleted
+                // agent X." on its own reads as though something on disk went
+                // with it.
+                WorktreeRemoval::NothingToRemove { folder_label } => {
+                    self.set_info(format!(
+                        "Deleted {} agent \"{}\". Its folder \"{folder_label}\" was left untouched: \
+                         dux never creates, moves or removes a standalone agent's folder.",
+                        session.provider.as_str(),
+                        session.display_label(),
+                    ));
+                }
                 WorktreeRemoval::SkippedForSiblings => {
                     self.set_info(format!(
                         "Deleted {} agent \"{}\". Worktree preserved because other sessions still use it.",
                         session.provider.as_str(),
-                        session.branch_name,
+                        branch_name,
                     ));
                 }
                 WorktreeRemoval::PreservedShared => {
                     self.set_info(format!(
                         "Deleted {} session for agent \"{}\". Worktree preserved for remaining sessions.",
                         session.provider.as_str(),
-                        session.branch_name,
+                        branch_name,
                     ));
                 }
                 WorktreeRemoval::PreservedOrphan => {
                     self.set_info(format!(
                         "Deleted {} agent \"{}\". Worktree preserved at {}.",
                         session.provider.as_str(),
-                        session.branch_name,
-                        session.worktree_path,
+                        branch_name,
+                        session.directory(),
                     ));
                 }
                 // The worktree went and the branches stayed: they were not
@@ -1982,9 +2021,8 @@ impl App {
                     self.set_info(format!(
                         "Deleted {} agent \"{}\" and removed its worktree. {}",
                         session.provider.as_str(),
-                        session.branch_name,
-                        provenance
-                            .kept_branches_note(&session.branch_name, &session.initial_branch),
+                        branch_name,
+                        provenance.kept_branches_note(&branch_name, &initial_branch),
                     ));
                 }
                 WorktreeRemoval::Performed {
@@ -2000,25 +2038,25 @@ impl App {
                                 "Deleted {} agent from project \"{}\" with branch \"{}\".",
                                 session.provider.as_str(),
                                 project_name,
-                                session.branch_name,
+                                branch_name,
                             )
                         }
                         dux_core::git::BranchDeletion::AlreadyGone => format!(
                             "Deleted agent (branch \"{}\" was already removed).",
-                            session.branch_name,
+                            branch_name,
                         ),
                         // Refused means the branch SURVIVED, which is the
                         // opposite of what this line used to claim.
                         dux_core::git::BranchDeletion::Refused { reason } => format!(
                             "Deleted agent, but its branch \"{}\" is still there. {}",
-                            session.branch_name,
-                            dux_core::git::branch_refusal_note(&session.branch_name, reason),
+                            branch_name,
+                            dux_core::git::branch_refusal_note(&branch_name, reason),
                         ),
                     };
                     // Only when the agent DRIFTED off the branch it was born on:
                     // that second branch is deleted too and the line must say so
                     // rather than leaving the user to discover it.
-                    if let Some(note) = branches.initial_branch_note(&session.initial_branch) {
+                    if let Some(note) = branches.initial_branch_note(&initial_branch) {
                         message.push(' ');
                         message.push_str(&note);
                     }
@@ -2106,7 +2144,7 @@ impl App {
             session_id: session.id.clone(),
             tab_id,
             session_label: self.session_label(&session),
-            worktree_path: session.worktree_path.clone(),
+            worktree_path: session.directory().to_string(),
             options: self.change_agent_provider_options(&session),
             selected: 0,
             mode: ChangeAgentProviderMode::Retarget,
@@ -2484,8 +2522,8 @@ impl App {
         };
         let new_enabled = !session.auto_reopen_enabled;
         let reaction = self.engine.apply(Command::ToggleAgentAutoReopen {
+            branch_name: session.display_label(),
             session_id: session.id,
-            branch_name: session.branch_name,
             new_enabled,
         })?;
         self.apply_reaction(reaction);
@@ -2716,11 +2754,26 @@ impl App {
             self.set_error("Select an agent first.");
             return Ok(());
         };
+        // A startup command provisions a worktree for a project, so a
+        // standalone agent has neither one to run nor a place to run it. The
+        // refusal names the shape of the thing rather than reporting a missing
+        // project record, which would suggest something broke.
+        let managed = match self.engine.branch_git_workspace(
+            &session.id,
+            "run a startup command for",
+            "A startup command provisions a new worktree, and this agent runs in a folder that already exists.",
+        ) {
+            Ok(managed) => managed.clone(),
+            Err(err) => {
+                self.set_error(err.to_string());
+                return Ok(());
+            }
+        };
         let Some(project) = self
             .engine
             .projects
             .iter()
-            .find(|project| project.id == session.project_id)
+            .find(|project| project.id == managed.project_id)
             .cloned()
         else {
             self.set_error("Could not find the selected agent's project.");
@@ -2741,7 +2794,7 @@ impl App {
         };
         let paths = self.engine.paths.clone();
         let tx = self.engine.worker_tx.clone();
-        let branch = session.branch_name.clone();
+        let branch = managed.branch_name.clone();
         let terminal = self.engine.config.startup_command_terminal.clone();
         let env = crate::config::resolve_agent_env(&self.engine.config.env, &project.env)
             .unwrap_or_default();
@@ -2772,6 +2825,7 @@ impl App {
                 crate::startup::StartupCommandRun {
                     project,
                     session,
+                    managed,
                     command,
                     terminal,
                     env,
@@ -2785,15 +2839,26 @@ impl App {
     }
 
     pub(crate) fn open_startup_command_logs(&mut self) -> Result<()> {
-        let (scope_label, scope) = if let Some(session) = self.selected_session().cloned() {
+        // A standalone agent has no project and so no startup-command logs;
+        // the scope falls through to the selected project, or to nothing.
+        let selected_agent_scope = self
+            .selected_session()
+            .cloned()
+            .filter(|session| session.project_id().is_some());
+        let (scope_label, scope) = if let Some(session) = selected_agent_scope {
             let project_name = self.engine.project_name_for_session(&session);
+            let project_id = session
+                .project_id()
+                .expect("filtered to agents with a project")
+                .to_string();
             (
                 format!(
                     "agent \"{}\" in project \"{}\"",
-                    session.branch_name, project_name
+                    session.display_label(),
+                    project_name
                 ),
                 crate::startup::StartupCommandLogScope::Agent {
-                    project_id: session.project_id,
+                    project_id,
                     session_id: session.id,
                 },
             )
@@ -3206,7 +3271,7 @@ impl App {
                 .engine
                 .sessions
                 .iter()
-                .any(|s| s.project_id == project.id);
+                .any(|s| s.project_id() == Some(project.id.as_str()));
             if has_sessions {
                 self.set_error("Delete all agents in this project first.");
                 return Ok(());
@@ -3245,8 +3310,11 @@ impl App {
         // No real project is selected. If an ORPHANED session is selected (its
         // project record is gone), clear the whole ghost group: Command::RemoveProject
         // cascades the orphaned session records and keeps their worktrees on disk.
-        if let Some(session) = self.selected_session().cloned() {
-            let project_id = session.project_id.clone();
+        // A STANDALONE agent is not an orphan: it has no project record to
+        // have lost, so there is no ghost group to clear for it.
+        if let Some(session) = self.selected_session().cloned()
+            && let Some(project_id) = session.project_id().map(str::to_string)
+        {
             let project_name = dux_core::sidebar::short_project_id(&project_id);
             let reaction = self.engine.apply(Command::RemoveProject {
                 project_id,
@@ -3367,7 +3435,7 @@ impl App {
         let Some(file) = self.selected_changed_file() else {
             return Ok(());
         };
-        let worktree_path = session.worktree_path.clone();
+        let worktree_path = session.directory().to_string();
         let rel_path = file.path.clone();
         let output = crate::diff::diff_file(
             Path::new(&worktree_path),
@@ -3424,7 +3492,7 @@ impl App {
                 .engine
                 .sessions
                 .get(*index)
-                .map(|s| s.worktree_path.clone()),
+                .map(|s| s.directory().to_string()),
             _ => None,
         };
         // Fall back to a chooser-picked project (agent-less projects have no row
@@ -3471,7 +3539,7 @@ impl App {
 
         let session_label = self.session_label(&session);
         let configured_default = self.engine.config.editor.default.trim().to_string();
-        self.open_worktree_in_editor(&session.worktree_path, &session_label, &selected_editor)?;
+        self.open_worktree_in_editor(session.directory(), &session_label, &selected_editor)?;
 
         if !configured_default.is_empty()
             && !editor::matches_configured_editor(&selected_editor, &configured_default)
@@ -3508,7 +3576,7 @@ impl App {
         let session_label = self.session_label(&session);
         self.prompt = PromptState::PickEditor {
             session_label,
-            worktree_path: session.worktree_path.clone(),
+            worktree_path: session.directory().to_string(),
             editors,
             selected,
         };
@@ -4144,6 +4212,7 @@ mod tests {
             refs_watch_paths: std::collections::HashMap::new(),
             resume_fallback_candidates: std::collections::HashMap::new(),
             pending_deletions: std::collections::HashSet::new(),
+            folder_repo_statuses: std::collections::HashMap::new(),
             closing_sessions: std::collections::HashSet::new(),
             deletion_busy_messages: std::collections::HashMap::new(),
             watched_worktree: Arc::new(Mutex::new(None::<PathBuf>)),
@@ -4387,6 +4456,7 @@ mod tests {
             refs_watch_paths: std::collections::HashMap::new(),
             resume_fallback_candidates: std::collections::HashMap::new(),
             pending_deletions: std::collections::HashSet::new(),
+            folder_repo_statuses: std::collections::HashMap::new(),
             closing_sessions: std::collections::HashSet::new(),
             deletion_busy_messages: std::collections::HashMap::new(),
             watched_worktree: Arc::new(Mutex::new(None::<PathBuf>)),

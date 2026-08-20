@@ -790,7 +790,8 @@ async fn rest_create_session_returns_201_and_scopes_status() {
     let body: serde_json::Value = resp.json().await.expect("created session json");
     let new_id = body["id"].as_str().expect("created session id");
     assert!(!new_id.is_empty());
-    assert_eq!(body["project_id"].as_str(), Some("p1"));
+    assert_eq!(body["workspace"]["kind"].as_str(), Some("managed"));
+    assert_eq!(body["workspace"]["project_id"].as_str(), Some("p1"));
 
     // The originating connection sees the create's status…
     assert!(
@@ -859,7 +860,7 @@ async fn rest_create_session_idempotency_replays_same_session() {
         .as_array()
         .map(|arr| {
             arr.iter()
-                .filter(|s| s["project_id"].as_str() == Some("p1"))
+                .filter(|s| s["workspace"]["project_id"].as_str() == Some("p1"))
                 .count()
         })
         .unwrap_or(0);
@@ -2437,7 +2438,7 @@ async fn thin_reads_still_nest_terminals_for_both_owner_kinds() {
     );
     // The session's own fields are untouched alongside it.
     assert_eq!(one["id"].as_str(), Some("s1"));
-    assert_eq!(one["project_id"].as_str(), Some("p1"));
+    assert_eq!(one["workspace"]["project_id"].as_str(), Some("p1"));
 
     let sessions: serde_json::Value = client
         .get(format!("http://{addr}/api/v1/sessions"))
@@ -2684,7 +2685,8 @@ async fn thin_reads_pin_the_exact_terminal_key_set() {
         "the nested terminals array must survive: {session_keys:?}"
     );
     assert!(session_keys.contains(&"id".to_string()));
-    assert!(session_keys.contains(&"project_id".to_string()));
+    // The project id lives inside the tagged workspace now, not beside it.
+    assert!(session_keys.contains(&"workspace".to_string()));
 }
 
 /// `POST /api/v1/sessions` and its idempotent replay serve the same nested shape

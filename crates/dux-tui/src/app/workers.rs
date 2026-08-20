@@ -313,7 +313,7 @@ impl App {
                         && !pty.output_excerpt.trim().is_empty()
                         && let Some(current) = self.selected_session()
                     {
-                        let branch = current.branch_name.clone();
+                        let branch = current.display_label();
                         let provider = self
                             .engine
                             .running_provider_for(current)
@@ -909,6 +909,11 @@ impl App {
                         );
                     }
                     BeginDeleteSessionOutcome::NotFound => {}
+                    // The delete did not happen: the caller asked dux to remove
+                    // a standalone agent's folder, which it never does.
+                    BeginDeleteSessionOutcome::Refused { message } => {
+                        self.set_error(message);
+                    }
                     BeginDeleteSessionOutcome::AsyncStarted { busy_message } => {
                         // The agent PTY + its terminals are already SIGTERMed and
                         // held for a background reap. Vanish the session now
@@ -1456,7 +1461,7 @@ impl App {
                 self.resolve_reconnect_op_or(
                     &session_id,
                     dux_core::engine::LaunchOutcome::ReconnectFailed {
-                        branch_name,
+                        branch_name: agent_label,
                         message,
                     },
                 );
@@ -1469,7 +1474,7 @@ impl App {
                 self.resolve_reconnect_op_or(
                     &session_id,
                     dux_core::engine::LaunchOutcome::ForceReconnectFailed {
-                        branch_name,
+                        branch_name: agent_label,
                         message,
                     },
                 );
@@ -1483,7 +1488,7 @@ impl App {
                 ..
             } => {
                 self.set_warning(format!(
-                    "Couldn't auto-reopen agent \"{branch_name}\": {message}"
+                    "Couldn't auto-reopen agent \"{agent_label}\": {message}"
                 ));
             }
             AgentLaunchFailedOutcome::Tab {
@@ -1495,7 +1500,7 @@ impl App {
                 // the real error so the user knows why nothing came up. The Engine
                 // has already removed a failed fresh-create's row.
                 self.set_warning(format!(
-                    "Tab launch failed for \"{branch_name}\": {message}"
+                    "Tab launch failed for \"{agent_label}\": {message}"
                 ));
             }
             AgentLaunchFailedOutcome::Silent => {

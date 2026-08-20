@@ -1012,12 +1012,15 @@ mod tests {
                 "ConfirmDeleteAgent",
                 PromptState::ConfirmDeleteAgent {
                     session_id: "s1".to_string(),
-                    branch_name: "b".to_string(),
-                    initial_branch: "wt-branch".to_string(),
-                    branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
+                    agent_label: "b".to_string(),
+                    target: crate::app::DeleteAgentTarget::Managed {
+                        branch_name: "b".to_string(),
+                        initial_branch: "wt-branch".to_string(),
+                        branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
+                        worktree_shared: false,
+                    },
                     focus: DeleteAgentFocus::Cancel,
                     delete_worktree: false,
-                    worktree_shared: false,
                 },
             ),
             (

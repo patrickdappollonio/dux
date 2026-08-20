@@ -169,6 +169,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         refs_watch_paths: std::collections::HashMap::new(),
         resume_fallback_candidates: std::collections::HashMap::new(),
         pending_deletions: std::collections::HashSet::new(),
+        folder_repo_statuses: std::collections::HashMap::new(),
         closing_sessions: std::collections::HashSet::new(),
         deletion_busy_messages: std::collections::HashMap::new(),
         watched_worktree: Arc::new(Mutex::new(None::<PathBuf>)),

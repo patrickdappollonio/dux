@@ -1052,6 +1052,27 @@ pub(crate) fn pr_state_word(state: &crate::model::PrState) -> &'static str {
     }
 }
 
+/// The LOCATION field an agent row shows and its search matches: the project's
+/// name for a managed agent, the home-collapsed folder for a standalone one.
+///
+/// One helper for the filter and the highlight, so a query can never match a
+/// field the row does not display, or highlight one it does not match on.
+pub(crate) fn agent_search_location(
+    engine: &dux_core::engine::Engine,
+    session: &AgentSession,
+) -> Option<String> {
+    match &session.workspace {
+        dux_core::model::AgentWorkspace::Managed(managed) => engine
+            .projects
+            .iter()
+            .find(|p| p.id == managed.project_id)
+            .map(|p| p.name.clone()),
+        dux_core::model::AgentWorkspace::Folder(folder) => Some(dux_core::home_path::shorten_home(
+            std::path::Path::new(&folder.folder_path),
+        )),
+    }
+}
+
 /// Build the body lines of the Agent Info modal from a session: name, provider,
 /// the current/original/forked-from branches, a drift note when the current
 /// branch differs from the branch the agent was created on, then the worktree,
@@ -1063,10 +1084,7 @@ pub(crate) fn agent_info_lines(
     project_default: Option<ProviderKind>,
     pr: Option<(&crate::model::PrInfo, bool)>,
 ) -> Vec<(String, AgentInfoTone)> {
-    let name = session
-        .title
-        .clone()
-        .unwrap_or_else(|| session.branch_name.clone());
+    let name = session.display_label();
     // Mirror the header's "current provider" note: when the agent runs a provider
     // other than its project's default, spell out the divergence here too.
     let provider_line = match project_default {
@@ -1080,32 +1098,52 @@ pub(crate) fn agent_info_lines(
     let mut lines = vec![
         (format!("Name:         {name}"), AgentInfoTone::Neutral),
         (provider_line, AgentInfoTone::Neutral),
-        (
-            format!("Current:      {}", session.branch_name),
-            AgentInfoTone::Neutral,
-        ),
-        (
-            format!("Original:     {}", session.initial_branch),
-            AgentInfoTone::Neutral,
-        ),
-        (
-            format!("Forked from:  {}", session.source_branch),
-            AgentInfoTone::Neutral,
-        ),
     ];
-    if branch_drifted(&session.branch_name, &session.initial_branch) {
-        lines.push((
-            format!(
-                "Branch changed since creation (orig: {})",
-                session.initial_branch
-            ),
-            AgentInfoTone::Warning,
-        ));
+    // The branch rows exist only for a managed agent. A standalone agent gets
+    // the one thing that is true of it instead: what it is and where it runs.
+    // Rendering "Current:" with an empty value would be worse than no row.
+    match &session.workspace {
+        dux_core::model::AgentWorkspace::Managed(managed) => {
+            lines.push((
+                format!("Current:      {}", managed.branch_name),
+                AgentInfoTone::Neutral,
+            ));
+            lines.push((
+                format!("Original:     {}", managed.initial_branch),
+                AgentInfoTone::Neutral,
+            ));
+            lines.push((
+                format!("Forked from:  {}", managed.source_branch),
+                AgentInfoTone::Neutral,
+            ));
+            if branch_drifted(&managed.branch_name, &managed.initial_branch) {
+                lines.push((
+                    format!(
+                        "Branch changed since creation (orig: {})",
+                        managed.initial_branch
+                    ),
+                    AgentInfoTone::Warning,
+                ));
+            }
+            lines.push((
+                format!("Worktree:     {}", managed.worktree_path),
+                AgentInfoTone::Neutral,
+            ));
+        }
+        dux_core::model::AgentWorkspace::Folder(folder) => {
+            lines.push((
+                "Kind:         Standalone agent".to_string(),
+                AgentInfoTone::Neutral,
+            ));
+            lines.push((
+                format!(
+                    "Folder:       {}",
+                    dux_core::home_path::shorten_home(std::path::Path::new(&folder.folder_path))
+                ),
+                AgentInfoTone::Neutral,
+            ));
+        }
     }
-    lines.push((
-        format!("Worktree:     {}", session.worktree_path),
-        AgentInfoTone::Neutral,
-    ));
     lines.push((
         format!(
             "Created:      {}",
@@ -1477,6 +1515,54 @@ pub(crate) enum ConfigReloadFailedFocus {
     Checkbox,
 }
 
+/// What deleting this agent is actually about, and therefore whether the modal
+/// has a removal to offer at all.
+///
+/// A STANDALONE agent takes [`DeleteAgentTarget::Folder`], which carries no
+/// branch identity and no worktree, so the "also remove the worktree" checkbox
+/// is not merely hidden for it, there is nothing for the checkbox to be about.
+/// That is the modal half of "dux never deletes the user's folder": the offer
+/// cannot be rendered, so it cannot be ticked.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum DeleteAgentTarget {
+    /// A managed working copy dux owns.
+    Managed {
+        branch_name: String,
+        /// The branch the agent was born on, needed by the copy: when it
+        /// differs from `branch_name` the agent drifted, and a kept-branch
+        /// delete keeps both of them.
+        initial_branch: String,
+        /// Where the branch came from. Decides whether the checkbox promises to
+        /// delete the branch or to keep it (see
+        /// [`super::render::delete_agent_checkbox_label`]).
+        branch_provenance: dux_core::model::BranchProvenance,
+        /// True when one or more other sessions share this worktree. In that
+        /// case the worktree is always preserved regardless of the user's
+        /// choice, so the checkbox is hidden and a note is shown instead.
+        worktree_shared: bool,
+    },
+    /// A folder the user already had. Deleting the agent removes dux's record
+    /// of it and nothing else. The label is home-collapsed for display.
+    Folder { folder_label: String },
+}
+
+impl DeleteAgentTarget {
+    /// Whether this dialog offers the "also remove the worktree" checkbox.
+    ///
+    /// THE ONE ANSWER, so the renderer, the focus ring and the click handler
+    /// cannot disagree about whether the control is there. A standalone agent
+    /// has no worktree to remove, and a shared worktree is preserved whatever
+    /// the user ticks, so neither offers it.
+    pub(crate) fn offers_worktree_checkbox(&self) -> bool {
+        match self {
+            Self::Managed {
+                worktree_shared, ..
+            } => !worktree_shared,
+            Self::Folder { .. } => false,
+        }
+    }
+}
+
 /// Which selectable element has focus in the Delete Agent confirmation modal.
 /// Focus cycles through all three via Tab / arrow keys / h / l.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1664,21 +1750,14 @@ pub(crate) enum PromptState {
     },
     ConfirmDeleteAgent {
         session_id: String,
-        branch_name: String,
-        /// The branch the agent was born on, needed by the copy: when it differs
-        /// from `branch_name` the agent drifted, and a kept-branch delete keeps
-        /// both of them.
-        initial_branch: String,
-        /// Where the branch came from. Decides whether the checkbox promises to
-        /// delete the branch or to keep it (see
-        /// [`super::render::delete_agent_checkbox_label`]).
-        branch_provenance: dux_core::model::BranchProvenance,
+        /// The agent's display name, for the heading. Not a branch: a
+        /// standalone agent has none.
+        agent_label: String,
+        /// What this delete is actually about, which decides whether there is a
+        /// removal to offer at all. See [`DeleteAgentTarget`].
+        target: DeleteAgentTarget,
         focus: DeleteAgentFocus,
         delete_worktree: bool,
-        /// True when one or more other sessions share this worktree. In that
-        /// case the worktree is always preserved regardless of the user's
-        /// choice, so the checkbox is hidden and a note is shown instead.
-        worktree_shared: bool,
     },
     ConfirmDeleteTerminal {
         terminal_id: String,
@@ -2979,6 +3058,7 @@ impl App {
             refs_watch_paths: HashMap::new(),
             resume_fallback_candidates: HashMap::new(),
             pending_deletions: HashSet::new(),
+            folder_repo_statuses: HashMap::new(),
             closing_sessions: HashSet::new(),
             deletion_busy_messages: HashMap::new(),
             watched_worktree: Arc::clone(&watched_worktree),
@@ -3815,7 +3895,10 @@ impl App {
                 // own project has a missing path.
                 LeftItem::Session(idx) => {
                     let s = self.engine.sessions.get(idx)?;
-                    let p = self.engine.projects.iter().find(|p| p.id == s.project_id)?;
+                    // A standalone agent has no project, so no project-path
+                    // warning can apply to it.
+                    let project_id = s.project_id()?;
+                    let p = self.engine.projects.iter().find(|p| p.id == project_id)?;
                     p.path_missing.then(|| p.path.clone())
                 }
                 _ => None,
@@ -4515,17 +4598,15 @@ impl App {
             .sessions
             .iter()
             .map(|session| {
-                let project_name = self
-                    .engine
-                    .projects
-                    .iter()
-                    .find(|p| p.id == session.project_id)
-                    .map(|p| p.name.as_str())
-                    .unwrap_or("");
+                // The row's second line shows a project for a managed agent
+                // and a FOLDER for a standalone one, so the search matches
+                // whichever the row actually shows. Typing part of a path finds
+                // a standalone agent, exactly as terminal searching works.
+                let location = agent_search_location(&self.engine, session);
                 dux_core::agent_search::matches_session(
                     session.title.as_deref(),
-                    &session.branch_name,
-                    project_name,
+                    session.branch_name(),
+                    location.as_deref(),
                     query,
                 )
             })
@@ -4713,10 +4794,11 @@ impl App {
         match self.left_items().get(self.selected_left) {
             Some(LeftItem::Session(index)) => {
                 self.engine.sessions.get(*index).and_then(|session| {
+                    let project_id = session.project_id()?;
                     self.engine
                         .projects
                         .iter()
-                        .find(|project| project.id == session.project_id)
+                        .find(|project| project.id == project_id)
                 })
             }
             _ => None,
@@ -5015,15 +5097,13 @@ impl App {
     /// `PromptState` so `Esc` closes it uniformly with every other prompt.
     pub(crate) fn open_agent_info(&mut self) -> Result<()> {
         if let Some(session) = self.selected_session().cloned() {
-            let label = session
-                .title
-                .clone()
-                .unwrap_or_else(|| session.branch_name.clone());
-            let project_default = self
-                .engine
-                .projects
-                .iter()
-                .find(|p| p.id == session.project_id)
+            let label = session.display_label();
+            // A standalone agent has no project, so there is no project default
+            // to compare its provider against and the divergence note is simply
+            // not written for it.
+            let project_default = session
+                .project_id()
+                .and_then(|project_id| self.engine.projects.iter().find(|p| p.id == project_id))
                 .map(|p| p.default_provider.clone());
             self.input_target = InputTarget::None;
             self.fullscreen_overlay = FullscreenOverlay::None;
@@ -5056,7 +5136,7 @@ impl App {
                 );
                 return Ok(());
             }
-            let current_name = session.title.unwrap_or_else(|| session.branch_name.clone());
+            let current_name = session.display_label();
             self.input_target = InputTarget::None;
             self.fullscreen_overlay = FullscreenOverlay::None;
             self.prompt = PromptState::RenameSession {
@@ -5314,8 +5394,12 @@ impl App {
                 .iter()
                 .find(|s| &s.id == sid)
                 .map(|s| {
-                    let agent = s.title.clone().unwrap_or_else(|| s.branch_name.clone());
-                    match self.engine.projects.iter().find(|p| p.id == s.project_id) {
+                    let agent = s.display_label();
+                    // A standalone agent has no project to qualify the label
+                    // with, so the terminal's owner is just the agent's name.
+                    match s.project_id().and_then(|project_id| {
+                        self.engine.projects.iter().find(|p| p.id == project_id)
+                    }) {
                         Some(p) => format!("{agent}@{}", p.name),
                         None => agent,
                     }
@@ -5344,9 +5428,16 @@ impl App {
     /// web's `matchesTerminalQuery`.
     fn terminal_owner_project_name(&self, terminal: &CompanionTerminal) -> String {
         let project_id = match &terminal.owner {
-            TerminalOwner::Session(sid) => match self.engine.sessions.iter().find(|s| &s.id == sid)
+            TerminalOwner::Session(sid) => match self
+                .engine
+                .sessions
+                .iter()
+                .find(|s| &s.id == sid)
+                .and_then(|session| session.project_id())
             {
-                Some(session) => session.project_id.clone(),
+                Some(project_id) => project_id.to_string(),
+                // Either the session is gone, or it is a standalone agent,
+                // which belongs to no project. Truthfully empty either way.
                 None => return String::new(),
             },
             TerminalOwner::Project(pid) => pid.clone(),
@@ -5966,6 +6057,49 @@ mod tests {
         }
     }
 
+    fn test_standalone_session(id: &str, folder: &str) -> AgentSession {
+        let mut session = test_session(id, "p1", 0);
+        session.title = Some(format!("{id}-title"));
+        session.workspace =
+            dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
+                folder_path: folder.to_string(),
+            });
+        session
+    }
+
+    /// The info panel says what this agent is and where it runs, and says
+    /// nothing about branches: it has none, and a row reading "Current:" with
+    /// an empty value is worse than no row.
+    #[test]
+    fn agent_info_lines_for_a_standalone_agent_name_the_folder_and_no_branches() {
+        let s = test_standalone_session("sa1", "/home/someone/notes");
+        let lines = agent_info_lines(&s, None, None);
+        let text = lines
+            .iter()
+            .map(|(l, _)| l.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            text.contains("Standalone agent"),
+            "the panel must say what kind of agent this is, got:\n{text}"
+        );
+        assert!(
+            text.contains("Folder:"),
+            "and name the folder it runs in, got:\n{text}"
+        );
+        assert!(
+            text.contains("notes"),
+            "with the folder's actual path, got:\n{text}"
+        );
+        for absent in ["Current:", "Original:", "Forked from:", "Worktree:"] {
+            assert!(
+                !text.contains(absent),
+                "{absent} must be absent, not blank, got:\n{text}"
+            );
+        }
+    }
+
     #[test]
     fn agent_info_lines_include_lineage_and_drift() {
         let mut s = test_session("s1", "p1", 0);
@@ -6418,9 +6552,18 @@ mod tests {
         );
 
         // `sessions` order is untouched: still the incoming order.
-        assert_eq!(sessions[0].branch_name, "charlie");
-        assert_eq!(sessions[1].branch_name, "alpha");
-        assert_eq!(sessions[2].branch_name, "bravo");
+        assert_eq!(
+            sessions[0].branch_name().expect("managed test session"),
+            "charlie"
+        );
+        assert_eq!(
+            sessions[1].branch_name().expect("managed test session"),
+            "alpha"
+        );
+        assert_eq!(
+            sessions[2].branch_name().expect("managed test session"),
+            "bravo"
+        );
     }
 
     #[test]
