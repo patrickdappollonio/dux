@@ -31,16 +31,21 @@
 //! (`spawn_blocking`). After a write, the changed-files cache is invalidated so a
 //! `session.changes` event reaches subscribed clients on `/ws/events`.
 
+use std::path::{Path as StdPath, PathBuf};
 use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, Path as ApiPath, Query, State, rejection::JsonRejection},
-    http::{StatusCode, header},
+    extract::{
+        DefaultBodyLimit, FromRequestParts, Path as ApiPath, Query, State, rejection::JsonRejection,
+    },
+    http::{StatusCode, header, request::Parts},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
+
+use dux_core::model::TerminalRoute;
 
 use crate::git_routes::resolve_worktree;
 use crate::rest_common::{id_within_bound, unknown_session};
@@ -180,47 +185,248 @@ struct OpenedEditor {
 const MAX_EDIT_WRITE_BYTES: usize =
     2 * dux_core::worktree_file::MAX_EDITABLE_BYTES as usize + 64 * 1024;
 
-/// The editor file routes. These
-/// are path-keyed: the session id is the `:id` path segment under
-/// `/api/v1/sessions/:id/files/*`, validated by `id_within_bound` and resolved to
-/// a worktree at the top of each handler (mirroring the other resource-nested REST
-/// routes). The `raw` proxy is a GET with a worktree-relative `?path=` query.
-pub fn routes() -> Router<AppState> {
-    let prefix = "/api/v1/sessions/{id}/files";
+/// What an editor request's paths are resolved against, decided by the ADDRESS
+/// the request arrived at and never by the id alone.
+///
+/// Three addresses reach exactly the same handlers. `/api/v1/sessions/{id}/files/*`
+/// roots at an agent's worktree; `/api/v1/terminals/{tid}/files/*` roots at a
+/// STANDALONE terminal's spawn directory; and
+/// `/api/v1/projects/{pid}/terminals/{tid}/files/*` roots at a project
+/// terminal's. Each address is an extractor that answers the root or refuses
+/// with a 404, so the guard for a namespace is written once and every handler
+/// is generic over which one ran. There is deliberately no session-nested
+/// terminal address: a session-owned terminal shares its agent's worktree, so
+/// its editor IS the agent's editor and gets the agent's routes, diff mode and
+/// changes broadcast along with it.
+///
+/// The terminal roots are pinned at spawn. That is the one place this parts
+/// company with the file-drop tenet, which follows the shell's live directory
+/// so a dropped file lands where the user is typing. An editor root backs a
+/// tree, a set of buffers, their drafts and a bookmarkable URL, and a root that
+/// moved when somebody typed `cd` would invalidate all four at once.
+trait EditorRoot: Send + 'static {
+    /// The absolute directory every path in the request resolves against.
+    fn path(&self) -> &StdPath;
+
+    /// The agent whose changed-files broadcast a mutation here should refresh.
+    ///
+    /// A terminal root answers `None`, and the absence is the design: it has no
+    /// agent, no changes pane and no diff mode, so there is nothing for a
+    /// broadcast to update. Freshness in a terminal-rooted editor rides the
+    /// remaining two triggers, window focus and tab activation.
+    fn changes_session(&self) -> Option<String>;
+
+    /// The flat walk backing the "Search files…" box. A worktree walks its own
+    /// dot directories (the editor opens `.git/config` through it); a terminal
+    /// root prunes them, for the reasons on [`dux_core::git::rooted_files`].
+    fn search_walk(
+        root: &StdPath,
+        max_files: usize,
+    ) -> anyhow::Result<dux_core::git::WorktreeFileList>;
+}
+
+/// An agent's worktree, from `/api/v1/sessions/{id}/files/*`.
+struct SessionRoot {
+    worktree: PathBuf,
+    session_id: String,
+}
+
+impl EditorRoot for SessionRoot {
+    fn path(&self) -> &StdPath {
+        &self.worktree
+    }
+    fn changes_session(&self) -> Option<String> {
+        Some(self.session_id.clone())
+    }
+    fn search_walk(
+        root: &StdPath,
+        max_files: usize,
+    ) -> anyhow::Result<dux_core::git::WorktreeFileList> {
+        dux_core::git::worktree_files(root, max_files)
+    }
+}
+
+impl FromRequestParts<AppState> for SessionRoot {
+    type Rejection = Response;
+
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Response> {
+        let ApiPath(id) = ApiPath::<String>::from_request_parts(parts, state)
+            .await
+            .map_err(|_| unknown_session())?;
+        if !id_within_bound(&id) {
+            return Err(unknown_session());
+        }
+        let worktree = resolve_worktree(state, id.clone()).await?;
+        Ok(Self {
+            worktree,
+            session_id: id,
+        })
+    }
+}
+
+/// A standalone terminal's pinned spawn directory, from
+/// `/api/v1/terminals/{tid}/files/*`.
+struct StandaloneTerminalRoot(PathBuf);
+
+/// A project terminal's pinned spawn directory, from
+/// `/api/v1/projects/{pid}/terminals/{tid}/files/*`.
+struct ProjectTerminalRoot(PathBuf);
+
+/// The shared body of both terminal roots. Only the extractors differ, because
+/// only the address differs.
+macro_rules! terminal_root {
+    ($ty:ident) => {
+        impl EditorRoot for $ty {
+            fn path(&self) -> &StdPath {
+                &self.0
+            }
+            fn changes_session(&self) -> Option<String> {
+                None
+            }
+            fn search_walk(
+                root: &StdPath,
+                max_files: usize,
+            ) -> anyhow::Result<dux_core::git::WorktreeFileList> {
+                dux_core::git::rooted_files(root, max_files)
+            }
+        }
+    };
+}
+
+terminal_root!(StandaloneTerminalRoot);
+terminal_root!(ProjectTerminalRoot);
+
+impl FromRequestParts<AppState> for StandaloneTerminalRoot {
+    type Rejection = Response;
+
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Response> {
+        let ApiPath(tid) = ApiPath::<String>::from_request_parts(parts, state)
+            .await
+            .map_err(|_| unknown_terminal())?;
+        resolve_terminal_root(state, TerminalRoute::Standalone, &tid)
+            .await
+            .map(Self)
+    }
+}
+
+impl FromRequestParts<AppState> for ProjectTerminalRoot {
+    type Rejection = Response;
+
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Response> {
+        let ApiPath((pid, tid)) = ApiPath::<(String, String)>::from_request_parts(parts, state)
+            .await
+            .map_err(|_| unknown_terminal())?;
+        if !id_within_bound(&pid) {
+            return Err(unknown_terminal());
+        }
+        resolve_terminal_root(state, TerminalRoute::Project(&pid), &tid)
+            .await
+            .map(Self)
+    }
+}
+
+/// The one place a terminal id becomes an editor root, for every terminal
+/// address there is.
+///
+/// It takes the ROUTE NAMESPACE, never just the id, and hands it to the
+/// exhaustive [`dux_core::model::TerminalOwner::is_at_route`] that the terminal
+/// delete routes already enforce membership with. That is what makes a session
+/// id, a project terminal at the un-nested address, or a terminal belonging to
+/// another project a 404 rather than a way to read a directory the address
+/// never named.
+async fn resolve_terminal_root(
+    state: &AppState,
+    route: TerminalRoute<'_>,
+    tid: &str,
+) -> Result<PathBuf, Response> {
+    if !id_within_bound(tid) {
+        return Err(unknown_terminal());
+    }
+    match state.engine.terminal_root(tid.to_string()).await {
+        Some((owner, root)) if owner.is_at_route(route) => Ok(root),
+        _ => Err(unknown_terminal()),
+    }
+}
+
+fn unknown_terminal() -> Response {
+    (StatusCode::NOT_FOUND, "unknown terminal").into_response()
+}
+
+/// Tell an agent's changes pane that a file moved underneath it, when there is
+/// an agent to tell. A terminal root answers no session, so a write there emits
+/// nothing: there is no changes pane listing that directory, and inventing a
+/// broadcast would mean naming an agent whose worktree the file is not in.
+fn refresh_root_changes<R: EditorRoot>(state: &AppState, root: &R, worktree: &StdPath) {
+    if let Some(session_id) = root.changes_session() {
+        crate::git_routes::refresh_changed_files_now(state, session_id, worktree);
+    }
+}
+
+/// The editor file routes for one address, generic over what that address roots
+/// at. Registering the same handlers three times is the whole mechanism: the
+/// guards live in the extractor and nothing below this line knows which
+/// namespace it is serving.
+fn editor_file_routes<R>(prefix: &str) -> Router<AppState>
+where
+    R: EditorRoot + FromRequestParts<AppState, Rejection = Response>,
+{
     Router::new()
-        .route(&format!("{prefix}/list"), post(list_files))
-        .route(&format!("{prefix}/tree"), post(list_tree))
-        .route(&format!("{prefix}/read"), post(read_file))
-        .route(&format!("{prefix}/diff"), post(diff_contents))
-        .route(&format!("{prefix}/raw"), get(read_raw))
+        .route(&format!("{prefix}/list"), post(list_files::<R>))
+        .route(&format!("{prefix}/tree"), post(list_tree::<R>))
+        .route(&format!("{prefix}/read"), post(read_file::<R>))
+        .route(&format!("{prefix}/raw"), get(read_raw::<R>))
         .route(
             &format!("{prefix}/write"),
             // Set EXPLICITLY, or the framework's 2 MB default applies and a file
             // the editor was willing to OPEN cannot be saved. See
             // [`MAX_EDIT_WRITE_BYTES`] for the size and why it is not simply the
             // read cap.
-            post(write_file).layer(DefaultBodyLimit::max(MAX_EDIT_WRITE_BYTES)),
+            post(write_file::<R>).layer(DefaultBodyLimit::max(MAX_EDIT_WRITE_BYTES)),
         )
-        .route(&format!("{prefix}/info"), post(entry_info))
-        .route(&format!("{prefix}/create-file"), post(create_file))
-        .route(&format!("{prefix}/create-dir"), post(create_dir))
-        .route(&format!("{prefix}/rename"), post(rename_entry))
-        .route(&format!("{prefix}/delete"), post(delete_entry))
-        .route(&format!("{prefix}/open-in-editor"), post(open_in_editor))
+        .route(&format!("{prefix}/info"), post(entry_info::<R>))
+        .route(&format!("{prefix}/create-file"), post(create_file::<R>))
+        .route(&format!("{prefix}/create-dir"), post(create_dir::<R>))
+        .route(&format!("{prefix}/rename"), post(rename_entry::<R>))
+        .route(&format!("{prefix}/delete"), post(delete_entry::<R>))
+        .route(
+            &format!("{prefix}/open-in-editor"),
+            post(open_in_editor::<R>),
+        )
 }
 
-async fn list_files(State(state): State<AppState>, ApiPath(id): ApiPath<String>) -> Response {
-    if !id_within_bound(&id) {
-        return unknown_session();
-    }
-    let worktree = match resolve_worktree(&state, id).await {
-        Ok(w) => w,
-        Err(r) => return r,
+/// The editor file routes. These are path-keyed: the id is a path segment,
+/// validated by `id_within_bound` and resolved to a root by the address's own
+/// extractor before any handler runs (mirroring the other resource-nested REST
+/// routes). The `raw` proxy is a GET with a root-relative `?path=` query.
+pub fn routes() -> Router<AppState> {
+    let session = "/api/v1/sessions/{id}/files";
+    Router::new()
+        .merge(editor_file_routes::<SessionRoot>(session))
+        // `diff` is registered for the AGENT address only. A terminal-rooted
+        // editor has no diff mode, so the route it would call does not exist:
+        // the affordance is absent rather than disabled, and there is no
+        // half-working endpoint for a client to find.
+        .route(&format!("{session}/diff"), post(diff_contents))
+        .merge(editor_file_routes::<StandaloneTerminalRoot>(
+            "/api/v1/terminals/{tid}/files",
+        ))
+        .merge(editor_file_routes::<ProjectTerminalRoot>(
+            "/api/v1/projects/{pid}/terminals/{tid}/files",
+        ))
+}
+
+/// The flat search walk. Bounded by `state.tree_list_semaphore`, the same permit
+/// `list_tree` takes: this is the more expensive of the two (a whole recursive
+/// walk against one `read_dir`), so leaving it unbounded while the cheap one was
+/// capped had the accounting backwards.
+async fn list_files<R: EditorRoot>(State(state): State<AppState>, root: R) -> Response {
+    let _permit = match tree_list_permit(&state).await {
+        Ok(permit) => permit,
+        Err(resp) => return resp,
     };
+    let worktree = root.path().to_path_buf();
     let max_files = state.search_index_max_files;
-    match tokio::task::spawn_blocking(move || dux_core::git::worktree_files(&worktree, max_files))
-        .await
-    {
+    match tokio::task::spawn_blocking(move || R::search_walk(&worktree, max_files)).await {
         Ok(Ok(listing)) => Json(FileList {
             files: listing.files,
             truncated: listing.truncated,
@@ -235,39 +441,41 @@ async fn list_files(State(state): State<AppState>, ApiPath(id): ApiPath<String>)
     }
 }
 
+/// A permit from `state.tree_list_semaphore` (`[server] tree_list_max_concurrency`)
+/// so a burst of directory work cannot exhaust the server's blocking-thread
+/// pool. A request beyond the limit WAITS for a free permit
+/// (`acquire_owned().await`) rather than being rejected: this is a small, fast
+/// unit of background work, not a long-lived connection like the
+/// `ws_*_semaphore` classes, which 503 on exhaustion instead. `None` means the
+/// config value is 0 (unlimited) and no permit is taken at all.
+async fn tree_list_permit(
+    state: &AppState,
+) -> Result<Option<tokio::sync::OwnedSemaphorePermit>, Response> {
+    match &state.tree_list_semaphore {
+        Some(sem) => match Arc::clone(sem).acquire_owned().await {
+            Ok(permit) => Ok(Some(permit)),
+            Err(_) => Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "tree listing semaphore closed unexpectedly",
+            )
+                .into_response()),
+        },
+        None => Ok(None),
+    }
+}
+
 /// Lazy tree listing: one directory per request, no recursion, no cap. The
 /// blocking `read_dir` runs off the async reactor via `spawn_blocking`, bounded
-/// by `state.tree_list_semaphore` (`[server] tree_list_max_concurrency`) so a
-/// burst of tree requests cannot exhaust the server's blocking-thread pool. A
-/// request beyond the limit WAITS for a free permit (`acquire_owned().await`)
-/// rather than being rejected — this is a small, fast unit of background work,
-/// not a long-lived connection like the `ws_*_semaphore` classes, which 503 on
-/// exhaustion instead.
-async fn list_tree(
+/// by [`tree_list_permit`].
+async fn list_tree<R: EditorRoot>(
     State(state): State<AppState>,
-    ApiPath(id): ApiPath<String>,
+    root: R,
     Json(op): Json<TreeOp>,
 ) -> Response {
-    if !id_within_bound(&id) {
-        return unknown_session();
-    }
-    let worktree = match resolve_worktree(&state, id).await {
-        Ok(w) => w,
-        Err(r) => return r,
-    };
-    // `None` means the config value is 0 (unlimited): skip the permit entirely.
-    let _permit = match &state.tree_list_semaphore {
-        Some(sem) => match Arc::clone(sem).acquire_owned().await {
-            Ok(permit) => Some(permit),
-            Err(_) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "tree listing semaphore closed unexpectedly",
-                )
-                    .into_response();
-            }
-        },
-        None => None,
+    let worktree = root.path().to_path_buf();
+    let _permit = match tree_list_permit(&state).await {
+        Ok(permit) => permit,
+        Err(resp) => return resp,
     };
     let dir = op.dir;
     let dir_echo = dir.clone();
@@ -288,18 +496,8 @@ async fn list_tree(
     }
 }
 
-async fn read_file(
-    State(state): State<AppState>,
-    ApiPath(id): ApiPath<String>,
-    Json(op): Json<ReadOp>,
-) -> Response {
-    if !id_within_bound(&id) {
-        return unknown_session();
-    }
-    let worktree = match resolve_worktree(&state, id).await {
-        Ok(w) => w,
-        Err(r) => return r,
-    };
+async fn read_file<R: EditorRoot>(root: R, Json(op): Json<ReadOp>) -> Response {
+    let worktree = root.path().to_path_buf();
     let path = op.path;
     match tokio::task::spawn_blocking(move || dux_core::worktree_file::read_file(&worktree, &path))
         .await
@@ -371,18 +569,8 @@ async fn diff_contents(
 /// Note: `read_file` intentionally ALLOWS outside-resolving symlinks (marking
 /// them `read_only: true`) so the editor can display them. We do NOT change
 /// that behaviour here; this restriction is image-proxy–only.
-async fn read_raw(
-    State(state): State<AppState>,
-    ApiPath(id): ApiPath<String>,
-    Query(q): Query<RawQuery>,
-) -> Response {
-    if !id_within_bound(&id) {
-        return unknown_session();
-    }
-    let worktree = match resolve_worktree(&state, id).await {
-        Ok(w) => w,
-        Err(r) => return r,
-    };
+async fn read_raw<R: EditorRoot>(root: R, Query(q): Query<RawQuery>) -> Response {
+    let worktree = root.path().to_path_buf();
     let path = q.path;
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<(&'static str, Vec<u8>)> {
         // Use the read-permissive resolver so symlinked images inside the
@@ -492,9 +680,9 @@ fn mime_for_path(path: &str) -> &'static str {
     }
 }
 
-async fn write_file(
+async fn write_file<R: EditorRoot>(
     State(state): State<AppState>,
-    ApiPath(id): ApiPath<String>,
+    root: R,
     op: Result<Json<WriteOp>, JsonRejection>,
 ) -> Response {
     // Taken as a Result so the OVER-SIZE case can say what happened. Left to the
@@ -505,14 +693,7 @@ async fn write_file(
         Ok(op) => op,
         Err(rejection) => return write_rejection(rejection),
     };
-    if !id_within_bound(&id) {
-        return unknown_session();
-    }
-    let session_id = id.clone();
-    let worktree = match resolve_worktree(&state, id).await {
-        Ok(w) => w,
-        Err(r) => return r,
-    };
+    let worktree = root.path().to_path_buf();
     let wt = worktree.clone();
     let path = op.path;
     let content = op.content;
@@ -556,7 +737,7 @@ async fn write_file(
                 .into_response();
         }
     };
-    crate::git_routes::refresh_changed_files_now(&state, session_id, &worktree);
+    refresh_root_changes(&state, &root, &worktree);
     Json(WriteResult {
         modified: stamp.modified,
         size: stamp.size,
@@ -595,18 +776,8 @@ fn write_rejection(rejection: JsonRejection) -> Response {
 /// `dux_core::worktree_file::entry_info`'s, which is the same boundary the
 /// write path uses. The git lookup shells out, so the whole thing runs off the
 /// async reactor.
-async fn entry_info(
-    State(state): State<AppState>,
-    ApiPath(id): ApiPath<String>,
-    Json(op): Json<PathOp>,
-) -> Response {
-    if !id_within_bound(&id) {
-        return unknown_session();
-    }
-    let worktree = match resolve_worktree(&state, id).await {
-        Ok(w) => w,
-        Err(r) => return r,
-    };
+async fn entry_info<R: EditorRoot>(root: R, Json(op): Json<PathOp>) -> Response {
+    let worktree = root.path().to_path_buf();
     let path = op.path;
     match tokio::task::spawn_blocking(move || dux_core::worktree_file::entry_info(&worktree, &path))
         .await
@@ -637,19 +808,12 @@ async fn entry_info(
 /// Create a new empty file at `op.path`. Refuses an already-existing entry and
 /// a missing parent, same as `write_file`'s create arm. See
 /// `dux_core::worktree_file::create_file` for the containment guards.
-async fn create_file(
+async fn create_file<R: EditorRoot>(
     State(state): State<AppState>,
-    ApiPath(id): ApiPath<String>,
+    root: R,
     Json(op): Json<PathOp>,
 ) -> Response {
-    if !id_within_bound(&id) {
-        return unknown_session();
-    }
-    let session_id = id.clone();
-    let worktree = match resolve_worktree(&state, id).await {
-        Ok(w) => w,
-        Err(r) => return r,
-    };
+    let worktree = root.path().to_path_buf();
     let wt = worktree.clone();
     let path = op.path;
     match tokio::task::spawn_blocking(move || dux_core::worktree_file::create_file(&wt, &path))
@@ -665,25 +829,18 @@ async fn create_file(
                 .into_response();
         }
     }
-    crate::git_routes::refresh_changed_files_now(&state, session_id, &worktree);
+    refresh_root_changes(&state, &root, &worktree);
     StatusCode::OK.into_response()
 }
 
 /// Create a new directory at `op.path`, creating missing intermediate
 /// components. See `dux_core::worktree_file::create_dir`.
-async fn create_dir(
+async fn create_dir<R: EditorRoot>(
     State(state): State<AppState>,
-    ApiPath(id): ApiPath<String>,
+    root: R,
     Json(op): Json<PathOp>,
 ) -> Response {
-    if !id_within_bound(&id) {
-        return unknown_session();
-    }
-    let session_id = id.clone();
-    let worktree = match resolve_worktree(&state, id).await {
-        Ok(w) => w,
-        Err(r) => return r,
-    };
+    let worktree = root.path().to_path_buf();
     let wt = worktree.clone();
     let path = op.path;
     match tokio::task::spawn_blocking(move || dux_core::worktree_file::create_dir(&wt, &path)).await
@@ -698,25 +855,18 @@ async fn create_dir(
                 .into_response();
         }
     }
-    crate::git_routes::refresh_changed_files_now(&state, session_id, &worktree);
+    refresh_root_changes(&state, &root, &worktree);
     StatusCode::OK.into_response()
 }
 
 /// Rename/move `op.from` to `op.to` (file or directory). See
 /// `dux_core::worktree_file::rename_entry`.
-async fn rename_entry(
+async fn rename_entry<R: EditorRoot>(
     State(state): State<AppState>,
-    ApiPath(id): ApiPath<String>,
+    root: R,
     Json(op): Json<RenameOp>,
 ) -> Response {
-    if !id_within_bound(&id) {
-        return unknown_session();
-    }
-    let session_id = id.clone();
-    let worktree = match resolve_worktree(&state, id).await {
-        Ok(w) => w,
-        Err(r) => return r,
-    };
+    let worktree = root.path().to_path_buf();
     let wt = worktree.clone();
     let from = op.from;
     let to = op.to;
@@ -735,25 +885,18 @@ async fn rename_entry(
                 .into_response();
         }
     }
-    crate::git_routes::refresh_changed_files_now(&state, session_id, &worktree);
+    refresh_root_changes(&state, &root, &worktree);
     StatusCode::OK.into_response()
 }
 
 /// Delete `op.path` (file or, recursively, a directory). Permanent: no trash on
 /// the server. See `dux_core::worktree_file::delete_entry`.
-async fn delete_entry(
+async fn delete_entry<R: EditorRoot>(
     State(state): State<AppState>,
-    ApiPath(id): ApiPath<String>,
+    root: R,
     Json(op): Json<PathOp>,
 ) -> Response {
-    if !id_within_bound(&id) {
-        return unknown_session();
-    }
-    let session_id = id.clone();
-    let worktree = match resolve_worktree(&state, id).await {
-        Ok(w) => w,
-        Err(r) => return r,
-    };
+    let worktree = root.path().to_path_buf();
     let wt = worktree.clone();
     let path = op.path;
     match tokio::task::spawn_blocking(move || dux_core::worktree_file::delete_entry(&wt, &path))
@@ -769,7 +912,7 @@ async fn delete_entry(
                 .into_response();
         }
     }
-    crate::git_routes::refresh_changed_files_now(&state, session_id, &worktree);
+    refresh_root_changes(&state, &root, &worktree);
     StatusCode::OK.into_response()
 }
 
@@ -784,18 +927,12 @@ async fn delete_entry(
 /// fails and we return the error. Containment is enforced by
 /// `resolve_worktree_path` exactly like read/write, so no path outside the
 /// worktree can be targeted.
-async fn open_in_editor(
+async fn open_in_editor<R: EditorRoot>(
     State(state): State<AppState>,
-    ApiPath(id): ApiPath<String>,
+    root: R,
     Json(op): Json<OpenInEditorOp>,
 ) -> Response {
-    if !id_within_bound(&id) {
-        return unknown_session();
-    }
-    let worktree = match resolve_worktree(&state, id).await {
-        Ok(w) => w,
-        Err(r) => return r,
-    };
+    let worktree = root.path().to_path_buf();
     let configured = state.engine.editor_default().await;
     let path = op.path;
     let requested = op.editor;

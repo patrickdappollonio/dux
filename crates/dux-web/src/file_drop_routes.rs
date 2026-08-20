@@ -1461,17 +1461,66 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn a_terminal_has_no_file_tree_so_a_tree_drop_on_one_is_not_found() {
-            // The tree belongs to an agent's worktree. A terminal id in `pty`
-            // must not quietly fall back to the terminal's own directory: that
-            // is the OTHER intent, and it would put the file somewhere the
-            // user did not point at.
+        async fn a_tree_drop_on_a_terminal_lands_at_its_pinned_root_not_where_the_shell_went() {
+            // A terminal HAS a file tree now, and the tree was drawn from the
+            // directory the terminal was spawned in. So the drop follows that
+            // root and not the live shell, which is the exact opposite of what a
+            // drop on the terminal's own pane does. The shell is walked
+            // somewhere else first, so the two answers are visibly different.
             let world = drop_world().await;
-            let terminal = world.create_terminal("/api/v1/terminals").await;
+            let terminal = world
+                .create_terminal("/api/v1/projects/p1/terminals")
+                .await;
+            world.cd(&terminal, &world.wt).await;
+
             let resp = world
                 .app
                 .clone()
                 .oneshot(tree_drop(&terminal, "notes.md", ""))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "{}", body_text(resp).await);
+
+            assert_eq!(std::fs::read(world.root.join("notes.md")).unwrap(), b"bytes");
+            assert!(
+                !world.wt.join("notes.md").exists(),
+                "the drop followed the shell rather than the pinned root"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_tree_drop_on_a_terminal_refreshes_nothing() {
+            // A terminal root has no agent behind it, so there is no changes
+            // pane to tell and nothing is broadcast. Silence is the answer, not
+            // an omission.
+            let world = drop_world().await;
+            let terminal = world
+                .create_terminal("/api/v1/projects/p1/terminals")
+                .await;
+            let (generation, _) = world.refreshes();
+
+            let resp = world
+                .app
+                .clone()
+                .oneshot(tree_drop(&terminal, "notes.md", ""))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let (generation_after, refreshes) = world.refreshes();
+            assert_eq!(generation_after, generation);
+            assert!(refreshes.is_empty(), "got {refreshes:?}");
+        }
+
+        #[tokio::test]
+        async fn a_tree_drop_naming_nothing_at_all_is_still_not_found() {
+            // The refusal did not go away, it narrowed: an id that names neither
+            // an agent nor a terminal still has no tree to drop on.
+            let world = drop_world().await;
+            let resp = world
+                .app
+                .clone()
+                .oneshot(tree_drop("nobody", "notes.md", ""))
                 .await
                 .unwrap();
             assert_eq!(resp.status(), StatusCode::NOT_FOUND);

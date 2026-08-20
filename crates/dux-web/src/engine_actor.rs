@@ -102,6 +102,17 @@ pub enum EngineRequest {
     /// `SubscribeTerminal`/`DeleteTerminal` path looks terminals up by id alone
     /// and does not check ownership).
     TerminalOwnerOf(String, oneshot::Sender<Option<TerminalOwner>>),
+    /// A terminal's owner paired with the ABSOLUTE directory it was spawned in:
+    /// the root a terminal-rooted editor serves files from. Both halves in one
+    /// call because the caller needs both to answer a single question, whether
+    /// this address may serve this terminal and from where; asking twice would
+    /// let the pair come from two different moments. Only the ~-collapsed
+    /// display label travels the wire elsewhere, which is why the real path
+    /// needs a query of its own.
+    TerminalRoot(
+        String,
+        oneshot::Sender<Option<(TerminalOwner, std::path::PathBuf)>>,
+    ),
     /// Create an extra tab for a session running the given provider (or the
     /// session's project default when `None`), replying `(tab_id, provider)`. The
     /// launch is fire-and-forget (async worker); the id returns synchronously so
@@ -920,6 +931,27 @@ impl EngineHandle {
         rx.await.unwrap_or(None)
     }
 
+    /// A terminal's owner and the absolute directory it was spawned in: the root
+    /// a terminal-rooted editor serves from. `None` when the terminal is unknown
+    /// or the engine thread is gone. The owner rides along so the caller can put
+    /// the terminal's real owner and the address it was asked at through
+    /// `TerminalOwner::is_at_route` before serving anything.
+    pub async fn terminal_root(
+        &self,
+        terminal_id: String,
+    ) -> Option<(TerminalOwner, std::path::PathBuf)> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .req_tx
+            .send(EngineRequest::TerminalRoot(terminal_id, tx))
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.unwrap_or(None)
+    }
+
     /// Gracefully wind down the engine: SIGTERM the agent/terminal children so
     /// CLIs can save state for a later resume, then stop the engine thread.
     /// Errors are ignored — if the thread is already gone, shutdown has already
@@ -1542,6 +1574,7 @@ fn request_mutates_spine(req: &EngineRequest) -> bool {
         // owner, project/session log context, worktree inputs). Read-only by
         // construction.
         EngineRequest::TerminalOwnerOf(..)
+        | EngineRequest::TerminalRoot(..)
         | EngineRequest::TabSession(..)
         | EngineRequest::SessionWorktree(..)
         | EngineRequest::FileDropDestination(..)
@@ -2707,6 +2740,13 @@ fn handle_request(
                 .get(&terminal_id)
                 .map(|t| t.owner.clone());
             let _ = reply.send(owner);
+        }
+        EngineRequest::TerminalRoot(terminal_id, reply) => {
+            let root = engine
+                .companion_terminals
+                .get(&terminal_id)
+                .map(|t| (t.owner.clone(), t.client.spawn_dir().to_path_buf()));
+            let _ = reply.send(root);
         }
         EngineRequest::CreateAgentTab(session_id, provider, reply) => {
             let res = create_agent_tab_inner(engine, &session_id, provider);
@@ -4894,6 +4934,11 @@ mod tests {
                 false,
             ),
             (
+                "TerminalRoot",
+                EngineRequest::TerminalRoot("t1".into(), dead_reply()),
+                false,
+            ),
+            (
                 "CreateAgentTab",
                 EngineRequest::CreateAgentTab("s1".into(), None, dead_reply()),
                 true,
@@ -5114,7 +5159,7 @@ mod tests {
         // through with a copied-from-its-neighbour `false` that nothing reads.
         assert_eq!(
             request_kind_answers().len(),
-            40,
+            41,
             "every EngineRequest kind needs a row in request_kind_answers; \
              update the count deliberately when adding one"
         );
