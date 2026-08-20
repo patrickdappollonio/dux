@@ -196,6 +196,56 @@ describe("the standalone editor shell", () => {
     ).toBeNull()
   })
 
+  it("names a terminal root by its row identity, directory and all", async () => {
+    // The tab and the sidebar row must call the same thing the same thing, so
+    // the header is drawn from the same facts: the terminal's own identity,
+    // with the second line's owner text beside it, which for a standalone
+    // terminal is the home-collapsed directory it opened in.
+    const terminalRoot = {
+      kind: "terminal" as const,
+      terminalId: "t1",
+      owner: { kind: "standalone" as const },
+    }
+    await seedState({
+      editorTarget: { root: terminalRoot, initialPath: PATH, initialMode: "file" },
+      editorRoute: { root: terminalRoot, mode: "file", path: PATH },
+      editorTabs: {
+        [rootKey(terminalRoot)]: {
+          tabs: [
+            { id: "t1", path: PATH, dirty: false, preview: false, mode: "file" },
+          ],
+          activeId: "t1",
+        },
+      },
+      spine: {
+        projects: [],
+        sessions: [],
+        terminals: [
+          {
+            id: "t1",
+            owner: { kind: "standalone", cwd_label: "~/code" },
+            label: "Terminal 1",
+            has_output: false,
+            working: false,
+            typing: false,
+            foreground_cmd: "vim",
+            sort_order: 1,
+            created_at: "2026-07-17T12:00:00Z",
+            updated_at: "2026-07-17T12:00:00Z",
+          },
+        ],
+        sidebar: { groups: [], agentless_start: null },
+      },
+    } as unknown as Partial<DuxState>)
+    const { StandaloneEditorShell } = await import(
+      "@/components/StandaloneEditor"
+    )
+    render(<StandaloneEditorShell />)
+    await screen.findByTestId("code-editor")
+    expect(screen.getByText("vim")).toBeTruthy()
+    expect(screen.getByText("~/code")).toBeTruthy()
+  })
+
   it("keeps the desktop header inline: mode toggle, preview-capable controls, Open local editor", async () => {
     await seedState({})
     const { StandaloneEditorShell } = await import(

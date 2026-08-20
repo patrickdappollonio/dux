@@ -2308,6 +2308,13 @@ function routeScreen(route: Route): MobileScreen {
 // comparison: opening the editor changes the key (so it pushes, and one Back
 // closes it), while switching files inside the editor keeps it (so switches
 // replace and never pile up). Exported for the routing tests only.
+//
+// The key says nothing about WHICH root the editor is on, so moving one
+// standalone editor tab from an agent root to a terminal root replaces rather
+// than pushes. Accepted: nothing in the app navigates between two standalone
+// editors (that surface has no in-app exits at all), so the only way to
+// produce it is to edit the address by hand, and a replace there is a
+// defensible reading of typing over an address anyway.
 export function routePushKey(route: Route): string {
   return `${routeScreen(route)}${route.editor ? "+editor" : ""}${route.standalone ? "+standalone" : ""}`
 }

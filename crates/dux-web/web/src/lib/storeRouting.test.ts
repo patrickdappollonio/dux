@@ -1594,6 +1594,30 @@ describe("the editor rides the URL", () => {
     expect(tabs[tabs.length - 1].mode).toBe("file")
   })
 
+  it("replaces rather than pushes between two standalone editor roots", async () => {
+    // The accepted collision: the push key carries the surface, not the root,
+    // so one standalone tab retargeted from an agent to a terminal keeps its
+    // history entry. Unreachable in-app (the surface has no exits), so this
+    // pins the decision rather than a journey.
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
+    const editor = { mode: "file" as const, path: null }
+    expect(
+      mod.routePushKey({
+        target: { kind: "agent", sessionId: "s1", tabId: "s1" },
+        changes: false,
+        editor,
+        standalone: true,
+      }),
+    ).toBe(
+      mod.routePushKey({
+        target: standaloneTerminal,
+        changes: false,
+        editor,
+        standalone: true,
+      }),
+    )
+  })
+
   it("boots the NORMAL shell on a standalone address with a malformed tail", async () => {
     // Strict parse at boot: the surface flag comes from the same grammar the
     // router uses, so a mangled link cannot marooon the tab on a standalone
