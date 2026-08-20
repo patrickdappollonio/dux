@@ -477,6 +477,60 @@ async function mountWithTab(path: string, mode: "file" | "diff" = "file") {
   return render(<EditorOverlay />)
 }
 
+// A TERMINAL-rooted editor, for the affordances that must not be there.
+const TERMINAL_ROOT = {
+  kind: "terminal" as const,
+  terminalId: "t1",
+  owner: { kind: "standalone" as const },
+}
+
+async function mountTerminalRootedTab(path = "notes.md") {
+  const { EditorOverlay } = await import("@/components/EditorOverlay")
+  const { getSnapshot } = await import("@/lib/store")
+  mockState = {
+    ...getSnapshot(),
+    editorTarget: { root: TERMINAL_ROOT, initialPath: path },
+    editorTabs: {
+      [rootKey(TERMINAL_ROOT)]: {
+        tabs: [{ id: TAB_ID, path, dirty: false, preview: false, mode: "file" }],
+        activeId: TAB_ID,
+      },
+    },
+  } as DuxState
+  return render(<EditorOverlay />)
+}
+
+describe("a terminal-rooted editor has no diff view at all", () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    installBootStubs()
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.unstubAllGlobals()
+  })
+
+  it("offers no File/Diff switch, on either the desktop bar or the phone fold", async () => {
+    // Absent, not disabled: there is no HEAD behind a terminal's directory and
+    // no diff route registered for it, so a disabled control would be
+    // promising something that does not exist.
+    await mountTerminalRootedTab()
+    await screen.findByTestId("code-editor")
+    expect(screen.queryByRole("group", { name: "View mode" })).toBeNull()
+    fireEvent.click(screen.getByLabelText("More editor actions"))
+    await screen.findByRole("menu")
+    expect(screen.queryByText("Diff view")).toBeNull()
+    expect(screen.queryByText("File view")).toBeNull()
+  })
+
+  it("still keeps the switch for an agent root, so the absence above is the root's", async () => {
+    await mountWithTab("src/a.ts")
+    await screen.findByTestId("code-editor")
+    expect(screen.queryByRole("group", { name: "View mode" })).not.toBeNull()
+  })
+})
+
 // The createObjectURL pair jsdom does not implement, installed onto the REAL
 // URL class (never a `{ ...URL }` spread global, which would destroy the URL
 // constructor for everything else in the render). Created Blobs are captured

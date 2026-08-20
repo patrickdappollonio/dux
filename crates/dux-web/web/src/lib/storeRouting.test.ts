@@ -1574,6 +1574,26 @@ describe("the editor rides the URL", () => {
     expect(mod.getSnapshot().editorTarget).not.toBeNull()
   })
 
+  it("refuses diff mode on a terminal root, wherever it is asked for", async () => {
+    // A terminal root has no HEAD to diff against and no diff route on the
+    // server, so the mode is not offered and is not honored either: a
+    // hand-typed or stale address opens the file rather than dead-ending on a
+    // request that cannot be served.
+    const mod = await loadStore(
+      "#/terminal/t1/editor/diff/notes.md",
+      [{ id: "s1", project_id: "p1" }],
+      undefined,
+      ["t1"],
+    )
+    expect(mod.getSnapshot().editorRoute?.mode).toBe("file")
+    expect(mod.getSnapshot().editorTabs["terminal:t1"].tabs[0].mode).toBe("file")
+
+    const root = mod.getSnapshot().editorTarget!.root
+    mod.editorOpenFile(root, "other.md", { mode: "diff" })
+    const tabs = mod.getSnapshot().editorTabs["terminal:t1"].tabs
+    expect(tabs[tabs.length - 1].mode).toBe("file")
+  })
+
   it("boots the NORMAL shell on a standalone address with a malformed tail", async () => {
     // Strict parse at boot: the surface flag comes from the same grammar the
     // router uses, so a mangled link cannot marooon the tab on a standalone

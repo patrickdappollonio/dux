@@ -120,6 +120,15 @@ export function rootSessionId(root: EditorRoot): string | null {
   }
 }
 
+// Does this root have a diff to show? Only an agent's does: diff mode is HEAD
+// against the working copy, and a terminal root is a plain directory that may
+// not be in a repository at all. The server registers no diff route for one, so
+// the affordance is absent rather than disabled, and the mode is refused rather
+// than merely unoffered (an address can still ask for it).
+export function rootHasDiff(root: EditorRoot): boolean {
+  return rootSessionId(root) !== null
+}
+
 export function sameRoot(a: EditorRoot | null, b: EditorRoot | null): boolean {
   if (a === null || b === null) return a === b
   return rootKey(a) === rootKey(b)

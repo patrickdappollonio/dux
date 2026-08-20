@@ -57,6 +57,7 @@ import type {
 import { isAllDeleteDiff } from "@/lib/diffPresentation"
 import { loadRootDrafts, storeRootDrafts } from "@/lib/editorDrafts"
 import {
+  rootHasDiff,
   rootKey,
   rootPtyId,
   rootSessionId,
@@ -226,6 +227,11 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   // The namespaced key for every per-root map, and the stable dependency for
   // every effect below: the root itself is a fresh object on each render.
   const key = rootKey(root)
+  // Whether this editor has a diff view at all. A terminal root does not: it is
+  // a plain directory with no HEAD behind it and no diff route on the server,
+  // so every diff affordance below is ABSENT rather than disabled, and the
+  // store refuses the mode even when an address asks for it.
+  const hasDiff = rootHasDiff(root)
   const tabsState = editorTabs[key]
   const tabs = useMemo(() => tabsState?.tabs ?? [], [tabsState])
   const activeTab = tabs.find((t) => t.id === tabsState?.activeId) ?? null
@@ -1732,7 +1738,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
             (no text to diff; the store coerces image opens to file mode, so
             offering the switch would only reach the binary-diff dead end).
             Sets the ACTIVE TAB's mode. */}
-        {activeTab && !isImageTab && (
+        {activeTab && !isImageTab && hasDiff && (
           // max-md:hidden: on phones (only the standalone surface — the
           // overlay is desktop-only) the header folds every secondary
           // control into the one ⋯ menu at the row's end, per the
@@ -1766,7 +1772,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
         {/* "File changed underneath you" reload — shown in diff mode when the
             changed-files broadcast indicates the open file moved since the diff was
             loaded. We don't auto-refetch (avoids churn); the user reloads on click. */}
-        {activeTab?.mode === "diff" && diffStale && (
+        {hasDiff && activeTab?.mode === "diff" && diffStale && (
           <SimpleTooltip content="This file changed on disk — reload the diff">
             <Button
               size="sm"
@@ -1914,7 +1920,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
               <Ellipsis />
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
-              {!isImageTab && (
+              {!isImageTab && hasDiff && (
                 <>
                   <DropdownMenuItem
                     aria-current={activeTab.mode === "file" ? "true" : undefined}
@@ -1938,7 +1944,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
                   </DropdownMenuItem>
                 </>
               )}
-              {activeTab.mode === "diff" && diffStale && (
+              {hasDiff && activeTab.mode === "diff" && diffStale && (
                 <DropdownMenuItem onClick={refreshDiff}>
                   <CircleAlert />
                   Reload diff

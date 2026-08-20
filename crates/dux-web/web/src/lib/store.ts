@@ -73,6 +73,7 @@ import type { EditorTabsState } from "./editorTabs"
 import {
   agentRoot,
   editorRootForTarget,
+  rootHasDiff,
   rootKey,
   sameRoot,
   type EditorRoot,
@@ -2574,7 +2575,8 @@ function syncEditorStateFromRoute(spine: Spine, route: Route): void {
     clearEditorStateSilently()
     return
   }
-  const { mode, path } = route.editor
+  const mode = editorMode(root, route.editor.mode, route.editor.path)
+  const { path } = route.editor
   // Keep the existing mount seed when it already points at this root:
   // `EditorBody` is keyed by the root key, so churning the seed would remount
   // it for nothing on every Back/Forward inside the same editor.
@@ -3635,8 +3637,7 @@ export function openEditor(
   // show the picture rather than dead-end on the binary-diff refusal. This
   // is the open choke point; `editorOpenFile` coerces too, and the render
   // keeps the image arm above the diff arm as defense in depth.
-  const effectiveMode: EditorViewMode =
-    initialPath !== null && isImagePreviewPath(initialPath) ? "file" : mode
+  const effectiveMode: EditorViewMode = editorMode(root, mode, initialPath)
   const editorPatch: Partial<DuxState> = {
     editorTarget: { root, initialPath, initialMode: effectiveMode },
     editorRoute: { root, mode: effectiveMode, path: initialPath },
@@ -3761,7 +3762,7 @@ export function editorOpenFile(
   // comment); an undefined mode stays undefined so a plain activation keeps
   // its no-intent semantics.
   const mode =
-    opts.mode !== undefined && isImagePreviewPath(path) ? "file" : opts.mode
+    opts.mode !== undefined ? editorMode(root, opts.mode, path) : undefined
   setEditorTabsFor(
     root,
     editorOpenFilePure(editorTabsFor(root), path, {
@@ -3770,6 +3771,18 @@ export function editorOpenFile(
       newId: () => newClientId(),
     }),
   )
+}
+
+// The mode a tab may actually open in. Two coercions, both to "file", and both
+// because the alternative is a dead end rather than a view: an image has no
+// text to diff, and a terminal root has no diff at all (see `rootHasDiff`).
+function editorMode(
+  root: EditorRoot,
+  mode: EditorViewMode,
+  path: string | null,
+): EditorViewMode {
+  if (!rootHasDiff(root)) return "file"
+  return path !== null && isImagePreviewPath(path) ? "file" : mode
 }
 
 export function editorActivateTab(root: EditorRoot, tabId: string): void {
