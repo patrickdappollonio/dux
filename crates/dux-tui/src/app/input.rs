@@ -2387,11 +2387,13 @@ impl App {
     }
 
     fn toggle_stage_selected_file(&mut self) -> Result<()> {
-        let Some(session) = self.selected_session() else {
+        if self.selected_session().is_none() {
             self.set_error("Select a session first.");
             return Ok(());
+        }
+        let Some(worktree) = self.changes_worktree_for_selection() else {
+            return Ok(());
         };
-        let worktree = PathBuf::from(session.directory());
         let file = match self.right_section {
             RightSection::Staged => self.engine.staged_files.get(self.files_index),
             RightSection::Unstaged => self.engine.unstaged_files.get(self.files_index),
@@ -2446,11 +2448,13 @@ impl App {
     }
 
     fn execute_commit(&mut self) -> Result<()> {
-        let Some(session) = self.selected_session() else {
+        if self.selected_session().is_none() {
             self.set_error("Select a session first.");
             return Ok(());
+        }
+        let Some(worktree) = self.changes_worktree_for_selection() else {
+            return Ok(());
         };
-        let worktree = PathBuf::from(session.directory());
         let message = self.commit_input.text.clone();
         // Route the empty-message / nothing-staged decision through the shared core
         // preflight so the TUI and the web agree, and so the nothing-staged check
@@ -2490,12 +2494,53 @@ impl App {
         Ok(())
     }
 
+    /// The directory a CHANGES-PANEL action may run git in: a managed worktree,
+    /// or a standalone agent's folder when that folder is itself a repository.
+    ///
+    /// Folder driven, not agent driven, which is the whole point: a standalone
+    /// agent pointed at a repository stages and commits exactly like any other.
+    /// When it is not one, the refusal carries the FOLDER's own sentence, never
+    /// a git error about a repository nobody named. Sets the status itself and
+    /// answers `None`, so every caller is one `let Some(...) else` away from
+    /// doing the right thing.
+    ///
+    /// The web twin is `git_routes::resolve_changes_worktree`; both read the one
+    /// engine verdict, so the two surfaces cannot disagree about a folder.
+    fn changes_worktree_for_selection(&mut self) -> Option<PathBuf> {
+        let session_id = self.selected_session()?.id.clone();
+        let access = self.engine.session_git_access(&session_id)?;
+        if !access.mutations_allowed() {
+            self.set_error(
+                access
+                    .quiet_reason()
+                    .unwrap_or("dux cannot work with git in this folder.")
+                    .to_string(),
+            );
+            return None;
+        }
+        Some(access.directory().to_path_buf())
+    }
+
     fn push_to_remote(&mut self) -> Result<()> {
         let Some(session) = self.selected_session() else {
             self.set_error("Select a session first.");
             return Ok(());
         };
-        let worktree = PathBuf::from(session.directory());
+        // Push publishes a BRANCH, which is the half that does not exist for a
+        // standalone agent. The same gate the HTTP route uses, so a keystroke
+        // and a curl refuse for the same reason and in the same words.
+        let session_id = session.id.clone();
+        let worktree = match self.engine.branch_git_workspace(
+            &session_id,
+            "push",
+            dux_core::engine::STANDALONE_ADD_AS_PROJECT_REMEDY,
+        ) {
+            Ok(managed) => PathBuf::from(managed.worktree_path.clone()),
+            Err(err) => {
+                self.set_error(err.to_string());
+                return Ok(());
+            }
+        };
         let reaction = self.engine.apply(Command::Push {
             worktree_path: worktree,
         })?;
@@ -7151,8 +7196,10 @@ impl App {
             _ => return false,
         };
         self.prompt = PromptState::None;
-        if confirm && let Some(session) = self.selected_session() {
-            let worktree = PathBuf::from(session.directory());
+        // Discard is the most destructive of the changes actions, so the
+        // folder-driven gate applies here too: it refuses in a folder with no
+        // repository rather than handing git a directory it cannot answer for.
+        if confirm && let Some(worktree) = self.changes_worktree_for_selection() {
             // Re-classify against LIVE git status at confirm time, then act on that
             // fresh flag, so the delete-vs-restore decision and the destructive
             // action agree with the worktree as it is NOW (not as it was when the
@@ -10323,6 +10370,85 @@ not_a_real_action = ["x"]
             ProjectBranchStatus::NotLeading
         );
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Info);
+    }
+
+    /// Turn the selected agent into a STANDALONE one, in a folder of the
+    /// caller's choosing, so the key-driven git actions can be pointed at an
+    /// agent that has no branch.
+    fn select_standalone_agent(app: &mut App, folder: &std::path::Path) {
+        app.selected_left = 1;
+        let session = app
+            .engine
+            .sessions
+            .get_mut(0)
+            .expect("the fixture has an agent");
+        session.title = Some("notes".to_string());
+        session.workspace =
+            dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
+                folder_path: folder.to_string_lossy().to_string(),
+            });
+    }
+
+    /// The key-driven git actions go through the same workspace gate the HTTP
+    /// routes do, so a keystroke and a curl refuse a standalone agent for the
+    /// same reason and in the same words. Push in particular publishes a
+    /// BRANCH, which is the half that does not exist here.
+    #[test]
+    fn push_and_pull_keys_refuse_a_standalone_agent_with_the_shared_sentence() {
+        let folder = tempfile::tempdir().expect("folder");
+        for action in ["push", "pull"] {
+            let mut app = test_app(default_bindings());
+            select_standalone_agent(&mut app, folder.path());
+            if action == "push" {
+                app.push_to_remote().expect("the refusal is not an error");
+            } else {
+                app.pull_from_remote().expect("the refusal is not an error");
+            }
+            assert_eq!(
+                app.status.tone(),
+                crate::statusline::StatusTone::Error,
+                "{action} must refuse: {}",
+                app.status.text()
+            );
+            assert!(
+                app.status.text().contains("standalone agent"),
+                "{action} must say what this agent is: {}",
+                app.status.text()
+            );
+            assert!(
+                app.status.text().contains("as a project"),
+                "{action} must point somewhere: {}",
+                app.status.text()
+            );
+        }
+    }
+
+    /// The changes-panel actions are FOLDER driven, not agent driven: they
+    /// refuse in a folder with no repository, and the refusal is the folder's
+    /// own sentence rather than a git error about a repository nobody named.
+    #[test]
+    fn staging_keys_refuse_a_folder_with_no_repository_in_its_own_words() {
+        let folder = tempfile::tempdir().expect("folder");
+        let mut app = test_app(default_bindings());
+        select_standalone_agent(&mut app, folder.path());
+        app.engine.folder_repo_statuses.insert(
+            app.engine.sessions[0].id.clone(),
+            dux_core::git::FolderRepoStatus::NoRepo,
+        );
+
+        app.commit_input = TextInput::with_text("a message".to_string());
+        app.execute_commit().expect("the refusal is not an error");
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
+        assert!(
+            app.status.text().contains("no git repository"),
+            "got {}",
+            app.status.text()
+        );
+        assert!(
+            !app.status.text().to_lowercase().contains("busy"),
+            "a folder with no repository is never a busy one: {}",
+            app.status.text()
+        );
     }
 
     #[test]
