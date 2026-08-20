@@ -230,21 +230,29 @@ impl Engine {
     /// to my project" with the place the user pointed at, as an ordinary file
     /// git can see.
     ///
-    /// A TERMINAL id answers `None` rather than falling back to that terminal's
-    /// own directory, and the fallback is what makes that worth stating: a
-    /// terminal has no file tree, so a tree drop naming one is a request that
-    /// cannot mean what it says, and quietly serving it from the other intent
-    /// would put the file somewhere the user never pointed at. `relative` is
-    /// carried through UNVALIDATED on purpose: the guards belong next to the
-    /// walk that opens the directory (`DropDir::open_tree_dir`), on the
-    /// blocking pool, not on the engine thread.
+    /// A TERMINAL id answers with its own root, because a terminal now has a
+    /// file tree: its editor is rooted at the directory the terminal was spawned
+    /// in. The root is that SPAWN directory and never the live working
+    /// directory, which is the one place this deliberately parts company with
+    /// [`Self::file_drop_destination`] above. A drop on the terminal itself is
+    /// "put this where I am typing", so it follows the shell; a drop on the
+    /// editor's tree is "add this file where I pointed", and the tree it was
+    /// pointed at is drawn from the pinned root. Following the shell here would
+    /// mean the same click landed somewhere else after a `cd`.
+    ///
+    /// `relative` is carried through UNVALIDATED on purpose: the guards belong
+    /// next to the walk that opens the directory (`DropDir::open_tree_dir`), on
+    /// the blocking pool, not on the engine thread.
     pub fn file_drop_tree_destination(
         &self,
         pty_id: &str,
         relative: &str,
     ) -> Option<crate::file_drop::FileDropDestination> {
-        if self.companion_terminals.contains_key(pty_id) {
-            return None;
+        if let Some(terminal) = self.companion_terminals.get(pty_id) {
+            return Some(crate::file_drop::FileDropDestination::WorktreeDirectory {
+                worktree: terminal.client.spawn_dir().to_path_buf(),
+                relative: relative.to_string(),
+            });
         }
         let session = self.session_behind_pty(pty_id)?;
         Some(crate::file_drop::FileDropDestination::WorktreeDirectory {
@@ -463,6 +471,44 @@ mod tests {
             }
             other => panic!("a terminal resolved to {other:?}, not a live lookup"),
         }
+    }
+
+    #[test]
+    fn a_tree_drop_on_a_terminal_lands_under_the_terminal_s_pinned_spawn_directory() {
+        // A terminal now HAS a file tree: its editor is rooted at the directory
+        // it started in. So a tree drop naming a terminal means what it says,
+        // and it means the same thing an agent's tree drop means, add this file
+        // where I pointed. The root is the SPAWN directory, never the live one,
+        // for the same reason the editor is pinned there.
+        let (mut engine, _tmp) = test_engine();
+        let repo = tempfile::tempdir().expect("repo dir");
+        engine
+            .projects
+            .push(sample_project("p1", repo.path().to_string_lossy().as_ref()));
+        engine.config.terminal.command = "cat".to_string();
+        engine.config.terminal.args = vec![];
+
+        let (terminal_id, _) = engine
+            .create_project_terminal("p1", 24, 80)
+            .expect("project terminal");
+
+        match engine.file_drop_tree_destination(&terminal_id, "docs") {
+            Some(crate::file_drop::FileDropDestination::WorktreeDirectory {
+                worktree: root,
+                relative,
+            }) => {
+                assert_eq!(root, repo.path());
+                assert_eq!(relative, "docs");
+            }
+            other => panic!("a terminal tree drop resolved to {other:?}"),
+        }
+
+        assert!(
+            engine
+                .file_drop_tree_destination("nobody", "docs")
+                .is_none(),
+            "an unknown pty id still has no tree to drop on"
+        );
     }
 
     #[test]

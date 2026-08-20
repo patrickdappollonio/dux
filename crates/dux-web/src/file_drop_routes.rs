@@ -49,8 +49,16 @@
 //! surface where the user picks the destination. Nothing here goes near the
 //! upload directory and nothing writes a `.gitignore`: hiding the file from git
 //! would defeat the whole point. A tree drop is marked by the `dir` query
-//! parameter, which is PRESENT (possibly empty, meaning the worktree root) for
+//! parameter, which is PRESENT (possibly empty, meaning the editor's root) for
 //! exactly this case.
+//!
+//! A tree drop naming a TERMINAL is served, and it is the one place a terminal
+//! answers with a fixed path. A terminal-rooted editor is pinned to the
+//! directory the terminal was spawned in, so the tree the user pointed at was
+//! drawn from that root and the drop has to land under the same one. Following
+//! the live shell here would make the same click land somewhere else after a
+//! `cd`, which is exactly what the pane case above wants and exactly what a
+//! tree cannot have.
 //!
 //! The two pane cases resolve through `Engine::file_drop_destination` and the
 //! tree case through `Engine::file_drop_tree_destination`; the directory

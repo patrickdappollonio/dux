@@ -1485,6 +1485,46 @@ pub struct WorktreeFileList {
 /// [`list_dir`]). Returns at most `max_files` entries and sets `truncated` if
 /// more exist; `max_files == 0` disables the cap entirely.
 pub fn worktree_files(worktree_path: &Path, max_files: usize) -> Result<WorktreeFileList> {
+    walk_files(worktree_path, max_files, DotDirectories::Walked)
+}
+
+/// The same flat walk for a root that is NOT a worktree: the directory a
+/// terminal was spawned in, backing a terminal-rooted editor's search box.
+///
+/// It differs from [`worktree_files`] in one way, and the difference is the
+/// reason it exists: dot directories are pruned. A worktree's dot directories
+/// are the project's own (`.github`, `.config`, and `.git` itself, which the
+/// editor can open read-only), so walking them is useful. A terminal roots
+/// wherever a shell starts, which is routinely a home directory, where the dot
+/// directories are caches, package stores and application state that nobody
+/// searches for source in and that can dwarf everything else in the walk. Plain
+/// dotFILES are kept, because a `.bashrc` is exactly what someone opens.
+///
+/// What the prune is NOT is a containment or privacy measure. A standalone
+/// terminal may legally root at `/` (the fallback when the home directory
+/// cannot be resolved), and pruning dot directories does nothing about `/proc`,
+/// `/sys` or anything else under such a root. What bounds that walk is the same
+/// `[server] search_index_max_files` cap every other walk gets, plus the
+/// single-tenant trusted-access model the whole server rests on: a client that
+/// can reach this can already browse the filesystem.
+pub fn rooted_files(root: &Path, max_files: usize) -> Result<WorktreeFileList> {
+    walk_files(root, max_files, DotDirectories::Pruned)
+}
+
+/// Whether a flat walk descends into directories whose name starts with a dot.
+/// Named rather than a bare bool so the two call sites read as the decision they
+/// are; see [`rooted_files`] for why the two roots answer differently.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DotDirectories {
+    Walked,
+    Pruned,
+}
+
+fn walk_files(
+    worktree_path: &Path,
+    max_files: usize,
+    dot_dirs: DotDirectories,
+) -> Result<WorktreeFileList> {
     use walkdir::WalkDir;
 
     let wt = worktree_path.to_path_buf();
@@ -1495,9 +1535,14 @@ pub fn worktree_files(worktree_path: &Path, max_files: usize) -> Result<Worktree
         .follow_links(false)
         .min_depth(1)
         .into_iter()
-        .filter_entry(|e| {
+        .filter_entry(move |e| {
             // Prune .git/objects and .git/logs subtrees entirely.
             if e.file_type().is_dir() {
+                if dot_dirs == DotDirectories::Pruned
+                    && e.file_name().to_string_lossy().starts_with('.')
+                {
+                    return false;
+                }
                 let pruned = e.path().strip_prefix(&wt).is_ok_and(|rel| {
                     let r = rel.to_string_lossy();
                     r == ".git/objects"
@@ -4025,6 +4070,63 @@ mod tests {
             .map(|e| e.name)
             .collect();
         assert!(names.contains(&"x.txt".to_string()));
+    }
+
+    #[test]
+    fn rooted_files_prunes_dot_directories_but_keeps_plain_dotfiles() {
+        // A terminal-rooted editor can be pointed at a home directory, where the
+        // dot directories are caches and state nobody searches for source in. The
+        // files themselves stay: a `.bashrc` is exactly what someone opens.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        std::fs::write(p.join(".bashrc"), "x").unwrap();
+        std::fs::write(p.join("notes.md"), "x").unwrap();
+        std::fs::create_dir(p.join(".cache")).unwrap();
+        std::fs::write(p.join(".cache/blob"), "x").unwrap();
+        std::fs::create_dir_all(p.join("code/.git")).unwrap();
+        std::fs::write(p.join("code/.git/HEAD"), "x").unwrap();
+        std::fs::write(p.join("code/main.rs"), "x").unwrap();
+
+        let result = rooted_files(p, crate::config::DEFAULT_SEARCH_INDEX_MAX_FILES).unwrap();
+
+        assert!(result.files.contains(&".bashrc".to_string()));
+        assert!(result.files.contains(&"notes.md".to_string()));
+        assert!(result.files.contains(&"code/main.rs".to_string()));
+        assert!(
+            !result.files.iter().any(|f| f.starts_with(".cache/")),
+            "a dot directory at the root must be pruned: {:?}",
+            result.files
+        );
+        assert!(
+            !result.files.iter().any(|f| f.contains("/.git/")),
+            "a nested dot directory must be pruned too: {:?}",
+            result.files
+        );
+    }
+
+    #[test]
+    fn rooted_files_keeps_the_cap_and_the_truncated_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        std::fs::create_dir(p.join("bulk")).unwrap();
+        for i in 0..25 {
+            std::fs::write(p.join(format!("bulk/f{i}.txt")), "x").unwrap();
+        }
+        let result = rooted_files(p, 20).unwrap();
+        assert!(result.truncated);
+        assert_eq!(result.files.len(), 20);
+    }
+
+    #[test]
+    fn worktree_files_still_walks_into_dot_directories() {
+        // The worktree walk is unchanged: the editor opens `.git/config` and a
+        // project's own dot directories through the search box today.
+        let repo = init_test_repo();
+        let p = repo.path();
+        std::fs::create_dir(p.join(".config")).unwrap();
+        std::fs::write(p.join(".config/tool.toml"), "x").unwrap();
+        let result = worktree_files(p, crate::config::DEFAULT_SEARCH_INDEX_MAX_FILES).unwrap();
+        assert!(result.files.contains(&".config/tool.toml".to_string()));
     }
 
     #[test]

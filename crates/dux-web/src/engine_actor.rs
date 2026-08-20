@@ -137,10 +137,11 @@ pub enum EngineRequest {
         oneshot::Sender<Option<dux_core::file_drop::FileDropDestination>>,
     ),
     /// Where a file dropped onto the EDITOR'S FILE TREE should be saved: the
-    /// worktree-relative directory the user dropped on, inside that agent's
-    /// worktree. A terminal id answers `None` (a terminal has no file tree).
-    /// The directory travels UNVALIDATED; its guards live beside the walk that
-    /// opens it, on the blocking pool.
+    /// root-relative directory the user dropped on, inside that editor's root.
+    /// That root is an agent's worktree, or, for a terminal-rooted editor, the
+    /// directory the terminal was spawned in. The directory travels
+    /// UNVALIDATED; its guards live beside the walk that opens it, on the
+    /// blocking pool.
     FileDropTreeDestination(
         String,
         String,
@@ -948,9 +949,10 @@ impl EngineHandle {
         rx.await.unwrap_or(None)
     }
 
-    /// Resolve `pty_id` plus a worktree-relative directory to an editor
-    /// file-tree drop destination. `None` when the pty id names a terminal or
-    /// is unknown, or the engine thread is gone.
+    /// Resolve `pty_id` plus a root-relative directory to an editor file-tree
+    /// drop destination: an agent's worktree, or a terminal's pinned spawn
+    /// directory. `None` when the pty id is unknown or the engine thread is
+    /// gone.
     pub async fn file_drop_tree_destination(
         &self,
         pty_id: String,
