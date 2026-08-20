@@ -77,6 +77,17 @@ const fakeHistory = {
   },
 }
 
+// Every warning the store raised, so a fallback that is supposed to be OUT
+// LOUD can be told from one that merely happened.
+const warnings: string[] = []
+vi.mock("./notify", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./notify")>()
+  return {
+    ...actual,
+    notifyWarning: (message: string) => void warnings.push(message),
+  }
+})
+
 // A session descriptor for `makeSpine`. `tabs` lists the EXTRA tabs; the
 // session-slot tab (`tabId === sessionId`) is always present and is added here
 // so a caller never has to remember it.
@@ -1490,6 +1501,77 @@ describe("the editor rides the URL", () => {
     expect(mod.getSnapshot().selectedSessionId).toBe("s2")
     expect(loc.hash).toBe("#/agent/s2")
     expect(index).toBe(depth)
+  })
+
+  it("ends a standalone terminal editor out loud when its terminal closes", async () => {
+    // Ruling: an editor does not outlive its target. A terminal id never comes
+    // back, so there is no truthful not-found screen to sit on; the tab says
+    // what happened and lands somewhere real.
+    const mod = await loadStore(
+      "#/editor/terminal/t1",
+      [{ id: "s1", project_id: "p1" }],
+      undefined,
+      ["t1"],
+    )
+    expect(mod.getSnapshot().standaloneEditor).toBe(true)
+    expect(mod.getSnapshot().editorTarget?.root).toEqual({
+      kind: "terminal",
+      terminalId: "t1",
+      owner: { kind: "standalone" },
+    })
+
+    await pushSpine(mod, [{ id: "s1", project_id: "p1" }], undefined, [])
+
+    expect(mod.getSnapshot().standaloneEditor).toBe(false)
+    expect(mod.getSnapshot().editorTarget).toBeNull()
+    expect(mod.getSnapshot().editorRoute).toBeNull()
+    expect(loc.hash).toBe("")
+    expect(warnings.join(" | ")).toMatch(/terminal/i)
+  })
+
+  it("holds a standalone terminal editor open on unsaved text and asks first", async () => {
+    // The one case where leaving silently would lose something: the buffer is
+    // dirty and the root that could save it is gone. The tab keeps the text on
+    // screen so it can be copied out, and asks before discarding it.
+    const mod = await loadStore(
+      "#/editor/terminal/t1/file/notes.md",
+      [{ id: "s1", project_id: "p1" }],
+      undefined,
+      ["t1"],
+    )
+    const root = mod.getSnapshot().editorTarget!.root
+    const tabId = mod.getSnapshot().editorTabs["terminal:t1"].tabs[0].id
+    mod.editorSetTabDirty(root, tabId, true)
+
+    await pushSpine(mod, [{ id: "s1", project_id: "p1" }], undefined, [])
+
+    expect(mod.getSnapshot().editorTargetGone).toEqual(root)
+    expect(mod.getSnapshot().editorTarget).not.toBeNull()
+    expect(mod.getSnapshot().standaloneEditor).toBe(true)
+
+    mod.discardVanishedEditor()
+    expect(mod.getSnapshot().editorTargetGone).toBeNull()
+    expect(mod.getSnapshot().editorTarget).toBeNull()
+    expect(mod.getSnapshot().standaloneEditor).toBe(false)
+    expect(loc.hash).toBe("")
+  })
+
+  it("asks once, so a spine that keeps arriving does not reopen the question", async () => {
+    const mod = await loadStore(
+      "#/editor/terminal/t1/file/notes.md",
+      [{ id: "s1", project_id: "p1" }],
+      undefined,
+      ["t1"],
+    )
+    const root = mod.getSnapshot().editorTarget!.root
+    const tabId = mod.getSnapshot().editorTabs["terminal:t1"].tabs[0].id
+    mod.editorSetTabDirty(root, tabId, true)
+    await pushSpine(mod, [{ id: "s1", project_id: "p1" }], undefined, [])
+    mod.keepVanishedEditor()
+    expect(mod.getSnapshot().editorTargetGone).toBeNull()
+    await pushSpine(mod, [{ id: "s1", project_id: "p1" }], undefined, [])
+    expect(mod.getSnapshot().editorTargetGone).toBeNull()
+    expect(mod.getSnapshot().editorTarget).not.toBeNull()
   })
 
   it("boots the NORMAL shell on a standalone address with a malformed tail", async () => {

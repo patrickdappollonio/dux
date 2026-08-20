@@ -42,6 +42,7 @@ import {
   notifyInfo,
   notifyStatus,
   notifySuccess,
+  notifyWarning,
   setStatusClearSeconds,
 } from "./notify"
 import { worktreeDeleteReport } from "./worktreeDelete"
@@ -700,6 +701,13 @@ export interface DuxState {
   // The tab pending the dirty-close confirmation (destructive-confirm
   // pattern), or null. Closing a NON-dirty tab skips this and closes directly.
   editorCloseTabTarget: { root: EditorRoot; tabId: string } | null
+  // The root of a STANDALONE editor tab whose target vanished while a buffer
+  // was dirty, or null. Set instead of tearing the editor down, because the
+  // root that could have saved that text is exactly what is gone: the tab
+  // stays up so the text can be read and copied out, and the confirm behind
+  // this is what discards it. Every other vanish leaves silently but says so
+  // (see `endVanishedStandaloneEditor`).
+  editorTargetGone: EditorRoot | null
   // Changed-files state for the selected session (see `ChangesSlice`). The single
   // source for changed-files data — replaces the global `viewModel.changed_files`
   // broadcast, which a second client could clobber.
@@ -889,6 +897,7 @@ let state: DuxState = {
   standaloneEditor: bootIsStandaloneEditor(),
   editorTabs: {},
   editorCloseTabTarget: null,
+  editorTargetGone: null,
   changes: emptyChanges(),
 }
 
@@ -1558,8 +1567,13 @@ function applyWorkspace(rawSpine: Spine, seq: number): void {
   // which makes the retry return immediately. Reading in URL-then-create order.
   retryRouteNotFound(spine)
   focusNewlyCreatedSession(spine)
-  pruneSelectionIfGone(spine, previousSessions)
-  pruneEditorStateIfGone(spine)
+  // The standalone tab's own ending runs FIRST, before the selection prune,
+  // because that prune would clear the surface flag along with the selection
+  // and the tab would go blank before anything had said why.
+  if (!endStandaloneEditorIfGone(spine)) {
+    pruneSelectionIfGone(spine, previousSessions)
+    pruneEditorStateIfGone(spine)
+  }
   // Re-restore a reconnect deep-link once its agent is present and back to
   // `active`, undoing a transient exit-eject that fired during the reconnect.
   restoreReconnectDeepLink(spine)
@@ -1597,6 +1611,7 @@ function pruneEditorStateIfGone(spine: Spine): void {
   }
   const openRoot = state.editorTarget?.root ?? state.editorRoute?.root ?? null
   if (openRoot !== null && !live.has(rootKey(openRoot))) {
+
     // State only, NO URL write: `pruneSelectionIfGone` (which runs before
     // this in the same `applyWorkspace` pass) is the single URL writer for a
     // vanished session — its navigation already serializes without the
@@ -2477,6 +2492,69 @@ function clearEditorStateSilently(): void {
     return
   }
   setState({ editorTarget: null, editorRoute: null, standaloneEditor: false })
+}
+
+// Has a STANDALONE editor tab lost what it was rooted at? If so this owns the
+// whole pass and answers true, so the ordinary selection and editor prunes do
+// not also run: they would clear the surface flag first and leave the tab
+// blank on an address that still names a dead target.
+function endStandaloneEditorIfGone(spine: Spine): boolean {
+  if (!state.standaloneEditor) return false
+  const root = state.editorTarget?.root ?? state.editorRoute?.root ?? null
+  if (root === null || rootIsLive(spine, root)) return false
+  if (hasDirtyTabForRoot(root)) {
+    // HOLD the whole pass, prunes included. The root that could have saved
+    // this text is exactly what vanished, so leaving now would discard it with
+    // no way back; the tab stays as it is, words on screen, until the confirm
+    // behind `editorTargetGone` is answered. The dead selection it holds on to
+    // meanwhile is invisible on this surface, and is resolved the moment that
+    // answer arrives.
+    const key = rootKey(root)
+    if (vanishedEditorAsked !== key) {
+      vanishedEditorAsked = key
+      setState({ editorTargetGone: root })
+    }
+    return true
+  }
+  // Nothing to lose: say what happened and let the ordinary prunes do the
+  // leaving, which already lands this tab on a real surface.
+  notifyWarning(vanishedEditorMessage(root))
+  return false
+}
+
+// Which root the vanish question has already been asked about, so a second
+// spine does not ask again. Module state rather than store state: it is about
+// a question that was answered, not about anything the UI renders.
+let vanishedEditorAsked: string | null = null
+
+function hasDirtyTabForRoot(root: EditorRoot): boolean {
+  const tabs = state.editorTabs[rootKey(root)]
+  return tabs !== undefined && tabs.tabs.some((tab) => tab.dirty)
+}
+
+function vanishedEditorMessage(root: EditorRoot): string {
+  return root.kind === "terminal"
+    ? "That terminal closed, so the editor rooted at its directory went with it. \
+Nothing unsaved was open. You are back at the workspace."
+    : "That agent is gone, so its editor went with it. Nothing unsaved was \
+open. You are back at the workspace."
+}
+
+// Leave the vanished editor: drop its state and land on home. The confirm
+// behind the dirty case calls this, and so does the clean case directly.
+export function discardVanishedEditor(): void {
+  setState({ editorTargetGone: null })
+  clearEditorStateSilently()
+  // The standalone tab has no selection worth keeping once its editor is gone,
+  // and this is the one URL write in the pass: the ordinary selection prune
+  // writes the in-app grammar, which is not an address this surface can be at.
+  selectSessionRoute(null, "replace")
+}
+
+// Keep it open: the text stays on screen to be copied out, and nothing asks
+// again for this root.
+export function keepVanishedEditor(): void {
+  setState({ editorTargetGone: null })
 }
 
 // Mirror a parsed route's editor half into state, directly and silently.

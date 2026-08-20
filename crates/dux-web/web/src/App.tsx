@@ -23,6 +23,7 @@ import { ConfirmUseExistingBranchDialog } from "@/components/ConfirmUseExistingB
 import { TaskManagerDialog } from "@/components/TaskManagerDialog"
 import { ConfirmDiscardFileDialog } from "@/components/ConfirmDiscardFileDialog"
 import { ConfirmCloseEditorTabDialog } from "@/components/ConfirmCloseEditorTabDialog"
+import { ConfirmVanishedEditorDialog } from "@/components/ConfirmVanishedEditorDialog"
 import { CreateAgentDialog } from "@/components/CreateAgentDialog"
 import { NewAgentPickerDialog } from "@/components/NewAgentPickerDialog"
 import { RenameSessionDialog } from "@/components/RenameSessionDialog"
@@ -67,7 +68,8 @@ import { keyboardLikelyOpen } from "@/lib/viewport"
 // is active — desktop, mobile, or the standalone editor. Hoisted deliberately:
 // the standalone surface needs the Toaster (save results), the OfflineOverlay,
 // and `ConfirmCloseEditorTabDialog` (without which a dirty per-tab close there
-// would be permanently inert). Everything here portals to the body, so it
+// would be permanently inert) and `ConfirmVanishedEditorDialog` (which only
+// that surface ever raises). Everything here portals to the body, so it
 // depends on no shell-specific provider. Shared JSX — never duplicated.
 function GlobalOverlays() {
   return (
@@ -90,6 +92,7 @@ function GlobalOverlays() {
       <FirstLoadDialog />
       <ConfirmDiscardFileDialog />
       <ConfirmCloseEditorTabDialog />
+      <ConfirmVanishedEditorDialog />
       <GlobalEnvDialog />
       <MacrosDialog />
       <ProjectInfoDialog />
