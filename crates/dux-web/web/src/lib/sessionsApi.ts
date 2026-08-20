@@ -51,6 +51,15 @@ export type CreateSessionBody =
   | { kind: "fork"; session_id: string; name?: string }
   | { kind: "from_worktree"; project_id: string; worktree_path: string; name?: string }
   | { kind: "from_pr"; project_id: string; pr: string; name?: string }
+  // A STANDALONE agent: it carries no project (it belongs to none), and it is
+  // the only kind that carries a provider, because the others take their
+  // project's default and this one has no project to take one from.
+  | {
+      kind: "standalone"
+      folder: string
+      name?: string
+      provider?: string
+    }
 
 // The parsed body of the server's existing-branch refusal (409). Present on a
 // `SessionsApiError` when the server asks the client to confirm attaching a new

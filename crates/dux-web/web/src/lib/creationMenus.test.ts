@@ -37,6 +37,7 @@ describe("newMenuItems", () => {
       ["item", "new-agent-plain"],
       ["item", "new-agent-from-pr"],
       ["item", "new-agent-from-worktree"],
+      ["item", "new-standalone-agent"],
       ["separator", "sep-new-terminals"],
       ["item", "new-standalone-terminal"],
     ])
@@ -44,6 +45,7 @@ describe("newMenuItems", () => {
       "New agent…",
       "New agent from PR…",
       "New agent from existing worktree…",
+      "New standalone agent…",
       "New standalone terminal",
     ])
   })
@@ -52,6 +54,7 @@ describe("newMenuItems", () => {
     expect(newMenuItems({ ghAvailable: false }).map((e) => e.id)).toEqual([
       "new-agent-plain",
       "new-agent-from-worktree",
+      "new-standalone-agent",
       "sep-new-terminals",
       "new-standalone-terminal",
     ])
@@ -102,7 +105,12 @@ describe("splitCreationGroups", () => {
         chunk.map((i) => i.id),
       ),
     ).toEqual([
-      ["new-agent-plain", "new-agent-from-pr", "new-agent-from-worktree"],
+      [
+        "new-agent-plain",
+        "new-agent-from-pr",
+        "new-agent-from-worktree",
+        "new-standalone-agent",
+      ],
       ["new-standalone-terminal"],
     ])
   })
@@ -115,7 +123,7 @@ describe("splitCreationGroups", () => {
         chunk.map((i) => i.id),
       ),
     ).toEqual([
-      ["new-agent-plain", "new-agent-from-worktree"],
+      ["new-agent-plain", "new-agent-from-worktree", "new-standalone-agent"],
       ["new-standalone-terminal"],
     ])
   })

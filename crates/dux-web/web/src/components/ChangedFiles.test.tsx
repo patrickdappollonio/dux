@@ -109,6 +109,79 @@ afterEach(() => {
 })
 
 describe("the Changes pane's Refresh changes action", () => {
+describe("ChangedFiles for a standalone agent", () => {
+  function standaloneState(
+    repo_status: "working_repo" | "no_repo" | "inside_repo_rooted_elsewhere",
+    quiet_reason: string,
+  ) {
+    return {
+      selectedSessionId: "sa1",
+      changes: { ...loadedChanges(), sessionId: "sa1" },
+      spine: {
+        projects: [],
+        terminals: [],
+        sessions: [
+          {
+            id: "sa1",
+            title: "notes",
+            provider: "claude",
+            status: "active",
+            tabs: [],
+            has_output: false,
+            working: false,
+            typing: false,
+            needs_attention: false,
+            created_at: "",
+            updated_at: "",
+            auto_reopen_enabled: false,
+            workspace: {
+              kind: "folder",
+              folder_path: "/home/someone/notes",
+              folder_label: "~/notes",
+              repo_status,
+              quiet_reason,
+            },
+          },
+        ],
+      },
+    } as unknown as DuxState
+  }
+
+  // A folder with no repository is QUIET, and it says why in the folder's own
+  // words. The old error path reported "the repository is busy" once per poll,
+  // which is a lie about a folder that simply has no repository.
+  it("says why the region is quiet, and never that a repository is busy", () => {
+    mockState = standaloneState(
+      "no_repo",
+      "This folder has no git repository, so there are no changes to show.",
+    )
+    render(<ChangedFiles />)
+    expect(screen.getByText(/no git repository/)).toBeTruthy()
+    expect(screen.queryByText(/busy/i)).toBeNull()
+    // And it names the folder, so the sentence is about something the user can
+    // see rather than an abstraction.
+    expect(screen.getByText(/~\/notes/)).toBeTruthy()
+  })
+
+  it("says which quiet this is for a folder inside somebody else's repository", () => {
+    mockState = standaloneState(
+      "inside_repo_rooted_elsewhere",
+      "This folder sits inside a repository rooted elsewhere, so dux shows no changes for it.",
+    )
+    render(<ChangedFiles />)
+    expect(screen.getByText(/rooted elsewhere/)).toBeTruthy()
+  })
+
+  // And when the folder IS a repository the panel is ordinary: no quiet copy,
+  // the real changes view.
+  it("renders the ordinary changes view when the folder is a repository", () => {
+    mockState = standaloneState("working_repo", "")
+    render(<ChangedFiles />)
+    expect(screen.queryByText(/no git repository/)).toBeNull()
+    expect(screen.getByLabelText("Changes actions")).toBeTruthy()
+  })
+})
+
   it("forces the server to ask git again rather than re-reading its cache", async () => {
     const menu = await openActionsMenu()
 

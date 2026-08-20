@@ -24,6 +24,7 @@ import {
   ExternalLink,
   FileCode2,
   Folder,
+  FolderOpen,
   GitFork,
   GitPullRequest,
   Info,
@@ -117,7 +118,9 @@ import { moveItem, ordersMatch, reorderById } from "@/lib/reorder"
 import { agentRoot, editorRootForTarget } from "@/lib/editorRoot"
 import {
   sessionLabel,
+  supportsBranchGit,
   workspaceDirectory,
+  workspaceLocation,
   workspaceProjectId,
 } from "@/lib/agentWorkspace"
 import {
@@ -202,6 +205,10 @@ export function AgentActionsMenu({
     (p) => p.id === workspaceProjectId(session.workspace),
   )?.name
   const ghAvailable = bootstrap?.gh_available ?? false
+  // Whether the branch-identity features exist for this agent at all: fork,
+  // pull requests, startup commands. They are about a branch dux manages, and
+  // a standalone agent has none whatever its folder contains.
+  const branchGit = supportsBranchGit(session.workspace)
   const prOverridden = session.pr?.overridden ?? false
   // Detach answers "this agent has no PR", so it is offered on ANY association,
   // pinned or autodetected: an autodetected badge the user does not want is the
@@ -351,10 +358,18 @@ export function AgentActionsMenu({
         <Pencil />
         Rename agent…
       </DropdownMenuItem>
-      <DropdownMenuItem onClick={() => openForkAgent(session.id)}>
-        <GitFork />
-        Fork agent…
-      </DropdownMenuItem>
+      {/* ABSENT, not disabled, for a standalone agent, and the same for every
+          branch-identity entry below. A disabled row promises the thing exists
+          and is unavailable right now; these features do not exist for an
+          agent with no branch at all, so there is nothing for the user to wait
+          for. Forking in particular copies a managed worktree onto a new
+          branch, and there is neither. */}
+      {branchGit && (
+        <DropdownMenuItem onClick={() => openForkAgent(session.id)}>
+          <GitFork />
+          Fork agent…
+        </DropdownMenuItem>
+      )}
       <DropdownMenuItem
         disabled={activeElsewhere}
         onClick={() => openChangeProvider(session.id)}
@@ -366,7 +381,7 @@ export function AgentActionsMenu({
           gh there is nothing to attach. The label flips on the OVERRIDE (a
           manually attached PR), not on mere PR presence, because attaching
           over an autodetected badge is still a first manual attach. */}
-      {ghAvailable && (
+      {branchGit && ghAvailable && (
         <DropdownMenuItem
           disabled={activeElsewhere}
           onClick={() => openAttachPullRequest(session.id)}
@@ -379,7 +394,7 @@ export function AgentActionsMenu({
       )}
       {/* No confirm and no ellipsis: detaching destroys nothing and there are
           two ways back (attach one by hand, or the resume entry below). */}
-      {prAssociated && (
+      {branchGit && prAssociated && (
         <DropdownMenuItem
           disabled={activeElsewhere}
           onClick={() => detachPullRequest(session.id)}
@@ -391,7 +406,7 @@ export function AgentActionsMenu({
       {/* The way back out of a detach, so the agent is never locked out of PR
           tracking. Same shape as the detach it undoes: icon, no ellipsis (it
           opens no dialog), no confirm, and no gh gate. */}
-      {prSuppressed && (
+      {branchGit && prSuppressed && (
         <DropdownMenuItem
           disabled={activeElsewhere}
           onClick={() => resumePullRequestAutodetection(session.id)}
@@ -405,18 +420,25 @@ export function AgentActionsMenu({
         Agent info…
       </DropdownMenuItem>
       <DropdownMenuSeparator />
-      <DropdownMenuItem onClick={() => openAgentStartupCommand(session.id)}>
-        <SquareChevronRight />
-        Configure startup command…
-      </DropdownMenuItem>
+      {/* A startup command provisions a worktree for a project. A standalone
+          agent has neither, so the three startup-command entries are absent
+          rather than offered and refused. */}
+      {branchGit && (
+        <DropdownMenuItem onClick={() => openAgentStartupCommand(session.id)}>
+          <SquareChevronRight />
+          Configure startup command…
+        </DropdownMenuItem>
+      )}
       <DropdownMenuItem onClick={() => openAgentEnv(session.id)}>
         <Variable />
         Configure environment variables…
       </DropdownMenuItem>
-      <DropdownMenuItem onClick={() => rerunStartupCommand(session.id)}>
-        <Play />
-        Rerun startup command
-      </DropdownMenuItem>
+      {branchGit && (
+        <DropdownMenuItem onClick={() => rerunStartupCommand(session.id)}>
+          <Play />
+          Rerun startup command
+        </DropdownMenuItem>
+      )}
       <DropdownMenuItem onClick={() => openStartupLogs(session.id)}>
         <ScrollText />
         Startup command logs…
@@ -492,6 +514,23 @@ function ProjectTag({ name, query }: { name: string; query: string }) {
   )
 }
 
+// A STANDALONE agent's folder, in the slot a project would occupy: same fact
+// ("which thing am I in") for the other kind of agent, so it takes the same
+// place rather than a badge of its own. The open-folder glyph tells the two
+// apart at a glance, and the label is home-collapsed server-side because the
+// browser is not necessarily on the server's machine. Searched like the project
+// name, so a query that matched a path explains itself.
+function FolderTag({ label, query }: { label: string; query: string }) {
+  return (
+    <span className="flex min-w-0 shrink items-center gap-1 text-muted-foreground">
+      <FolderOpen className="size-3 shrink-0" />
+      <span className="min-w-0 truncate font-mono">
+        <HighlightedText text={label} query={query} />
+      </span>
+    </span>
+  )
+}
+
 function Dot({ className }: { className: string }) {
   return <span className={cn("size-1 shrink-0 rounded-full bg-current opacity-50", className)} />
 }
@@ -561,6 +600,10 @@ function AgentFlatRow({
     session.typing,
   )
   const word = stateWord(session)
+  // Which thing this agent is IN: its project, or (for a standalone agent) the
+  // folder it runs in. Tagged rather than a bare string, so the row picks the
+  // glyph without re-deriving which kind of agent it is.
+  const location = workspaceLocation(session.workspace)
   const tabCount = session.tabs.length
 
   const { changes } = useDux()
@@ -692,7 +735,11 @@ function AgentFlatRow({
               {/* Line two: display-only project + state word + tabs. Sans
                   throughout to match the app. */}
               <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                <ProjectTag name={projectName} query={query} />
+                {location.kind === "folder" ? (
+                  <FolderTag label={location.label} query={query} />
+                ) : (
+                  <ProjectTag name={projectName} query={query} />
+                )}
                 <Dot className="text-muted-foreground" />
                 {/* Keyed on the label so a state change (Working ⇄ Idle ⇄ Detached
                     …) remounts the span and replays the one-shot fade+rise instead

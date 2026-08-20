@@ -21,6 +21,7 @@
 import {
   Bot,
   FolderGit2,
+  FolderOpen,
   FolderPlus,
   GitPullRequest,
   SquareTerminal,
@@ -33,6 +34,7 @@ import {
   openAddProjectForInit,
   openCreateAgentFromPr,
   openNewAgentPicker,
+  openStandaloneAgentPicker,
 } from "@/lib/store"
 
 export interface CreationMenuAction {
@@ -120,6 +122,18 @@ export function newMenuItems(ctx: {
       title: "New agent from existing worktree…",
       icon: FolderGit2,
       run: () => openNewAgentPicker("from_worktree"),
+    },
+    // A standalone agent is still an AGENT, so it sits with the agent variants
+    // above the rule rather than beside the standalone terminal below it: the
+    // rule separates the two kinds of thing, not the two "belongs to nothing"
+    // ones. It is named to match the standalone terminal so a user who has met
+    // one recognises the other.
+    {
+      kind: "item",
+      id: "new-standalone-agent",
+      title: "New standalone agent…",
+      icon: FolderOpen,
+      run: () => openStandaloneAgentPicker(),
     },
     { kind: "separator", id: "sep-new-terminals" },
     {

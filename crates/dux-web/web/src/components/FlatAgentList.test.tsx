@@ -424,6 +424,32 @@ describe("FlatAgentList agent row branch", () => {
     expect(document.body.textContent).not.toContain("feat/silver")
   })
 
+  // The row's second line names the FOLDER where an ordinary agent names its
+  // project: it is the same fact ("which thing am I in") for the other kind of
+  // agent, so it takes the same slot rather than a badge of its own.
+  it("names a standalone agent's folder where a managed agent names its project", () => {
+    const state = makeState("name")
+    state.spine!.sessions = [
+      {
+        ...state.spine!.sessions[0],
+        id: "notes",
+        title: "Notes",
+        workspace: {
+          kind: "folder",
+          folder_path: "/home/someone/work/notes",
+          folder_label: "~/work/notes",
+          repo_status: "no_repo",
+          quiet_reason: "This folder has no git repository.",
+        },
+      } as SessionView,
+    ]
+    mockState = state
+    render(<FlatAgentList handlers={handlers} />)
+    expect(screen.getByText("~/work/notes")).toBeTruthy()
+    // And no project name, because it belongs to none.
+    expect(screen.queryByText("Repo")).toBeNull()
+  })
+
   it("keeps the rest of line two: the project tag, the state word, the tab count", () => {
     const state = makeState("name")
     state.spine!.sessions = state.spine!.sessions.map((s) =>

@@ -8,6 +8,7 @@ import {
   GitCommitVertical,
   Loader2,
   Minus,
+  FolderOpen,
   MousePointerClick,
   PanelRightClose,
   Pencil,
@@ -49,6 +50,10 @@ import {
   EmptyMedia,
   EmptyTitle,
 } from "@/components/ui/empty"
+import {
+  changesQuietReason,
+  folderWorkspace,
+} from "@/lib/agentWorkspace"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Separator } from "@/components/ui/separator"
@@ -250,7 +255,7 @@ function FileGroup({ heading, files, total, filtering, action, sessionId, onOpen
 }
 
 export function ChangedFiles() {
-  const { changes, selectedSessionId } = useDux()
+  const { changes, selectedSessionId, spine } = useDux()
   // The hide-pane action is desktop-only: the mobile hub reaches Changes through
   // its own nav, so there's no panel to hide there.
   const isMobile = useIsMobile()
@@ -276,6 +281,44 @@ export function ChangedFiles() {
           </EmptyMedia>
           <EmptyTitle>No session selected</EmptyTitle>
           <EmptyDescription>Select a session to see its changes.</EmptyDescription>
+        </EmptyHeader>
+      </Empty>
+    )
+  }
+
+  // A STANDALONE agent whose folder is not a repository: quiet, and honest
+  // about which quiet this is. The sentence is the SERVER's (it is the one that
+  // consulted git, and the terminal UI says the same thing), so the two
+  // surfaces cannot describe the same folder differently.
+  //
+  // Checked before the slice below, because there is nothing to fetch: the
+  // server does not poll such a folder, so waiting on a phase would leave a
+  // spinner up forever. The old path ran git in it and reported "the repository
+  // is busy" once per poll, which is a lie about a folder that simply has no
+  // repository.
+  const selectedSession = spine?.sessions.find(
+    (s) => s.id === selectedSessionId,
+  )
+  const quietReason = selectedSession
+    ? changesQuietReason(selectedSession.workspace)
+    : null
+  if (quietReason) {
+    const folder = selectedSession
+      ? folderWorkspace(selectedSession.workspace)
+      : null
+    return (
+      <Empty className="h-full border-0">
+        <EmptyHeader>
+          <EmptyMedia variant="icon">
+            <FolderOpen />
+          </EmptyMedia>
+          <EmptyTitle>No changes to show</EmptyTitle>
+          <EmptyDescription>{quietReason}</EmptyDescription>
+          {folder ? (
+            <EmptyDescription className="font-mono break-all">
+              {folder.folder_label}
+            </EmptyDescription>
+          ) : null}
         </EmptyHeader>
       </Empty>
     )

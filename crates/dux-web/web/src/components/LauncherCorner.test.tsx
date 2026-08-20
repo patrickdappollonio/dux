@@ -92,6 +92,7 @@ describe("LauncherCorner overflow", () => {
     expect(screen.getAllByRole("menuitem").map((i) => i.textContent)).toEqual([
       "New agent from PR…",
       "New agent from existing worktree…",
+      "New standalone agent…",
       "New standalone terminal",
       "Add project…",
       "Initialize a repository…",

@@ -270,6 +270,57 @@ describe("AgentActionsMenu while the agent is active on another device", () => {
   })
 })
 
+function makeStandaloneSession(id: string): SessionView {
+  return {
+    ...makeSession({ id }),
+    workspace: {
+      kind: "folder",
+      folder_path: `/home/someone/${id}`,
+      folder_label: `~/${id}`,
+      repo_status: "no_repo",
+      quiet_reason: "This folder has no git repository.",
+    },
+  }
+}
+
+describe("AgentActionsMenu for a standalone agent", () => {
+  // ABSENT, not disabled. A disabled row is a promise that the thing exists and
+  // is unavailable right now; these features do not exist for this kind of
+  // agent at all, and never will, so there is nothing for a user to wait for.
+  it("offers no branch-identity entries at all", async () => {
+    const session = makeStandaloneSession("sa1")
+    seed(session, true)
+    await openMenu(session)
+    for (const absent of [
+      /Fork agent/,
+      /Attach pull request/,
+      /attached pull request/,
+      /Detach pull request/,
+      /Resume PR autodetection/,
+      /Configure startup command/,
+      /Rerun startup command/,
+    ]) {
+      expect(screen.queryByText(absent)).toBeNull()
+    }
+  })
+
+  // The features that never needed git keep working: the agent still runs, is
+  // still renamed, still retargets its provider, and still gets deleted.
+  it("keeps every entry that was never about a branch", async () => {
+    const session = makeStandaloneSession("sa1")
+    seed(session, true)
+    await openMenu(session)
+    for (const present of [
+      "Rename agent…",
+      "Change agent provider…",
+      "Agent info…",
+      "New terminal",
+    ]) {
+      expect(screen.getByText(present)).toBeTruthy()
+    }
+  })
+})
+
 describe("AgentActionsMenu pull-request entries", () => {
   it("hides both entries without a usable gh and no override", async () => {
     seed(makeSession({ id: "s1" }), false)

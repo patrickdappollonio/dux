@@ -363,6 +363,11 @@ export interface DuxState {
     location: "local" | "remote"
   } | null
   addProjectOpen: boolean
+  /** The standalone-agent folder picker. It shares the `browse*` slice with the
+   * add-project picker, which is right: only one folder picker is open at a
+   * time, and the browsing itself is the same act. What differs is what
+   * happens to the folder you choose. */
+  standaloneAgentPickerOpen: boolean
   // Why the picker was opened: "add" (the default) or "init" (the split
   // button's "Initialize a repository…" entry). The intent's ONLY effect is a
   // header hint in the dialog; the primary-action ladder does the real work
@@ -833,6 +838,7 @@ let state: DuxState = {
   forceReconnectTarget: null,
   existingBranchTarget: null,
   addProjectOpen: false,
+  standaloneAgentPickerOpen: false,
   addProjectIntent: "add",
   browsePath: "",
   browseEntries: [],
@@ -4321,11 +4327,18 @@ export function closeForceReconnect(): void {
 // `/ws` `browse_dir` → `dir_entries` round-trip). A null path resolves the
 // server's configured default start directory. The reply is ignored once the
 // dialog has closed so a late response can't repopulate a closed picker.
+/** Whether SOME folder picker is still open. The browse reply is dropped
+ * otherwise, so a late response cannot repopulate a closed picker. Both
+ * pickers share the slice, so both must be consulted. */
+function browsingOpen(): boolean {
+  return state.addProjectOpen || state.standaloneAgentPickerOpen
+}
+
 function runBrowse(path: string | null): void {
   browseApi
     .browse(path)
     .then((res) => {
-      if (!state.addProjectOpen) return
+      if (!browsingOpen()) return
       setState({
         browsePath: res.path,
         browseEntries: res.entries,
@@ -4333,12 +4346,49 @@ function runBrowse(path: string | null): void {
       })
     })
     .catch((e) => {
-      if (!state.addProjectOpen) return
+      if (!browsingOpen()) return
       setState({ browseEntries: [], browseLoading: false })
       notifyError(
         e instanceof Error ? e.message : "Could not browse the directory.",
       )
     })
+}
+
+/** Open the standalone-agent folder picker, at the server's configured default
+ * start directory.
+ *
+ * Deliberately no inspection: the add-project picker classifies the folder
+ * before committing, because a project must be a repository. A standalone agent
+ * accepts whatever is there, so there is nothing to check and nothing to warn
+ * about. */
+export function openStandaloneAgentPicker(): void {
+  setState({
+    standaloneAgentPickerOpen: true,
+    browseLoading: true,
+    browseEntries: [],
+  })
+  runBrowse(null)
+}
+
+export function closeStandaloneAgentPicker(): void {
+  setState({ standaloneAgentPickerOpen: false })
+}
+
+/** Create a standalone agent in `folder`, with an optional display name.
+ *
+ * Every refusal (a relative path, a folder that already hosts one) is the
+ * server's, shared with the terminal UI, so the two surfaces cannot answer
+ * differently. */
+export function createStandaloneAgent(folder: string, name: string): void {
+  void sessionsApi
+    .create({ kind: "standalone", folder, name })
+    .catch((e) =>
+      notifyError(
+        e instanceof Error
+          ? e.message
+          : "Could not create the standalone agent.",
+      ),
+    )
 }
 
 export function openAddProject(): void {
@@ -4369,6 +4419,7 @@ export function openAddProjectForInit(): void {
 export function closeAddProject(): void {
   setState({
     addProjectOpen: false,
+  standaloneAgentPickerOpen: false,
     addProjectIntent: "add",
     projectPathInspection: null,
   })

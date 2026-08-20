@@ -3,6 +3,7 @@ import { useEffect, useRef } from "react"
 import type { PanelImperativeHandle } from "react-resizable-panels"
 
 import { AddProjectDialog } from "@/components/AddProjectDialog"
+import { StandaloneAgentDialog } from "@/components/StandaloneAgentDialog"
 import { AgentEnvDialog } from "@/components/AgentEnvDialog"
 import { AgentInfoDialog } from "@/components/AgentInfoDialog"
 import { AgentStartupCommandDialog } from "@/components/AgentStartupCommandDialog"
@@ -102,6 +103,7 @@ function GlobalOverlays() {
       <AgentEnvDialog />
       <StartupLogsDialog />
       <AddProjectDialog />
+      <StandaloneAgentDialog />
       <WorktreesDialog />
       <RemoveProjectDialog />
       <DeleteProjectDialog />

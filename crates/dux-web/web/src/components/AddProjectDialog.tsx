@@ -2,16 +2,12 @@ import { useLayoutEffect, useRef, useState } from "react"
 import {
   AlertTriangle,
   Ban,
-  CornerLeftUp,
-  Folder,
-  FolderGit2,
-  FolderOpen,
   FolderPlus,
 } from "lucide-react"
 import { notifyError } from "@/lib/notify"
 
 import { BrailleSpinner } from "@/components/BrailleSpinner"
-import { Badge } from "@/components/ui/badge"
+import { FolderBrowseList } from "@/components/FolderBrowseList"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import {
@@ -22,7 +18,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
-import { ScrollArea } from "@/components/ui/scroll-area"
 import {
   addProjectPrimaryAction,
   branchWarningCopy,
@@ -42,14 +37,6 @@ import {
   useDux,
 } from "@/lib/store"
 import type { DirEntryView } from "@/lib/types"
-
-// Trailing path segment, used for the pinned row's target pill and the parent
-// row's "Up to <folder>" label.
-function baseName(path: string): string {
-  const trimmed = path.endsWith("/") && path !== "/" ? path.slice(0, -1) : path
-  const idx = trimmed.lastIndexOf("/")
-  return idx >= 0 ? trimmed.slice(idx + 1) || trimmed : trimmed
-}
 
 // The inline "New folder" affordance in the dialog header: a ghost button that
 // swaps for an input + Create/Cancel. On success it navigates INTO the new
@@ -178,15 +165,6 @@ function PathField({ value }: { value: string }) {
 // A monospace name chip with a leading folder glyph. Shared by the pinned
 // "Use this folder" row and the "Up to <folder>" parent row so the two folder
 // names render identically and cannot drift.
-function FolderPill({ name }: { name: string }) {
-  return (
-    <span className="inline-flex min-w-0 items-center gap-1 rounded-full border border-border bg-muted px-2 py-0.5 font-mono text-xs">
-      <Folder className="size-3 shrink-0 text-muted-foreground" />
-      <span className="truncate">{name}</span>
-    </span>
-  )
-}
-
 // The browser body is mounted only while the dialog is open so its local
 // `selected`/`name` state resets on each open — no set-state-in-effect needed.
 function AddProjectBrowser() {
@@ -305,83 +283,15 @@ function AddProjectBrowser() {
         </div>
       </DialogHeader>
 
-      <ScrollArea className="h-[50vh] rounded-md border md:h-80">
-        {browseLoading ? (
-          <div className="flex h-[50vh] items-center justify-center md:h-80">
-            <BrailleSpinner className="text-lg text-muted-foreground" />
-          </div>
-        ) : (
-          <div className="flex flex-col">
-            {/* Pinned, client-synthesized "Use this folder" row: the ONLY way
-                the current directory becomes a target. The footer stays
-                strictly selection-driven; the primary button never acts on
-                wherever the user happens to be standing. The pinned band (a
-                faint elevated tint plus a neutral left accent rule) and the
-                monospace target pill read this as a commit action, distinct
-                from the ordinary folder rows below. */}
-            <button
-              type="button"
-              onClick={() => selectTarget(browsePath)}
-              className={`flex min-h-11 items-center gap-2 border-l-2 border-primary/60 px-3 py-2 text-left text-sm hover:bg-accent md:min-h-0 ${
-                usingThisFolder ? "bg-accent" : "bg-muted/40"
-              }`}
-            >
-              <FolderOpen className="size-4 shrink-0 text-muted-foreground" />
-              <span className="shrink-0">Use this folder</span>
-              <FolderPill name={baseName(browsePath)} />
-            </button>
-            {/* Non-interactive divider separating the commit action from the
-                navigation list below. */}
-            <div className="px-3 py-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
-              Browse
-            </div>
-            {browseEntries.map((entry) => {
-              // The synthetic parent ("../") row reads as an "up" action, not a
-              // folder: a distinct glyph and the parent's basename. It shows no
-              // path, because the header field above is the authoritative path
-              // for where you are and repeating it here only widened the row and
-              // duplicated that path. No git badge.
-              if (entry.is_parent) {
-                return (
-                  <button
-                    key={entry.path}
-                    type="button"
-                    onClick={() => handleEntryClick(entry)}
-                    // min-h-11 on phones gives each row a ≥44px touch target;
-                    // desktop keeps the compact py-2 density via md:.
-                    className="flex min-h-11 items-center gap-2 px-3 py-2 text-left text-sm hover:bg-accent md:min-h-0"
-                  >
-                    <CornerLeftUp className="size-4 shrink-0 text-muted-foreground" />
-                    <span className="shrink-0">Up to</span>
-                    <FolderPill name={baseName(entry.path)} />
-                  </button>
-                )
-              }
-              // No row-level selected state: every folder row navigates, and
-              // selection lives solely on the pinned "Use this folder" row.
-              const Icon = entry.is_git_repo ? FolderGit2 : Folder
-              return (
-                <button
-                  key={entry.path}
-                  type="button"
-                  onClick={() => handleEntryClick(entry)}
-                  // min-h-11 on phones gives each row a ≥44px touch target;
-                  // desktop keeps the compact py-2 density via md:.
-                  className="flex min-h-11 items-center gap-2 px-3 py-2 text-left text-sm hover:bg-accent md:min-h-0"
-                >
-                  <Icon className="size-4 shrink-0 text-muted-foreground" />
-                  <span className="flex-1 truncate">{entry.label}</span>
-                  {entry.is_git_repo ? (
-                    <Badge variant="secondary" className="shrink-0">
-                      git
-                    </Badge>
-                  ) : null}
-                </button>
-              )
-            })}
-          </div>
-        )}
-      </ScrollArea>
+      <FolderBrowseList
+        path={browsePath}
+        entries={browseEntries}
+        loading={browseLoading}
+        commitLabel="Use this folder"
+        committed={usingThisFolder}
+        onCommit={selectTarget}
+        onOpen={handleEntryClick}
+      />
 
       {selected ? (
         <div className="flex flex-col gap-2">
