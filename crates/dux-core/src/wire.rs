@@ -1169,6 +1169,11 @@ pub fn delete_session_status_message(
         // dux's to delete. The wording names every kept branch with its own
         // reason (drift makes them differ) and how to remove one by hand: once
         // the worktree is gone, no dux surface can reach the branch any more.
+        //
+        // The `unwrap_or_default` on the branch reads below are unreachable
+        // placeholders, not values any sentence renders: a standalone agent has
+        // no branch and takes the `NothingToRemove` arm above, which is the
+        // only arm it can take.
         WorktreeRemoval::Performed {
             branches: crate::engine::RemovedBranches::Kept(provenance),
         } => {
