@@ -1073,6 +1073,7 @@ mod tests {
                     input: TextInput::with_text("name".to_string()),
                     rename_branch: false,
                     focus: RenameSessionFocus::Input,
+                    branch_named: true,
                 },
             ),
             (

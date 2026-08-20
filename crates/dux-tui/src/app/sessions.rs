@@ -468,6 +468,19 @@ impl App {
             self.set_error("Select an agent session first to fork.");
             return Ok(());
         };
+        // Forking copies a BRANCH into a new worktree, which is the half a
+        // standalone agent does not have. The same gate the HTTP route uses, so
+        // a keystroke, a palette command and a curl refuse for the same reason
+        // and in the same words; without it this fell through to "Select an
+        // agent session first to fork." with an agent plainly selected.
+        if let Err(err) = self.engine.branch_git_workspace(
+            &source_session.id,
+            "fork",
+            dux_core::engine::STANDALONE_ADD_AS_PROJECT_REMEDY,
+        ) {
+            self.set_error(err.to_string());
+            return Ok(());
+        }
         // Fork is agent-scoped: the new worktree belongs to the SAME project as
         // the agent being forked. Derive it from the source session, not from
         // `selected_project()`, which can resolve to a `manage-projects` target
@@ -4435,6 +4448,34 @@ mod tests {
                 },
             ),
         }
+    }
+
+    /// Forking a standalone agent gives the purposeful refusal, not "select an
+    /// agent first" with an agent plainly selected.
+    ///
+    /// The keystroke and the palette command land here, and the HTTP route
+    /// answers through the same chokepoint, so all three say the same thing.
+    #[test]
+    fn forking_a_standalone_agent_refuses_in_the_shared_words() {
+        let mut session = make_session("sa1", "claude", "/unused");
+        session.title = Some("My Notes".to_string());
+        session.workspace =
+            dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
+                folder_path: "/home/someone/My Notes".to_string(),
+            });
+        let mut app = test_app_with_sessions(vec![session], Vec::new());
+        app.selected_left = 1;
+
+        app.fork_selected_session().expect("fork is handled");
+        let status = app.status.message();
+        assert!(
+            status.contains("standalone agent") && status.contains("fork"),
+            "the refusal names what this agent is and what was refused, got: {status}"
+        );
+        assert!(
+            !status.contains("Select an agent session first"),
+            "and never claims nothing is selected, got: {status}"
+        );
     }
 
     fn test_engine_with_sessions(

@@ -1833,6 +1833,14 @@ pub(crate) enum PromptState {
         input: TextInput,
         rename_branch: bool,
         focus: RenameSessionFocus,
+        /// Whether this agent's name is also a git branch name.
+        ///
+        /// False for a standalone agent, and it changes three things at once:
+        /// the branch checkbox is ABSENT (there is no branch to rename), the
+        /// modal is therefore single-control, and the field takes the name
+        /// verbatim instead of through the refname char map, because the label
+        /// dux itself derived from the folder may legally contain a space.
+        branch_named: bool,
     },
     PullRequestInput {
         /// `None` when the modal was opened from the global command: the
@@ -4917,8 +4925,15 @@ impl App {
         // The cheap half: point the watch at the session and empty the lists. No
         // git runs here.
         let Some(worktree) = self.engine.set_watched_session(Some(&session_id)) else {
+            // Reachable only for a standalone agent whose folder is not a
+            // working repository, so the reason is the FOLDER's, read from the
+            // one engine verdict every other refusal reads. Describing the
+            // agent's shape here instead ("no worktree to read") was both less
+            // useful and the only refusal on either surface that disagreed with
+            // the panel sitting next to it.
+            let reason = self.engine.folder_repo_status(&session_id).quiet_reason();
             self.set_warning(format!(
-                "Could not refresh the changed files for \"{name}\": that agent has no worktree to read."
+                "Could not refresh the changed files for \"{name}\": {reason}"
             ));
             return Ok(());
         };
@@ -5162,14 +5177,24 @@ impl App {
                 return Ok(());
             }
             let current_name = session.display_label();
+            let branch_named = session.supports_branch_git();
             self.input_target = InputTarget::None;
             self.fullscreen_overlay = FullscreenOverlay::None;
+            // The refname char map is applied only where the name becomes a
+            // branch. For a standalone agent it would rewrite the space in the
+            // label dux itself derived from the folder, so the pre-filled name
+            // could not be re-submitted as typed.
+            let input = if branch_named {
+                TextInput::with_text(current_name).with_char_map(crate::git::agent_name_char_map)
+            } else {
+                TextInput::with_text(current_name)
+            };
             self.prompt = PromptState::RenameSession {
                 session_id: session.id,
-                input: TextInput::with_text(current_name)
-                    .with_char_map(crate::git::agent_name_char_map),
-                rename_branch: true,
+                input,
+                rename_branch: branch_named,
                 focus: RenameSessionFocus::Input,
+                branch_named,
             };
         } else {
             self.set_error("No agent session selected.");

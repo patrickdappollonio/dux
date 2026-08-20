@@ -24,6 +24,20 @@ const MOUSE_WHEEL_LINES: usize = 3;
 /// glyph, so the cell count is decided by the base character alone: the marks
 /// add nothing, however many there are. Anything unmeasurable falls back to one,
 /// because a cell that exists occupies at least one column.
+/// What a successful commit says, and whether it points at the push key.
+///
+/// `push_key` is `Some` only when this agent can actually push, which a
+/// standalone agent cannot: it has no branch, so `push_to_remote` refuses it,
+/// and naming the key here walked the user into that refusal one keystroke
+/// after a successful commit. Pure, so the decision is testable without a git
+/// repository behind it.
+fn commit_success_message(push_key: Option<&str>) -> String {
+    match push_key {
+        Some(key) => format!("Changes committed successfully. Press {key} to push to remote."),
+        None => "Changes committed successfully in this agent's folder.".to_string(),
+    }
+}
+
 fn snapshot_cell_columns(symbol: &str) -> u16 {
     let Some(first) = symbol.chars().next() else {
         return 1;
@@ -2471,9 +2485,15 @@ impl App {
             }
             git::CommitPreflight::Ready => {}
         }
-        let push_key = self.bindings.label_for(Action::PushToRemote);
-        let success_message =
-            format!("Changes committed successfully. Press {push_key} to push to remote.");
+        // The push hint is only offered where pushing is possible. A standalone
+        // agent has no branch, so `push_to_remote` refuses it, and advertising
+        // the key here sent the user straight into that refusal one keystroke
+        // after a successful commit.
+        let push_key = self
+            .selected_session()
+            .filter(|session| session.supports_branch_git())
+            .map(|_| self.bindings.label_for(Action::PushToRemote));
+        let success_message = commit_success_message(push_key.as_deref());
         let reaction = self.engine.apply(Command::CommitChanges {
             worktree_path: worktree,
             message,
@@ -7475,14 +7495,21 @@ impl App {
     /// modal's, but with only two controls both directions land on the other
     /// one, so it has nothing to decide here.
     fn focus_next_rename_session_control(&mut self, forward: bool) {
-        if let PromptState::RenameSession { focus, .. } = &mut self.prompt {
-            // Two unconditional stops, so both directions land in the same
-            // place; the ring is used anyway so this modal's focus order is
-            // declared as data like everyone else's.
+        if let PromptState::RenameSession {
+            focus,
+            branch_named,
+            ..
+        } = &mut self.prompt
+        {
+            // Two stops normally, so both directions land in the same place.
+            // The checkbox stop is conditional because a standalone agent's
+            // rename does not render one: focus would otherwise move to a
+            // control that is not on screen.
+            let branch_named = *branch_named;
             *focus = next_focus(
                 &[
                     (RenameSessionFocus::Input, true),
-                    (RenameSessionFocus::RenameBranchCheckbox, true),
+                    (RenameSessionFocus::RenameBranchCheckbox, branch_named),
                 ],
                 *focus,
                 forward,
@@ -9724,9 +9751,32 @@ mod tests {
     use crate::app::ResizeDragState;
     use crate::app::SelectionOrigin;
     use crate::app::input::{
-        assemble_selection_text, configure_focus, configure_project_text_input,
-        cursor_from_single_line_position, snapshot_cell_columns, startup_command_log_visual_lines,
+        assemble_selection_text, commit_success_message, configure_focus,
+        configure_project_text_input, cursor_from_single_line_position, snapshot_cell_columns,
+        startup_command_log_visual_lines,
     };
+
+    /// The commit success message advertises the push key only where pushing can
+    /// succeed. A standalone agent has no branch, so the key it used to name
+    /// unconditionally refuses one keystroke later.
+    #[test]
+    fn the_commit_success_message_only_advertises_a_push_that_can_happen() {
+        let managed = commit_success_message(Some("Ctrl-u"));
+        assert!(
+            managed.contains("Ctrl-u") && managed.contains("push"),
+            "got: {managed}"
+        );
+
+        let standalone = commit_success_message(None);
+        assert!(
+            standalone.contains("committed successfully"),
+            "still says the commit worked, got: {standalone}"
+        );
+        assert!(
+            !standalone.to_lowercase().contains("push"),
+            "and never points at a push that will be refused, got: {standalone}"
+        );
+    }
     use crate::app::test_support::*;
     use crate::app::{
         AgentLaunchKind, App, BranchWarningKind, CenterMode, ChangeAgentProviderMode,
@@ -10477,6 +10527,7 @@ not_a_real_action = ["x"]
             input: TextInput::with_text("agent".to_string()),
             rename_branch: false,
             focus: RenameSessionFocus::Input,
+            branch_named: true,
         };
         app.input_target = InputTarget::Agent;
 
@@ -10500,6 +10551,7 @@ not_a_real_action = ["x"]
             input: TextInput::with_text("agent".to_string()),
             rename_branch: false,
             focus: RenameSessionFocus::Input,
+            branch_named: true,
         };
 
         app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
@@ -10522,6 +10574,7 @@ not_a_real_action = ["x"]
             input: TextInput::with_text("agent-branch".to_string()),
             rename_branch: false,
             focus: RenameSessionFocus::Input,
+            branch_named: true,
         };
 
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
@@ -11138,6 +11191,7 @@ not_a_real_action = ["x"]
             input: TextInput::with_text("test".to_string()),
             rename_branch: true,
             focus: RenameSessionFocus::Input,
+            branch_named: true,
         };
 
         // Tab moves focus onto the checkbox, leaving its value alone.
@@ -11199,6 +11253,7 @@ not_a_real_action = ["x"]
             input: TextInput::with_text("a".to_string()),
             rename_branch: true,
             focus: RenameSessionFocus::Input,
+            branch_named: true,
         };
 
         app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
@@ -11233,6 +11288,7 @@ not_a_real_action = ["x"]
             input: TextInput::with_text("test".to_string()),
             rename_branch: true,
             focus: RenameSessionFocus::Input,
+            branch_named: true,
         };
 
         app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT))
@@ -11268,6 +11324,7 @@ not_a_real_action = ["x"]
                 input: TextInput::with_text("agent".to_string()),
                 rename_branch: true,
                 focus: RenameSessionFocus::RenameBranchCheckbox,
+                branch_named: true,
             };
 
             app.handle_key(KeyEvent::new(code, KeyModifiers::NONE))
@@ -11301,6 +11358,7 @@ not_a_real_action = ["x"]
             input: TextInput::with_text("agent".to_string()),
             rename_branch: false,
             focus: RenameSessionFocus::Input,
+            branch_named: true,
         };
         install_rename_overlay(&mut app);
 
@@ -11343,6 +11401,7 @@ not_a_real_action = ["x"]
             input: TextInput::with_text("agent".to_string()),
             rename_branch: true,
             focus: RenameSessionFocus::Input,
+            branch_named: true,
         };
 
         app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))
@@ -11390,6 +11449,7 @@ not_a_real_action = ["x"]
             input: TextInput::with_text(String::new()),
             rename_branch: true,
             focus: RenameSessionFocus::Input,
+            branch_named: true,
         };
 
         for c in ['h', 'l'] {
@@ -21382,6 +21442,7 @@ cyan = "#00ffff"
             input: TextInput::with_text("rename me".to_string()),
             rename_branch: false,
             focus: RenameSessionFocus::Input,
+            branch_named: true,
         };
         install_rename_overlay(&mut app);
 
@@ -21404,6 +21465,7 @@ cyan = "#00ffff"
             input: TextInput::with_text("rename me".to_string()),
             rename_branch: false,
             focus: RenameSessionFocus::Input,
+            branch_named: true,
         };
         install_rename_overlay(&mut app);
 
@@ -26725,6 +26787,7 @@ cyan = "#00ffff"
             input: TextInput::new(),
             rename_branch: false,
             focus: RenameSessionFocus::Input,
+            branch_named: true,
         };
         app.handle_paste("new name");
         if let PromptState::RenameSession { input, .. } = &app.prompt {
@@ -28318,6 +28381,7 @@ cyan = "#00ffff"
             input: TextInput::with_text("abcdef".to_string()),
             rename_branch: false,
             focus: RenameSessionFocus::Input,
+            branch_named: true,
         };
         let backend = TestBackend::new(120, 40);
         let mut terminal = Terminal::new(backend).expect("terminal");

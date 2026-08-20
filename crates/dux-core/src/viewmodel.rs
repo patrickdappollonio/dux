@@ -523,6 +523,7 @@ fn folder_repo_status_wire(status: crate::git::FolderRepoStatus) -> &'static str
         crate::git::FolderRepoStatus::InsideRepoRootedElsewhere => "inside_repo_rooted_elsewhere",
         crate::git::FolderRepoStatus::NoRepo => "no_repo",
         crate::git::FolderRepoStatus::Indeterminate => "indeterminate",
+        crate::git::FolderRepoStatus::Unprobed => "unprobed",
     }
 }
 
@@ -1552,12 +1553,12 @@ mod tests {
         }
         // An unprobed folder is honest about not knowing yet, and its quiet
         // sentence travels with it so both surfaces say the same thing.
-        assert_eq!(json["workspace"]["repo_status"], "indeterminate");
+        assert_eq!(json["workspace"]["repo_status"], "unprobed");
         assert!(
             json["workspace"]["quiet_reason"]
                 .as_str()
                 .expect("a quiet reason")
-                .contains("could not consult git")
+                .contains("still looking")
         );
     }
 

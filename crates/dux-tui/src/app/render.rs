@@ -8118,6 +8118,7 @@ impl App {
                 input,
                 rename_branch,
                 focus,
+                branch_named,
                 ..
             } => {
                 let checkbox_state = if *focus == RenameSessionFocus::RenameBranchCheckbox {
@@ -8130,15 +8131,22 @@ impl App {
                     .state(checkbox_state);
                 let dialog_width = 62.min(frame.area().width.max(1));
                 let inner_width = dialog_width.saturating_sub(2);
-                let checkbox_height = checkbox
-                    .layout(
-                        inner_width,
-                        checkbox.marker_style(Style::default()),
-                        checkbox.label_style(Style::default()),
-                    )
-                    .height
-                    .saturating_add(1);
-                let checkbox_spacing = 1;
+                // A standalone agent has no branch, so the checkbox is ABSENT
+                // rather than present-and-inert, and the modal shrinks to the
+                // one control it really has.
+                let checkbox_height = if *branch_named {
+                    checkbox
+                        .layout(
+                            inner_width,
+                            checkbox.marker_style(Style::default()),
+                            checkbox.label_style(Style::default()),
+                        )
+                        .height
+                        .saturating_add(1)
+                } else {
+                    0
+                };
+                let checkbox_spacing = if *branch_named { 1 } else { 0 };
                 let area = centered_rect_exact(
                     dialog_width,
                     9 + checkbox_spacing + checkbox_height,
@@ -8187,20 +8195,25 @@ impl App {
                 .block(input_block)
                 .render(input_area, frame.buffer_mut());
 
-                let (checkbox_rect, _) = self.render_overlay_checkbox(
-                    frame,
-                    checkbox_area,
-                    "Also rename the git branch",
-                    *rename_branch,
-                    checkbox_state,
-                    Some(Line::from(Span::styled(
-                        format!(
-                            "{}Open PRs will still reference the old branch name",
-                            Checkbox::indent()
-                        ),
-                        Style::default().fg(self.theme.hint_desc_fg),
-                    ))),
-                );
+                let checkbox_rect = if *branch_named {
+                    let (rect, _) = self.render_overlay_checkbox(
+                        frame,
+                        checkbox_area,
+                        "Also rename the git branch",
+                        *rename_branch,
+                        checkbox_state,
+                        Some(Line::from(Span::styled(
+                            format!(
+                                "{}Open PRs will still reference the old branch name",
+                                Checkbox::indent()
+                            ),
+                            Style::default().fg(self.theme.hint_desc_fg),
+                        ))),
+                    );
+                    Some(rect)
+                } else {
+                    None
+                };
 
                 let confirm_key = self.bindings.label_for(Action::Confirm);
                 let close_key = self.bindings.label_for(Action::CloseOverlay);
@@ -8210,9 +8223,15 @@ impl App {
                 // here (see `text_field_owns_key`). If a rebinding leaves none,
                 // the segment is dropped: naming a key that types a character
                 // is worse than naming none.
-                let focus_key = self
-                    .bindings
-                    .label_for_text_field_dialog(Action::ToggleSelection);
+                // Nothing to move focus to when the checkbox is absent, so the
+                // segment goes with it rather than naming a key that does
+                // nothing.
+                let focus_key = if *branch_named {
+                    self.bindings
+                        .label_for_text_field_dialog(Action::ToggleSelection)
+                } else {
+                    None
+                };
                 let hints = modal_hint_line(
                     &self.theme,
                     &[
@@ -8236,9 +8255,9 @@ impl App {
                 Paragraph::new(hints).render(hint_area, frame.buffer_mut());
                 self.overlay_layout.active = OverlayMouseLayout::RenameSession {
                     input: input_inner,
-                    checkbox: Some(OverlayCheckbox {
+                    checkbox: checkbox_rect.map(|rect| OverlayCheckbox {
                         id: OverlayCheckboxId::RenameSessionBranch,
-                        rect: checkbox_rect,
+                        rect,
                     }),
                 };
             }
@@ -10928,6 +10947,111 @@ mod tests {
         assert!(
             !rendered.to_lowercase().contains("busy"),
             "and never that a repository is busy; got:\n{rendered}"
+        );
+    }
+
+    /// The rename modal for a standalone agent has NO branch checkbox: there is
+    /// no branch to rename, and a checkbox that cannot do anything is worse than
+    /// none. Rendered rather than reasoned about, because the modal's height is
+    /// computed from the checkbox and a stale layout would leave a hole.
+    #[test]
+    fn the_rename_modal_offers_no_branch_checkbox_for_a_standalone_agent() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        app.selected_left = 1;
+        app.engine.sessions[0].title = Some("My Notes".to_string());
+        app.engine.sessions[0].workspace =
+            dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
+                folder_path: "/home/someone/My Notes".to_string(),
+            });
+        app.open_rename_session().expect("open the rename modal");
+
+        // The pre-filled name survives verbatim: the refname char map, which
+        // rewrites a space to a dash, must not be attached here or the name dux
+        // itself derived from the folder could not be submitted as shown.
+        let PromptState::RenameSession {
+            input,
+            rename_branch,
+            branch_named,
+            ..
+        } = &app.prompt
+        else {
+            panic!("expected the rename modal, got {:?}", app.prompt);
+        };
+        assert_eq!(input.text, "My Notes");
+        assert!(!*branch_named, "a standalone agent has no branch");
+        assert!(!*rename_branch, "so no branch rename is requested");
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(
+            !rendered.contains("Also rename the git branch"),
+            "the branch checkbox must be absent, not present-and-inert; got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("My Notes"),
+            "and the pre-filled name is on screen; got:\n{rendered}"
+        );
+
+        // A managed agent still gets it, so the absence above is about the
+        // workspace and not about the modal having lost its checkbox.
+        let mut app = test_app(default_bindings());
+        app.selected_left = 1;
+        app.open_rename_session().expect("open the rename modal");
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(
+            rendered.contains("Also rename the git branch"),
+            "a managed agent's rename still offers the branch checkbox; got:\n{rendered}"
+        );
+    }
+
+    /// `refresh-changes` on a standalone agent whose folder is not a repository
+    /// refuses with the FOLDER's reason, read from the one engine verdict every
+    /// other refusal reads, rather than describing the agent's shape in words of
+    /// its own ("no worktree to read") that disagreed with the pane beside it.
+    #[test]
+    fn refreshing_changes_for_a_standalone_folder_gives_the_shared_reason() {
+        let mut app = test_app(default_bindings());
+        app.selected_left = 1;
+        let id = app.engine.sessions[0].id.clone();
+        app.engine.sessions[0].workspace =
+            dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
+                folder_path: "/home/someone/notes".to_string(),
+            });
+        app.engine
+            .folder_repo_statuses
+            .insert(id, dux_core::git::FolderRepoStatus::NoRepo);
+
+        app.refresh_changed_files_now().expect("refresh is handled");
+        let message = app.status.message();
+        assert!(
+            message.contains("This folder has no git repository"),
+            "the refusal is the folder's own quiet reason, got: {message}"
+        );
+        assert!(
+            !message.contains("no worktree to read"),
+            "and not a sentence about the agent's shape, got: {message}"
         );
     }
 
@@ -15984,6 +16108,7 @@ mod tests {
                 input,
                 rename_branch,
                 focus: RenameSessionFocus::RenameBranchCheckbox,
+                branch_named: true,
             },
             other => panic!("expected RenameSession, got {other:?}"),
         };
@@ -16412,6 +16537,7 @@ mod tests {
             input: TextInput::with_text("agent".to_string()),
             rename_branch: false,
             focus: RenameSessionFocus::Input,
+            branch_named: true,
         }
     }
 
@@ -16746,6 +16872,7 @@ mod tests {
             input,
             rename_branch: false,
             focus,
+            branch_named: true,
         }
     }
 
@@ -17641,6 +17768,7 @@ mod tests {
             input: TextInput::with_text("agent".to_string()),
             rename_branch: false,
             focus: RenameSessionFocus::RenameBranchCheckbox,
+            branch_named: true,
         };
         let screen = rendered_screen(&mut app);
         assert!(

@@ -20,7 +20,14 @@ import { assertNever } from "@/lib/assertNever"
  * server acted on. Only `working_repo` gets a real changes panel; the rest are
  * quiet, and `quiet_reason` says which quiet this is. */
 export type FolderRepoStatus =
-  "working_repo" | "inside_repo_rooted_elsewhere" | "no_repo" | "indeterminate"
+  | "working_repo"
+  | "inside_repo_rooted_elsewhere"
+  | "no_repo"
+  | "indeterminate"
+  /** Nobody has looked yet. Gates exactly as `indeterminate` does; its
+   * `quiet_reason` reads as a wait rather than as a fault, because a freshly
+   * created agent in a healthy repository spends a moment here. */
+  | "unprobed"
 
 /** The serialized workspace, exactly as it arrives on `SessionView.workspace`.
  * Field names are the server's (snake_case). */

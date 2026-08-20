@@ -259,6 +259,17 @@ pub enum FolderRepoStatus {
     /// and every mutation is refused, matching the `CommitState` doctrine of
     /// failing closed on an unknown answer.
     Indeterminate,
+    /// Nobody has looked yet: the folder has no verdict because its probe has
+    /// not landed (it is spawned right after the agent is created, and again
+    /// on restore).
+    ///
+    /// A variant of its own rather than a second meaning for `Indeterminate`,
+    /// because the two gate identically but read completely differently: "dux
+    /// is still looking" is a wait, while "git could not be consulted" accuses
+    /// the user's machine of a fault it does not have. A freshly created agent
+    /// in a perfectly healthy repository hits this window, and it was the
+    /// sentence it got.
+    Unprobed,
 }
 
 impl FolderRepoStatus {
@@ -266,7 +277,10 @@ impl FolderRepoStatus {
     pub fn changes_panel_works(self) -> bool {
         match self {
             Self::WorkingRepo => true,
-            Self::InsideRepoRootedElsewhere | Self::NoRepo | Self::Indeterminate => false,
+            Self::InsideRepoRootedElsewhere
+            | Self::NoRepo
+            | Self::Indeterminate
+            | Self::Unprobed => false,
         }
     }
 
@@ -276,7 +290,10 @@ impl FolderRepoStatus {
     pub fn mutations_allowed(self) -> bool {
         match self {
             Self::WorkingRepo => true,
-            Self::InsideRepoRootedElsewhere | Self::NoRepo | Self::Indeterminate => false,
+            Self::InsideRepoRootedElsewhere
+            | Self::NoRepo
+            | Self::Indeterminate
+            | Self::Unprobed => false,
         }
     }
 
@@ -289,7 +306,7 @@ impl FolderRepoStatus {
     pub fn git_can_see_path(self) -> bool {
         match self {
             Self::WorkingRepo | Self::InsideRepoRootedElsewhere => true,
-            Self::NoRepo | Self::Indeterminate => false,
+            Self::NoRepo | Self::Indeterminate | Self::Unprobed => false,
         }
     }
 
@@ -312,6 +329,10 @@ impl FolderRepoStatus {
             Self::Indeterminate => {
                 "dux could not consult git about this folder, so it cannot say whether it has changes. \
                  Check that git is installed and that the folder is readable, then reopen this panel."
+            }
+            Self::Unprobed => {
+                "dux is still looking at this folder to see whether it is a git repository. \
+                 This should take a moment; nothing is wrong."
             }
         }
     }

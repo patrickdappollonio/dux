@@ -455,6 +455,7 @@ mod tests {
             input,
             rename_branch: false,
             focus: RenameSessionFocus::Input,
+            branch_named: true,
         }
     }
 

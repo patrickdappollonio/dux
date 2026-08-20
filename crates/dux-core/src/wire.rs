@@ -4617,7 +4617,7 @@ mod tests {
             Err(err) => err.to_string(),
             Ok(_) => panic!("a folder dux has not classified must not be staged into"),
         };
-        assert!(message.contains("could not consult git"), "{message:?}");
+        assert!(message.contains("still looking"), "{message:?}");
 
         // A real repository: staging is ordinary work again.
         engine

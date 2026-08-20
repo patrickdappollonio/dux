@@ -2134,9 +2134,14 @@ impl Engine {
     /// first sorting out which kind it is.
     ///
     /// An unprobed standalone folder answers
-    /// [`crate::git::FolderRepoStatus::Indeterminate`], not "no repository":
-    /// dux has not looked yet, and saying anything more definite would let a
-    /// mutation through on a guess.
+    /// [`crate::git::FolderRepoStatus::Unprobed`], not "no repository": dux has
+    /// not looked yet, and saying anything more definite would let a mutation
+    /// through on a guess. It gates exactly as `Indeterminate` does and reads
+    /// as a wait rather than as a fault, which matters because a freshly
+    /// created agent in a healthy repository spends a moment in this state.
+    ///
+    /// An unknown id keeps `Indeterminate`: there is no folder to still be
+    /// looking at.
     pub fn folder_repo_status(&self, session_id: &str) -> crate::git::FolderRepoStatus {
         let Some(session) = self.sessions.iter().find(|s| s.id == session_id) else {
             return crate::git::FolderRepoStatus::Indeterminate;
@@ -2147,7 +2152,7 @@ impl Engine {
                 .folder_repo_statuses
                 .get(session_id)
                 .copied()
-                .unwrap_or(crate::git::FolderRepoStatus::Indeterminate),
+                .unwrap_or(crate::git::FolderRepoStatus::Unprobed),
         }
     }
 
@@ -3641,11 +3646,24 @@ impl Engine {
         let title = crate::git::standalone_agent_title(name, &folder);
         // The GLOBAL default provider, the same source the config's own default
         // uses, unless the caller overrode it.
-        let provider = provider
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(crate::model::ProviderKind::new)
-            .unwrap_or_else(|| self.config.default_provider());
+        //
+        // An override is validated against the configured provider list, the
+        // same rule `change_agent_provider_wire` applies, because this plan is
+        // reachable from an HTTP body: an unconfigured name falls back to being
+        // used AS THE COMMAND (`Config::provider_command`), so accepting one
+        // spawns whatever the caller named.
+        let provider = match provider.map(str::trim).filter(|value| !value.is_empty()) {
+            Some(value) => {
+                if !self.config.providers.commands.contains_key(value) {
+                    anyhow::bail!(
+                        "Provider \"{value}\" is not configured. Pick one of the configured \
+                         providers, or add it to the [providers] section of your config."
+                    );
+                }
+                crate::model::ProviderKind::new(value)
+            }
+            None => self.config.default_provider(),
+        };
         let busy_message = format!(
             "Creating a standalone agent in \"{}\"\u{2026}",
             crate::home_path::shorten_home(&folder)
@@ -4527,10 +4545,12 @@ mod tests {
             other => panic!("a managed agent has the full git surface, got {other:?}"),
         }
 
-        // Not probed yet: honest-quiet, and no mutations on a guess.
+        // Not probed yet: honest-quiet, and no mutations on a guess. The
+        // sentence is a wait rather than an accusation, because this is the
+        // state a healthy repository passes through on the way to its verdict.
         match engine.session_git_access("sa1") {
             Some(SessionGitAccess::NoRepository { quiet_reason, .. }) => {
-                assert!(quiet_reason.contains("could not consult git"));
+                assert!(quiet_reason.contains("still looking"), "{quiet_reason}");
             }
             other => panic!("an unprobed folder must be honest-quiet, got {other:?}"),
         }
@@ -4561,6 +4581,69 @@ mod tests {
         }
 
         assert!(engine.session_git_access("nope").is_none());
+    }
+
+    /// A provider the client made up is refused, rather than being spawned as a
+    /// command.
+    ///
+    /// This is the only create path that takes a provider from the request, and
+    /// an unconfigured name falls back to being used AS THE COMMAND, so without
+    /// the check an HTTP body could name any executable on the server's PATH.
+    #[test]
+    fn a_standalone_create_refuses_a_provider_that_is_not_configured() {
+        let (engine, tmp) = test_engine();
+        let folder = tmp.path().join("plain");
+        std::fs::create_dir_all(&folder).expect("folder");
+        let folder = folder.to_string_lossy().to_string();
+
+        let err = engine
+            .plan_standalone_agent(&folder, "", Some("not-a-provider"))
+            .expect_err("an unconfigured provider is refused");
+        assert!(
+            err.to_string().contains("not configured"),
+            "and says so in the user's terms, got: {err}"
+        );
+
+        // A configured one still plans, so the guard is about the value and not
+        // about overrides in general.
+        let configured = engine
+            .config
+            .providers
+            .commands
+            .keys()
+            .next()
+            .expect("the default config configures providers")
+            .clone();
+        engine
+            .plan_standalone_agent(&folder, "", Some(&configured))
+            .expect("a configured provider is accepted");
+    }
+
+    /// "Nobody has looked yet" reads as a wait, not as a fault on the user's
+    /// machine. A freshly created agent in a healthy repository spends a moment
+    /// in this state, and it used to be told to check that git was installed.
+    #[test]
+    fn an_unprobed_folder_is_not_reported_as_a_broken_git() {
+        let (mut engine, _tmp) = test_engine();
+        engine
+            .sessions
+            .push(sample_standalone_session("sa1", "/home/someone/notes"));
+
+        let status = engine.folder_repo_status("sa1");
+        assert_eq!(status, crate::git::FolderRepoStatus::Unprobed);
+        // Gates exactly as Indeterminate does: fail closed on both.
+        assert!(!status.mutations_allowed());
+        assert!(!status.changes_panel_works());
+        assert!(!status.git_can_see_path());
+        let reason = status.quiet_reason();
+        assert!(
+            reason.contains("still looking"),
+            "it reads as a wait, got: {reason}"
+        );
+        assert!(
+            !reason.contains("git is installed"),
+            "and never accuses the user's machine, got: {reason}"
+        );
     }
 
     /// One probe per standalone agent at a time.
