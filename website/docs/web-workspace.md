@@ -285,6 +285,13 @@ menu's **New** submenu. Its row shows the
 directory it opened in, shortened with `~`, where the other two show their owner,
 so the sidebar search finds it by path.
 
+Every terminal row's `⋯` menu also carries **Open editor here** and **Open
+editor in new tab**, rooted at the directory that terminal opened in, so a
+shell and a real editor over the same files are one click apart. A terminal
+that belongs to an agent opens that agent's editor instead, since it is the
+same worktree. See [The code editor](/docs/web-editor) for what a
+terminal-rooted editor does and does not carry.
+
 Nothing closes a standalone terminal for you. Removing a project closes that
 project's terminals and deleting an agent closes that agent's; neither has
 anything to do with this one. It ends when you close it, or when dux shuts

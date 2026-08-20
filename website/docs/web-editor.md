@@ -1,6 +1,6 @@
 ---
 title: The code editor
-description: A real Monaco editor in the browser for any file in a worktree, with syntax highlighting, JSON and TOML help, Markdown and SVG previews, image viewing, path search, diffs against HEAD, file management including moving and inspecting files, dragging files in from your desktop, and open-in-local-editor.
+description: A real Monaco editor in the browser for any file in a worktree or in the directory a terminal opened in, with syntax highlighting, JSON and TOML help, Markdown and SVG previews, image viewing, path search, diffs against HEAD, file management including moving and inspecting files, dragging files in from your desktop, and open-in-local-editor.
 group: Web UI
 order: 62
 ---
@@ -16,6 +16,8 @@ sees your change on disk immediately.
 The editor opens as a full-screen overlay from a few places:
 
 - An agent's `⋯` menu has **Open editor here**.
+- A terminal's `⋯` menu has the same pair, and roots the editor at the
+  directory that terminal opened in (see below).
 - A changed file's `⋯` menu has **Edit**, and clicking a changed file opens its
   diff (more on that below).
 
@@ -24,8 +26,9 @@ It loads only when you open it, so it costs nothing until you use it.
 Prefer the editor in its own browser tab? The agent's `⋯` menu also has **Open
 editor in new tab**, and the editor's own header carries a matching icon that
 opens the current file in that standalone tab (middle-click works, it is a real
-link). The standalone tab is nothing but the editor, full-viewport, with the
-agent's name at the top. There is no in-app link back to the workspace — the
+link). The standalone tab is nothing but the editor, full-viewport, named at the top
+by whatever it is rooted at: the agent, or the terminal and the directory it
+opened in. There is no in-app link back to the workspace: the
 tab is yours, so your browser's Back button or closing the tab is the way out.
 
 The standalone tab is also deliberately quiet. Workspace messages and the
@@ -44,6 +47,36 @@ keyboard. The phone header stays lean, too: only the explorer toggle and
 toggle, **Open local editor** — folds into one `⋯` menu at the end of the row.
 Fixing a typo from the couch is exactly what it is for; long editing sessions
 still want a real keyboard.
+
+## Editing next to a terminal
+
+A terminal's `⋯` menu carries the same two entries an agent's does, and they do
+what they say: the editor opens rooted at the directory that terminal started
+in. A project terminal gets the repo root, a standalone terminal gets wherever
+it opened, home included. It is the whole tree from there, files you can create
+and rename and save, not a read-only peek.
+
+The root is pinned to where the terminal STARTED, and it stays there when you
+`cd`. That is on purpose. The root is behind your file tree, your open buffers,
+your unsaved drafts and the address in your bar, and if it moved every time you
+changed directory, all four would quietly stop meaning what they said.
+
+A terminal spawned by an agent is the exception, and it is not really an
+exception: it lives in that agent's worktree, so its two entries open the
+agent's editor, with the full git surface that comes with it.
+
+Two things a terminal's editor does not have, because there is nothing behind
+them: the **Diff** view (a plain directory has no last-committed version to
+compare against) and the live changed-files chatter an agent's editor listens
+to. Everything else is the same editor. Freshness still works there, it just
+leans on the other two signals: come back to the tab, or click into it, and dux
+re-checks what is open.
+
+And an editor never outlives what it is rooted at. Close the terminal and its
+editor goes with it, saying so rather than blanking. If you had unsaved text in
+it, dux stops and asks first, and keeps the words on screen so you can copy them
+out. There is nowhere left to save them to: the root that could have taken them
+is exactly what just closed.
 
 ## The URL knows where you are
 
@@ -350,6 +383,9 @@ you wanted to see anyway. It is simply the fastest way to check what an agent
 just drew into the worktree.
 
 ## Diffs against HEAD
+
+This one is for agent worktrees; a terminal-rooted editor simply has no Diff
+button, for the reason above.
 
 Flip to the **Diff** view (or click a changed file in the Changes pane) to see a
 read-only, syntax-highlighted comparison of the file's working copy against its
