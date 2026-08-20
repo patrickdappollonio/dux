@@ -1,4 +1,4 @@
-import { FileCode2, Loader2 } from "lucide-react"
+import { FileCode2, Loader2, SquareTerminal } from "lucide-react"
 
 import { AgentNotFound } from "@/components/AgentNotFound"
 import { EditorBody } from "@/components/EditorBody"
@@ -6,13 +6,17 @@ import { useIsMobile } from "@/hooks/use-mobile"
 import { useVisualViewportHeight } from "@/hooks/use-visual-viewport"
 import { swallowMissedFileDrop } from "@/lib/editorDrop"
 import { useDux } from "@/lib/store"
+import { rootKey } from "@/lib/editorRoot"
+import { standaloneEditorName } from "@/lib/standaloneEditorName"
 import { keyboardLikelyOpen } from "@/lib/viewport"
 
 // The standalone editor surface: a whole browser tab that is nothing but the
-// editor, at `#/editor/agent/<sid>[/<mode>/<encoded-path>]`. It is a full
+// editor, at `#/editor/<root>[/<mode>/<encoded-path>]`, where the root is an
+// agent, a standalone terminal, or a project's terminal. It is a full
 // second SPA instance (bootstrap, spine, events socket, restart reload — that
 // cost is accepted); this shell only composes the extracted `EditorBody`
-// full-viewport under a minimal header naming the agent. There is
+// full-viewport under a minimal header naming what the editor is rooted at.
+// There is
 // deliberately NO in-app way out (no "Open in dux" link): this surface is a
 // browser tab the user opened, and the browser's own controls — Back, or
 // closing the tab — are the exit. The store still listens for hash changes,
@@ -42,13 +46,9 @@ export function StandaloneEditorShell() {
     viewportHeight !== null &&
     keyboardLikelyOpen(viewportHeight, window.innerHeight)
 
-  const sessionId = editorTarget?.sessionId ?? null
-  const session =
-    sessionId !== null
-      ? spine?.sessions.find((s) => s.id === sessionId)
-      : undefined
-  const agentName =
-    session !== undefined ? session.title || session.branch_name : sessionId
+  // The header's identity, from the same facts the sidebar row is drawn from,
+  // so the tab and the row cannot disagree about what this editor is on.
+  const named = standaloneEditorName(editorTarget?.root ?? null, spine)
 
   return (
     <div
@@ -81,14 +81,25 @@ export function StandaloneEditorShell() {
       ) : (
         <>
           <div className="flex shrink-0 items-center gap-2 border-b px-3 py-2">
-            <FileCode2 className="size-4 shrink-0 text-muted-foreground" />
+            {/* The root's own glyph, so a terminal-rooted tab reads as one at a
+                glance rather than as an agent whose name happens to be a path. */}
+            {named.glyph === "terminal" ? (
+              <SquareTerminal className="size-4 shrink-0 text-muted-foreground" />
+            ) : (
+              <FileCode2 className="size-4 shrink-0 text-muted-foreground" />
+            )}
             <span className="min-w-0 flex-1 truncate text-sm font-medium">
-              {agentName}
+              {named.name}
             </span>
+            {named.detail !== null && (
+              <span className="min-w-0 shrink truncate text-xs text-muted-foreground">
+                {named.detail}
+              </span>
+            )}
           </div>
           <EditorBody
-            key={editorTarget.sessionId}
-            sessionId={editorTarget.sessionId}
+            key={rootKey(editorTarget.root)}
+            root={editorTarget.root}
             standalone
           />
         </>

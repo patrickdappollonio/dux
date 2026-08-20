@@ -3,10 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { TabBuffer } from "./editorBuffers"
 import { emptyBuffer, fileLoadSeedBuffer } from "./editorBuffers"
 import {
-  clearSessionDrafts,
-  loadSessionDrafts,
-  pruneSessionDrafts,
-  storeSessionDrafts,
+  clearRootDrafts,
+  loadRootDrafts,
+  pruneRootDrafts,
+  storeRootDrafts,
   syncBeforeUnloadGuard,
 } from "./editorDrafts"
 
@@ -23,23 +23,23 @@ function buf(path: string, draft: string): TabBuffer {
 
 describe("the per-session draft cache", () => {
   afterEach(() => {
-    clearSessionDrafts("s1")
-    clearSessionDrafts("s2")
+    clearRootDrafts("s1")
+    clearRootDrafts("s2")
   })
 
   it("round-trips buffers per session", () => {
-    storeSessionDrafts("s1", new Map([["t1", buf("a.txt", "hello")]]))
-    storeSessionDrafts("s2", new Map([["t9", buf("b.txt", "other")]]))
-    const restored = loadSessionDrafts("s1")
+    storeRootDrafts("s1", new Map([["t1", buf("a.txt", "hello")]]))
+    storeRootDrafts("s2", new Map([["t9", buf("b.txt", "other")]]))
+    const restored = loadRootDrafts("s1")
     expect(restored.get("t1")?.draft).toBe("hello")
     expect(restored.has("t9")).toBe(false)
   })
 
   it("hands out copies, so mutating the loaded map cannot corrupt the cache", () => {
-    storeSessionDrafts("s1", new Map([["t1", buf("a.txt", "hello")]]))
-    const first = loadSessionDrafts("s1")
+    storeRootDrafts("s1", new Map([["t1", buf("a.txt", "hello")]]))
+    const first = loadRootDrafts("s1")
     first.delete("t1")
-    expect(loadSessionDrafts("s1").get("t1")?.draft).toBe("hello")
+    expect(loadRootDrafts("s1").get("t1")?.draft).toBe("hello")
   })
 
   it("drops a buffer whose read was still in flight when it was cached", () => {
@@ -48,36 +48,36 @@ describe("the per-session draft cache", () => {
     // `shouldSkipFileLoad` skip the re-read and park the tab on a spinner
     // forever. Loading such an entry must yield nothing so the remount
     // re-fetches from scratch.
-    storeSessionDrafts(
+    storeRootDrafts(
       "s1",
       new Map([
         ["t1", fileLoadSeedBuffer("a.txt")],
         ["t2", buf("b.txt", "kept")],
       ]),
     )
-    const restored = loadSessionDrafts("s1")
+    const restored = loadRootDrafts("s1")
     expect(restored.has("t1")).toBe(false)
     expect(restored.get("t2")?.draft).toBe("kept")
   })
 
   it("prunes entries for tabs that no longer exist", () => {
-    storeSessionDrafts(
+    storeRootDrafts(
       "s1",
       new Map([
         ["t1", buf("a.txt", "one")],
         ["t2", buf("b.txt", "two")],
       ]),
     )
-    pruneSessionDrafts("s1", new Set(["t2"]))
-    const restored = loadSessionDrafts("s1")
+    pruneRootDrafts("s1", new Set(["t2"]))
+    const restored = loadRootDrafts("s1")
     expect(restored.has("t1")).toBe(false)
     expect(restored.get("t2")?.draft).toBe("two")
   })
 
   it("clears a whole session (the session-delete path)", () => {
-    storeSessionDrafts("s1", new Map([["t1", buf("a.txt", "one")]]))
-    clearSessionDrafts("s1")
-    expect(loadSessionDrafts("s1").size).toBe(0)
+    storeRootDrafts("s1", new Map([["t1", buf("a.txt", "one")]]))
+    clearRootDrafts("s1")
+    expect(loadRootDrafts("s1").size).toBe(0)
   })
 })
 

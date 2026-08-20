@@ -6,6 +6,7 @@ import {
 } from "@/components/ui/dialog"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { closeEditor, useDux } from "@/lib/store"
+import { rootKey } from "@/lib/editorRoot"
 import { EditorBody } from "@/components/EditorBody"
 import { swallowMissedFileDrop } from "@/lib/editorDrop"
 
@@ -17,7 +18,7 @@ import { swallowMissedFileDrop } from "@/lib/editorDrop"
 // While this tab IS that surface the overlay stands down entirely, so the
 // Dialog and the standalone shell can never both mount an EditorBody (two
 // Monaco model sets and two buffer maps over the same files). The body is
-// keyed by SESSION ONLY (not file/mode) so opening a new file (or a
+// keyed by ROOT ONLY (not file/mode) so opening a new file (or a
 // preview-replace) while the overlay is already open never remounts it and
 // drops the tab list. Esc/backdrop/Close all close immediately: closing is
 // NON-destructive now (drafts survive in lib/editorDrafts.ts and the tab
@@ -54,8 +55,8 @@ export function EditorOverlay() {
         </DialogDescription>
         {editorTarget && (
           <EditorBody
-            key={editorTarget.sessionId}
-            sessionId={editorTarget.sessionId}
+            key={rootKey(editorTarget.root)}
+            root={editorTarget.root}
           />
         )}
       </DialogContent>

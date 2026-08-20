@@ -70,8 +70,16 @@ import {
 } from "./editorTabs"
 import type { EditorTabsState } from "./editorTabs"
 import {
-  clearSessionDrafts,
-  pruneSessionDrafts,
+  agentRoot,
+  editorRootForTarget,
+  rootKey,
+  sameRoot,
+  type EditorRoot,
+  type TerminalTarget,
+} from "./editorRoot"
+import {
+  clearRootDrafts,
+  pruneRootDrafts,
   syncBeforeUnloadGuard,
 } from "./editorDrafts"
 import { isImagePreviewPath } from "./editorPreview"
@@ -107,6 +115,11 @@ import type {
 // be silently ignored by session-shaped code.
 export type { TerminalOwnerRef } from "./terminalOwner"
 
+// What the editor is rooted at: an agent's worktree, or the directory a
+// terminal was spawned in. Re-exported so the many `from "@/lib/store"` editor
+// imports keep working.
+export type { EditorRoot } from "./editorRoot"
+
 // The currently-streamed target: either an agent session or a companion
 // terminal. An agent target carries a `sessionId` for session-scoped UI (the
 // breadcrumb, changed files); a terminal target carries its OWNER, which is a
@@ -116,7 +129,7 @@ export type SelectedTarget =
   // its own id. The streamed PTY and all per-tab UI resolve from `tabId`, while
   // session-scoped UI keeps using `sessionId`.
   | { kind: "agent"; sessionId: string; tabId: string }
-  | { kind: "terminal"; terminalId: string; owner: TerminalOwnerRef }
+  | TerminalTarget
 
 // The mobile hub-&-spoke shell shows one screen at a time: the project/session
 // hub ("home"), the focused terminal, or the changed-files view. Desktop never
@@ -654,7 +667,7 @@ export interface DuxState {
   // that session first and reuses the existing changed-files broadcast for its
   // file list. Null = overlay closed.
   editorTarget: {
-    sessionId: string
+    root: EditorRoot
     initialPath: string | null
     initialMode: EditorViewMode
   } | null
@@ -666,7 +679,7 @@ export interface DuxState {
   // `currentRoute()` can serialize where the editor actually is. Written by
   // open/close and the reconstitution paths; null = editor closed.
   editorRoute: {
-    sessionId: string
+    root: EditorRoot
     mode: EditorViewMode
     path: string | null
   } | null
@@ -678,14 +691,15 @@ export interface DuxState {
   // and kept in line with the URL by `applyUrlRoute`, so the standalone
   // header's plain-anchor way back into the full app just works.
   standaloneEditor: boolean
-  // Per-session editor tab metadata (pure client state; the heavy Monaco
-  // buffers live in the `EditorBody` component, keyed by tab id). Keyed by
-  // session id so reopening a session's editor restores its tab list. A
-  // session absent here has no tabs (not yet opened, or cleared on delete).
+  // Per-ROOT editor tab metadata (pure client state; the heavy Monaco buffers
+  // live in the `EditorBody` component, keyed by tab id). Keyed by `rootKey`,
+  // not by a bare id: agent ids and terminal ids come from different counters,
+  // so only the namespaced key keeps two editors apart. A root absent here has
+  // no tabs (not yet opened, or cleared when its target vanished).
   editorTabs: Record<string, EditorTabsState>
   // The tab pending the dirty-close confirmation (destructive-confirm
   // pattern), or null. Closing a NON-dirty tab skips this and closes directly.
-  editorCloseTabTarget: { sessionId: string; tabId: string } | null
+  editorCloseTabTarget: { root: EditorRoot; tabId: string } | null
   // Changed-files state for the selected session (see `ChangesSlice`). The single
   // source for changed-files data — replaces the global `viewModel.changed_files`
   // broadcast, which a second client could clobber.
@@ -1558,18 +1572,31 @@ function applyWorkspace(rawSpine: Spine, seq: number): void {
   if (rev !== undefined) appliedWorkspaceRev = rev
 }
 
-// Drop editor-tab state for any session that no longer exists in the spine
-// (deleted here or by another client), and close the editor overlay if it was
-// pointed at that now-gone session, the code-editor's own out-of-band-clear
+// Drop editor-tab state for any root whose target no longer exists in the
+// spine (deleted here or by another client), and close the editor if it was
+// pointed at that now-gone target, the code-editor's own out-of-band-clear
 // path, mirroring `pruneSelectionIfGone` for the main selection.
+//
+// A terminal root is checked against the live TERMINALS, and the check has to
+// exist because an editor must not outlive its target: closing a terminal
+// takes its editor with it. A terminal id is also never reused after it goes,
+// so there is nothing to come back for.
 function pruneEditorStateIfGone(spine: Spine): void {
-  const liveSessionIds = new Set(spine.sessions.map((s) => s.id))
-  for (const sessionId of Object.keys(state.editorTabs)) {
-    if (!liveSessionIds.has(sessionId)) editorClearSession(sessionId)
+  const live = new Set([
+    ...spine.sessions.map((session) => rootKey(agentRoot(session.id))),
+    ...spine.terminals.map((terminal) =>
+      rootKey({
+        kind: "terminal",
+        terminalId: terminal.id,
+        owner: { kind: "standalone" },
+      }),
+    ),
+  ])
+  for (const key of Object.keys(state.editorTabs)) {
+    if (!live.has(key)) clearEditorTabsForKey(key)
   }
-  const editorSession =
-    state.editorTarget?.sessionId ?? state.editorRoute?.sessionId ?? null
-  if (editorSession !== null && !liveSessionIds.has(editorSession)) {
+  const openRoot = state.editorTarget?.root ?? state.editorRoute?.root ?? null
+  if (openRoot !== null && !live.has(rootKey(openRoot))) {
     // State only, NO URL write: `pruneSelectionIfGone` (which runs before
     // this in the same `applyWorkspace` pass) is the single URL writer for a
     // vanished session — its navigation already serializes without the
@@ -2098,8 +2125,12 @@ const CHANGES_SUFFIX = "/changes"
 const EDITOR_SUFFIX = "/editor"
 
 // Parse the editor suffix off a hash, or null when it carries none. The
-// prefix must itself parse as a target that HAS a session (the editor is
-// session-scoped, so `#/terminal/t1/editor` is not a route).
+// prefix must itself parse as a target, whatever kind: a terminal has an
+// editor too, rooted at the directory it was spawned in, so
+// `#/terminal/<tid>/editor` and `#/project/<pid>/terminal/<tid>/editor` are
+// routes. `#/agent/<sid>/terminal/<tid>/editor` keeps its existing meaning,
+// the AGENT's worktree, because `editorRootForTarget` sends a session-owned
+// terminal to its agent root.
 //
 // NOT a single greedy regex, deliberately: a file literally named "editor"
 // makes the string contain "/editor" twice (`#/agent/s1/editor/file/editor`),
@@ -2107,7 +2138,7 @@ const EDITOR_SUFFIX = "/editor"
 // target, so the whole route used to fall through to home. Instead every
 // "/editor" occurrence is tried as the split point, rightmost first, and the
 // first candidate whose tail has the suffix shape AND whose prefix parses as
-// a session-carrying target wins.
+// a target wins.
 function parseEditorRoute(hash: string): Route | null {
   let at = hash.length
   while ((at = hash.lastIndexOf(EDITOR_SUFFIX, at - 1)) > 0) {
@@ -2115,23 +2146,36 @@ function parseEditorRoute(hash: string): Route | null {
     const tm = tail.match(/^(?:\/(file|diff)\/([^/]+))?$/)
     if (!tm) continue
     const target = parseSelectionHash(hash.slice(0, at))
-    if (!target || targetSessionId(target) === null) continue
+    if (!target) continue
     const editor = parseEditorSegment(tm[1], tm[2])
     return { target, changes: false, editor, standalone: false }
   }
   return null
 }
 
-// The standalone editor's whole-tab address: `#/editor/agent/<sid>` plus the
-// same optional mode/path pair as the in-app suffix. It cannot collide with
-// the target grammars (none begins `#/editor/`), and it always names the
-// session-slot target: the standalone surface is the editor, not a tab strip.
+// The standalone editor's whole-tab address: the root's own spelling plus the
+// same optional mode/path pair as the in-app suffix. Three shapes, one per
+// root the surface can carry:
+//
+//   #/editor/agent/<sid>
+//   #/editor/terminal/<tid>
+//   #/editor/project/<pid>/terminal/<tid>
+//
+// The last two exist so both menu items are offered for every kind of
+// terminal; menu symmetry beats grammar thrift. None of them can collide with
+// the target grammars, which never begin `#/editor/`. An agent address always
+// names the session-slot target: the standalone surface is the editor, not a
+// tab strip.
 function parseStandaloneEditorRoute(hash: string): Route | null {
-  const m = hash.match(/^#\/editor\/agent\/([^/]+)(?:\/(file|diff)\/([^/]+))?$/)
+  const m = hash.match(
+    /^#\/editor\/(agent\/[^/]+|terminal\/[^/]+|project\/[^/]+\/terminal\/[^/]+)(?:\/(file|diff)\/([^/]+))?$/,
+  )
   if (!m) return null
   try {
-    const sessionId = decodeURIComponent(m[1])
-    if (!sessionId) return null
+    // The root half is the ordinary selection grammar with the `#/editor`
+    // prefix peeled off, so the two can never drift: one parser, one spelling.
+    const target = parseSelectionHash(`#/${m[1]}`)
+    if (!target) return null
     const editor = parseEditorSegment(m[2], m[3])
     // STRICT, unlike the in-app suffix (which degrades a malformed path to
     // the bare agent): a standalone route with no editor half is a shell
@@ -2139,12 +2183,7 @@ function parseStandaloneEditorRoute(hash: string): Route | null {
     // all — it boots the NORMAL shell and takes the ordinary
     // route-correction path there.
     if (editor === null) return null
-    return {
-      target: { kind: "agent", sessionId, tabId: sessionId },
-      changes: false,
-      editor,
-      standalone: true,
-    }
+    return { target, changes: false, editor, standalone: true }
   } catch {
     return null
   }
@@ -2214,12 +2253,11 @@ export function routeHash(route: Route): string {
   // target somehow lost its session (or its editor half) falls through to
   // the ordinary grammar.
   if (route.standalone && route.editor && route.target !== null) {
-    const sessionId = targetSessionId(route.target)
-    if (sessionId !== null) {
-      const base = `#/editor/agent/${encodeURIComponent(sessionId)}`
-      if (route.editor.path === null) return base
-      return `${base}/${route.editor.mode}/${encodeURIComponent(route.editor.path)}`
-    }
+    // The root half is the selection grammar with `#/editor` in front of it,
+    // the exact inverse of the parser's peel.
+    const base = `#/editor${selectionHash(standaloneTarget(route.target)).slice(1)}`
+    if (route.editor.path === null) return base
+    return `${base}/${route.editor.mode}/${encodeURIComponent(route.editor.path)}`
   }
   const base = selectionHash(route.target)
   if (base === "") return base
@@ -2229,6 +2267,15 @@ export function routeHash(route: Route): string {
   }
   if (!route.changes) return base
   return base + CHANGES_SUFFIX
+}
+
+// The target a standalone editor address serializes: an agent target is
+// flattened to its session-slot tab, because the standalone surface is the
+// editor and not a tab strip, and the parser can only ever produce that form.
+// A terminal target is already its own whole spelling.
+function standaloneTarget(target: SelectedTarget): SelectedTarget {
+  if (target.kind === "terminal") return target
+  return { kind: "agent", sessionId: target.sessionId, tabId: target.sessionId }
 }
 
 // The screen a route puts the mobile shell on. This is the whole derivation:
@@ -2249,32 +2296,40 @@ export function routePushKey(route: Route): string {
   return `${routeScreen(route)}${route.editor ? "+editor" : ""}${route.standalone ? "+standalone" : ""}`
 }
 
-// The standalone editor's address for a session, optionally carrying the file
+// The standalone editor's address for a root, optionally carrying the file
 // position the affordance should hand over. Pure, and built on `routeHash` so
 // the open-in-new-tab anchors can never drift from the parser's grammar.
 export function standaloneEditorHash(
-  sessionId: string,
+  root: EditorRoot,
   editor: { mode: EditorViewMode; path: string | null } | null = null,
 ): string {
   return routeHash({
-    target: { kind: "agent", sessionId, tabId: sessionId },
+    target: targetForRoot(root),
     changes: false,
     editor: editor ?? { mode: "file", path: null },
     standalone: true,
   })
 }
 
+// The selection target that spells a root in the URL. The inverse of
+// `editorRootForTarget` for the roots it can produce: an agent root is its
+// session-slot tab, and a terminal root is itself.
+function targetForRoot(root: EditorRoot): SelectedTarget {
+  if (root.kind === "terminal") return root
+  return { kind: "agent", sessionId: root.sessionId, tabId: root.sessionId }
+}
+
 // The route the app currently holds in state.
 function currentRoute(): Route {
   const target = state.selectedTarget
   const er = state.editorRoute
-  // The editor arm is serialized only while it names the SAME session the
-  // focused target resolves to: in the one window where they can disagree
-  // (the editor's session vanished and the selection prune is navigating away
-  // before the editor prune clears the state), the URL must not carry a dead
-  // editor suffix on the new agent's address.
+  // The editor arm is serialized only while it names the SAME root the focused
+  // target resolves to: in the one window where they can disagree (the
+  // editor's target vanished and the selection prune is navigating away before
+  // the editor prune clears the state), the URL must not carry a dead editor
+  // suffix on the new address.
   const editor =
-    er !== null && target !== null && targetSessionId(target) === er.sessionId
+    er !== null && target !== null && sameRoot(editorRootForTarget(target), er.root)
       ? { mode: er.mode, path: er.path }
       : null
   return {
@@ -2433,28 +2488,34 @@ function clearEditorStateSilently(): void {
 // state work. An editor half naming a session this spine does not have (or no
 // editor half at all) closes an open editor, state only.
 function syncEditorStateFromRoute(spine: Spine, route: Route): void {
-  const sessionId =
+  const root =
     route.editor !== null && route.target !== null
-      ? targetSessionId(route.target)
+      ? editorRootForTarget(route.target)
       : null
-  if (
-    route.editor === null ||
-    sessionId === null ||
-    !spine.sessions.some((s) => s.id === sessionId)
-  ) {
+  if (route.editor === null || root === null || !rootIsLive(spine, root)) {
     clearEditorStateSilently()
     return
   }
   const { mode, path } = route.editor
-  // Keep the existing mount seed when it already points at this session:
-  // `EditorBody` is keyed by session id, so churning the seed would remount
+  // Keep the existing mount seed when it already points at this root:
+  // `EditorBody` is keyed by the root key, so churning the seed would remount
   // it for nothing on every Back/Forward inside the same editor.
   const editorTarget =
-    state.editorTarget !== null && state.editorTarget.sessionId === sessionId
+    state.editorTarget !== null && sameRoot(state.editorTarget.root, root)
       ? state.editorTarget
-      : { sessionId, initialPath: path, initialMode: mode }
-  setState({ editorTarget, editorRoute: { sessionId, mode, path } })
-  if (path !== null) editorOpenFile(sessionId, path, { mode })
+      : { root, initialPath: path, initialMode: mode }
+  setState({ editorTarget, editorRoute: { root, mode, path } })
+  if (path !== null) editorOpenFile(root, path, { mode })
+}
+
+// Does this spine still have the thing the root names? The two kinds are
+// looked up in different lists, and both have to be, or a closed terminal
+// would keep an editor open over a directory nothing is running in.
+function rootIsLive(spine: Spine, root: EditorRoot): boolean {
+  if (root.kind === "agent") {
+    return spine.sessions.some((session) => session.id === root.sessionId)
+  }
+  return spine.terminals.some((terminal) => terminal.id === root.terminalId)
 }
 
 // Resolve a whole parsed route against a spine: the editor half first (state
@@ -2981,10 +3042,14 @@ function screenPatch(changes?: boolean): { mobileScreen: MobileScreen } | object
 // the editor's OWN session (or the same session's tab/terminal) keeps it
 // open. `openEditor` overrides this patch with its own open patch, which is
 // how its selection move and its editor open land as one commit.
-function editorSelectionPatch(sessionId: string | null): Partial<DuxState> {
-  const editorSession =
-    state.editorRoute?.sessionId ?? state.editorTarget?.sessionId ?? null
-  if (editorSession === null || editorSession === sessionId) return {}
+function editorSelectionPatch(target: SelectedTarget | null): Partial<DuxState> {
+  const openRoot = state.editorRoute?.root ?? state.editorTarget?.root ?? null
+  if (openRoot === null) return {}
+  // Compared as ROOTS, not as session ids, so a terminal-rooted editor is kept
+  // by a selection of its own terminal and closed by everything else. An
+  // agent's editor keeps its old behavior for free: every tab and every
+  // session-owned terminal of that agent resolves to the same agent root.
+  if (target !== null && sameRoot(editorRootForTarget(target), openRoot)) return {}
   return { editorTarget: null, editorRoute: null, standaloneEditor: false }
 }
 
@@ -3026,7 +3091,7 @@ function selectSessionRoute(
     // the loading window so the pane shows a spinner, not the previous session's
     // files.
     changes: prev === id ? state.changes : loadingChanges(id),
-    ...editorSelectionPatch(id),
+    ...editorSelectionPatch({ kind: "agent", sessionId: id, tabId: id }),
     ...screenPatch(changes),
     ...(extra ?? {}),
   })
@@ -3100,7 +3165,7 @@ export function selectTab(
     selectedTarget: { kind: "agent", sessionId, tabId },
     selectedSessionId: sessionId,
     changes: prev === sessionId ? state.changes : loadingChanges(sessionId),
-    ...editorSelectionPatch(sessionId),
+    ...editorSelectionPatch({ kind: "agent", sessionId, tabId }),
     ...screenPatch(opts?.changes),
     ...(opts?.extra ?? {}),
   })
@@ -3152,7 +3217,14 @@ function fireFocusedTabPut(
 export function selectTerminal(
   terminalId: string,
   owner: TerminalOwnerRef,
-  opts?: { urlMode?: "replace"; changes?: boolean },
+  opts?: {
+    urlMode?: "replace"
+    changes?: boolean
+    // Same contract as `selectSessionRoute`'s: a patch committed in the same
+    // setState, so opening a terminal's editor is one navigation and one
+    // history entry rather than a selection followed by an open.
+    extra?: Partial<DuxState>
+  },
 ): void {
   const prev = state.selectedSessionId
   // Lossy on purpose: `selectedSessionId` exists to scope session-only UI, so
@@ -3171,10 +3243,12 @@ export function selectTerminal(
         : prev === sessionId
           ? state.changes
           : loadingChanges(sessionId),
-    // A terminal of the editor's own session keeps the editor; any other
-    // owner closes it, same rule as an agent selection.
-    ...editorSelectionPatch(sessionId),
+    // A terminal of the editor's own session keeps the editor, and so does the
+    // terminal whose OWN editor is open; anything else closes it, the same rule
+    // as an agent selection.
+    ...editorSelectionPatch({ kind: "terminal", terminalId, owner }),
     ...screenPatch(opts?.changes),
+    ...(opts?.extra ?? {}),
   })
   // The changed files belong to the SESSION, so subscribe/fetch the parent
   // session even when a companion terminal is the streamed target; a project
@@ -3473,7 +3547,7 @@ export function setCommitDraft(text: string): void {
 // the overlay on a session restores its tabs (`editorTabs` persists across
 // `closeEditor`; only `editorClearSession`, on session delete, clears it).
 export function openEditor(
-  sessionId: string,
+  root: EditorRoot,
   initialPath: string | null = null,
   mode: EditorViewMode = "file",
   opts?: { urlMode?: "replace" },
@@ -3486,14 +3560,14 @@ export function openEditor(
   const effectiveMode: EditorViewMode =
     initialPath !== null && isImagePreviewPath(initialPath) ? "file" : mode
   const editorPatch: Partial<DuxState> = {
-    editorTarget: { sessionId, initialPath, initialMode: effectiveMode },
-    editorRoute: { sessionId, mode: effectiveMode, path: initialPath },
+    editorTarget: { root, initialPath, initialMode: effectiveMode },
+    editorRoute: { root, mode: effectiveMode, path: initialPath },
   }
   // Tab seeding first: it touches only `editorTabs`, which the URL never
   // serializes, so ordering it before the route commit changes nothing the
   // history sees.
   if (initialPath !== null)
-    editorOpenFile(sessionId, initialPath, { mode: effectiveMode })
+    editorOpenFile(root, initialPath, { mode: effectiveMode })
   // Opening the editor is a move to a new position, so by default it PUSHES
   // (routePushKey changes on the editor-open bit) and one Back closes it and
   // lands wherever the user opened it FROM. When the session was not already
@@ -3502,8 +3576,27 @@ export function openEditor(
   // `syncUrl` — never two pushes with a never-visited agent screen buried
   // between. `urlMode: "replace"` is for the restore paths, exactly as on
   // the selection functions.
-  if (state.selectedSessionId !== sessionId) {
-    selectSessionRoute(sessionId, opts?.urlMode, undefined, editorPatch)
+  // A terminal root selects its TERMINAL rather than a session: the editor's
+  // address rides on the target's hash, so the two must name the same thing.
+  if (root.kind === "terminal") {
+    const selected = state.selectedTarget
+    if (
+      selected === null ||
+      selected.kind !== "terminal" ||
+      selected.terminalId !== root.terminalId
+    ) {
+      selectTerminal(root.terminalId, root.owner, {
+        urlMode: opts?.urlMode,
+        extra: editorPatch,
+      })
+      return
+    }
+    setState(editorPatch)
+    syncUrl(opts?.urlMode)
+    return
+  }
+  if (state.selectedSessionId !== root.sessionId) {
+    selectSessionRoute(root.sessionId, opts?.urlMode, undefined, editorPatch)
     return
   }
   setState(editorPatch)
@@ -3532,25 +3625,25 @@ export function closeEditor(opts?: { urlMode?: "replace" }): void {
 // session whose editor is not open is dropped — a late effect from an
 // unmounting body must not resurrect a closed editor's suffix.
 export function editorSyncActiveTab(
-  sessionId: string,
+  root: EditorRoot,
   mode: EditorViewMode,
   path: string | null,
 ): void {
   const cur = state.editorRoute
-  if (cur === null || cur.sessionId !== sessionId) return
+  if (cur === null || !sameRoot(cur.root, root)) return
   if (cur.mode === mode && cur.path === path) return
-  setState({ editorRoute: { sessionId, mode, path } })
+  setState({ editorRoute: { root, mode, path } })
   syncUrl()
 }
 
 // --- Editor tabs: thin store wrappers over the pure reducer (lib/editorTabs.ts).
-// Each mutates only `editorTabs[sessionId]`, leaving every other session's tabs
-// untouched. Components/dialogs call ONLY these, never the pure functions
+// Each mutates only `editorTabs[rootKey(root)]`, leaving every other root's
+// tabs untouched. Components/dialogs call ONLY these, never the pure functions
 // directly, so the store stays the single place that knows how to read/write
-// the per-session slice.
+// the per-root slice.
 
-function editorTabsFor(sessionId: string): EditorTabsState {
-  return state.editorTabs[sessionId] ?? emptyTabsState()
+export function editorTabsFor(root: EditorRoot): EditorTabsState {
+  return state.editorTabs[rootKey(root)] ?? emptyTabsState()
 }
 
 // Skips `setState` entirely when `next` is REFERENCE-EQUAL to the session's
@@ -3560,16 +3653,17 @@ function editorTabsFor(sessionId: string): EditorTabsState {
 // consumer app-wide re-renders on every `setState`; without this guard a
 // no-op dispatch (like the one `editorSetTabDirty` would otherwise fire on
 // every keystroke) would still fan out a global re-render for nothing.
-function setEditorTabsFor(sessionId: string, next: EditorTabsState): void {
-  if (state.editorTabs[sessionId] === next) return
-  setState({ editorTabs: { ...state.editorTabs, [sessionId]: next } })
+function setEditorTabsFor(root: EditorRoot, next: EditorTabsState): void {
+  const key = rootKey(root)
+  if (state.editorTabs[key] === next) return
+  setState({ editorTabs: { ...state.editorTabs, [key]: next } })
   // A tab that no longer exists takes its cached draft with it (per-tab
   // discard confirmed, a deleted file closing its tabs, a rename collision),
   // whether or not an EditorBody is mounted at the time. And the unload
   // guard tracks the STORE dirty flags, which outlive the editor body: it
   // stays armed while the editor is closed over a dirty cached draft, and a
   // discard that clears the last flag disarms it.
-  pruneSessionDrafts(sessionId, new Set(next.tabs.map((t) => t.id)))
+  pruneRootDrafts(key, new Set(next.tabs.map((t) => t.id)))
   syncBeforeUnloadGuard(hasAnyDirtyTab(state.editorTabs))
 }
 
@@ -3581,7 +3675,7 @@ function setEditorTabsFor(sessionId: string, next: EditorTabsState): void {
 // plain activation (tree/search click) so re-clicking an already-open path
 // never silently flips its existing diff view back to file view.
 export function editorOpenFile(
-  sessionId: string,
+  root: EditorRoot,
   path: string,
   opts: { mode?: EditorViewMode; pin?: boolean } = {},
 ): void {
@@ -3591,8 +3685,8 @@ export function editorOpenFile(
   const mode =
     opts.mode !== undefined && isImagePreviewPath(path) ? "file" : opts.mode
   setEditorTabsFor(
-    sessionId,
-    editorOpenFilePure(editorTabsFor(sessionId), path, {
+    root,
+    editorOpenFilePure(editorTabsFor(root), path, {
       mode,
       pin: opts.pin,
       newId: () => newClientId(),
@@ -3600,46 +3694,40 @@ export function editorOpenFile(
   )
 }
 
-export function editorActivateTab(sessionId: string, tabId: string): void {
-  setEditorTabsFor(sessionId, editorActivateTabPure(editorTabsFor(sessionId), tabId))
+export function editorActivateTab(root: EditorRoot, tabId: string): void {
+  setEditorTabsFor(root, editorActivateTabPure(editorTabsFor(root), tabId))
 }
 
 // Promote a tab to permanent: double-click on the row/pill, or the tab's first
 // edit (a dirty preview tab is promoted so an edit is never silently discarded
 // by a later preview-replace).
-export function editorPinTab(sessionId: string, tabId: string): void {
-  setEditorTabsFor(sessionId, editorPinTabPure(editorTabsFor(sessionId), tabId))
+export function editorPinTab(root: EditorRoot, tabId: string): void {
+  setEditorTabsFor(root, editorPinTabPure(editorTabsFor(root), tabId))
 }
 
 // Mirrors the buffer's dirty state up to the store so the strip's dot and the
 // close-confirm gating read from one place, without putting file contents in
 // the global store (see lib/editorTabs.ts header comment).
 export function editorSetTabDirty(
-  sessionId: string,
+  root: EditorRoot,
   tabId: string,
   dirty: boolean,
 ): void {
-  setEditorTabsFor(
-    sessionId,
-    editorSetTabDirtyPure(editorTabsFor(sessionId), tabId, dirty),
-  )
+  setEditorTabsFor(root, editorSetTabDirtyPure(editorTabsFor(root), tabId, dirty))
 }
 
 export function editorSetTabMode(
-  sessionId: string,
+  root: EditorRoot,
   tabId: string,
   mode: EditorViewMode,
 ): void {
-  setEditorTabsFor(
-    sessionId,
-    editorSetTabModePure(editorTabsFor(sessionId), tabId, mode),
-  )
+  setEditorTabsFor(root, editorSetTabModePure(editorTabsFor(root), tabId, mode))
 }
 
 // Unconditional close (post-confirm, or the tab was clean). Picks the next
 // active tab via the VS Code right-then-left rule.
-export function editorCloseTab(sessionId: string, tabId: string): void {
-  setEditorTabsFor(sessionId, editorCloseTabPure(editorTabsFor(sessionId), tabId))
+export function editorCloseTab(root: EditorRoot, tabId: string): void {
+  setEditorTabsFor(root, editorCloseTabPure(editorTabsFor(root), tabId))
 }
 
 // Rename retarget: rewrite the path of the tab(s) affected by renaming a file
@@ -3647,40 +3735,40 @@ export function editorCloseTab(sessionId: string, tabId: string): void {
 // the folder-prefix rewrite and the pre-existing-destination-tab collision
 // close.
 export function editorRenameTabPaths(
-  sessionId: string,
+  root: EditorRoot,
   from: string,
   to: string,
 ): void {
-  setEditorTabsFor(
-    sessionId,
-    editorRenameTabPathsPure(editorTabsFor(sessionId), from, to),
-  )
+  setEditorTabsFor(root, editorRenameTabPathsPure(editorTabsFor(root), from, to))
 }
 
 // Close every tab under a deleted file or folder path. See
 // `lib/editorTabs.ts` `closeTabsUnderPath`.
-export function editorCloseTabsUnderPath(sessionId: string, path: string): void {
-  setEditorTabsFor(
-    sessionId,
-    editorCloseTabsUnderPathPure(editorTabsFor(sessionId), path),
-  )
+export function editorCloseTabsUnderPath(root: EditorRoot, path: string): void {
+  setEditorTabsFor(root, editorCloseTabsUnderPathPure(editorTabsFor(root), path))
 }
 
-// Drop all of a session's editor tabs (session deleted from the spine). See
-// the `editorTabs` prune in `applyWorkspace`, which calls this for any session
-// key no longer present in the live spine.
-export function editorClearSession(sessionId: string): void {
-  clearSessionDrafts(sessionId)
-  if (!(sessionId in state.editorTabs)) return
+// Drop all of a root's editor tabs, because the thing it was rooted at is gone
+// from the spine. See the `editorTabs` prune in `applyWorkspace`, which calls
+// this for any key no longer present.
+export function editorClearRoot(root: EditorRoot): void {
+  clearEditorTabsForKey(rootKey(root))
+}
+
+// The same by raw key, for the prune, which is walking keys whose roots it can
+// no longer reconstruct: the target they named is exactly what has vanished.
+function clearEditorTabsForKey(key: string): void {
+  clearRootDrafts(key)
+  if (!(key in state.editorTabs)) return
   const next = { ...state.editorTabs }
-  delete next[sessionId]
+  delete next[key]
   setState({ editorTabs: next })
   syncBeforeUnloadGuard(hasAnyDirtyTab(state.editorTabs))
 }
 
 // Open the dirty-tab close confirmation.
-export function openEditorCloseTab(sessionId: string, tabId: string): void {
-  setState({ editorCloseTabTarget: { sessionId, tabId } })
+export function openEditorCloseTab(root: EditorRoot, tabId: string): void {
+  setState({ editorCloseTabTarget: { root, tabId } })
 }
 
 export function closeEditorCloseTab(): void {

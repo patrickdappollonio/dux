@@ -7,6 +7,7 @@ import {
   EXPLORER_DEFAULT_SIZE_PX,
   EXPLORER_MIN_SIZE_PX,
 } from "@/lib/editorLayout"
+import { agentRoot, rootKey } from "@/lib/editorRoot"
 
 // The standalone editor surface: a whole browser tab that is nothing but the
 // editor (plan (b)). What is pinned here: the shell composes EditorBody (the
@@ -44,8 +45,8 @@ vi.mock("@/lib/fileApi", () => ({
       binary: false,
       read_only: false,
     })),
-    rawUrl: (sessionId: string, path: string) =>
-      `/api/v1/sessions/${encodeURIComponent(sessionId)}/files/raw?path=${encodeURIComponent(path)}`,
+    rawUrl: (_root: unknown, path: string) =>
+      `/api/v1/sessions/s1/files/raw?path=${encodeURIComponent(path)}`,
     diff: vi.fn(async () => ({ head: "", working: "", binary: false })),
     write: vi.fn(),
     openInEditor: vi.fn(),
@@ -140,10 +141,10 @@ async function seedState(overrides: Partial<DuxState>) {
   mockState = { ...getSnapshot() } as DuxState
   baseState({
     standaloneEditor: true,
-    editorTarget: { sessionId: SESSION, initialPath: PATH, initialMode: "file" },
-    editorRoute: { sessionId: SESSION, mode: "file", path: PATH },
+    editorTarget: { root: agentRoot(SESSION), initialPath: PATH, initialMode: "file" },
+    editorRoute: { root: agentRoot(SESSION), mode: "file", path: PATH },
     editorTabs: {
-      [SESSION]: {
+      [rootKey(agentRoot(SESSION))]: {
         tabs: [
           { id: "t1", path: PATH, dirty: false, preview: false, mode: "file" },
         ],
@@ -166,8 +167,8 @@ describe("the standalone editor shell", () => {
   beforeEach(async () => {
     vi.clearAllMocks()
     installBootStubs()
-    const { clearSessionDrafts } = await import("@/lib/editorDrafts")
-    clearSessionDrafts(SESSION)
+    const { clearRootDrafts } = await import("@/lib/editorDrafts")
+    clearRootDrafts(rootKey(agentRoot(SESSION)))
   })
 
   afterEach(() => {
@@ -258,7 +259,7 @@ describe("the standalone editor shell", () => {
   it("the ⋯ menu offers the preview toggle for a previewable file", async () => {
     await seedState({
       editorTabs: {
-        [SESSION]: {
+        [rootKey(agentRoot(SESSION))]: {
           tabs: [
             {
               id: "t1",
@@ -320,8 +321,8 @@ describe("the overlay stands down on the standalone surface", () => {
   beforeEach(async () => {
     vi.clearAllMocks()
     installBootStubs()
-    const { clearSessionDrafts } = await import("@/lib/editorDrafts")
-    clearSessionDrafts(SESSION)
+    const { clearRootDrafts } = await import("@/lib/editorDrafts")
+    clearRootDrafts(rootKey(agentRoot(SESSION)))
   })
 
   afterEach(() => {

@@ -15,6 +15,7 @@ import {
   EXPLORER_LAYOUT_KEY,
   EXPLORER_MIN_SIZE_PX,
 } from "@/lib/editorLayout"
+import { agentRoot, rootKey } from "@/lib/editorRoot"
 
 // What this file exists for, and it is one property.
 //
@@ -122,8 +123,8 @@ vi.mock("@/lib/fileApi", async (importOriginal) => ({
     read: (...a: unknown[]) => readMock(...a),
     // The real builder's shape, duplicated here because the module is fully
     // mocked: the image-pane test asserts the exact URL the <img> gets.
-    rawUrl: (sessionId: string, path: string) =>
-      `/api/v1/sessions/${encodeURIComponent(sessionId)}/files/raw?path=${encodeURIComponent(path)}`,
+    rawUrl: (_root: unknown, path: string) =>
+      `/api/v1/sessions/s1/files/raw?path=${encodeURIComponent(path)}`,
     diff: () => diffMock(),
     write: (...args: unknown[]) => writeMock(...args),
     openInEditor: vi.fn(),
@@ -304,9 +305,9 @@ async function mountWithDirtyTab() {
   // file silently stale.
   mockState = {
     ...getSnapshot(),
-    editorTarget: { sessionId: SESSION, initialPath: PATH },
+    editorTarget: { root: agentRoot(SESSION), initialPath: PATH },
     editorTabs: {
-      [SESSION]: {
+      [rootKey(agentRoot(SESSION))]: {
         tabs: [
           {
             id: TAB_ID,
@@ -337,8 +338,8 @@ describe("a save the server refuses", () => {
     installBootStubs()
     // The draft cache is module-level and would otherwise carry one test's
     // typed text into the next mount of the same session.
-    const { clearSessionDrafts } = await import("@/lib/editorDrafts")
-    clearSessionDrafts(SESSION)
+    const { clearRootDrafts } = await import("@/lib/editorDrafts")
+    clearRootDrafts(rootKey(agentRoot(SESSION)))
   })
 
   afterEach(() => {
@@ -362,8 +363,7 @@ describe("a save the server refuses", () => {
     expect(box.value).toBe(TYPED)
     // And the tab is never marked clean, so the unsaved-changes guard still
     // protects it on close.
-    expect(editorSetTabDirtyMock).not.toHaveBeenCalledWith(
-      SESSION,
+    expect(editorSetTabDirtyMock).not.toHaveBeenCalledWith(agentRoot(SESSION),
       TAB_ID,
       false,
     )
@@ -384,8 +384,7 @@ describe("a save the server refuses", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /save/i }))
     await waitFor(() =>
-      expect(editorSetTabDirtyMock).toHaveBeenCalledWith(
-        SESSION,
+      expect(editorSetTabDirtyMock).toHaveBeenCalledWith(agentRoot(SESSION),
         TAB_ID,
         false,
       ),
@@ -402,8 +401,8 @@ describe("drafts survive the editor closing", () => {
   beforeEach(async () => {
     vi.clearAllMocks()
     installBootStubs()
-    const { clearSessionDrafts } = await import("@/lib/editorDrafts")
-    clearSessionDrafts(SESSION)
+    const { clearRootDrafts } = await import("@/lib/editorDrafts")
+    clearRootDrafts(rootKey(agentRoot(SESSION)))
   })
 
   afterEach(() => {
@@ -425,9 +424,9 @@ describe("drafts survive the editor closing", () => {
       const { getSnapshot } = await import("@/lib/store")
       mockState = {
         ...getSnapshot(),
-        editorTarget: { sessionId: SESSION, initialPath: PATH },
+        editorTarget: { root: agentRoot(SESSION), initialPath: PATH },
         editorTabs: {
-          [SESSION]: {
+          [rootKey(agentRoot(SESSION))]: {
             tabs: [
               { id: TAB_ID, path: PATH, dirty: true, preview: false, mode: "file" },
             ],
@@ -467,9 +466,9 @@ async function mountWithTab(path: string, mode: "file" | "diff" = "file") {
   const { getSnapshot } = await import("@/lib/store")
   mockState = {
     ...getSnapshot(),
-    editorTarget: { sessionId: SESSION, initialPath: path },
+    editorTarget: { root: agentRoot(SESSION), initialPath: path },
     editorTabs: {
-      [SESSION]: {
+      [rootKey(agentRoot(SESSION))]: {
         tabs: [{ id: TAB_ID, path, dirty: false, preview: false, mode }],
         activeId: TAB_ID,
       },
@@ -612,7 +611,7 @@ describe("image and svg preview", () => {
     mockState = {
       ...mockState,
       editorTabs: {
-        [SESSION]: {
+        [rootKey(agentRoot(SESSION))]: {
           tabs: [
             {
               id: TAB_ID,
@@ -632,7 +631,7 @@ describe("image and svg preview", () => {
     mockState = {
       ...mockState,
       editorTabs: {
-        [SESSION]: {
+        [rootKey(agentRoot(SESSION))]: {
           tabs: [
             { id: TAB_ID, path: PATH, dirty: false, preview: true, mode: "file" },
           ],
@@ -658,8 +657,8 @@ describe("preview in diff mode", () => {
     vi.clearAllMocks()
     installBootStubs()
     installObjectUrlMocks()
-    const { clearSessionDrafts } = await import("@/lib/editorDrafts")
-    clearSessionDrafts(SESSION)
+    const { clearRootDrafts } = await import("@/lib/editorDrafts")
+    clearRootDrafts(rootKey(agentRoot(SESSION)))
   })
 
   afterEach(() => {
@@ -723,7 +722,7 @@ describe("preview in diff mode", () => {
     mockState = {
       ...mockState,
       editorTabs: {
-        [SESSION]: {
+        [rootKey(agentRoot(SESSION))]: {
           tabs: [
             {
               id: TAB_ID,
@@ -788,8 +787,8 @@ describe("a deleted file in the editor", () => {
   beforeEach(async () => {
     vi.clearAllMocks()
     installBootStubs()
-    const { clearSessionDrafts } = await import("@/lib/editorDrafts")
-    clearSessionDrafts(SESSION)
+    const { clearRootDrafts } = await import("@/lib/editorDrafts")
+    clearRootDrafts(rootKey(agentRoot(SESSION)))
   })
 
   afterEach(() => {
@@ -852,7 +851,7 @@ describe("a deleted file in the editor", () => {
   it("preview-replacing a diff tab onto another path loads the new diff", async () => {
     // The Changes-pane flow that reuses a tab id: open file A in diff mode,
     // then the store preview-replaces the SAME tab onto path B (rule 2 in
-    // lib/editorTabs.ts). The tab's cached buffer still carries A's path, and
+    // lib/editorTabs["agent:ts"]). The tab's cached buffer still carries A's path, and
     // the diff fetch for B must not be dropped on that stale buffer — that
     // drop is a permanent spinner (nothing re-triggers the load effect).
     diffMock.mockResolvedValue({
@@ -874,7 +873,7 @@ describe("a deleted file in the editor", () => {
     mockState = {
       ...mockState,
       editorTabs: {
-        [SESSION]: {
+        [rootKey(agentRoot(SESSION))]: {
           tabs: [
             {
               id: TAB_ID,
@@ -1062,8 +1061,8 @@ describe("editor header keeps a stable height", () => {
     const { getSnapshot } = await import("@/lib/store")
     mockState = {
       ...getSnapshot(),
-      editorTarget: { sessionId: SESSION, initialPath: null },
-      editorTabs: { [SESSION]: { tabs: [], activeId: null } },
+      editorTarget: { root: agentRoot(SESSION), initialPath: null },
+      editorTabs: { [rootKey(agentRoot(SESSION))]: { tabs: [], activeId: null } },
     } as DuxState
     render(<EditorOverlay />)
     expect(screen.queryByRole("button", { name: /save/i })).toBeNull()
@@ -1269,8 +1268,8 @@ describe("the header's language picker", () => {
     // The draft cache is module-level and outlives a render, so an earlier
     // describe's settled fileError for this session would be seeded straight
     // back in and the pane would never reach the editor arm at all.
-    const { clearSessionDrafts } = await import("@/lib/editorDrafts")
-    clearSessionDrafts(SESSION)
+    const { clearRootDrafts } = await import("@/lib/editorDrafts")
+    clearRootDrafts(rootKey(agentRoot(SESSION)))
     // `clearAllMocks` clears calls and KEEPS implementations, and earlier
     // describes in this file leave `readMock` rejecting and `diffMock`
     // returning their own sides. Put both back, or the panes never reach the
@@ -1389,7 +1388,7 @@ describe("the header's language picker", () => {
     mockState = {
       ...mockState,
       editorTabs: {
-        [SESSION]: {
+        [rootKey(agentRoot(SESSION))]: {
           tabs: [
             {
               id: TAB_ID,
@@ -1431,7 +1430,7 @@ describe("the header's language picker", () => {
     mockState = {
       ...mockState,
       editorTabs: {
-        [SESSION]: {
+        [rootKey(agentRoot(SESSION))]: {
           tabs: [
             {
               id: TAB_ID,
@@ -1460,7 +1459,7 @@ describe("the header's language picker", () => {
     mockState = {
       ...mockState,
       editorTabs: {
-        [SESSION]: { tabs: [other], activeId: other.id },
+        [rootKey(agentRoot(SESSION))]: { tabs: [other], activeId: other.id },
       },
     } as DuxState
     view.rerender(<EditorOverlay />)
@@ -1468,7 +1467,7 @@ describe("the header's language picker", () => {
     mockState = {
       ...mockState,
       editorTabs: {
-        [SESSION]: {
+        [rootKey(agentRoot(SESSION))]: {
           tabs: [
             other,
             {
@@ -1566,7 +1565,7 @@ describe("when the file changes on disk underneath the editor", () => {
     mockState = {
       ...mockState,
       ...(changes === undefined ? {} : { changes }),
-      editorTabs: { [SESSION]: { tabs, activeId } },
+      editorTabs: { [rootKey(agentRoot(SESSION))]: { tabs, activeId } },
     } as DuxState
   }
 
@@ -1579,9 +1578,9 @@ describe("when the file changes on disk underneath the editor", () => {
     const { getSnapshot } = await import("@/lib/store")
     mockState = {
       ...getSnapshot(),
-      editorTarget: { sessionId: SESSION, initialPath: PATH },
+      editorTarget: { root: agentRoot(SESSION), initialPath: PATH },
       editorTabs: {
-        [SESSION]: { tabs: [tab(TAB_ID, PATH, dirty)], activeId: TAB_ID },
+        [rootKey(agentRoot(SESSION))]: { tabs: [tab(TAB_ID, PATH, dirty)], activeId: TAB_ID },
       },
     } as DuxState
     const view = render(<Overlay />)
@@ -1597,8 +1596,8 @@ describe("when the file changes on disk underneath the editor", () => {
   beforeEach(async () => {
     vi.clearAllMocks()
     installBootStubs()
-    const { clearSessionDrafts } = await import("@/lib/editorDrafts")
-    clearSessionDrafts(SESSION)
+    const { clearRootDrafts } = await import("@/lib/editorDrafts")
+    clearRootDrafts(rootKey(agentRoot(SESSION)))
     Overlay = (await import("@/components/EditorOverlay")).EditorOverlay
     selectionActive = false
     disk = new Map()
@@ -1903,7 +1902,7 @@ describe("when the file changes on disk underneath the editor", () => {
     await screen.findByRole("status")
 
     fireEvent.click(screen.getByRole("button", { name: /close tab/i }))
-    expect(openEditorCloseTabMock).toHaveBeenCalledWith(SESSION, TAB_ID)
+    expect(openEditorCloseTabMock).toHaveBeenCalledWith(agentRoot(SESSION), TAB_ID)
     expect(editorCloseTabMock).not.toHaveBeenCalled()
   })
 
@@ -1915,7 +1914,7 @@ describe("when the file changes on disk underneath the editor", () => {
     await screen.findByRole("status")
 
     fireEvent.click(screen.getByRole("button", { name: /close tab/i }))
-    expect(editorCloseTabMock).toHaveBeenCalledWith(SESSION, TAB_ID)
+    expect(editorCloseTabMock).toHaveBeenCalledWith(agentRoot(SESSION), TAB_ID)
     expect(openEditorCloseTabMock).not.toHaveBeenCalled()
   })
 
@@ -1983,7 +1982,7 @@ describe("when the file changes on disk underneath the editor", () => {
     // Wait for the save to have LANDED in the buffer, not merely to have been
     // sent: the re-baseline is what the stale check then disagrees with.
     await waitFor(() =>
-      expect(editorSetTabDirtyMock).toHaveBeenCalledWith(SESSION, TAB_ID, false),
+      expect(editorSetTabDirtyMock).toHaveBeenCalledWith(agentRoot(SESSION), TAB_ID, false),
     )
 
     // Now the stale check answers, describing the file as it was BEFORE the
@@ -2031,7 +2030,7 @@ describe("when the file changes on disk underneath the editor", () => {
   })
 
   // The draft cache hands a buffer back across a remount with its disk state
-  // still on it. That is deliberate (see `loadSessionDrafts`), and it only
+  // still on it. That is deliberate (see `loadRootDrafts`), and it only
   // stays honest because the mount trigger re-checks: a file put back the way
   // the buffer has it must lose the banner.
   it("re-checks a buffer restored from the draft cache on mount", async () => {

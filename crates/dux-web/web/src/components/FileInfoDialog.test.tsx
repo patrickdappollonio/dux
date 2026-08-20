@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 
 import { FileInfoDialog } from "./FileInfoDialog"
 import type { WorktreeEntryInfo } from "@/lib/fileInfo"
+import { agentRoot } from "@/lib/editorRoot"
 
 const FILE_INFO: WorktreeEntryInfo = {
   path: "src/main.rs",
@@ -56,7 +57,7 @@ describe("FileInfoDialog", () => {
   it("reports every field the panel promises", async () => {
     render(
       <FileInfoDialog
-        sessionId="s1"
+        root={agentRoot("s1")}
         target={{ path: "src/main.rs" }}
         onClose={() => {}}
       />,
@@ -85,7 +86,7 @@ describe("FileInfoDialog", () => {
     }))
     render(
       <FileInfoDialog
-        sessionId="s1"
+        root={agentRoot("s1")}
         target={{ path: "src" }}
         onClose={() => {}}
       />,
@@ -108,7 +109,7 @@ describe("FileInfoDialog", () => {
     }))
     render(
       <FileInfoDialog
-        sessionId="s1"
+        root={agentRoot("s1")}
         target={{ path: "link.txt" }}
         onClose={() => {}}
       />,
@@ -125,7 +126,7 @@ describe("FileInfoDialog", () => {
     const onClose = vi.fn()
     render(
       <FileInfoDialog
-        sessionId="s1"
+        root={agentRoot("s1")}
         target={{ path: "src/gone.rs" }}
         onClose={onClose}
       />,
@@ -147,7 +148,7 @@ describe("FileInfoDialog", () => {
     const onClose = vi.fn()
     render(
       <FileInfoDialog
-        sessionId="s1"
+        root={agentRoot("s1")}
         target={{ path: "src/main.rs" }}
         onClose={onClose}
       />,
@@ -166,7 +167,7 @@ describe("FileInfoDialog", () => {
     const onClose = vi.fn()
     render(
       <FileInfoDialog
-        sessionId="s1"
+        root={agentRoot("s1")}
         target={{ path: "src/main.rs" }}
         onClose={onClose}
       />,
@@ -188,7 +189,7 @@ describe("FileInfoDialog", () => {
     const onClose = vi.fn()
     render(
       <FileInfoDialog
-        sessionId="s1"
+        root={agentRoot("s1")}
         target={{ path: ".git/config" }}
         onClose={onClose}
       />,

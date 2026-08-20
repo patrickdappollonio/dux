@@ -15,6 +15,7 @@ import { dirIconKind } from "@/lib/fileIcons"
 import { fileApi } from "@/lib/fileApi"
 import type { DirEntry } from "@/lib/fileTree"
 import { basename, moveTarget, parentDir, validateMove } from "@/lib/fileTreeOps"
+import type { EditorRoot } from "@/lib/editorRoot"
 
 export interface MoveEntryTarget {
   path: string
@@ -22,7 +23,7 @@ export interface MoveEntryTarget {
 }
 
 interface MoveEntryDialogProps {
-  sessionId: string
+  root: EditorRoot
   target: MoveEntryTarget | null
   // True when `target` (or, for a folder, a descendant of it) has unsaved
   // changes, computed by the caller exactly as RenameEntryDialog's `isDirty`
@@ -46,7 +47,7 @@ interface MoveEntryDialogProps {
 // nothing to open and an empty directory is still reachable (a list derived
 // from file paths would omit it).
 export function MoveEntryDialog({
-  sessionId,
+  root,
   target,
   isDirty,
   onClose,
@@ -66,7 +67,7 @@ export function MoveEntryDialog({
           // previous move happened to leave off.
           <MoveEntryDialogBody
             key={target.path}
-            sessionId={sessionId}
+            root={root}
             target={target}
             isDirty={isDirty}
             onClose={onClose}
@@ -84,13 +85,13 @@ type BrowseState =
   | { status: "error"; message: string }
 
 function MoveEntryDialogBody({
-  sessionId,
+  root,
   target,
   isDirty,
   onClose,
   onSubmit,
 }: {
-  sessionId: string
+  root: EditorRoot
   target: MoveEntryTarget
   isDirty: boolean
   onClose: () => void
@@ -116,7 +117,7 @@ function MoveEntryDialogBody({
   useEffect(() => {
     let cancelled = false
     fileApi
-      .tree(sessionId, dir)
+      .tree(root, dir)
       .then((result) => {
         if (!cancelled) {
           setLoaded({ key, state: { status: "loaded", entries: result.entries } })
@@ -136,7 +137,7 @@ function MoveEntryDialogBody({
     return () => {
       cancelled = true
     }
-  }, [sessionId, dir, key])
+  }, [root, dir, key])
 
   // Stepping into (or out of) a folder UNMOUNTS the button that was clicked,
   // and the browser then drops focus onto the dialog container, so a keyboard

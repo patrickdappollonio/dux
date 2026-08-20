@@ -20,6 +20,7 @@ import {
   flattenLazy,
 } from "@/lib/fileTree"
 import type { DirState } from "@/lib/fileTree"
+import type { EditorRoot } from "@/lib/editorRoot"
 
 const noop = () => {}
 
@@ -27,7 +28,7 @@ const ROW_HEIGHT = 28 // px — must match the py-1 + text-sm row height
 const OVERSCAN = 10 // rows to render above/below the viewport
 
 interface FileTreeProps {
-  sessionId: string
+  root: EditorRoot
   openPath: string | null
   // path → raw git status code, for marking changed files in the tree.
   changed: Map<string, string>
@@ -78,7 +79,7 @@ interface FileTreeProps {
 const ROOT_DROP_KEY = "\u0000root"
 
 export function FileTree({
-  sessionId,
+  root,
   openPath,
   changed,
   initialPath,
@@ -161,7 +162,7 @@ export function FileTree({
         return next
       })
       fileApi
-        .tree(sessionId, dir)
+        .tree(root, dir)
         .then((result) => {
           if (unmountedRef.current || requestTokenRef.current.get(dir) !== token)
             return
@@ -192,7 +193,7 @@ export function FileTree({
           })
         })
     },
-    [sessionId],
+    [root],
   )
 
   // Mount: fetch the root; when a deep-link target is present, also fetch and
@@ -285,7 +286,7 @@ export function FileTree({
     })
     // Only the nonce should retrigger this: `dirs` is intentionally excluded
     // (it would refetch on every unrelated directory load) and `fetchDir` is
-    // stable per sessionId.
+    // stable per root.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [revalidate?.nonce])
 

@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
 import type { EditorTab, EditorTabsState } from "@/lib/editorTabs"
+import { agentRoot, rootKey, type EditorRoot } from "@/lib/editorRoot"
 
 let mockState: DuxState
 const editorCloseTabMock = vi.fn()
@@ -48,13 +49,13 @@ function tab(overrides: Partial<EditorTab>): EditorTab {
 }
 
 function seed(
-  target: { sessionId: string; tabId: string } | null,
+  target: { root: EditorRoot; tabId: string } | null,
   tabs: EditorTab[],
 ) {
   const tabsState: EditorTabsState = { tabs, activeId: tabs[0]?.id ?? null }
   mockState = {
     editorCloseTabTarget: target,
-    editorTabs: target ? { [target.sessionId]: tabsState } : {},
+    editorTabs: target ? { [rootKey(target.root)]: tabsState } : {},
   } as unknown as DuxState
 }
 
@@ -71,14 +72,14 @@ afterEach(() => {
 
 describe("ConfirmCloseEditorTabDialog", () => {
   it("renders when a dirty tab target is set and shows its path", () => {
-    seed({ sessionId: "s1", tabId: "t1" }, [tab({ dirty: true, path: "src/a.ts" })])
+    seed({ root: agentRoot("s1"), tabId: "t1" }, [tab({ dirty: true, path: "src/a.ts" })])
     render(<ConfirmCloseEditorTabDialog />)
     expect(screen.getByText("Discard unsaved changes?")).toBeTruthy()
     expect(screen.getByText("src/a.ts")).toBeTruthy()
   })
 
   it("Cancel / Keep editing is autoFocused and closes without closing the tab", () => {
-    seed({ sessionId: "s1", tabId: "t1" }, [tab({ dirty: true })])
+    seed({ root: agentRoot("s1"), tabId: "t1" }, [tab({ dirty: true })])
     render(<ConfirmCloseEditorTabDialog />)
     const cancel = screen.getByRole("button", { name: "Keep editing" })
     expect(document.activeElement).toBe(cancel)
@@ -88,23 +89,23 @@ describe("ConfirmCloseEditorTabDialog", () => {
   })
 
   it("Discard button has variant destructive and calls editorCloseTab", () => {
-    seed({ sessionId: "s1", tabId: "t1" }, [tab({ dirty: true })])
+    seed({ root: agentRoot("s1"), tabId: "t1" }, [tab({ dirty: true })])
     render(<ConfirmCloseEditorTabDialog />)
     const discard = screen.getByRole("button", { name: /discard/i })
     fireEvent.click(discard)
-    expect(editorCloseTabMock).toHaveBeenCalledWith("s1", "t1")
+    expect(editorCloseTabMock).toHaveBeenCalledWith(agentRoot("s1"), "t1")
     expect(closeEditorCloseTabMock).toHaveBeenCalled()
   })
 
   it("self-closes via the vanished-target guard when the target tab disappears", () => {
-    seed({ sessionId: "s1", tabId: "gone" }, [tab({ id: "t1", dirty: true })])
+    seed({ root: agentRoot("s1"), tabId: "gone" }, [tab({ id: "t1", dirty: true })])
     render(<ConfirmCloseEditorTabDialog />)
     expect(screen.queryByText("Discard unsaved changes?")).toBeNull()
     expect(closeEditorCloseTabMock).toHaveBeenCalled()
   })
 
   it("self-closes when the target tab stopped being dirty (saved elsewhere)", () => {
-    seed({ sessionId: "s1", tabId: "t1" }, [tab({ id: "t1", dirty: false })])
+    seed({ root: agentRoot("s1"), tabId: "t1" }, [tab({ id: "t1", dirty: false })])
     render(<ConfirmCloseEditorTabDialog />)
     expect(screen.queryByText("Discard unsaved changes?")).toBeNull()
     expect(closeEditorCloseTabMock).toHaveBeenCalled()
@@ -118,7 +119,7 @@ describe("ConfirmCloseEditorTabDialog", () => {
   // `<button>` elements (not divs with onClick), so the browser's native Space
   // handling applies without any extra code in this dialog.
   it("both footer buttons are native <button> elements (Space works without extra wiring)", () => {
-    seed({ sessionId: "s1", tabId: "t1" }, [tab({ dirty: true })])
+    seed({ root: agentRoot("s1"), tabId: "t1" }, [tab({ dirty: true })])
     render(<ConfirmCloseEditorTabDialog />)
     const cancel = screen.getByRole("button", { name: "Keep editing" })
     const discard = screen.getByRole("button", { name: /discard/i })

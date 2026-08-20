@@ -55,10 +55,13 @@ import type {
   TabBuffer,
 } from "@/lib/editorBuffers"
 import { isAllDeleteDiff } from "@/lib/diffPresentation"
+import { loadRootDrafts, storeRootDrafts } from "@/lib/editorDrafts"
 import {
-  loadSessionDrafts,
-  storeSessionDrafts,
-} from "@/lib/editorDrafts"
+  rootKey,
+  rootPtyId,
+  rootSessionId,
+  type EditorRoot,
+} from "@/lib/editorRoot"
 import {
   hasDirtyUnderPath,
   saveResolutionOutcome,
@@ -207,7 +210,10 @@ function writeExplorerLayout(px: number | null, collapsed: boolean): void {
 }
 
 interface EditorBodyProps {
-  sessionId: string
+  // What this editor is rooted at: an agent's worktree, or the directory a
+  // terminal was spawned in. Every file call, tab-list lookup and draft-cache
+  // entry keys off it rather than off a bare id.
+  root: EditorRoot
   // True when composed by StandaloneEditorShell: the body IS the tab, so the
   // header drops its Close button (there is nothing to close into; the
   // shell's open-in-dux link is the way out) and its open-in-new-tab anchor
@@ -215,9 +221,12 @@ interface EditorBodyProps {
   standalone?: boolean
 }
 
-export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
+export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   const { bootstrap, changes, editorTarget, editorTabs } = useDux()
-  const tabsState = editorTabs[sessionId]
+  // The namespaced key for every per-root map, and the stable dependency for
+  // every effect below: the root itself is a fresh object on each render.
+  const key = rootKey(root)
+  const tabsState = editorTabs[key]
   const tabs = useMemo(() => tabsState?.tabs ?? [], [tabsState])
   const activeTab = tabs.find((t) => t.id === tabsState?.activeId) ?? null
 
@@ -228,7 +237,7 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
   // draft cache (lib/editorDrafts.ts) and written back below, which is what
   // lets an unsaved draft survive the editor being closed and reopened.
   const [buffers, setBuffers] = useState<Map<string, TabBuffer>>(() =>
-    loadSessionDrafts(sessionId),
+    loadRootDrafts(key),
   )
   const activeBuffer = activeTab ? buffers.get(activeTab.id) : undefined
 
@@ -236,8 +245,8 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
   // component; the store prunes it when tabs close and clears it on session
   // delete, so this side is write-only.
   useEffect(() => {
-    storeSessionDrafts(sessionId, buffers)
-  }, [sessionId, buffers])
+    storeRootDrafts(key, buffers)
+  }, [key, buffers])
 
   // Report the active tab up as the editor's live URL position: the address
   // bar names the file (and mode) actually on screen, and in-editor switches
@@ -246,8 +255,11 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
   const activeTabMode = activeTab?.mode ?? "file"
   const activeTabPathForUrl = activeTab?.path ?? null
   useEffect(() => {
-    editorSyncActiveTab(sessionId, activeTabMode, activeTabPathForUrl)
-  }, [sessionId, activeTabMode, activeTabPathForUrl])
+    editorSyncActiveTab(root, activeTabMode, activeTabPathForUrl)
+    // `root` is a fresh object every render, so the KEY is the dependency; a
+    // root that keys the same is the same root.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key, activeTabMode, activeTabPathForUrl])
 
   // The `monaco` instance, captured once CodeEditor mounts (see CodeEditor's
   // `onReady`). EditorBody, not CodeEditor, owns disposal because it owns
@@ -549,9 +561,12 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
   }
 
   // The changed-files slice, trusted only when it belongs to THIS editor's
-  // session (the editor always operates on the selected session, but a fast
-  // switch could momentarily leave the slice pointed elsewhere).
-  const slice = changes.sessionId === sessionId ? changes : null
+  // session (an agent editor always operates on the selected session, but a
+  // fast switch could momentarily leave the slice pointed elsewhere). A
+  // TERMINAL root has no session, so it never gets a slice: no diff mode, no
+  // changed-file decorations from the broadcast, and freshness rides window
+  // focus and tab activation instead.
+  const slice = changes.sessionId === rootSessionId(root) ? changes : null
 
   // Mark the tree's changed files from the slice. Stores the raw git status code
   // per path; FileStatusIcon maps it to an icon + label.
@@ -641,7 +656,7 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
         >
           <MarkdownPreview
             content={previewContent}
-            sessionId={sessionId}
+            root={root}
             path={path}
           />
         </Suspense>
@@ -664,7 +679,7 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
   // directory via fileApi.tree, revalidated separately (see `revalidateDirs`).
   function refreshSearchIndex(): Promise<void> {
     return fileApi
-      .list(sessionId)
+      .list(root)
       .then((result) => {
         setSearchIndex(result.files)
         setSearchTruncated(result.truncated ?? false)
@@ -691,7 +706,7 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
   // function (rather than inlined in the effect below) so the effect body
   // never calls `setBuffers` directly, mirrors FileTree.tsx's `fetchDir`. A
   // plain function (not `useCallback`): `eslint-plugin-react-hooks`'
-  // compiler-derived manual-memoization lint disagreed with a `[sessionId]`
+  // compiler-derived manual-memoization lint disagreed with a `[root]`
   // dependency array here even though this mirrors `fetchDir`'s (which DOES
   // pass) shape exactly; the effect below still gates on tab/path identity,
   // so a fresh function
@@ -715,7 +730,7 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
       return next
     })
     fileApi
-      .read(sessionId, path)
+      .read(root, path)
       .then((f) => {
         if (fileRequestTokenRef.current.get(tabId) !== token) return
         setBuffers((prev) => {
@@ -878,7 +893,7 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
     fileRequestTokenRef.current.set(tabId, token)
     const signalAtRequest = changeSignalFor(sliceRef.current, path)
     fileApi
-      .read(sessionId, path)
+      .read(root, path)
       .then((f) => {
         if (fileRequestTokenRef.current.get(tabId) !== token) return
         // The buffer was clean when this read was decided, but the read is a
@@ -911,7 +926,7 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
           next.set(tabId, reloadedInPlace(cur, path, f, signalAtRequest))
           return next
         })
-        editorSetTabDirty(sessionId, tabId, false)
+        editorSetTabDirty(root, tabId, false)
       })
       .catch((e) => {
         if (fileRequestTokenRef.current.get(tabId) !== token) return
@@ -978,7 +993,7 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
     freshnessCheckRef.current.set(tabId, path)
     const signalAtRequest = changeSignalFor(sliceRef.current, path)
     fileApi
-      .info(sessionId, path)
+      .info(root, path)
       .then((info) => {
         const cur = buffersRef.current.get(tabId)
         if (!cur || isBufferStale(cur, path) || cur.loadedPath !== path) return
@@ -1132,7 +1147,7 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
     const token = (diffRequestTokenRef.current.get(tabId) ?? 0) + 1
     diffRequestTokenRef.current.set(tabId, token)
     fileApi
-      .diff(sessionId, path)
+      .diff(root, path)
       .then((d) => {
         if (diffRequestTokenRef.current.get(tabId) !== token) return
         setBuffers((prev) => {
@@ -1262,7 +1277,7 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
   // preserve whatever mode that tab is currently showing (openFile's rule 1)
   // rather than silently flipping an open diff tab back to file view.
   function requestOpen(path: string, opts?: { pin?: boolean }): void {
-    editorOpenFile(sessionId, path, opts)
+    editorOpenFile(root, path, opts)
   }
 
   // Kept current here (an effect, not render) so the diff fetch's late callback
@@ -1296,9 +1311,9 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
       // here avoids even constructing the new-tabs-array allocation the
       // reducer would otherwise do on every keystroke.
       if (newDirty !== activeTab.dirty) {
-        editorSetTabDirty(sessionId, tabId, newDirty)
+        editorSetTabDirty(root, tabId, newDirty)
       }
-      if (shouldPromoteOnEdit(activeTab, newDirty)) editorPinTab(sessionId, tabId)
+      if (shouldPromoteOnEdit(activeTab, newDirty)) editorPinTab(root, tabId)
     }
   }
 
@@ -1329,7 +1344,7 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
       return next
     })
     fileApi
-      .write(sessionId, path, body, expected)
+      .write(root, path, body, expected)
       .then((result) => {
         // Re-check the LIVE tabs list at RESOLVE time (via `tabsRef`, kept
         // current every render), not the `tabs` this closure captured when
@@ -1364,7 +1379,7 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
             )
             return next
           })
-          editorSetTabDirty(sessionId, tabId, false)
+          editorSetTabDirty(root, tabId, false)
         }
         if (outcome.tone === "warning") notifyWarning(outcome.message)
         else notifySuccess(outcome.message)
@@ -1447,7 +1462,7 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
     if (!activeTab || openingEditor) return
     setOpeningEditor(true)
     fileApi
-      .openInEditor(sessionId, activeTab.path, editorKey)
+      .openInEditor(root, activeTab.path, editorKey)
       // "Opening" not "Opened": we spawned the editor but can't confirm a window
       // actually appeared (e.g. a headless server would launch-then-exit).
       .then((editor) => notifySuccess(`Opening in ${editor}…`))
@@ -1470,15 +1485,15 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
     const path = joinName(dir, name)
     const create =
       kind === "file"
-        ? fileApi.createFile(sessionId, path)
-        : fileApi.createDir(sessionId, path)
+        ? fileApi.createFile(root, path)
+        : fileApi.createDir(root, path)
     return create
       .then(() => {
         setNewEntryTarget(null)
         notifySuccess(createdMessage(kind, path))
         revalidateDirs([dir])
         if (kind === "file") {
-          editorOpenFile(sessionId, path, { mode: "file", pin: true })
+          editorOpenFile(root, path, { mode: "file", pin: true })
         }
         return refreshSearchIndex()
       })
@@ -1502,11 +1517,11 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
     const from = renameEntryTarget.path
     const to = computeRenameTarget(from, newName)
     return fileApi
-      .rename(sessionId, from, to)
+      .rename(root, from, to)
       .then(() => {
         setRenameEntryTarget(null)
         notifySuccess(renamedMessage(from, to))
-        editorRenameTabPaths(sessionId, from, to)
+        editorRenameTabPaths(root, from, to)
         retargetOverrides(from, to)
         revalidateDirs([parentDir(from), parentDir(to)])
         return refreshSearchIndex()
@@ -1526,10 +1541,10 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
   function handleMoveSubmit(destDir: string): Promise<void> {
     if (!moveEntryTarget) return Promise.resolve()
     return performMove(moveEntryTarget.path, destDir, {
-      rename: (from, to) => fileApi.rename(sessionId, from, to),
+      rename: (from, to) => fileApi.rename(root, from, to),
       clearTarget: () => setMoveEntryTarget(null),
       retargetTabs: (from, to) => {
-        editorRenameTabPaths(sessionId, from, to)
+        editorRenameTabPaths(root, from, to)
         retargetOverrides(from, to)
       },
       revalidateDirs,
@@ -1555,14 +1570,14 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
     if (!target || savingPaths.has(target.path)) return
     setDeleteEntryTarget(null)
     fileApi
-      .remove(sessionId, target.path)
+      .remove(root, target.path)
       .then(() => {
         // The one confirmation that is load-bearing rather than merely
         // polite: the dialog closed the moment it was confirmed (see above),
         // so without this a delete leaves no trace on screen at all and the
         // user is left reading the tree to work out whether it happened.
         notifySuccess(deletedMessage(target.path, target.isDir))
-        editorCloseTabsUnderPath(sessionId, target.path)
+        editorCloseTabsUnderPath(root, target.path)
         revalidateDirs([parentDir(target.path)])
         return refreshSearchIndex()
       })
@@ -1597,7 +1612,7 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
         // check it feeds exists only so a viewer who cannot paste is told
         // before a file is written. A tree drop pastes nothing, so there is
         // nothing to check and no socket to name.
-        uploadDroppedFile(file, { pty: sessionId, conn: null, dir: into }),
+        uploadDroppedFile(file, { pty: rootPtyId(root), conn: null, dir: into }),
       revalidateDirs,
       refreshSearchIndex,
       reportBusy: (message) => notifyBusy(message, { id: toastId }),
@@ -1732,7 +1747,7 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
               size="sm"
               variant={activeTab.mode === "file" ? "default" : "ghost"}
               aria-pressed={activeTab.mode === "file"}
-              onClick={() => editorSetTabMode(sessionId, activeTab.id, "file")}
+              onClick={() => editorSetTabMode(root, activeTab.id, "file")}
             >
               <FileText />
               File
@@ -1741,7 +1756,7 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
               size="sm"
               variant={activeTab.mode === "diff" ? "default" : "ghost"}
               aria-pressed={activeTab.mode === "diff"}
-              onClick={() => editorSetTabMode(sessionId, activeTab.id, "diff")}
+              onClick={() => editorSetTabMode(root, activeTab.id, "diff")}
             >
               <GitCompare />
               Diff
@@ -1904,7 +1919,7 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
                   <DropdownMenuItem
                     aria-current={activeTab.mode === "file" ? "true" : undefined}
                     onClick={() =>
-                      editorSetTabMode(sessionId, activeTab.id, "file")
+                      editorSetTabMode(root, activeTab.id, "file")
                     }
                   >
                     <FileText />
@@ -1914,7 +1929,7 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
                   <DropdownMenuItem
                     aria-current={activeTab.mode === "diff" ? "true" : undefined}
                     onClick={() =>
-                      editorSetTabMode(sessionId, activeTab.id, "diff")
+                      editorSetTabMode(root, activeTab.id, "diff")
                     }
                   >
                     <GitCompare />
@@ -1992,7 +2007,7 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
             render={
               <a
                 href={standaloneEditorHash(
-                  sessionId,
+                  root,
                   activeTab
                     ? { mode: activeTab.mode, path: activeTab.path }
                     : null,
@@ -2023,7 +2038,7 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
       </div>
 
       {/* Tab strip, only renders once the session has at least one tab. */}
-      <EditorTabsStrip sessionId={sessionId} />
+      <EditorTabsStrip root={root} />
 
       {/* Body: worktree file tree (left, a collapsible resizable panel) +
           Monaco editor/diff (right). The outer div mirrors DesktopShell's
@@ -2153,7 +2168,7 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
                 </ScrollArea>
               ) : (
                 <FileTree
-                  sessionId={sessionId}
+                  root={root}
                   openPath={openPath}
                   changed={changedMap}
                   initialPath={initialPath}
@@ -2211,8 +2226,8 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
                     // the confirm would be the one destructive action in the
                     // editor that never asks.
                     onCloseTab={() => {
-                      if (dirty) openEditorCloseTab(sessionId, activeTab.id)
-                      else editorCloseTab(sessionId, activeTab.id)
+                      if (dirty) openEditorCloseTab(root, activeTab.id)
+                      else editorCloseTab(root, activeTab.id)
                     }}
                   />
                 )}
@@ -2233,7 +2248,7 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
                 // preview-replaces onto another file.
                 <ImagePreviewPane
                   key={activeTab.path}
-                  src={fileApi.rawUrl(sessionId, activeTab.path)}
+                  src={fileApi.rawUrl(root, activeTab.path)}
                   path={activeTab.path}
                 />
               ) : activeTab.mode === "diff" ? (
@@ -2402,7 +2417,7 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
         onSubmit={handleRenameSubmit}
       />
       <MoveEntryDialog
-        sessionId={sessionId}
+        root={root}
         target={moveEntryTarget}
         isDirty={
           moveEntryTarget !== null &&
@@ -2415,7 +2430,7 @@ export function EditorBody({ sessionId, standalone = false }: EditorBodyProps) {
         onSubmit={handleMoveSubmit}
       />
       <FileInfoDialog
-        sessionId={sessionId}
+        root={root}
         target={fileInfoTarget}
         onClose={() => setFileInfoTarget(null)}
       />

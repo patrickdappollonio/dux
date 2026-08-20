@@ -5,12 +5,13 @@ import rehypeSanitize from "rehype-sanitize"
 import remarkFrontmatter from "remark-frontmatter"
 import remarkGfm from "remark-gfm"
 import { markdownAssetUrl } from "@/lib/markdown"
+import type { EditorRoot } from "@/lib/editorRoot"
 
 interface MarkdownPreviewProps {
   // The current editor buffer (so the preview reflects unsaved edits).
   content: string
   // The session whose worktree backs the relative-image proxy.
-  sessionId: string
+  root: EditorRoot
   // The markdown file's worktree path — relative image `src`s resolve against its
   // directory. Null when no file is open (relative images then aren't rewritten).
   path: string | null
@@ -34,7 +35,7 @@ interface MarkdownPreviewProps {
 // expects" without opening a script-injection hole. sanitize must run AFTER raw.
 export default function MarkdownPreview({
   content,
-  sessionId,
+  root,
   path,
 }: MarkdownPreviewProps) {
   // Rewrite a relative image `src` to the auth-gated worktree asset proxy so a
@@ -43,7 +44,7 @@ export default function MarkdownPreview({
   // through to react-markdown's default (safe) URL handling unchanged.
   function transformUrl(url: string, key: string): string {
     if (key === "src" && path !== null) {
-      const proxied = markdownAssetUrl(sessionId, path, url)
+      const proxied = markdownAssetUrl(root, path, url)
       if (proxied !== null) return proxied
     }
     return defaultUrlTransform(url)

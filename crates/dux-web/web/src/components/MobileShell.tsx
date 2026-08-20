@@ -1,4 +1,11 @@
-import { ChevronLeft, Ellipsis, GitPullRequest, Settings, X } from "lucide-react"
+import {
+  ChevronLeft,
+  Ellipsis,
+  ExternalLink,
+  GitPullRequest,
+  Settings,
+  X,
+} from "lucide-react"
 import { Suspense, useState, type ReactElement } from "react"
 
 import { AgentNotFound } from "@/components/AgentNotFound"
@@ -19,6 +26,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { InputMenuItems } from "@/components/InputMenuItems"
@@ -33,11 +41,13 @@ import {
   openDeleteTerminal,
   selectSession,
   selectTerminal,
+  standaloneEditorHash,
   useDux,
 } from "@/lib/store"
 import { prIconClass, prIconHoverClass, prStateLabel } from "@/lib/pr"
 import type { TerminalOwnerRef } from "@/lib/store"
 import type { SessionView } from "@/lib/types"
+import { editorRootForTarget } from "@/lib/editorRoot"
 import { matchOwner } from "@/lib/terminalOwner"
 import { terminalsForOwner, terminalTitle } from "@/lib/terminals"
 import { cn } from "@/lib/utils"
@@ -200,6 +210,29 @@ function AgentlessTerminalScreen({
                 }}
                 trailingSeparator
               />
+              {/* The new-tab editor entry only, matching the agent screen's
+                  menu: the in-app overlay is desktop-only, so its item would be
+                  a dead no-op here. A real anchor, so a long-press keeps its
+                  native open-in-new-tab. */}
+              <DropdownMenuItem
+                render={
+                  <a
+                    href={standaloneEditorHash(
+                      editorRootForTarget({
+                        kind: "terminal",
+                        terminalId,
+                        owner,
+                      }),
+                    )}
+                    target="_blank"
+                    rel="noopener"
+                  />
+                }
+              >
+                <ExternalLink />
+                Open editor in new tab
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
               <DropdownMenuItem onClick={() => openDeleteTerminal(terminalId)}>
                 <X />
                 Close…

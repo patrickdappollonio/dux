@@ -1,3 +1,5 @@
+import { rootApiBase, type EditorRoot } from "@/lib/editorRoot"
+
 // Recognize markdown files by extension so the editor can offer a rendered
 // preview toggle only where it makes sense. Case-insensitive.
 const MARKDOWN_EXTENSIONS = [".md", ".markdown", ".mdown", ".mkd", ".mdx"]
@@ -40,15 +42,15 @@ export function resolveWorktreeRelative(
   return stack.length > 0 ? stack.join("/") : null
 }
 
-// The same-origin proxy URL that serves a worktree asset for the markdown
-// preview, or null when `src` isn't a worktree-relative reference. The route is
-// auth-gated; the path is re-validated server-side for worktree containment.
+// The same-origin proxy URL that serves an asset under the editor's root for
+// the markdown preview, or null when `src` isn't a root-relative reference. The
+// path is re-validated server-side for containment inside that root.
 export function markdownAssetUrl(
-  sessionId: string,
+  root: EditorRoot,
   filePath: string,
   src: string,
 ): string | null {
   const rel = resolveWorktreeRelative(filePath, src)
   if (rel === null) return null
-  return `/api/v1/sessions/${encodeURIComponent(sessionId)}/files/raw?path=${encodeURIComponent(rel)}`
+  return `${rootApiBase(root)}/files/raw?path=${encodeURIComponent(rel)}`
 }

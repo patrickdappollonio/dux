@@ -22,6 +22,7 @@ import {
 } from "@/lib/fileInfo"
 import type { WorktreeEntryInfo } from "@/lib/fileInfo"
 import { basename } from "@/lib/fileTreeOps"
+import type { EditorRoot } from "@/lib/editorRoot"
 
 export interface FileInfoTarget {
   path: string
@@ -33,7 +34,7 @@ type InfoResult =
   | { kind: "vanished" }
 
 interface FileInfoDialogProps {
-  sessionId: string
+  root: EditorRoot
   target: FileInfoTarget | null
   onClose: () => void
 }
@@ -60,7 +61,7 @@ interface FileInfoDialogProps {
 // one request per return, and it needs no timer. A file deleted by an agent
 // while this tab stays focused is NOT noticed, and that is the accepted gap.
 export function FileInfoDialog({
-  sessionId,
+  root,
   target,
   onClose,
 }: FileInfoDialogProps) {
@@ -85,7 +86,7 @@ export function FileInfoDialog({
     if (path === null) return
     let cancelled = false
     fileApi
-      .info(sessionId, path)
+      .info(root, path)
       .then((value) => {
         if (!cancelled) setLoaded({ path, result: { kind: "ok", info: value } })
       })
@@ -110,7 +111,7 @@ export function FileInfoDialog({
     return () => {
       cancelled = true
     }
-  }, [sessionId, path, revalidateNonce])
+  }, [root, path, revalidateNonce])
 
   // The panel's only revalidation signal. A tab the user has come back to is
   // exactly when its facts are most likely to be stale, and it costs one

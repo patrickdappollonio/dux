@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { Bootstrap } from "./bootstrapApi"
+import { agentRoot } from "@/lib/editorRoot"
 
 // Exercises the editor-tabs store slice end to end: `editorOpenFile` seeding
 // and preview-replacing, `openEditor`'s tab-seeding extension, pin/dirty
 // mutation, close + neighbor-activation, and session-scoped clearing. The pure
-// reducer rules themselves are covered by `editorTabs.test.ts`; this file only
+// reducer rules themselves are covered by `editorTabs["agent:test"].ts`; this file only
 // checks the store's thin wrapping (keys by session id, wires `openEditor`,
 // exposes the close-confirm target).
 
@@ -135,8 +136,8 @@ async function loadStore() {
 describe("editor tabs store slice", () => {
   it("editorOpenFile seeds a preview tab and sets it active", async () => {
     const mod = await loadStore()
-    mod.editorOpenFile("s1", "a.ts")
-    const tabs = mod.getSnapshot().editorTabs.s1
+    mod.editorOpenFile(agentRoot("s1"), "a.ts")
+    const tabs = mod.getSnapshot().editorTabs["agent:s1"]
     expect(tabs.tabs).toHaveLength(1)
     expect(tabs.tabs[0]).toMatchObject({ path: "a.ts", preview: true, dirty: false })
     expect(tabs.activeId).toBe(tabs.tabs[0].id)
@@ -144,10 +145,10 @@ describe("editor tabs store slice", () => {
 
   it("editorOpenFile a second path replaces the preview tab (no accumulation)", async () => {
     const mod = await loadStore()
-    mod.editorOpenFile("s1", "a.ts")
-    const firstId = mod.getSnapshot().editorTabs.s1.tabs[0].id
-    mod.editorOpenFile("s1", "b.ts")
-    const tabs = mod.getSnapshot().editorTabs.s1.tabs
+    mod.editorOpenFile(agentRoot("s1"), "a.ts")
+    const firstId = mod.getSnapshot().editorTabs["agent:s1"].tabs[0].id
+    mod.editorOpenFile(agentRoot("s1"), "b.ts")
+    const tabs = mod.getSnapshot().editorTabs["agent:s1"].tabs
     expect(tabs).toHaveLength(1)
     expect(tabs[0].id).toBe(firstId)
     expect(tabs[0].path).toBe("b.ts")
@@ -155,23 +156,23 @@ describe("editor tabs store slice", () => {
 
   it("openEditor with initialPath opens the overlay AND seeds a matching tab", async () => {
     const mod = await loadStore()
-    mod.openEditor("s1", "a.ts", "diff")
+    mod.openEditor(agentRoot("s1"), "a.ts", "diff")
     expect(mod.getSnapshot().editorTarget).toEqual({
-      sessionId: "s1",
+      root: agentRoot("s1"),
       initialPath: "a.ts",
       initialMode: "diff",
     })
-    const tabs = mod.getSnapshot().editorTabs.s1.tabs
+    const tabs = mod.getSnapshot().editorTabs["agent:s1"].tabs
     expect(tabs).toHaveLength(1)
     expect(tabs[0]).toMatchObject({ path: "a.ts", mode: "diff" })
   })
 
   it("editorOpenFile without an explicit mode preserves an existing tab's mode (tree/search re-click)", async () => {
     const mod = await loadStore()
-    mod.openEditor("s1", "a.ts", "diff")
+    mod.openEditor(agentRoot("s1"), "a.ts", "diff")
     // A tree/search click on the already-open path carries no mode intent.
-    mod.editorOpenFile("s1", "a.ts")
-    const tabs = mod.getSnapshot().editorTabs.s1.tabs
+    mod.editorOpenFile(agentRoot("s1"), "a.ts")
+    const tabs = mod.getSnapshot().editorTabs["agent:s1"].tabs
     expect(tabs).toHaveLength(1)
     expect(tabs[0].mode).toBe("diff")
   })
@@ -181,99 +182,99 @@ describe("editor tabs store slice", () => {
     // no text to diff, so the choke point coerces and the overlay shows the
     // picture instead of dead-ending on the binary-diff refusal.
     const mod = await loadStore()
-    mod.openEditor("s1", "assets/logo.png", "diff")
+    mod.openEditor(agentRoot("s1"), "assets/logo.png", "diff")
     expect(mod.getSnapshot().editorTarget).toEqual({
-      sessionId: "s1",
+      root: agentRoot("s1"),
       initialPath: "assets/logo.png",
       initialMode: "file",
     })
-    const tabs = mod.getSnapshot().editorTabs.s1.tabs
+    const tabs = mod.getSnapshot().editorTabs["agent:s1"].tabs
     expect(tabs).toHaveLength(1)
     expect(tabs[0]).toMatchObject({ path: "assets/logo.png", mode: "file" })
   })
 
   it("editorOpenFile coerces an explicit diff intent to file for an image path", async () => {
     const mod = await loadStore()
-    mod.editorOpenFile("s1", "logo.png", { mode: "diff" })
-    expect(mod.getSnapshot().editorTabs.s1.tabs[0].mode).toBe("file")
+    mod.editorOpenFile(agentRoot("s1"), "logo.png", { mode: "diff" })
+    expect(mod.getSnapshot().editorTabs["agent:s1"].tabs[0].mode).toBe("file")
     // And an already-open image tab cannot be retargeted into diff either.
-    mod.editorOpenFile("s1", "logo.png", { mode: "diff" })
-    expect(mod.getSnapshot().editorTabs.s1.tabs[0].mode).toBe("file")
+    mod.editorOpenFile(agentRoot("s1"), "logo.png", { mode: "diff" })
+    expect(mod.getSnapshot().editorTabs["agent:s1"].tabs[0].mode).toBe("file")
   })
 
   it("an svg path still honors diff mode (it is a text tab, not an image tab)", async () => {
     const mod = await loadStore()
-    mod.openEditor("s1", "icons/logo.svg", "diff")
-    expect(mod.getSnapshot().editorTabs.s1.tabs[0].mode).toBe("diff")
+    mod.openEditor(agentRoot("s1"), "icons/logo.svg", "diff")
+    expect(mod.getSnapshot().editorTabs["agent:s1"].tabs[0].mode).toBe("diff")
   })
 
   it("editorOpenFile with an explicit mode retargets an existing tab (changed-files Diff button)", async () => {
     const mod = await loadStore()
-    mod.editorOpenFile("s1", "a.ts", { mode: "file", pin: true })
-    mod.editorOpenFile("s1", "a.ts", { mode: "diff" })
-    const tabs = mod.getSnapshot().editorTabs.s1.tabs
+    mod.editorOpenFile(agentRoot("s1"), "a.ts", { mode: "file", pin: true })
+    mod.editorOpenFile(agentRoot("s1"), "a.ts", { mode: "diff" })
+    const tabs = mod.getSnapshot().editorTabs["agent:s1"].tabs
     expect(tabs).toHaveLength(1)
     expect(tabs[0].mode).toBe("diff")
   })
 
   it("editorPinTab clears preview", async () => {
     const mod = await loadStore()
-    mod.editorOpenFile("s1", "a.ts")
-    const id = mod.getSnapshot().editorTabs.s1.tabs[0].id
-    expect(mod.getSnapshot().editorTabs.s1.tabs[0].preview).toBe(true)
-    mod.editorPinTab("s1", id)
-    expect(mod.getSnapshot().editorTabs.s1.tabs[0].preview).toBe(false)
+    mod.editorOpenFile(agentRoot("s1"), "a.ts")
+    const id = mod.getSnapshot().editorTabs["agent:s1"].tabs[0].id
+    expect(mod.getSnapshot().editorTabs["agent:s1"].tabs[0].preview).toBe(true)
+    mod.editorPinTab(agentRoot("s1"), id)
+    expect(mod.getSnapshot().editorTabs["agent:s1"].tabs[0].preview).toBe(false)
   })
 
   it("editorSetTabDirty flips dirty and shouldConfirmClose-equivalent gating reflects it", async () => {
     const mod = await loadStore()
-    mod.editorOpenFile("s1", "a.ts")
-    const id = mod.getSnapshot().editorTabs.s1.tabs[0].id
-    mod.editorSetTabDirty("s1", id, true)
-    expect(mod.getSnapshot().editorTabs.s1.tabs[0].dirty).toBe(true)
-    mod.editorSetTabDirty("s1", id, false)
-    expect(mod.getSnapshot().editorTabs.s1.tabs[0].dirty).toBe(false)
+    mod.editorOpenFile(agentRoot("s1"), "a.ts")
+    const id = mod.getSnapshot().editorTabs["agent:s1"].tabs[0].id
+    mod.editorSetTabDirty(agentRoot("s1"), id, true)
+    expect(mod.getSnapshot().editorTabs["agent:s1"].tabs[0].dirty).toBe(true)
+    mod.editorSetTabDirty(agentRoot("s1"), id, false)
+    expect(mod.getSnapshot().editorTabs["agent:s1"].tabs[0].dirty).toBe(false)
   })
 
   it("editorSetTabDirty with an unchanged value is a no-op and keeps the session's tabs state reference identical (no store-wide re-render)", async () => {
     const mod = await loadStore()
-    mod.editorOpenFile("s1", "a.ts")
-    const id = mod.getSnapshot().editorTabs.s1.tabs[0].id
-    const before = mod.getSnapshot().editorTabs.s1
+    mod.editorOpenFile(agentRoot("s1"), "a.ts")
+    const id = mod.getSnapshot().editorTabs["agent:s1"].tabs[0].id
+    const before = mod.getSnapshot().editorTabs["agent:s1"]
     // The freshly-opened tab already starts at dirty: false, so setting it to
     // false again must not replace the session's tabs-state object.
-    mod.editorSetTabDirty("s1", id, false)
-    expect(mod.getSnapshot().editorTabs.s1).toBe(before)
+    mod.editorSetTabDirty(agentRoot("s1"), id, false)
+    expect(mod.getSnapshot().editorTabs["agent:s1"]).toBe(before)
   })
 
   it("editorCloseTab activates the neighbor and removes the tab", async () => {
     const mod = await loadStore()
-    mod.editorOpenFile("s1", "a.ts", { pin: true })
-    mod.editorOpenFile("s1", "b.ts", { pin: true })
-    const [a, b] = mod.getSnapshot().editorTabs.s1.tabs
-    mod.editorActivateTab("s1", a.id)
-    mod.editorCloseTab("s1", a.id)
-    const tabs = mod.getSnapshot().editorTabs.s1
+    mod.editorOpenFile(agentRoot("s1"), "a.ts", { pin: true })
+    mod.editorOpenFile(agentRoot("s1"), "b.ts", { pin: true })
+    const [a, b] = mod.getSnapshot().editorTabs["agent:s1"].tabs
+    mod.editorActivateTab(agentRoot("s1"), a.id)
+    mod.editorCloseTab(agentRoot("s1"), a.id)
+    const tabs = mod.getSnapshot().editorTabs["agent:s1"]
     expect(tabs.tabs.map((t) => t.id)).toEqual([b.id])
     expect(tabs.activeId).toBe(b.id)
   })
 
-  it("editorClearSession empties that session's tabs only", async () => {
+  it("editorClearRoot empties that session's tabs only", async () => {
     spineBody = makeSpine(["s1", "s2"])
     const mod = await loadStore()
-    mod.editorOpenFile("s1", "a.ts")
-    mod.editorOpenFile("s2", "b.ts")
-    mod.editorClearSession("s1")
-    expect(mod.getSnapshot().editorTabs.s1).toBeUndefined()
-    expect(mod.getSnapshot().editorTabs.s2.tabs).toHaveLength(1)
+    mod.editorOpenFile(agentRoot("s1"), "a.ts")
+    mod.editorOpenFile(agentRoot("s2"), "b.ts")
+    mod.editorClearRoot(agentRoot("s1"))
+    expect(mod.getSnapshot().editorTabs["agent:s1"]).toBeUndefined()
+    expect(mod.getSnapshot().editorTabs["agent:s2"].tabs).toHaveLength(1)
   })
 
   it("editorCloseTab on the last tab leaves an empty, overlay-open state", async () => {
     const mod = await loadStore()
-    mod.openEditor("s1", "a.ts")
-    const id = mod.getSnapshot().editorTabs.s1.tabs[0].id
-    mod.editorCloseTab("s1", id)
-    const tabs = mod.getSnapshot().editorTabs.s1
+    mod.openEditor(agentRoot("s1"), "a.ts")
+    const id = mod.getSnapshot().editorTabs["agent:s1"].tabs[0].id
+    mod.editorCloseTab(agentRoot("s1"), id)
+    const tabs = mod.getSnapshot().editorTabs["agent:s1"]
     expect(tabs.tabs).toEqual([])
     expect(tabs.activeId).toBeNull()
     // The overlay itself stays open, only the tab list emptied.
@@ -282,19 +283,19 @@ describe("editor tabs store slice", () => {
 
   it("a preview-replace via editorOpenFile always lands the reused tab at dirty: false", async () => {
     const mod = await loadStore()
-    mod.editorOpenFile("s1", "a.ts")
-    const id = mod.getSnapshot().editorTabs.s1.tabs[0].id
-    mod.editorOpenFile("s1", "b.ts")
-    const tabs = mod.getSnapshot().editorTabs.s1.tabs
+    mod.editorOpenFile(agentRoot("s1"), "a.ts")
+    const id = mod.getSnapshot().editorTabs["agent:s1"].tabs[0].id
+    mod.editorOpenFile(agentRoot("s1"), "b.ts")
+    const tabs = mod.getSnapshot().editorTabs["agent:s1"].tabs
     expect(tabs).toHaveLength(1)
     expect(tabs[0]).toMatchObject({ id, path: "b.ts", dirty: false })
   })
 
   it("openEditorCloseTab / closeEditorCloseTab drive the close-confirm target", async () => {
     const mod = await loadStore()
-    mod.openEditorCloseTab("s1", "t1")
+    mod.openEditorCloseTab(agentRoot("s1"), "t1")
     expect(mod.getSnapshot().editorCloseTabTarget).toEqual({
-      sessionId: "s1",
+      root: agentRoot("s1"),
       tabId: "t1",
     })
     mod.closeEditorCloseTab()
@@ -303,78 +304,78 @@ describe("editor tabs store slice", () => {
 
   // Finding 8: `editorRenameTabPaths`/`editorCloseTabsUnderPath` had no direct
   // store-level coverage; the pure reducers (`renameTabPaths`/
-  // `closeTabsUnderPath`) are covered by editorTabs.test.ts, but the store's
+  // `closeTabsUnderPath`) are covered by editorTabs["agent:test"].ts, but the store's
   // thin wrapping (keying by session id, and the ref-equal no-op short-
   // circuit `setEditorTabsFor` relies on to skip a store-wide re-render) was
   // untested at this layer.
   it("editorRenameTabPaths retargets the matching tab's path via editorTabsFor snapshot", async () => {
     const mod = await loadStore()
-    mod.editorOpenFile("s1", "src/a.ts", { pin: true })
-    const id = mod.getSnapshot().editorTabs.s1.tabs[0].id
-    mod.editorRenameTabPaths("s1", "src/a.ts", "src/renamed.ts")
-    const tabs = mod.getSnapshot().editorTabs.s1.tabs
+    mod.editorOpenFile(agentRoot("s1"), "src/a.ts", { pin: true })
+    const id = mod.getSnapshot().editorTabs["agent:s1"].tabs[0].id
+    mod.editorRenameTabPaths(agentRoot("s1"), "src/a.ts", "src/renamed.ts")
+    const tabs = mod.getSnapshot().editorTabs["agent:s1"].tabs
     expect(tabs).toHaveLength(1)
     expect(tabs[0]).toMatchObject({ id, path: "src/renamed.ts" })
   })
 
   it("editorRenameTabPaths retargets every tab under a renamed folder", async () => {
     const mod = await loadStore()
-    mod.editorOpenFile("s1", "src/a.ts", { pin: true })
-    mod.editorOpenFile("s1", "src/nested/b.ts", { pin: true })
-    mod.editorRenameTabPaths("s1", "src", "lib")
-    const paths = mod.getSnapshot().editorTabs.s1.tabs.map((t) => t.path).sort()
+    mod.editorOpenFile(agentRoot("s1"), "src/a.ts", { pin: true })
+    mod.editorOpenFile(agentRoot("s1"), "src/nested/b.ts", { pin: true })
+    mod.editorRenameTabPaths(agentRoot("s1"), "src", "lib")
+    const paths = mod.getSnapshot().editorTabs["agent:s1"].tabs.map((t) => t.path).sort()
     expect(paths).toEqual(["lib/a.ts", "lib/nested/b.ts"])
   })
 
   it("editorRenameTabPaths is a ref-equal no-op on a session with no matching tab (no store-wide re-render)", async () => {
     const mod = await loadStore()
-    mod.editorOpenFile("s1", "a.ts")
-    const before = mod.getSnapshot().editorTabs.s1
-    mod.editorRenameTabPaths("s1", "unrelated.ts", "still-unrelated.ts")
-    expect(mod.getSnapshot().editorTabs.s1).toBe(before)
+    mod.editorOpenFile(agentRoot("s1"), "a.ts")
+    const before = mod.getSnapshot().editorTabs["agent:s1"]
+    mod.editorRenameTabPaths(agentRoot("s1"), "unrelated.ts", "still-unrelated.ts")
+    expect(mod.getSnapshot().editorTabs["agent:s1"]).toBe(before)
   })
 
   it("editorCloseTabsUnderPath closes the tab at an exact deleted file path and reselects", async () => {
     const mod = await loadStore()
-    mod.editorOpenFile("s1", "a.ts", { pin: true })
-    mod.editorOpenFile("s1", "b.ts", { pin: true })
-    const [, b] = mod.getSnapshot().editorTabs.s1.tabs
-    mod.editorCloseTabsUnderPath("s1", "a.ts")
-    const tabs = mod.getSnapshot().editorTabs.s1
+    mod.editorOpenFile(agentRoot("s1"), "a.ts", { pin: true })
+    mod.editorOpenFile(agentRoot("s1"), "b.ts", { pin: true })
+    const [, b] = mod.getSnapshot().editorTabs["agent:s1"].tabs
+    mod.editorCloseTabsUnderPath(agentRoot("s1"), "a.ts")
+    const tabs = mod.getSnapshot().editorTabs["agent:s1"]
     expect(tabs.tabs.map((t) => t.id)).toEqual([b.id])
     expect(tabs.activeId).toBe(b.id)
   })
 
   it("editorCloseTabsUnderPath closes every tab under a deleted folder", async () => {
     const mod = await loadStore()
-    mod.editorOpenFile("s1", "src/a.ts", { pin: true })
-    mod.editorOpenFile("s1", "src/nested/b.ts", { pin: true })
-    mod.editorOpenFile("s1", "keep.ts", { pin: true })
-    mod.editorCloseTabsUnderPath("s1", "src")
-    const paths = mod.getSnapshot().editorTabs.s1.tabs.map((t) => t.path)
+    mod.editorOpenFile(agentRoot("s1"), "src/a.ts", { pin: true })
+    mod.editorOpenFile(agentRoot("s1"), "src/nested/b.ts", { pin: true })
+    mod.editorOpenFile(agentRoot("s1"), "keep.ts", { pin: true })
+    mod.editorCloseTabsUnderPath(agentRoot("s1"), "src")
+    const paths = mod.getSnapshot().editorTabs["agent:s1"].tabs.map((t) => t.path)
     expect(paths).toEqual(["keep.ts"])
   })
 
   it("editorCloseTabsUnderPath is a ref-equal no-op when nothing matches (no store-wide re-render)", async () => {
     const mod = await loadStore()
-    mod.editorOpenFile("s1", "a.ts")
-    const before = mod.getSnapshot().editorTabs.s1
-    mod.editorCloseTabsUnderPath("s1", "unrelated.ts")
-    expect(mod.getSnapshot().editorTabs.s1).toBe(before)
+    mod.editorOpenFile(agentRoot("s1"), "a.ts")
+    const before = mod.getSnapshot().editorTabs["agent:s1"]
+    mod.editorCloseTabsUnderPath(agentRoot("s1"), "unrelated.ts")
+    expect(mod.getSnapshot().editorTabs["agent:s1"]).toBe(before)
   })
 
   it("clears a session's editor tabs and closes a targeted editor overlay when the session vanishes from the spine", async () => {
     spineBody = makeSpine(["s1", "s2"])
     const mod = await loadStore()
-    mod.openEditor("s1", "a.ts")
-    expect(mod.getSnapshot().editorTabs.s1.tabs).toHaveLength(1)
+    mod.openEditor(agentRoot("s1"), "a.ts")
+    expect(mod.getSnapshot().editorTabs["agent:s1"].tabs).toHaveLength(1)
 
     // Session s1 disappears from a later spine (deleted by this or another client).
     spineBody = makeSpine(["s2"])
     fireSessionsChanged()
     await tick()
 
-    expect(mod.getSnapshot().editorTabs.s1).toBeUndefined()
+    expect(mod.getSnapshot().editorTabs["agent:s1"]).toBeUndefined()
     expect(mod.getSnapshot().editorTarget).toBeNull()
   })
 })
@@ -419,31 +420,31 @@ describe("draft cache and unload guard wiring", () => {
 
   it("a closed tab takes its cached draft with it", async () => {
     const { mod, drafts } = await loadWithGuardWindow()
-    mod.editorOpenFile("s1", "a.ts", { pin: true })
-    const tabId = mod.getSnapshot().editorTabs.s1.tabs[0].id
-    drafts.storeSessionDrafts("s1", new Map([[tabId, cachedBuffer("a.ts")]]))
+    mod.editorOpenFile(agentRoot("s1"), "a.ts", { pin: true })
+    const tabId = mod.getSnapshot().editorTabs["agent:s1"].tabs[0].id
+    drafts.storeRootDrafts("agent:s1", new Map([[tabId, cachedBuffer("a.ts")]]))
 
-    mod.editorCloseTab("s1", tabId)
-    expect(drafts.loadSessionDrafts("s1").size).toBe(0)
+    mod.editorCloseTab(agentRoot("s1"), tabId)
+    expect(drafts.loadRootDrafts("agent:s1").size).toBe(0)
   })
 
   it("clearing a session drops its whole draft cache entry", async () => {
     const { mod, drafts } = await loadWithGuardWindow()
-    mod.editorOpenFile("s1", "a.ts", { pin: true })
-    const tabId = mod.getSnapshot().editorTabs.s1.tabs[0].id
-    drafts.storeSessionDrafts("s1", new Map([[tabId, cachedBuffer("a.ts")]]))
+    mod.editorOpenFile(agentRoot("s1"), "a.ts", { pin: true })
+    const tabId = mod.getSnapshot().editorTabs["agent:s1"].tabs[0].id
+    drafts.storeRootDrafts("agent:s1", new Map([[tabId, cachedBuffer("a.ts")]]))
 
-    mod.editorClearSession("s1")
-    expect(drafts.loadSessionDrafts("s1").size).toBe(0)
+    mod.editorClearRoot(agentRoot("s1"))
+    expect(drafts.loadRootDrafts("agent:s1").size).toBe(0)
   })
 
   it("arms the beforeunload guard while any tab is dirty and disarms on discard", async () => {
     const { mod, added, removed } = await loadWithGuardWindow()
-    mod.editorOpenFile("s1", "a.ts", { pin: true })
-    const tabId = mod.getSnapshot().editorTabs.s1.tabs[0].id
+    mod.editorOpenFile(agentRoot("s1"), "a.ts", { pin: true })
+    const tabId = mod.getSnapshot().editorTabs["agent:s1"].tabs[0].id
     expect(added).not.toContain("beforeunload")
 
-    mod.editorSetTabDirty("s1", tabId, true)
+    mod.editorSetTabDirty(agentRoot("s1"), tabId, true)
     expect(added).toContain("beforeunload")
     expect(removed).not.toContain("beforeunload")
 
@@ -453,7 +454,7 @@ describe("draft cache and unload guard wiring", () => {
     expect(removed).not.toContain("beforeunload")
 
     // The per-tab discard clears the flag with the tab, and the guard drops.
-    mod.editorCloseTab("s1", tabId)
+    mod.editorCloseTab(agentRoot("s1"), tabId)
     expect(removed).toContain("beforeunload")
   })
 
@@ -462,9 +463,9 @@ describe("draft cache and unload guard wiring", () => {
     spineBody = makeSpine(["s1", "s2"])
     fireSessionsChanged()
     await tick()
-    mod.editorOpenFile("s1", "a.ts", { pin: true })
-    const tabId = mod.getSnapshot().editorTabs.s1.tabs[0].id
-    mod.editorSetTabDirty("s1", tabId, true)
+    mod.editorOpenFile(agentRoot("s1"), "a.ts", { pin: true })
+    const tabId = mod.getSnapshot().editorTabs["agent:s1"].tabs[0].id
+    mod.editorSetTabDirty(agentRoot("s1"), tabId, true)
     expect(added).toContain("beforeunload")
 
     spineBody = makeSpine(["s2"])

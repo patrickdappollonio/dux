@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
 import type { EditorTab } from "@/lib/editorTabs"
+import { agentRoot, rootKey } from "@/lib/editorRoot"
 
 let mockState: DuxState
 const editorActivateTabMock = vi.fn()
@@ -51,7 +52,7 @@ function tab(overrides: Partial<EditorTab>): EditorTab {
 
 function seed(sessionId: string, tabs: EditorTab[], activeId: string | null) {
   mockState = {
-    editorTabs: { [sessionId]: { tabs, activeId } },
+    editorTabs: { [rootKey(agentRoot(sessionId))]: { tabs, activeId } },
   } as unknown as DuxState
 }
 
@@ -75,7 +76,7 @@ describe("EditorTabsStrip", () => {
       [tab({ id: "t1", path: "src/a.ts" }), tab({ id: "t2", path: "b.ts" })],
       "t1",
     )
-    render(<EditorTabsStrip sessionId="s1" />)
+    render(<EditorTabsStrip root={agentRoot("s1")} />)
     expect(screen.getByText("a.ts")).toBeTruthy()
     expect(screen.getByText("b.ts")).toBeTruthy()
   })
@@ -89,7 +90,7 @@ describe("EditorTabsStrip", () => {
       ],
       "t1",
     )
-    render(<EditorTabsStrip sessionId="s1" />)
+    render(<EditorTabsStrip root={agentRoot("s1")} />)
     expect(screen.getByText("a.ts").className).toContain("italic")
     expect(screen.getByText("b.ts").className).not.toContain("italic")
   })
@@ -107,61 +108,61 @@ describe("EditorTabsStrip", () => {
       ],
       "t1",
     )
-    render(<EditorTabsStrip sessionId="s1" />)
+    render(<EditorTabsStrip root={agentRoot("s1")} />)
     expect(screen.getByText("a.ts").className).toContain("pr-0.5")
     expect(screen.getByText("b.ts").className).toContain("pr-0.5")
   })
 
   it("clicking a pill activates that tab", () => {
     seed("s1", [tab({ id: "t1" }), tab({ id: "t2", path: "b.ts" })], "t1")
-    render(<EditorTabsStrip sessionId="s1" />)
+    render(<EditorTabsStrip root={agentRoot("s1")} />)
     fireEvent.click(screen.getByText("b.ts"))
-    expect(editorActivateTabMock).toHaveBeenCalledWith("s1", "t2")
+    expect(editorActivateTabMock).toHaveBeenCalledWith(agentRoot("s1"), "t2")
   })
 
   it("double-clicking a pill pins it (clears preview)", () => {
     seed("s1", [tab({ id: "t1", preview: true })], "t1")
-    render(<EditorTabsStrip sessionId="s1" />)
+    render(<EditorTabsStrip root={agentRoot("s1")} />)
     fireEvent.doubleClick(screen.getByText("a.ts"))
-    expect(editorPinTabMock).toHaveBeenCalledWith("s1", "t1")
+    expect(editorPinTabMock).toHaveBeenCalledWith(agentRoot("s1"), "t1")
   })
 
   it("a dirty tab shows the dirty dot", () => {
     seed("s1", [tab({ id: "t1", dirty: true })], "t1")
-    render(<EditorTabsStrip sessionId="s1" />)
+    render(<EditorTabsStrip root={agentRoot("s1")} />)
     expect(screen.getByText(/unsaved changes/i)).toBeTruthy()
   })
 
   it("closing a clean tab calls editorCloseTab directly (no dialog target set)", () => {
     seed("s1", [tab({ id: "t1", dirty: false })], "t1")
-    render(<EditorTabsStrip sessionId="s1" />)
+    render(<EditorTabsStrip root={agentRoot("s1")} />)
     fireEvent.click(screen.getByLabelText("Close a.ts"))
-    expect(editorCloseTabMock).toHaveBeenCalledWith("s1", "t1")
+    expect(editorCloseTabMock).toHaveBeenCalledWith(agentRoot("s1"), "t1")
     expect(openEditorCloseTabMock).not.toHaveBeenCalled()
   })
 
   it("closing a dirty tab sets editorCloseTabTarget (opens the confirm dialog)", () => {
     seed("s1", [tab({ id: "t1", dirty: true })], "t1")
-    render(<EditorTabsStrip sessionId="s1" />)
+    render(<EditorTabsStrip root={agentRoot("s1")} />)
     fireEvent.click(screen.getByLabelText("Close a.ts"))
-    expect(openEditorCloseTabMock).toHaveBeenCalledWith("s1", "t1")
+    expect(openEditorCloseTabMock).toHaveBeenCalledWith(agentRoot("s1"), "t1")
     expect(editorCloseTabMock).not.toHaveBeenCalled()
   })
 
   it("middle-click on a pill triggers the same close path", () => {
     seed("s1", [tab({ id: "t1", dirty: false })], "t1")
-    render(<EditorTabsStrip sessionId="s1" />)
+    render(<EditorTabsStrip root={agentRoot("s1")} />)
     const pillEl = screen.getByText("a.ts").closest('[role="tab"]')!
     fireEvent(
       pillEl,
       new MouseEvent("auxclick", { button: 1, bubbles: true }),
     )
-    expect(editorCloseTabMock).toHaveBeenCalledWith("s1", "t1")
+    expect(editorCloseTabMock).toHaveBeenCalledWith(agentRoot("s1"), "t1")
   })
 
   it("strip container is horizontally scrollable", () => {
     seed("s1", [tab({ id: "t1" })], "t1")
-    const { container } = render(<EditorTabsStrip sessionId="s1" />)
+    const { container } = render(<EditorTabsStrip root={agentRoot("s1")} />)
     const strip = container.firstElementChild as HTMLElement
     expect(strip.className).toContain("overflow-x-auto")
   })
@@ -173,7 +174,7 @@ describe("EditorTabsStrip", () => {
     // this surface. The close button keeps a larger-than-visual hit area
     // (max-md:size-8 fits inside the 34px pill without adding height).
     seed("s1", [tab({ id: "t1" })], "t1")
-    render(<EditorTabsStrip sessionId="s1" />)
+    render(<EditorTabsStrip root={agentRoot("s1")} />)
     const pill = screen.getByText("a.ts").closest('[role="tab"]') as HTMLElement
     expect(pill.className).toContain("max-md:min-h-8.5")
     // py-0 on the phone: the 32px close-button hit area already fills the
@@ -187,7 +188,7 @@ describe("EditorTabsStrip", () => {
 
   it("renders nothing when the session has no tabs", () => {
     seed("s1", [], null)
-    const { container } = render(<EditorTabsStrip sessionId="s1" />)
+    const { container } = render(<EditorTabsStrip root={agentRoot("s1")} />)
     expect(container.firstChild).toBeNull()
   })
 })

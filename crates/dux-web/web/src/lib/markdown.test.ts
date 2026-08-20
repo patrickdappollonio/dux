@@ -5,6 +5,7 @@ import {
   markdownAssetUrl,
   resolveWorktreeRelative,
 } from "./markdown"
+import { agentRoot } from "@/lib/editorRoot"
 
 describe("isMarkdownPath", () => {
   it("matches common markdown extensions", () => {
@@ -79,12 +80,12 @@ describe("resolveWorktreeRelative", () => {
 
 describe("markdownAssetUrl", () => {
   it("builds an auth-gated proxy URL with encoded params for a relative asset", () => {
-    expect(markdownAssetUrl("s 1", "docs/guide.md", "img/a b.png")).toBe(
+    expect(markdownAssetUrl(agentRoot("s 1"), "docs/guide.md", "img/a b.png")).toBe(
       "/api/v1/sessions/s%201/files/raw?path=docs%2Fimg%2Fa%20b.png",
     )
   })
 
   it("returns null for external references (no rewrite)", () => {
-    expect(markdownAssetUrl("s1", "README.md", "https://x/y.png")).toBeNull()
+    expect(markdownAssetUrl(agentRoot("s1"), "README.md", "https://x/y.png")).toBeNull()
   })
 })

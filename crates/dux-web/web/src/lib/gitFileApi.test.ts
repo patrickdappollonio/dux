@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { git } from "./git"
 import { FileApiError, FileConflictError, fileApi } from "./fileApi"
+import { agentRoot } from "@/lib/editorRoot"
 
 // The git/file mutation clients are nested under the session resource: the
 // session id is the `:id` path segment (`/api/v1/sessions/:id/git/*` and
@@ -83,7 +84,7 @@ describe("git REST client targets /api/v1/sessions/:id/git/*", () => {
 
 describe("file REST client targets /api/v1/sessions/:id/files/*", () => {
   it("read POSTs the nested path with a body-less session id", async () => {
-    await fileApi.read("s1", "a.txt")
+    await fileApi.read(agentRoot("s1"), "a.txt")
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/v1/sessions/s1/files/read",
       expect.objectContaining({
@@ -94,7 +95,7 @@ describe("file REST client targets /api/v1/sessions/:id/files/*", () => {
   })
 
   it("list POSTs the nested path with an empty body", async () => {
-    await fileApi.list("s1")
+    await fileApi.list(agentRoot("s1"))
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/v1/sessions/s1/files/list",
       expect.objectContaining({
@@ -105,7 +106,7 @@ describe("file REST client targets /api/v1/sessions/:id/files/*", () => {
   })
 
   it("write POSTs the nested path with path + content only", async () => {
-    await fileApi.write("s1", "a.txt", "hello")
+    await fileApi.write(agentRoot("s1"), "a.txt", "hello")
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/v1/sessions/s1/files/write",
       expect.objectContaining({
@@ -119,10 +120,10 @@ describe("file REST client targets /api/v1/sessions/:id/files/*", () => {
   // straight to an <img src>. It must hit the same GET /files/raw route the
   // markdown preview's asset proxy uses, with both segments encoded.
   it("rawUrl builds the GET /files/raw URL with encoded session id and path", () => {
-    expect(fileApi.rawUrl("s1", "img/logo.png")).toBe(
+    expect(fileApi.rawUrl(agentRoot("s1"), "img/logo.png")).toBe(
       "/api/v1/sessions/s1/files/raw?path=img%2Flogo.png",
     )
-    expect(fileApi.rawUrl("a/b c", "sp ace/ñ.png")).toBe(
+    expect(fileApi.rawUrl(agentRoot("a/b c"), "sp ace/ñ.png")).toBe(
       "/api/v1/sessions/a%2Fb%20c/files/raw?path=sp%20ace%2F%C3%B1.png",
     )
     expect(fetchMock).not.toHaveBeenCalled()
@@ -135,7 +136,7 @@ describe("file REST client targets /api/v1/sessions/:id/files/*", () => {
 // else to the plain error toast.
 describe("the guarded save", () => {
   it("omits the token entirely when the caller has none", async () => {
-    await fileApi.write("s1", "a.txt", "hello")
+    await fileApi.write(agentRoot("s1"), "a.txt", "hello")
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/v1/sessions/s1/files/write",
       expect.objectContaining({
@@ -145,7 +146,7 @@ describe("the guarded save", () => {
   })
 
   it("sends both halves of the token when it has both", async () => {
-    await fileApi.write("s1", "a.txt", "hello", {
+    await fileApi.write(agentRoot("s1"), "a.txt", "hello", {
       modified: "2026-01-01T00:00:00+00:00",
       size: 5,
     })
@@ -163,7 +164,7 @@ describe("the guarded save", () => {
   })
 
   it("sends no token at all when only one half is known", async () => {
-    await fileApi.write("s1", "a.txt", "hello", { modified: null, size: 5 })
+    await fileApi.write(agentRoot("s1"), "a.txt", "hello", { modified: null, size: 5 })
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/v1/sessions/s1/files/write",
       expect.objectContaining({
@@ -188,7 +189,7 @@ describe("the guarded save", () => {
       headers: { get: () => null },
     } as unknown as Response)
     const err = await fileApi
-      .write("s1", "a.txt", "hello", { modified: "old", size: 5 })
+      .write(agentRoot("s1"), "a.txt", "hello", { modified: "old", size: 5 })
       .catch((e: unknown) => e)
     expect(err).toBeInstanceOf(FileConflictError)
     const conflict = err as FileConflictError
@@ -210,7 +211,7 @@ describe("the guarded save", () => {
       headers: { get: () => null },
     } as unknown as Response)
     const err = (await fileApi
-      .write("s1", "a.txt", "hello", { modified: "old", size: 5 })
+      .write(agentRoot("s1"), "a.txt", "hello", { modified: "old", size: 5 })
       .catch((e: unknown) => e)) as FileConflictError
     expect(err.deleted).toBe(true)
     expect(String(err.message)).toContain("deleted")
@@ -230,7 +231,7 @@ describe("the guarded save", () => {
       headers: { get: () => null },
     } as unknown as Response)
     const err = (await fileApi
-      .write("s1", "a.txt", "hello", { modified: "old", size: 5 })
+      .write(agentRoot("s1"), "a.txt", "hello", { modified: "old", size: 5 })
       .catch((e: unknown) => e)) as FileApiError
     expect(err).not.toBeInstanceOf(FileConflictError)
     expect(err.status).toBe(409)

@@ -8,6 +8,7 @@ import {
 } from "@/components/ui/dialog"
 import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import { closeEditorCloseTab, editorCloseTab, useDux } from "@/lib/store"
+import { rootKey } from "@/lib/editorRoot"
 
 // Confirmation before closing a DIRTY editor tab (the per-tab close affordance
 // in the strip). A clean tab closes immediately with no dialog, see
@@ -21,7 +22,7 @@ export function ConfirmCloseEditorTabDialog() {
   const { editorCloseTabTarget, editorTabs } = useDux()
 
   const tabsState = editorCloseTabTarget
-    ? editorTabs[editorCloseTabTarget.sessionId]
+    ? editorTabs[rootKey(editorCloseTabTarget.root)]
     : undefined
   const tab = tabsState?.tabs.find((t) => t.id === editorCloseTabTarget?.tabId)
   // If the tab stopped being dirty (saved elsewhere) the dialog self-closes
@@ -37,7 +38,7 @@ export function ConfirmCloseEditorTabDialog() {
 
   function handleConfirm() {
     if (!editorCloseTabTarget) return
-    editorCloseTab(editorCloseTabTarget.sessionId, editorCloseTabTarget.tabId)
+    editorCloseTab(editorCloseTabTarget.root, editorCloseTabTarget.tabId)
     closeEditorCloseTab()
   }
 

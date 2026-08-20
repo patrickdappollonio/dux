@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import type { Spine } from "./workspaceApi"
 import { ownerKey } from "./terminalOwner"
+import { agentRoot } from "@/lib/editorRoot"
 
 // Routing: the URL is the source of truth for where the app is. The screen is
 // DERIVED from the hash (no target = home, a target = terminal, a `/changes`
@@ -969,6 +970,19 @@ describe("a standalone terminal is addressable in its own right", () => {
 // the `/changes` suffix; opening the editor PUSHES one entry, in-editor file
 // switches REPLACE it, one Back closes the editor and keeps every draft, and
 // a hard refresh restores the editor and its open file from the address.
+// The two terminal targets whose editors are rooted at their own spawn
+// directory, shared by the grammar rows below.
+const standaloneTerminal = {
+  kind: "terminal" as const,
+  terminalId: "t1",
+  owner: { kind: "standalone" as const },
+}
+const projectTerminal = {
+  kind: "terminal" as const,
+  terminalId: "t2",
+  owner: { kind: "project" as const, projectId: "p1" },
+}
+
 describe("the editor rides the URL", () => {
   function editorBuffer(path: string, draft: string) {
     return {
@@ -1054,10 +1068,102 @@ describe("the editor rides the URL", () => {
         editor: { mode: "file" as const, path: "editor" },
         standalone: true,
       },
+      // A TERMINAL root's editor, in-page and as its own tab, for both of the
+      // terminals that get one of their own. The session-owned shape is not
+      // here: it serializes as the agent's editor, which the row above already
+      // covers.
+      {
+        target: standaloneTerminal,
+        changes: false,
+        editor: { mode: "file" as const, path: null },
+        standalone: false,
+      },
+      {
+        target: standaloneTerminal,
+        changes: false,
+        editor: { mode: "file" as const, path: "notes/a b.md" },
+        standalone: false,
+      },
+      {
+        target: standaloneTerminal,
+        changes: false,
+        editor: { mode: "file" as const, path: "editor" },
+        standalone: false,
+      },
+      {
+        target: projectTerminal,
+        changes: false,
+        editor: { mode: "diff" as const, path: "src/a.ts" },
+        standalone: false,
+      },
+      {
+        target: standaloneTerminal,
+        changes: false,
+        editor: { mode: "file" as const, path: null },
+        standalone: true,
+      },
+      {
+        target: projectTerminal,
+        changes: false,
+        editor: { mode: "file" as const, path: "src/a b.ts" },
+        standalone: true,
+      },
     ]
     for (const route of routes) {
       expect(mod.parseRoute(mod.routeHash(route))).toEqual(route)
     }
+  })
+
+  it("spells the terminal editor addresses the way the affordances write them", async () => {
+    // Pinned literally, because these strings are bookmarks and menu hrefs:
+    // a change here is a change to addresses users already hold.
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
+    const editor = { mode: "file" as const, path: null }
+    expect(
+      mod.routeHash({
+        target: standaloneTerminal,
+        changes: false,
+        editor,
+        standalone: false,
+      }),
+    ).toBe("#/terminal/t1/editor")
+    expect(
+      mod.routeHash({
+        target: projectTerminal,
+        changes: false,
+        editor,
+        standalone: false,
+      }),
+    ).toBe("#/project/p1/terminal/t2/editor")
+    expect(
+      mod.routeHash({
+        target: standaloneTerminal,
+        changes: false,
+        editor,
+        standalone: true,
+      }),
+    ).toBe("#/editor/terminal/t1")
+    expect(
+      mod.routeHash({
+        target: projectTerminal,
+        changes: false,
+        editor,
+        standalone: true,
+      }),
+    ).toBe("#/editor/project/p1/terminal/t2")
+  })
+
+  it("keeps an agent-terminal editor address meaning the AGENT's worktree", async () => {
+    // The address predates terminal roots and must not change meaning under
+    // anyone's bookmark: a terminal spawned in the agent's worktree opens the
+    // agent's editor, with its tabs, its diff mode and its changed files.
+    const mod = await loadStore("#/agent/s1/terminal/t9/editor", [
+      { id: "s1", project_id: "p1" },
+    ])
+    expect(mod.getSnapshot().editorTarget?.root).toEqual({
+      kind: "agent",
+      sessionId: "s1",
+    })
   })
 
   it("normalizes the shapes the standalone grammar cannot carry", async () => {
@@ -1125,7 +1231,7 @@ describe("the editor rides the URL", () => {
     const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
     mod.selectSession("s1")
     const depth = index
-    mod.openEditor("s1")
+    mod.openEditor(agentRoot("s1"))
     expect(loc.hash).toBe("#/agent/s1/editor")
     expect(index).toBe(depth + 1)
     history.back()
@@ -1139,7 +1245,7 @@ describe("the editor rides the URL", () => {
     // screen the user never visited between home and the editor.
     const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
     const depth = index
-    mod.openEditor("s1", "a.ts")
+    mod.openEditor(agentRoot("s1"), "a.ts")
     expect(mod.getSnapshot().selectedSessionId).toBe("s1")
     expect(loc.hash).toBe("#/agent/s1/editor/file/a.ts")
     expect(index).toBe(depth + 1)
@@ -1156,7 +1262,7 @@ describe("the editor rides the URL", () => {
     ])
     mod.selectSession("s2")
     const depth = index
-    mod.openEditor("s1", "a.ts")
+    mod.openEditor(agentRoot("s1"), "a.ts")
     expect(mod.getSnapshot().selectedSessionId).toBe("s1")
     expect(loc.hash).toBe("#/agent/s1/editor/file/a.ts")
     expect(index).toBe(depth + 1)
@@ -1170,13 +1276,13 @@ describe("the editor rides the URL", () => {
   it("an in-editor file switch replaces the entry rather than piling up", async () => {
     const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
     mod.selectSession("s1")
-    mod.openEditor("s1", "a.ts")
+    mod.openEditor(agentRoot("s1"), "a.ts")
     expect(loc.hash).toBe("#/agent/s1/editor/file/a.ts")
     const depth = index
-    mod.editorSyncActiveTab("s1", "file", "b.ts")
+    mod.editorSyncActiveTab(agentRoot("s1"), "file", "b.ts")
     expect(loc.hash).toBe("#/agent/s1/editor/file/b.ts")
     expect(index).toBe(depth)
-    mod.editorSyncActiveTab("s1", "diff", "b.ts")
+    mod.editorSyncActiveTab(agentRoot("s1"), "diff", "b.ts")
     expect(loc.hash).toBe("#/agent/s1/editor/diff/b.ts")
     expect(index).toBe(depth)
   })
@@ -1185,13 +1291,13 @@ describe("the editor rides the URL", () => {
     const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
     const drafts = await import("./editorDrafts")
     mod.selectSession("s1")
-    mod.openEditor("s1", "a.ts")
-    const tabId = mod.getSnapshot().editorTabs.s1.tabs[0].id
+    mod.openEditor(agentRoot("s1"), "a.ts")
+    const tabId = mod.getSnapshot().editorTabs["agent:s1"].tabs[0].id
     // The user typed: the store flag flips and the draft cache holds the text
     // (in the app EditorBody does both; the store test does them directly).
-    mod.editorSetTabDirty("s1", tabId, true)
-    drafts.storeSessionDrafts(
-      "s1",
+    mod.editorSetTabDirty(agentRoot("s1"), tabId, true)
+    drafts.storeRootDrafts(
+      "agent:s1",
       new Map([[tabId, editorBuffer("a.ts", "typed and unsaved")]]),
     )
 
@@ -1201,9 +1307,9 @@ describe("the editor rides the URL", () => {
     expect(mod.getSnapshot().editorTarget).toBeNull()
     expect(mod.getSnapshot().editorRoute).toBeNull()
     expect(loc.hash).toBe("#/agent/s1")
-    expect(mod.getSnapshot().editorTabs.s1.tabs).toHaveLength(1)
-    expect(mod.getSnapshot().editorTabs.s1.tabs[0].dirty).toBe(true)
-    expect(drafts.loadSessionDrafts("s1").get(tabId)?.draft).toBe(
+    expect(mod.getSnapshot().editorTabs["agent:s1"].tabs).toHaveLength(1)
+    expect(mod.getSnapshot().editorTabs["agent:s1"].tabs[0].dirty).toBe(true)
+    expect(drafts.loadRootDrafts("agent:s1").get(tabId)?.draft).toBe(
       "typed and unsaved",
     )
 
@@ -1211,11 +1317,11 @@ describe("the editor rides the URL", () => {
     history.forward()
     expect(mod.getSnapshot().editorTarget).not.toBeNull()
     expect(mod.getSnapshot().editorRoute).toEqual({
-      sessionId: "s1",
+      root: agentRoot("s1"),
       mode: "file",
       path: "a.ts",
     })
-    drafts.clearSessionDrafts("s1")
+    drafts.clearRootDrafts("agent:s1")
   })
 
   it("a hard refresh restores the editor and its open file from the address", async () => {
@@ -1224,16 +1330,16 @@ describe("the editor rides the URL", () => {
     ])
     expect(mod.getSnapshot().selectedSessionId).toBe("s1")
     expect(mod.getSnapshot().editorTarget).toEqual({
-      sessionId: "s1",
+      root: agentRoot("s1"),
       initialPath: "src/a.ts",
       initialMode: "file",
     })
     expect(mod.getSnapshot().editorRoute).toEqual({
-      sessionId: "s1",
+      root: agentRoot("s1"),
       mode: "file",
       path: "src/a.ts",
     })
-    expect(mod.getSnapshot().editorTabs.s1.tabs.map((t) => t.path)).toEqual([
+    expect(mod.getSnapshot().editorTabs["agent:s1"].tabs.map((t) => t.path)).toEqual([
       "src/a.ts",
     ])
     // A restore, not a move: the browser is already parked on this entry.
@@ -1247,7 +1353,7 @@ describe("the editor rides the URL", () => {
       { id: "s2", project_id: "p1" },
     ])
     mod.selectSession("s1")
-    mod.openEditor("s1", "a.ts")
+    mod.openEditor(agentRoot("s1"), "a.ts")
     const depth = index
     await pushSpine(mod, [{ id: "s2", project_id: "p1" }])
     // The selection prune is the single URL writer in that pass; the editor
@@ -1269,7 +1375,7 @@ describe("the editor rides the URL", () => {
       { id: "s1", project_id: "p1" },
       { id: "s2", project_id: "p1" },
     ])
-    mod.openEditor("s1", "a.ts")
+    mod.openEditor(agentRoot("s1"), "a.ts")
     expect(mod.getSnapshot().editorRoute).not.toBeNull()
     mod.selectSession("s2")
     expect(mod.getSnapshot().editorTarget).toBeNull()
@@ -1277,7 +1383,7 @@ describe("the editor rides the URL", () => {
     expect(loc.hash).toBe("#/agent/s2")
     // Re-selecting the editor's own session keeps it open (the guard is
     // about a DIFFERENT session, not any selection at all).
-    mod.openEditor("s2", "b.ts")
+    mod.openEditor(agentRoot("s2"), "b.ts")
     mod.selectSession("s2")
     expect(mod.getSnapshot().editorRoute).not.toBeNull()
   })
@@ -1308,11 +1414,11 @@ describe("the editor rides the URL", () => {
     expect(mod.getSnapshot().standaloneEditor).toBe(true)
     expect(mod.getSnapshot().selectedSessionId).toBe("s1")
     expect(mod.getSnapshot().editorRoute).toEqual({
-      sessionId: "s1",
+      root: agentRoot("s1"),
       mode: "file",
       path: "src/a.ts",
     })
-    expect(mod.getSnapshot().editorTabs.s1.tabs.map((t) => t.path)).toEqual([
+    expect(mod.getSnapshot().editorTabs["agent:s1"].tabs.map((t) => t.path)).toEqual([
       "src/a.ts",
     ])
     // A restore of the address the tab opened on: nothing pushed, nothing
@@ -1327,7 +1433,7 @@ describe("the editor rides the URL", () => {
     ])
     expect(mod.getSnapshot().standaloneEditor).toBe(true)
     const depth = index
-    mod.editorSyncActiveTab("s1", "file", "b.ts")
+    mod.editorSyncActiveTab(agentRoot("s1"), "file", "b.ts")
     expect(loc.hash).toBe("#/editor/agent/s1/file/b.ts")
     expect(index).toBe(depth)
   })

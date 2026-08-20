@@ -50,6 +50,7 @@ const setAgentSortMock = vi.fn()
 const openNewAgentPickerMock = vi.fn()
 const openAddProjectMock = vi.fn()
 const createStandaloneTerminalMock = vi.fn()
+const openEditorMock = vi.fn()
 let mockState: DuxState
 vi.mock("@/lib/store", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/store")>()
@@ -63,6 +64,7 @@ vi.mock("@/lib/store", async (importOriginal) => {
     openAddProject: (...args: unknown[]) => openAddProjectMock(...args),
     createStandaloneTerminal: (...args: unknown[]) =>
       createStandaloneTerminalMock(...args),
+    openEditor: (...args: unknown[]) => openEditorMock(...args),
   }
 })
 
@@ -642,6 +644,87 @@ describe("FlatAgentList editor menu entries", () => {
     expect(item!.getAttribute("rel")).toBe("noopener")
     fireEvent.click(item!)
     expect(open).not.toHaveBeenCalled()
+  })
+})
+
+// (c) the TERMINAL row menu's editor entries. A terminal gets an editor too,
+// rooted at the directory it was spawned in, and the two items follow the
+// agent-row idiom exactly. Which addresses they point at is decided by the
+// terminal's OWNER: one spawned in an agent's worktree is sent to that agent's
+// editor, because it is the same files with the full git surface.
+describe("FlatAgentList terminal editor menu entries", () => {
+  async function openTerminalMenu(index = 0) {
+    render(<FlatAgentList handlers={handlers} />)
+    fireEvent.click(screen.getAllByLabelText("Terminal actions")[index])
+    await screen.findByRole("menu")
+  }
+
+  it("offers both items, with the in-app one hidden on phones", async () => {
+    await openTerminalMenu()
+    const here = screen
+      .getByText("Open editor here")
+      .closest('[role="menuitem"]')
+    expect(here).not.toBeNull()
+    expect(here!.className).toContain("max-md:hidden")
+    const tab = screen
+      .getByText("Open editor in new tab")
+      .closest('[role="menuitem"]')
+    expect(tab).not.toBeNull()
+    expect(tab!.tagName).toBe("A")
+    expect(tab!.getAttribute("target")).toBe("_blank")
+    expect(tab!.getAttribute("rel")).toBe("noopener")
+    expect(tab!.className).not.toContain("max-md:hidden")
+  })
+
+  it("sends a SESSION-owned terminal to its agent's editor, not to a terminal root", async () => {
+    // Both fixture terminals belong to the Zeta agent, so both rows point at
+    // the agent address: same worktree, same editor, no second one.
+    await openTerminalMenu()
+    const tab = screen
+      .getByText("Open editor in new tab")
+      .closest('[role="menuitem"]')
+    expect(tab!.getAttribute("href")).toBe("#/editor/agent/zeta")
+    fireEvent.click(screen.getByText("Open editor here"))
+    expect(openEditorMock).toHaveBeenCalledWith({
+      kind: "agent",
+      sessionId: "zeta",
+    })
+  })
+
+  it("gives a PROJECT terminal and a STANDALONE terminal their own rooted addresses", async () => {
+    mockState = {
+      ...makeState("name"),
+      spine: {
+        ...makeState("name").spine,
+        terminals: [
+          makeTerminal({
+            id: "t-p",
+            label: "proj",
+            owner: { kind: "project", project_id: "p1" },
+          }),
+          makeTerminal({
+            id: "t-s",
+            label: "solo",
+            owner: { kind: "standalone", cwd_label: "~" },
+          }),
+        ],
+      },
+    } as DuxState
+    await openTerminalMenu(0)
+    expect(
+      screen
+        .getByText("Open editor in new tab")
+        .closest('[role="menuitem"]')!
+        .getAttribute("href"),
+    ).toBe("#/editor/project/p1/terminal/t-p")
+    cleanup()
+    await openTerminalMenu(1)
+    expect(
+      screen
+        .getByText("Open editor in new tab")
+        .closest('[role="menuitem"]')!
+        .getAttribute("href"),
+    ).toBe("#/editor/terminal/t-s")
   })
 })
 

@@ -113,6 +113,7 @@ import { prIconClass, prIconHoverClass, prStateLabel } from "@/lib/pr"
 import { launcherVerb } from "@/lib/launcherVerb"
 import { partitionProjects } from "@/lib/projects"
 import { moveItem, ordersMatch, reorderById } from "@/lib/reorder"
+import { agentRoot, editorRootForTarget } from "@/lib/editorRoot"
 import {
   addTab,
   agentSortValue,
@@ -420,7 +421,7 @@ export function AgentActionsMenu({
           editor entry on phones. Final copy was left to PR review. */}
       <DropdownMenuItem
         className="max-md:hidden"
-        onClick={() => openEditor(session.id)}
+        onClick={() => openEditor(agentRoot(session.id))}
       >
         <FileCode2 />
         Open editor here
@@ -431,7 +432,7 @@ export function AgentActionsMenu({
       <DropdownMenuItem
         render={
           <a
-            href={standaloneEditorHash(session.id)}
+            href={standaloneEditorHash(agentRoot(session.id))}
             target="_blank"
             rel="noopener"
           />
@@ -787,6 +788,15 @@ function TerminalFlatRow({
   // there to attach through.
   const attachToPane = useAttachCapability([terminal.id])
 
+  // Where this row's two editor entries point. A session-owned terminal
+  // resolves to its AGENT's root, which is what keeps one worktree from
+  // sprouting a second, git-blind editor beside the agent's.
+  const editorRoot = editorRootForTarget({
+    kind: "terminal",
+    terminalId: terminal.id,
+    owner,
+  })
+
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
     useSortable({ id: terminal.id })
   const style: CSSProperties = {
@@ -871,14 +881,40 @@ function TerminalFlatRow({
             <Ellipsis />
           </DropdownMenuTrigger>
         </div>
-        {/* Closing is the one action on the terminal itself: opening it is the
-            row's own click, and a menu duplicate of that ("Stream") was removed
-            as misleading; the menu stays (rather than an inline X) so the
-            destructive action keeps its confirm flow and misclick-safe
-            reveal-on-hover treatment. "Attach a file…" is not an action on the
-            terminal but on its live pane, which is why it appears only while
-            that pane is mounted and owns its input. */}
+        {/* Streaming the terminal is the row's own click, so it is deliberately
+            not repeated here (a menu duplicate, "Stream", was removed as
+            misleading). What the menu carries is everything else: the two
+            editor entries, matching the agent row's pair exactly, "Attach a
+            file…", which is an action on the terminal's live PANE rather than
+            on the terminal (hence only while that pane is mounted and owns its
+            input), and Close, which stays in the menu rather than becoming an
+            inline X so the destructive action keeps its confirm flow and its
+            misclick-safe reveal-on-hover treatment. */}
         <DropdownMenuContent side="right" align="start">
+          {/* The editor's root is the directory this terminal was SPAWNED in,
+              and a terminal owned by an agent is sent to that agent's editor
+              instead: same worktree, and the agent's editor is the one with the
+              git surface. `editorRootForTarget` is what decides that. */}
+          <DropdownMenuItem
+            className="max-md:hidden"
+            onClick={() => openEditor(editorRoot)}
+          >
+            <FileCode2 />
+            Open editor here
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            render={
+              <a
+                href={standaloneEditorHash(editorRoot)}
+                target="_blank"
+                rel="noopener"
+              />
+            }
+          >
+            <ExternalLink />
+            Open editor in new tab
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
           {attachToPane ? (
             <DropdownMenuItem onClick={attachToPane}>
               <Paperclip />

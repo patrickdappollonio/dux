@@ -4,6 +4,7 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 
 import type { DirEntry } from "@/lib/fileTree"
 import type { DroppedItems } from "@/lib/editorDrop"
+import { agentRoot } from "@/lib/editorRoot"
 
 // FileTree talks to the server exclusively through `fileApi.tree`, so mocking
 // that one function is enough to drive every scenario below without a real
@@ -63,7 +64,7 @@ describe("FileTree", () => {
 
     render(
       <FileTree
-        sessionId="s1"
+        root={agentRoot("s1")}
         openPath="src/app/main.ts"
         changed={new Map()}
         initialPath="src/app/main.ts"
@@ -74,9 +75,9 @@ describe("FileTree", () => {
     expect(await screen.findByText("main.ts")).toBeTruthy()
     expect(screen.getByText("src")).toBeTruthy()
     expect(screen.getByText("app")).toBeTruthy()
-    expect(treeMock).toHaveBeenCalledWith("s1", "")
-    expect(treeMock).toHaveBeenCalledWith("s1", "src")
-    expect(treeMock).toHaveBeenCalledWith("s1", "src/app")
+    expect(treeMock).toHaveBeenCalledWith(agentRoot("s1"), "")
+    expect(treeMock).toHaveBeenCalledWith(agentRoot("s1"), "src")
+    expect(treeMock).toHaveBeenCalledWith(agentRoot("s1"), "src/app")
   })
 
   it("refetches a loaded parent once when it doesn't yet list the newly opened file, with no infinite refetch", async () => {
@@ -96,7 +97,7 @@ describe("FileTree", () => {
 
     const { rerender } = render(
       <FileTree
-        sessionId="s1"
+        root={agentRoot("s1")}
         openPath="src/existing.ts"
         changed={new Map()}
         initialPath="src/existing.ts"
@@ -108,7 +109,7 @@ describe("FileTree", () => {
 
     rerender(
       <FileTree
-        sessionId="s1"
+        root={agentRoot("s1")}
         openPath="src/new.ts"
         changed={new Map()}
         initialPath="src/existing.ts"
@@ -125,7 +126,7 @@ describe("FileTree", () => {
     })
     rerender(
       <FileTree
-        sessionId="s1"
+        root={agentRoot("s1")}
         openPath="src/new.ts"
         changed={new Map()}
         initialPath="src/existing.ts"
@@ -145,7 +146,7 @@ describe("FileTree", () => {
     const onOpen = vi.fn()
     render(
       <FileTree
-        sessionId="s1"
+        root={agentRoot("s1")}
         openPath={null}
         changed={new Map()}
         initialPath={null}
@@ -178,7 +179,7 @@ describe("FileTree", () => {
     )
     render(
       <FileTree
-        sessionId="s1"
+        root={agentRoot("s1")}
         openPath={null}
         changed={new Map()}
         initialPath={null}
@@ -204,7 +205,7 @@ describe("FileTree", () => {
     )
     render(
       <FileTree
-        sessionId="s1"
+        root={agentRoot("s1")}
         openPath={null}
         changed={new Map()}
         initialPath={null}
@@ -227,7 +228,7 @@ describe("FileTree", () => {
     const onOpen = vi.fn()
     render(
       <FileTree
-        sessionId="s1"
+        root={agentRoot("s1")}
         openPath={null}
         changed={new Map()}
         initialPath={null}
@@ -242,7 +243,7 @@ describe("FileTree", () => {
   // A real browser double-click fires click, click, THEN dblclick, in that
   // order, not just a single doubleclick event. The comment above FileTree's
   // `onOpen` prop claims the two preceding `onClick`s are "harmless" because
-  // `openFile` (lib/editorTabs.ts) is idempotent for an already-open path; this
+  // `openFile` (lib/editorTabs["agent:ts"]) is idempotent for an already-open path; this
   // exercises that actual three-event sequence rather than only the synthetic
   // `fireEvent.doubleClick` shortcut used above, so a regression that makes the
   // preceding clicks NOT harmless (e.g. clobbering the pin) would be caught.
@@ -253,7 +254,7 @@ describe("FileTree", () => {
     const onOpen = vi.fn()
     render(
       <FileTree
-        sessionId="s1"
+        root={agentRoot("s1")}
         openPath={null}
         changed={new Map()}
         initialPath={null}
@@ -283,7 +284,7 @@ describe("FileTree", () => {
     })
     render(
       <FileTree
-        sessionId="s1"
+        root={agentRoot("s1")}
         openPath={null}
         changed={new Map()}
         initialPath={null}
@@ -315,7 +316,7 @@ describe("FileTree", () => {
     })
     render(
       <FileTree
-        sessionId="s1"
+        root={agentRoot("s1")}
         openPath="bad/file.ts"
         changed={new Map()}
         initialPath="bad/file.ts"
@@ -349,7 +350,7 @@ describe("FileTree", () => {
     )
     render(
       <FileTree
-        sessionId="s1"
+        root={agentRoot("s1")}
         openPath="parent/target.ts"
         changed={new Map()}
         initialPath="parent/target.ts"
@@ -390,7 +391,7 @@ describe("FileTree", () => {
 
     const { container } = render(
       <FileTree
-        sessionId="s1"
+        root={agentRoot("s1")}
         openPath={null}
         changed={new Map()}
         initialPath={null}
@@ -433,7 +434,7 @@ describe("FileTree", () => {
       )
       render(
         <FileTree
-          sessionId="s1"
+          root={agentRoot("s1")}
           openPath={null}
           changed={new Map()}
           initialPath={null}
@@ -468,7 +469,7 @@ describe("FileTree", () => {
       )
       render(
         <FileTree
-          sessionId="s1"
+          root={agentRoot("s1")}
           openPath={null}
           changed={new Map()}
           initialPath={null}
@@ -496,7 +497,7 @@ describe("FileTree", () => {
       )
       render(
         <FileTree
-          sessionId="s1"
+          root={agentRoot("s1")}
           openPath={null}
           changed={new Map()}
           initialPath="src/a.ts"
@@ -520,7 +521,7 @@ describe("FileTree", () => {
       )
       const { container } = render(
         <FileTree
-          sessionId="s1"
+          root={agentRoot("s1")}
           openPath={null}
           changed={new Map()}
           initialPath={null}
@@ -553,7 +554,7 @@ describe("FileTree", () => {
       )
       const { container } = render(
         <FileTree
-          sessionId="s1"
+          root={agentRoot("s1")}
           openPath={null}
           changed={new Map()}
           initialPath={null}
@@ -581,7 +582,7 @@ describe("FileTree", () => {
       )
       const { container } = render(
         <FileTree
-          sessionId="s1"
+          root={agentRoot("s1")}
           openPath={null}
           changed={new Map()}
           initialPath={null}
@@ -610,7 +611,7 @@ describe("FileTree", () => {
       )
       render(
         <FileTree
-          sessionId="s1"
+          root={agentRoot("s1")}
           openPath={null}
           changed={new Map()}
           initialPath={null}
@@ -686,7 +687,7 @@ describe("FileTree", () => {
       )
       render(
         <FileTree
-          sessionId="s1"
+          root={agentRoot("s1")}
           openPath={null}
           changed={new Map()}
           initialPath={null}
@@ -826,7 +827,7 @@ describe("FileTree", () => {
       )
       render(
         <FileTree
-          sessionId="s1"
+          root={agentRoot("s1")}
           openPath={null}
           changed={new Map()}
           initialPath={null}
@@ -860,7 +861,7 @@ describe("FileTree", () => {
       )
       render(
         <FileTree
-          sessionId="s1"
+          root={agentRoot("s1")}
           openPath={null}
           changed={new Map()}
           initialPath={null}

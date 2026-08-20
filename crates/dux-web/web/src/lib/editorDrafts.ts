@@ -1,4 +1,4 @@
-// The editor's per-session draft cache, plus the beforeunload guard that
+// The editor's per-ROOT draft cache, plus the beforeunload guard that
 // covers the one loss the cache cannot: the page itself going away.
 //
 // Why a NEW module with mutable state, rather than either of the obvious
@@ -16,7 +16,7 @@
 // Lifecycle: entries are pruned to the live tab set whenever the store's
 // editor-tabs slice changes (`setEditorTabsFor`), so a closed tab's draft
 // (including a confirmed per-tab discard) leaves the cache with the tab, and
-// a whole session's entry dies with the session (`editorClearSession`).
+// a whole root's entry dies with the target it was rooted at (`editorClearRoot`).
 // Drafts live in page memory only: a reload or a dux restart loses them,
 // which is exactly what the beforeunload guard below exists to warn about.
 
@@ -24,7 +24,7 @@ import type { TabBuffer } from "./editorBuffers"
 
 const cache = new Map<string, Map<string, TabBuffer>>()
 
-// A COPY of the session's cached buffers, safe to hand to React state. A
+// A COPY of the root's cached buffers, safe to hand to React state. A
 // buffer cached mid-fetch (`loading: true`) is dropped: its resolver died
 // with the component that started it, and restoring it would make
 // `shouldSkipFileLoad` skip the re-read and park the tab on a spinner
@@ -42,8 +42,8 @@ const cache = new Map<string, Map<string, TabBuffer>>()
 // save token, so a restored one cannot authorize an overwrite, and the mount
 // trigger in `EditorBody` re-checks every restored buffer, so a stale banner
 // is retired by the next check rather than living forever.
-export function loadSessionDrafts(sessionId: string): Map<string, TabBuffer> {
-  const entry = cache.get(sessionId)
+export function loadRootDrafts(rootKey: string): Map<string, TabBuffer> {
+  const entry = cache.get(rootKey)
   const restored = new Map<string, TabBuffer>()
   if (!entry) return restored
   for (const [tabId, buffer] of entry) {
@@ -52,36 +52,36 @@ export function loadSessionDrafts(sessionId: string): Map<string, TabBuffer> {
   return restored
 }
 
-// Snapshot the session's buffers into the cache. Called by `EditorBody` on
+// Snapshot the root's buffers into the cache. Called by `EditorBody` on
 // every buffer change; copying is cheap (the map is small and the buffers are
 // immutable values) and keeps the cache immune to later state mutations.
-export function storeSessionDrafts(
-  sessionId: string,
+export function storeRootDrafts(
+  rootKey: string,
   buffers: ReadonlyMap<string, TabBuffer>,
 ): void {
-  cache.set(sessionId, new Map(buffers))
+  cache.set(rootKey, new Map(buffers))
 }
 
 // Drop every cached buffer whose tab no longer exists. Wired into the store's
 // `setEditorTabsFor`, so a tab closed ANYWHERE (per-tab discard confirmed, a
 // deleted file closing its tabs, a rename collision) takes its draft with it,
 // whether or not an `EditorBody` is mounted at the time.
-export function pruneSessionDrafts(
-  sessionId: string,
+export function pruneRootDrafts(
+  rootKey: string,
   liveTabIds: ReadonlySet<string>,
 ): void {
-  const entry = cache.get(sessionId)
+  const entry = cache.get(rootKey)
   if (!entry) return
   for (const tabId of [...entry.keys()]) {
     if (!liveTabIds.has(tabId)) entry.delete(tabId)
   }
-  if (entry.size === 0) cache.delete(sessionId)
+  if (entry.size === 0) cache.delete(rootKey)
 }
 
-// Drop a session's whole entry: the session-delete path, cleared exactly
-// where `editorTabs` is (`editorClearSession`).
-export function clearSessionDrafts(sessionId: string): void {
-  cache.delete(sessionId)
+// Drop a root's whole entry: the path taken when the agent or terminal it was
+// rooted at leaves the spine, cleared exactly where `editorTabs` is.
+export function clearRootDrafts(rootKey: string): void {
+  cache.delete(rootKey)
 }
 
 // --- The beforeunload guard ------------------------------------------------

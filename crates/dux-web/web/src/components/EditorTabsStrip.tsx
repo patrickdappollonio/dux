@@ -12,23 +12,24 @@ import {
   useDux,
 } from "@/lib/store"
 import { cn } from "@/lib/utils"
+import { rootKey, type EditorRoot } from "@/lib/editorRoot"
 
 // The code-editor tab strip (pills), rhymes with `AgentTabsStrip` but is its
 // own component: editor tabs are pure client state (see lib/editorTabs.ts),
 // not server-sourced. Renders only when the session has at least one tab; with
 // zero tabs the body's "Select a file" empty state covers it, so this returns
 // null rather than an empty bar.
-export function EditorTabsStrip({ sessionId }: { sessionId: string }) {
+export function EditorTabsStrip({ root }: { root: EditorRoot }) {
   const { editorTabs } = useDux()
-  const state = editorTabs[sessionId]
+  const state = editorTabs[rootKey(root)]
   const tabs = state?.tabs ?? []
   if (tabs.length === 0) return null
 
   function requestClose(tab: EditorTab) {
     if (tab.dirty) {
-      openEditorCloseTab(sessionId, tab.id)
+      openEditorCloseTab(root, tab.id)
     } else {
-      editorCloseTab(sessionId, tab.id)
+      editorCloseTab(root, tab.id)
     }
   }
 
@@ -39,8 +40,8 @@ export function EditorTabsStrip({ sessionId }: { sessionId: string }) {
           key={tab.id}
           tab={tab}
           active={tab.id === state?.activeId}
-          onActivate={() => editorActivateTab(sessionId, tab.id)}
-          onPin={() => editorPinTab(sessionId, tab.id)}
+          onActivate={() => editorActivateTab(root, tab.id)}
+          onPin={() => editorPinTab(root, tab.id)}
           onClose={() => requestClose(tab)}
         />
       ))}

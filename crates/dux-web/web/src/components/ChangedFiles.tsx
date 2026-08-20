@@ -64,6 +64,7 @@ import {
 } from "@/lib/store"
 import { useIsMobile } from "@/hooks/use-mobile"
 import type { ChangedFileView } from "@/lib/types"
+import { agentRoot } from "@/lib/editorRoot"
 
 interface FileRowProps {
   file: ChangedFileView
@@ -169,7 +170,7 @@ function FileRow({ file, action, sessionId, onOpenDiff }: FileRowProps) {
             {kind !== "deleted" && (
               <DropdownMenuItem
                 className="hidden md:flex"
-                onClick={() => openEditor(sessionId, file.path)}
+                onClick={() => openEditor(agentRoot(sessionId), file.path)}
               >
                 <Pencil />
                 Edit
@@ -486,7 +487,7 @@ export function ChangedFiles() {
                 filtering={filtering}
                 action="unstage"
                 sessionId={selectedSessionId}
-                onOpenDiff={(path) => openEditor(selectedSessionId, path, "diff")}
+                onOpenDiff={(path) => openEditor(agentRoot(selectedSessionId), path, "diff")}
               />
 
               {showSeparator && <Separator className="my-1" />}
@@ -498,7 +499,7 @@ export function ChangedFiles() {
                 filtering={filtering}
                 action="stage"
                 sessionId={selectedSessionId}
-                onOpenDiff={(path) => openEditor(selectedSessionId, path, "diff")}
+                onOpenDiff={(path) => openEditor(agentRoot(selectedSessionId), path, "diff")}
               />
             </div>
           </ScrollArea>

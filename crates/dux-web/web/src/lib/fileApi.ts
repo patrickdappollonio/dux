@@ -2,13 +2,14 @@
 // copy. Request/response (like `git.ts`) so the editor can await the content,
 // show per-file loading/saving state, and surface a real error message.
 //
-// The server validates every request (session resolution + that the path stays
-// inside the worktree root — a path-escape/`.git`/symlink guard — plus a
-// binary/size guard), so the UI never has to. There is NO git-tracked/changed
-// gate: any path inside the worktree is editable, ignored or not. A write
-// triggers an engine changed-files recompute that reaches every client over the
-// WebSocket.
+// The server validates every request (root resolution + that the path stays
+// inside that root — a path-escape/`.git`/symlink guard — plus a binary/size
+// guard), so the UI never has to. There is NO git-tracked/changed gate: any
+// path inside the root is editable, ignored or not. A write against an AGENT
+// root triggers an engine changed-files recompute that reaches every client
+// over the WebSocket; a terminal root has no agent, so it broadcasts nothing.
 
+import { rootApiBase, type EditorRoot } from "@/lib/editorRoot"
 import type { DirEntry } from "@/lib/fileTree"
 import type { WorktreeEntryInfo } from "@/lib/fileInfo"
 
@@ -150,9 +151,11 @@ async function postFileNoContent(
   }
 }
 
-// The session id is the `:id` path segment (encoded) — no longer a body field.
-const fileUrl = (sessionId: string, action: string) =>
-  `/api/v1/sessions/${encodeURIComponent(sessionId)}/files/${action}`
+// The root's own namespace is the path prefix; see `rootApiBase`. An agent
+// root serves from `/api/v1/sessions/<id>` and a terminal root from its
+// terminal address, and the server refuses each id outside its own namespace.
+const fileUrl = (root: EditorRoot, action: string) =>
+  `${rootApiBase(root)}/files/${action}`
 
 export const fileApi = {
   // The flat file list backing ONLY the editor's "Search files…" box: a full
@@ -161,38 +164,38 @@ export const fileApi = {
   // cap was hit). The TREE does not use this — it browses lazily via `tree`.
   // Editing is NOT limited to this set — any path inside the worktree can be
   // read/written/created (the server enforces containment).
-  list: (sessionId: string) =>
+  list: (root: EditorRoot) =>
     postFile<{ files: string[]; truncated?: boolean }>(
-      fileUrl(sessionId, "list"),
+      fileUrl(root, "list"),
       {},
     ),
   // One directory's children for the lazy tree. `dir` is worktree-relative; ""
   // lists the worktree root. The server lists exactly this directory (no
   // recursion, no cap). Entries are pre-sorted dirs-first, case-insensitive.
-  tree: (sessionId: string, dir: string) =>
-    postFile<{ dir: string; entries: DirEntry[] }>(fileUrl(sessionId, "tree"), {
+  tree: (root: EditorRoot, dir: string) =>
+    postFile<{ dir: string; entries: DirEntry[] }>(fileUrl(root, "tree"), {
       dir,
     }),
   // The read-only facts behind the editor's "File info…" panel: kind, size,
   // modified time, permissions, and what git says about this one path. A
   // missing entry answers 404 (the panel dismisses itself); a refused path
   // answers 400 (the panel says why).
-  info: (sessionId: string, path: string) =>
-    postFile<WorktreeEntryInfo>(fileUrl(sessionId, "info"), { path }),
-  read: (sessionId: string, path: string) =>
-    postFile<WorktreeFile>(fileUrl(sessionId, "read"), { path }),
+  info: (root: EditorRoot, path: string) =>
+    postFile<WorktreeEntryInfo>(fileUrl(root, "info"), { path }),
+  read: (root: EditorRoot, path: string) =>
+    postFile<WorktreeFile>(fileUrl(root, "read"), { path }),
   // The GET URL that serves a file's raw bytes (same route the markdown
   // preview's asset proxy hits, see `markdownAssetUrl` in lib/markdown.ts): a
   // pure builder, no fetch; the image preview pane hands it straight to an
   // <img src>. The server re-validates worktree containment and caps the
   // response; it already sends Cache-Control: no-cache, so no cache-busting
   // param is needed here.
-  rawUrl: (sessionId: string, path: string) =>
-    `${fileUrl(sessionId, "raw")}?path=${encodeURIComponent(path)}`,
+  rawUrl: (root: EditorRoot, path: string) =>
+    `${fileUrl(root, "raw")}?path=${encodeURIComponent(path)}`,
   // The two raw sides (HEAD vs working copy) of a changed file for the Monaco
   // diff view. The server resolves both sides and the binary flag.
-  diff: (sessionId: string, path: string) =>
-    postFile<FileDiffContents>(fileUrl(sessionId, "diff"), { path }),
+  diff: (root: EditorRoot, path: string) =>
+    postFile<FileDiffContents>(fileUrl(root, "diff"), { path }),
   // Save a file's working copy, optionally guarded by the freshness token the
   // read handed out. With `expected`, a file that moved on disk since it was
   // read answers 409 and this rejects with a `FileConflictError` carrying the
@@ -200,12 +203,12 @@ export const fileApi = {
   // other writer (and any older page) does. The resolved value is the file's
   // new stamp, which the caller must adopt as its baseline.
   write: (
-    sessionId: string,
+    root: EditorRoot,
     path: string,
     content: string,
     expected?: { modified: string | null; size: number | null },
   ) =>
-    postFile<WriteResult>(fileUrl(sessionId, "write"), {
+    postFile<WriteResult>(fileUrl(root, "write"), {
       path,
       content,
       // Both halves or neither: the server treats half a token as no token,
@@ -219,25 +222,25 @@ export const fileApi = {
   // editor config key (e.g. "vscode") the user picked; the server launches that
   // one and errors if it isn't installed. Only useful when the server is the
   // user's own machine — the UI gates this to local-access URLs.
-  openInEditor: (sessionId: string, path: string, editor: string) =>
-    postFile<{ editor: string }>(fileUrl(sessionId, "open-in-editor"), {
+  openInEditor: (root: EditorRoot, path: string, editor: string) =>
+    postFile<{ editor: string }>(fileUrl(root, "open-in-editor"), {
       path,
       editor,
     }).then((r) => r.editor),
   // Create a new empty file. Refused (400) if the entry already exists or the
   // parent directory is missing, matching write's create semantics minus the
   // implicit overwrite.
-  createFile: (sessionId: string, path: string) =>
-    postFileNoContent(fileUrl(sessionId, "create-file"), { path }),
+  createFile: (root: EditorRoot, path: string) =>
+    postFileNoContent(fileUrl(root, "create-file"), { path }),
   // Create a new directory, creating missing intermediate components.
-  createDir: (sessionId: string, path: string) =>
-    postFileNoContent(fileUrl(sessionId, "create-dir"), { path }),
+  createDir: (root: EditorRoot, path: string) =>
+    postFileNoContent(fileUrl(root, "create-dir"), { path }),
   // Rename/move a file or directory. Refused (400) if the destination already
   // exists (no overwrite).
-  rename: (sessionId: string, from: string, to: string) =>
-    postFileNoContent(fileUrl(sessionId, "rename"), { from, to }),
+  rename: (root: EditorRoot, from: string, to: string) =>
+    postFileNoContent(fileUrl(root, "rename"), { from, to }),
   // Permanently delete a file or (recursively) a directory. Named `remove`,
   // not `delete`, to avoid the reserved-word-adjacent name.
-  remove: (sessionId: string, path: string) =>
-    postFileNoContent(fileUrl(sessionId, "delete"), { path }),
+  remove: (root: EditorRoot, path: string) =>
+    postFileNoContent(fileUrl(root, "delete"), { path }),
 }

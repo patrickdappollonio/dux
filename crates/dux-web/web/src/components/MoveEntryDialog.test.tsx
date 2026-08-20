@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 
 import { MoveEntryDialog } from "./MoveEntryDialog"
+import { agentRoot } from "@/lib/editorRoot"
 
 // A tiny worktree: the root holds `lib/`, `src/`, `src-old/` and a README;
 // `lib/` holds `util/`; `src/` is empty. Only the network is faked, so the
@@ -59,7 +60,7 @@ function renderDialog(
   overrides: Partial<Parameters<typeof MoveEntryDialog>[0]> = {},
 ) {
   const props = {
-    sessionId: "s1",
+    root: agentRoot("s1"),
     target: { path: "src/moveme.txt", isDir: false },
     isDirty: false,
     onClose: vi.fn(),
