@@ -473,7 +473,11 @@ pub enum AgentWorkspaceView {
         /// server's machine and so cannot shorten it correctly itself.
         folder_label: String,
         /// The live repository verdict for the folder: "working_repo" |
-        /// "inside_repo_rooted_elsewhere" | "no_repo" | "indeterminate". The
+        /// "inside_repo_rooted_elsewhere" | "no_repo" | "indeterminate" |
+        /// "unprobed" (nobody has looked yet; it gates exactly as
+        /// "indeterminate" does, and its quiet reason reads as a wait rather
+        /// than as a fault, because a freshly created agent in a healthy
+        /// repository spends a moment there). The
         /// changes region renders a real repository view for the first and its
         /// quiet copy otherwise. Decided on the server so both surfaces show
         /// the same answer the server acted on.

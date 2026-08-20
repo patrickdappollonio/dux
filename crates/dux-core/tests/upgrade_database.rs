@@ -26,6 +26,15 @@
 //! tested here: every column added is nullable or has a default, so an older
 //! binary's `INSERT` (which names none of them) still satisfies the schema.
 //!
+//! The one downgrade consequence worth writing down, because it is a READ and
+//! no test can catch it here: a binary older than standalone agents does not
+//! know the `workspace_kind` column, so it reads a folder row as an ordinary
+//! managed one. Such a row stores empty text in every git column and an empty
+//! project id, so it surfaces as an agent in a phantom project group with no
+//! branch, no worktree and nothing the branch features can act on. It is
+//! records-only: the user's folder is untouched, and re-running a current dux
+//! reads the row correctly again.
+//!
 //! The two fixtures below are TRANSCRIBED from the real history rather than
 //! invented, because an invented "old" schema tests a user who never existed and
 //! quietly leaves the shipped one untested. They are the first public release
@@ -629,10 +638,14 @@ fn old_state_survives_a_write_a_close_and_a_reopen() {
         store
             .set_last_focused_tab("sess-1", Some("tab-x"))
             .expect("focused tab");
-        // A STANDALONE agent created after the upgrade. The second open runs
-        // both healing backfills again, and both are gated on the kind column,
-        // so this row is the one that proves the gates hold across a reopen and
-        // not merely within one.
+        // A STANDALONE agent created after the upgrade, so the reopen below has
+        // one to bring back. Only the `initial_branch` heal runs again on that
+        // second open (the title freeze is one-time, gated on the migration that
+        // first added the column), and for a folder row that heal would be a
+        // no-op with or without its kind gate, because the row's branch columns
+        // are empty by design. What the reopen pins is the OUTCOME: the row
+        // survives a close and reopen as a folder, with no branch identity
+        // invented for it and its title exactly as written.
         store
             .upsert_session(&AgentSession {
                 id: "sess-folder".to_string(),

@@ -248,6 +248,20 @@ impl Engine {
     /// and a folder dux could not classify gets nothing either: writing into
     /// the user's directory on a guess is the one direction that cannot be
     /// undone by dux, which never cleans the folder up.
+    ///
+    /// THE UNPROBED WINDOW, and how it heals. A drop that lands before the
+    /// folder has been classified still CREATES the upload directory (that is
+    /// `DropDir::open_uploads`'s job and it is not conditional), just without
+    /// the `.gitignore`. For a folder that turns out to be a repository, those
+    /// uploads show up as untracked files until the next drop into the same
+    /// agent: `open_uploads` runs again with the verdict in hand, and its
+    /// `.gitignore` create is `O_CREAT | O_EXCL`, so it seeds the directory that
+    /// is already there rather than needing a fresh one. Nothing is lost in the
+    /// meantime and nothing is written on a guess. A retroactive seed the moment
+    /// the verdict lands was considered and not taken: it would put a filesystem
+    /// write on the engine actor thread (or need its own worker plus a
+    /// seed-an-existing-directory entry point) to close a window the next drop
+    /// closes for free.
     fn upload_seed_allowed(&self, session: &crate::model::AgentSession) -> bool {
         if !self.config.ui.upload_write_gitignore {
             return false;

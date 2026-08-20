@@ -9,7 +9,6 @@ import { useDux } from "@/lib/store"
 import { rootKey } from "@/lib/editorRoot"
 import { standaloneEditorName } from "@/lib/standaloneEditorName"
 import { keyboardLikelyOpen } from "@/lib/viewport"
-import { sessionLabel } from "@/lib/agentWorkspace"
 
 // The standalone editor surface: a whole browser tab that is nothing but the
 // editor, at `#/editor/<root>[/<mode>/<encoded-path>]`, where the root is an

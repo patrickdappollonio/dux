@@ -392,7 +392,9 @@ it yourself if you no longer want it.
 Since a standalone agent has no branch, its changed-files panel is driven by the
 folder instead. When the folder is itself a git repository's top level, the panel
 works exactly as it does anywhere: changed files, diffs, staging, committing.
-Pushing stays out, because it publishes a branch.
+Pushing stays out, because it publishes a branch. A commit made from the panel
+runs that repository's own git hooks, exactly as a commit you typed in a terminal
+there would: it is your repository, not a worktree dux made for the occasion.
 
 When the folder is not a repository the panel is quiet and says which quiet it
 is, because the cases are genuinely different:

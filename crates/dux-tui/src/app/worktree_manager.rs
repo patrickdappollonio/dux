@@ -161,7 +161,9 @@ impl App {
                 dux_core::worktree_manager::RemovalOutcome::Attached => {
                     dux_core::engine::Final::warning(format!(
                         "Nothing was removed: an agent is attached to {display_path}. Delete that \
-                         agent instead, which removes its worktree with it."
+                         agent first. Deleting a managed agent removes its worktree with it; \
+                         deleting a standalone agent leaves its directory in place, so remove \
+                         that one yourself."
                     ))
                 }
                 dux_core::worktree_manager::RemovalOutcome::Removed { path, branch } => {
