@@ -48,7 +48,7 @@ use serde::{Deserialize, Serialize};
 use dux_core::model::TerminalRoute;
 
 use crate::git_routes::resolve_worktree;
-use crate::rest_common::{id_within_bound, unknown_session};
+use crate::rest_common::{RouteRejection, id_within_bound, unknown_session};
 use crate::server::AppState;
 
 /// Largest raw asset the markdown-preview proxy will serve. Bigger than the
@@ -247,14 +247,17 @@ impl EditorRoot for SessionRoot {
 }
 
 impl FromRequestParts<AppState> for SessionRoot {
-    type Rejection = Response;
+    type Rejection = RouteRejection;
 
-    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Response> {
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, RouteRejection> {
         let ApiPath(id) = ApiPath::<String>::from_request_parts(parts, state)
             .await
             .map_err(|_| unknown_session())?;
         if !id_within_bound(&id) {
-            return Err(unknown_session());
+            return Err(unknown_session().into());
         }
         let worktree = resolve_worktree(state, id.clone()).await?;
         Ok(Self {
@@ -297,9 +300,12 @@ terminal_root!(StandaloneTerminalRoot);
 terminal_root!(ProjectTerminalRoot);
 
 impl FromRequestParts<AppState> for StandaloneTerminalRoot {
-    type Rejection = Response;
+    type Rejection = RouteRejection;
 
-    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Response> {
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, RouteRejection> {
         let ApiPath(tid) = ApiPath::<String>::from_request_parts(parts, state)
             .await
             .map_err(|_| unknown_terminal())?;
@@ -310,14 +316,17 @@ impl FromRequestParts<AppState> for StandaloneTerminalRoot {
 }
 
 impl FromRequestParts<AppState> for ProjectTerminalRoot {
-    type Rejection = Response;
+    type Rejection = RouteRejection;
 
-    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Response> {
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, RouteRejection> {
         let ApiPath((pid, tid)) = ApiPath::<(String, String)>::from_request_parts(parts, state)
             .await
             .map_err(|_| unknown_terminal())?;
         if !id_within_bound(&pid) {
-            return Err(unknown_terminal());
+            return Err(unknown_terminal().into());
         }
         resolve_terminal_root(state, TerminalRoute::Project(&pid), &tid)
             .await
@@ -338,13 +347,13 @@ async fn resolve_terminal_root(
     state: &AppState,
     route: TerminalRoute<'_>,
     tid: &str,
-) -> Result<PathBuf, Response> {
+) -> Result<PathBuf, RouteRejection> {
     if !id_within_bound(tid) {
-        return Err(unknown_terminal());
+        return Err(unknown_terminal().into());
     }
     match state.engine.terminal_root(tid.to_string()).await {
         Some((owner, root)) if owner.is_at_route(route) => Ok(root),
-        _ => Err(unknown_terminal()),
+        _ => Err(unknown_terminal().into()),
     }
 }
 
@@ -368,7 +377,7 @@ fn refresh_root_changes<R: EditorRoot>(state: &AppState, root: &R, worktree: &St
 /// namespace it is serving.
 fn editor_file_routes<R>(prefix: &str) -> Router<AppState>
 where
-    R: EditorRoot + FromRequestParts<AppState, Rejection = Response>,
+    R: EditorRoot + FromRequestParts<AppState, Rejection = RouteRejection>,
 {
     Router::new()
         .route(&format!("{prefix}/list"), post(list_files::<R>))
@@ -422,7 +431,7 @@ pub fn routes() -> Router<AppState> {
 async fn list_files<R: EditorRoot>(State(state): State<AppState>, root: R) -> Response {
     let _permit = match tree_list_permit(&state).await {
         Ok(permit) => permit,
-        Err(resp) => return resp,
+        Err(resp) => return resp.into_response(),
     };
     let worktree = root.path().to_path_buf();
     let max_files = state.search_index_max_files;
@@ -456,7 +465,7 @@ async fn list_files<R: EditorRoot>(State(state): State<AppState>, root: R) -> Re
 /// chosen unbounded work.
 async fn tree_list_permit(
     state: &AppState,
-) -> Result<Option<tokio::sync::OwnedSemaphorePermit>, Response> {
+) -> Result<Option<tokio::sync::OwnedSemaphorePermit>, RouteRejection> {
     match &state.tree_list_semaphore {
         Some(sem) => match Arc::clone(sem).acquire_owned().await {
             Ok(permit) => Ok(Some(permit)),
@@ -464,7 +473,8 @@ async fn tree_list_permit(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "tree listing semaphore closed unexpectedly",
             )
-                .into_response()),
+                .into_response()
+                .into()),
         },
         None => Ok(None),
     }
@@ -481,7 +491,7 @@ async fn list_tree<R: EditorRoot>(
     let worktree = root.path().to_path_buf();
     let _permit = match tree_list_permit(&state).await {
         Ok(permit) => permit,
-        Err(resp) => return resp,
+        Err(resp) => return resp.into_response(),
     };
     let dir = op.dir;
     let dir_echo = dir.clone();
@@ -537,7 +547,7 @@ async fn diff_contents(
     // repository would render as fully added.
     let worktree = match crate::git_routes::resolve_changes_worktree(&state, id).await {
         Ok(w) => w,
-        Err(r) => return r,
+        Err(r) => return r.into_response(),
     };
     let path = op.path;
     match tokio::task::spawn_blocking(move || dux_core::diff::file_diff_contents(&worktree, &path))

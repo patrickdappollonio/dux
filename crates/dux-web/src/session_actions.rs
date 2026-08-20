@@ -397,7 +397,7 @@ async fn delete_session(
         return unknown_session();
     }
     if let Err(resp) = resolve_worktree(&state, id.clone()).await {
-        return resp;
+        return resp.into_response();
     }
     match state
         .engine
@@ -462,7 +462,7 @@ async fn patch_session(
         return unknown_session();
     }
     if let Err(resp) = resolve_worktree(&state, id.clone()).await {
-        return resp;
+        return resp.into_response();
     }
     let scope = scope_from_headers(&headers, &state.connections);
 
@@ -568,7 +568,7 @@ async fn reconnect_session(
         return unknown_session();
     }
     if let Err(resp) = resolve_worktree(&state, id.clone()).await {
-        return resp;
+        return resp.into_response();
     }
     let force = body.map(|Json(b)| b.force).unwrap_or(false);
     match state
@@ -604,7 +604,7 @@ async fn rerun_startup_command(
         return unknown_session();
     }
     if let Err(resp) = resolve_worktree(&state, id.clone()).await {
-        return resp;
+        return resp.into_response();
     }
     match state
         .engine

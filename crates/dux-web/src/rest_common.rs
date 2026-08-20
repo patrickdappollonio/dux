@@ -156,6 +156,26 @@ pub fn unknown_session() -> Response {
     (StatusCode::NOT_FOUND, "unknown session").into_response()
 }
 
+/// A boxed error arm for helpers and extractors whose failure is a ready-made
+/// axum [`Response`]. `Response` is a large type, and the stable clippy that
+/// newly reached CI fires `result_large_err` on any `Result` carrying it in the
+/// `Err` variant, so this newtype boxes it to shrink the `Result` by
+/// construction rather than suppressing the lint, following the same choice
+/// documented on `acquire_ws_permit` in `server.rs`.
+pub struct RouteRejection(Box<Response>);
+
+impl From<Response> for RouteRejection {
+    fn from(resp: Response) -> Self {
+        Self(Box::new(resp))
+    }
+}
+
+impl IntoResponse for RouteRejection {
+    fn into_response(self) -> Response {
+        *self.0
+    }
+}
+
 /// Whether `provider` is in the engine's configured provider list (the same source
 /// as the bootstrap document's `available_providers`). Returns `None` when the
 /// engine is unavailable, so a caller can distinguish "not configured" (`Some(false)`)

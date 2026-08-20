@@ -61,7 +61,7 @@ async fn get_changes(State(state): State<AppState>, Path(id): Path<String>) -> R
     }
     // 404 if the session is unknown (reuse the shared worktree resolver).
     if let Err(resp) = resolve_worktree(&state, id.clone()).await {
-        return resp;
+        return resp.into_response();
     }
     match state.changes.get(&id).await {
         Ok(c) => Json(ChangesResponseBody {

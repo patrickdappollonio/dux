@@ -101,7 +101,7 @@ async fn create_tab(
         return unknown_session();
     }
     if let Err(resp) = resolve_worktree(&state, id.clone()).await {
-        return resp;
+        return resp.into_response();
     }
     let provider = body.and_then(|b| b.0.provider);
     match state.engine.create_agent_tab(id.clone(), provider).await {
@@ -137,7 +137,7 @@ async fn delete_tab(
         return unknown_tab();
     }
     if let Err(resp) = resolve_worktree(&state, id.clone()).await {
-        return resp;
+        return resp.into_response();
     }
     // The session-slot tab has no row, so its "close" goes through the single-tab
     // KillSessionPty path: it stops that tab and detaches the agent only if it was
@@ -216,7 +216,7 @@ async fn retarget_tab(
         return unknown_tab();
     }
     if let Err(resp) = resolve_worktree(&state, id.clone()).await {
-        return resp;
+        return resp.into_response();
     }
     // Extra tabs must belong to the path session; the session-slot tab (tab ==
     // id) is always valid and delegates to the session-level provider change.
@@ -263,7 +263,7 @@ async fn set_focused_tab_route(
         return unknown_session();
     }
     if let Err(resp) = resolve_worktree(&state, id.clone()).await {
-        return resp;
+        return resp.into_response();
     }
     match state
         .engine

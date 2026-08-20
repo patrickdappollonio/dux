@@ -46,7 +46,7 @@ use axum::{
 use dux_core::wire::WireCommand;
 use serde::Deserialize;
 
-use crate::rest_common::{id_within_bound, scope_from_headers, unknown_session};
+use crate::rest_common::{RouteRejection, id_within_bound, scope_from_headers, unknown_session};
 use crate::server::AppState;
 
 #[derive(Deserialize)]
@@ -111,10 +111,12 @@ pub(crate) fn refresh_changed_files_now(state: &AppState, session_id: String, wo
 pub(crate) async fn resolve_worktree(
     state: &AppState,
     session_id: String,
-) -> Result<PathBuf, Response> {
+) -> Result<PathBuf, RouteRejection> {
     match state.engine.session_worktree(session_id).await {
         Some(w) => Ok(PathBuf::from(w)),
-        None => Err((StatusCode::NOT_FOUND, "unknown session").into_response()),
+        None => Err((StatusCode::NOT_FOUND, "unknown session")
+            .into_response()
+            .into()),
     }
 }
 
@@ -134,7 +136,7 @@ pub(crate) async fn resolve_worktree(
 pub(crate) async fn resolve_changes_worktree(
     state: &AppState,
     session_id: String,
-) -> Result<PathBuf, Response> {
+) -> Result<PathBuf, RouteRejection> {
     resolve_git_directory(state, session_id, GitAsk::Read).await
 }
 
@@ -148,7 +150,7 @@ pub(crate) async fn resolve_changes_worktree(
 pub(crate) async fn resolve_mutation_worktree(
     state: &AppState,
     session_id: String,
-) -> Result<PathBuf, Response> {
+) -> Result<PathBuf, RouteRejection> {
     resolve_git_directory(state, session_id, GitAsk::Mutate).await
 }
 
@@ -163,10 +165,14 @@ async fn resolve_git_directory(
     state: &AppState,
     session_id: String,
     ask: GitAsk,
-) -> Result<PathBuf, Response> {
+) -> Result<PathBuf, RouteRejection> {
     let access = match state.engine.session_git_access(session_id).await {
         Some(access) => access,
-        None => return Err((StatusCode::NOT_FOUND, "unknown session").into_response()),
+        None => {
+            return Err((StatusCode::NOT_FOUND, "unknown session")
+                .into_response()
+                .into());
+        }
     };
     let allowed = match ask {
         GitAsk::Read => access.changes_panel_works(),
@@ -182,13 +188,14 @@ async fn resolve_git_directory(
             .unwrap_or("dux cannot work with git in this folder.")
             .to_string(),
     )
-        .into_response())
+        .into_response()
+        .into())
 }
 
 /// Reject a file path that isn't a real changed file git is tracking in this
 /// worktree (defends against operating on arbitrary filesystem paths). Runs the
 /// `git status` read off-thread.
-async fn validate_changed_path(worktree: &Path, path: &str) -> Result<(), Response> {
+async fn validate_changed_path(worktree: &Path, path: &str) -> Result<(), RouteRejection> {
     let wt = worktree.to_path_buf();
     let p = path.to_string();
     let ok = tokio::task::spawn_blocking(move || match dux_core::git::changed_files(&wt) {
@@ -204,7 +211,8 @@ async fn validate_changed_path(worktree: &Path, path: &str) -> Result<(), Respon
             StatusCode::BAD_REQUEST,
             format!("not a changed file tracked by git in this worktree: {path}"),
         )
-            .into_response())
+            .into_response()
+            .into())
     }
 }
 
@@ -241,7 +249,7 @@ async fn validate_changed_path(worktree: &Path, path: &str) -> Result<(), Respon
 /// The ordinary refusals a user actually hits do not come through here: the
 /// empty-message and nothing-staged commit cases are caught by
 /// `git::commit_preflight` and answered as a 400 with their own wording.
-async fn run_git<F>(action: &'static str, worktree: &Path, op: F) -> Result<(), Response>
+async fn run_git<F>(action: &'static str, worktree: &Path, op: F) -> Result<(), RouteRejection>
 where
     F: FnOnce() -> anyhow::Result<()> + Send + 'static,
 {
@@ -255,13 +263,15 @@ where
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Could not {action}. {detail}"),
             )
-                .into_response())
+                .into_response()
+                .into())
         }
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("git task failed: {e}"),
         )
-            .into_response()),
+            .into_response()
+            .into()),
     }
 }
 
@@ -306,7 +316,7 @@ async fn discard(
     let session_id = id.clone();
     let worktree = match resolve_mutation_worktree(&state, id).await {
         Ok(w) => w,
-        Err(r) => return r,
+        Err(r) => return r.into_response(),
     };
     // Discard is destructive (deletes untracked files / restores tracked ones),
     // so the tracked-vs-untracked distinction is derived SERVER-SIDE from live
@@ -343,7 +353,7 @@ async fn discard(
     })
     .await
     {
-        return r;
+        return r.into_response();
     }
     refresh_changed_files_now(&state, session_id, &worktree);
     StatusCode::OK.into_response()
@@ -361,14 +371,14 @@ where
 {
     let worktree = match resolve_mutation_worktree(&state, session_id.clone()).await {
         Ok(w) => w,
-        Err(r) => return r,
+        Err(r) => return r.into_response(),
     };
     if let Err(r) = validate_changed_path(&worktree, &path).await {
-        return r;
+        return r.into_response();
     }
     let wt = worktree.clone();
     if let Err(r) = run_git(action, &worktree, move || op(wt, path)).await {
-        return r;
+        return r.into_response();
     }
     refresh_changed_files_now(&state, session_id, &worktree);
     StatusCode::OK.into_response()
@@ -396,7 +406,7 @@ async fn commit(
     let session_id = id.clone();
     let worktree = match resolve_mutation_worktree(&state, id).await {
         Ok(w) => w,
-        Err(r) => return r,
+        Err(r) => return r.into_response(),
     };
     // The empty-message and nothing-staged refusals are the shared core decision
     // (`commit_preflight`), read against LIVE git status. This adds the
@@ -433,7 +443,7 @@ async fn commit(
     })
     .await
     {
-        return r;
+        return r.into_response();
     }
     refresh_changed_files_now(&state, session_id, &worktree);
     StatusCode::OK.into_response()
@@ -453,7 +463,7 @@ async fn refresh_changes(State(state): State<AppState>, ApiPath(id): ApiPath<Str
     let session_id = id.clone();
     let worktree = match resolve_changes_worktree(&state, id).await {
         Ok(w) => w,
-        Err(r) => return r,
+        Err(r) => return r.into_response(),
     };
     refresh_changed_files_now(&state, session_id, &worktree);
     StatusCode::OK.into_response()
@@ -855,7 +865,8 @@ mod tests {
             Err(anyhow::anyhow!("git commit failed: {stderr}"))
         })
         .await
-        .expect_err("a failing git op must produce a response");
+        .expect_err("a failing git op must produce a response")
+        .into_response();
 
         assert_eq!(err.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let body = String::from_utf8(

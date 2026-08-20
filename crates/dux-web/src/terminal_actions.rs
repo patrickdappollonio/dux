@@ -102,7 +102,7 @@ async fn create_terminal(State(state): State<AppState>, Path(id): Path<String>) 
         return unknown_session();
     }
     if let Err(resp) = resolve_worktree(&state, id.clone()).await {
-        return resp;
+        return resp.into_response();
     }
     match state.engine.create_terminal(id.clone()).await {
         Ok((terminal_id, label)) => {
@@ -195,7 +195,7 @@ async fn delete_terminal(
         return unknown_terminal();
     }
     if let Err(resp) = resolve_worktree(&state, id.clone()).await {
-        return resp;
+        return resp.into_response();
     }
     // Route membership is decided by the owner type's exhaustive
     // `is_at_route`: an unknown terminal, one owned by a different session, or a
