@@ -138,6 +138,17 @@ pub enum EngineRequest {
     /// Resolve a session's worktree path (instant lookup; diff I/O happens
     /// off-thread in the server handler).
     SessionWorktree(String, oneshot::Sender<Option<String>>),
+    /// What git dux may do for one agent, in ONE round trip: the directory, and
+    /// whether the changes panel works and the branch features exist there.
+    /// Asking those separately would let a caller act on half an answer.
+    ///
+    /// Asking also REFRESHES a standalone folder's verdict off-thread, so a
+    /// folder that became a repository since the last look starts working the
+    /// next time the panel asks. `None` means the session is unknown.
+    SessionGitAccess(
+        String,
+        oneshot::Sender<Option<dux_core::engine::SessionGitAccess>>,
+    ),
     /// Where a file dropped onto the pane showing this pty id should be saved.
     /// The pty id may be a terminal, an agent's session id, or an extra tab's
     /// id; the engine resolves all three. A terminal answers with a PLAN rather
@@ -1021,6 +1032,22 @@ impl EngineHandle {
         rx.await.unwrap_or(None)
     }
 
+    pub async fn session_git_access(
+        &self,
+        session_id: String,
+    ) -> Option<dux_core::engine::SessionGitAccess> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .req_tx
+            .send(EngineRequest::SessionGitAccess(session_id, tx))
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.unwrap_or(None)
+    }
+
     pub async fn session_worktree(&self, session_id: String) -> Option<String> {
         let (tx, rx) = oneshot::channel();
         if self
@@ -1577,6 +1604,7 @@ fn request_mutates_spine(req: &EngineRequest) -> bool {
         | EngineRequest::TerminalRoot(..)
         | EngineRequest::TabSession(..)
         | EngineRequest::SessionWorktree(..)
+        | EngineRequest::SessionGitAccess(..)
         | EngineRequest::FileDropDestination(..)
         | EngineRequest::FileDropTreeDestination(..)
         | EngineRequest::FileDropRefreshTarget(..)
@@ -2787,6 +2815,14 @@ fn handle_request(
                 .find(|s| s.id == session_id)
                 .map(|s| s.directory().to_string());
             let _ = reply.send(worktree);
+        }
+        EngineRequest::SessionGitAccess(session_id, reply) => {
+            // Refresh first: the probe is off-thread, so this call answers with
+            // the previous verdict and the next one sees the new answer. That
+            // is how a folder that became a repository is noticed when the
+            // changes panel opens, with no git subprocess on the engine thread.
+            engine.spawn_folder_repo_probe(&session_id);
+            let _ = reply.send(engine.session_git_access(&session_id));
         }
         EngineRequest::ProjectPath(project_id, reply) => {
             let path = engine

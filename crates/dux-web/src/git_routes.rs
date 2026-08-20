@@ -118,6 +118,37 @@ pub(crate) async fn resolve_worktree(
     }
 }
 
+/// Resolve the directory a CHANGES-PANEL route may run git in: a managed
+/// worktree, or a standalone agent's folder when that folder is itself a
+/// repository.
+///
+/// Folder-driven and not agent-driven, deliberately: a standalone agent pointed
+/// at a repository gets a real changes panel. When the folder is not one, the
+/// refusal carries the folder's OWN sentence ("this folder has no git
+/// repository", "this folder sits inside a repository rooted elsewhere"), never
+/// a git error about a repository nobody named.
+///
+/// `409` rather than `404`, because the agent exists and the route is real: it
+/// is the folder underneath that cannot answer, which is the same shape as a
+/// locked repository and the status the client already knows how to render.
+pub(crate) async fn resolve_changes_worktree(
+    state: &AppState,
+    session_id: String,
+) -> Result<PathBuf, Response> {
+    match state.engine.session_git_access(session_id).await {
+        Some(access) if access.changes_panel_works() => Ok(access.directory().to_path_buf()),
+        Some(access) => Err((
+            StatusCode::CONFLICT,
+            access
+                .quiet_reason()
+                .unwrap_or("dux cannot work with git in this folder.")
+                .to_string(),
+        )
+            .into_response()),
+        None => Err((StatusCode::NOT_FOUND, "unknown session").into_response()),
+    }
+}
+
 /// Reject a file path that isn't a real changed file git is tracking in this
 /// worktree (defends against operating on arbitrary filesystem paths). Runs the
 /// `git status` read off-thread.
@@ -237,7 +268,7 @@ async fn discard(
         return unknown_session();
     }
     let session_id = id.clone();
-    let worktree = match resolve_worktree(&state, id).await {
+    let worktree = match resolve_changes_worktree(&state, id).await {
         Ok(w) => w,
         Err(r) => return r,
     };
@@ -292,7 +323,7 @@ async fn file_op<F>(
 where
     F: FnOnce(PathBuf, String) -> anyhow::Result<()> + Send + 'static,
 {
-    let worktree = match resolve_worktree(&state, session_id.clone()).await {
+    let worktree = match resolve_changes_worktree(&state, session_id.clone()).await {
         Ok(w) => w,
         Err(r) => return r,
     };
@@ -327,7 +358,7 @@ async fn commit(
             .into_response();
     }
     let session_id = id.clone();
-    let worktree = match resolve_worktree(&state, id).await {
+    let worktree = match resolve_changes_worktree(&state, id).await {
         Ok(w) => w,
         Err(r) => return r,
     };
@@ -384,7 +415,7 @@ async fn refresh_changes(State(state): State<AppState>, ApiPath(id): ApiPath<Str
         return unknown_session();
     }
     let session_id = id.clone();
-    let worktree = match resolve_worktree(&state, id).await {
+    let worktree = match resolve_changes_worktree(&state, id).await {
         Ok(w) => w,
         Err(r) => return r,
     };

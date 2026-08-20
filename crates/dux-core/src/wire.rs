@@ -3666,15 +3666,15 @@ impl Engine {
     fn wire_to_command(&self, command: WireCommand) -> anyhow::Result<Command> {
         Ok(match command {
             WireCommand::StageFile { session_id, path } => Command::StageFile {
-                worktree_path: self.session_worktree(&session_id)?,
+                worktree_path: self.changes_worktree(&session_id)?,
                 path,
             },
             WireCommand::UnstageFile { session_id, path } => Command::UnstageFile {
-                worktree_path: self.session_worktree(&session_id)?,
+                worktree_path: self.changes_worktree(&session_id)?,
                 path,
             },
             WireCommand::DiscardFile { session_id, path } => {
-                let worktree_path = self.session_worktree(&session_id)?;
+                let worktree_path = self.changes_worktree(&session_id)?;
                 let is_untracked = crate::git::discard_classify(&worktree_path, &path)?;
                 Command::DiscardFile {
                     worktree_path,
@@ -3686,15 +3686,38 @@ impl Engine {
                 session_id,
                 message,
             } => Command::CommitChanges {
-                worktree_path: self.session_worktree(&session_id)?,
+                worktree_path: self.changes_worktree(&session_id)?,
                 message,
                 success_message: "Changes committed successfully.".to_string(),
             },
             WireCommand::Push { session_id } => Command::Push {
-                worktree_path: self.session_worktree(&session_id)?,
+                // Push publishes a BRANCH, which is the half that does not
+                // exist for a standalone agent. Refused on the server, not
+                // merely hidden in the client: this is an HTTP route, and a
+                // client that skipped the UI could otherwise reach a real push
+                // in the user's folder.
+                worktree_path: PathBuf::from(
+                    &self
+                        .branch_git_workspace(
+                            &session_id,
+                            "push",
+                            crate::engine::STANDALONE_ADD_AS_PROJECT_REMEDY,
+                        )?
+                        .worktree_path,
+                ),
             },
             WireCommand::Pull { session_id } => Command::Pull {
-                repo_path: self.session_worktree(&session_id)?,
+                // Same gate as push, and for the same reason: a pull updates
+                // the branch dux manages for this agent, and there is none.
+                repo_path: PathBuf::from(
+                    &self
+                        .branch_git_workspace(
+                            &session_id,
+                            "pull into",
+                            crate::engine::STANDALONE_ADD_AS_PROJECT_REMEDY,
+                        )?
+                        .worktree_path,
+                ),
                 target: PullTarget::Session,
                 busy_message: "Pulling latest changes from remote\u{2026}".to_string(),
                 already_running_message:
@@ -4281,19 +4304,36 @@ impl Engine {
             .ok_or_else(|| anyhow::anyhow!("unknown project: {project_id}"))
     }
 
-    /// The directory an agent's file operations are rooted at: its managed
-    /// worktree, or a standalone agent's folder. This is deliberately
-    /// [`crate::model::AgentSession::directory`] and not the managed-only
-    /// accessor: the editor's tree, read, write and search routes are pure
-    /// filesystem work and are exactly as correct in a plain folder. The GIT
-    /// routes go through `branch_git_workspace` instead.
-    fn session_worktree(&self, session_id: &str) -> anyhow::Result<PathBuf> {
-        let session = self
-            .sessions
-            .iter()
-            .find(|s| s.id == session_id)
+    /// The directory a CHANGES-PANEL mutation may run in: a managed worktree,
+    ///
+    /// (This replaced a plain "resolve the session's worktree" helper. Every
+    /// wire command that used it was a git command, and each now goes through
+    /// either this folder-driven gate or the branch-identity one. The PURE
+    /// FILESYSTEM routes never went through the wire at all: they resolve the
+    /// agent's directory in `crate::git_routes::resolve_worktree`, which is
+    /// correct for a plain folder and stays ungated.)
+    /// or a standalone agent's folder when that folder is itself a repository.
+    ///
+    /// Folder-driven, not agent-driven, which is the whole point: a standalone
+    /// agent pointed at a repository stages and commits exactly like any other.
+    /// When the folder is not a repository the refusal carries the folder's own
+    /// quiet sentence, so the user is told "this folder has no git repository"
+    /// rather than the "the repository is busy" the old error path produced once
+    /// per poll. An unclassified folder fails CLOSED: a mutation on a guess is
+    /// how a directory dux does not understand gets written to.
+    fn changes_worktree(&self, session_id: &str) -> anyhow::Result<PathBuf> {
+        let access = self
+            .session_git_access(session_id)
             .ok_or_else(|| anyhow::anyhow!("unknown session: {session_id}"))?;
-        Ok(PathBuf::from(session.directory()))
+        if !access.mutations_allowed() {
+            anyhow::bail!(
+                "{}",
+                access
+                    .quiet_reason()
+                    .unwrap_or("dux cannot work with git in this folder.")
+            );
+        }
+        Ok(access.directory().to_path_buf())
     }
 
     /// List the project's managed worktrees that are currently adoptable as a
@@ -4455,6 +4495,82 @@ mod tests {
             crate::git::standalone_agent_title("Sort the downloads!", Path::new("/anywhere")),
             "Sort the downloads!",
             "a typed name is used verbatim once trimmed"
+        );
+    }
+
+    /// Hiding the buttons is not an answer when the same action is an HTTP
+    /// route: a standalone agent's id must not be able to reach a real push in
+    /// the user's folder from a command line. Every branch-identity command
+    /// refuses it on the server, with a purposeful sentence rather than an
+    /// accidental git error about a repository nobody named.
+    #[test]
+    fn the_branch_identity_commands_refuse_a_standalone_agent_on_the_server() {
+        let (mut engine, _tmp) = test_engine();
+        engine
+            .sessions
+            .push(sample_standalone_session("sa1", "/home/someone/notes"));
+
+        for command in [
+            WireCommand::Push {
+                session_id: "sa1".to_string(),
+            },
+            WireCommand::Pull {
+                session_id: "sa1".to_string(),
+            },
+            WireCommand::ForkSession {
+                session_id: "sa1".to_string(),
+                name: "copy".to_string(),
+            },
+        ] {
+            let label = format!("{command:?}");
+            let message = match engine.wire_to_command(command) {
+                Err(err) => err.to_string(),
+                Ok(_) => panic!("{label} must be refused for a standalone agent"),
+            };
+            assert!(message.contains("standalone agent"), "{label}: {message:?}");
+            assert!(message.contains("no branch"), "{label}: {message:?}");
+            // A refusal with no way forward is where a user gets stuck.
+            assert!(
+                message.contains("as a project"),
+                "{label} must point somewhere: {message:?}"
+            );
+        }
+    }
+
+    /// The changes routes are FOLDER driven, not agent driven: they work in a
+    /// standalone agent's folder when it is a repository, and refuse when it is
+    /// not, saying why in the folder's own terms.
+    #[test]
+    fn the_changes_routes_follow_the_folder_and_not_the_agent() {
+        let (mut engine, _tmp) = test_engine();
+        let repo = tempfile::tempdir().unwrap();
+        engine.sessions.push(sample_standalone_session(
+            "sa1",
+            &repo.path().to_string_lossy(),
+        ));
+
+        // Unprobed: quiet, and no mutation on a guess.
+        let message = match engine.wire_to_command(WireCommand::StageFile {
+            session_id: "sa1".to_string(),
+            path: "a.txt".to_string(),
+        }) {
+            Err(err) => err.to_string(),
+            Ok(_) => panic!("a folder dux has not classified must not be staged into"),
+        };
+        assert!(message.contains("could not consult git"), "{message:?}");
+
+        // A real repository: staging is ordinary work again.
+        engine
+            .folder_repo_statuses
+            .insert("sa1".to_string(), crate::git::FolderRepoStatus::WorkingRepo);
+        assert!(
+            engine
+                .wire_to_command(WireCommand::StageFile {
+                    session_id: "sa1".to_string(),
+                    path: "a.txt".to_string(),
+                })
+                .is_ok(),
+            "a standalone agent pointed at a repository gets a real changes panel"
         );
     }
 

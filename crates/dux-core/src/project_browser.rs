@@ -708,6 +708,85 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    /// THE WORKTREE-MANAGER GUARD. The manager can force-remove any directory
+    /// under dux's managed area, and its "is an agent living here" check is this
+    /// classification. A STANDALONE agent pointed at a managed worktree must
+    /// therefore show up as occupied, or the manager would offer to delete the
+    /// ground out from under it.
+    ///
+    /// Compared canonically, so a symlinked folder cannot hide the occupant.
+    #[test]
+    fn a_standalone_agent_occupying_a_managed_worktree_makes_it_unselectable() {
+        let root = tempdir().unwrap().keep();
+        let repo = root.join("repo");
+        let occupied = root.join("worktrees").join("demo").join("occupied");
+        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&occupied).unwrap();
+        let project = Project {
+            id: "p1".to_string(),
+            name: "demo".to_string(),
+            path: repo.to_string_lossy().to_string(),
+            explicit_default_provider: None,
+            default_provider: ProviderKind::new("claude"),
+            leading_branch: None,
+            auto_reopen_agents: None,
+            startup_command: None,
+            env: Default::default(),
+            current_branch: "main".to_string(),
+            branch_status: crate::model::ProjectBranchStatus::Unknown,
+            path_missing: false,
+            created_at: None,
+        };
+        let paths = DuxPaths {
+            root: root.clone(),
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite"),
+            worktrees_root: root.join("worktrees"),
+            lock_path: root.join("lock"),
+        };
+        // Reached through a symlink, to prove the comparison is canonical.
+        let link = root.join("link-to-occupied");
+        std::os::unix::fs::symlink(&occupied, &link).unwrap();
+        let sessions = vec![AgentSession {
+            id: "sa1".to_string(),
+            provider: ProviderKind::new("claude"),
+            title: Some("notes".to_string()),
+            started_providers: Vec::new(),
+            desired_running: false,
+            auto_reopen_enabled: true,
+            status: SessionStatus::Detached,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_focused_tab: None,
+            workspace: crate::model::AgentWorkspace::Folder(crate::model::FolderWorkspace {
+                folder_path: link.to_string_lossy().to_string(),
+            }),
+        }];
+        let worktrees = vec![git::GitWorktree {
+            path: occupied.clone(),
+            head: Some("1111111".to_string()),
+            branch_name: Some("whatever".to_string()),
+            detached: false,
+        }];
+
+        let entries = classify_project_worktrees(&project, &paths, &sessions, worktrees);
+        let entry = entries
+            .iter()
+            .find(|e| e.path == occupied.canonicalize().unwrap())
+            .expect("the occupied worktree is listed");
+        assert_eq!(
+            entry.existing_session_id.as_deref(),
+            Some("sa1"),
+            "a standalone agent occupies this directory and must be seen doing so"
+        );
+        assert!(
+            !entry.is_selectable,
+            "the manager must not offer to remove a directory an agent is living in"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn load_projects_converts_project_config_to_project() {
         use crate::config::{Config, ProjectConfig};

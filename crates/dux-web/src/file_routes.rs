@@ -530,7 +530,12 @@ async fn diff_contents(
     if !id_within_bound(&id) {
         return unknown_session();
     }
-    let worktree = match resolve_worktree(&state, id).await {
+    // A DIFF is a git read, so it follows the folder-driven verdict like the
+    // rest of the changes panel. Ungated it would be actively misleading rather
+    // than merely broken: `file_bytes_at_head` maps a git failure to Ok(None),
+    // which the diff reads as "new file", so every file in a folder with no
+    // repository would render as fully added.
+    let worktree = match crate::git_routes::resolve_changes_worktree(&state, id).await {
         Ok(w) => w,
         Err(r) => return r,
     };

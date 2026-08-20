@@ -446,6 +446,61 @@ mod tests {
         }
     }
 
+    /// The upload seed for a STANDALONE agent follows "can git see this path",
+    /// which is a different question from "does the changes panel work here".
+    ///
+    /// A folder INSIDE somebody else's repository is exactly where untracked
+    /// uploads would pollute their `git status`, so it gets the seed even
+    /// though its own panel stays quiet. A plain folder gets no junk written
+    /// into it, and a folder dux could not classify gets nothing either:
+    /// writing into the user's directory on a guess is the one direction dux
+    /// cannot undo, because it never cleans the folder up.
+    #[test]
+    fn the_upload_seed_for_a_standalone_agent_follows_git_visibility() {
+        let (mut engine, _tmp) = test_engine();
+        let folder = tempfile::tempdir().expect("folder");
+        engine
+            .sessions
+            .push(crate::engine::test_support::sample_standalone_session(
+                "sa1",
+                folder.path().to_string_lossy().as_ref(),
+            ));
+        engine.config.ui.upload_write_gitignore = true;
+
+        let seeded = |engine: &super::Engine| match engine.file_drop_destination("sa1") {
+            Some(crate::file_drop::FileDropDestination::AgentUploads {
+                write_gitignore, ..
+            }) => write_gitignore,
+            other => panic!("resolved to {other:?}"),
+        };
+
+        // Unprobed, so unknown: fail closed.
+        assert!(!seeded(&engine));
+
+        for (status, expected) in [
+            (crate::git::FolderRepoStatus::WorkingRepo, true),
+            (
+                crate::git::FolderRepoStatus::InsideRepoRootedElsewhere,
+                true,
+            ),
+            (crate::git::FolderRepoStatus::NoRepo, false),
+            (crate::git::FolderRepoStatus::Indeterminate, false),
+        ] {
+            engine
+                .folder_repo_statuses
+                .insert("sa1".to_string(), status);
+            assert_eq!(seeded(&engine), expected, "{status:?}");
+        }
+
+        // And the preference still wins outright: switching it off writes
+        // nothing anywhere, repository or not.
+        engine.config.ui.upload_write_gitignore = false;
+        engine
+            .folder_repo_statuses
+            .insert("sa1".to_string(), crate::git::FolderRepoStatus::WorkingRepo);
+        assert!(!seeded(&engine));
+    }
+
     #[test]
     fn a_terminal_of_every_owner_keeps_the_live_working_directory() {
         // The narrowing has to stop at agents. A terminal is where the user is

@@ -28,7 +28,6 @@
 //! spurious empty-cache error.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
@@ -553,8 +552,22 @@ impl ChangesService {
         // poll tick, strand a permanent All-scoped warning, and make GETs return
         // 409 instead of 404. So leave no cache entry at all — `get` distinguishes
         // "no entry, session gone" (404) from a real git error (409).
-        let worktree = match self.engine.session_worktree(session_id.to_string()).await {
-            Some(w) => PathBuf::from(w),
+        //
+        // The resolution is FOLDER-DRIVEN for a standalone agent: it yields a
+        // directory only when that folder is itself a repository. A plain
+        // folder stores an empty-but-successful result instead of running git
+        // in it, because running git there answers with an error every poll
+        // cycle and surfaces as "the repository is busy", which is a lie about
+        // a folder that simply has no repository. The honest sentence travels
+        // with the agent's workspace on the wire, so the panel can say what is
+        // actually going on without this ever producing an error.
+        let worktree = match self.engine.session_git_access(session_id.to_string()).await {
+            Some(access) if access.changes_panel_works() => access.directory().to_path_buf(),
+            Some(_) => {
+                self.store_ok_and_maybe_emit(session_id, generation, Vec::new(), Vec::new())
+                    .await;
+                return;
+            }
             None => return,
         };
 

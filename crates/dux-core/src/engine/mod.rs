@@ -880,6 +880,75 @@ pub(crate) fn pr_attach_in_flight_message(agent_name: &str) -> String {
     )
 }
 
+/// What git dux may do for one agent, resolved in a single engine round trip so
+/// a route cannot ask half the question and act on the other half.
+///
+/// The three-way split IS the design: the branch-identity features (push, pull,
+/// fork, pull requests, branch rename, provenance, the worktree manager) are
+/// AGENT driven and never exist for a standalone agent whatever its folder
+/// contains, while the changes panel is FOLDER driven and works whenever the
+/// folder is itself a repository.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SessionGitAccess {
+    /// A managed working copy: the whole git surface, as always.
+    Full { worktree: PathBuf },
+    /// A standalone agent whose folder IS a repository's top level: the changes
+    /// panel works here exactly as anywhere, and nothing branch-shaped exists.
+    ChangesOnly { directory: PathBuf },
+    /// A standalone agent with no repository to work in: no branch features and
+    /// a quiet changes region. `quiet_reason` says why, in the user's terms,
+    /// and never "the repository is busy".
+    NoRepository {
+        directory: PathBuf,
+        quiet_reason: &'static str,
+    },
+}
+
+impl SessionGitAccess {
+    /// The directory this agent occupies, whichever answer applies.
+    pub fn directory(&self) -> &Path {
+        match self {
+            Self::Full { worktree } => worktree,
+            Self::ChangesOnly { directory } | Self::NoRepository { directory, .. } => directory,
+        }
+    }
+
+    /// Whether the changes panel shows a real repository view.
+    pub fn changes_panel_works(&self) -> bool {
+        match self {
+            Self::Full { .. } | Self::ChangesOnly { .. } => true,
+            Self::NoRepository { .. } => false,
+        }
+    }
+
+    /// Whether staging, unstaging, discarding and committing are allowed.
+    /// Identical to [`Self::changes_panel_works`] today and kept as its own
+    /// question because they are different ones: a future read-only repository
+    /// view would show files it must not let you stage.
+    pub fn mutations_allowed(&self) -> bool {
+        match self {
+            Self::Full { .. } | Self::ChangesOnly { .. } => true,
+            Self::NoRepository { .. } => false,
+        }
+    }
+
+    /// Whether the branch-identity features exist for this agent.
+    pub fn supports_branch_git(&self) -> bool {
+        match self {
+            Self::Full { .. } => true,
+            Self::ChangesOnly { .. } | Self::NoRepository { .. } => false,
+        }
+    }
+
+    /// Why the changes region is quiet, or `None` when it is not.
+    pub fn quiet_reason(&self) -> Option<&'static str> {
+        match self {
+            Self::Full { .. } | Self::ChangesOnly { .. } => None,
+            Self::NoRepository { quiet_reason, .. } => Some(quiet_reason),
+        }
+    }
+}
+
 /// The refusal every branch-identity git feature gives for a standalone agent.
 ///
 /// Purposeful, not accidental: hiding a button is not an answer when the same
@@ -3484,6 +3553,35 @@ impl Engine {
             .unwrap_or_else(|| "unknown".to_string())
     }
 
+    /// Resolve what git dux may do for one agent. `None` for an unknown id, so
+    /// a route can still answer 404 for one.
+    ///
+    /// The companion to [`Self::branch_git_workspace`]: that one answers the
+    /// branch-identity question with a refusal sentence, this one answers all
+    /// three parts at once for a caller that has to choose between them (the
+    /// changes routes, which work in a standalone agent's folder when it is a
+    /// repository, and refuse when it is not).
+    pub fn session_git_access(&self, session_id: &str) -> Option<SessionGitAccess> {
+        let session = self.sessions.iter().find(|s| s.id == session_id)?;
+        Some(match &session.workspace {
+            crate::model::AgentWorkspace::Managed(managed) => SessionGitAccess::Full {
+                worktree: PathBuf::from(&managed.worktree_path),
+            },
+            crate::model::AgentWorkspace::Folder(folder) => {
+                let directory = PathBuf::from(&folder.folder_path);
+                let status = self.folder_repo_status(session_id);
+                if status.changes_panel_works() {
+                    SessionGitAccess::ChangesOnly { directory }
+                } else {
+                    SessionGitAccess::NoRepository {
+                        directory,
+                        quiet_reason: status.quiet_reason(),
+                    }
+                }
+            }
+        })
+    }
+
     /// THE CHOKEPOINT. Resolve a session id to the managed working copy a
     /// branch-identity git feature may run in, or an error saying why it may
     /// not.
@@ -4304,6 +4402,58 @@ mod tests {
             folder.path().to_string_lossy().as_ref(),
         ));
         (engine, tmp, folder)
+    }
+
+    /// The three-way capability, resolved in one engine round trip so a route
+    /// cannot ask half the question. A managed agent gets everything; a
+    /// standalone agent in a repository gets the changes panel and nothing
+    /// branch-shaped; a standalone agent in a plain folder gets neither, with
+    /// a sentence saying why.
+    #[test]
+    fn session_git_access_answers_the_three_way_capability() {
+        let (mut engine, _tmp, folder) = engine_with_a_standalone_agent();
+
+        match engine.session_git_access("s1") {
+            Some(SessionGitAccess::Full { worktree }) => {
+                assert_eq!(worktree, std::path::Path::new("/tmp/s1-worktree"));
+            }
+            other => panic!("a managed agent has the full git surface, got {other:?}"),
+        }
+
+        // Not probed yet: honest-quiet, and no mutations on a guess.
+        match engine.session_git_access("sa1") {
+            Some(SessionGitAccess::NoRepository { quiet_reason, .. }) => {
+                assert!(quiet_reason.contains("could not consult git"));
+            }
+            other => panic!("an unprobed folder must be honest-quiet, got {other:?}"),
+        }
+
+        // The folder IS a repository: the changes panel works, and only that.
+        engine
+            .folder_repo_statuses
+            .insert("sa1".to_string(), crate::git::FolderRepoStatus::WorkingRepo);
+        match engine.session_git_access("sa1") {
+            Some(SessionGitAccess::ChangesOnly { directory }) => {
+                assert_eq!(directory, folder.path());
+            }
+            other => panic!("a repository folder gets the changes panel, got {other:?}"),
+        }
+
+        // A folder inside somebody else's repository stays quiet, and says so
+        // in its own words rather than reporting a busy repository.
+        engine.folder_repo_statuses.insert(
+            "sa1".to_string(),
+            crate::git::FolderRepoStatus::InsideRepoRootedElsewhere,
+        );
+        match engine.session_git_access("sa1") {
+            Some(SessionGitAccess::NoRepository { quiet_reason, .. }) => {
+                assert!(quiet_reason.contains("rooted elsewhere"), "{quiet_reason}");
+                assert!(!quiet_reason.to_lowercase().contains("busy"));
+            }
+            other => panic!("a nested folder must stay quiet, got {other:?}"),
+        }
+
+        assert!(engine.session_git_access("nope").is_none());
     }
 
     /// Every pull-request route refuses a standalone id with a purposeful
