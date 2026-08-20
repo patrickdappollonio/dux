@@ -57,15 +57,38 @@ function tab(id: string, provider: string, over: Partial<AgentTabView> = {}): Ag
 }
 
 function session(
-  over: Partial<SessionView> &
-    Pick<SessionView, "id" | "project_id" | "title" | "branch_name">,
+  over: Omit<Partial<SessionView>, "workspace"> &
+    Pick<SessionView, "id" | "title"> & {
+      project_id: string
+      branch_name: string
+      /** A STANDALONE agent's folder. Mutually exclusive with `project_id` in
+       * practice; when set, the row is seeded as a folder workspace instead. */
+      folder?: { path: string; label: string }
+    },
 ): SessionView {
   const branch = over.branch_name
+  const { project_id, branch_name: _branch, folder, ...rest } = over
   return {
     provider: "claude",
-    initial_branch: branch,
-    source_branch: "main",
-    worktree_path: `/home/dev/.local/share/dux/worktrees/${over.id}`,
+    workspace: folder
+      ? {
+          kind: "folder",
+          folder_path: folder.path,
+          folder_label: folder.label,
+          // The figure's standalone agent points at a repository, so its
+          // changes panel is the ordinary one.
+          repo_status: "working_repo",
+          quiet_reason: "",
+        }
+      : {
+          kind: "managed",
+          project_id,
+          branch_name: branch,
+          initial_branch: branch,
+          branch_provenance: "created",
+          source_branch: "main",
+          worktree_path: `/home/dev/.local/share/dux/worktrees/${over.id}`,
+        },
     status: "active",
     auto_reopen_enabled: true,
     terminals: [],
@@ -77,7 +100,7 @@ function session(
     created_at: CREATED,
     updated_at: UPDATED,
     last_focused_tab: null,
-    ...over,
+    ...rest,
   }
 }
 
@@ -176,6 +199,18 @@ const sessions: SessionView[] = [
     provider: "codex",
     branch_name: "dux/invoice-pdf-export",
     // Idle: nothing running, nothing waiting on the user.
+  }),
+  // A STANDALONE agent: it belongs to no project and runs in a folder the user
+  // already had, so its row names the folder where the others name a project.
+  // Seeded here because a figure that only shows project agents would not show
+  // that row shape at all.
+  session({
+    id: "agt-notes",
+    project_id: "",
+    title: "release-notes",
+    provider: "claude",
+    branch_name: "",
+    folder: { path: "/home/dev/work/release-notes", label: "~/work/release-notes" },
   }),
   session({
     id: "agt-search-ranking",

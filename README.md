@@ -4,7 +4,7 @@
 
 <img src="assets/dux-logo.png" width="200" align="right" />
 
-Your AI agents deserve a proper office. **dux** (pronounced "dooks") runs multiple AI coding agents side by side, each in its own git worktree, with companion terminals, provider tabs, macros, and a full git staging area. Drive it from a terminal, or run `dux server` and drive the same workspace from a browser, phone included.
+Your AI agents deserve a proper office. **dux** (pronounced "dooks") runs multiple AI coding agents side by side, each in its own git worktree (or, for a standalone agent, in a folder you already have), with companion terminals, provider tabs, macros, and a full git staging area. Drive it from a terminal, or run `dux server` and drive the same workspace from a browser, phone included.
 
 No protocol layers. No adapters. No JSON-RPC. Just real CLIs running in real terminals.
 

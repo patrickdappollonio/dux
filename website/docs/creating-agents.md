@@ -1,16 +1,22 @@
 ---
 title: Creating agents
-description: The four ways to spin up an agent in dux (fresh branch, GitHub PR, existing worktree, or fork) and how provider selection works at creation time.
+description: The ways to spin up an agent in dux (fresh branch, GitHub PR, existing worktree, fork, or a plain folder you already have) and how provider selection works at creation time.
 group: Guides
 order: 10
 ---
 
-An agent in dux is a CLI tool running in its own git worktree on its own branch.
-Every agent is isolated: two agents on the same project can work simultaneously
-without touching each other's files, and switching between them is instant. Before
-you can create agents, you need at least one project added to dux: the Add-project
-button in the browser, or the `add-project` command in the terminal UI's palette.
-Either one opens a project browser over the same filesystem.
+An agent in dux is usually a CLI tool running in its own git worktree on its own
+branch. Those agents are isolated: two of them on the same project can work
+simultaneously without touching each other's files, and switching between them is
+instant. Before you can create them, you need at least one project added to dux:
+the Add-project button in the browser, or the `add-project` command in the
+terminal UI's palette. Either one opens a project browser over the same
+filesystem.
+
+There is one deliberate exception, described in
+[Running an agent in a folder you already have](#running-an-agent-in-a-folder-you-already-have):
+a **standalone agent** skips the branch and the worktree entirely and runs in a
+folder you point it at. It needs no project at all.
 
 The creation paths below are available from both front ends, and this guide
 describes them once for both, because what dux does is the same either way. Only
@@ -330,10 +336,78 @@ which are invisible to git status).
 This is useful for exploring two different approaches to the same problem: fork
 the agent at the decision point and let each branch go its own way.
 
+## Running an agent in a folder you already have
+
+Everything above creates a branch and a working copy. Sometimes that is not what
+you want: you have a scratch directory, a notes folder, a pile of downloads to
+sort, or a repository you want worked on in place. A **standalone agent** is for
+exactly that. You pick a folder, and the AI runs there.
+
+In the browser, open the launcher's `⋯` menu and pick **New standalone agent…**;
+in the terminal UI, run the `new-standalone-agent` palette command. Both open a
+folder browser. Unlike adding a project, any folder is accepted: it does not have
+to be a git repository, and dux initializes nothing in it.
+
+What a standalone agent does NOT have:
+
+- **No branch and no worktree.** dux creates nothing on disk for it.
+- **No project.** It sits among your other agents in the sidebar, told apart by
+  its folder on the row's second line, and it belongs to no project group.
+- **No branch features.** Pushing, pulling, forking, pull requests, branch
+  renaming and startup commands are about a branch dux manages, and there is
+  none, so those actions are absent rather than offered and refused.
+
+What it does have: the embedded terminal, agent tabs, companion terminals, the
+in-browser editor, file drops, renaming, the resource monitor and auto-reopen,
+all exactly as any other agent.
+
+### dux never touches the folder
+
+This is the rule the whole feature rests on. dux does not create, move or remove
+a standalone agent's folder, ever. Deleting the agent removes dux's own record of
+it and nothing else, and the delete dialog says so: there is no
+"also remove the worktree" checkbox, because there is no worktree. A factory
+reset skips it too, on the same principle that dux resets only what dux made.
+
+One consequence worth stating: when you drop a file onto a standalone agent, dux
+saves it in a hidden upload directory inside the folder, and because dux never
+cleans the folder up, that directory stays there after the agent is gone. Remove
+it yourself if you no longer want it.
+
+### The changes panel follows the folder
+
+Since a standalone agent has no branch, its changed-files panel is driven by the
+folder instead. When the folder is itself a git repository's top level, the panel
+works exactly as it does anywhere: changed files, diffs, staging, committing.
+Pushing stays out, because it publishes a branch.
+
+When the folder is not a repository the panel is quiet and says which quiet it
+is, because the cases are genuinely different:
+
+- The folder has no git repository at all.
+- The folder sits **inside** a repository rooted somewhere else. This one is
+  quiet on purpose: git answers questions by walking up parent directories, so
+  showing changes here would show, stage and commit to that other repository.
+  Point an agent at the repository's top level, or add it as a project, to work
+  with its changes.
+- dux could not consult git. Nothing is guessed and no change is written.
+
+A folder that becomes a repository later is noticed the next time the panel
+opens.
+
+### One standalone agent per folder
+
+dux refuses a second standalone agent in a folder that already has one. Coding
+CLIs remember their conversation history per directory, so the second agent would
+silently pick up the first one's conversation. If you want several agents working
+on one directory, add it as a project instead: agents there each get their own
+worktree, and they get [tabs](/docs/agent-tabs) too.
+
 ## Choosing a provider at creation time
 
 Every agent is tied to one provider. At creation time, dux uses whichever
-provider is configured as the default for that project:
+provider is configured as the default for that project (a standalone agent has no
+project, so it takes the global default instead):
 
 ```toml
 [[projects]]

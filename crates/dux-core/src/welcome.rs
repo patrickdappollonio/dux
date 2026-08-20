@@ -188,7 +188,7 @@ pub const WELCOME_TIPS: &[WelcomeTip] = &[
     WelcomeTip {
         web: None,
         tui: Some(|_resolve| {
-            "Worktrees are the secret sauce: each agent gets its own isolated branch. No conflicts, ever.".into()
+            "Worktrees are the secret sauce: an agent in a project gets its own isolated branch. No conflicts, ever.".into()
         }),
     },
     WelcomeTip {
