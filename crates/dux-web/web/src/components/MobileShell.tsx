@@ -52,6 +52,7 @@ import { matchOwner } from "@/lib/terminalOwner"
 import { terminalsForOwner, terminalTitle } from "@/lib/terminals"
 import { cn } from "@/lib/utils"
 import {
+  folderWorkspace,
   sessionLabel,
   workspaceBranchName,
   workspaceProjectId,
@@ -325,6 +326,11 @@ function MobileHeaderLanes({
     name: sessionLabel(session),
     provider,
     projectName,
+    // A STANDALONE agent's answer to the project question. Without it the phone
+    // header said only the agent's name and its assistant, so nothing on screen
+    // said where it was working; the chip model has carried the directory chip
+    // all along and this call site simply never handed it the label.
+    folderLabel: folderWorkspace(session.workspace)?.folder_label,
     branchName: workspaceBranchName(session.workspace),
   })
   const LeadGlyph = CHIP_GLYPHS[lead.kind]

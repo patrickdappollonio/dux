@@ -756,7 +756,13 @@ impl Engine {
             .iter()
             .find(|s| {
                 s.id != exclude_id
-                    && s.directory() == worktree_path
+                    // Canonical comparison, like every other place dux asks
+                    // whether two agents occupy one directory (the
+                    // occupied-directory refusal at create, the worktree
+                    // manager). A raw string compare misses a symlinked
+                    // spelling of the same worktree, and then both agents run a
+                    // provider in it and resume each other's conversation.
+                    && crate::project_browser::same_directory(s.directory(), worktree_path)
                     // Tab-aware: a conflicting session may have its session-slot tab dead
                     // while an extra tab is still live in the shared worktree.
                     // `providers` is tab-keyed, so check every tab, not just `s.id`.
@@ -3650,6 +3656,39 @@ mod tests {
         assert!(!engine.running_provider_pins.contains_key("v-tab"));
         // ...but its extra-tab ROW survives: the session still exists, detached.
         assert!(engine.agent_tabs.contains_key("v-tab"));
+    }
+
+    /// Two spellings of one directory are one directory. The comparison used to
+    /// be a raw string compare, so a symlinked path let a second agent launch a
+    /// provider in a worktree another agent was already running in, which is the
+    /// shared-conversation hazard every other same-directory check in dux
+    /// compares canonically to avoid.
+    #[test]
+    fn detach_conflicting_sees_through_a_symlinked_spelling_of_the_worktree() {
+        use crate::pty::PtyClient;
+        let (mut engine, _tmp) = test_engine();
+        let tmp = tempfile::tempdir().expect("worktree dir");
+        let real = tmp.path().join("real");
+        std::fs::create_dir_all(&real).expect("real worktree");
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink the worktree");
+
+        let mut victim = sample_session("victim", "p1", "feat");
+        victim
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = real.to_string_lossy().to_string();
+        engine.sessions.push(victim);
+        engine.providers.insert(
+            "victim".to_string(),
+            PtyClient::spawn_with_env("cat", &[], &real, 24, 80, 1000, &[]).unwrap(),
+        );
+
+        let detached =
+            engine.detach_conflicting_worktree_session(link.to_string_lossy().as_ref(), "req");
+        assert_eq!(detached.map(|d| d.id), Some("victim".to_string()));
+        assert!(!engine.providers.contains_key("victim"));
     }
 
     #[test]

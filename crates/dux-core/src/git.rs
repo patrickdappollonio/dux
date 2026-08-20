@@ -7901,6 +7901,39 @@ mod tests {
         assert_eq!(folder_repo_status(&link), FolderRepoStatus::WorkingRepo);
     }
 
+    // ── SHARED VECTORS with paths.test.ts `standaloneAgentDefaultName` ────────
+    //
+    // The web's create dialog PROMISES this name in its placeholder ("defaults
+    // to ..."), so the browser has to derive the same string the server will
+    // actually store. These are the cases a plain trailing-segment read gets
+    // wrong.
+    #[test]
+    fn the_default_standalone_name_collapses_whitespace_and_never_ends_up_empty() {
+        for (folder, expected) in [
+            ("/home/ada/notes", "notes"),
+            ("/home/ada/notes/", "notes"),
+            // Runs of whitespace collapse and the ends are trimmed, so a name
+            // copied out of a file manager does not render with a ragged gap.
+            ("/home/ada/My   Notes ", "My Notes"),
+            // Nothing usable left: the root, a name of only whitespace, nothing
+            // at all.
+            ("/", "Standalone agent"),
+            ("/home/ada/   ", "Standalone agent"),
+            ("", "Standalone agent"),
+        ] {
+            assert_eq!(
+                standalone_agent_title("", Path::new(folder)),
+                expected,
+                "for {folder:?}"
+            );
+        }
+        // A typed name wins, trimmed and otherwise verbatim.
+        assert_eq!(
+            standalone_agent_title("  Sort the downloads!  ", Path::new("/home/ada/notes")),
+            "Sort the downloads!"
+        );
+    }
+
     #[test]
     fn only_a_working_repo_lets_the_changes_panel_mutate_anything() {
         assert!(FolderRepoStatus::WorkingRepo.changes_panel_works());

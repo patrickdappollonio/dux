@@ -410,6 +410,22 @@ impl Engine {
         let label = spec.label;
         let label_for_thread = label.clone();
 
+        // Test-only: take the same exit a synchronous spawn failure takes,
+        // without exhausting the machine's process table to provoke a real one.
+        // A caller holding a single-instance slot for this loop has to release
+        // it when this returns false, so that recovery has to be reachable from
+        // a test.
+        #[cfg(test)]
+        if self
+            .force_loop_worker_spawn_failure
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            crate::logger::error(&format!(
+                "spawn_loop_worker[{label}] failed to spawn thread: injected test failure",
+            ));
+            return false;
+        }
+
         let spawn_result = thread::Builder::new()
             .name(format!("dux-loop-{label_for_thread}"))
             .spawn(move || {

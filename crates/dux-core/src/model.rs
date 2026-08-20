@@ -946,6 +946,58 @@ mod tests {
         );
     }
 
+    fn folder_session(title: Option<&str>, folder_path: &str) -> AgentSession {
+        let now = Utc::now();
+        AgentSession {
+            id: "sa1".to_string(),
+            provider: ProviderKind::new("claude"),
+            workspace: AgentWorkspace::Folder(FolderWorkspace {
+                folder_path: folder_path.to_string(),
+            }),
+            title: title.map(str::to_string),
+            started_providers: Vec::new(),
+            desired_running: false,
+            auto_reopen_enabled: false,
+            status: SessionStatus::Detached,
+            created_at: now,
+            updated_at: now,
+            last_focused_tab: None,
+        }
+    }
+
+    // ── SHARED VECTORS with agentWorkspace.test.ts `sessionLabel` ──────────────
+    //
+    // The web has its own `sessionLabel`, and the two must name one agent the
+    // same thing. The path cases below are the ones a split-on-slash gets wrong;
+    // they are MEASURED here against `Path::file_name` and mirrored there.
+    #[test]
+    fn display_label_names_a_standalone_agent_after_its_folder() {
+        // A title always wins, whatever the folder is called.
+        assert_eq!(
+            folder_session(Some("My notes"), "/home/someone/notes").display_label(),
+            "My notes"
+        );
+        for (path, expected) in [
+            ("/home/someone/notes", "notes"),
+            // A trailing slash names the same folder.
+            ("/home/someone/notes/", "notes"),
+            // A trailing "." is not a name of its own.
+            ("/home/someone/notes/.", "notes"),
+            // A path whose last component is ".." has no name at all, so the
+            // label falls back to the whole path rather than the word "..".
+            ("/home/someone/notes/..", "/home/someone/notes/.."),
+            // Nor has the root, nor the empty string.
+            ("/", "/"),
+            ("", ""),
+        ] {
+            assert_eq!(
+                folder_session(None, path).display_label(),
+                expected,
+                "for {path:?}"
+            );
+        }
+    }
+
     #[test]
     fn resolved_focused_tab_none_falls_back_to_session_slot() {
         let session = session_with_focus(None);

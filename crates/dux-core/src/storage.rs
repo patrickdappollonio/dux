@@ -1336,6 +1336,26 @@ impl SessionStore {
             );
             let workspace = match kind {
                 crate::model::AgentWorkspaceKind::Managed => {
+                    // A managed row's working copy is where its provider is
+                    // spawned, where git runs and what deletion may remove, so
+                    // an empty one is not an agent dux can load either. The
+                    // strictness mirrors the folder arm below, and the
+                    // population is the same one: `from_str` reads an unknown
+                    // workspace kind as MANAGED, so a row written by a newer dux
+                    // (or edited by hand) whose real shape has no worktree lands
+                    // here with every git column empty. Admitted, it would
+                    // enrol in branch sync with an empty branch and render as a
+                    // nameless row. Skipped, loudly, instead.
+                    let worktree_path: String = row.get(5)?;
+                    if worktree_path.trim().is_empty() {
+                        let id: String = row.get(0)?;
+                        crate::logger::error(&format!(
+                            "skipping session {id}: it is recorded as running in a working copy \
+                             dux manages but the row names no worktree, so there is no directory \
+                             to run it in"
+                        ));
+                        return Ok(None);
+                    }
                     crate::model::AgentWorkspace::Managed(crate::model::ManagedWorkspace {
                         project_id: row.get::<_, String>(1).unwrap_or_default(),
                         project_path: row.get(7)?,
@@ -1345,7 +1365,7 @@ impl SessionStore {
                         branch_provenance: crate::model::BranchProvenance::from_str(
                             row.get::<_, String>(16)?.as_str(),
                         ),
-                        worktree_path: row.get(5)?,
+                        worktree_path,
                     })
                 }
                 crate::model::AgentWorkspaceKind::Folder => {
@@ -1726,6 +1746,45 @@ mod tests {
         assert!(store.load_sessions().unwrap().iter().all(|s| s.id != "sa1"));
     }
 
+    /// The same strictness from the other side: a MANAGED row that names no
+    /// worktree is skipped too.
+    ///
+    /// It is reachable the same way the folder arm's refusal is, and by one more
+    /// door: an unknown `workspace_kind` reads as managed on purpose, so a row
+    /// whose real shape this build has never heard of arrives here with every
+    /// git column empty. Loaded, it would enrol in branch sync with an empty
+    /// branch and render as a nameless row pointing at "".
+    #[test]
+    fn a_managed_row_with_no_worktree_is_refused_rather_than_loaded_empty() {
+        let (_dir, store) = temp_store();
+        let now = Utc::now();
+        store
+            .upsert_session(&test_session_in("m1", "p1", now, now))
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "update agent_sessions set worktree_path = '' where id = 'm1'",
+                [],
+            )
+            .unwrap();
+        assert!(
+            store.load_sessions().unwrap().iter().all(|s| s.id != "m1"),
+            "a managed row with no worktree must not load as an agent"
+        );
+
+        // And through the other door: a kind this build cannot classify reads as
+        // managed, and such a row has no worktree either.
+        store
+            .conn
+            .execute(
+                "update agent_sessions set workspace_kind = 'something-newer' where id = 'm1'",
+                [],
+            )
+            .unwrap();
+        assert!(store.load_sessions().unwrap().iter().all(|s| s.id != "m1"));
+    }
+
     /// A new standalone agent lands at the TOP of the list.
     ///
     /// Its row stores an empty project id, so taking the minimum over "its
@@ -1776,9 +1835,15 @@ mod tests {
     }
 
     /// The self-healing backfill freezes an empty `initial_branch` to
-    /// `branch_name`. A standalone row has both empty and must be left alone:
-    /// healing it would write a branch identity onto an agent that has none,
-    /// and the kind column is what makes that gate possible.
+    /// `branch_name`. What this pins is the OUTCOME for a standalone row: it
+    /// comes back through `migrate()` with no branch identity invented for it.
+    ///
+    /// It deliberately does not claim to prove the kind gate is load-bearing,
+    /// because it is not: a folder row has `branch_name` empty too, so the
+    /// assignment would be '' to '' with or without the gate. The gate is there
+    /// so a future change to either side (a default branch name, a non-empty
+    /// placeholder) cannot start writing a branch onto an agent that has none,
+    /// and this test is what would notice if one did.
     #[test]
     fn the_initial_branch_healing_never_touches_a_standalone_row() {
         let (_dir, store) = temp_store();

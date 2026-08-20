@@ -610,15 +610,26 @@ fn reset_agent_data(paths: &DuxPaths) -> Result<()> {
                     // path check inside the removal: a standalone agent pointed
                     // AT a directory under dux's managed root would sail past
                     // that check and have the ground deleted from under it.
+                    //
+                    // TWO PASSES, and the order is the whole point. Collecting
+                    // the occupied folders while already removing worktrees left
+                    // the removal deciding with a half-filled list: a managed
+                    // worktree that CONTAINS (or IS) a standalone agent's folder
+                    // ends in an unconditional `remove_dir_all`, so whether the
+                    // user's folder survived came down to which row the loader
+                    // happened to return first.
+                    for session in &sessions {
+                        if session.workspace.as_managed().is_none() {
+                            occupied_folders
+                                .push(canonical_or_original(Path::new(session.directory())));
+                        }
+                    }
                     let mut removed = 0usize;
                     for session in &sessions {
-                        match session.workspace.as_managed() {
-                            Some(managed) => {
-                                remove_session_worktree(paths, managed);
-                                removed += 1;
-                            }
-                            None => occupied_folders
-                                .push(canonical_or_original(Path::new(session.directory()))),
+                        if let Some(managed) = session.workspace.as_managed()
+                            && remove_session_worktree(paths, managed, &occupied_folders)
+                        {
+                            removed += 1;
                         }
                     }
                     println!("removed {removed} session worktree(s)");
@@ -698,21 +709,53 @@ fn remove_worktrees_root_sparing(root: &Path, occupied: &[PathBuf]) -> Result<()
     Ok(())
 }
 
-/// Remove one agent's MANAGED worktree during a factory reset.
+/// Whether a managed worktree must be left standing because it IS, or CONTAINS,
+/// a folder a standalone agent occupies.
+///
+/// The same rule [`remove_worktrees_root_sparing`] applies to the root's own
+/// entries, and compared the same way: canonically, so a symlinked spelling
+/// cannot slip past. A worktree strictly INSIDE an occupied folder is not spared
+/// here, deliberately: dux made that worktree and resets what it made, and the
+/// user's folder itself is still standing around it afterwards.
+fn worktree_holds_occupied_folder(worktree: &Path, occupied: &[PathBuf]) -> bool {
+    let worktree = canonical_or_original(worktree);
+    occupied.iter().any(|folder| folder.starts_with(&worktree))
+}
+
+/// Remove one agent's MANAGED worktree during a factory reset. Returns whether
+/// it was actually removed, so the caller's count cannot claim a skip.
 ///
 /// It takes a [`ManagedWorkspace`], not a session, and that is the guard: this
 /// function ends in an unconditional `remove_dir_all`, so a standalone agent's
 /// folder must not be nameable here at all. The managed-root path check below
 /// is not enough on its own, because a standalone agent pointed at a directory
 /// under dux's managed root would pass it.
-fn remove_session_worktree(paths: &DuxPaths, managed: &dux_core::model::ManagedWorkspace) {
+///
+/// `occupied` closes the other door: the worktree itself may BE, or contain, a
+/// folder a standalone agent occupies (point a standalone agent at an empty
+/// directory under the managed root, then create a managed agent whose worktree
+/// lands on it). The `remove_dir_all` would take the user's folder with it, so
+/// the whole removal is skipped and the reason is printed.
+fn remove_session_worktree(
+    paths: &DuxPaths,
+    managed: &dux_core::model::ManagedWorkspace,
+    occupied: &[PathBuf],
+) -> bool {
     let worktree = Path::new(&managed.worktree_path);
     if !git::is_under(&paths.worktrees_root, worktree) {
         eprintln!(
             "warning: skipping worktree outside of managed root: {}",
             managed.worktree_path
         );
-        return;
+        return false;
+    }
+    if worktree_holds_occupied_folder(worktree, occupied) {
+        eprintln!(
+            "warning: keeping {}: a standalone agent is running in that directory or one \
+             inside it, and dux never removes a folder it did not make",
+            managed.worktree_path
+        );
+        return false;
     }
 
     // Route through the shared core removal so the worktree is removed with the
@@ -747,6 +790,7 @@ fn remove_session_worktree(paths: &DuxPaths, managed: &dux_core::model::ManagedW
     if worktree.exists() {
         let _ = fs::remove_dir_all(worktree);
     }
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -933,6 +977,127 @@ mod tests {
             !managed.exists(),
             "dux's own managed worktree is still reset: it made that one"
         );
+    }
+
+    /// The other door into the same data loss: the folder is not beside the
+    /// managed worktrees, it is INSIDE one. The removal of that worktree ends in
+    /// an unconditional `remove_dir_all`, so it took the user's folder with it,
+    /// and which of the two rows the loader returned first decided whether it
+    /// happened at all.
+    ///
+    /// Reachable: point a standalone agent at an empty directory under the
+    /// managed root, then create a managed agent whose worktree lands on it.
+    #[test]
+    fn a_factory_reset_keeps_a_standalone_folder_inside_a_managed_worktree() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths = DuxPaths {
+            root: tmp.path().to_path_buf(),
+            config_path: tmp.path().join("config.toml"),
+            sessions_db_path: tmp.path().join("sessions.sqlite3"),
+            worktrees_root: tmp.path().join("worktrees"),
+            lock_path: tmp.path().join("dux.lock"),
+        };
+        let managed_worktree = paths.worktrees_root.join("proj").join("feat");
+        let occupied = managed_worktree.join("notes");
+        fs::create_dir_all(&occupied).expect("occupied dir");
+        fs::write(occupied.join("notes.txt"), "mine\n").expect("seed a file");
+
+        let now = Utc::now();
+        let store = SessionStore::open(&paths.sessions_db_path).expect("store");
+        // The MANAGED row first, so the loader's order is the hostile one even
+        // without relying on how it sorts.
+        store
+            .upsert_session(&AgentSession {
+                id: "m1".to_string(),
+                provider: ProviderKind::new("claude"),
+                workspace: dux_core::model::AgentWorkspace::Managed(
+                    dux_core::model::ManagedWorkspace {
+                        project_id: "p1".to_string(),
+                        // No owning repo, so the removal is the CLI's own
+                        // `remove_dir_all` and no git subprocess runs.
+                        project_path: None,
+                        source_branch: "main".to_string(),
+                        branch_name: "feat".to_string(),
+                        initial_branch: "feat".to_string(),
+                        branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
+                        worktree_path: managed_worktree.to_string_lossy().to_string(),
+                    },
+                ),
+                title: None,
+                started_providers: Vec::new(),
+                desired_running: false,
+                auto_reopen_enabled: false,
+                status: SessionStatus::Detached,
+                created_at: now,
+                updated_at: now,
+                last_focused_tab: None,
+            })
+            .expect("upsert managed");
+        store
+            .upsert_session(&AgentSession {
+                id: "sa1".to_string(),
+                provider: ProviderKind::new("claude"),
+                workspace: dux_core::model::AgentWorkspace::Folder(
+                    dux_core::model::FolderWorkspace {
+                        folder_path: occupied.to_string_lossy().to_string(),
+                    },
+                ),
+                title: Some("notes".to_string()),
+                started_providers: Vec::new(),
+                desired_running: false,
+                auto_reopen_enabled: false,
+                status: SessionStatus::Detached,
+                created_at: now,
+                updated_at: now,
+                last_focused_tab: None,
+            })
+            .expect("upsert standalone");
+        drop(store);
+
+        reset_agent_data(&paths).expect("reset");
+
+        assert_eq!(
+            fs::read_to_string(occupied.join("notes.txt")).expect("the folder survives"),
+            "mine\n",
+            "a standalone agent's folder survives even when a managed worktree encloses it"
+        );
+    }
+
+    /// The skip rule itself, on the four ways two paths can overlap. Only the
+    /// two where removing the worktree would take the user's folder with it are
+    /// spared.
+    #[test]
+    fn the_reset_skip_rule_spares_a_worktree_that_is_or_holds_an_occupied_folder() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        let worktree = root.join("wt");
+        fs::create_dir_all(worktree.join("inner")).expect("dirs");
+        fs::create_dir_all(root.join("elsewhere")).expect("dirs");
+
+        // Equal: the standalone agent is running in the worktree itself.
+        assert!(worktree_holds_occupied_folder(
+            &worktree,
+            std::slice::from_ref(&worktree)
+        ));
+        // The worktree CONTAINS the folder: removing it recursively takes the
+        // folder with it.
+        assert!(worktree_holds_occupied_folder(
+            &worktree,
+            &[worktree.join("inner")]
+        ));
+        // The folder CONTAINS the worktree: dux made the worktree, so it goes,
+        // and the user's folder is still there around it.
+        assert!(!worktree_holds_occupied_folder(
+            &worktree.join("inner"),
+            std::slice::from_ref(&worktree)
+        ));
+        // Disjoint.
+        assert!(!worktree_holds_occupied_folder(
+            &worktree,
+            &[root.join("elsewhere")]
+        ));
+        // Nothing occupied at all is the ordinary reset.
+        assert!(!worktree_holds_occupied_folder(&worktree, &[]));
     }
 
     #[test]
@@ -1799,6 +1964,7 @@ mod tests {
                 .workspace
                 .as_managed()
                 .expect("the fixture builds a managed agent"),
+            &[],
         );
 
         assert!(!worktree.exists(), "the worktree directory must be removed");
@@ -1892,6 +2058,7 @@ mod tests {
                 .workspace
                 .as_managed()
                 .expect("the fixture builds a managed agent"),
+            &[],
         );
 
         assert!(!worktree.exists(), "the worktree directory must be removed");

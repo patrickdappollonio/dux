@@ -146,6 +146,32 @@ describe("DeleteSessionDialog", () => {
     expect(deleteSession).toHaveBeenCalledWith("sa1", false)
   })
 
+  // The checkbox state outlives one open: the dialog stays mounted. A box ticked
+  // for a managed agent and then reopened on a standalone one used to send
+  // `delete_worktree: true` for an agent that has no worktree, which the server
+  // refuses out loud, with no control on screen to clear it.
+  it("does not carry a ticked worktree box over to a standalone agent", () => {
+    const standalone = {
+      id: "sa1",
+      title: "notes",
+      workspace: {
+        kind: "folder",
+        folder_path: "/home/someone/notes",
+        folder_label: "~/notes",
+        repo_status: "working_repo",
+        quiet_reason: "",
+      },
+    }
+    seed("s1", [session1, standalone])
+    const { rerender } = render(<DeleteSessionDialog />)
+    fireEvent.click(screen.getByRole("checkbox"))
+
+    seed("sa1", [session1, standalone])
+    rerender(<DeleteSessionDialog />)
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }))
+    expect(deleteSession).toHaveBeenCalledWith("sa1", false)
+  })
+
   it("says the branch is kept when the agent attached to one it did not create", () => {
     // Promising to delete a branch dux will deliberately keep is the same class
     // of bug from the other direction: the dialog has to describe what happens.

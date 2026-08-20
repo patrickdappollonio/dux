@@ -65,6 +65,7 @@ pub(crate) fn test_engine() -> (Engine, TempDir) {
         pending_group_removals: Vec::new(),
         gh_status: GhStatus::Unknown,
         force_worker_spawn_failure: false,
+        force_loop_worker_spawn_failure: AtomicBool::new(false),
         gh_probe: Default::default(),
         pr_statuses: HashMap::new(),
         pr_overrides: HashMap::new(),

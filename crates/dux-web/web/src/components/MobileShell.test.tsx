@@ -374,6 +374,66 @@ describe("MobileShell drawer header", () => {
   })
 })
 
+// The phone header's second lane, for a STANDALONE agent: the folder takes the
+// slot a project would. The chip model has always been able to draw it, and the
+// helper's own test passed, while this call site never handed it the label. The
+// assertion lives at the component so the pure test cannot mask it again.
+describe("MobileShell phone header for a standalone agent", () => {
+  function standaloneSpine(): DuxState["spine"] {
+    return {
+      projects: [],
+      sessions: [
+        {
+          id: "sa1",
+          workspace: {
+            kind: "folder",
+            folder_path: "/home/someone/notes",
+            folder_label: "~/notes",
+            repo_status: "working_repo",
+            quiet_reason: "",
+          },
+          title: "notes",
+          provider: "claude",
+          status: "active",
+          auto_reopen_enabled: false,
+          tabs: [
+            {
+              id: "sa1",
+              provider: "claude",
+              order: 0,
+              working: false,
+              has_output: false,
+              has_live_process: true,
+            },
+          ],
+          has_output: false,
+          working: false,
+        },
+      ],
+      sidebar: { groups: [], agentless_start: null },
+    } as unknown as DuxState["spine"]
+  }
+
+  it("names the folder in the header", () => {
+    mockState = makeState({
+      spine: standaloneSpine(),
+      bootstrap: {
+        title: "dux",
+        dux_version: "v1",
+        available_providers: ["claude"],
+      },
+      selectedTarget: { kind: "agent", sessionId: "sa1", tabId: "sa1" },
+      selectedSessionId: "sa1",
+      mobileScreen: "terminal",
+      changes: { sessionId: "sa1", phase: "loaded", staged: [], unstaged: [] },
+      startedDormantTabs: [],
+      terminalEpoch: 0,
+    } as unknown as Partial<DuxState>)
+    render(<MobileShell />)
+    expect(screen.getByText("~/notes")).toBeTruthy()
+  })
+})
+
 // The in-app Back chevrons and the not-found screen's way out are UP controls,
 // not history steps. A deep-link boot pushes nothing, so on those screens dux's
 // own first entry IS the screen being shown, and a relative step from there

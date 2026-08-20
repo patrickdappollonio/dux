@@ -7,6 +7,7 @@ import {
   folderWorkspace,
   managedWorkspace,
   matchWorkspace,
+  sessionLabel,
   supportsBranchGit,
   workspaceBranchName,
   workspaceDirectory,
@@ -109,6 +110,47 @@ describe("agent workspace", () => {
   // a compile error, and it is asserted here as the last line of defence for a
   // hand-built workspace that skipped ingestion, NOT as the behaviour a real
   // newer server produces.
+  // ── SHARED VECTORS with dux-core `model.rs`
+  // `display_label_names_a_standalone_agent_after_its_folder` ────────────────
+  //
+  // The two surfaces name one agent, so they must name it the same thing. The
+  // path cases are the ones a split-on-slash gets wrong, measured on the Rust
+  // side against `Path::file_name`.
+  it("names a standalone agent exactly as dux-core's display_label does", () => {
+    const withFolder = (folder_path: string, title: string | null = null) => ({
+      title,
+      workspace: {
+        kind: "folder" as const,
+        folder_path,
+        folder_label: "~/elsewhere",
+        repo_status: "working_repo" as const,
+        quiet_reason: "",
+      },
+    })
+
+    // A title always wins, whatever the folder is called.
+    expect(sessionLabel(withFolder("/home/someone/notes", "My notes"))).toBe(
+      "My notes",
+    )
+    expect(sessionLabel(withFolder("/home/someone/notes"))).toBe("notes")
+    // A trailing slash names the same folder.
+    expect(sessionLabel(withFolder("/home/someone/notes/"))).toBe("notes")
+    // A trailing "." is not a name of its own.
+    expect(sessionLabel(withFolder("/home/someone/notes/."))).toBe("notes")
+    // A path whose last component is ".." has no name at all, so the label
+    // falls back to the whole path rather than the word "..".
+    expect(sessionLabel(withFolder("/home/someone/notes/.."))).toBe(
+      "/home/someone/notes/..",
+    )
+    // Nor has the root, nor the empty string. Both fall back to the same field
+    // the Rust side falls back to, the path itself.
+    expect(sessionLabel(withFolder("/"))).toBe("/")
+    expect(sessionLabel(withFolder(""))).toBe("")
+
+    // A managed agent still takes its branch.
+    expect(sessionLabel({ title: null, workspace: managed })).toBe("feature/x")
+  })
+
   it("refuses to guess at a workspace kind it has never heard of", () => {
     const future = { kind: "something-new" } as unknown as AgentWorkspaceWire
     expect(() =>

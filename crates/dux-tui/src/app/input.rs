@@ -2527,9 +2527,31 @@ impl App {
     /// The web twin is `git_routes::resolve_changes_worktree`; both read the one
     /// engine verdict, so the two surfaces cannot disagree about a folder.
     fn changes_worktree_for_selection(&mut self) -> Option<PathBuf> {
+        self.selection_changes_directory(true)
+    }
+
+    /// The same directory for a changes-panel READ (the file diff). A separate
+    /// entry point because it is a different question: staging and showing a
+    /// diff are gated by two engine predicates, identical today and deliberately
+    /// kept apart for the day a read-only repository view shows files it must
+    /// not let you stage. Routing the diff through here rather than reading the
+    /// session's directory raw is what keeps a stale `WorkingRepo` verdict from
+    /// rendering every file in a folder with no repository as fully added.
+    pub(crate) fn diff_worktree_for_selection(&mut self) -> Option<PathBuf> {
+        self.selection_changes_directory(false)
+    }
+
+    /// `mutating` picks which of the two engine predicates decides. Both set the
+    /// folder's own refusal sentence and answer `None`.
+    fn selection_changes_directory(&mut self, mutating: bool) -> Option<PathBuf> {
         let session_id = self.selected_session()?.id.clone();
         let access = self.engine.session_git_access(&session_id)?;
-        if !access.mutations_allowed() {
+        let allowed = if mutating {
+            access.mutations_allowed()
+        } else {
+            access.changes_panel_works()
+        };
+        if !allowed {
             self.set_error(
                 access
                     .quiet_reason()
@@ -10497,6 +10519,45 @@ not_a_real_action = ["x"]
         assert!(
             !app.status.text().to_lowercase().contains("busy"),
             "a folder with no repository is never a busy one: {}",
+            app.status.text()
+        );
+    }
+
+    /// Opening a DIFF is a git read, and it goes through the same folder gate.
+    /// Ungated it is worse than broken: the base version of every file comes
+    /// back empty in a folder with no repository, which the diff renders as a
+    /// fully added file.
+    #[test]
+    fn opening_a_diff_refuses_a_folder_with_no_repository_in_its_own_words() {
+        let folder = tempfile::tempdir().expect("folder");
+        std::fs::write(folder.path().join("notes.md"), "hello\n").expect("a file to diff");
+        let mut app = test_app(default_bindings());
+        select_standalone_agent(&mut app, folder.path());
+        app.engine.folder_repo_statuses.insert(
+            app.engine.sessions[0].id.clone(),
+            dux_core::git::FolderRepoStatus::NoRepo,
+        );
+        app.engine.unstaged_files = vec![dux_core::model::ChangedFile {
+            path: "notes.md".to_string(),
+            status: "M".to_string(),
+            additions: 1,
+            deletions: 0,
+            binary: false,
+        }];
+        app.right_section = RightSection::Unstaged;
+        app.files_index = 0;
+
+        app.open_diff_for_selected_file()
+            .expect("the refusal is not an error");
+
+        assert!(
+            !matches!(app.center_mode, CenterMode::Diff { .. }),
+            "no diff is opened for a folder git cannot answer for"
+        );
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
+        assert!(
+            app.status.text().contains("no git repository"),
+            "got {}",
             app.status.text()
         );
     }

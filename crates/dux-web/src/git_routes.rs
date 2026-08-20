@@ -135,18 +135,54 @@ pub(crate) async fn resolve_changes_worktree(
     state: &AppState,
     session_id: String,
 ) -> Result<PathBuf, Response> {
-    match state.engine.session_git_access(session_id).await {
-        Some(access) if access.changes_panel_works() => Ok(access.directory().to_path_buf()),
-        Some(access) => Err((
-            StatusCode::CONFLICT,
-            access
-                .quiet_reason()
-                .unwrap_or("dux cannot work with git in this folder.")
-                .to_string(),
-        )
-            .into_response()),
-        None => Err((StatusCode::NOT_FOUND, "unknown session").into_response()),
+    resolve_git_directory(state, session_id, GitAsk::Read).await
+}
+
+/// The same directory for a route that WRITES (stage, unstage, discard,
+/// commit), gated on the engine's mutation predicate instead.
+///
+/// A separate entry point because it is a separate question: the two predicates
+/// answer identically today, and a read-only repository view would show files it
+/// must not let anyone stage. Asking the read question in a mutating handler is
+/// how that difference would go unnoticed the day it appears.
+pub(crate) async fn resolve_mutation_worktree(
+    state: &AppState,
+    session_id: String,
+) -> Result<PathBuf, Response> {
+    resolve_git_directory(state, session_id, GitAsk::Mutate).await
+}
+
+/// Which of the two engine predicates a resolution asks.
+#[derive(Clone, Copy)]
+enum GitAsk {
+    Read,
+    Mutate,
+}
+
+async fn resolve_git_directory(
+    state: &AppState,
+    session_id: String,
+    ask: GitAsk,
+) -> Result<PathBuf, Response> {
+    let access = match state.engine.session_git_access(session_id).await {
+        Some(access) => access,
+        None => return Err((StatusCode::NOT_FOUND, "unknown session").into_response()),
+    };
+    let allowed = match ask {
+        GitAsk::Read => access.changes_panel_works(),
+        GitAsk::Mutate => access.mutations_allowed(),
+    };
+    if allowed {
+        return Ok(access.directory().to_path_buf());
     }
+    Err((
+        StatusCode::CONFLICT,
+        access
+            .quiet_reason()
+            .unwrap_or("dux cannot work with git in this folder.")
+            .to_string(),
+    )
+        .into_response())
 }
 
 /// Reject a file path that isn't a real changed file git is tracking in this
@@ -268,7 +304,7 @@ async fn discard(
         return unknown_session();
     }
     let session_id = id.clone();
-    let worktree = match resolve_changes_worktree(&state, id).await {
+    let worktree = match resolve_mutation_worktree(&state, id).await {
         Ok(w) => w,
         Err(r) => return r,
     };
@@ -323,7 +359,7 @@ async fn file_op<F>(
 where
     F: FnOnce(PathBuf, String) -> anyhow::Result<()> + Send + 'static,
 {
-    let worktree = match resolve_changes_worktree(&state, session_id.clone()).await {
+    let worktree = match resolve_mutation_worktree(&state, session_id.clone()).await {
         Ok(w) => w,
         Err(r) => return r,
     };
@@ -358,7 +394,7 @@ async fn commit(
             .into_response();
     }
     let session_id = id.clone();
-    let worktree = match resolve_changes_worktree(&state, id).await {
+    let worktree = match resolve_mutation_worktree(&state, id).await {
         Ok(w) => w,
         Err(r) => return r,
     };

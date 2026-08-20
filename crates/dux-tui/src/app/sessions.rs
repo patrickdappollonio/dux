@@ -3489,15 +3489,22 @@ impl App {
     }
 
     pub(crate) fn open_diff_for_selected_file(&mut self) -> Result<()> {
-        let Some(session) = self.selected_session() else {
+        if self.selected_session().is_none() {
             self.set_error("Select a session first.");
             return Ok(());
-        };
-        let Some(file) = self.selected_changed_file() else {
+        }
+        let Some(rel_path) = self.selected_changed_file().map(|file| file.path.clone()) else {
             return Ok(());
         };
-        let worktree_path = session.directory().to_string();
-        let rel_path = file.path.clone();
+        // Through the same gate every other changes-panel action uses, rather
+        // than reading the session's directory raw. The two answers are
+        // identical today; the gate is what stops a folder with no repository
+        // from rendering every file as fully added (the base version comes back
+        // empty, which a diff reads as "new file").
+        let Some(worktree_path) = self.diff_worktree_for_selection() else {
+            return Ok(());
+        };
+        let worktree_path = worktree_path.to_string_lossy().to_string();
         let output = crate::diff::diff_file(
             Path::new(&worktree_path),
             &rel_path,

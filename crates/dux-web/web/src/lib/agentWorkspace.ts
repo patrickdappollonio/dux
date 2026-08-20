@@ -190,7 +190,11 @@ export function workspaceLocation(
  * same reason: every label site used to fall back through the branch name, and
  * a standalone agent has none, so those sites would have rendered a nameless
  * row. Creation guarantees a standalone agent has a title, so the folder
- * fallback here is belt and braces rather than a path users reach. */
+ * fallback here is belt and braces rather than a path users reach.
+ *
+ * The folder half is pinned by shared vectors with `display_label`'s own test,
+ * because a twin that answers differently is worse than no twin: the same agent
+ * would be called two things on the two surfaces. */
 export function sessionLabel(session: {
   title: string | null
   workspace: AgentWorkspaceWire
@@ -200,11 +204,24 @@ export function sessionLabel(session: {
   }
   return matchWorkspace(session.workspace, {
     managed: (w) => w.branch_name,
-    folder: (w) => {
-      const segments = w.folder_path.split("/").filter(Boolean)
-      return segments[segments.length - 1] ?? w.folder_label
-    },
+    folder: (w) => folderName(w.folder_path) ?? w.folder_path,
   })
+}
+
+/** The last NAMED component of a path, or null when it has none.
+ *
+ * The twin of Rust's `Path::file_name`, which is what `display_label` uses. The
+ * rules a naive split-on-slash gets wrong, all MEASURED against the real
+ * `Path::file_name`: a trailing slash is ignored, a trailing `.` is not a name
+ * (`/a/notes/.` is `notes`), and a path whose last component is `..` has no name
+ * at all rather than being labelled `..`. A path with no named component (`/`,
+ * the empty string) answers null, and the caller falls back to the whole path,
+ * exactly as the Rust side does. */
+export function folderName(folderPath: string): string | null {
+  const named = folderPath.split("/").filter((s) => s !== "" && s !== ".")
+  const last = named[named.length - 1]
+  if (last === undefined || last === "..") return null
+  return last
 }
 
 /** Whether an agent's current branch has drifted from the branch it was created

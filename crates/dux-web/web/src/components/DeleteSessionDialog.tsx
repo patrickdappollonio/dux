@@ -47,7 +47,12 @@ export function DeleteSessionDialog() {
 
   function handleConfirm() {
     if (!deleteTarget) return
-    deleteSession(deleteTarget, deleteWorktree)
+    // A standalone agent has no worktree to remove, and the server REFUSES a
+    // worktree-removing delete on one rather than downgrading it quietly. The
+    // checkbox does not exist for one, but this component stays mounted across
+    // opens, so a tick left over from a managed agent would otherwise ride along
+    // and wedge the delete in a refusal with no control on screen to clear.
+    deleteSession(deleteTarget, managed ? deleteWorktree : false)
     setDeleteWorktree(false)
     closeDelete()
   }

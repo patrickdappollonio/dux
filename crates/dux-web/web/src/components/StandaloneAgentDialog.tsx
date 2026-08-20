@@ -10,7 +10,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
-import { baseName } from "@/lib/paths"
+import { standaloneAgentDefaultName } from "@/lib/paths"
 import {
   browseDir,
   closeStandaloneAgentPicker,
@@ -82,7 +82,10 @@ function StandaloneAgentBrowser() {
             // Empty is the ordinary case: the server names the agent after the
             // folder. A typed name is used as typed, since no branch is created
             // and no ref-name rule applies.
-            placeholder={`Agent name (optional, defaults to "${baseName(selected)}")`}
+            // The promised default is derived through the twin of the server's
+            // own sanitizer, so the placeholder cannot name something other
+            // than what gets stored.
+            placeholder={`Agent name (optional, defaults to "${standaloneAgentDefaultName(selected)}")`}
           />
           <span className="font-mono text-xs break-all text-muted-foreground">
             {selected}

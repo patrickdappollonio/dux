@@ -245,6 +245,14 @@ pub struct Engine {
     /// machine's process table, which this project does not do.
     #[cfg(test)]
     pub(crate) force_worker_spawn_failure: bool,
+    /// The same injection point for LOOP workers, which spawn through
+    /// `spawn_loop_worker` and take `&self`, hence the atomic rather than a
+    /// plain bool. Consumed (reset to false) by the next loop-worker spawn,
+    /// which then returns `false` without starting a thread, exactly as a real
+    /// `thread::Builder::spawn` failure does. It exists because a loop worker's
+    /// caller may be holding a single-instance slot that only it can release.
+    #[cfg(test)]
+    pub(crate) force_loop_worker_spawn_failure: AtomicBool,
     /// State owned by the `gh` host probe: which hosts qualify, the generation
     /// stamp that keeps overlapping probes ordered, and the program to run.
     pub gh_probe: GhProbeState,
@@ -2187,7 +2195,8 @@ impl Engine {
         }
         self.mark_in_flight(key);
         let label = format!("folder-repo-probe:{session_id}");
-        self.spawn_loop_worker(LoopWorkerSpec { label }, move |tx| {
+        let probed_session = session_id.clone();
+        let started = self.spawn_loop_worker(LoopWorkerSpec { label }, move |tx| {
             let status = crate::git::folder_repo_status(&folder);
             let _ = tx.send(WorkerEvent::FolderRepoStatusReady {
                 session_id: session_id.clone(),
@@ -2197,6 +2206,29 @@ impl Engine {
             // in-flight key above is what stops that becoming a loop.
             LoopControl::Break
         });
+        if !started {
+            self.release_folder_repo_probe(&probed_session);
+        }
+    }
+
+    /// Give the probe's single-instance slot back after a spawn that never
+    /// started.
+    ///
+    /// [`Self::spawn_loop_worker`] deliberately does not clear in-flight keys
+    /// itself (its own doc says so), and this key is otherwise cleared only by
+    /// the `FolderRepoStatusReady` handler, which a thread that never ran can
+    /// never post. One failed spawn would therefore pin the key for the rest of
+    /// the run: the folder's git surface keeps answering `Unprobed`, the changes
+    /// panel stays quiet, every mutation is refused, the upload seed is
+    /// withheld, and only a restart heals it. Releasing the key re-arms the
+    /// probe instead, so the next ask (the changed-files poll, a couple of
+    /// seconds away while the panel is open) tries again.
+    fn release_folder_repo_probe(&mut self, session_id: &str) {
+        self.clear_in_flight(&InFlightKey::FolderRepoProbe(session_id.to_string()));
+        crate::logger::warn(&format!(
+            "could not start the folder classification for agent {session_id}, so dux does not \
+             know yet whether its folder is a git repository; the next look will try again"
+        ));
     }
 
     /// How many runtime PTYs are alive: one per launched provider tab plus one
@@ -3628,16 +3660,25 @@ impl Engine {
         // This canonicalizes ON THE ENGINE THREAD, which the folder probe's own
         // doc forbids for itself, and the difference is deliberate: the probe
         // runs on a poll and would repeat that cost forever, while this runs
-        // once per create, on a folder the user just picked in a browser that
-        // had to stat it to list it. The accepted cost is that a create aimed at
-        // a stalled mount blocks the actor for that one call; the alternative is
-        // a two-phase create, where the occupancy refusal would have to be
-        // re-checked after the worker returns anyway.
+        // once per create.
+        //
+        // BE HONEST ABOUT THE BLAST RADIUS, though, because it is wider than the
+        // one folder the user just picked: the loop canonicalizes EVERY existing
+        // agent's directory as well, so one hung mount anywhere in the workspace
+        // stalls the engine actor for this whole call, and the actor is what
+        // serves keystrokes to every other agent. The accepted cost is that
+        // window, on an action the user just took; the alternative is a
+        // two-phase create, where the occupancy refusal would have to be
+        // re-checked after the worker returned anyway. The candidate is
+        // canonicalized ONCE up front rather than once per session, which is the
+        // cheap half of the cost and all of it when there are no other agents.
         //
         // The refusal is a SIGNPOST, not a wall: adding the folder as a project
         // is the multi-agent shape dux is built for, and it brings tabs along.
+        let wanted = crate::project_browser::canonical_or_original(&folder);
         if let Some(existing) = self.sessions.iter().find(|session| {
-            crate::project_browser::same_directory(session.directory(), &folder.to_string_lossy())
+            crate::project_browser::canonical_or_original(std::path::Path::new(session.directory()))
+                == wanted
         }) {
             anyhow::bail!(
                 "Agent \"{}\" is already working in \"{}\". Coding CLIs resume their \
@@ -4705,6 +4746,44 @@ mod tests {
                 .recv_timeout(std::time::Duration::from_secs(10))
                 .is_ok(),
             "a later ask probes again once the previous answer landed"
+        );
+    }
+
+    /// A probe whose THREAD never started must give the in-flight key back.
+    ///
+    /// `spawn_loop_worker` does not clear keys on a spawn failure, and only the
+    /// `FolderRepoStatusReady` handler clears this one, so a single failed spawn
+    /// used to pin the key for the rest of the run: the folder answered
+    /// `Unprobed` forever, its changes panel stayed quiet, its mutations were
+    /// refused, and nothing short of a restart healed it.
+    #[test]
+    fn a_folder_repo_probe_that_cannot_spawn_re_arms_the_next_ask() {
+        let (mut engine, tmp) = test_engine();
+        let folder = tmp.path().join("plain-folder");
+        std::fs::create_dir_all(&folder).expect("folder");
+        let folder = folder.to_string_lossy().to_string();
+        engine
+            .sessions
+            .push(sample_standalone_session("sa1", &folder));
+
+        engine
+            .force_loop_worker_spawn_failure
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        engine.spawn_folder_repo_probe("sa1");
+        assert!(
+            !engine.is_in_flight(&InFlightKey::FolderRepoProbe("sa1".to_string())),
+            "a probe that never started must not keep holding its slot"
+        );
+
+        // And the next ask really does probe, without a restart or an event
+        // that can no longer arrive.
+        engine.spawn_folder_repo_probe("sa1");
+        assert!(
+            engine
+                .worker_rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .is_ok(),
+            "the ask after a failed spawn classifies the folder"
         );
     }
 
