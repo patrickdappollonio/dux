@@ -1395,14 +1395,22 @@ impl Engine {
             .iter()
             .any(|s| s.id != session.id && s.directory() == session.directory());
 
-        // A standalone agent's directory is the user's folder, so deletion
-        // removes dux's record of the agent and nothing else, ever. The named
-        // question answers that; the removal payload below cannot even be built
-        // without a managed workspace, so this is a guard and a restatement.
-        let should_remove_worktree = delete_worktree
-            && session.workspace.deletion_may_remove_directory()
-            && !other_sessions_on_worktree
-            && project.is_some();
+        // What a removal actually needs: a project to run git in AND a managed
+        // working copy to remove. Resolved as one pair up front, so the removal
+        // block below can be entered only when both exist and there is no arm
+        // in it that could delete a directory dux did not create.
+        //
+        // A standalone agent's directory is the user's folder, so its deletion
+        // removes dux's record of the agent and nothing else, ever: it has no
+        // managed workspace, so `removal_target` is `None` for it and the block
+        // is unreachable rather than guarded.
+        let removal_target = match (project.as_ref(), session.workspace.as_managed()) {
+            (Some(project), Some(managed)) if delete_worktree && !other_sessions_on_worktree => {
+                Some((project, managed))
+            }
+            _ => None,
+        };
+        let should_remove_worktree = removal_target.is_some();
 
         if self.pending_deletions.contains(session_id) {
             crate::logger::error(&format!(
@@ -1434,7 +1442,7 @@ impl Engine {
         if should_remove_worktree {
             self.closing_sessions.insert(session.id.clone());
         }
-        let remove_outcome = if should_remove_worktree {
+        let remove_outcome = if let Some((project, managed)) = removal_target {
             // Hard-kill every live tab PTY (Main + Support) and companion terminal
             // of this session BEFORE removing the worktree: dropping a `PtyClient`
             // SIGKILLs its whole process group, so no provider process is alive in
@@ -1455,16 +1463,6 @@ impl Engine {
                 self.companion_terminals.remove(terminal_id);
                 self.clear_terminal_runtime(terminal_id);
             }
-            let project = project
-                .as_ref()
-                .expect("should_remove_worktree implies a project");
-            // `deletion_may_remove_directory` above is what makes this hold: a
-            // folder workspace never reaches this branch, so there is no arm
-            // here that could delete a directory dux did not create.
-            let managed = session
-                .workspace
-                .as_managed()
-                .expect("should_remove_worktree implies a managed working copy");
             // Clear `closing_sessions` even if removal fails: the session record
             // survives an `Err` (the `?` aborts the delete), and unlike the async
             // `WorktreeRemoveCompleted` handler nothing else would clear the flag,
