@@ -2083,10 +2083,21 @@ impl Engine {
     /// name, which is why an empty title clears rather than errors here.
     fn rename_session(&mut self, session_id: &str, title: &str) -> anyhow::Result<WireStatus> {
         let trimmed = title.trim();
+        // The refname rules apply only where the name can become a git branch.
+        // A STANDALONE agent's title is a label taken verbatim at creation
+        // (folder names legally contain characters a ref cannot), so validating
+        // it as a ref here made a title dux itself minted impossible to type
+        // back. Same rule as `Engine::prepare_branch_rename`.
+        let branch_named = self
+            .sessions
+            .iter()
+            .find(|s| s.id == session_id)
+            .map(|s| s.supports_branch_git())
+            .unwrap_or(true);
         let new_title = if trimmed.is_empty() {
             None
         } else {
-            if !crate::git::is_valid_agent_name(trimmed) {
+            if branch_named && !crate::git::is_valid_agent_name(trimmed) {
                 anyhow::bail!(
                     "Invalid agent name \"{trimmed}\". Use only letters, digits, dashes, \
                      underscores and slashes; it must start with a letter or digit, must \
@@ -4381,6 +4392,101 @@ mod tests {
         );
     }
 
+    /// A standalone agent cannot be aimed at a directory ANOTHER AGENT already
+    /// occupies, whichever kind that agent is.
+    ///
+    /// The refusal exists because coding CLIs resume their conversation history
+    /// per directory, and that is just as true of a managed agent's worktree:
+    /// pointing a standalone agent there would resume the managed agent's
+    /// conversation. It is worse than a resumed conversation, too, because
+    /// launching in an occupied worktree DETACHES the agent already there, and
+    /// the survivor then blocks that worktree's deletion forever with a
+    /// "still used by other agents" message.
+    #[test]
+    fn a_standalone_agent_cannot_be_aimed_at_a_managed_agents_worktree() {
+        let (mut engine, tmp) = test_engine();
+        let worktree = tmp.path().join("wt");
+        std::fs::create_dir_all(&worktree).unwrap();
+        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        let mut managed = sample_session("s1", "p1", "feat");
+        managed
+            .workspace
+            .as_managed_mut()
+            .expect("managed")
+            .worktree_path = worktree.to_string_lossy().to_string();
+        engine.sessions.push(managed);
+
+        // Reached by a different spelling, to pin the canonical comparison.
+        let link = tmp.path().join("link-to-wt");
+        std::os::unix::fs::symlink(&worktree, &link).unwrap();
+        let message = match engine.apply_wire(WireCommand::CreateStandaloneAgent {
+            folder: link.to_string_lossy().to_string(),
+            name: String::new(),
+            provider: None,
+        }) {
+            Err(err) => err.to_string(),
+            Ok(_) => panic!("a directory another agent occupies must be refused"),
+        };
+        assert!(
+            message.contains("s1-title"),
+            "the refusal must name who is already there, got {message:?}"
+        );
+        assert!(
+            message.contains("conversation"),
+            "and why it matters, got {message:?}"
+        );
+    }
+
+    /// Two creates for the same folder cannot both get through, even before the
+    /// first one's session exists to be seen.
+    ///
+    /// The one-agent-per-folder refusal reads `self.sessions`, and a session is
+    /// not inserted until its provider has launched, which leaves a window the
+    /// refusal cannot see into. What closes it is the process-global create
+    /// lock: creates are serialised whole, and it is cleared in the same
+    /// synchronous handler that inserts the session, so there is no moment when
+    /// a create is in flight and its folder looks free.
+    ///
+    /// Pinned because the reasoning is the guarantee: nothing about the folder
+    /// refusal itself would stop the second create.
+    #[test]
+    fn two_creates_for_one_folder_cannot_both_be_in_flight() {
+        let (mut engine, _tmp) = test_engine();
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().to_string_lossy().to_string();
+        let create = || WireCommand::CreateStandaloneAgent {
+            folder: path.clone(),
+            name: String::new(),
+            provider: None,
+        };
+
+        engine
+            .apply_wire(create())
+            .expect("the first create starts");
+        assert!(
+            engine.is_in_flight(&InFlightKey::CreateAgent),
+            "and holds the process-global create lock while it runs"
+        );
+
+        // No session exists yet: the folder refusal has nothing to find.
+        assert!(engine.sessions.is_empty());
+        let second = engine.apply_wire(create()).expect("the second is answered");
+        let message = second
+            .status
+            .as_ref()
+            .map(|s| s.message.clone())
+            .unwrap_or_default();
+        assert_eq!(
+            second.status.as_ref().map(|s| s.tone.as_str()),
+            Some("error"),
+            "the second create must be refused, got {message:?}"
+        );
+        assert!(
+            message.contains("already being created"),
+            "and refused by the create lock, which is what covers this window: {message:?}"
+        );
+    }
+
     #[test]
     fn the_same_folder_reached_through_a_symlink_is_still_the_same_folder() {
         let (mut engine, _tmp) = test_engine();
@@ -4525,6 +4631,54 @@ mod tests {
                 })
                 .is_ok(),
             "a standalone agent pointed at a repository gets a real changes panel"
+        );
+    }
+
+    /// A directory two agents share is preserved, and "share" is decided on
+    /// CANONICAL paths.
+    ///
+    /// This is the one guard between "delete agent A and remove its worktree"
+    /// and destroying a directory another agent is running in. The worktree
+    /// manager's occupancy check compares canonically; this one compared the
+    /// stored strings, so a standalone agent reaching the same directory by a
+    /// different spelling was invisible to it and the removal went ahead with
+    /// the `--force` flag.
+    #[test]
+    fn a_shared_directory_is_preserved_even_when_the_other_agent_spells_it_differently() {
+        let (mut engine, tmp) = test_engine();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let worktree = tmp.path().join("wt");
+        std::fs::create_dir_all(&worktree).unwrap();
+        // The same directory, reached through a symlink.
+        let link = tmp.path().join("link-to-wt");
+        std::os::unix::fs::symlink(&worktree, &link).unwrap();
+
+        engine
+            .projects
+            .push(sample_project("p1", repo.to_string_lossy().as_ref()));
+        let mut managed = sample_session("s1", "p1", "feat");
+        managed
+            .workspace
+            .as_managed_mut()
+            .expect("managed")
+            .worktree_path = worktree.to_string_lossy().to_string();
+        engine.sessions.push(managed);
+        engine
+            .sessions
+            .push(sample_standalone_session("sa1", &link.to_string_lossy()));
+
+        let outcome = match engine.do_delete_session("s1", true) {
+            Ok(Some(outcome)) => outcome,
+            other => panic!("the delete must proceed, got {:?}", other.is_ok()),
+        };
+        assert!(
+            matches!(outcome.removal, WorktreeRemoval::SkippedForSiblings),
+            "the directory is occupied by another agent, so it must be preserved"
+        );
+        assert!(
+            worktree.exists(),
+            "and it must still be on disk: another agent is running in it"
         );
     }
 
@@ -9074,6 +9228,43 @@ mod tests {
             .map(|_| ())
             .unwrap_err();
         assert!(err.to_string().contains("Invalid agent name"), "err: {err}");
+    }
+
+    /// A STANDALONE agent's title is a label, not a refname, so the wire
+    /// rename is not held to the refname rules either.
+    ///
+    /// The asymmetry this pins was a one-way door: creation takes a standalone
+    /// title verbatim (folder names legally contain spaces and punctuation a
+    /// ref cannot), so a title dux itself minted from a folder called
+    /// `My Notes` could not be typed back over the wire.
+    #[test]
+    fn apply_wire_rename_session_takes_a_standalone_title_verbatim() {
+        let (mut engine, _tmp) = test_engine();
+        let session = sample_standalone_session("sa1", "/home/someone/My Notes");
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+
+        engine
+            .apply_wire(WireCommand::RenameSession {
+                session_id: "sa1".to_string(),
+                title: "  My Notes (2026)  ".to_string(),
+            })
+            .expect("a standalone rename is not a refname");
+        assert_eq!(
+            engine.sessions[0].title.as_deref(),
+            Some("My Notes (2026)"),
+            "trimmed, and otherwise taken verbatim"
+        );
+        let reloaded = engine.session_store.load_sessions().expect("reload");
+        assert_eq!(
+            reloaded
+                .iter()
+                .find(|s| s.id == "sa1")
+                .expect("row")
+                .title
+                .as_deref(),
+            Some("My Notes (2026)")
+        );
     }
 
     #[test]

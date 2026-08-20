@@ -9,6 +9,7 @@ use crate::git;
 use crate::keybindings::RuntimeBindings;
 use crate::logger;
 use crate::storage::SessionStore;
+use dux_core::project_browser::canonical_or_original;
 
 // ---------------------------------------------------------------------------
 // CLI dispatch
@@ -591,6 +592,11 @@ fn print_unified_diff(label_a: &str, label_b: &str, a: &str, b: &str) {
 // ---------------------------------------------------------------------------
 
 fn reset_agent_data(paths: &DuxPaths) -> Result<()> {
+    // Folders a STANDALONE agent occupies. Collected because the sweep of the
+    // whole worktrees root below is otherwise indiscriminate: nothing stops a
+    // user pointing a standalone agent at a directory inside dux's managed
+    // area, and dux resets what dux MADE, which that directory is not.
+    let mut occupied_folders: Vec<PathBuf> = Vec::new();
     if paths.sessions_db_path.exists() {
         match SessionStore::open(&paths.sessions_db_path) {
             Ok(store) => match store.load_sessions() {
@@ -606,9 +612,13 @@ fn reset_agent_data(paths: &DuxPaths) -> Result<()> {
                     // that check and have the ground deleted from under it.
                     let mut removed = 0usize;
                     for session in &sessions {
-                        if let Some(managed) = session.workspace.as_managed() {
-                            remove_session_worktree(paths, managed);
-                            removed += 1;
+                        match session.workspace.as_managed() {
+                            Some(managed) => {
+                                remove_session_worktree(paths, managed);
+                                removed += 1;
+                            }
+                            None => occupied_folders
+                                .push(canonical_or_original(Path::new(session.directory()))),
                         }
                     }
                     println!("removed {removed} session worktree(s)");
@@ -623,8 +633,68 @@ fn reset_agent_data(paths: &DuxPaths) -> Result<()> {
         }
     }
 
-    remove_dir_with_message(&paths.worktrees_root)?;
+    // The sweep that finishes the job: whatever the per-session loop could not
+    // account for (a worktree whose row was already gone, a stray directory)
+    // goes with the root.
+    //
+    // Except a folder a standalone agent occupies. Removing the root wholesale
+    // undid the filter above one line later, which is the exact scenario
+    // `remove_session_worktree`'s doc comment warns about, arriving by the
+    // other door. When one is in the way, the root's other entries are removed
+    // individually and the root itself is left standing around them.
+    if occupied_folders.is_empty() {
+        remove_dir_with_message(&paths.worktrees_root)?;
+    } else {
+        remove_worktrees_root_sparing(&paths.worktrees_root, &occupied_folders)?;
+    }
     remove_file_with_message(&paths.sessions_db_path)?;
+    Ok(())
+}
+
+/// Clear the managed worktrees root, leaving every entry that CONTAINS OR IS a
+/// folder a standalone agent occupies.
+///
+/// Containment, not equality: an agent pointed at `worktrees/a/b` must keep
+/// `worktrees/a` too, or removing the parent takes the child with it. Compared
+/// canonically, so a symlinked spelling cannot slip past.
+///
+/// Continue-on-error, like the rest of the reset: one undeletable entry must
+/// not stop the others.
+fn remove_worktrees_root_sparing(root: &Path, occupied: &[PathBuf]) -> Result<()> {
+    if !root.exists() {
+        return Ok(());
+    }
+    let Ok(entries) = fs::read_dir(root) else {
+        eprintln!(
+            "warning: could not read {} to reset it; left as is",
+            root.display()
+        );
+        return Ok(());
+    };
+    let mut kept = 0usize;
+    for entry in entries.flatten() {
+        let path = canonical_or_original(&entry.path());
+        if occupied.iter().any(|folder| folder.starts_with(&path)) {
+            kept += 1;
+            continue;
+        }
+        let removed = if entry.path().is_dir() {
+            fs::remove_dir_all(entry.path())
+        } else {
+            fs::remove_file(entry.path())
+        };
+        if let Err(err) = removed {
+            eprintln!(
+                "warning: could not remove {}: {err}",
+                entry.path().display()
+            );
+        }
+    }
+    println!(
+        "reset {} but kept {kept} entr{} a standalone agent is running in",
+        root.display(),
+        if kept == 1 { "y" } else { "ies" }
+    );
     Ok(())
 }
 
@@ -798,6 +868,72 @@ mod tests {
     use crate::config::{self, Config};
     use crate::keybindings::RuntimeBindings;
     use crate::model::{AgentSession, ProviderKind, SessionStatus};
+
+    /// A factory reset must not remove a STANDALONE agent's folder, even when
+    /// the user pointed that agent at a directory inside dux's own managed
+    /// area. The per-session loop already skips it; the sweep of the whole
+    /// worktrees root afterwards did not, so the guard held for one line and
+    /// then the directory went anyway.
+    ///
+    /// Nothing refuses a folder under the managed root at creation, so this is
+    /// reachable, not theoretical.
+    #[test]
+    fn a_factory_reset_keeps_a_standalone_agents_folder_inside_the_managed_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths = DuxPaths {
+            root: tmp.path().to_path_buf(),
+            config_path: tmp.path().join("config.toml"),
+            sessions_db_path: tmp.path().join("sessions.sqlite3"),
+            worktrees_root: tmp.path().join("worktrees"),
+            lock_path: tmp.path().join("dux.lock"),
+        };
+        // A managed worktree dux made, and a standalone folder the user chose
+        // that happens to live beside it under the same root.
+        let managed = paths.worktrees_root.join("proj").join("feat");
+        let occupied = paths.worktrees_root.join("my-notes");
+        fs::create_dir_all(&managed).expect("managed dir");
+        fs::create_dir_all(&occupied).expect("occupied dir");
+        fs::write(occupied.join("notes.txt"), "mine\n").expect("seed a file");
+
+        let now = Utc::now();
+        let store = SessionStore::open(&paths.sessions_db_path).expect("store");
+        store
+            .upsert_session(&AgentSession {
+                id: "sa1".to_string(),
+                provider: ProviderKind::new("claude"),
+                workspace: dux_core::model::AgentWorkspace::Folder(
+                    dux_core::model::FolderWorkspace {
+                        folder_path: occupied.to_string_lossy().to_string(),
+                    },
+                ),
+                title: Some("my-notes".to_string()),
+                started_providers: Vec::new(),
+                desired_running: false,
+                auto_reopen_enabled: false,
+                status: SessionStatus::Detached,
+                created_at: now,
+                updated_at: now,
+                last_focused_tab: None,
+            })
+            .expect("upsert standalone");
+        drop(store);
+
+        reset_agent_data(&paths).expect("reset");
+
+        assert!(
+            occupied.exists(),
+            "a standalone agent's folder is the user's and survives a factory reset"
+        );
+        assert_eq!(
+            fs::read_to_string(occupied.join("notes.txt")).expect("the file survives"),
+            "mine\n",
+            "and so does everything in it"
+        );
+        assert!(
+            !managed.exists(),
+            "dux's own managed worktree is still reset: it made that one"
+        );
+    }
 
     #[test]
     fn config_diff_reports_nothing_for_a_default_config() {

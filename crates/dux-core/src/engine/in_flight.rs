@@ -17,6 +17,15 @@ pub enum InFlightKey {
     /// classify this session's in-progress rename as external drift.
     BranchRename(String),
     Pull(String),
+    /// A standalone agent's folder is being classified by
+    /// `Engine::spawn_folder_repo_probe`. Bounds the probe to one at a time per
+    /// agent: `repo_path_kind` runs up to four git subprocesses, and every
+    /// question about the folder asks for a refresh, including the web's
+    /// changed-files poller, which asks every two seconds. Without this the
+    /// probe was an unbounded thread-and-subprocess loop for as long as a
+    /// standalone agent's changes panel stayed open. Cleared by the
+    /// `FolderRepoStatusReady` handler.
+    FolderRepoProbe(String),
     ResourceStats,
     /// A one-shot PR check (foreground/refs-watcher/exit trigger) is running for
     /// this session id. Bounds concurrent `gh` subprocesses for one session (a

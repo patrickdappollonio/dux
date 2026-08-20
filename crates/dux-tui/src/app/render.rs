@@ -1046,7 +1046,54 @@ impl App {
                 Style::default().fg(self.theme.branch_fg).bg(bg),
             ),
         ];
-        if let Some(project) = self.selected_project() {
+        // A STANDALONE agent has no project and no branch, so it gets the one
+        // crumb that IS true of it: the folder it runs in, home-collapsed. It
+        // takes the slot the project crumb occupies, which is the same fact
+        // ("which thing am I in") for the other kind of agent.
+        //
+        // Its own arm rather than a hole in the project arm, because the bar
+        // used to wrap its whole body in "a project is selected" and a
+        // project-less agent therefore lost the provider and terminal-count
+        // crumbs too, which it does have.
+        if let Some(folder) = self
+            .selected_session()
+            .and_then(|session| session.folder_path())
+            .map(|folder| dux_core::home_path::shorten_home(std::path::Path::new(folder)))
+        {
+            spans.push(Span::styled(" ╱ ", Style::default().fg(sep_fg).bg(bg)));
+            spans.push(Span::styled(
+                "folder: ",
+                Style::default().fg(label_fg).bg(bg),
+            ));
+            spans.push(Span::styled(
+                folder,
+                Style::default().fg(self.theme.branch_fg).bg(bg),
+            ));
+            if let Some(session) = self.selected_session() {
+                spans.push(Span::styled(" ╱ ", Style::default().fg(sep_fg).bg(bg)));
+                spans.push(Span::styled(
+                    "provider: ",
+                    Style::default().fg(label_fg).bg(bg),
+                ));
+                spans.push(Span::styled(
+                    session.provider.as_str().to_string(),
+                    Style::default().fg(self.theme.branch_fg).bg(bg),
+                ));
+            }
+            let running_terminals = self.running_companion_terminal_count();
+            if running_terminals > 0 {
+                spans.push(Span::styled(" ╱ ", Style::default().fg(sep_fg).bg(bg)));
+                let label = if running_terminals == 1 {
+                    "● 1 terminal".to_string()
+                } else {
+                    format!("● {running_terminals} terminals")
+                };
+                spans.push(Span::styled(
+                    label,
+                    Style::default().fg(self.theme.session_active).bg(bg),
+                ));
+            }
+        } else if let Some(project) = self.selected_project() {
             spans.push(Span::styled(" ╱ ", Style::default().fg(sep_fg).bg(bg)));
             spans.push(Span::styled(
                 "project: ",
@@ -1076,8 +1123,8 @@ impl App {
                 // not nested inside the project-current-branch comparison.
                 //
                 // A STANDALONE agent has no branch, so there is no crumb to
-                // show and the whole block is skipped: the folder chip beside
-                // it already says where this agent lives.
+                // show. It cannot reach here at all: the folder arm above
+                // handles it, and that arm names its folder instead.
                 if let Some(managed) = session.workspace.as_managed()
                     && let drifted = branch_drifted(&managed.branch_name, &managed.initial_branch)
                     && let differs_from_project = managed.branch_name != project.current_branch
@@ -3205,6 +3252,19 @@ impl App {
             return;
         }
 
+        // A STANDALONE agent whose folder is not a repository: the region is
+        // quiet, and it says WHICH quiet rather than showing an empty file list
+        // the user cannot interpret. The sentence is the engine's, shared with
+        // the browser, so both surfaces describe the same folder the same way.
+        //
+        // Ahead of the collapsed rail too: a rail of nothing is no more
+        // informative than an empty list, and the pane is the only place this
+        // can be said.
+        if let Some(reason) = self.quiet_changes_reason() {
+            self.render_quiet_changes(frame, area, &reason);
+            return;
+        }
+
         if self.right_collapsed {
             let focused = self.focus == FocusPane::Files;
             let all_files: Vec<(&str, Color)> = self
@@ -3302,6 +3362,43 @@ impl App {
     /// Render a file list inside a bordered block and return the inner `Rect`
     /// where file rows were actually placed.  Callers store this in
     /// `mouse_layout` so that mouse-hit detection matches the real rendering.
+    /// Why the changes region is quiet for the selected agent, or `None` when it
+    /// is not. Reads the one engine verdict, so this and the mutation gate can
+    /// never disagree about a folder.
+    fn quiet_changes_reason(&self) -> Option<String> {
+        let session = self.selected_session()?;
+        let access = self.engine.session_git_access(&session.id)?;
+        if access.changes_panel_works() {
+            return None;
+        }
+        let folder = dux_core::home_path::shorten_home(access.directory());
+        Some(format!(
+            "{}\n\n{folder}",
+            access
+                .quiet_reason()
+                .unwrap_or("dux cannot work with git in this folder.")
+        ))
+    }
+
+    /// The quiet changes region: the pane's own frame, and the reason inside it.
+    ///
+    /// Wrapped rather than truncated, because the reason is a sentence that
+    /// tells the user what to do next and a clipped one tells them nothing.
+    fn render_quiet_changes(&mut self, frame: &mut Frame, area: Rect, reason: &str) {
+        let focused = self.focus == FocusPane::Files;
+        let block = self.themed_block("Changes", focused);
+        let inner = block.inner(area);
+        block.render(area, frame.buffer_mut());
+        Paragraph::new(reason)
+            .wrap(Wrap { trim: false })
+            .style(Style::default().fg(self.theme.hint_desc_fg))
+            .render(inner, frame.buffer_mut());
+        // No list and no rows, so nothing here is clickable: clear the click
+        // maps rather than leaving the previous agent's rects behind.
+        self.mouse_layout.unstaged_list = None;
+        self.mouse_layout.staged_list = None;
+    }
+
     fn render_file_list(
         &self,
         frame: &mut Frame,
@@ -10738,6 +10835,101 @@ mod tests {
     };
     use crate::model::{CompanionTerminal, SessionSurface};
     use crate::pty::PtyClient;
+
+    /// The top bar is not blank for a standalone agent: it names the folder
+    /// where a project agent's bar names the project and the branch, and it
+    /// still carries the provider.
+    ///
+    /// The old bar wrapped its entire body in "if a project is selected", so a
+    /// project-less agent got the dux name and version and nothing else, losing
+    /// the provider and the terminal count with it.
+    #[test]
+    fn the_top_bar_names_a_standalone_agents_folder_and_provider() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        app.selected_left = 1;
+        app.engine.sessions[0].workspace =
+            dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
+                folder_path: "/home/someone/work/notes".to_string(),
+            });
+        // No project selected, which is the real shape: a standalone agent's row
+        // belongs to no project group.
+        app.engine.projects.clear();
+
+        let mut terminal = Terminal::new(TestBackend::new(160, 40)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(
+            rendered.contains("folder:"),
+            "the bar must name the folder crumb; got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("~/work/notes") || rendered.contains("/home/someone/work/notes"),
+            "and the folder itself; got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("provider:"),
+            "and keep the provider crumb it used to lose; got:\n{rendered}"
+        );
+    }
+
+    /// The changes pane says WHY it is quiet for a standalone agent whose folder
+    /// is not a repository, matching the browser rather than showing an empty
+    /// list the user cannot interpret. Rendered rather than reasoned about: the
+    /// sentence has to actually fit on screen and reach the buffer.
+    #[test]
+    fn the_changes_pane_says_why_a_standalone_folder_is_quiet() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        app.selected_left = 1;
+        let id = app.engine.sessions[0].id.clone();
+        app.engine.sessions[0].workspace =
+            dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
+                folder_path: "/home/someone/notes".to_string(),
+            });
+        app.engine
+            .folder_repo_statuses
+            .insert(id, dux_core::git::FolderRepoStatus::NoRepo);
+
+        let mut terminal = Terminal::new(TestBackend::new(140, 40)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        // Asserted as fragments that each fit on one wrapped line: the pane
+        // wraps the sentence, and the flattened buffer has no newlines, so a
+        // longer phrase would be split by the pane border between rows.
+        assert!(
+            rendered.contains("This folder has no git"),
+            "the pane must say why it is quiet; got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("/home/someone/notes"),
+            "and name the folder it is talking about; got:\n{rendered}"
+        );
+        assert!(
+            !rendered.to_lowercase().contains("busy"),
+            "and never that a repository is busy; got:\n{rendered}"
+        );
+    }
 
     #[test]
     fn project_tag_kind_classifies_healthy_path_missing_and_orphan() {

@@ -89,6 +89,21 @@ pub fn canonical_or_original(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// Whether two stored paths name the SAME directory on disk.
+///
+/// Canonical, deliberately. Two agents can reach one directory by different
+/// spellings (a symlink, a `..` component, a trailing slash), and the places
+/// that ask this question are the guards standing between "delete this agent's
+/// worktree" and destroying a directory another agent is running in. A string
+/// compare answers "different" for the same directory, which is the wrong
+/// direction to be wrong in.
+///
+/// Falls back to the original path when canonicalization fails (a directory
+/// that has already been removed), so two identical strings still match.
+pub fn same_directory(a: &str, b: &str) -> bool {
+    canonical_or_original(Path::new(a)) == canonical_or_original(Path::new(b))
+}
+
 /// Resolve the leading branch for a project. Prefer the remote's default
 /// branch (origin/HEAD) when available, otherwise fall back to whatever
 /// branch is currently checked out. When no current branch is known (detached

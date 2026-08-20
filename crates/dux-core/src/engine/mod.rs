@@ -2158,7 +2158,14 @@ impl Engine {
     /// whose repository-ness can change under dux. `repo_path_kind` runs up to
     /// four git subprocesses, so this must never run inline; a folder on a
     /// stalled network mount would otherwise freeze every web client.
-    pub fn spawn_folder_repo_probe(&self, session_id: &str) {
+    ///
+    /// Also a no-op while a probe for the same agent is already running. Every
+    /// question about the folder asks for a refresh, and the web's
+    /// changed-files poller asks every two seconds, so without the guard this
+    /// was an unbounded loop of threads and git subprocesses for as long as a
+    /// standalone agent's changes panel stayed open. One probe in flight is
+    /// enough: its answer is what the next question reads.
+    pub fn spawn_folder_repo_probe(&mut self, session_id: &str) {
         let Some(folder) = self
             .sessions
             .iter()
@@ -2169,6 +2176,11 @@ impl Engine {
             return;
         };
         let session_id = session_id.to_string();
+        let key = InFlightKey::FolderRepoProbe(session_id.clone());
+        if self.is_in_flight(&key) {
+            return;
+        }
+        self.mark_in_flight(key);
         let label = format!("folder-repo-probe:{session_id}");
         self.spawn_loop_worker(LoopWorkerSpec { label }, move |tx| {
             let status = crate::git::folder_repo_status(&folder);
@@ -2176,7 +2188,8 @@ impl Engine {
                 session_id: session_id.clone(),
                 status,
             });
-            // One-shot: the panel reopening is what asks again.
+            // One-shot: the next question about the folder asks again, and the
+            // in-flight key above is what stops that becoming a loop.
             LoopControl::Break
         });
     }
@@ -3079,7 +3092,24 @@ impl Engine {
         if name.is_empty() {
             return BranchRenamePlan::Rejected(BranchRenameRejection::EmptyName);
         }
-        if !crate::git::is_valid_agent_name(&name) {
+        // The refname rules apply only when the name really does become a git
+        // branch. A STANDALONE agent's name is a label: creation takes it
+        // verbatim precisely because folder names legally contain spaces, dots
+        // and punctuation a ref cannot, so applying the ref validator here made
+        // a title dux itself had minted impossible to type back, and clearing it
+        // a one-way door (the fallback label is that same folder name).
+        //
+        // Non-empty, checked above, is the whole rule for a folder: every row
+        // label falls back through a branch name it does not have, so a
+        // nameless agent is what must not be allowed.
+        if self
+            .sessions
+            .iter()
+            .find(|s| s.id == session_id)
+            .map(|s| s.supports_branch_git())
+            .unwrap_or(true)
+            && !crate::git::is_valid_agent_name(&name)
+        {
             return BranchRenamePlan::Rejected(BranchRenameRejection::MalformedName);
         }
         // Block overlapping renames: a second concurrent `git branch -m` on the
@@ -3575,27 +3605,32 @@ impl Engine {
                 folder.display()
             );
         }
-        // THE SAME-FOLDER REFUSAL. Coding CLIs resume their conversation
-        // history PER DIRECTORY, so two standalone agents in one folder would
-        // silently pick up each other's conversation, which is a
-        // data-loss-shaped surprise rather than a mere duplicate. Compared on
-        // canonical paths so a symlink is not a way around it.
+        // THE OCCUPIED-DIRECTORY REFUSAL. Coding CLIs resume their conversation
+        // history PER DIRECTORY, so a second agent in one directory would
+        // silently pick up the first one's conversation, which is a
+        // data-loss-shaped surprise rather than a mere duplicate.
+        //
+        // It compares against EVERY agent, not only the standalone ones. A
+        // managed agent's worktree is a directory just the same, and aiming a
+        // standalone agent at one is worse than a shared conversation: the
+        // launch detaches the agent already there
+        // (`detach_conflicting_worktree_session`), and the survivor then blocks
+        // that worktree's deletion forever with a "still used by other agents"
+        // message about an agent the user never associated with it.
+        //
+        // Canonical paths, so a symlink is not a way around it.
         //
         // The refusal is a SIGNPOST, not a wall: adding the folder as a project
         // is the multi-agent shape dux is built for, and it brings tabs along.
-        let canonical = crate::project_browser::canonical_or_original(&folder);
         if let Some(existing) = self.sessions.iter().find(|session| {
-            session.folder_path().is_some_and(|existing_folder| {
-                crate::project_browser::canonical_or_original(Path::new(existing_folder))
-                    == canonical
-            })
+            crate::project_browser::same_directory(session.directory(), &folder.to_string_lossy())
         }) {
             anyhow::bail!(
-                "Agent \"{}\" is already running in \"{}\". Coding CLIs resume their \
-                 conversation history per directory, so a second standalone agent there would \
-                 silently pick up the first one's conversation. Add that folder as a project \
-                 instead if you want several agents working on it: agents in a project each \
-                 get their own worktree, and they get tabs too.",
+                "Agent \"{}\" is already working in \"{}\". Coding CLIs resume their \
+                 conversation history per directory, so a second agent there would silently \
+                 pick up the first one's conversation. Add that folder as a project instead if \
+                 you want several agents working on it: agents in a project each get their own \
+                 worktree, so their conversations stay separate.",
                 existing.display_label(),
                 crate::home_path::shorten_home(&folder)
             );
@@ -4526,6 +4561,129 @@ mod tests {
         }
 
         assert!(engine.session_git_access("nope").is_none());
+    }
+
+    /// One probe per standalone agent at a time.
+    ///
+    /// Every question about the folder asks for a refresh, and the web's
+    /// changed-files poller asks every two seconds for as long as the panel is
+    /// open, so without the in-flight key this was an unbounded loop of OS
+    /// threads each running up to four git subprocesses, in exactly the case
+    /// where the feature works (a folder that IS a repository).
+    #[test]
+    fn a_second_folder_repo_probe_is_a_no_op_while_the_first_is_in_flight() {
+        let (mut engine, tmp) = test_engine();
+        let folder = tmp.path().join("plain-folder");
+        std::fs::create_dir_all(&folder).expect("folder");
+        let folder = folder.to_string_lossy().to_string();
+        engine
+            .sessions
+            .push(sample_standalone_session("sa1", &folder));
+
+        // Three asks in a row, as the poller would make them.
+        engine.spawn_folder_repo_probe("sa1");
+        engine.spawn_folder_repo_probe("sa1");
+        engine.spawn_folder_repo_probe("sa1");
+
+        let first = engine
+            .worker_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the first ask really does probe");
+        assert!(matches!(
+            &first,
+            WorkerEvent::FolderRepoStatusReady { session_id, .. } if session_id == "sa1"
+        ));
+        assert_eq!(
+            engine
+                .worker_rx
+                .recv_timeout(std::time::Duration::from_millis(200))
+                .err()
+                .map(|_| ()),
+            Some(()),
+            "the asks that arrived while a probe was in flight spawned nothing"
+        );
+
+        // The answer being applied is what re-arms the next probe: the key is
+        // cleared by the handler, not by a timer.
+        engine.process_worker_event(first);
+        engine.spawn_folder_repo_probe("sa1");
+        assert!(
+            engine
+                .worker_rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .is_ok(),
+            "a later ask probes again once the previous answer landed"
+        );
+    }
+
+    /// The stored verdict goes with the session, so a deleted agent leaves no
+    /// residue in the map.
+    #[test]
+    fn deleting_an_agent_drops_its_folder_repo_verdict() {
+        let (mut engine, _tmp) = test_engine();
+        let session = sample_standalone_session("sa1", "/home/someone/notes");
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+        engine
+            .folder_repo_statuses
+            .insert("sa1".to_string(), crate::git::FolderRepoStatus::NoRepo);
+
+        engine
+            .finish_delete_session("sa1")
+            .expect("delete the session");
+        assert!(
+            !engine.folder_repo_statuses.contains_key("sa1"),
+            "the verdict is runtime state keyed by session id and goes with it"
+        );
+    }
+
+    /// A standalone agent's name is not a refname, so renaming it is not held
+    /// to the refname rules.
+    ///
+    /// The asymmetry this fixes was a one-way door: creation deliberately takes
+    /// a standalone title verbatim (folder names legally contain spaces, dots
+    /// and punctuation a ref cannot), while rename ran the ref validator, so a
+    /// title dux itself had minted could not be typed back. Clearing it made it
+    /// worse, because the fallback label is the folder's name, which the
+    /// validator also refuses.
+    #[test]
+    fn renaming_a_standalone_agent_is_not_held_to_the_refname_rules() {
+        let (mut engine, _tmp) = test_engine();
+        engine
+            .sessions
+            .push(sample_standalone_session("sa1", "/home/someone/My Notes"));
+
+        // A name dux itself can mint from a folder called "My Notes".
+        let plan = engine.prepare_branch_rename("sa1", "My Notes (2026)", true);
+        assert!(
+            matches!(&plan, BranchRenamePlan::TitleWritten { name, sync_branches: false } if name == "My Notes (2026)"),
+            "a standalone rename writes the title and syncs no branch, got {plan:?}"
+        );
+        assert_eq!(
+            engine.sessions[0].title.as_deref(),
+            Some("My Notes (2026)"),
+            "and the title actually changed"
+        );
+
+        // Empty is still refused: every row label falls back through a branch
+        // name this agent does not have, so a nameless agent is not allowed.
+        assert!(matches!(
+            engine.prepare_branch_rename("sa1", "   ", true),
+            BranchRenamePlan::Rejected(BranchRenameRejection::EmptyName)
+        ));
+    }
+
+    /// A MANAGED agent keeps the refname rules, because its name really does
+    /// become a git branch.
+    #[test]
+    fn renaming_a_managed_agent_still_enforces_the_refname_rules() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        engine.sessions.push(sample_session("s1", "p1", "feat"));
+        assert!(matches!(
+            engine.prepare_branch_rename("s1", "My Notes", true),
+            BranchRenamePlan::Rejected(BranchRenameRejection::MalformedName)
+        ));
     }
 
     /// Every pull-request route refuses a standalone id with a purposeful

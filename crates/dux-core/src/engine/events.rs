@@ -1270,10 +1270,10 @@ impl Engine {
                 .find(|project| project.id == project_id)
                 .cloned()
         });
-        let other_sessions_on_worktree = self
-            .sessions
-            .iter()
-            .any(|s| s.id != session.id && s.directory() == session.directory());
+        let other_sessions_on_worktree = self.sessions.iter().any(|s| {
+            s.id != session.id
+                && crate::project_browser::same_directory(s.directory(), session.directory())
+        });
 
         // Startup-command logs are keyed by project id, and only a managed
         // agent can ever have run a startup command (it is a worktree
@@ -1316,6 +1316,12 @@ impl Engine {
         // session); leaving it would ghost-gate the identity guard and the
         // detach palette entry for a later session reusing the id.
         self.pr_overrides.remove(&session.id);
+        // The folder-repository verdict is runtime state keyed by session id,
+        // so it goes with the session too. A verdict arriving after this point
+        // is dropped by the `FolderRepoStatusReady` handler's own
+        // still-exists check; this is the other half, for the verdict already
+        // stored.
+        self.folder_repo_statuses.remove(&session.id);
         // The detach state goes with the session too, so a later session that
         // reuses the id does not inherit a detach it never asked for.
         self.pr_suppressions.remove(&session.id);
@@ -1390,10 +1396,10 @@ impl Engine {
                 .find(|project| project.id == project_id)
                 .cloned()
         });
-        let other_sessions_on_worktree = self
-            .sessions
-            .iter()
-            .any(|s| s.id != session.id && s.directory() == session.directory());
+        let other_sessions_on_worktree = self.sessions.iter().any(|s| {
+            s.id != session.id
+                && crate::project_browser::same_directory(s.directory(), session.directory())
+        });
 
         // What a removal actually needs: a project to run git in AND a managed
         // working copy to remove. Resolved as one pair up front, so the removal
@@ -1573,10 +1579,10 @@ impl Engine {
                 .find(|project| project.id == project_id)
                 .cloned()
         });
-        let other_sessions_on_worktree = self
-            .sessions
-            .iter()
-            .any(|s| s.id != session.id && s.directory() == session.directory());
+        let other_sessions_on_worktree = self.sessions.iter().any(|s| {
+            s.id != session.id
+                && crate::project_browser::same_directory(s.directory(), session.directory())
+        });
         // A standalone agent's directory is the user's folder, so deletion
         // removes dux's record of the agent and nothing else, ever. The named
         // question answers that; the removal payload below cannot even be built
@@ -1758,6 +1764,32 @@ impl Engine {
             branch_provenance,
             ..
         } = managed;
+        // RE-CHECK the occupancy the decision was made on. This removal was
+        // planned when the delete began and runs only once the agent's PTYs
+        // reap, which is seconds later; in that window another agent can come
+        // to occupy the directory. `closing_sessions` does not cover it: that
+        // blocks new TABS on the dying agent, not a new agent pointed at the
+        // same place, which is exactly what creating a standalone agent there
+        // does.
+        //
+        // Preserving the directory is the safe direction to be wrong in: the
+        // worst case is a leftover the worktree manager can still remove, and
+        // the alternative is `git worktree remove --force` on a directory a
+        // live provider is running in.
+        if let Some(occupant) = self.sessions.iter().find(|s| {
+            s.id != session_id
+                && crate::project_browser::same_directory(s.directory(), &worktree_path)
+        }) {
+            let message = format!(
+                "Kept the worktree at \"{}\": agent \"{}\" started working in it while this \
+                 agent was shutting down. Remove it from the worktree manager if you still \
+                 want it gone.",
+                crate::home_path::shorten_home(std::path::Path::new(&worktree_path)),
+                occupant.display_label()
+            );
+            logger::warn(&message);
+            return message;
+        }
         // Guard against a duplicate worker (e.g. a project delete racing the
         // reap); the completion handler clears it.
         self.pending_deletions.insert(session_id.clone());
@@ -2144,10 +2176,11 @@ impl Engine {
                 }
             }
             WorkerEvent::FolderRepoStatusReady { session_id, status } => {
-                // A verdict for an agent that has since been deleted is
-                // dropped rather than stored: the map is keyed by session id
-                // and a stale entry would be inherited by a later session
-                // reusing it.
+                self.clear_in_flight(&InFlightKey::FolderRepoProbe(session_id.clone()));
+                // A verdict for an agent deleted while its probe was in
+                // flight is dropped rather than stored: nothing would ever read
+                // it, and nothing would ever remove it (the delete has already
+                // run its own prune of this map).
                 if !self.sessions.iter().any(|s| s.id == session_id) {
                     return EventReaction::Nothing;
                 }
@@ -4113,6 +4146,65 @@ mod tests {
             s.branch_name().expect("managed test session"),
             "old-branch",
             "expected rename branches must never mutate the session mid-rename"
+        );
+    }
+
+    /// A deferred worktree removal that finds another agent living in the
+    /// directory keeps it, and says who is there.
+    ///
+    /// The removal is planned when the delete begins and runs only once the
+    /// dying agent's PTYs reap. A standalone agent created in that window
+    /// occupies the directory, and `closing_sessions` does not see it: that
+    /// blocks new TABS on the dying agent, not a new agent pointed at the same
+    /// place. Without the re-check this ran `git worktree remove --force` on a
+    /// directory a live provider was working in.
+    #[test]
+    fn a_deferred_removal_keeps_a_directory_another_agent_moved_into() {
+        let (mut engine, tmp) = test_engine();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let worktree = tmp.path().join("wt");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(worktree.join("live.txt"), "in use\n").unwrap();
+        // The agent that moved in while the other was shutting down, reaching
+        // the directory by a different spelling for good measure.
+        let link = tmp.path().join("link-to-wt");
+        std::os::unix::fs::symlink(&worktree, &link).unwrap();
+        engine
+            .sessions
+            .push(crate::engine::test_support::sample_standalone_session(
+                "sa1",
+                &link.to_string_lossy(),
+            ));
+
+        let message =
+            engine.dispatch_deferred_worktree_removal(crate::engine::DeferredWorktreeRemoval {
+                session_id: "s1".to_string(),
+                project_path: repo.to_string_lossy().to_string(),
+                managed: crate::model::ManagedWorkspace {
+                    project_id: "p1".to_string(),
+                    project_path: None,
+                    source_branch: "main".to_string(),
+                    branch_name: "feat".to_string(),
+                    initial_branch: "feat".to_string(),
+                    branch_provenance: crate::model::BranchProvenance::CreatedByDux,
+                    worktree_path: worktree.to_string_lossy().to_string(),
+                },
+                busy_message: "Removing worktree\u{2026}".to_string(),
+            });
+
+        assert!(
+            message.contains("Kept the worktree"),
+            "the outcome must say the directory stayed, got {message:?}"
+        );
+        assert!(
+            message.contains("sa1-title"),
+            "and name who is in it, got {message:?}"
+        );
+        assert!(worktree.exists(), "the directory must still be there");
+        assert!(
+            !engine.pending_deletions.contains("s1"),
+            "no removal worker was dispatched, so nothing may be left marked pending"
         );
     }
 

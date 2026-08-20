@@ -1768,11 +1768,13 @@ impl App {
         };
         let target = match &session.workspace {
             dux_core::model::AgentWorkspace::Managed(managed) => {
-                let worktree_shared = self
-                    .engine
-                    .sessions
-                    .iter()
-                    .any(|s| s.id != session.id && s.directory() == session.directory());
+                let worktree_shared = self.engine.sessions.iter().any(|s| {
+                    s.id != session.id
+                        && dux_core::project_browser::same_directory(
+                            s.directory(),
+                            session.directory(),
+                        )
+                });
                 crate::app::DeleteAgentTarget::Managed {
                     branch_name: managed.branch_name.clone(),
                     initial_branch: managed.initial_branch.clone(),

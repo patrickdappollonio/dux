@@ -724,7 +724,7 @@ impl Engine {
     ///
     /// A no-op when there are none, which is the ordinary case, so this costs
     /// nothing for a workspace of project agents.
-    pub fn probe_standalone_folders(&self) {
+    pub fn probe_standalone_folders(&mut self) {
         let ids: Vec<String> = self
             .sessions
             .iter()
