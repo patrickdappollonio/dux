@@ -1568,10 +1568,12 @@ function applyWorkspace(rawSpine: Spine, seq: number): void {
   // which makes the retry return immediately. Reading in URL-then-create order.
   retryRouteNotFound(spine)
   focusNewlyCreatedSession(spine)
-  // The standalone tab's own ending runs FIRST, before the selection prune,
-  // because that prune would clear the surface flag along with the selection
-  // and the tab would go blank before anything had said why.
-  if (!endStandaloneEditorIfGone(spine)) {
+  // The open editor's own ending runs FIRST, before the prunes: on the
+  // standalone tab the selection prune would clear the surface flag along
+  // with the selection and the tab would go blank before anything had said
+  // why, and on either surface the editor prune would silently delete the
+  // tabs a dirty hold exists to protect.
+  if (!endOpenEditorIfRootGone(spine)) {
     pruneSelectionIfGone(spine, previousSessions)
     pruneEditorStateIfGone(spine)
   }
@@ -1597,7 +1599,26 @@ function applyWorkspace(rawSpine: Spine, seq: number): void {
 // takes its editor with it. A terminal id is also never reused after it goes,
 // so there is nothing to come back for.
 function pruneEditorStateIfGone(spine: Spine): void {
-  const live = new Set([
+  const live = liveEditorRootKeys(spine)
+  pruneDeadEditorTabs(live, null)
+  const openRoot = state.editorTarget?.root ?? state.editorRoute?.root ?? null
+  if (openRoot !== null && !live.has(rootKey(openRoot))) {
+    // State only, NO URL write: `pruneSelectionIfGone` (which runs before
+    // this in the same `applyWorkspace` pass) is the single URL writer for a
+    // vanished session. Its navigation already serializes without the
+    // editor suffix, because `currentRoute` drops an editor arm whose
+    // session no longer matches the focused target. A second writer here
+    // (the old `closeEditor()` call) would push or double-write.
+    clearEditorStateSilently()
+  }
+}
+
+// Every root key this spine can still answer for. The terminal owner here is
+// fabricated: only the STANDALONE variant is written, whatever the terminal's
+// real owner is, and that is correct only because `rootKey` keys a terminal
+// root by its id alone and ignores the owner.
+function liveEditorRootKeys(spine: Spine): Set<string> {
+  return new Set([
     ...spine.sessions.map((session) => rootKey(agentRoot(session.id))),
     ...spine.terminals.map((terminal) =>
       rootKey({
@@ -1607,19 +1628,18 @@ function pruneEditorStateIfGone(spine: Spine): void {
       }),
     ),
   ])
-  for (const key of Object.keys(state.editorTabs)) {
-    if (!live.has(key)) clearEditorTabsForKey(key)
-  }
-  const openRoot = state.editorTarget?.root ?? state.editorRoute?.root ?? null
-  if (openRoot !== null && !live.has(rootKey(openRoot))) {
+}
 
-    // State only, NO URL write: `pruneSelectionIfGone` (which runs before
-    // this in the same `applyWorkspace` pass) is the single URL writer for a
-    // vanished session — its navigation already serializes without the
-    // editor suffix, because `currentRoute` drops an editor arm whose
-    // session no longer matches the focused target. A second writer here
-    // (the old `closeEditor()` call) would push or double-write.
-    clearEditorStateSilently()
+// Drop the tabs (and their drafts) of every root the spine no longer has,
+// except the one a dirty vanish-hold is protecting, when there is one. The
+// hold shields exactly the root whose unsaved text is still on screen; a
+// different dead root has nothing on screen and no question pending, so its
+// tabs are pruned in the same pass rather than surviving behind the hold and
+// keeping the beforeunload guard armed for text nobody can see.
+function pruneDeadEditorTabs(live: Set<string>, heldKey: string | null): void {
+  for (const key of Object.keys(state.editorTabs)) {
+    if (key === heldKey) continue
+    if (!live.has(key)) clearEditorTabsForKey(key)
   }
 }
 
@@ -2502,22 +2522,29 @@ function clearEditorStateSilently(): void {
   setState({ editorTarget: null, editorRoute: null, standaloneEditor: false })
 }
 
-// Has a STANDALONE editor tab lost what it was rooted at? If so this owns the
-// whole pass and answers true, so the ordinary selection and editor prunes do
-// not also run: they would clear the surface flag first and leave the tab
-// blank on an address that still names a dead target.
-function endStandaloneEditorIfGone(spine: Spine): boolean {
-  if (!state.standaloneEditor) return false
+// Has the OPEN editor, on either surface, lost what it was rooted at? Both
+// the standalone tab and the in-app overlay get the same answer, because a
+// root vanishes routinely (a typed exit, a crash, another client closing the
+// terminal or deleting the agent) and the owner's two rulings compose the
+// same way on both: an editor does not outlive its target, but only a
+// destructive confirm may discard typed text. Answering true owns the whole
+// pass, so the ordinary selection and editor prunes do not also run: the
+// editor prune would delete the very tabs a dirty hold protects, and on the
+// standalone tab the selection prune would clear the surface flag first and
+// leave the tab blank on an address that still names a dead target.
+function endOpenEditorIfRootGone(spine: Spine): boolean {
   const root = state.editorTarget?.root ?? state.editorRoute?.root ?? null
   if (root === null || rootIsLive(spine, root)) return false
   if (hasDirtyTabForRoot(root)) {
-    // HOLD the whole pass, prunes included. The root that could have saved
-    // this text is exactly what vanished, so leaving now would discard it with
-    // no way back; the tab stays as it is, words on screen, until the confirm
-    // behind `editorTargetGone` is answered. The dead selection it holds on to
-    // meanwhile is invisible on this surface, and is resolved the moment that
-    // answer arrives.
+    // HOLD the pass for this root: the root that could have saved this text
+    // is exactly what vanished, so leaving now would discard it with no way
+    // back; the tab stays as it is, words on screen, until the confirm behind
+    // `editorTargetGone` is answered. The dead selection it holds on to
+    // meanwhile is resolved the moment that answer arrives. Other dead roots'
+    // tabs are NOT shielded by the hold: they have nothing on screen, so they
+    // are pruned here in the same pass the ordinary prune would have run.
     const key = rootKey(root)
+    pruneDeadEditorTabs(liveEditorRootKeys(spine), key)
     if (vanishedEditorAsked !== key) {
       vanishedEditorAsked = key
       setState({ editorTargetGone: root })
@@ -2525,7 +2552,9 @@ function endStandaloneEditorIfGone(spine: Spine): boolean {
     return true
   }
   // Nothing to lose: say what happened and let the ordinary prunes do the
-  // leaving, which already lands this tab on a real surface.
+  // leaving, which already lands on a real surface (pinned for the standalone
+  // tab by "swaps the standalone tab to the ordinary shell when its session
+  // vanishes" in storeRouting.test.ts).
   notifyWarning(vanishedEditorMessage(root))
   return false
 }
@@ -2553,9 +2582,11 @@ open. You are back at the workspace."
 export function discardVanishedEditor(): void {
   setState({ editorTargetGone: null })
   clearEditorStateSilently()
-  // The standalone tab has no selection worth keeping once its editor is gone,
-  // and this is the one URL write in the pass: the ordinary selection prune
-  // writes the in-app grammar, which is not an address this surface can be at.
+  // There is no selection worth keeping once the editor is gone: the held
+  // selection named the vanished root itself. Landing on home is the one URL
+  // write in the pass, and it is a replace, because the address behind it
+  // names a target that no longer exists and must not be re-enterable by
+  // Back. Both surfaces take this same exit.
   selectSessionRoute(null, "replace")
 }
 

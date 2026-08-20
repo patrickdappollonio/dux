@@ -1574,6 +1574,115 @@ describe("the editor rides the URL", () => {
     expect(mod.getSnapshot().editorTarget).not.toBeNull()
   })
 
+  it("closes an in-app overlay's clean editor out loud when its terminal closes", async () => {
+    // The overlay gets the SAME vanish handling as the standalone tab: a
+    // terminal dies routinely (a typed exit, a crash, another client closing
+    // it), and a clean buffer closes with the warning toast rather than
+    // silently, so the user learns why the editor went.
+    const mod = await loadStore(
+      "#/terminal/t1/editor/file/notes.md",
+      [{ id: "s1", project_id: "p1" }],
+      undefined,
+      ["t1"],
+    )
+    expect(mod.getSnapshot().standaloneEditor).toBe(false)
+    expect(mod.getSnapshot().editorTabs["terminal:t1"]).toBeDefined()
+    const before = warnings.length
+
+    await pushSpine(mod, [{ id: "s1", project_id: "p1" }], undefined, [])
+
+    expect(mod.getSnapshot().editorTarget).toBeNull()
+    expect(mod.getSnapshot().editorRoute).toBeNull()
+    expect(mod.getSnapshot().editorTabs["terminal:t1"]).toBeUndefined()
+    expect(warnings.length).toBe(before + 1)
+    expect(warnings[before]).toMatch(/terminal/i)
+
+    // A second spine finds no open editor and warns nothing further.
+    await pushSpine(mod, [{ id: "s1", project_id: "p1" }], undefined, [])
+    expect(warnings.length).toBe(before + 1)
+  })
+
+  it("holds an in-app overlay's dirty editor open and asks, like the standalone tab", async () => {
+    const mod = await loadStore(
+      "#/terminal/t1/editor/file/notes.md",
+      [{ id: "s1", project_id: "p1" }],
+      undefined,
+      ["t1"],
+    )
+    expect(mod.getSnapshot().standaloneEditor).toBe(false)
+    const root = mod.getSnapshot().editorTarget!.root
+    const tabId = mod.getSnapshot().editorTabs["terminal:t1"].tabs[0].id
+    mod.editorSetTabDirty(root, tabId, true)
+    const before = warnings.length
+
+    await pushSpine(mod, [{ id: "s1", project_id: "p1" }], undefined, [])
+
+    // Held: the tabs and the open editor survive, the confirm is raised, and
+    // no warning toast doubles up on the question.
+    expect(mod.getSnapshot().editorTargetGone).toEqual(root)
+    expect(mod.getSnapshot().editorTarget).not.toBeNull()
+    expect(mod.getSnapshot().editorTabs["terminal:t1"]).toBeDefined()
+    expect(warnings.length).toBe(before)
+
+    // Discarding tears down exactly once: the state clears, and a further
+    // spine neither re-asks nor warns again.
+    mod.discardVanishedEditor()
+    expect(mod.getSnapshot().editorTargetGone).toBeNull()
+    expect(mod.getSnapshot().editorTarget).toBeNull()
+    await pushSpine(mod, [{ id: "s1", project_id: "p1" }], undefined, [])
+    expect(mod.getSnapshot().editorTargetGone).toBeNull()
+    expect(warnings.length).toBe(before)
+  })
+
+  it("keeps an in-app overlay's dirty editor open on Keep, and asks only once", async () => {
+    const mod = await loadStore(
+      "#/terminal/t1/editor/file/notes.md",
+      [{ id: "s1", project_id: "p1" }],
+      undefined,
+      ["t1"],
+    )
+    const root = mod.getSnapshot().editorTarget!.root
+    const tabId = mod.getSnapshot().editorTabs["terminal:t1"].tabs[0].id
+    mod.editorSetTabDirty(root, tabId, true)
+    await pushSpine(mod, [{ id: "s1", project_id: "p1" }], undefined, [])
+    expect(mod.getSnapshot().editorTargetGone).toEqual(root)
+
+    mod.keepVanishedEditor()
+    expect(mod.getSnapshot().editorTargetGone).toBeNull()
+    expect(mod.getSnapshot().editorTarget).not.toBeNull()
+
+    await pushSpine(mod, [{ id: "s1", project_id: "p1" }], undefined, [])
+    expect(mod.getSnapshot().editorTargetGone).toBeNull()
+    expect(mod.getSnapshot().editorTarget).not.toBeNull()
+    expect(mod.getSnapshot().editorTabs["terminal:t1"]).toBeDefined()
+  })
+
+  it("a held dirty root does not shield OTHER vanished roots' tabs from the prune", async () => {
+    // The hold exists to protect exactly one thing: the dirty text whose root
+    // vanished. Tabs belonging to a DIFFERENT dead root have nothing on
+    // screen and no question pending, so they are pruned in the same pass.
+    const mod = await loadStore(
+      "#/terminal/t1/editor/file/notes.md",
+      [{ id: "s1", project_id: "p1" }],
+      undefined,
+      ["t1", "t2"],
+    )
+    const root = mod.getSnapshot().editorTarget!.root
+    const tabId = mod.getSnapshot().editorTabs["terminal:t1"].tabs[0].id
+    mod.editorSetTabDirty(root, tabId, true)
+    mod.editorOpenFile(
+      { kind: "terminal", terminalId: "t2", owner: { kind: "standalone" } },
+      "other.md",
+    )
+    expect(mod.getSnapshot().editorTabs["terminal:t2"]).toBeDefined()
+
+    await pushSpine(mod, [{ id: "s1", project_id: "p1" }], undefined, [])
+
+    expect(mod.getSnapshot().editorTargetGone).toEqual(root)
+    expect(mod.getSnapshot().editorTabs["terminal:t1"]).toBeDefined()
+    expect(mod.getSnapshot().editorTabs["terminal:t2"]).toBeUndefined()
+  })
+
   it("refuses diff mode on a terminal root, wherever it is asked for", async () => {
     // A terminal root has no HEAD to diff against and no diff route on the
     // server, so the mode is not offered and is not honored either: a

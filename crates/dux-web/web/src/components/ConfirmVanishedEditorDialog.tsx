@@ -12,8 +12,8 @@ import {
   useDux,
 } from "@/lib/store"
 
-// What a standalone editor tab says when the thing it was rooted at goes away
-// while a buffer is dirty.
+// What an editor says when the thing it was rooted at goes away while a
+// buffer is dirty.
 //
 // It is a sibling of `ConfirmCloseEditorTabDialog`, not a variant of the reload
 // confirm: that one is about disk truth (the file moved, reload or keep), and
@@ -23,9 +23,11 @@ import {
 // leaving and staying to copy the words out, so "Keep it open" is the safe
 // default and the destructive half is the one that discards.
 //
-// It is deliberately not raised for the in-app overlay: there the workspace is
-// still around it, and the ordinary prune already leaves the user somewhere
-// they can see.
+// Both surfaces raise it: the standalone tab and the in-app overlay share one
+// vanish handler (`endOpenEditorIfRootGone` in the store), because the
+// workspace still being visible around the overlay changes nothing about the
+// unsaved text. On either surface, only this confirm may discard it; a clean
+// buffer closes with a warning toast instead.
 export function ConfirmVanishedEditorDialog() {
   const { editorTargetGone } = useDux()
   const isTerminal = editorTargetGone?.kind === "terminal"

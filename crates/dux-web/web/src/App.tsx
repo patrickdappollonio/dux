@@ -68,8 +68,8 @@ import { keyboardLikelyOpen } from "@/lib/viewport"
 // is active — desktop, mobile, or the standalone editor. Hoisted deliberately:
 // the standalone surface needs the Toaster (save results), the OfflineOverlay,
 // and `ConfirmCloseEditorTabDialog` (without which a dirty per-tab close there
-// would be permanently inert) and `ConfirmVanishedEditorDialog` (which only
-// that surface ever raises). Everything here portals to the body, so it
+// would be permanently inert) and `ConfirmVanishedEditorDialog` (raised by
+// every surface with an open editor). Everything here portals to the body, so it
 // depends on no shell-specific provider. Shared JSX — never duplicated.
 function GlobalOverlays() {
   return (
