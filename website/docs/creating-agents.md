@@ -357,7 +357,10 @@ What a standalone agent does NOT have:
 
 - **No branch and no worktree.** dux creates nothing on disk for it.
 - **No project.** It sits among your other agents in the sidebar, told apart by
-  its folder on the row's second line, and it belongs to no project group.
+  the `✷` standalone star over its folder on the row's second line, and it
+  belongs to no project group. The star means "this one lives in your folder,
+  not in a working copy dux manages", and a standalone terminal wears the same
+  one.
 - **No branch features.** Pushing, pulling, forking, pull requests and branch
   renaming are about a branch dux manages, and there is none, so those actions
   are absent rather than offered and refused.

@@ -450,11 +450,14 @@ describe("FlatAgentList agent row branch", () => {
     expect(screen.queryByText("Repo")).toBeNull()
   })
 
-  // The standalone agent's identity glyph is a house, and the glyph plus the
-  // folder label wear the dux-standalone identity token (the web twin of the
-  // TUI's standalone-location theme color), never a hardcoded color. A managed
-  // agent's project tag keeps its plain folder glyph and its muted tone.
-  it("marks a standalone agent's folder with the House glyph in the identity tone", () => {
+  // The standalone identity glyph is the literal ✷ star, drawn as text the way
+  // the terminal rows draw the ↳ arrow, and the glyph plus the folder label
+  // wear the dux-standalone identity token (the web twin of the TUI's
+  // standalone-location theme color), never a hardcoded color. The star is
+  // aria-hidden with an sr-only word beside it, so screen readers speak the
+  // MEANING rather than a Unicode name. A managed agent's project tag keeps
+  // its plain folder glyph and its muted tone.
+  it("marks a standalone agent's folder with the standalone star in the identity tone", () => {
     const state = makeState("name")
     state.spine!.sessions = [
       state.spine!.sessions[0],
@@ -475,18 +478,62 @@ describe("FlatAgentList agent row branch", () => {
     render(<FlatAgentList handlers={handlers} />)
     const tag = screen.getByText("~/work/notes").closest("span")?.parentElement
     expect(tag).toBeTruthy()
-    // The house, not the old open folder.
-    expect(tag!.querySelector("svg.lucide-house")).toBeTruthy()
-    expect(tag!.querySelector("svg.lucide-folder-open")).toBeNull()
+    // The literal star as a text glyph, no icon component behind it.
+    const star = tag!.querySelector("[aria-hidden]")
+    expect(star?.textContent).toBe("✷")
+    expect(tag!.querySelector("svg")).toBeNull()
+    // Screen readers get the meaning, not the codepoint.
+    expect(tag!.querySelector(".sr-only")?.textContent).toBe("standalone")
     // The identity tone is the dedicated dux-standalone token, scoped to the
     // glyph and the label; the rest of line two stays muted.
     expect(tag!.className).toContain("text-dux-standalone")
     expect(tag!.className).not.toContain("text-muted-foreground")
-    // The managed row beside it is untouched: plain folder glyph, no house.
+    // The managed row beside it is untouched: plain folder glyph, no star.
     const project = screen.getByText("Repo").closest("span")?.parentElement
     expect(project!.querySelector("svg.lucide-folder")).toBeTruthy()
-    expect(project!.querySelector("svg.lucide-house")).toBeNull()
+    expect(project!.textContent).not.toContain("✷")
     expect(project!.className).toContain("text-muted-foreground")
+  })
+
+  // A STANDALONE terminal's owner tag is the same star in the same tone: one
+  // indicator, learned once, meaning "this one lives in your folder, not in a
+  // dux-managed working copy". An OWNED terminal keeps the ↳ arrow, where it
+  // means "owned by".
+  it("marks a standalone terminal with the star and keeps the arrow on owned terminals", () => {
+    const base = makeState("name")
+    mockState = {
+      ...base,
+      spine: {
+        ...base.spine,
+        terminals: [
+          makeTerminal({
+            id: "t-owned",
+            label: "owned",
+            owner: { kind: "session", session_id: "zeta" },
+          }),
+          makeTerminal({
+            id: "t-solo",
+            label: "solo",
+            owner: { kind: "standalone", cwd_label: "~/play" },
+          }),
+        ],
+      },
+    } as DuxState
+    render(<FlatAgentList handlers={handlers} />)
+    // The standalone terminal's tag: star, sr-only meaning, identity tone.
+    const solo = screen.getByText("~/play").closest("span")?.parentElement
+    expect(solo).toBeTruthy()
+    expect(solo!.querySelector("[aria-hidden]")?.textContent).toBe("✷")
+    expect(solo!.querySelector(".sr-only")?.textContent).toBe("standalone")
+    expect(solo!.className).toContain("text-dux-standalone")
+    // The owned terminal keeps the muted arrow and no star.
+    const owned = screen
+      .getByText("Zeta@Repo")
+      .closest("span")?.parentElement
+    expect(owned).toBeTruthy()
+    expect(owned!.textContent).toContain("↳")
+    expect(owned!.textContent).not.toContain("✷")
+    expect(owned!.className).not.toContain("text-dux-standalone")
   })
 
   it("keeps the rest of line two: the project tag, the state word, the tab count", () => {

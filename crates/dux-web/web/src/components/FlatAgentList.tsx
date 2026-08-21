@@ -26,7 +26,6 @@ import {
   Folder,
   GitFork,
   GitPullRequest,
-  House,
   Info,
   Paperclip,
   Pencil,
@@ -157,6 +156,7 @@ import {
 import { useAttachCapability } from "@/lib/attachRegistry"
 import { terminalForeground, terminalTitle } from "@/lib/terminals"
 import type { SelectedTarget, TerminalOwnerRef } from "@/lib/store"
+import { matchOwner } from "@/lib/terminalOwner"
 import type { SessionView, TerminalView } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
@@ -522,20 +522,25 @@ function ProjectTag({ name, query }: { name: string; query: string }) {
   )
 }
 
-// A STANDALONE agent's folder, in the slot a project would occupy: same fact
-// ("which thing am I in") for the other kind of agent, so it takes the same
-// place rather than a badge of its own. The house glyph tells the two apart at
-// a glance ("this agent lives in your folder"), and glyph plus label wear the
-// dux-standalone token, the web twin of the TUI's standalone-location theme
-// color: an IDENTITY tone, never a state color, quiet enough that it cannot
-// shout over the row's state cues, and scoped to this tag so the rest of line
-// two stays muted. The label is home-collapsed server-side because the browser
-// is not necessarily on the server's machine. Searched like the project name,
-// so a query that matched a path explains itself.
-function FolderTag({ label, query }: { label: string; query: string }) {
+// The STANDALONE identity tag: the folder something standalone lives in, in
+// the slot an owner would occupy. Worn by a standalone agent's row (where a
+// project tag would sit) and a standalone terminal's row (where the ↳ owner
+// tag would sit): one indicator, learned once, meaning "this one lives in your
+// folder, not in a dux-managed working copy". The glyph is the literal ✷ star
+// drawn as text, following the ↳ arrow's own idiom, and glyph plus label wear
+// the dux-standalone token, the web twin of the TUI's standalone-location
+// theme color: an IDENTITY tone, never a state color, quiet enough that it
+// cannot shout over the row's state cues, and scoped to this tag so the rest
+// of line two stays muted. The star is aria-hidden with an sr-only word beside
+// it, so a screen reader speaks the meaning rather than the Unicode name. The
+// label is home-collapsed server-side because the browser is not necessarily
+// on the server's machine. Searched like the project name, so a query that
+// matched a path explains itself.
+function StandaloneTag({ label, query }: { label: string; query: string }) {
   return (
     <span className="flex min-w-0 shrink items-center gap-1 text-dux-standalone">
-      <House className="size-3 shrink-0" />
+      <span aria-hidden>✷</span>
+      <span className="sr-only">standalone</span>
       <span className="min-w-0 truncate font-mono">
         <HighlightedText text={label} query={query} />
       </span>
@@ -748,7 +753,7 @@ function AgentFlatRow({
                   throughout to match the app. */}
               <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
                 {location.kind === "folder" ? (
-                  <FolderTag label={location.label} query={query} />
+                  <StandaloneTag label={location.label} query={query} />
                 ) : (
                   <ProjectTag name={projectName} query={query} />
                 )}
@@ -814,6 +819,8 @@ function AgentFlatRow({
 // caret cues. Line two: `↳ {ownerLabel} · {stateWord}`, the owner being the agent
 // name (session terminal) or the project name (project terminal), and the state
 // word one of Typing / Working / Idle (terminals have no detached/exited/attention).
+// A standalone terminal swaps the arrow for the shared standalone star over the
+// directory it opened in; see `StandaloneTag`.
 function TerminalFlatRow({
   terminal,
   siblings,
@@ -847,6 +854,15 @@ function TerminalFlatRow({
   // Same working cue as the agent row: the name shimmers while streaming, and only
   // while streaming and NOT typing (typing owns the caret) so the two read apart.
   const shimmer = terminal.working && !terminal.typing
+
+  // Whether this row wears the standalone star instead of the owned-by arrow,
+  // decided by the exhaustive owner matcher so a new owner kind must answer
+  // for its marker before this compiles.
+  const isStandalone = matchOwner(owner, {
+    session: () => false,
+    project: () => false,
+    standalone: () => true,
+  })
 
   // Whole-row drag, exactly like AgentFlatRow: `useSortable` supplies the drag
   // listeners spread onto the select button (the mouse sensor's 6px activation
@@ -914,14 +930,22 @@ function TerminalFlatRow({
             {terminal.typing ? <TypingCaret /> : null}
           </span>
           <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            {/* The ↳ owner tag mirrors the agent row's project tag: which owner
-                this terminal belongs to, then its colored state word. */}
-            <span className="flex min-w-0 shrink items-center gap-1">
-              <span aria-hidden>↳</span>
-              <span className="min-w-0 truncate">
-                <HighlightedText text={ownerLabel} query={query} />
+            {/* The owner tag mirrors the agent row's project tag: which owner
+                this terminal belongs to, then its colored state word. A
+                STANDALONE terminal has no owner, so it wears the shared
+                standalone star over its directory instead, the same tag a
+                standalone agent's row wears; owned terminals keep the ↳
+                arrow, where it means "owned by". */}
+            {isStandalone ? (
+              <StandaloneTag label={ownerLabel} query={query} />
+            ) : (
+              <span className="flex min-w-0 shrink items-center gap-1">
+                <span aria-hidden>↳</span>
+                <span className="min-w-0 truncate">
+                  <HighlightedText text={ownerLabel} query={query} />
+                </span>
               </span>
-            </span>
+            )}
             <Dot className="text-muted-foreground" />
             <span
               key={word.label}

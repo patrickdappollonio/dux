@@ -143,7 +143,7 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     --color-dux-typing: var(--dux-typing);
     /* The standalone agent's location tone: a soft slate blue matching the dux
        TUI's bundled dark-theme standalone-location hue (`#7d96a0`). Used for
-       the agent row's house glyph and folder label. This is an IDENTITY color
+       the row's standalone star and folder label. This is an IDENTITY color
        ("this agent lives in your folder"), never a state color, so it stays on
        line two and must read quieter than the working/typing/attention cues.
        Its value lives in :root/.dark below. */

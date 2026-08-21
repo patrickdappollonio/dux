@@ -1339,11 +1339,12 @@ impl App {
         // the glyph column lines up with the name on line one). The marker span
         // includes that indent; the project NAME is a separate, truncatable span.
         //
-        // A STANDALONE agent names its folder here instead, marked with a house
-        // glyph in the standalone identity tone: "this agent lives in your
-        // folder". Identity, not state, so the tone stays on line two and the
-        // terminal row keeps its own return arrow untouched. Same indent, same
-        // column.
+        // A STANDALONE agent names its folder here instead, marked with the
+        // standalone star in the standalone identity tone: "this agent lives
+        // in your folder". Identity, not state, so the tone stays on line two.
+        // The standalone terminal row wears the same star; owned terminal rows
+        // keep their return arrow, where it means "owned by". Same indent,
+        // same column.
         let missing_fg = self.theme.project_missing_fg;
         let standalone_fg = self.theme.standalone_location_fg;
         let (marker, name_span): (Span<'static>, Option<Span<'static>>) =
@@ -1361,7 +1362,10 @@ impl App {
                     None,
                 ),
                 AgentRowOwnerTag::Folder { label } => (
-                    Span::styled("  ⌂ ".to_string(), Style::default().fg(standalone_fg)),
+                    Span::styled(
+                        format!("  {} ", crate::theme::STANDALONE_GLYPH),
+                        Style::default().fg(standalone_fg),
+                    ),
                     Some(Span::styled(label, Style::default().fg(standalone_fg))),
                 ),
             };
@@ -1697,13 +1701,21 @@ impl App {
         // Each row carries an owner-derived display name (the agent's branch or
         // the project's name) so a generic engine label like "Terminal 3" is
         // never ambiguous between an agent terminal and a project terminal.
-        let terminal_render_data: Vec<(String, Option<String>, String)> = terminal_items
+        let terminal_render_data: Vec<(String, Option<String>, String, bool)> = terminal_items
             .iter()
             .map(|(id, t)| {
                 // The owner element, resolved by the one shared rule the sidebar
                 // filter also matches against, so a row can never say one thing
                 // and be searched by another.
                 let owner_name = self.terminal_owner_label(t);
+                // Whether the row wears the standalone star instead of the
+                // owned-by arrow. Exhaustive, so a new owner kind must decide
+                // its marker here before this compiles.
+                let standalone = match t.owner.as_ref() {
+                    dux_core::model::TerminalOwnerRef::Standalone => true,
+                    dux_core::model::TerminalOwnerRef::Session(_)
+                    | dux_core::model::TerminalOwnerRef::Project(_) => false,
+                };
                 // Idle (foreground normalizes to nothing) -> None -> "Terminal".
                 // Running -> the collision-resolved title, disambiguated against
                 // the OTHER same-owner terminals' foregrounds.
@@ -1725,7 +1737,7 @@ impl App {
                 } else {
                     None
                 };
-                ((*id).clone(), display_title, owner_name)
+                ((*id).clone(), display_title, owner_name, standalone)
             })
             .collect();
 
@@ -1960,7 +1972,7 @@ impl App {
             });
             let term_items: Vec<ListItem> = terminal_render_data
                 .iter()
-                .map(|(term_id, fg_cmd, owner_name)| {
+                .map(|(term_id, fg_cmd, owner_name, standalone)| {
                     // A terminal is either alive or gone (never detached / needs
                     // you), so the state reduces to typing -> working -> idle. It
                     // is Working when streaming output OR running a foreground app
@@ -1975,6 +1987,7 @@ impl App {
                         spinner,
                         fg_cmd.as_deref(),
                         owner_name,
+                        *standalone,
                         term_text_width,
                         self.start_time.elapsed().as_millis(),
                         term_highlight,
@@ -10212,6 +10225,12 @@ fn quit_process_description(agents: usize, terminals: usize) -> String {
 /// `fit_agent_meta_line` so the marker and word stay fixed while the owner name
 /// truncates char-safely. The state word wording matches the agent row exactly
 /// ("Typing" / "Working" / "Idle").
+///
+/// A STANDALONE terminal has no owner to mark, so its marker is the standalone
+/// star in the standalone identity tone, with the directory label wearing the
+/// tone alongside it: the same indicator a standalone agent's folder line
+/// wears, meaning "this one lives in your folder". Owned terminals keep the
+/// muted return arrow, where it means "owned by".
 #[allow(clippy::too_many_arguments)]
 fn terminal_row_lines(
     theme: &crate::theme::Theme,
@@ -10222,6 +10241,9 @@ fn terminal_row_lines(
     // the shared `terminal_title` rule), or `None` when the terminal is idle.
     display_title: Option<&str>,
     owner_name: &str,
+    // Whether this terminal is standalone (owned by nothing at all), resolved by
+    // the caller through an exhaustive match on the owner.
+    standalone: bool,
     text_width: u16,
     elapsed_ms: u128,
     // The live sidebar query and the style to emphasize its hit with, or `None`
@@ -10284,14 +10306,25 @@ fn terminal_row_lines(
     } else {
         muted
     };
-    // A two-space indent plus a return arrow aligns the owner marker under the
-    // label column, echoing the agent row's "  ※ " project marker.
+    // A two-space indent aligns the owner marker under the label column,
+    // echoing the agent row's "  ※ " project marker. An owned terminal wears
+    // the muted return arrow ("owned by"); a standalone terminal wears the
+    // standalone star and its directory in the standalone identity tone, the
+    // one indicator every standalone row shares.
+    let (marker, marker_fg) = if standalone {
+        (
+            format!("  {} ", crate::theme::STANDALONE_GLYPH),
+            theme.standalone_location_fg,
+        )
+    } else {
+        ("  ↳ ".to_string(), muted)
+    };
     let line2 = fit_agent_meta_line(
         text_width,
-        Span::styled("  ↳ ".to_string(), Style::default().fg(muted)),
+        Span::styled(marker, Style::default().fg(marker_fg)),
         Some(Span::styled(
             owner_name.to_string(),
-            Style::default().fg(muted),
+            Style::default().fg(marker_fg),
         )),
         Span::styled(word.to_string(), Style::default().fg(word_color)),
         None,
@@ -11101,13 +11134,13 @@ mod tests {
         }
     }
 
-    /// The rendered sidebar: a standalone agent's second line carries the house
-    /// glyph and its folder in the standalone identity tone, while the managed
-    /// row beside it keeps its muted project marker exactly as before. The
-    /// house is identity, not state, so it must never borrow a state color and
-    /// must never leak onto the managed row.
+    /// The rendered sidebar: a standalone agent's second line carries the
+    /// standalone star and its folder in the standalone identity tone, while
+    /// the managed row beside it keeps its muted project marker exactly as
+    /// before. The star is identity, not state, so it must never borrow a
+    /// state color and must never leak onto the managed row.
     #[test]
-    fn a_standalone_agents_row_wears_the_house_glyph_in_the_identity_tone() {
+    fn a_standalone_agents_row_wears_the_standalone_star_in_the_identity_tone() {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
@@ -11135,14 +11168,14 @@ mod tests {
                 .unwrap_or_else(|| panic!("no `{sym}` cell rendered"))
         };
 
-        // The house glyph and the folder path share the identity tone.
-        let (hx, hy) = cell_at("⌂");
+        // The star glyph and the folder path share the identity tone.
+        let (hx, hy) = cell_at(crate::theme::STANDALONE_GLYPH);
         assert_eq!(
             buf[(hx, hy)].fg,
             app.theme.standalone_location_fg,
-            "the house glyph must wear the standalone identity tone"
+            "the standalone star must wear the standalone identity tone"
         );
-        // The folder path follows two cells after the glyph ("⌂ /srv/notes").
+        // The folder path follows two cells after the glyph ("✷ /srv/notes").
         let path_start = (hx + 2, hy);
         assert_eq!(buf[path_start].symbol(), "/");
         assert_eq!(
@@ -11277,8 +11310,18 @@ mod tests {
         // Idle terminal: a steady dot, a plain "Terminal" (not the shell label),
         // and a muted "Idle" word. `terminal_row_lines` now returns the two
         // content lines; the trailing spacer is added by `framed_row_item`.
-        let (idle0, idle1) =
-            terminal_row_lines(&theme, false, false, '⠋', None, "my-branch", width, 0, None);
+        let (idle0, idle1) = terminal_row_lines(
+            &theme,
+            false,
+            false,
+            '⠋',
+            None,
+            "my-branch",
+            false,
+            width,
+            0,
+            None,
+        );
         assert!(line_text(&idle0).contains(crate::theme::DOT_GLYPH));
         assert!(line_text(&idle0).contains("Terminal"));
         assert!(!line_text(&idle0).contains("zsh"));
@@ -11287,6 +11330,14 @@ mod tests {
         assert_eq!(idle0.spans[0].style.fg, Some(theme.session_active));
         assert!(line_text(&idle1).contains("my-branch"));
         assert_eq!(word_span(&idle1, "Idle"), Some(theme.provider_label_fg));
+        // An OWNED terminal keeps the muted return arrow: there the marker
+        // means "owned by", and the standalone star must never leak onto it.
+        assert_eq!(idle1.spans[0].content.as_ref(), "  ↳ ");
+        assert_eq!(idle1.spans[0].style.fg, Some(theme.provider_label_fg));
+        assert_eq!(
+            word_span(&idle1, "my-branch"),
+            Some(theme.provider_label_fg)
+        );
 
         // Busy terminal: the foreground command replaces the label, the spinner
         // glyph shows in the NEUTRAL color, the label shimmers (split per char),
@@ -11298,6 +11349,7 @@ mod tests {
             '⠙',
             Some("cargo test"),
             "proj",
+            false,
             width,
             0,
             None,
@@ -11315,12 +11367,69 @@ mod tests {
 
         // Typing wins over working: the typing glyph shows, but line one stays
         // neutral; only the "Typing" word carries the session_typing color.
-        let (typing0, typing1) =
-            terminal_row_lines(&theme, true, true, '⠹', Some("vim"), "proj", width, 0, None);
+        let (typing0, typing1) = terminal_row_lines(
+            &theme,
+            true,
+            true,
+            '⠹',
+            Some("vim"),
+            "proj",
+            false,
+            width,
+            0,
+            None,
+        );
         assert!(line_text(&typing0).contains(crate::theme::TYPING_GLYPH));
         assert!(line_text(&typing0).contains("vim"));
         assert_eq!(typing0.spans[0].style.fg, Some(theme.session_active));
         assert_eq!(word_span(&typing1, "Typing"), Some(theme.session_typing));
+    }
+
+    /// A STANDALONE terminal's second line wears the same standalone star and
+    /// identity tone a standalone agent's folder line wears: one indicator,
+    /// learned once, meaning "this one lives in your folder". The directory
+    /// label wears the tone with it; the state word is untouched.
+    #[test]
+    fn a_standalone_terminal_row_wears_the_standalone_star_in_the_identity_tone() {
+        let theme = crate::theme::Theme::default_dark();
+        let (_, line2) = terminal_row_lines(
+            &theme, false, false, '⠋', None, "~/notes", true, 40, 0, None,
+        );
+        let marker = &line2.spans[0];
+        assert_eq!(
+            marker.content.as_ref(),
+            format!("  {} ", crate::theme::STANDALONE_GLYPH),
+            "the standalone terminal's marker must be the standalone star"
+        );
+        assert_eq!(
+            marker.style.fg,
+            Some(theme.standalone_location_fg),
+            "the star must wear the standalone identity tone"
+        );
+        let dir_fg = line2
+            .spans
+            .iter()
+            .find(|s| s.content.as_ref() == "~/notes")
+            .expect("the directory label span")
+            .style
+            .fg;
+        assert_eq!(
+            dir_fg,
+            Some(theme.standalone_location_fg),
+            "the directory label must wear the identity tone too"
+        );
+        let word_fg = line2
+            .spans
+            .iter()
+            .find(|s| s.content.as_ref() == "Idle")
+            .expect("the state word span")
+            .style
+            .fg;
+        assert_eq!(
+            word_fg,
+            Some(theme.provider_label_fg),
+            "the state word keeps its own color; the tone is identity, not state"
+        );
     }
 
     #[test]
@@ -11444,8 +11553,12 @@ mod tests {
             .map(|c| c.symbol())
             .collect();
         assert!(
-            rendered.contains("↳ ~ "),
-            "the standalone row's second line must name its directory as `~`; got:\n{rendered}"
+            rendered.contains("✷ ~ "),
+            "the standalone row's second line must name its directory as `~` behind the standalone star; got:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains('↳'),
+            "a standalone terminal has no owner, so its row must not wear the owned-by arrow; got:\n{rendered}"
         );
     }
 
@@ -11537,7 +11650,7 @@ mod tests {
             .collect();
 
         assert!(
-            rendered.contains("↳ ~ "),
+            rendered.contains("✷ ~ "),
             "the standalone terminal matches `~` and must still be on screen; got:\n{rendered}"
         );
         // The prefix, not the whole `agent-branch@demo`: the left pane is narrow

@@ -282,8 +282,11 @@ shell you would have opened on the machine anyway, except it is in the browser.
 Open one from the **Terminals** group of the launcher's `⋯` menu, from the
 **+** on the sidebar's Terminals divider, or from the same entry in the cog
 menu's **New** submenu. Its row shows the
-directory it opened in, shortened with `~`, where the other two show their owner,
-so the sidebar search finds it by path.
+directory it opened in, shortened with `~` and marked with the `✷` standalone
+star, where the other two show the `↳` arrow and their owner, so the sidebar
+search finds it by path. The star is the same one a standalone agent wears, and
+it always means the same thing: this one lives in your folder, not in a working
+copy dux manages.
 
 Every terminal row's `⋯` menu also carries **Open editor here** and **Open
 editor in new tab**, rooted at the directory that terminal opened in, so a

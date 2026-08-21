@@ -29,13 +29,20 @@ collapsible "Inactive" tail so finished work isn't in your face.
 ▾ Terminals
   ● cargo test    ↳ auth-refactor@dux   Running
   ○ zsh           ↳ project              Idle
-  ○ Terminal      ↳ ~/code               Idle
+  ○ Terminal      ✷ ~/code               Idle
 ```
 
 A terminal's second line names its owner as `agent@project` (or just the project,
 for a project terminal), so you always know whose shell you're looking at. A
 standalone terminal has no owner, so it names the directory it opened in instead,
 shortened with `~`. Whichever it shows is what the sidebar search matches on.
+
+That little `✷` is the standalone star, and it means the same thing wherever you
+see it: this one lives in your own folder, not in a working copy dux manages. A
+[standalone agent](/docs/creating-agents#running-an-agent-in-a-folder-you-already-have)
+wears it over its folder and a standalone terminal wears it over its directory,
+while anything owned keeps the `↳` arrow pointing at its owner. One glyph,
+learned once.
 
 ## Sorting
 

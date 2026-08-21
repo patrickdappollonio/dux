@@ -34,6 +34,17 @@ pub const ATTENTION_GLYPH: &str = DOT_GLYPH;
 /// you". Themed via `Theme::session_typing`, never a hardcoded color.
 pub const TYPING_GLYPH: &str = "▍";
 
+/// The standalone identity glyph, worn (in `standalone_location_fg`) by every
+/// row whose subject lives in the user's own folder rather than a dux-managed
+/// working copy: a standalone agent's folder line and a standalone terminal's
+/// directory line. One filled star, reused by name, so "standalone" is a single
+/// indicator the user learns once. The star (U+2737) is deliberate: it is
+/// filled like the TUI's other icons, and screen renderers announce it by a
+/// neutral name. Its rendered width is pinned to one cell by a test against the
+/// same `CellWidth` machinery the row layout measures with; do not swap the
+/// glyph without re-pinning.
+pub const STANDALONE_GLYPH: &str = "✷";
+
 /// The bundled `dux_dark` theme TOML, embedded at compile time so the default
 /// path never depends on a file on disk.
 const DUX_DARK_TOML: &str = include_str!("../../../assets/themes/dux_dark.toml");
@@ -70,10 +81,11 @@ pub struct Theme {
     pub selection_bg: Color,
     pub project_icon: Color,
     pub project_missing_fg: Color,
-    /// Foreground for a standalone agent's location on its sidebar row: the
-    /// house glyph and the folder path on line two. This is an IDENTITY color
-    /// ("this agent lives in your folder"), never a state color, so it stays on
-    /// line two and must read quieter than the working/typing/attention cues.
+    /// Foreground for the standalone indicator on sidebar rows: the star
+    /// glyph and the directory label on line two, worn by standalone agents
+    /// and standalone terminals alike. This is an IDENTITY color ("this one
+    /// lives in your folder"), never a state color, so it stays on line two
+    /// and must read quieter than the working/typing/attention cues.
     /// Defaults to the theme's own info hue, the one semantic family no row
     /// state uses, so the tone holds in every theme without shouting.
     pub standalone_location_fg: Color,
@@ -782,6 +794,21 @@ impl Theme {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The standalone star must occupy exactly one terminal cell, measured
+    /// through the same `CellWidth` trait the row layout advances columns
+    /// with (ratatui-core over unicode-width), not through an assumption
+    /// about the codepoint. A wide or ambiguous-wide glyph would shear every
+    /// row that carries it; this pin is the gate for ever changing the glyph.
+    #[test]
+    fn the_standalone_glyph_measures_one_cell_wide() {
+        use ratatui::buffer::CellWidth;
+        assert_eq!(
+            STANDALONE_GLYPH.cell_width(),
+            1,
+            "the standalone glyph must be one cell wide in the width machinery the rows trust"
+        );
+    }
 
     /// A modal that refuses an outside click flashes its border ring from
     /// `overlay_border` to `overlay_border_refused` (see

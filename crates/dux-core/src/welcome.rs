@@ -191,6 +191,15 @@ pub const WELCOME_TIPS: &[WelcomeTip] = &[
             "Worktrees are the secret sauce: an agent in a project gets its own isolated branch. No conflicts, ever.".into()
         }),
     },
+    // The standalone star: one indicator, learned once, on both surfaces.
+    WelcomeTip {
+        web: Some(
+            "Spot a ✷ in the sidebar? Standalone. That agent or terminal lives in your own folder, not a worktree dux made. Your folder, your rules.",
+        ),
+        tui: Some(|_resolve| {
+            "Spot a ✷ in the sidebar? Standalone. That agent or terminal lives in your own folder, not a worktree dux made. Your folder, your rules.".into()
+        }),
+    },
     WelcomeTip {
         web: None,
         tui: Some(|resolve| {
