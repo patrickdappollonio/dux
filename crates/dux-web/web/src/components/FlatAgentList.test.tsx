@@ -450,6 +450,45 @@ describe("FlatAgentList agent row branch", () => {
     expect(screen.queryByText("Repo")).toBeNull()
   })
 
+  // The standalone agent's identity glyph is a house, and the glyph plus the
+  // folder label wear the dux-standalone identity token (the web twin of the
+  // TUI's standalone-location theme color), never a hardcoded color. A managed
+  // agent's project tag keeps its plain folder glyph and its muted tone.
+  it("marks a standalone agent's folder with the House glyph in the identity tone", () => {
+    const state = makeState("name")
+    state.spine!.sessions = [
+      state.spine!.sessions[0],
+      {
+        ...state.spine!.sessions[0],
+        id: "notes",
+        title: "Notes",
+        workspace: {
+          kind: "folder",
+          folder_path: "/home/someone/work/notes",
+          folder_label: "~/work/notes",
+          repo_status: "no_repo",
+          quiet_reason: "This folder has no git repository.",
+        },
+      } as SessionView,
+    ]
+    mockState = state
+    render(<FlatAgentList handlers={handlers} />)
+    const tag = screen.getByText("~/work/notes").closest("span")?.parentElement
+    expect(tag).toBeTruthy()
+    // The house, not the old open folder.
+    expect(tag!.querySelector("svg.lucide-house")).toBeTruthy()
+    expect(tag!.querySelector("svg.lucide-folder-open")).toBeNull()
+    // The identity tone is the dedicated dux-standalone token, scoped to the
+    // glyph and the label; the rest of line two stays muted.
+    expect(tag!.className).toContain("text-dux-standalone")
+    expect(tag!.className).not.toContain("text-muted-foreground")
+    // The managed row beside it is untouched: plain folder glyph, no house.
+    const project = screen.getByText("Repo").closest("span")?.parentElement
+    expect(project!.querySelector("svg.lucide-folder")).toBeTruthy()
+    expect(project!.querySelector("svg.lucide-house")).toBeNull()
+    expect(project!.className).toContain("text-muted-foreground")
+  })
+
   it("keeps the rest of line two: the project tag, the state word, the tab count", () => {
     const state = makeState("name")
     state.spine!.sessions = state.spine!.sessions.map((s) =>

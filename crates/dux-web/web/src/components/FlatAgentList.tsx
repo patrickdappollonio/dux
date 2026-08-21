@@ -24,9 +24,9 @@ import {
   ExternalLink,
   FileCode2,
   Folder,
-  FolderOpen,
   GitFork,
   GitPullRequest,
+  House,
   Info,
   Paperclip,
   Pencil,
@@ -524,14 +524,18 @@ function ProjectTag({ name, query }: { name: string; query: string }) {
 
 // A STANDALONE agent's folder, in the slot a project would occupy: same fact
 // ("which thing am I in") for the other kind of agent, so it takes the same
-// place rather than a badge of its own. The open-folder glyph tells the two
-// apart at a glance, and the label is home-collapsed server-side because the
-// browser is not necessarily on the server's machine. Searched like the project
-// name, so a query that matched a path explains itself.
+// place rather than a badge of its own. The house glyph tells the two apart at
+// a glance ("this agent lives in your folder"), and glyph plus label wear the
+// dux-standalone token, the web twin of the TUI's standalone-location theme
+// color: an IDENTITY tone, never a state color, quiet enough that it cannot
+// shout over the row's state cues, and scoped to this tag so the rest of line
+// two stays muted. The label is home-collapsed server-side because the browser
+// is not necessarily on the server's machine. Searched like the project name,
+// so a query that matched a path explains itself.
 function FolderTag({ label, query }: { label: string; query: string }) {
   return (
-    <span className="flex min-w-0 shrink items-center gap-1 text-muted-foreground">
-      <FolderOpen className="size-3 shrink-0" />
+    <span className="flex min-w-0 shrink items-center gap-1 text-dux-standalone">
+      <House className="size-3 shrink-0" />
       <span className="min-w-0 truncate font-mono">
         <HighlightedText text={label} query={query} />
       </span>

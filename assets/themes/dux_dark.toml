@@ -70,6 +70,9 @@ ansi_darkgray = "#808080"
 # ── Project & session indicators ─────────────────────────────────────
 "dux.project_icon"         = "#6495ed"
 "dux.project_missing_fg"   = "#b4a050"
+# A standalone agent's house glyph and folder path: an identity tone, not a
+# state color, so a soft slate blue that stays quieter than the state cues.
+"dux.standalone_location_fg" = "#7d96a0"
 "dux.session_active"       = "#d2d2d2"
 "dux.session_detached"     = "ansi_yellow"
 "dux.session_exited"       = "#646464"

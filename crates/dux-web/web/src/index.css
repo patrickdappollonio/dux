@@ -141,6 +141,13 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
        "Typing" state word and the typing caret. The one new semantic token this
        feature adds; its value lives in :root/.dark below. */
     --color-dux-typing: var(--dux-typing);
+    /* The standalone agent's location tone: a soft slate blue matching the dux
+       TUI's bundled dark-theme standalone-location hue (`#7d96a0`). Used for
+       the agent row's house glyph and folder label. This is an IDENTITY color
+       ("this agent lives in your folder"), never a state color, so it stays on
+       line two and must read quieter than the working/typing/attention cues.
+       Its value lives in :root/.dark below. */
+    --color-dux-standalone: var(--dux-standalone);
     --radius-sm: calc(var(--radius) * 0.6);
     --radius-md: calc(var(--radius) * 0.8);
     --radius-lg: var(--radius);
@@ -334,6 +341,10 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     /* Typing state color, matching the dux TUI bundled dark theme's soft violet
        (`#c586e0`). Constant across light/dark since the web app is dark-only. */
     --dux-typing: #c586e0;
+    /* Standalone-location identity color, the oklch reading of the dux TUI
+       bundled dark theme's soft slate blue (`#7d96a0`). Identity, not state.
+       Constant across light/dark since the web app is dark-only. */
+    --dux-standalone: oklch(0.657 0.032 224);
 }
 
 .dark {
@@ -374,6 +385,8 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     --dux-shimmer-bright: oklch(0.62 0 0);
     /* Typing state color (see :root above). */
     --dux-typing: #c586e0;
+    /* Standalone-location identity color (see :root above). */
+    --dux-standalone: oklch(0.657 0.032 224);
 }
 
 /* Slim the xterm scrollbar so it doesn't dominate the terminal column. xterm 6

@@ -1339,10 +1339,13 @@ impl App {
         // the glyph column lines up with the name on line one). The marker span
         // includes that indent; the project NAME is a separate, truncatable span.
         //
-        // A STANDALONE agent names its folder here instead, with the return
-        // arrow the standalone terminal row already uses for the same idea:
-        // "this is where it runs". Same indent, same column.
+        // A STANDALONE agent names its folder here instead, marked with a house
+        // glyph in the standalone identity tone: "this agent lives in your
+        // folder". Identity, not state, so the tone stays on line two and the
+        // terminal row keeps its own return arrow untouched. Same indent, same
+        // column.
         let missing_fg = self.theme.project_missing_fg;
+        let standalone_fg = self.theme.standalone_location_fg;
         let (marker, name_span): (Span<'static>, Option<Span<'static>>) =
             match agent_row_owner_tag(session, found) {
                 AgentRowOwnerTag::Project(ProjectTagKind::Healthy, project_name) => (
@@ -1358,8 +1361,8 @@ impl App {
                     None,
                 ),
                 AgentRowOwnerTag::Folder { label } => (
-                    Span::styled("  ↳ ".to_string(), Style::default().fg(muted)),
-                    Some(Span::styled(label, Style::default().fg(muted))),
+                    Span::styled("  ⌂ ".to_string(), Style::default().fg(standalone_fg)),
+                    Some(Span::styled(label, Style::default().fg(standalone_fg))),
                 ),
             };
         let word = agent_state_word(session.status, working, typing, needs_attention);
@@ -11096,6 +11099,82 @@ mod tests {
             }
             other => panic!("a standalone agent must never take a project arm, got {other:?}"),
         }
+    }
+
+    /// The rendered sidebar: a standalone agent's second line carries the house
+    /// glyph and its folder in the standalone identity tone, while the managed
+    /// row beside it keeps its muted project marker exactly as before. The
+    /// house is identity, not state, so it must never borrow a state color and
+    /// must never leak onto the managed row.
+    #[test]
+    fn a_standalone_agents_row_wears_the_house_glyph_in_the_identity_tone() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        let mut standalone = app.engine.sessions[0].clone();
+        standalone.id = "session-2".to_string();
+        standalone.title = Some("Notes".to_string());
+        standalone.workspace =
+            dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
+                folder_path: "/srv/notes".to_string(),
+            });
+        app.engine.sessions.push(standalone);
+        app.focus = FocusPane::Left;
+        app.rebuild_left_items();
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let buf = terminal.backend().buffer();
+        let cell_at = |sym: &str| {
+            (0..buf.area.height)
+                .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
+                .find(|&(x, y)| buf[(x, y)].symbol() == sym)
+                .unwrap_or_else(|| panic!("no `{sym}` cell rendered"))
+        };
+
+        // The house glyph and the folder path share the identity tone.
+        let (hx, hy) = cell_at("⌂");
+        assert_eq!(
+            buf[(hx, hy)].fg,
+            app.theme.standalone_location_fg,
+            "the house glyph must wear the standalone identity tone"
+        );
+        // The folder path follows two cells after the glyph ("⌂ /srv/notes").
+        let path_start = (hx + 2, hy);
+        assert_eq!(buf[path_start].symbol(), "/");
+        assert_eq!(
+            buf[path_start].fg, app.theme.standalone_location_fg,
+            "the folder path must wear the identity tone too"
+        );
+        // No return arrow anywhere: the agent row dropped it and no terminal
+        // row exists in this app to legitimately carry one.
+        let rendered: String = buf.content().iter().map(|c| c.symbol()).collect();
+        assert!(
+            !rendered.contains('↳'),
+            "the standalone agent row must not use the return arrow; got:\n{rendered}"
+        );
+
+        // The managed row is untouched: the project marker and name keep the
+        // muted provider-label color they always had.
+        let (mx, my) = cell_at("※");
+        assert_eq!(
+            buf[(mx, my)].fg,
+            app.theme.provider_label_fg,
+            "the managed row's project marker must stay muted"
+        );
+        let project_start = (mx + 2, my);
+        assert_eq!(
+            buf[project_start].symbol(),
+            "d",
+            "expected `demo` after `※ `"
+        );
+        assert_eq!(
+            buf[project_start].fg, app.theme.provider_label_fg,
+            "the managed row's project name must stay muted"
+        );
     }
 
     /// The branch segment is CONDITIONAL on the row already, so an agent with

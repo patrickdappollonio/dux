@@ -70,6 +70,13 @@ pub struct Theme {
     pub selection_bg: Color,
     pub project_icon: Color,
     pub project_missing_fg: Color,
+    /// Foreground for a standalone agent's location on its sidebar row: the
+    /// house glyph and the folder path on line two. This is an IDENTITY color
+    /// ("this agent lives in your folder"), never a state color, so it stays on
+    /// line two and must read quieter than the working/typing/attention cues.
+    /// Defaults to the theme's own info hue, the one semantic family no row
+    /// state uses, so the tone holds in every theme without shouting.
+    pub standalone_location_fg: Color,
     pub session_active: Color,
     pub session_detached: Color,
     pub session_exited: Color,
@@ -387,6 +394,7 @@ fn register_dux_defaults(theme: &mut OpalineTheme) {
     // Projects & sessions
     theme.register_default_token("dux.project_icon", accent_primary);
     theme.register_default_token("dux.project_missing_fg", warning);
+    theme.register_default_token("dux.standalone_location_fg", info);
     theme.register_default_token("dux.session_active", text_primary);
     theme.register_default_token("dux.session_detached", warning);
     theme.register_default_token("dux.session_exited", text_dim);
@@ -544,6 +552,7 @@ impl Theme {
             selection_bg: pick("dux.selection_bg"),
             project_icon: pick("dux.project_icon"),
             project_missing_fg: pick("dux.project_missing_fg"),
+            standalone_location_fg: pick("dux.standalone_location_fg"),
             session_active: pick("dux.session_active"),
             session_detached: pick("dux.session_detached"),
             session_exited: pick("dux.session_exited"),
@@ -888,6 +897,9 @@ mod tests {
             selection_bg: Color::Rgb(0, 229, 229),
             project_icon: Color::Rgb(100, 149, 237),
             project_missing_fg: Color::Rgb(180, 160, 80),
+            // The standalone agent's identity tone: a soft slate blue from the
+            // info family, quiet beside the state colors on the same line.
+            standalone_location_fg: Color::Rgb(125, 150, 160),
             session_active: Color::Rgb(210, 210, 210),
             session_detached: Color::Yellow,
             session_exited: Color::Rgb(100, 100, 100),
@@ -1003,6 +1015,7 @@ mod tests {
         assert_field!(selection_bg);
         assert_field!(project_icon);
         assert_field!(project_missing_fg);
+        assert_field!(standalone_location_fg);
         assert_field!(session_active);
         assert_field!(session_detached);
         assert_field!(session_exited);
@@ -1225,6 +1238,43 @@ variant = "dark"
         let nord = Theme::from_opaline(&nord);
         // Derived from Nord's accent.secondary, not the FALLBACK gray.
         assert_ne!(nord.session_typing, Color::Rgb(128, 128, 128));
+    }
+
+    /// The standalone agent's identity tone must resolve in every theme dux can
+    /// actually load: the bundled dux-dark defines the token explicitly, and
+    /// every built-in derives it from its own info hue rather than falling back
+    /// to the FALLBACK gray of a missing token. Identity you cannot resolve is
+    /// a row that silently loses its "lives in your folder" cue.
+    #[test]
+    fn the_standalone_location_tone_resolves_in_every_loadable_theme() {
+        let dux_dark = load_from_str(DUX_DARK_TOML).expect("bundled dux-dark must parse");
+        assert_eq!(dux_dark.standalone_location_fg, Color::Rgb(125, 150, 160));
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+        let paths = DuxPaths {
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            worktrees_root: root.join("worktrees"),
+            lock_path: root.join("dux.lock"),
+            root,
+        };
+        let listings = discover_available(&paths);
+        assert!(
+            listings.len() > 1,
+            "expected the bundled theme plus built-ins, got {}",
+            listings.len()
+        );
+        for listing in listings {
+            let theme = load(&listing.id, &paths)
+                .unwrap_or_else(|err| panic!("theme {} failed to load: {err}", listing.id));
+            assert_ne!(
+                theme.standalone_location_fg,
+                Color::Rgb(128, 128, 128),
+                "theme {} left the standalone location tone at the FALLBACK gray",
+                listing.id
+            );
+        }
     }
 
     /// A generic Opaline built-in (no `dux.*` tokens defined) should derive
