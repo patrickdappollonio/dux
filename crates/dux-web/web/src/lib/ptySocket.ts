@@ -7,9 +7,11 @@
 // Protocol (matches `handle_pty_socket` in `crates/dux-web/src/server.rs`):
 //   - On (re)open the server sends a Text `connected` frame FIRST carrying this
 //     socket's connection id, the replay generation, who currently drives the
-//     PTY, the ownership epoch of that owner snapshot, the PTY's current
-//     grid, and the grid sequence that grid is at least as new as:
-//     `{"event":"connected","id":"<connId>","gen":<n>,"owner":"<connId>"|null,"owner_epoch":<n>,"rows":<n>|null,"cols":<n>|null,"grid_seq":<n>}`.
+//     PTY, the ownership epoch of that owner snapshot, the owner's device label
+//     (its captured `User-Agent`; the key is omitted when there is none to
+//     name), the PTY's current grid, and the grid sequence that grid is at
+//     least as new as:
+//     `{"event":"connected","id":"<connId>","gen":<n>,"owner":"<connId>"|null,"owner_epoch":<n>,"owner_device":"<ua>","rows":<n>|null,"cols":<n>|null,"grid_seq":<n>}`.
 //   - Whenever a resize is APPLIED to the PTY, every socket attached to it gets
 //     a Text event frame `{"event":"size","rows":R,"cols":C,"seq":<n>}`. One PTY
 //     has one authoritative grid (the owner's) and every other attached browser
@@ -180,6 +182,16 @@ export class PtySocket extends ReconnectingSocket {
   // key was absent (an old server, which then omitted `owner` too).
   private connectedOwnerEpoch: number | undefined = undefined
 
+  // The owner's device label on the handshake's owner snapshot
+  // (`owner_device`): the raw `User-Agent` the owning connection presented at
+  // its upgrade, recorded server-side at claim time and read under the same
+  // lock as `owner`. It is the same string a `pty.owner` handover carries as
+  // `device`, and it rides the handshake because a mere attach hears no such
+  // handover: without it a watcher that simply opened the pane could only
+  // title its take-over card with the generic copy. `undefined` when the key
+  // is absent (an old server, an unowned pty, or an owner with no User-Agent).
+  private connectedOwnerDevice: string | undefined = undefined
+
   // The PTY's grid as of the most recent frame that reported one: the
   // `connected` handshake at attach, then every `size` event after it. Null
   // when the server did not answer (an old server, or a pty it could not read),
@@ -205,6 +217,7 @@ export class PtySocket extends ReconnectingSocket {
     id: string,
     owner: string | null | undefined,
     ownerEpoch: number | undefined,
+    ownerDevice: string | undefined,
   ) => void = () => {}
 
   // Fired with the PTY's grid every time the wire reports one, and with
@@ -299,6 +312,7 @@ export class PtySocket extends ReconnectingSocket {
           gen?: number
           owner?: string | null
           owner_epoch?: number
+          owner_device?: string
           rows?: number | null
           cols?: number | null
           seq?: number
@@ -342,6 +356,13 @@ export class PtySocket extends ReconnectingSocket {
           // together, so an absent epoch is the same mixed-version signal.
           this.connectedOwnerEpoch =
             typeof frame.owner_epoch === "number" ? frame.owner_epoch : undefined
+          // The owner's device label. Absent (not null) whenever there is no
+          // name to give, so a bare presence check is enough; only a string is
+          // ever accepted.
+          this.connectedOwnerDevice =
+            typeof frame.owner_device === "string"
+              ? frame.owner_device
+              : undefined
           // The grid this attach is joining. A server that cannot answer sends
           // explicit nulls (and an older one omits the keys), and both land
           // here as null: "nothing known", never "it matches".
@@ -352,7 +373,12 @@ export class PtySocket extends ReconnectingSocket {
           // old server, which leaves the filter off.
           this.lastGridSeq =
             typeof frame.grid_seq === "number" ? frame.grid_seq : null
-          this.onConnected(frame.id, this.connectedOwner, this.connectedOwnerEpoch)
+          this.onConnected(
+            frame.id,
+            this.connectedOwner,
+            this.connectedOwnerEpoch,
+            this.connectedOwnerDevice,
+          )
           this.onPtyGrid(this.ptyGrid, true)
         }
       } catch {

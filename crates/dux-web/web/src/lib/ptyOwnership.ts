@@ -90,6 +90,44 @@ export function seedVerdictFromConnected(input: {
   return input.owner === input.myConnId
 }
 
+// SEED the other device's NAME from the same `connected` handshake the verdict
+// seeds from. The handshake's `owner_device` is the owner's raw `User-Agent`,
+// recorded server-side at claim time and read under the same lock as `owner`,
+// and it exists because a mere attach hears no `pty.owner` broadcast at all:
+// under attach-never-steals the handshake is a watcher's ONLY word on who
+// drives, so without this rule its card could only say "Active on another
+// device". Returns what the pane should store as the take-over device string.
+//
+// The rules mirror the verdict seed's, one for one:
+//   - This pane OWNS the pty: null. An owning pane never names another device.
+//   - The handshake is SUPERSEDED by a newer applied `pty.owner`: keep the
+//     prior name, exactly as the verdict keeps the prior verdict. The newer
+//     event's name (or its absence) already stands; a stale snapshot must not
+//     overwrite it in either direction.
+//   - No owner id on the handshake (an old server's absent key, or an unowned
+//     pty's null): null. There is no device to name, and an old server that
+//     cannot answer falls back to the generic title rather than a stale name.
+//   - Otherwise the handshake names a foreign owner: its device, or null when
+//     that connection sent no User-Agent.
+export function seedDeviceFromConnected(input: {
+  /// The verdict `seedVerdictFromConnected` returned for this same handshake.
+  mine: boolean
+  /// `handshakeSuperseded` for this same handshake, computed once by the caller
+  /// so the name and the verdict cannot disagree about staleness.
+  superseded: boolean
+  owner: HandshakeOwner
+  /// The handshake's `owner_device`; undefined when absent (an old server, an
+  /// unowned pty, or an owner that sent no User-Agent).
+  ownerDevice: string | undefined
+  /// The name standing when the handshake landed.
+  priorDevice: string | null
+}): string | null {
+  if (input.mine) return null
+  if (input.superseded) return input.priorDevice
+  if (typeof input.owner !== "string") return null
+  return input.ownerDevice ?? null
+}
+
 // Whether a `connected` handshake's owner snapshot has been overtaken by a
 // `pty.owner` already applied for the same pty: true only when BOTH epochs are
 // known and the applied one is strictly newer. Equal epochs mean the handshake

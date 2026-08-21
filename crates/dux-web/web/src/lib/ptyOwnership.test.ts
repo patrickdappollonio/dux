@@ -8,6 +8,7 @@ import {
   notifyPtyOwner,
   onPtyOwner,
   resetPtyOwnerEpochs,
+  seedDeviceFromConnected,
   seedVerdictFromConnected,
 } from "./ptyOwnership"
 
@@ -230,6 +231,84 @@ describe("seedVerdictFromConnected", () => {
         }),
       ).toBe(true)
     })
+  })
+})
+
+// The NAME half of the handshake seed. A watcher that merely attaches hears no
+// `pty.owner` broadcast at all (attaching never steals, and a refused claim
+// emits nothing), so the handshake's `owner_device` is its only source of a
+// specific take-over title; these rules mirror the verdict seed's one for one.
+describe("seedDeviceFromConnected", () => {
+  it("names the foreign owner's device from the handshake", () => {
+    expect(
+      seedDeviceFromConnected({
+        mine: false,
+        superseded: false,
+        owner: "conn-other",
+        ownerDevice: "Driver UA",
+        priorDevice: null,
+      }),
+    ).toBe("Driver UA")
+  })
+
+  it("clears any name when this pane owns the pty", () => {
+    expect(
+      seedDeviceFromConnected({
+        mine: true,
+        superseded: false,
+        owner: "conn-self",
+        ownerDevice: "Driver UA",
+        priorDevice: "Stale UA",
+      }),
+    ).toBeNull()
+  })
+
+  it("keeps the newer applied pty.owner's name against a superseded handshake", () => {
+    expect(
+      seedDeviceFromConnected({
+        mine: false,
+        superseded: true,
+        owner: null,
+        ownerDevice: undefined,
+        priorDevice: "Newer Claimer UA",
+      }),
+    ).toBe("Newer Claimer UA")
+  })
+
+  it("falls back to the generic title against an old server that omits the owner", () => {
+    expect(
+      seedDeviceFromConnected({
+        mine: false,
+        superseded: false,
+        owner: undefined,
+        ownerDevice: undefined,
+        priorDevice: "Stale UA",
+      }),
+    ).toBeNull()
+  })
+
+  it("names nobody on an unowned pty, whatever stood before", () => {
+    expect(
+      seedDeviceFromConnected({
+        mine: false,
+        superseded: false,
+        owner: null,
+        ownerDevice: undefined,
+        priorDevice: "Stale UA",
+      }),
+    ).toBeNull()
+  })
+
+  it("reads an owner with no captured User-Agent as unnamed, not as an error", () => {
+    expect(
+      seedDeviceFromConnected({
+        mine: false,
+        superseded: false,
+        owner: "conn-other",
+        ownerDevice: undefined,
+        priorDevice: "Stale UA",
+      }),
+    ).toBeNull()
   })
 })
 

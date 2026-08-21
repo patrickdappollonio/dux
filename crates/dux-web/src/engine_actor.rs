@@ -4285,7 +4285,7 @@ mod tests {
         // Steady state: the owner typing away bumps nothing, so further checks
         // must not churn (no event, no re-serialize).
         let serializes_after_claim = check.fp_call_count;
-        assert!(owners.may_write("s1", 42).allowed);
+        assert!(owners.may_write("s1", 42, None).allowed);
         check.maybe_check(&engine, 0, 0, &owners, &tx, &workspace_tx);
         assert_eq!(
             check.fp_call_count, serializes_after_claim,

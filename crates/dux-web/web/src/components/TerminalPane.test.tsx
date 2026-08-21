@@ -315,7 +315,12 @@ class FakePtySocket {
   // id, and the pane seeds its ownership verdict from it. Tests that pass no
   // owner exercise the older-server fallback (the key absent, so the foreground
   // guess still decides), which is what most of this file wants.
-  onConnected: (id: string, owner?: string | null) => void = () => {}
+  onConnected: (
+    id: string,
+    owner?: string | null,
+    ownerEpoch?: number,
+    ownerDevice?: string,
+  ) => void = () => {}
   // The PTY's authoritative grid, reported by the `connected` handshake at
   // attach (`fromHandshake` true) and by a `size` event on every applied resize
   // after it. A test drives it directly, which is exactly what the server does.
@@ -892,6 +897,17 @@ describe("TerminalPane take-over card", () => {
 describe("TerminalPane take-over device naming", () => {
   const chromeMac =
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+  // THE MERE-ATTACH CASE, the user-reported regression. Under attach-never-steals
+  // a watcher's only word on who drives arrives on the `connected` handshake; no
+  // `pty.owner` ever follows a plain attach, so the handshake must carry the
+  // owner's device label or the card can only say "Active on another device".
+  it("names the owning device from the connected handshake alone, no pty.owner event", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    act(() => last().onConnected("conn-self", "conn-other", 3, chromeMac))
+    expect(screen.getByText("Open on Chrome on macOS")).toBeTruthy()
+    expect(screen.queryByText("Active on another device")).toBeNull()
+  })
 
   it("names the other device in the modal when a handover carries a device UA", () => {
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)

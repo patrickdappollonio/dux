@@ -37,7 +37,7 @@ function setVisibility(state: "visible" | "hidden") {
   })
 }
 
-function setup(opts: { kind?: "agent" | "terminal" } = {}) {
+function setup(opts: { kind?: "agent" | "terminal"; conn?: "open" | "connecting" } = {}) {
   const pty = new PtyFake()
   const focuses: number[] = []
   const reconnecting: boolean[] = []
@@ -45,7 +45,7 @@ function setup(opts: { kind?: "agent" | "terminal" } = {}) {
     useTerminalOwnership({
       id: "p1",
       kind: opts.kind ?? "agent",
-      conn: "open",
+      conn: opts.conn ?? "open",
       ptyRef: { current: pty as unknown as PtySocket },
       focusTypingSurface: () => focuses.push(1),
       setReconnecting: (v) => reconnecting.push(v),
@@ -158,6 +158,55 @@ describe("seeding the verdict from the connected handshake", () => {
     const { view } = setup()
     act(() => view.result.current.seedFromConnected("mine", undefined))
     expect(view.result.current.isOwner).toBe(true)
+    expect(view.result.current.ownerPresent).toBe(true)
+  })
+
+  // THE MERE-ATTACH NAME, the user-reported regression. A watcher that simply
+  // attaches hears no `pty.owner` broadcast (attaching never steals and a
+  // refused claim emits nothing), so the handshake's `owner_device` is its only
+  // source of a specific card title.
+  it("names the driving device from the handshake alone, with no pty.owner event", () => {
+    const { view } = setup()
+    act(() =>
+      view.result.current.seedFromConnected(
+        "mine",
+        "theirs",
+        1,
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      ),
+    )
+    expect(view.result.current.isOwner).toBe(false)
+    expect(view.result.current.takeoverLabel).toBe("Chrome on macOS")
+  })
+
+  // A name planted while the EVENTS socket is down could never be corrected
+  // (pty.owner broadcasts are live-only, and they are the one channel that
+  // updates a name), so the handshake's name half is gated on that socket
+  // being open. The VERDICT half still seeds: the generic title is never
+  // wrong, a stale specific name is.
+  it("seeds the verdict but not the name while the events socket is down", () => {
+    const { view } = setup({ conn: "connecting" })
+    act(() =>
+      view.result.current.seedFromConnected(
+        "mine",
+        "theirs",
+        1,
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      ),
+    )
+    expect(view.result.current.isOwner).toBe(false)
+    expect(view.result.current.ownerPresent).toBe(true)
+    expect(view.result.current.takeoverLabel).toBeNull()
+  })
+
+  // An old server sends no `owner_device` (it omits `owner` too), and an owner
+  // that presented no User-Agent has nothing to be named by: both fall back to
+  // the generic title rather than a guess.
+  it("leaves the title generic when the handshake carries no device", () => {
+    const { view } = setup()
+    act(() => view.result.current.seedFromConnected("mine", "theirs", 1))
+    expect(view.result.current.isOwner).toBe(false)
+    expect(view.result.current.takeoverLabel).toBeNull()
     expect(view.result.current.ownerPresent).toBe(true)
   })
 

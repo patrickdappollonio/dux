@@ -1638,6 +1638,84 @@ async fn the_connected_handshake_names_the_ptys_current_owner() {
     );
 }
 
+/// The `connected` handshake also names the owner's DEVICE: the `User-Agent`
+/// the owning connection presented at its upgrade, recorded at claim time and
+/// read under the same owners-lock acquisition as `owner` and `owner_epoch`.
+///
+/// This is the frame's answer to the mere-attach case: a watcher that simply
+/// opens the pane hears no `pty.owner` broadcast (attaching never steals and a
+/// refused claim emits nothing), so without this key its take-over card can
+/// only say "Active on another device" instead of naming the driving device.
+/// An unowned pty omits the key, so the pre-claim shape stays byte-identical
+/// to what an older client already parses.
+#[tokio::test]
+async fn the_connected_handshake_names_the_owners_device() {
+    let (addr, _tmp) = boot().await;
+    let url = format!("ws://{addr}/ws/sessions/s1/pty");
+
+    /// The first Text frame on a PTY socket is the `connected` handshake; the
+    /// Binary frames around it are the scrollback replay and live output.
+    async fn first_text(
+        ws: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ) -> serde_json::Value {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+        while tokio::time::Instant::now() < deadline {
+            if let Ok(Some(Ok(Message::Text(t)))) =
+                tokio::time::timeout(Duration::from_millis(300), ws.next()).await
+            {
+                return serde_json::from_str(&t).expect("the connected frame is JSON");
+            }
+        }
+        panic!("no connected frame arrived");
+    }
+
+    // The driver connects with a `User-Agent`, as every real browser does.
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let mut request = url.clone().into_client_request().expect("a client request");
+    request.headers_mut().insert(
+        axum::http::header::USER_AGENT,
+        "Test Driver UA".parse().expect("a header value"),
+    );
+    let (mut ws_a, _) = tokio_tungstenite::connect_async(request)
+        .await
+        .expect("connect the driving pty socket");
+    let hello_a = first_text(&mut ws_a).await;
+    assert!(
+        hello_a.get("owner_device").is_none(),
+        "an unowned pty has no device to name, and the key is omitted; got {hello_a}"
+    );
+
+    // A claims the unowned pty, then proves the claim was processed by echoing
+    // a marker through the pty (frames on one socket are handled in order).
+    ws_a.send(Message::Text(r#"{"rows":24,"cols":80}"#.into()))
+        .await
+        .unwrap();
+    ws_a.send(Message::Binary(b"dux-device-marker\n".to_vec().into()))
+        .await
+        .unwrap();
+    let _ = accumulate_until(&mut ws_a, "dux-device-marker", Duration::from_secs(8)).await;
+
+    // A second, plain arrival must be told the driver's device on its handshake,
+    // with no pty.owner broadcast involved anywhere on its path.
+    let (mut ws_b, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("connect second pty socket");
+    let hello_b = first_text(&mut ws_b).await;
+    assert_eq!(
+        hello_b["owner"].as_str(),
+        hello_a["id"].as_str(),
+        "the second arrival joins the pty the first connection drives"
+    );
+    assert_eq!(
+        hello_b["owner_device"].as_str(),
+        Some("Test Driver UA"),
+        "the handshake must name the owner's device, or a watcher that merely \
+         attached can only title its card 'Active on another device'"
+    );
+}
+
 /// One byte past the 16 MiB message cap dux is expected to configure, written
 /// as a LITERAL and deliberately NOT derived from
 /// `dux_web::server::MAX_WS_MESSAGE_SIZE`.

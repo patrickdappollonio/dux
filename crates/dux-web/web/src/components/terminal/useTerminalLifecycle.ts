@@ -144,10 +144,14 @@ export type TerminalLifecyclePorts = {
   connId: ConnectionIdentity
   /// Re-seed the ownership verdict from the `connected` handshake's `owner`
   /// field. The frame lands here; the decision lives in the ownership machine.
+  /// `ownerDevice` is the handshake's `owner_device`, which seeds the take-over
+  /// card's device name for a watcher that merely attached (a mere attach hears
+  /// no `pty.owner` broadcast, so this frame is its only source of a name).
   seedOwnershipFromConnected: (
     myConnId: string,
     owner: HandshakeOwner,
     ownerEpoch?: number,
+    ownerDevice?: string,
   ) => void
   /// Record a grid the wire reported for this PTY (the `connected` handshake's
   /// snapshot, then every applied change). The viewer-grid machine decides what
@@ -434,7 +438,7 @@ export function useTerminalLifecycle(
     // Record this socket's connection id (the socket's first `connected` frame, and
     // again on every reconnect since the server allocates a fresh id per open) so
     // the `pty.owner` handler can compare a handover's claimer id against ours.
-    pty.onConnected = (connectionId, owner, ownerEpoch) => {
+    pty.onConnected = (connectionId, owner, ownerEpoch, ownerDevice) => {
       connId.write(connectionId)
       // Register the id as one of OURS in the store, so the server-published
       // `input_owner` spine field can be compared against this client's own
@@ -454,7 +458,9 @@ export function useTerminalLifecycle(
       // claiming an UNOWNED pty. The epoch rides along so the seed can defer
       // to a strictly newer `pty.owner` this client already applied off the
       // events socket (the two sockets have no ordering between them).
-      seedOwnershipFromConnected(connectionId, owner, ownerEpoch)
+      // The owner's device label rides along too: it is this pane's only source
+      // of a name when it merely attached, since no `pty.owner` will follow.
+      seedOwnershipFromConnected(connectionId, owner, ownerEpoch, ownerDevice)
     }
 
     // THE REMOTE HALF: the grid the child is actually drawing for, reported by

@@ -169,7 +169,7 @@ impl AppState {
     pub(crate) fn input_held_by_someone_else(&self, pty_id: &str, conn_id: u64) -> bool {
         matches!(
             self.pty_size_owners.owners.lock().unwrap().map.get(pty_id),
-            Some(owner) if *owner != conn_id
+            Some(record) if record.conn_id != conn_id
         )
     }
 
@@ -1512,7 +1512,12 @@ async fn handle_pty_socket(
     // a strictly newer `pty.owner` recognize this frame as stale and keep the
     // newer verdict, instead of re-seeding itself as a phantom owner from an
     // outdated `owner: null` that nothing would ever correct.
-    let (current_owner, owner_epoch) = pty_size_owners.current_owner(target.pty_id());
+    // The owner's device label rides the same snapshot: it is recorded with the
+    // owner id at claim time, so this one lock acquisition answers who drives,
+    // since when, and from what device. A mere attach broadcasts no `pty.owner`,
+    // so the handshake is the only frame that can name the driving device to a
+    // watcher that simply opened the pane.
+    let owner_snapshot = pty_size_owners.current_owner(target.pty_id());
     // The per-pty grid sequence, read BEFORE the actor-queued grid read below,
     // which makes it a valid LOWER bound for the grid the handshake carries: a
     // resize stamped at or below this value was enqueued to the engine actor
@@ -1557,8 +1562,7 @@ async fn handle_pty_socket(
         &sink,
         conn_id,
         replay_generation,
-        current_owner,
-        owner_epoch,
+        owner_snapshot,
         grid,
         handshake_grid_seq,
     )
@@ -1663,7 +1667,7 @@ async fn handle_pty_socket(
             // out-of-band case that arrives before any size frame).
             Message::Binary(bytes) => {
                 let pty_id = target.pty_id();
-                let claim = pty_size_owners.may_write(pty_id, conn_id);
+                let claim = pty_size_owners.may_write(pty_id, conn_id, user_agent.as_deref());
                 if claim.allowed {
                     // `epoch` is `Some` exactly when this write newly claimed an
                     // unowned PTY, so emit one handover stamped with that epoch.
@@ -1695,10 +1699,15 @@ async fn handle_pty_socket(
             Message::Text(text) => {
                 if let Ok(frame) = serde_json::from_str::<PtyResizeFrame>(text.as_str()) {
                     let pty_id = target.pty_id();
-                    let outcome =
-                        pty_size_owners.claim_for_resize(pty_id, conn_id, frame.takeover, || {
+                    let outcome = pty_size_owners.claim_for_resize(
+                        pty_id,
+                        conn_id,
+                        frame.takeover,
+                        user_agent.as_deref(),
+                        || {
                             engine.resize_pty(pty_id.to_string(), frame.rows, frame.cols);
-                        });
+                        },
+                    );
                     if let Some(epoch) = outcome.epoch {
                         bus.emit(pty_owner_event(
                             pty_id,
@@ -2044,6 +2053,19 @@ struct PtyConnectedFrame {
     /// verdict. An old server omits both keys together, which is the client's
     /// mixed-version fallback signal.
     owner_epoch: u64,
+    /// The owner's device label: the raw `User-Agent` the owning connection
+    /// presented at its upgrade, recorded at claim time and read here under the
+    /// SAME owners-lock acquisition as `owner` and `owner_epoch`. It is the
+    /// same string the claim's own `pty.owner` broadcast carried as `device`,
+    /// and it exists because a mere attach emits no such broadcast: without it
+    /// a watcher that simply opened the pane could only title its take-over
+    /// card "Active on another device". Unlike `owner`, absence needs no
+    /// second meaning (the owner key already tells an old server apart), so it
+    /// is omitted rather than null when there is no owner or the owner sent no
+    /// `User-Agent`; a client treats an absent key as "no name known" and
+    /// falls back to the generic title.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner_device: Option<String>,
     /// The PTY's grid at attach time, the geometry the child is drawing for.
     /// Deliberately serialized even when null, for the same reason `owner` is:
     /// the field's PRESENCE tells the client this server answers the question
@@ -2110,25 +2132,30 @@ fn pty_size_frame_text(rows: u16, cols: u16, seq: u64) -> String {
 
 /// Serialize and send the PTY-socket `connected` handshake carrying this socket's
 /// connection id, the replay generation for the repaint that follows, the
-/// pty's current owner plus the ownership epoch of that snapshot (both read
-/// under ONE owners-lock acquisition by the caller), the grid the child is
-/// currently drawing for, and the grid sequence that grid is at least as new
-/// as (see [`PtyConnectedFrame::grid_seq`]).
+/// pty's current owner plus the ownership epoch and the owner's device label of
+/// that snapshot (all three read under ONE owners-lock acquisition by the
+/// caller), the grid the child is currently drawing for, and the grid sequence
+/// that grid is at least as new as (see [`PtyConnectedFrame::grid_seq`]).
+///
+/// `owner_snapshot` is [`PtySizeOwners::current_owner`]'s answer verbatim, kept
+/// as one value so the three fields that were read under one lock acquisition
+/// travel together and cannot be recombined from different snapshots.
 async fn send_pty_connected(
     sink: &SharedSink,
     conn_id: u64,
     generation: u64,
-    owner: Option<u64>,
-    owner_epoch: u64,
+    owner_snapshot: (Option<u64>, u64, Option<String>),
     grid: Option<(u16, u16)>,
     grid_seq: u64,
 ) -> Result<(), ()> {
+    let (owner, owner_epoch, owner_device) = owner_snapshot;
     let frame = PtyConnectedFrame {
         event: "connected",
         id: conn_id.to_string(),
         generation,
         owner: owner.map(|id| id.to_string()),
         owner_epoch,
+        owner_device,
         rows: grid.map(|(rows, _)| rows),
         cols: grid.map(|(_, cols)| cols),
         grid_seq,
@@ -3646,8 +3673,7 @@ mod tests {
         let driver = owners.next_conn_id();
         let viewer = owners.next_conn_id();
 
-        let denied =
-            |conn: u64| matches!(owners.owners.lock().unwrap().map.get(pty), Some(o) if *o != conn);
+        let denied = |conn: u64| matches!(owners.owners.lock().unwrap().map.get(pty), Some(o) if o.conn_id != conn);
 
         assert!(
             !denied(viewer),
@@ -3767,7 +3793,7 @@ mod tests {
         // A size-frame claim on one pty: epoch 1.
         assert_eq!(owners.claim("pty-a", conn_a), Some(1));
         // A first-writer claim on another pty (the `may_write` path): epoch 2.
-        let w = owners.may_write("pty-b", conn_b);
+        let w = owners.may_write("pty-b", conn_b, None);
         assert_eq!(
             w,
             WriteClaim {
@@ -3781,7 +3807,7 @@ mod tests {
         assert_eq!(owners.claim("pty-a", conn_b), Some(3));
         // A same-owner re-write on pty-b does not advance the epoch and emits none.
         assert_eq!(
-            owners.may_write("pty-b", conn_b),
+            owners.may_write("pty-b", conn_b, None),
             WriteClaim {
                 allowed: true,
                 claimed_new: false,
@@ -3810,7 +3836,7 @@ mod tests {
 
         // The handler forwards a stdin frame only when `may_write` allows it.
         assert_eq!(
-            owners.may_write(pty, conn_b),
+            owners.may_write(pty, conn_b, None),
             WriteClaim {
                 allowed: true,
                 claimed_new: false,
@@ -3819,7 +3845,7 @@ mod tests {
             "the owner B's stdin is forwarded without re-claiming"
         );
         assert_eq!(
-            owners.may_write(pty, conn_a),
+            owners.may_write(pty, conn_a, None),
             WriteClaim {
                 allowed: false,
                 claimed_new: false,
@@ -3849,7 +3875,7 @@ mod tests {
         // Unowned PTY: the first writer is allowed and NEWLY claims ownership,
         // taking the first ownership epoch so its `pty.owner` handover is ordered.
         assert_eq!(
-            owners.may_write(pty, conn_a),
+            owners.may_write(pty, conn_a, None),
             WriteClaim {
                 allowed: true,
                 claimed_new: true,
@@ -3865,7 +3891,7 @@ mod tests {
         // The same owner writing again is allowed without re-claiming (so the
         // caller does not re-emit a `pty.owner` for steady-state typing).
         assert_eq!(
-            owners.may_write(pty, conn_a),
+            owners.may_write(pty, conn_a, None),
             WriteClaim {
                 allowed: true,
                 claimed_new: false,
@@ -3876,7 +3902,7 @@ mod tests {
 
         // A different connection is denied and does not steal ownership by typing.
         assert_eq!(
-            owners.may_write(pty, conn_b),
+            owners.may_write(pty, conn_b, None),
             WriteClaim {
                 allowed: false,
                 claimed_new: false,
@@ -4244,6 +4270,7 @@ mod tests {
             generation: 7,
             owner: Some("41".into()),
             owner_epoch: 3,
+            owner_device: None,
             rows: Some(30),
             cols: Some(100),
             grid_seq: 5,
@@ -4251,6 +4278,50 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&frame).unwrap(),
             r#"{"event":"connected","id":"abc-123","gen":7,"owner":"41","owner_epoch":3,"rows":30,"cols":100,"grid_seq":5}"#
+        );
+    }
+
+    /// The handshake names the owner's DEVICE alongside the owner id, because a
+    /// mere attach hears no `pty.owner` broadcast: without this key a watcher
+    /// that simply opened the pane could only title its take-over card with the
+    /// generic copy. Unlike `owner`, the key is omitted rather than null when
+    /// there is no name to give (absence needs no second meaning here; `owner`
+    /// already tells an old server apart), so the no-owner and no-User-Agent
+    /// shapes stay byte-identical to what an older client already parses.
+    #[test]
+    fn pty_connected_frame_names_the_owners_device_and_omits_an_absent_one() {
+        let named = PtyConnectedFrame {
+            event: "connected",
+            id: "abc-123".into(),
+            generation: 7,
+            owner: Some("41".into()),
+            owner_epoch: 3,
+            owner_device: Some("Chrome UA".into()),
+            rows: Some(30),
+            cols: Some(100),
+            grid_seq: 5,
+        };
+        assert_eq!(
+            serde_json::to_string(&named).unwrap(),
+            r#"{"event":"connected","id":"abc-123","gen":7,"owner":"41","owner_epoch":3,"owner_device":"Chrome UA","rows":30,"cols":100,"grid_seq":5}"#
+        );
+
+        let unnamed = PtyConnectedFrame {
+            event: "connected",
+            id: "abc-123".into(),
+            generation: 7,
+            owner: Some("41".into()),
+            owner_epoch: 3,
+            owner_device: None,
+            rows: Some(30),
+            cols: Some(100),
+            grid_seq: 5,
+        };
+        assert!(
+            !serde_json::to_string(&unnamed)
+                .unwrap()
+                .contains("owner_device"),
+            "an owner with no captured User-Agent omits the key entirely"
         );
     }
 
@@ -4267,6 +4338,7 @@ mod tests {
             generation: 7,
             owner: None,
             owner_epoch: 0,
+            owner_device: None,
             rows: None,
             cols: None,
             grid_seq: 0,
@@ -4301,6 +4373,7 @@ mod tests {
             generation: 7,
             owner: None,
             owner_epoch: 0,
+            owner_device: None,
             rows: Some(24),
             cols: Some(80),
             grid_seq: 0,

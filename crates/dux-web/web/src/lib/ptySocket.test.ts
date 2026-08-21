@@ -383,6 +383,48 @@ describe("PtySocket", () => {
     expect(epochs.at(-1)).toBeUndefined()
   })
 
+  // The owner's device label rides the handshake for the mere-attach case: a
+  // watcher that simply opens the pane hears no `pty.owner` broadcast, so this
+  // key is its only source of a specific name for the take-over card. Absent
+  // (never null) when there is nothing to name, and only a string is accepted.
+  it("passes the handshake's owner_device through, and undefined when absent", () => {
+    const devices: (string | undefined)[] = []
+    const sock = new PtySocket("ws://x/pty")
+    sock.onConnected = (_id, _owner, _ownerEpoch, ownerDevice) => {
+      devices.push(ownerDevice)
+    }
+    sock.connect()
+    last().open()
+
+    last().text(
+      JSON.stringify({
+        event: "connected",
+        id: "c-1",
+        gen: 1,
+        owner: "c-9",
+        owner_epoch: 7,
+        owner_device: "Driver UA",
+      }),
+    )
+    expect(devices.at(-1)).toBe("Driver UA")
+
+    // An owner that sent no User-Agent: the key is omitted.
+    last().text(
+      JSON.stringify({
+        event: "connected",
+        id: "c-2",
+        gen: 2,
+        owner: "c-9",
+        owner_epoch: 8,
+      }),
+    )
+    expect(devices.at(-1)).toBeUndefined()
+
+    // Old server: no owner key, no epoch, no device.
+    last().text(JSON.stringify({ event: "connected", id: "c-3", gen: 3 }))
+    expect(devices.at(-1)).toBeUndefined()
+  })
+
   // A take-over is the ONE frame this client sends while it knows it is not the
   // owner, and the flag is what makes the server grant it. The ordinary frame
   // stays byte-identical to the one every prior version sent, so an old server

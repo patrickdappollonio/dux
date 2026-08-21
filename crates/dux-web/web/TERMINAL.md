@@ -506,16 +506,22 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
 2. **The server's first frame is Text `connected` carrying this socket's connection id
     and the replay generation; the replay follows as one Binary frame.**
     AMENDED at the take-over arc (it also names the pty's `owner` and the
-    `owner_epoch` of that snapshot, C1) and again at the viewer-geometry arc (it
+    `owner_epoch` of that snapshot, C1), again at the viewer-geometry arc (it
     also carries the pty's `rows`/`cols`, plus the `grid_seq` those are at least
-    as new as, A20). It is now the only frame a client
-    needs to know all three things about the pty it just joined: who drives it,
-    since when, and at what geometry. `size` is the one OTHER Text frame the
-    server sends on this socket, and the two are told apart by `event` alone.
+    as new as, A20), and again when it gained the owner's DEVICE label
+    (`owner_device`, the owner's captured `User-Agent`, read under the same
+    owners-lock acquisition as `owner` and omitted when there is none to name;
+    C9). It is now the only frame a client needs to know everything about the
+    pty it just joined: who drives it, since when, from what device, and at
+    what geometry. `size` is the one OTHER Text frame the server sends on this
+    socket, and the two are told apart by `event` alone.
     Fix: `src/lib/ptySocket.ts` (`handleMessage`); `crates/dux-web/src/server.rs`
     (`PtyConnectedFrame`, `send_pty_connected`).
     Pinned: `src/lib/ptySocket.test.ts` "records connection id and replay generation from
-    the connected frame", "leaves replayGeneration null when the connected frame omits gen".
+    the connected frame", "leaves replayGeneration null when the connected frame omits gen",
+    "passes the handshake's owner_device through, and undefined when absent";
+    `crates/dux-web/src/server.rs`
+    `pty_connected_frame_names_the_owners_device_and_omits_an_absent_one`.
 
 3. **Replay idempotency by generation (Mechanism A): a replay whose generation was
     already applied is dropped whole, no reset, no write.** Trap: on mobile the socket
@@ -751,14 +757,35 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     `src/components/terminal/ownership.test.ts` "taking over" suite (arm, idempotence
     mid-bounce, survival across the bounce, retirement on demotion).
 
-9. **The take-over card names the other device from the handover's `User-Agent`, and
-    the specific name is dropped whenever the events socket is not open.** Trap:
-    `pty.owner` is delivered live-only with no replay; across an outage the name goes
-    stale, and the generic copy is never wrong. Cleared on the render-phase transition,
-    not an effect. Fix: src/components/terminal/ownership.ts:205-207, src/components/terminal/ownership.ts:219-232, src/components/terminal/ownership.ts:402-403 (`deviceLabel`);
-    server `crates/dux-web/src/server.rs:1403-1407`.
+9. **The take-over card names the other device from the owner's `User-Agent`, which
+    reaches a watcher on TWO frames: the `pty.owner` handover's `device`, and the
+    `connected` handshake's `owner_device`. The specific name is dropped whenever the
+    events socket is not open.** The handshake half exists because a mere attach
+    hears no `pty.owner` at all under attach-never-steals (the regression a user
+    reported: every watcher's card had degraded to "Active on another device"),
+    so the server records the UA in the owner map at claim time and the seed
+    stores it exactly as a handover would, through the pure
+    `seedDeviceFromConnected` rule (owner pane never names a device, a
+    SUPERSEDED handshake keeps the newer applied handover's name, an old
+    server's absent key falls back generic). Trap: `pty.owner` is delivered
+    live-only with no replay; across an outage the name goes stale, and the
+    generic copy is never wrong. So the name is dropped on the events socket
+    closing (the render-phase transition, not an effect) AND the handshake
+    seed's name half is gated on that socket being OPEN: a handshake landing
+    during an events outage seeds the verdict but not the name, because the
+    broadcast channel that could later correct a name is exactly what is down.
+    Fix: src/components/terminal/ownership.ts (`takeoverDevice`, the site-6
+    render-phase clear, `seedFromConnected`, `deviceLabel` in the return);
+    `src/lib/ptyOwnership.ts` (`seedDeviceFromConnected`); server
+    `crates/dux-web/src/server.rs` (`captured_user_agent`,
+    `PtyConnectedFrame.owner_device`) and `crates/dux-web/src/pty_owners.rs`
+    (`OwnerRecord.device`, `current_owner`).
     Pinned: `components/TerminalPane.test.tsx` "TerminalPane take-over device naming"
-    (all three tests); `src/lib/deviceLabel.test.ts`.
+    (all four tests, including "names the owning device from the connected handshake
+    alone, no pty.owner event"); `src/lib/deviceLabel.test.ts`;
+    `src/lib/ptyOwnership.test.ts` "seedDeviceFromConnected" suite;
+    `crates/dux-web/src/pty_owners.rs` `current_owner_reports_the_device_recorded_at_claim_time`;
+    `crates/dux-web/tests/ws_transport.rs` `the_connected_handshake_names_the_owners_device`.
 
 10. **The pane publishes its ownership verdict into the store ledger, agent PTYs only,
     and a pane whose socket has failed for good publishes no verdict at all.** Trap: a
@@ -910,7 +937,10 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     scrollback stays clean whatever covers the pane, and take-over remains a
     fresh attach (C8). Same three titles, same second description sentence
     ("Take over to drive this agent from here", or its terminal variant), same
-    single confirm-free Take over action.
+    single confirm-free Take over action. The specific-name title ("Open on
+    Chrome on macOS") is reachable by a mere attach too, seeded from the
+    handshake's `owner_device` (C9), so a watcher that simply opened the pane
+    is not stuck on the generic "Active on another device".
     Fix: `src/components/TerminalPane.tsx` (the `Card` overlay; the badge that
     used to sit under its z-20 is gone entirely, A21).
     Pinned: `components/TerminalPane.test.tsx` "TerminalPane take-over card"

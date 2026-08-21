@@ -17,6 +17,22 @@
 //!   on the shared spine so every client — including one with no PTY socket
 //!   attached — can tell that another connection is driving an agent.
 
+/// One recorded owner: the connection id that drives the pty, plus the raw
+/// `User-Agent` that connection presented at its upgrade. The device rides in
+/// the SAME map entry as the id, written at claim time and removed with the
+/// entry on release, so [`PtySizeOwners::current_owner`] can hand the handshake
+/// the owner's device label under the same lock acquisition as the id and the
+/// epoch. Without it the label existed only as a local in the claiming socket's
+/// task, so only the `pty.owner` broadcast could name the device, and a watcher
+/// that merely attached (which broadcasts nothing) could not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OwnerRecord {
+    pub(crate) conn_id: u64,
+    /// The owning connection's raw `User-Agent`, already length-bounded by the
+    /// capture at the upgrade; `None` when it sent none.
+    pub(crate) device: Option<String>,
+}
+
 /// The owner map plus the monotonic ownership epoch, guarded together by ONE std
 /// Mutex so a fresh epoch is assigned in the SAME critical section that records a
 /// new owner. Bumping the epoch under the lock that serializes every owner write
@@ -26,8 +42,8 @@
 /// client without confusing which claim actually won (see `ptyOwnership.ts`).
 #[derive(Default)]
 pub(crate) struct OwnersState {
-    /// pty id -> the connection id that currently owns sizing+input.
-    pub(crate) map: std::collections::HashMap<String, u64>,
+    /// pty id -> the connection that currently owns sizing+input.
+    pub(crate) map: std::collections::HashMap<String, OwnerRecord>,
     /// Bumped on every ownership CHANGE, a release included; the value handed to
     /// the caller and stamped onto the emitted `pty.owner` so clients converge on
     /// the latest claim regardless of broadcast arrival order. Never decreases
@@ -136,9 +152,19 @@ impl PtySizeOwners {
     /// `pty.owner{owner:B}` followed by a slow `connected{owner:null}` would
     /// re-seed the client as a phantom owner, and nothing would ever correct it
     /// (the stale-null direction emits no further event).
-    pub(crate) fn current_owner(&self, pty_id: &str) -> (Option<u64>, u64) {
+    ///
+    /// The owner's DEVICE label (its captured `User-Agent`) travels in the same
+    /// snapshot, for the same reason the epoch does: it is what lets the
+    /// take-over card of a client that merely attached name the driving device,
+    /// because a mere attach emits no `pty.owner` for that client to hear.
+    pub(crate) fn current_owner(&self, pty_id: &str) -> (Option<u64>, u64, Option<String>) {
         let owners = self.owners.lock().unwrap();
-        (owners.map.get(pty_id).copied(), owners.epoch)
+        let record = owners.map.get(pty_id);
+        (
+            record.map(|r| r.conn_id),
+            owners.epoch,
+            record.and_then(|r| r.device.clone()),
+        )
     }
 
     /// THE ONE ATOMIC DECISION behind every resize frame: may `conn_id` resize
@@ -170,16 +196,21 @@ impl PtySizeOwners {
     /// never across an await. This mirrors the precedent set by
     /// [`Self::may_write`], which likewise resolves the stdin gate under the lock
     /// rather than checking and then writing.
+    ///
+    /// `device` is the claiming connection's captured `User-Agent`, recorded
+    /// with the owner id on a claim so [`Self::current_owner`] can name the
+    /// device on later handshakes; it is ignored on every non-claiming outcome.
     pub(crate) fn claim_for_resize(
         &self,
         pty_id: &str,
         conn_id: u64,
         takeover: bool,
+        device: Option<&str>,
         apply_resize: impl FnOnce(),
     ) -> ResizeClaim {
         let mut owners = self.owners.lock().unwrap();
         let mut outcome = match owners.map.get(pty_id) {
-            Some(&owner) if owner == conn_id => ResizeClaim {
+            Some(record) if record.conn_id == conn_id => ResizeClaim {
                 apply: true,
                 epoch: None,
                 seq: None,
@@ -190,7 +221,13 @@ impl PtySizeOwners {
                 seq: None,
             },
             _ => {
-                owners.map.insert(pty_id.to_string(), conn_id);
+                owners.map.insert(
+                    pty_id.to_string(),
+                    OwnerRecord {
+                        conn_id,
+                        device: device.map(str::to_owned),
+                    },
+                );
                 owners.epoch += 1;
                 owners.generation += 1;
                 ResizeClaim {
@@ -222,7 +259,8 @@ impl PtySizeOwners {
     /// something to say, and by the claim-table tests.
     #[cfg(test)]
     pub(crate) fn claim(&self, pty_id: &str, conn_id: u64) -> Option<u64> {
-        self.claim_for_resize(pty_id, conn_id, true, || {}).epoch
+        self.claim_for_resize(pty_id, conn_id, true, None, || {})
+            .epoch
     }
 
     /// Whether `conn_id` is the current owner of `pty_id`. Unlike [`claim`] this
@@ -241,7 +279,12 @@ impl PtySizeOwners {
     /// [`current_owner`]: PtySizeOwners::current_owner
     #[cfg(test)]
     pub(crate) fn is_owner(&self, pty_id: &str, conn_id: u64) -> bool {
-        self.owners.lock().unwrap().map.get(pty_id) == Some(&conn_id)
+        self.owners
+            .lock()
+            .unwrap()
+            .map
+            .get(pty_id)
+            .is_some_and(|record| record.conn_id == conn_id)
     }
 
     /// Decide whether `conn_id` may write stdin to `pty_id`, resolving the gate
@@ -264,10 +307,15 @@ impl PtySizeOwners {
     /// resize explicitly flagged as a take-over.
     ///
     /// [`claim_for_resize`]: PtySizeOwners::claim_for_resize
-    pub(crate) fn may_write(&self, pty_id: &str, conn_id: u64) -> WriteClaim {
+    ///
+    /// `device` is the writing connection's captured `User-Agent`, recorded with
+    /// the owner id when the write newly claims an unowned pty (so later
+    /// handshakes can name the device, exactly as a resize claim records it);
+    /// it is ignored on every other outcome.
+    pub(crate) fn may_write(&self, pty_id: &str, conn_id: u64, device: Option<&str>) -> WriteClaim {
         let mut owners = self.owners.lock().unwrap();
         match owners.map.get(pty_id) {
-            Some(&owner) if owner == conn_id => WriteClaim {
+            Some(record) if record.conn_id == conn_id => WriteClaim {
                 allowed: true,
                 claimed_new: false,
                 epoch: None,
@@ -278,7 +326,13 @@ impl PtySizeOwners {
                 epoch: None,
             },
             None => {
-                owners.map.insert(pty_id.to_string(), conn_id);
+                owners.map.insert(
+                    pty_id.to_string(),
+                    OwnerRecord {
+                        conn_id,
+                        device: device.map(str::to_owned),
+                    },
+                );
                 owners.epoch += 1;
                 owners.generation += 1;
                 WriteClaim {
@@ -305,7 +359,11 @@ impl PtySizeOwners {
     /// duplicate and the lie would survive anyway.
     pub(crate) fn release(&self, pty_id: &str, conn_id: u64) -> Option<u64> {
         let mut owners = self.owners.lock().unwrap();
-        if owners.map.get(pty_id) != Some(&conn_id) {
+        if owners
+            .map
+            .get(pty_id)
+            .is_none_or(|record| record.conn_id != conn_id)
+        {
             return None;
         }
         owners.map.remove(pty_id);
@@ -347,7 +405,13 @@ impl PtySizeOwners {
     /// clone rather than a borrow: the map is small (one entry per driven PTY)
     /// and the lock must not be held across the spine projection.
     pub(crate) fn input_owners_snapshot(&self) -> std::collections::HashMap<String, u64> {
-        self.owners.lock().unwrap().map.clone()
+        self.owners
+            .lock()
+            .unwrap()
+            .map
+            .iter()
+            .map(|(pty_id, record)| (pty_id.clone(), record.conn_id))
+            .collect()
     }
 }
 
@@ -365,7 +429,7 @@ mod tests {
         takeover: bool,
     ) -> (ResizeClaim, bool) {
         let applied = std::cell::Cell::new(false);
-        let outcome = owners.claim_for_resize(pty, conn, takeover, || applied.set(true));
+        let outcome = owners.claim_for_resize(pty, conn, takeover, None, || applied.set(true));
         (outcome, applied.get())
     }
 
@@ -466,10 +530,10 @@ mod tests {
         let applied: std::cell::RefCell<Vec<(u64, u64)>> = std::cell::RefCell::new(Vec::new());
 
         // A claims at 24x80, B takes over at 30x100.
-        let first = owners.claim_for_resize("p", a, false, || {
+        let first = owners.claim_for_resize("p", a, false, None, || {
             applied.borrow_mut().push((a, 80));
         });
-        let second = owners.claim_for_resize("p", b, true, || {
+        let second = owners.claim_for_resize("p", b, true, None, || {
             applied.borrow_mut().push((b, 100));
         });
 
@@ -563,16 +627,59 @@ mod tests {
     fn current_owner_reports_the_live_owner_and_epoch_and_clears_with_it() {
         let owners = PtySizeOwners::default();
         let a = owners.next_conn_id();
-        assert_eq!(owners.current_owner("p"), (None, 0));
+        assert_eq!(owners.current_owner("p"), (None, 0, None));
         let claim_epoch = owners.claim("p", a).expect("a fresh claim has an epoch");
         assert_eq!(
             owners.current_owner("p"),
-            (Some(a), claim_epoch),
+            (Some(a), claim_epoch, None),
             "the handshake snapshot must carry the SAME epoch the claim's \
              pty.owner broadcast carried, or the client cannot order the two"
         );
         let cleared_epoch = owners.release("p", a).expect("the owner's release");
-        assert_eq!(owners.current_owner("p"), (None, cleared_epoch));
+        assert_eq!(owners.current_owner("p"), (None, cleared_epoch, None));
+    }
+
+    /// The handshake's DEVICE half: the claimer's `User-Agent` is recorded with
+    /// the owner id (whichever claim path took the pty), replaced whole by the
+    /// next handover, and removed with the entry on release. It is what lets the
+    /// take-over card of a client that merely attached name the driving device,
+    /// because a mere attach hears no `pty.owner` broadcast at all.
+    #[test]
+    fn current_owner_reports_the_device_recorded_at_claim_time() {
+        let owners = PtySizeOwners::default();
+        let a = owners.next_conn_id();
+        let b = owners.next_conn_id();
+
+        // A resize claim records the claimer's device.
+        let claim = owners.claim_for_resize("p", a, false, Some("Desktop UA"), || {});
+        assert!(claim.epoch.is_some(), "the unowned pty was claimed");
+        let (owner, _, device) = owners.current_owner("p");
+        assert_eq!(owner, Some(a));
+        assert_eq!(
+            device.as_deref(),
+            Some("Desktop UA"),
+            "the handshake snapshot must name the claimer's device"
+        );
+
+        // A take-over replaces both halves together; a claimer that sent no
+        // User-Agent leaves the device empty rather than inheriting the old one.
+        let takeover = owners.claim_for_resize("p", b, true, None, || {});
+        assert!(takeover.epoch.is_some());
+        assert_eq!(
+            owners.current_owner("p"),
+            (Some(b), takeover.epoch.unwrap(), None)
+        );
+
+        // The release removes the device with the entry.
+        let cleared = owners.release("p", b).expect("the owner's release");
+        assert_eq!(owners.current_owner("p"), (None, cleared, None));
+
+        // A first-writer claim records the device too, exactly like a resize claim.
+        let write = owners.may_write("p", a, Some("Phone UA"));
+        assert!(write.claimed_new, "the first writer claims the unowned pty");
+        let (owner, _, device) = owners.current_owner("p");
+        assert_eq!(owner, Some(a));
+        assert_eq!(device.as_deref(), Some("Phone UA"));
     }
 
     /// The generation is the spine check's gate signal, so it must move on every
@@ -604,7 +711,7 @@ mod tests {
             "a release that removed the owner must bump the generation"
         );
 
-        let claim = owners.may_write("s2", a);
+        let claim = owners.may_write("s2", a, None);
         assert!(claim.claimed_new, "first write claims the unowned pty");
         assert!(
             owners.ownership_generation() > g3,
@@ -625,8 +732,11 @@ mod tests {
         let g = owners.ownership_generation();
 
         assert!(owners.claim("s1", a).is_none(), "same-owner re-claim");
-        assert!(owners.may_write("s1", a).allowed, "owner keystroke");
-        assert!(!owners.may_write("s1", b).allowed, "denied non-owner write");
+        assert!(owners.may_write("s1", a, None).allowed, "owner keystroke");
+        assert!(
+            !owners.may_write("s1", b, None).allowed,
+            "denied non-owner write"
+        );
         let _ = owners.release("s1", b);
         // A release by a connection that does not hold the pty removes nothing.
 

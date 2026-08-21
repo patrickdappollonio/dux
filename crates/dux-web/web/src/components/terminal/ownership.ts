@@ -80,6 +80,7 @@ import {
   isForeground,
   isOwnerAfterHandover,
   onPtyOwner,
+  seedDeviceFromConnected,
   seedVerdictFromConnected,
   type HandshakeOwner,
 } from "@/lib/ptyOwnership"
@@ -123,10 +124,15 @@ export type TerminalOwnership = {
   /// lifecycle, which is where the frame lands. `ownerEpoch` is the handshake's
   /// `owner_epoch` stamp (undefined on an old server), which lets the seed
   /// defer to a strictly newer `pty.owner` already applied for this pty.
+  /// `ownerDevice` is the handshake's `owner_device` (the owner's captured
+  /// User-Agent; undefined on an old server or when there is none to name),
+  /// which seeds the take-over card's device name for a watcher that merely
+  /// attached and will therefore hear no `pty.owner` broadcast.
   seedFromConnected: (
     myConnId: string,
     owner: HandshakeOwner,
     ownerEpoch?: number,
+    ownerDevice?: string,
   ) => void
   /// A human label for the device that took over ("Chrome on macOS"), or null
   /// when the other device's `User-Agent` was absent, unrecognized, or stale.
@@ -200,8 +206,10 @@ export function useTerminalOwnership(
     [],
   )
 
-  // The other device's raw `User-Agent`, captured from the handover that
-  // demoted this client.
+  // The other device's raw `User-Agent`. Two writers: the `pty.owner`
+  // handover that demoted this client, and the connected handshake's seed
+  // for a watcher that merely attached (gated on the events socket, which
+  // is the only channel that can later correct the name).
   const [takeoverDevice, setTakeoverDevice] = useState<string | null>(null)
   // Whether ANY connection drives this pty, as far as this client knows. It
   // starts true and pessimistic: before the handshake answers, "somebody might
@@ -323,6 +331,7 @@ export function useTerminalOwnership(
     myConnId: string,
     owner: HandshakeOwner,
     ownerEpoch?: number,
+    ownerDevice?: string,
   ) {
     const appliedEpoch = appliedPtyOwnerEpoch(id)
     const superseded = handshakeSuperseded(ownerEpoch, appliedEpoch)
@@ -370,9 +379,21 @@ export function useTerminalOwnership(
       priorVerdict: ownership.read(),
     })
     ownership.write(mine)
-    // Whatever decided it, an owning pane never names another device: the name
-    // only ever names a device this client does NOT own.
-    if (mine) setTakeoverDevice(null)
+    // Seed the other device's NAME from the same frame, through the pure rule
+    // beside the verdict seed. A watcher that merely attached hears no
+    // `pty.owner` broadcast at all, so this is its only chance at a specific
+    // name; an owning pane never names another device, and a superseded
+    // handshake keeps whatever the newer applied event wrote (functional
+    // update, so the prior name is read at apply time rather than captured).
+    // Gated on the EVENTS socket being open: `pty.owner` broadcasts are the
+    // only thing that can ever correct a name, so a name planted while that
+    // socket is down could go stale with no correction coming. The verdict
+    // seed above is deliberately not gated; the generic title is never wrong.
+    if (conn === "open") {
+      setTakeoverDevice((priorDevice) =>
+        seedDeviceFromConnected({ mine, superseded, owner, ownerDevice, priorDevice }),
+      )
+    }
   }
 
   // SITE 3. TAKE-OVER IS A FRESH ATTACH: arm the intent, flip the verdict, bounce
