@@ -2,9 +2,9 @@
 //!
 //! Unless `[server] tailscale` is `"no"`, local mode also binds the machine's
 //! Tailscale address so tailnet devices can reach dux over WireGuard-encrypted
-//! transit. Detection shells out to the `tailscale ip` CLI — the same tolerant
-//! pattern the `gh` integration uses: a missing CLI, a down daemon, or garbage
-//! output degrades to `None` (with a reason for the warning message), never an
+//! transit. Detection shells out to the `tailscale ip` CLI, following the same
+//! tolerant pattern the `gh` integration uses: a missing CLI, a down daemon, or
+//! garbage output degrades to `None` (with a reason for the warning message), never an
 //! error that blocks loopback serving.
 //!
 //! On `"auto"` this detection is not a one-shot at startup: the serve path polls
@@ -297,19 +297,69 @@ mod tests {
         );
     }
 
+    /// A throwaway executable stand-in for the `tailscale` CLI, named by absolute
+    /// path so nothing has to mutate the test process's shared `PATH`. This is the
+    /// `gh` host-probe precedent, with the body written per test: a stand-in that
+    /// ignores its `ip` argument is the only way to prove anything about a wedged
+    /// CLI, because a real program handed an argument it cannot parse just exits
+    /// non-zero immediately.
+    struct StandIn {
+        path: std::path::PathBuf,
+    }
+
+    impl StandIn {
+        fn new(name: &str, body: &str) -> Self {
+            use std::io::Write;
+            use std::os::unix::fs::PermissionsExt;
+            let path = std::env::temp_dir().join(format!(
+                "dux-tailscale-stand-in-{}-{name}",
+                std::process::id()
+            ));
+            let mut file = std::fs::File::create(&path).expect("create the stand-in");
+            writeln!(file, "#!/bin/sh\n{body}").expect("write the stand-in");
+            drop(file);
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("make the stand-in executable");
+            Self { path }
+        }
+
+        fn program(&self) -> &str {
+            self.path.to_str().expect("a UTF-8 temp path")
+        }
+    }
+
+    impl Drop for StandIn {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
     #[test]
     fn a_wedged_tailscale_cli_times_out_and_reports_a_failure() {
         // The whole reason the call is bounded. On "auto" this runs for the life
         // of the server, so a tailscaled that stopped answering (a suspend and
         // resume, which is exactly the case the watcher serves) must cost one
         // timeout and not the watcher itself.
+        //
+        // The stand-in ignores its `ip` argument and sleeps far past the cap, so
+        // the ONLY way out of the call is the timeout: with the cap removed this
+        // test parks for thirty seconds instead of passing. It `exec`s the sleep
+        // so the process the runner kills is the sleep itself, leaving no orphan
+        // behind. Asserting the elapsed time is at least the cap is what proves
+        // the timeout, and not some other early exit, is what ended the call.
+        let cli = StandIn::new("wedged", "exec sleep 30");
+        let cap = std::time::Duration::from_millis(300);
         let start = std::time::Instant::now();
-        let result = detect_ip_with("sleep", std::time::Duration::from_millis(200));
+        let result = detect_ip_with(cli.program(), cap);
+        let elapsed = start.elapsed();
         assert_eq!(result, Err(TailscaleUnavailable::CommandFailed));
         assert!(
-            start.elapsed() < std::time::Duration::from_secs(5),
-            "a wedged CLI must not park the caller, took {:?}",
-            start.elapsed()
+            elapsed >= cap,
+            "the call must have run into the cap, not exited early: took {elapsed:?}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "a wedged CLI must not park the caller for its whole sleep, took {elapsed:?}"
         );
     }
 
@@ -324,9 +374,22 @@ mod tests {
 
     #[test]
     fn a_stand_in_cli_that_prints_an_address_is_parsed() {
-        // Proves the bounded path really reads stdout, not just that it exits.
-        // `echo` ignores the `ip` argument and prints it back, which is a valid
-        // enough answer for the parser to reject; `printf` would need a format.
+        // Proves the bounded path really reads stdout, and not just that the
+        // program exited zero. The stand-in ignores its `ip` argument and prints
+        // one CGNAT address, which is what `tailscale ip` does on a normal
+        // tailnet.
+        let cli = StandIn::new("address", "echo 100.64.0.7");
+        assert_eq!(
+            detect_ip_with(cli.program(), DETECT_TIMEOUT),
+            Ok("100.64.0.7".parse().unwrap()),
+            "the address the CLI printed must reach the caller"
+        );
+    }
+
+    #[test]
+    fn a_stand_in_cli_that_succeeds_with_no_output_has_no_address() {
+        // The other half: exiting zero is not an answer. `true` ignores the `ip`
+        // argument and prints nothing, so there is nothing to parse.
         assert_eq!(
             detect_ip_with("true", DETECT_TIMEOUT),
             Err(TailscaleUnavailable::NoAddress),

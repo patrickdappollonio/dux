@@ -809,14 +809,14 @@ fn config_schema() -> Vec<ConfigEntry> {
              # Three settings below decide where dux listens and who it answers.\n\
              # They do NOT override each other; they stack, and they are checked in\n\
              # this order:\n\
-             #   1. host + port     — the one address dux binds. `dux server --bind\n\
+             #   1. host + port:      the one address dux binds. `dux server --bind\n\
              #                        IP:port` overrides both for that run.\n\
-             #   2. tailscale       — binds an ADDITIONAL address (this machine's\n\
+             #   2. tailscale:        binds an ADDITIONAL address (this machine's\n\
              #                        Tailscale IP, same port). Never replaces host;\n\
              #                        best-effort, so a failure only warns. On \"auto\"\n\
              #                        dux keeps watching, so this leg comes and goes\n\
              #                        with the interface while dux keeps serving.\n\
-             #   3. allowed_hosts   — not an address at all. Once a request arrives\n\
+             #   3. allowed_hosts:    not an address at all. Once a request arrives\n\
              #                        at one of the addresses above, this is the\n\
              #                        guard on its Host header.\n\
              # So: binding is (1) plus optionally (2); (3) only ever rejects.",
@@ -861,7 +861,7 @@ fn config_schema() -> Vec<ConfigEntry> {
                  #                    configured host only for the whole run.\n\
                  #   \"no\":            never bind it and never run the detection.\n\
                  # If the CLI is missing, the daemon is down, or something else already\n\
-                 # holds that port, dux WARNS and keeps serving — a Tailscale problem\n\
+                 # holds that port, dux WARNS and keeps serving. A Tailscale problem\n\
                  # never stops dux from starting. `dux server --no-tailscale` forces\n\
                  # \"no\" for a single run.\n\
                  # NOTE: a shared tailnet means OTHER people's devices can reach dux, and\n\

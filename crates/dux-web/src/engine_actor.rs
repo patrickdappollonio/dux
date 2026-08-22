@@ -449,7 +449,10 @@ fn server_rebind_settings_changed(
 ) -> bool {
     prev.host != next.host
         || prev.port != next.port
-        || prev.tailscale != next.tailscale
+        // The parsed MODE, never the raw string: the value is trimmed and
+        // case-insensitive, so comparing the text would tell a user who retyped
+        // "Auto" to restart a server whose behavior did not change at all.
+        || prev.tailscale_mode() != next.tailscale_mode()
         || prev.allowed_hosts != next.allowed_hosts
         || prev.max_websocket_events_connections != next.max_websocket_events_connections
         || prev.max_websocket_agent_connections != next.max_websocket_agent_connections
@@ -3975,6 +3978,23 @@ mod tests {
             assert!(
                 server_rebind_settings_changed(&prev, &next),
                 "changing tailscale from {} to {mode} must warn",
+                prev.tailscale
+            );
+        }
+    }
+
+    #[test]
+    fn rebind_drift_ignores_a_tailscale_value_that_means_the_same_mode() {
+        // The value is trimmed and matched case-insensitively, so " AUTO " is the
+        // mode the server is already running under. Telling that user to restart
+        // would be a warning about nothing.
+        let prev = dux_core::config::ServerConfig::default();
+        for same in [" auto", "Auto", "AUTO ", "\tauto\t"] {
+            let mut next = prev.clone();
+            next.tailscale = same.to_string();
+            assert!(
+                !server_rebind_settings_changed(&prev, &next),
+                "{same:?} is the same mode as {:?} and must not warn",
                 prev.tailscale
             );
         }
