@@ -3005,7 +3005,12 @@ impl App {
             SeqAction::Forward(_) | SeqAction::Intercept(..) => true,
             SeqAction::Mouse(..) => false,
         });
-        let may_write_pty = !batch_can_reach_pty || self.may_type_into_focused_pty();
+        // Scroll mode is asked about first: while it is on nothing in this batch
+        // reaches the child at all, so claiming a pty on the strength of it would
+        // be this device announcing itself as the driver of a terminal it is not
+        // typing into.
+        let may_write_pty =
+            is_scrolled_back || !batch_can_reach_pty || self.may_type_into_focused_pty();
 
         // Process collected actions, batching consecutive forward sequences
         // into a single PTY write to avoid per-character lock/write/flush
