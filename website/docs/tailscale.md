@@ -101,17 +101,20 @@ looking, while on `"yes"` it is settled for the rest of the run. If you do not u
 Tailscale and would rather not read about it every start, set `tailscale = "no"` (or
 pass `--no-tailscale` for a single run) and the warning goes with it.
 
-### The palette flip is loopback plus Tailscale, always
+### Serving from the terminal UI is loopback plus Tailscale, always
 
 Worth filing away, because it surprises people: `dux server` honors your configured
-`[server] host` and `--bind`, but flipping a running terminal UI into the browser
-with the `start-web-server` command always serves loopback plus your Tailscale
-address, and never reaches for a custom host. If you need a specific interface, start
-with `dux server`.
+`[server] host` and `--bind`, but the two ways of serving from inside a running
+terminal UI always serve loopback plus your Tailscale address, and never reach for a
+custom host. That is both flipping the terminal over with `start-web-server` and
+keeping it with `serve_while_tui` (see
+[Serve in the background](/docs/server-mode#serve-in-the-background-and-keep-the-tui)).
+If you need a specific interface, start with `dux server`.
 
-The `tailscale` mode applies to the flip exactly as it does to `dux server`, so on
+The `tailscale` mode applies to all three the same way, watcher included, so on
 `"auto"` a flipped server picks up your tailnet address while its status screen is
-sitting there, and says so in the activity panel.
+sitting there and says so in the activity panel, and a background server does it
+while you carry on working in the TUI.
 
 ## The MagicDNS gotcha
 

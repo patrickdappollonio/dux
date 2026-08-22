@@ -1,6 +1,6 @@
 ---
 title: Server mode overview
-description: What server mode is, how to start it (the dux server command or the in-app flip), the startup banner, the honest no-login trust model, and every [server] config key with its default.
+description: What server mode is, the three ways to serve it (the dux server command, the in-app flip, or quietly behind a running TUI), the startup banner, the honest no-login trust model, and every [server] config key with its default.
 group: Web UI
 order: 60
 ---
@@ -28,11 +28,13 @@ moment; there is one workspace and everyone pointed at it shares it. Start an ag
 at your desk in the terminal UI, hand the workspace to the browser with the flip
 below, walk away, and pick that exact session up on your phone with it still running.
 
-The one thing you cannot do is sit in both front ends simultaneously, because one dux
-process owns a config directory at a time. Moving between them is a hand-off, not a
-second window, and the next section is how you do it.
+You can have both front ends up at once, if you ask for it: one setting keeps a web
+server serving quietly in the background of a running terminal UI. What you cannot
+do is run two dux processes against one config directory, so all three ways of
+serving below are three shapes of the same single process rather than three servers.
+Pick the one that matches where you want to be sitting.
 
-## Two ways to start it
+## Three ways to serve it
 
 ### `dux server`
 
@@ -79,9 +81,10 @@ during that wait skips the grace period and exits immediately.
 Only one `dux server` (or `dux` TUI) can run against a given config directory at
 a time: both acquire the same single-instance lock, so starting a second one
 against the same directory fails fast with a clear "already running" message
-instead of two processes fighting over the same SQLite database. So one process
-serves one front end at a time. The in-app flip below is how you move a running
-workspace from one to the other without restarting anything.
+instead of two processes fighting over the same SQLite database. One process, one
+workspace. The two sections below are how that one process serves the browser
+without you restarting anything: the flip hands the terminal over, and the
+background mode keeps it.
 
 #### Restarting it, with a tab still open
 
@@ -134,6 +137,65 @@ One difference worth filing away: **`dux server` honors your configured
 your Tailscale address only.** The flip never reaches for a custom host. If you
 need to bind a specific interface, start with `dux server`.
 
+### Serve in the background, and keep the TUI
+
+The flip is a hand-off. This is the other answer: keep the terminal UI exactly
+where it is and run the web server behind it, so the same workspace is on your
+terminal and on your phone at the same moment. Turn it on with one key in
+`config.toml`:
+
+```toml
+[server]
+serve_while_tui = true
+```
+
+Off by default. You do not have to edit the file to change your mind, either: the
+palette commands **start-background-server** and **stop-background-server** turn it
+on and off while dux is running, and they save your choice back to config, so the
+next start comes up the way you left it. Starting binds before anything else
+happens, which means a busy port is a message on the status line and your TUI is
+untouched. Stopping leaves every agent and terminal running; only the listener goes
+away, and browsers that were connected report the connection closed.
+
+It binds exactly the way the flip does: loopback plus your Tailscale address, never
+a custom host. And it is the flip's alternative, not its companion, so
+**start-web-server** while this is serving is refused with a note saying so, rather
+than colliding with dux on its own port.
+
+While it serves, the top bar grows a crumb: `serving :8080 · 3 connected`. The
+address half is the standing reminder that a listener exists; the count is browser
+tabs, not people, so one laptop with two tabs open is two. It says nothing when the
+listener is off, which is how you can tell at a glance. Each agent's row picks up a
+quiet `2 remote` on its second line when browsers are watching that agent, and the
+center pane's caption says the same for the terminal you are looking at.
+
+**One driver at a time.** The terminal UI is a participant in the same
+input-ownership model the browsers use, not a privileged owner of it. The first
+device to type into a terminal nobody is driving claims it, and everybody who
+arrives after that watches. Nothing passive ever takes it away again, which is the
+point: arriving is not a gesture, so no amount of opening panes or reconnecting
+moves the keyboard. Watching is real watching: live output, scrolling, copying, all
+of it. When someone else has the
+terminal you are looking at, the hint bar names the device that is driving and your
+keystrokes do not reach the child, and **take-over-terminal** takes it back. In the
+browser it is the take-over card on the pane, which names the terminal UI as `the
+dux TUI` when that is what is driving. Taking a terminal over also retargets its
+size to the device that took it, and everyone watching adopts that geometry, so one
+terminal has one shape whoever is driving. Take-over works in both directions and it
+is sticky either way: losing a terminal does not silently give it back to you, so
+nothing swaps under either device's fingers.
+
+Quitting the TUI stops the listener on the way out, and so does flipping. What it
+does not do is decide anything about next time: your saved setting is what decides
+that.
+
+Which to reach for: `dux server` when nothing needs a terminal (a headless box, a
+tmux pane you will detach from), the flip when you are done with the terminal for
+now and want the browser to be the whole story, and this when you want to keep
+working in the terminal and still be able to pick the same agent up on the couch.
+The flip is unchanged by any of this, and it is still there whenever the background
+mode is off.
+
 ## The trust model, stated plainly
 
 dux is a single-tenant, trusted-access tool, and server mode is built around that
@@ -149,6 +211,10 @@ Access control is delegated to where you bind and who can reach it.
   than a snapshot: dux binds that address whenever the interface is there, drops
   the listener when it goes, and binds it again when it comes back, all without a
   restart. See [Reaching dux over Tailscale](/docs/tailscale).
+- **A background listener lasts as long as dux does.** `serve_while_tui = true`
+  means there is a server running for the whole time your terminal UI is open, not
+  only while you happen to be looking at a browser. Same trust model as the rest of
+  this page; what changes is how much of your day it applies to.
 - **Anything wider is on you.** Binding a LAN or public address (say
   `--bind 0.0.0.0:8080`) puts your agents and worktrees in reach of anyone who
   can hit that address, with no login in front. dux prints a loud warning before
@@ -194,6 +260,13 @@ port = 8080
 # configured host only.
 tailscale = "auto"
 
+# Serve the web UI in the background while the terminal UI keeps running, on
+# loopback plus the Tailscale address, exactly like the palette flip binds. Off
+# by default. The start-background-server and stop-background-server palette
+# commands flip it while dux runs and save the choice back here. With this on,
+# a listener exists for as long as dux does, and there is no login.
+serve_while_tui = false
+
 # Extra Host header values to accept when a request is not same-origin. List a
 # reverse-proxy hostname or a tailnet MagicDNS name here so it is not rejected.
 allowed_hosts = []
@@ -220,6 +293,11 @@ The rest tune presentation and limits:
 changing any of them needs a server restart and a config reload says so. That
 includes `tailscale`, even though `"auto"` binds and unbinds by itself: the mode
 decides whether dux watches the interface at all, and it is decided once.
+
+`serve_while_tui` is the exception, and deliberately so: it is a live switch. A
+config reload that flips it acts on it there and then, in both directions, because
+someone who edits the file to turn a listener off has asked for the listener to go
+away, not to be told about it at the next restart.
 
 The two `file_drop_*` keys are read at startup like the connection caps, so
 changing either needs a server restart. The full story of what dropping or

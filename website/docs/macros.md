@@ -86,6 +86,12 @@ Once the bar is open:
 dux writes the macro bytes directly to the active PTY client and shows
 `Sent macro "<name>".` in the status line.
 
+A macro is a write like any other, so it goes through input ownership: if another
+device is driving that terminal (which can only happen while dux is
+[serving in the background](/docs/server-mode#serve-in-the-background-and-keep-the-tui)),
+the macro is not sent and the status line says which device has it and that you can
+take it over first. Nothing half-sends.
+
 ## Sending a macro in the web UI
 
 In the browser, every terminal pane (agent or companion terminal) has a macro

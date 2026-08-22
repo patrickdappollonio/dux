@@ -352,6 +352,21 @@ pub const WELCOME_TIPS: &[WelcomeTip] = &[
             )
         }),
     },
+    // The BACKGROUND mode, next to the flip on purpose: they are the two answers
+    // to the same question and the pair reads as a choice. Both names are
+    // palette-only commands with no keybinding, so naming them literally is
+    // correct; the palette's own key is resolved.
+    WelcomeTip {
+        web: Some(
+            "Someone may be sitting in the terminal UI this very second: `serve_while_tui` runs both faces at once. First one to type drives, everybody else gets front-row seats.",
+        ),
+        tui: Some(|resolve| {
+            format!(
+                "Not ready to hand your terminal over? `start-background-server` in the palette (`{}`) serves the web UI behind your back instead. The top bar starts counting who wandered in.",
+                resolve(Action::OpenPalette)
+            )
+        }),
+    },
 ];
 
 /// The web-surface tip strings, in declaration order.

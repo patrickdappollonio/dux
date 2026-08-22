@@ -138,6 +138,12 @@ desktop is already typing into and the phone watches; nothing you do by merely
 arriving takes the keyboard away. If nobody holds it, the first device to look at
 it picks it up.
 
+**The terminal UI is one of those devices.** When dux is
+[serving in the background of a running TUI](/docs/server-mode#serve-in-the-background-and-keep-the-tui),
+that terminal takes part in exactly this model rather than sitting above it: it can
+hold a terminal, it can be a watcher, and the card names it as `the dux TUI`. Its own
+hint bar names your browser the same way when you are the one driving.
+
 **A watcher sees the take-over card.** A watched terminal is covered by a
 full-pane card naming who has the keyboard ("Open on Chrome on macOS") with a
 **Take over** button. The card is deliberate, and it is telling you something

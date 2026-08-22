@@ -122,12 +122,18 @@ to; dux adds no traffic of its own.
 
 ### Can I run the terminal UI and the browser at the same time?
 
-Not simultaneously, and you do not need to. One dux process owns a config directory
-at a time (they share a single-instance lock), so a second one fails fast rather than
-two processes fighting over the same database. Instead you hand the workspace across:
-the `start-web-server` palette command flips a running terminal UI into serving the
-browser, and pressing `q` there hands it back. Your agents keep running through every
-transition. See [Two ways to start it](/docs/server-mode#two-ways-to-start-it).
+Yes, if you ask for it. Set `serve_while_tui = true` under `[server]` (or run the
+`start-background-server` palette command) and one dux process keeps the terminal UI
+in front of you and serves the browser behind it. Both are looking at the same live
+engine, one device drives a given terminal at a time, and everybody else watches.
+
+What you still cannot do is run two dux processes against one config directory: they
+share a single-instance lock, so the second one fails fast rather than two processes
+fighting over the same database. If you would rather hand the terminal over than keep
+it, the `start-web-server` palette command flips a running terminal UI into serving
+the browser and pressing `q` there hands it back. Your agents keep running through
+every one of these transitions. See
+[Three ways to serve it](/docs/server-mode#three-ways-to-serve-it).
 
 ### Can I reach it from my phone?
 

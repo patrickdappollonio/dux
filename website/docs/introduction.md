@@ -30,10 +30,11 @@ To know whether something is available where you are, the surface itself is the
 answer: the terminal's help overlay and command palette list what it can do, and
 the browser's cog menu and row menus list what it can do.
 
-The web UI is [server mode](/docs/server-mode), started with `dux server` or flipped
-on from a running terminal UI. You run one front end at a time (one dux process owns
-your config directory), and moving between them is a hand-off that leaves your agents
-running. Everything else on this page is true of both.
+The web UI is [server mode](/docs/server-mode), started with `dux server`, flipped on
+from a running terminal UI, or served quietly in the background of one. It is always
+one dux process (it owns your config directory), so moving between the front ends is
+a hand-off rather than a second copy, and your agents keep running either way.
+Everything else on this page is true of both.
 
 ## The mental model
 
