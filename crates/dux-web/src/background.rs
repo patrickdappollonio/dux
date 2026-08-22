@@ -19,6 +19,27 @@
 //!
 //! It also installs no signal handlers. The terminal UI's handlers own the
 //! process's SIGINT/SIGTERM, and its quit path is what stops this serve.
+//!
+//! ## Accepted: the engine's surface kind stays `Tui`
+//!
+//! `Engine::surface_kind` decides how a launched agent resolves `auto`/`mirror`
+//! terminal identity, and it stays `Tui` here even for an agent a browser
+//! launched. The flip sets `WebHeadless` because after a flip there IS no terminal
+//! to resolve against; that is the case the headless identity exists for. Here a
+//! real terminal is running, and resolving against it is the better answer of the
+//! two available: the alternative would give every locally-launched agent a forced
+//! identity for the sake of the remote ones. A per-launch surface kind would fix
+//! it properly and is not worth the reach in this phase.
+//!
+//! ## Accepted: the terminal UI's statuses stay on the terminal
+//!
+//! A status the terminal UI sets by hand (a keystroke's confirmation, a refusal)
+//! goes to its own status line only. What DOES reach browsers is every status
+//! carried by a drained worker event, because those flow through the seam: so the
+//! final of any operation a worker completes is seen on both surfaces, while the
+//! chatter of driving the terminal is not. Web-originated statuses are unaffected
+//! and stay scoped per connection, decided inside `handle_request` before this
+//! type is ever involved.
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;

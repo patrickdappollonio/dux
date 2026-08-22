@@ -488,6 +488,17 @@ fn take_apply_reloaded_config(reaction: EventReaction) -> Option<Box<dux_core::c
 /// producer is far outrunning a 20-drains-per-second consumer. Kept a const,
 /// like the broadcast capacities above, rather than user config: it is an
 /// internal safety ceiling, not a preference.
+///
+/// WITH THE BACKGROUND SERVER the consumer is the terminal UI's run loop rather
+/// than this 50ms tick, so the drain cadence is that loop's poll interval (capped
+/// at 33ms while serving, so if anything faster). The shedding above is accepted
+/// unchanged, and it is worth saying why rather than leaving it to be rediscovered:
+/// 1024 in-flight fire-and-forget requests means a producer far outrunning a
+/// ~30-drains-per-second consumer, and the two kinds of request that can be shed
+/// there already heal. A dropped keystroke is a keystroke the user watches not
+/// appear and retypes; a dropped resize is recovered by the grid handshake, which
+/// re-reads the authoritative geometry on the next attach or bounce rather than
+/// trusting that every resize frame landed.
 const REQ_CHANNEL_CAPACITY: usize = 1024;
 
 /// Build the actor channels and split them into the caller-facing
@@ -3566,6 +3577,55 @@ mod tests {
             spine_changes.try_recv().is_ok(),
             "the bump must carry a terminal-side change to clients within one check period"
         );
+        drop(handle);
+    }
+
+    /// THE STATUS CONTRACT, in concurrent mode.
+    ///
+    /// A worker-completing final reaches browsers, because it rides the drain
+    /// seam. A status the terminal UI sets by hand does not, because it never
+    /// becomes a reaction the drain sees, so it never reaches this fanout at all.
+    /// Only the first half can regress silently (a fanout that stopped emitting
+    /// looks like nothing happening), so that is the half asserted; the second is
+    /// asserted negatively, by fanning out a reaction that carries no status and
+    /// checking the channel stays quiet.
+    ///
+    /// Web-originated statuses are a third thing entirely and are unaffected here:
+    /// they are scoped per connection inside `handle_request`, before any of this.
+    #[test]
+    fn the_drain_seam_carries_worker_finals_to_clients_and_nothing_else() {
+        let (_tmp, paths) = temp_paths();
+        let mut engine = bootstrap_engine(&paths).expect("engine");
+        let (handle, ends) = build_actor_channels(&engine);
+        let mut statuses = handle.subscribe_status();
+        let mut svc = EngineService::new(&engine, ends, ShutdownEcho::Silent);
+
+        // A reaction with no status of its own: the fanout must stay quiet, which
+        // is what makes the positive case below mean something.
+        svc.fanout_reaction(
+            &mut engine,
+            &EventReaction::RebuildLeftItems,
+            FollowupRouting::ByOrigin,
+        );
+        assert!(
+            statuses.try_recv().is_err(),
+            "a view-refresh reaction is not news for a browser"
+        );
+
+        // A worker's final. This is the one a browser has to see: the operation it
+        // reports may well have been started from the terminal, and "it finished"
+        // is not terminal-only chatter.
+        svc.fanout_reaction(
+            &mut engine,
+            &EventReaction::Status(dux_core::engine::StatusUpdate::info(
+                "Pulled main.".to_string(),
+            )),
+            FollowupRouting::ByOrigin,
+        );
+        let emitted = statuses
+            .try_recv()
+            .expect("a worker-completing final must reach clients through the seam");
+        assert_eq!(emitted.message, "Pulled main.");
         drop(handle);
     }
 
