@@ -449,6 +449,12 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
     patch_table_string_array(doc, "server", "allowed_hosts", &config.server.allowed_hosts);
     patch_table_str(doc, "server", "color", &config.server.color);
     patch_table_bool(doc, "server", "access_log", config.server.access_log);
+    patch_table_bool(
+        doc,
+        "server",
+        "serve_while_tui",
+        config.server.serve_while_tui,
+    );
     // The single WebSocket cap was split into three per-class caps; drop the
     // obsolete key from any existing config block on every save so saves stop
     // carrying it (mirrors the oneshot strip in `patch_providers`). Warn when

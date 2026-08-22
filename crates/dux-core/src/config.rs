@@ -536,6 +536,21 @@ pub struct ServerConfig {
     /// Default true. The access log is console-only (never written to `dux.log`),
     /// so piping `dux server`'s stdout captures it.
     pub access_log: bool,
+    /// Whether dux serves the web UI in the BACKGROUND while the terminal UI
+    /// keeps running, instead of only through the `start-web-server` flip (which
+    /// replaces the TUI with the server and is unaffected by this setting).
+    ///
+    /// Off by default, because turning it on means a network listener exists for
+    /// as long as dux does, and there is no login gate: the same trust model the
+    /// rest of `[server]` documents, now in effect whenever the TUI is open. The
+    /// mode is toggleable at runtime through the `start-background-server` and
+    /// `stop-background-server` palette commands, and this setting decides only
+    /// whether it comes up serving at startup.
+    ///
+    /// EXPERIMENTAL for now: the terminal UI does not yet take part in the PTY
+    /// ownership model, so the TUI and a browser can both believe they drive the
+    /// same agent's terminal geometry.
+    pub serve_while_tui: bool,
     /// Maximum number of concurrent events (`/ws`) WebSocket connections. This is
     /// the status/changed-files event stream every browser tab opens. Once this
     /// many are live, further upgrade attempts are rejected with HTTP 503 until a
@@ -1617,6 +1632,7 @@ impl Default for ServerConfig {
             allowed_hosts: Vec::new(),
             color: "auto".to_string(),
             access_log: true,
+            serve_while_tui: false,
             max_websocket_events_connections: DEFAULT_MAX_WEBSOCKET_EVENTS_CONNECTIONS,
             max_websocket_agent_connections: DEFAULT_MAX_WEBSOCKET_AGENT_CONNECTIONS,
             max_websocket_terminal_connections: DEFAULT_MAX_WEBSOCKET_TERMINAL_CONNECTIONS,
