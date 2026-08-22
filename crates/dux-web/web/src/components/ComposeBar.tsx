@@ -3,6 +3,7 @@ import { useEffect, useRef } from "react"
 import { CornerDownLeft } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
+import { composeHardwareKeyForwards } from "@/lib/termkeys"
 
 // Typing straight into xterm's hidden textarea is hostile on a phone: the
 // soft keyboard's autocorrect/swipe/IME fight an input that must stay raw, and
@@ -21,7 +22,10 @@ import { Button } from "@/components/ui/button"
 // lib/composebar.
 //
 // Enter inside the textarea is NOT intercepted: it inserts a newline in the
-// buffer (native textarea behavior). Only Send delivers-and-submits.
+// buffer (native textarea behavior). Only Send delivers-and-submits. The one
+// class of physical key that IS intercepted is the keys a textarea has no
+// meaning for, Escape and F1-F12, which forward to the PTY through
+// `onForwardKey` (see the prop and `composeHardwareKeyForwards`).
 
 interface ComposeBarProps {
   // The buffered message text, owned by the parent (controlled input).
@@ -49,6 +53,15 @@ interface ComposeBarProps {
   // it is, so it says; the default is the shell wording, which is what a bar
   // rendered without an opinion is sitting under.
   placeholder?: string
+  // Forward the bytes of a physical key the textarea has no meaning for
+  // (Escape and F1-F12, decided by the pure `composeHardwareKeyForwards` in
+  // lib/termkeys) to the PTY. A tablet with a keyboard case keeps the compose
+  // bar up, and its hardware Esc must interrupt a running agent the way the
+  // accessory bar's Esc key does; the parent routes this through the SAME
+  // write helper as that key (`sendSeq`), which owns the ownership gate and
+  // the modifier latch. Optional and presentational like everything else
+  // here: without it every keystroke keeps native textarea behavior.
+  onForwardKey?: (seq: string) => void
   // The control in the row's LEADING slot, opposite Send. In practice this is
   // always the input ⋯ menu, but the bar takes it as a node rather than naming
   // it: the compose bar is presentational and the anchor matrix (which of the
@@ -122,6 +135,7 @@ export function ComposeBar({
   onChange,
   onSend,
   inputRef,
+  onForwardKey,
   placeholder = TERMINAL_PLACEHOLDER,
   leading,
 }: ComposeBarProps) {
@@ -155,6 +169,31 @@ export function ComposeBar({
     trySend()
   }
 
+  // The physical-keyboard forward: consult the pure rule and, on a match,
+  // consume the event and hand the bytes to the parent. preventDefault is all
+  // the consumption needed; the draft and the focus are untouched, so the box
+  // keeps composing right through an Esc that interrupts the agent. The rule
+  // itself refuses anything modified or mid-IME-composition (Escape while
+  // composing keeps its native cancel-composition meaning), so a bail here is
+  // the browser's key exactly as before. `isComposing` lives on the native
+  // event, not React's synthetic one.
+  const onKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (!onForwardKey) return
+    const seq = composeHardwareKeyForwards({
+      type: event.type,
+      key: event.key,
+      ctrlKey: event.ctrlKey,
+      shiftKey: event.shiftKey,
+      altKey: event.altKey,
+      metaKey: event.metaKey,
+      isComposing: event.nativeEvent.isComposing,
+      keyCode: event.keyCode,
+    })
+    if (seq === null) return
+    event.preventDefault()
+    onForwardKey(seq)
+  }
+
   // Keyboard/AT activation: Enter or Space on the focused button fires a
   // `click` with `detail === 0` (no pointer press). A click that FOLLOWS a
   // real pointer tap carries `detail >= 1` and is ignored here, because the
@@ -177,6 +216,7 @@ export function ComposeBar({
         ref={taRef}
         value={value}
         onChange={(e) => onChange(e.target.value)}
+        onKeyDown={onKeyDown}
         rows={1}
         placeholder={placeholder}
         aria-label="Message"

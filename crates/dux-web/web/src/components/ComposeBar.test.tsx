@@ -243,6 +243,74 @@ describe("ComposeBar", () => {
   })
 })
 
+describe("ComposeBar hardware key forwarding", () => {
+  // A tablet with both the compose bar and a physical keyboard: Esc and the
+  // F-keys have no meaning inside a textarea, so they ride the accessory
+  // keys' write path to the PTY. The component consults the pure
+  // `composeHardwareKeyForwards` rule and emits the bytes through
+  // `onForwardKey`; everything with a textarea meaning stays native.
+  const onForwardKey = vi.fn<(seq: string) => void>()
+
+  function ForwardHarness({ initial = "" }: { initial?: string }) {
+    const [value, setValue] = useState(initial)
+    return (
+      <ComposeBar
+        value={value}
+        onChange={setValue}
+        onSend={onSend}
+        onForwardKey={onForwardKey}
+      />
+    )
+  }
+
+  beforeEach(() => {
+    onForwardKey.mockClear()
+  })
+
+  it("physical Escape while focused writes the ESC byte and keeps the draft", () => {
+    render(<ForwardHarness initial="precious draft" />)
+    const ta = textarea()
+    ta.focus()
+    const notPrevented = fireEvent.keyDown(ta, { key: "Escape" })
+    expect(notPrevented).toBe(false)
+    expect(onForwardKey).toHaveBeenCalledTimes(1)
+    expect(onForwardKey).toHaveBeenCalledWith("\x1b")
+    expect(ta.value).toBe("precious draft")
+    expect(document.activeElement).toBe(ta)
+  })
+
+  it("physical F5 writes its CSI sequence", () => {
+    render(<ForwardHarness />)
+    fireEvent.keyDown(textarea(), { key: "F5" })
+    expect(onForwardKey).toHaveBeenCalledWith("\x1b[15~")
+  })
+
+  it("a Ctrl chord never forwards and is left to the browser", () => {
+    render(<ForwardHarness initial="draft" />)
+    const ta = textarea()
+    const notPrevented = fireEvent.keyDown(ta, { key: "c", ctrlKey: true })
+    expect(notPrevented).toBe(true)
+    expect(onForwardKey).not.toHaveBeenCalled()
+    expect(ta.value).toBe("draft")
+  })
+
+  it("Escape mid-IME-composition cancels composition locally, forwarding nothing", () => {
+    render(<ForwardHarness />)
+    const notPrevented = fireEvent.keyDown(textarea(), {
+      key: "Escape",
+      isComposing: true,
+    })
+    expect(notPrevented).toBe(true)
+    expect(onForwardKey).not.toHaveBeenCalled()
+  })
+
+  it("without the prop, Escape stays a plain textarea keystroke", () => {
+    render(<Harness />)
+    const notPrevented = fireEvent.keyDown(textarea(), { key: "Escape" })
+    expect(notPrevented).toBe(true)
+  })
+})
+
 describe("ComposeBar leading slot", () => {
   it("renders nothing there unless the parent supplies it", () => {
     render(<Harness />)

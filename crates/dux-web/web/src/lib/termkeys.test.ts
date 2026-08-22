@@ -5,6 +5,7 @@ import {
   arrowSeq,
   classifyClipboardKey,
   type ClipboardKeyEvent,
+  composeHardwareKeyForwards,
   copyOnSelectAction,
   type CopyOnSelectContext,
   ctrlByte,
@@ -161,6 +162,125 @@ describe("softNewlineAction", () => {
       { ...OWNER, ctrlLatched: true },
     )
     expect(a).toEqual({ handled: false, send: null, clearLatch: false })
+  })
+})
+
+describe("composeHardwareKeyForwards", () => {
+  // The exact bytes a real terminal sends, matched against the TUI's own
+  // encoder (crates/dux-tui/src/key_encode.rs): F1-F4 are SS3 P/Q/R/S, F5 and
+  // up are the CSI tilde forms with their historical gaps (no 16, no 22).
+  const FKEYS: Array<[string, string]> = [
+    ["F1", `${ESC}OP`],
+    ["F2", `${ESC}OQ`],
+    ["F3", `${ESC}OR`],
+    ["F4", `${ESC}OS`],
+    ["F5", `${ESC}[15~`],
+    ["F6", `${ESC}[17~`],
+    ["F7", `${ESC}[18~`],
+    ["F8", `${ESC}[19~`],
+    ["F9", `${ESC}[20~`],
+    ["F10", `${ESC}[21~`],
+    ["F11", `${ESC}[23~`],
+    ["F12", `${ESC}[24~`],
+  ]
+
+  it("forwards a bare Escape as the ESC byte", () => {
+    expect(composeHardwareKeyForwards(keyEvent({ key: "Escape", keyCode: 27 }))).toBe(
+      ESC,
+    )
+  })
+
+  it("forwards each bare F-key as its standard xterm sequence", () => {
+    for (const [key, seq] of FKEYS) {
+      expect(composeHardwareKeyForwards(keyEvent({ key, keyCode: 0 }))).toBe(seq)
+    }
+  })
+
+  it("never forwards while any modifier is held (browser/OS chords stay browser-side)", () => {
+    expect(
+      composeHardwareKeyForwards(keyEvent({ key: "c", ctrlKey: true })),
+    ).toBeNull()
+    expect(
+      composeHardwareKeyForwards(keyEvent({ key: "1", ctrlKey: true })),
+    ).toBeNull()
+    expect(
+      composeHardwareKeyForwards(keyEvent({ key: "Escape", ctrlKey: true })),
+    ).toBeNull()
+    expect(
+      composeHardwareKeyForwards(keyEvent({ key: "F1", altKey: true })),
+    ).toBeNull()
+    expect(
+      composeHardwareKeyForwards(keyEvent({ key: "F5", ctrlKey: true })),
+    ).toBeNull()
+    expect(
+      composeHardwareKeyForwards(keyEvent({ key: "Escape", metaKey: true })),
+    ).toBeNull()
+    expect(
+      composeHardwareKeyForwards(keyEvent({ key: "F12", metaKey: true })),
+    ).toBeNull()
+    // A shifted F-key is a different key on the wire (xterm's modified CSI
+    // forms), so forwarding the plain bytes would lie; it stays browser-side.
+    expect(
+      composeHardwareKeyForwards(keyEvent({ key: "F1", shiftKey: true })),
+    ).toBeNull()
+    // Shift+Escape gets the same refusal: the blanket modifier check covers
+    // Escape too, and this pins it.
+    expect(
+      composeHardwareKeyForwards(keyEvent({ key: "Escape", shiftKey: true })),
+    ).toBeNull()
+  })
+
+  it("never forwards a bare modifier key press", () => {
+    for (const key of ["Control", "Alt", "Meta", "Shift"]) {
+      expect(composeHardwareKeyForwards(keyEvent({ key }))).toBeNull()
+    }
+    // A bare Control keydown carries ctrlKey: true on real browsers.
+    expect(
+      composeHardwareKeyForwards(keyEvent({ key: "Control", ctrlKey: true })),
+    ).toBeNull()
+  })
+
+  it("never forwards mid-IME-composition", () => {
+    expect(
+      composeHardwareKeyForwards(
+        keyEvent({ key: "Escape", isComposing: true }),
+      ),
+    ).toBeNull()
+    expect(
+      composeHardwareKeyForwards(keyEvent({ key: "Escape", keyCode: 229 })),
+    ).toBeNull()
+  })
+
+  it("leaves every textarea-meaningful key alone", () => {
+    for (const key of [
+      "a",
+      "A",
+      "1",
+      " ",
+      "Tab",
+      "Enter",
+      "Backspace",
+      "Delete",
+      "ArrowUp",
+      "ArrowDown",
+      "ArrowLeft",
+      "ArrowRight",
+      "Home",
+      "End",
+      "PageUp",
+      "PageDown",
+    ]) {
+      expect(composeHardwareKeyForwards(keyEvent({ key }))).toBeNull()
+    }
+    expect(
+      composeHardwareKeyForwards(keyEvent({ key: "Enter", shiftKey: true })),
+    ).toBeNull()
+  })
+
+  it("matches keydown only, never keyup", () => {
+    expect(
+      composeHardwareKeyForwards(keyEvent({ type: "keyup", key: "Escape" })),
+    ).toBeNull()
   })
 })
 

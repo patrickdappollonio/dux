@@ -1215,6 +1215,13 @@ export function TerminalPane(props: TerminalPaneProps) {
               onChange={setComposeText}
               onSend={input.sendCompose}
               inputRef={composeInputRef}
+              // A physical keyboard's Escape or F-key pressed while the
+              // compose box is focused: the same bytes on the same write
+              // path as the accessory bar's Esc key (`sendSeq` owns the
+              // ownership gate and the modifier latch), because a hardware
+              // Esc is the physical twin of tapping that key. Which keys
+              // qualify is the pure `composeHardwareKeyForwards` rule.
+              onForwardKey={input.sendSeq}
               // WHAT THIS SURFACE IS FOR, off the pane's own kind: an agent
               // pane is a conversation with a CLI, every terminal pane is a
               // shell, and `kind` is the discriminator that already answers

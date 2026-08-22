@@ -263,6 +263,81 @@ export function softNewlineAction(
   }
 }
 
+// The bytes a bare F-key sends, matched against the TUI's own PTY encoder
+// (`crates/dux-tui/src/key_encode.rs`, the `KeyCode::F(n)` arm), which itself
+// encodes the standard xterm forms: F1-F4 are the SS3 sequences ESC O P/Q/R/S,
+// F5 and up are the CSI tilde forms with their historical gaps (14 is skipped
+// to 15, 16 and 22 do not exist). Keeping the two encoders in agreement means
+// a hardware F-key does the same thing whether dux is the terminal or the web
+// page in front of one.
+const FKEY_SEQ: Record<string, string> = {
+  F1: `${ESC}OP`,
+  F2: `${ESC}OQ`,
+  F3: `${ESC}OR`,
+  F4: `${ESC}OS`,
+  F5: `${ESC}[15~`,
+  F6: `${ESC}[17~`,
+  F7: `${ESC}[18~`,
+  F8: `${ESC}[19~`,
+  F9: `${ESC}[20~`,
+  F10: `${ESC}[21~`,
+  F11: `${ESC}[23~`,
+  F12: `${ESC}[24~`,
+}
+
+/**
+ * Decides whether a physical keydown inside the COMPOSE TEXTAREA is forwarded
+ * to the PTY, returning the bytes to send or `null` to leave the key to the
+ * browser.
+ *
+ * The compose bar buffers typing, so while it is focused a physical keyboard's
+ * Escape lands in the textarea (where it means nothing) instead of the PTY
+ * (where it interrupts a running agent). A hardware Esc is the physical twin
+ * of tapping the accessory bar's Esc key, so it earns the same bytes on the
+ * same write path; the F-keys ride along because they are equally meaningless
+ * to a textarea and equally standard on the wire (see `FKEY_SEQ` for the
+ * source the sequences are matched against).
+ *
+ * The tier is deliberately just Escape and F1-F12:
+ *
+ *  - Every key with a textarea meaning (printables, Backspace/Delete, arrows,
+ *    Home/End, Tab, Enter) keeps it; the buffer is the point of the bar.
+ *  - EVERY modified press stays browser-side. Ctrl-c is copy in a browser and
+ *    SIGINT in a PTY, and hijacking copy out of a text field is the worse
+ *    trade; an Alt/Ctrl/Meta-modified F-key is a browser or OS chord; a
+ *    SHIFTED F-key is a different key on the wire (xterm's modified CSI
+ *    forms), so sending the plain bytes would lie. Direct mode is the
+ *    full-fidelity escape for anyone who needs the rest.
+ *  - A bare modifier press (`Control`, `Alt`, ...) is not in the map, so it
+ *    falls out as `null` like any other unlisted key.
+ *
+ * Matching is by `ev.key`, stated as a choice: unlike the clipboard chords
+ * (whose letters move with the layout, see `ClipboardKeyEvent`), `Escape` and
+ * `F1`-`F12` are layout-independent key values, so the logical and physical
+ * key are the same signal here.
+ *
+ * The IME guard is absolute, same shape as `softNewline`: while composing,
+ * Escape is the CANCEL-COMPOSITION key and must keep that local meaning, so a
+ * composing event (or the Safari-style `keyCode` 229) forwards nothing. Only
+ * `keydown` matches, so keyup/keypress can never double-send.
+ */
+export function composeHardwareKeyForwards(e: {
+  type: string
+  key: string
+  ctrlKey: boolean
+  shiftKey: boolean
+  altKey: boolean
+  metaKey: boolean
+  isComposing: boolean
+  keyCode: number
+}): string | null {
+  if (e.type !== "keydown") return null
+  if (e.ctrlKey || e.shiftKey || e.altKey || e.metaKey) return null
+  if (e.isComposing || e.keyCode === 229) return null
+  if (e.key === "Escape") return ESC
+  return FKEY_SEQ[e.key] ?? null
+}
+
 /** What the terminal should do with a clipboard key chord. */
 export type ClipboardKeyAction = "copy" | "paste" | "passthrough"
 

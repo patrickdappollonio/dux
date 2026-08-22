@@ -380,6 +380,16 @@ box holds the keyboard focus the whole time, the terminal's own caret stays a
 solid block rather than hollowing out the way an unfocused terminal normally
 would: the prompt you are writing to should not look asleep.
 
+A physical keyboard works with the compose box rather than around it. Typing
+lands in the box as you would expect, and the keys a text box has no use for,
+**Esc** and **F1** through **F12**, go straight to the terminal: pressing Esc on
+a tablet's keyboard case interrupts a running agent exactly like tapping the
+accessory bar's Esc key. (A few F-keys are grabbed by the browser itself before
+any page can see them, F12's developer tools being the classic, so those may
+trigger both.) Modified presses stay with your browser (Ctrl+C keeps
+meaning copy, not SIGINT), and if you want every keystroke on the wire, the
+Direct typing surface is one tap away.
+
 Whether the compose bar appears is the `ui.compose_bar` setting, a Preferences
 row with three values. **Automatic** (the default) asks your browser whether you
 point at the screen with a finger. That is a question about your *input*, not
