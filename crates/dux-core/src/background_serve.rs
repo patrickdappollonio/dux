@@ -26,8 +26,7 @@
 //! process (and with it every agent's terminal), so nothing that used to survive
 //! stops surviving. What is genuinely new is the reverse direction: a bug in the
 //! web layer's per-iteration servicing can now take down a terminal UI that used
-//! to be independent of it. The mode is opt-in and marked experimental for that
-//! reason among others.
+//! to be independent of it. That is why the mode is opt-in.
 
 use std::sync::Arc;
 

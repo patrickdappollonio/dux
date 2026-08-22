@@ -924,10 +924,12 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # as dux runs, and anyone who can reach it drives your agents and\n\
                  # worktrees. That is the same trust model as the rest of this section;\n\
                  # what changes is that it now applies whenever the TUI is open.\n\
-                 # EXPERIMENTAL: the TUI does not yet take part in the browser-side PTY\n\
-                 # ownership model, so the TUI and a browser can both think they own an\n\
-                 # agent's terminal size. Fine for one person at one keyboard; expect\n\
-                 # the odd redraw fight if you type in both at once.\n\
+                 # ONE DRIVER AT A TIME: the TUI and every browser take part in the same\n\
+                 # input-ownership model, so a terminal is driven by whichever device\n\
+                 # claimed it and the others watch. A watcher still sees the live output\n\
+                 # and can scroll and copy it; the hint bar (or the browser's card) names\n\
+                 # the device that has it, and take-over-terminal here (or Take over\n\
+                 # there) moves it to this device.\n\
                  # You do not need to edit this file to change your mind: the palette\n\
                  # commands start-background-server and stop-background-server turn it\n\
                  # on and off while dux runs, and they save the choice back here.",
@@ -2198,9 +2200,15 @@ mod tests {
     /// The config file is the documentation, and this setting starts a network
     /// listener behind the user's back for as long as the TUI runs. Its comment
     /// therefore has to carry four things: what it does, the trust consequence,
-    /// that the mode is experimental for now, and how to turn it off again.
+    /// what happens when two devices want the same terminal, and how to turn it
+    /// off again.
+    ///
+    /// The experimental marker this used to require is deliberately GONE: it was
+    /// there because the TUI did not take part in the ownership model, and it now
+    /// does, so the comment describes one driver at a time instead of warning
+    /// about a redraw fight that can no longer happen.
     #[test]
-    fn serve_while_tui_comment_states_what_trust_experimental_and_how_to_stop() {
+    fn serve_while_tui_comment_states_what_trust_ownership_and_how_to_stop() {
         let toml = render_default_config();
         assert!(
             toml.contains("serve_while_tui = false"),
@@ -2216,8 +2224,8 @@ mod tests {
             "keeps running",
             // the trust consequence
             "no login",
-            // the experimental marker
-            "experimental",
+            // what happens when two devices want the same terminal
+            "take-over-terminal",
             // how to stop it
             "stop-background-server",
         ] {
