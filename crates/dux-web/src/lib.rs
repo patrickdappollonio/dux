@@ -45,6 +45,7 @@ pub(crate) mod pty_owners;
 pub(crate) mod pty_sizes;
 pub mod resource_routes;
 pub mod rest_common;
+pub mod serve_legs;
 pub mod server;
 pub mod session_actions;
 pub mod startup_logs;
@@ -65,12 +66,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
+use axum::Router;
 use axum::serve::ListenerExt;
-use dux_core::config::{DuxPaths, PlanAddr, ServerPlan};
+use dux_core::config::{DuxPaths, PlanAddr, ServerPlan, TailscaleMode};
 use dux_core::engine::Engine;
 
 use crate::console::{Banner, Console, ListenerRow};
 use crate::engine_actor::LoopControl;
+use crate::serve_legs::{
+    LegCommand, ServeShutdown, WATCH_PERIOD, wait_for_leg_shutdown, waiting_note,
+    watch_tailscale_leg,
+};
 use crate::server::RouterParams;
 
 /// Boot the engine on its own thread and serve the web UI on every address in
@@ -85,7 +91,7 @@ use crate::server::RouterParams;
 /// paths. The TUI flip ([`serve_with_engine`]) NEVER constructs a real console —
 /// it keeps its themed status screen and must not print to stdout.
 pub fn run_server(paths: DuxPaths, plan: ServerPlan, version: String) -> Result<()> {
-    run_plain_http(paths, plan.addrs, version)
+    run_plain_http(paths, plan, version)
 }
 
 /// Log a WARN when this binary has no web UI compiled in (built with
@@ -324,8 +330,19 @@ fn reachability(bound: &[(SocketAddr, bool)]) -> Reachability {
 /// primary + a best-effort Tailscale leg). Exported so the TUI flip path in
 /// `crates/dux/src/main.rs` can reference the same text without a separate
 /// copy.
-pub const SAFETY_NOTE_TAILNET: &str = "Reachable by other devices on your tailnet (no login). \
-     Disable with tailscale_enabled = false under [server].";
+pub const SAFETY_NOTE_TAILNET: &str = "Reachable by other devices on your tailnet whenever this machine is connected to it \
+     (no login). Set tailscale = \"no\" under [server] to serve without that address.";
+
+/// The tailnet safety note for a serve that is WATCHING the interface (the `auto`
+/// mode) rather than holding a Tailscale listener right now.
+///
+/// A separate sentence because the plain note would be a lie in both directions:
+/// dux is not reachable on the tailnet at this instant, and it is not going to
+/// stay unreachable either. The note has to cover the whole run, because it is
+/// printed once and the leg comes and goes behind it.
+pub const SAFETY_NOTE_TAILNET_WATCHED: &str = "Reachable by other devices on your tailnet whenever this machine is connected to it \
+     (no login), including after a reconnect: dux binds your Tailscale address by itself \
+     when the interface appears. Set tailscale = \"no\" under [server] to serve without it.";
 
 /// Safety note shown when the server is bound on a required non-loopback
 /// (public/LAN) address. Exported alongside [`SAFETY_NOTE_TAILNET`] so both
@@ -338,15 +355,28 @@ pub const SAFETY_NOTE_PUBLIC: &str = "Reachable on your network with NO login. \
 /// is ALSO bound alongside the required public/LAN primary.
 pub const SAFETY_NOTE_TAILSCALE_ALSO_BOUND: &str = " (The Tailscale address is bound too.)";
 
-/// Operator-facing safety note based on the bound addresses' reachability.
-/// Returns None when the server is loopback-only (nothing to warn about).
+/// Operator-facing safety note based on the bound addresses' reachability and
+/// the Tailscale mode. Returns None when the server is loopback-only AND cannot
+/// grow a tailnet leg later (nothing to warn about).
+///
 /// Uses highest-severity-wins: a required non-loopback primary yields the LAN
 /// warning regardless of whether a Tailscale leg is also bound.
-pub fn safety_note(addrs: &[PlanAddr]) -> Option<String> {
+///
+/// The mode matters because this note is computed ONCE and the Tailscale leg
+/// comes and goes behind it on `auto`. A loopback-only serve that is watching the
+/// interface is a serve that will be reachable on the tailnet the moment the
+/// laptop reconnects, and saying nothing would be the wrong half of the truth.
+pub fn safety_note(addrs: &[PlanAddr], tailscale: TailscaleMode) -> Option<String> {
     let pairs: Vec<(SocketAddr, bool)> =
         addrs.iter().map(|a| (a.addr(), a.is_required())).collect();
     match reachability(&pairs) {
+        Reachability::LoopbackOnly if tailscale.watches_interface() => {
+            Some(SAFETY_NOTE_TAILNET_WATCHED.to_string())
+        }
         Reachability::LoopbackOnly => None,
+        Reachability::Tailscale if tailscale.watches_interface() => {
+            Some(SAFETY_NOTE_TAILNET_WATCHED.to_string())
+        }
         Reachability::Tailscale => Some(SAFETY_NOTE_TAILNET.to_string()),
         Reachability::Public => {
             let has_tailscale = pairs
@@ -361,7 +391,12 @@ pub fn safety_note(addrs: &[PlanAddr]) -> Option<String> {
     }
 }
 
-fn run_plain_http(paths: DuxPaths, addrs: Vec<PlanAddr>, version: String) -> Result<()> {
+fn run_plain_http(paths: DuxPaths, plan: ServerPlan, version: String) -> Result<()> {
+    let ServerPlan {
+        addrs,
+        primary,
+        tailscale,
+    } = plan;
     warn_if_ui_not_built();
     let engine = bootstrap::bootstrap_engine(&paths)?;
     // Build the vite-style CLI console (color from [server] color) + the access-log
@@ -408,11 +443,19 @@ fn run_plain_http(paths: DuxPaths, addrs: Vec<PlanAddr>, version: String) -> Res
                 }
             })
             .collect();
-        let note = safety_note(&bound_plan_addrs);
+        let initial_tailscale_leg = bound
+            .iter()
+            .find(|b| !b.required && !b.addr.ip().is_loopback())
+            .map(|b| b.addr);
+        let note = safety_note(&bound_plan_addrs, tailscale);
+        // The third state the banner has to be able to say: on `auto` with no
+        // address yet, dux is not "without Tailscale", it is waiting for it.
+        let mut banner_warnings = bind_warnings.clone();
+        banner_warnings.extend(waiting_note(tailscale, initial_tailscale_leg.is_some()));
         console.banner(&plain_http_banner(
             &version,
             &banner_legs,
-            &bind_warnings,
+            &banner_warnings,
             note,
             web_assets::ui_startup_warning(),
         ));
@@ -452,7 +495,11 @@ fn run_plain_http(paths: DuxPaths, addrs: Vec<PlanAddr>, version: String) -> Res
                 .with_tree_list_max_concurrency(tree_list_max_concurrency)
                 .with_release_notes_max_concurrency(release_notes_max_concurrency)
                 .with_file_drop_limits(file_drop_max_bytes, file_drop_max_concurrency)
-                .with_host_allowlist(bound_ips, engine_allowed_hosts.clone()),
+                .with_host_allowlist(
+                    bound_ips,
+                    engine_allowed_hosts.clone(),
+                    tailscale.wants_tailscale(),
+                ),
         );
 
         // Translate a SIGINT/SIGTERM into a watch trip so every listener winds
@@ -465,56 +512,49 @@ fn run_plain_http(paths: DuxPaths, addrs: Vec<PlanAddr>, version: String) -> Res
             });
         }
 
-        // Serve every BOUND address; each serve task's graceful-shutdown future
-        // awaits the shared watch, so any trip (signal OR a sibling's failure)
-        // winds them all down together.
+        // Serve every BOUND address, each on its own leg (its own stop lane), so
+        // the Tailscale leg can be added and dropped later without disturbing the
+        // required one.
         let mut tasks = tokio::task::JoinSet::new();
-        for BoundListener { listener, .. } in bound {
-            let app = app.clone();
-            let shutdown = shutdown.clone();
-            let task_shutdown = shutdown.subscribe();
-            tasks.spawn(async move {
-                // Serve with connect-info so the access-log middleware can include
-                // the peer IP in each log line. `tap_io` disables Nagle on
-                // each accepted socket: terminal traffic is many tiny packets
-                // (keystrokes, per-char echo/redraws), and Nagle batches them into
-                // laggy clumps that make remote typing stutter and flicker.
-                let result = axum::serve(
-                    listener.tap_io(|stream| {
-                        let _ = stream.set_nodelay(true);
-                    }),
-                    app.into_make_service_with_connect_info::<SocketAddr>(),
-                )
-                .with_graceful_shutdown(wait_for_shutdown(task_shutdown))
-                .await;
-                if let Err(e) = &result {
-                    // The accept loop died while serving (graceful shutdown returns
-                    // Ok). Record the first error and trip the watch so the OTHER
-                    // listeners wind down too — never let the server limp on with
-                    // one dead listener.
-                    dux_core::logger::error(&format!(
-                        "[server] a plain-HTTP listener's accept loop failed; \
-                         shutting the server down: {e}"
-                    ));
-                    shutdown.record_failure(anyhow::anyhow!("web server listener failed: {e}"));
-                }
-                result
-            });
+        for BoundListener {
+            listener,
+            addr,
+            required,
+        } in bound
+        {
+            spawn_leg(
+                &mut tasks,
+                app.clone(),
+                listener,
+                addr,
+                required,
+                &shutdown,
+                console.clone(),
+            );
         }
-        // Wait for all serve tasks to finish (they all wind down together once the
-        // watch trips). A task that PANICKED yields a JoinError here and recorded
-        // nothing, so record it and trip the watch so siblings stop too.
-        while let Some(joined) = tasks.join_next().await {
-            if let Err(join_err) = joined {
-                dux_core::logger::error(&format!(
-                    "[server] a plain-HTTP serve task panicked: {join_err} — shutting the other \
-                     listeners down so the server does not limp on half-dead."
-                ));
-                shutdown.record_failure(anyhow::anyhow!(
-                    "a plain-HTTP serve task panicked: {join_err}"
-                ));
-            }
-        }
+
+        // On `auto`, watch the Tailscale interface for the rest of the run.
+        let watcher_stop = Arc::new(AtomicBool::new(false));
+        let (leg_commands, bound_tailscale) = start_tailscale_watcher(
+            tailscale,
+            primary,
+            initial_tailscale_leg,
+            Arc::clone(&watcher_stop),
+        );
+
+        run_serve_loop(
+            tasks,
+            shutdown.clone(),
+            leg_commands,
+            app,
+            console.clone(),
+            bound_tailscale,
+        )
+        .await;
+
+        // Serving is over: let the watcher thread finish its current park and
+        // exit rather than probing a server that has stopped.
+        watcher_stop.store(true, Ordering::SeqCst);
         // SIGTERM the agents (they save state for a later resume), mark their
         // sessions Detached, then exit; Drop hard-kills any straggler.
         shutdown.trigger();
@@ -557,92 +597,241 @@ const SERVER_JOIN_TIMEOUT: Duration = Duration::from_secs(3);
 /// have unparked the forwarders well within this bound; this is belt-and-braces.
 const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// The ONE serve-shutdown primitive shared by all three serve paths
-/// (`run_plain_http`, `serve_with_engine`). It bundles the
-/// first-error bookkeeping with the `watch<bool>` shutdown lane every listener
-/// awaits, so a single dying listener winds the siblings down identically
-/// everywhere:
+/// Depth of the watcher-to-serve-loop command channel. A transition every ten
+/// seconds at the very most, so anything above a couple of slots is theatre; the
+/// bound exists so a wedged serve loop cannot make the watcher grow memory.
+const LEG_COMMAND_QUEUE: usize = 8;
+
+/// Spawn one listener's serve task into `tasks`, registering its per-leg stop
+/// lane so it can be stopped on its own. The task's graceful-shutdown future
+/// waits on BOTH that lane and the parent's, so a per-leg stop and a whole-server
+/// teardown both reach it.
 ///
-/// - `failed` — armed once (compare-exchange) so the FIRST failing listener is
-///   the one that records the returned error and is reported.
-/// - `error` — the first error, surfaced to the caller after wind-down.
-/// - `shutdown_tx` — flipped to `true` on the first failure (and on a normal
-///   SIGINT/SIGTERM); every serve task's graceful-shutdown future awaits the
-///   matching receiver, so tripping it stops the whole server. Replaces the old
-///   `run_plain_http` no-abort JoinSet wait.
-#[derive(Clone)]
-struct ServeShutdown {
-    failed: Arc<AtomicBool>,
-    error: Arc<std::sync::Mutex<Option<anyhow::Error>>>,
-    shutdown_tx: tokio::sync::watch::Sender<bool>,
+/// A REQUIRED leg's accept-loop death is fatal for the serve; a BEST-EFFORT leg's
+/// is logged and isolated. That split is the whole reason legs exist.
+fn spawn_leg(
+    tasks: &mut tokio::task::JoinSet<()>,
+    app: Router,
+    listener: tokio::net::TcpListener,
+    addr: SocketAddr,
+    required: bool,
+    shutdown: &ServeShutdown,
+    console: Console,
+) {
+    let leg_lane = shutdown.register_leg(addr);
+    let parent_lane = shutdown.subscribe();
+    let shutdown = shutdown.clone();
+    tasks.spawn(async move {
+        // Serve with connect-info so the access-log middleware can include the
+        // peer IP in each log line. `tap_io` disables Nagle on each accepted
+        // socket: terminal traffic is many tiny packets (keystrokes, per-char
+        // echo/redraws), and Nagle batches them into laggy clumps that make
+        // remote typing stutter and flicker.
+        let result = axum::serve(
+            listener.tap_io(|stream| {
+                let _ = stream.set_nodelay(true);
+            }),
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(wait_for_leg_shutdown(parent_lane, leg_lane))
+        .await;
+        match (&result, required) {
+            (Ok(()), _) => shutdown.forget_leg(addr),
+            (Err(err), true) => {
+                // The accept loop died while serving (graceful shutdown returns
+                // Ok). Record the first error and trip the parent so the OTHER
+                // listeners wind down too: never let the server limp on with one
+                // dead required listener.
+                dux_core::logger::error(&format!(
+                    "[server] the listener on {addr} failed; shutting the server down: {err}"
+                ));
+                shutdown.record_failure(anyhow::anyhow!("web server listener failed: {err}"));
+            }
+            (Err(err), false) => {
+                let err = anyhow::anyhow!("{err}");
+                shutdown.record_best_effort_failure(addr, &err);
+                console.bind_degraded(&format!(
+                    "the Tailscale listener on {addr} stopped serving: {err}"
+                ));
+            }
+        }
+    });
 }
 
-impl ServeShutdown {
-    fn new() -> Self {
-        let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(false);
-        Self {
-            failed: Arc::new(AtomicBool::new(false)),
-            error: Arc::new(std::sync::Mutex::new(None)),
-            shutdown_tx,
+/// The serve loop: hold the per-leg serve tasks, act on the Tailscale watcher's
+/// commands, and end only when the shutdown lane is tripped.
+///
+/// Deliberately NOT a `while let Some(..) = join_next()` drain: with a watcher
+/// running, an empty task set is a legitimate mid-life state (the required leg is
+/// there, but a moment where every task has just been replaced is possible), and
+/// exiting on set-empty would end a server nobody asked to stop. The exit
+/// condition is the shutdown lane and nothing else.
+async fn run_serve_loop(
+    mut tasks: tokio::task::JoinSet<()>,
+    shutdown: ServeShutdown,
+    mut commands: tokio::sync::mpsc::Receiver<LegCommand>,
+    app: Router,
+    console: Console,
+    bound_tailscale: Arc<std::sync::Mutex<Option<SocketAddr>>>,
+) {
+    let mut parent = shutdown.subscribe();
+    let mut watcher_open = true;
+    while !*parent.borrow_and_update() {
+        tokio::select! {
+            _ = parent.changed() => {}
+            Some(joined) = tasks.join_next(), if !tasks.is_empty() => {
+                if let Err(join_err) = joined {
+                    // A task PANICKED and recorded nothing, so record it here and
+                    // trip the lane: a panicking serve task is not a leg going
+                    // quietly, it is a bug, and the server must not limp on
+                    // half-dead.
+                    dux_core::logger::error(&format!(
+                        "[server] a serve task panicked: {join_err} — shutting the other \
+                         listeners down so the server does not limp on half-dead."
+                    ));
+                    shutdown.record_failure(anyhow::anyhow!(
+                        "a serve task panicked: {join_err}"
+                    ));
+                }
+            }
+            command = commands.recv(), if watcher_open => {
+                match command {
+                    Some(command) => {
+                        apply_leg_command(
+                            command,
+                            &mut tasks,
+                            &shutdown,
+                            &app,
+                            &console,
+                            &bound_tailscale,
+                        )
+                        .await;
+                    }
+                    // The watcher has ended (mode is not auto, or serving is
+                    // winding down). Stop listening to it; keep serving.
+                    None => watcher_open = false,
+                }
+            }
         }
     }
+    // The lane is tripped and `trigger` has fanned out to every leg, so each task
+    // is winding down. Reap them; the CALLER bounds how long it waits for this.
+    while tasks.join_next().await.is_some() {}
+}
 
-    /// A fresh receiver on the shutdown lane (one per serve task).
-    fn subscribe(&self) -> tokio::sync::watch::Receiver<bool> {
-        self.shutdown_tx.subscribe()
-    }
-
-    /// Whether a serve task has already recorded a failure (polled by the flip's
-    /// engine-loop control closure to exit the loop).
-    fn is_failed(&self) -> bool {
-        self.failed.load(Ordering::SeqCst)
-    }
-
-    /// Trigger a graceful, non-error wind-down (a SIGINT/SIGTERM or the flip's
-    /// engine loop returning). Idempotent.
-    fn trigger(&self) {
-        let _ = self.shutdown_tx.send(true);
-    }
-
-    /// Take the first recorded serve error, if any. Called once after every
-    /// listener has wound down so the caller can surface a genuine death.
-    fn take_error(&self) -> Option<anyhow::Error> {
-        self.error.lock().ok().and_then(|mut slot| slot.take())
-    }
-
-    /// Record a serve-task failure exactly once and wind the whole server down.
-    ///
-    /// Called by every per-listener serve task whose accept loop returns an `Err`
-    /// (graceful shutdown returns `Ok`, so this only fires on a genuine death).
-    /// The FIRST caller wins: it stores the error
-    /// and is the one reported; later callers (other listeners winding down behind
-    /// it) no-op the error slot. Always trips the shutdown watch so the remaining
-    /// listeners stop too. Returns `true` when this call was the first-error
-    /// winner.
-    fn record_failure(&self, err: anyhow::Error) -> bool {
-        let first = self
-            .failed
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok();
-        if first && let Ok(mut slot) = self.error.lock() {
-            *slot = Some(err);
+/// Act on one watcher command: bind and start serving the Tailscale leg, or stop
+/// it. Records what is bound so the watcher's next period compares against
+/// reality (which is what makes a failed bind retry rather than vanish).
+async fn apply_leg_command(
+    command: LegCommand,
+    tasks: &mut tokio::task::JoinSet<()>,
+    shutdown: &ServeShutdown,
+    app: &Router,
+    console: &Console,
+    bound_tailscale: &Arc<std::sync::Mutex<Option<SocketAddr>>>,
+) {
+    match command {
+        LegCommand::Bind(addr) => match tokio::net::TcpListener::bind(addr).await {
+            Ok(listener) => {
+                spawn_leg(
+                    tasks,
+                    app.clone(),
+                    listener,
+                    addr,
+                    false,
+                    shutdown,
+                    console.clone(),
+                );
+                if let Ok(mut slot) = bound_tailscale.lock() {
+                    *slot = Some(addr);
+                }
+                let message = format!(
+                    "Tailscale interface is back: dux is now also serving on http://{addr}. \
+                     Nothing else changed; your other address is untouched."
+                );
+                dux_core::logger::info(&format!("[server] {message}"));
+                console.bind_degraded(&message);
+            }
+            Err(err) => {
+                // Best-effort: say so and carry on. The watcher compares against
+                // what is BOUND, so it asks again next period.
+                let warning = tailscale_bind_warning(addr, &err);
+                dux_core::logger::warn(&format!("[server] {warning}"));
+                console.bind_degraded(&warning);
+                if let Ok(mut slot) = bound_tailscale.lock() {
+                    *slot = None;
+                }
+            }
+        },
+        LegCommand::Unbind(addr) => {
+            let stopped = shutdown.stop_leg(addr);
+            if let Ok(mut slot) = bound_tailscale.lock() {
+                *slot = None;
+            }
+            if stopped {
+                let message = format!(
+                    "Tailscale interface went away: dux stopped serving on {addr} and is still \
+                     serving on its other address(es). Browsers that were on the tailnet \
+                     reconnect by themselves when it comes back."
+                );
+                dux_core::logger::info(&format!("[server] {message}"));
+                console.bind_degraded(&message);
+            }
         }
-        // Always wind the others down, even for a non-first caller (idempotent).
-        let _ = self.shutdown_tx.send(true);
-        first
     }
 }
 
-/// Await the shared shutdown lane: resolve once the watch flips to `true` (a
-/// SIGINT/SIGTERM trigger or a first-listener failure). The receiver is consumed,
-/// so each caller passes its own [`ServeShutdown::subscribe`] handle. A
-/// wakeup-driven await (no sleep-poll).
-async fn wait_for_shutdown(mut rx: tokio::sync::watch::Receiver<bool>) {
-    while !*rx.borrow_and_update() {
-        if rx.changed().await.is_err() {
-            break;
-        }
+/// Start the Tailscale interface watcher on its OWN std thread when the mode is
+/// `auto`, returning the command receiver the serve loop listens on and the
+/// shared "what is bound" cell they both read.
+///
+/// A dedicated thread, never a runtime worker: the probe is a bounded but
+/// blocking subprocess call, and a wedged `tailscaled` (a suspend and resume,
+/// which is the exact scenario this watcher serves) must not be able to occupy a
+/// tokio worker or, worse, stop the watcher from ever checking again.
+///
+/// For every other mode this still returns a receiver, one that simply never
+/// yields, so the serve loop has a single shape.
+fn start_tailscale_watcher(
+    mode: TailscaleMode,
+    primary: SocketAddr,
+    initial: Option<SocketAddr>,
+    stop: Arc<AtomicBool>,
+) -> (
+    tokio::sync::mpsc::Receiver<LegCommand>,
+    Arc<std::sync::Mutex<Option<SocketAddr>>>,
+) {
+    let bound = Arc::new(std::sync::Mutex::new(initial));
+    let (tx, rx) = tokio::sync::mpsc::channel(LEG_COMMAND_QUEUE);
+    if !mode.watches_interface() {
+        // `yes` and `no` are static answers: nothing watches, and dropping the
+        // sender closes the channel so the serve loop stops listening for good.
+        return (rx, bound);
     }
+    let watcher_bound = Arc::clone(&bound);
+    std::thread::Builder::new()
+        .name("dux-tailscale-watch".to_string())
+        .spawn(move || {
+            watch_tailscale_leg(
+                primary,
+                WATCH_PERIOD,
+                &dux_core::tailscale::detect_ip,
+                &|| watcher_bound.lock().ok().and_then(|slot| *slot),
+                &|command| tx.blocking_send(command).is_ok(),
+                &|| stop.load(Ordering::SeqCst),
+            );
+        })
+        .map(|_| ())
+        .unwrap_or_else(|err| {
+            // A thread dux cannot start is not a reason to refuse to serve; it is
+            // a reason to say the Tailscale leg is now static for this run.
+            dux_core::logger::warn(&format!(
+                "[server] could not start the Tailscale interface watcher: {err}. dux is \
+                 serving on the addresses it bound at startup; restart dux to pick up a \
+                 Tailscale address that appears later."
+            ));
+        });
+    (rx, bound)
 }
 
 /// Serve the web UI over an EXISTING engine on the CALLER's thread, returning
@@ -705,6 +894,18 @@ pub fn serve_with_engine(
         .map(|a| a.ip())
         .collect();
     let flip_allowed_hosts = engine.config.server.allowed_hosts.clone();
+    // The flip is structurally LOCAL MODE: loopback plus, when wanted, the
+    // Tailscale leg. So the primary is the loopback listener and the watched port
+    // is whatever the TUI's pre-flight bound it on (which may be ephemeral).
+    let flip_tailscale = engine.config.server.tailscale_mode();
+    let flip_primary = listeners
+        .iter()
+        .filter_map(|l| l.local_addr().ok())
+        .find(|a| a.ip().is_loopback());
+    let flip_tailscale_leg = listeners
+        .iter()
+        .filter_map(|l| l.local_addr().ok())
+        .find(|a| !a.ip().is_loopback());
     let flip_max_ws = (
         engine.config.server.max_websocket_events_connections,
         engine.config.server.max_websocket_agent_connections,
@@ -792,45 +993,61 @@ pub fn serve_with_engine(
                 .with_tree_list_max_concurrency(flip_tree_list_max_concurrency)
                 .with_release_notes_max_concurrency(flip_release_notes_max_concurrency)
                 .with_file_drop_limits(flip_file_drop_max_bytes, flip_file_drop_max_concurrency)
-                .with_host_allowlist(flip_bound_ips, flip_allowed_hosts),
+                .with_host_allowlist(
+                    flip_bound_ips,
+                    flip_allowed_hosts,
+                    flip_tailscale.wants_tailscale(),
+                ),
         )
     };
 
-    // One axum serve task per listener, all sharing the same router/state and the
-    // same shutdown watch. A JoinSet lets us join them all (bounded) on teardown.
-    let mut server_tasks = tokio::task::JoinSet::new();
-    for tokio_listener in tokio_listeners {
-        let app = app.clone();
+    // One serve leg per listener, plus (on `auto`) the Tailscale watcher and the
+    // loop that acts on it. The whole set runs as ONE supervisor task on the
+    // runtime, so the flip's teardown is a single bounded join, and a leg the
+    // watcher added later winds down through the same trigger as the rest.
+    let watcher_stop = Arc::new(AtomicBool::new(false));
+    let (leg_commands, bound_tailscale) = {
+        let _guard = runtime.enter();
+        start_tailscale_watcher(
+            flip_tailscale,
+            flip_primary.unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], 0))),
+            flip_tailscale_leg,
+            Arc::clone(&watcher_stop),
+        )
+    };
+    let serve_supervisor = {
         let shutdown = shutdown.clone();
-        let task_shutdown = shutdown.subscribe();
-        server_tasks.spawn_on(
-            async move {
-                // Disable Nagle per accepted socket (see run_plain_http) so
-                // interactive terminal traffic isn't batched into laggy clumps.
-                let result = axum::serve(
-                    tokio_listener.tap_io(|stream| {
-                        let _ = stream.set_nodelay(true);
-                    }),
-                    app.into_make_service_with_connect_info::<SocketAddr>(),
-                )
-                .with_graceful_shutdown(wait_for_shutdown(task_shutdown))
-                .await;
-                if let Err(err) = &result {
-                    // The accept loop died while serving (graceful shutdown returns
-                    // Ok). Log loudly, then record the first error and trip the
-                    // watch (so the engine loop exits via `is_failed()` and the
-                    // OTHER listeners wind down too) — never let the server limp on
-                    // with one dead listener.
-                    dux_core::logger::error(&format!(
-                        "[server] a listener's accept loop failed; shutting the flip down: {err}"
-                    ));
-                    shutdown.record_failure(anyhow::anyhow!("web server listener failed: {err}"));
-                }
-                result
-            },
-            runtime.handle(),
-        );
-    }
+        let app = app.clone();
+        let console = console.clone();
+        let mut legs = tokio::task::JoinSet::new();
+        let guard = runtime.enter();
+        for tokio_listener in tokio_listeners {
+            let addr = tokio_listener
+                .local_addr()
+                .unwrap_or_else(|_| SocketAddr::from(([127, 0, 0, 1], 0)));
+            // Loopback is the flip's REQUIRED leg (it cannot serve without it);
+            // the Tailscale leg is best-effort, exactly as in the CLI path.
+            let required = addr.ip().is_loopback();
+            spawn_leg(
+                &mut legs,
+                app.clone(),
+                tokio_listener,
+                addr,
+                required,
+                &shutdown,
+                console.clone(),
+            );
+        }
+        drop(guard);
+        runtime.spawn(run_serve_loop(
+            legs,
+            shutdown,
+            leg_commands,
+            app,
+            console,
+            bound_tailscale,
+        ))
+    };
     // The router holds its own cloned handle(s); drop ours so only the serve
     // tasks keep the request side alive (matches the pre-multi-listener move).
     drop(handle);
@@ -880,15 +1097,18 @@ pub fn serve_with_engine(
     // window elapses (and an implicit drop would hang forever).
     shutdown_flag.store(true, Ordering::SeqCst);
 
-    // Trigger graceful axum shutdown and wait (bounded) for ALL server tasks to
-    // wind down. A single bounded join over the whole set keeps a wedged client
-    // connection on any listener from hanging the flip back to the TUI.
+    // Stop the Tailscale watcher: serving is over, and it must not keep probing
+    // (or, worse, hand a bind command to a loop that is winding down).
+    watcher_stop.store(true, Ordering::SeqCst);
+
+    // Trigger graceful axum shutdown and wait (bounded) for the serve supervisor
+    // to reap every leg. `trigger` fans out over the leg registry, so a Tailscale
+    // leg the watcher added mid-serve winds down here too rather than carrying its
+    // listener into the resumed TUI. The bound keeps a wedged client connection on
+    // any listener from hanging the flip back.
     shutdown.trigger();
     runtime.block_on(async {
-        let _ = tokio::time::timeout(SERVER_JOIN_TIMEOUT, async {
-            while server_tasks.join_next().await.is_some() {}
-        })
-        .await;
+        let _ = tokio::time::timeout(SERVER_JOIN_TIMEOUT, serve_supervisor).await;
     });
     if matches!(exit, ServerExit::QuitProcess) {
         // Quit teardown: SIGTERM the children so CLIs can save state for a later
@@ -1051,10 +1271,10 @@ async fn next_terminate_signal(
 #[cfg(test)]
 mod tests {
     use super::{
-        Reachability, ServeShutdown, bind_plan_addrs, plain_http_banner, reachability, safety_note,
-        tailscale_bind_warning, wait_for_shutdown,
+        Reachability, bind_plan_addrs, plain_http_banner, reachability, safety_note,
+        tailscale_bind_warning,
     };
-    use dux_core::config::PlanAddr;
+    use dux_core::config::{PlanAddr, TailscaleMode};
     use dux_core::engine::Command;
 
     #[test]
@@ -1225,9 +1445,28 @@ mod tests {
     }
 
     #[test]
-    fn safety_note_loopback_only_is_none() {
+    fn safety_note_loopback_only_is_none_when_tailscale_is_off() {
         let addrs = vec![plan_addr("127.0.0.1:8080", true)];
-        assert_eq!(safety_note(&addrs), None);
+        assert_eq!(safety_note(&addrs, TailscaleMode::No), None);
+        // `yes` looked once and found nothing, so this run stays loopback-only and
+        // there is genuinely nothing to warn about either.
+        assert_eq!(safety_note(&addrs, TailscaleMode::Yes), None);
+    }
+
+    #[test]
+    fn safety_note_loopback_only_on_auto_still_says_the_tailnet_can_arrive() {
+        // The note is printed ONCE and the leg comes and goes behind it. A serve
+        // that is watching the interface will be reachable on the tailnet the
+        // moment the laptop reconnects, and saying nothing is the wrong half of
+        // the truth.
+        let addrs = vec![plan_addr("127.0.0.1:8080", true)];
+        let note = safety_note(&addrs, TailscaleMode::Auto)
+            .expect("a watching serve must still warn about the tailnet");
+        assert!(note.contains("tailnet"), "must mention tailnet: {note}");
+        assert!(
+            note.contains("when the interface appears"),
+            "must say the leg can arrive later: {note}"
+        );
     }
 
     #[test]
@@ -1236,8 +1475,13 @@ mod tests {
             plan_addr("127.0.0.1:8080", true),
             plan_addr("100.64.0.5:8080", false),
         ];
-        let note = safety_note(&addrs).expect("must have a note for tailscale leg");
+        let note =
+            safety_note(&addrs, TailscaleMode::Yes).expect("must have a note for tailscale leg");
         assert!(note.contains("tailnet"), "must mention tailnet: {note}");
+        assert!(
+            note.contains("connected"),
+            "must scope it to being connected to the tailnet: {note}"
+        );
         assert!(
             !note.contains("NO login"),
             "tailscale note must NOT say NO login: {note}"
@@ -1247,7 +1491,7 @@ mod tests {
     #[test]
     fn safety_note_wildcard_primary_mentions_no_login() {
         let addrs = vec![plan_addr("0.0.0.0:8080", true)];
-        let note = safety_note(&addrs).expect("must warn for 0.0.0.0");
+        let note = safety_note(&addrs, TailscaleMode::Auto).expect("must warn for 0.0.0.0");
         assert!(note.contains("NO login"), "must contain 'NO login': {note}");
     }
 
@@ -1259,7 +1503,7 @@ mod tests {
             plan_addr("192.168.1.5:8080", true),
             plan_addr("100.64.0.5:8080", false),
         ];
-        let note = safety_note(&addrs).expect("must warn for LAN primary");
+        let note = safety_note(&addrs, TailscaleMode::Auto).expect("must warn for LAN primary");
         assert!(note.contains("NO login"), "must contain 'NO login': {note}");
         assert!(
             note.contains("Tailscale address is bound too"),
@@ -1347,100 +1591,6 @@ mod tests {
             banner.warnings.is_empty(),
             "a normal build must produce no warning rows: {:?}",
             banner.warnings
-        );
-    }
-
-    #[test]
-    fn record_serve_failure_first_caller_wins_and_triggers_shutdown() {
-        // The first serve task to die records its error, arms the flag, and trips
-        // the shutdown watch; a later caller (another listener winding down) does
-        // NOT overwrite the first error but STILL nudges shutdown. This is the F5
-        // load-bearing logic, tested directly because forcing a real axum accept
-        // loop to error mid-serve is inherently flaky. Now exercised through the
-        // ONE shared [`ServeShutdown`] primitive every serve path uses.
-        let shutdown = ServeShutdown::new();
-        let mut shutdown_rx = shutdown.subscribe();
-
-        let first = shutdown.record_failure(anyhow::anyhow!("listener A died"));
-        assert!(first, "the first failure must win");
-        assert!(shutdown.is_failed(), "the flag must be armed");
-        assert!(
-            *shutdown_rx.borrow_and_update(),
-            "the shutdown watch must be tripped so other listeners wind down"
-        );
-
-        // A second listener failing afterwards must NOT clobber the first error,
-        // but still no-ops the shutdown send (idempotent).
-        let second = shutdown.record_failure(anyhow::anyhow!("listener B died"));
-        assert!(!second, "a later failure is not the first-error winner");
-        assert_eq!(
-            shutdown.take_error().unwrap().to_string(),
-            "listener A died",
-            "the first error is preserved"
-        );
-        // After taking it, the slot is empty.
-        assert!(
-            shutdown.take_error().is_none(),
-            "the error slot is drained by take_error"
-        );
-    }
-
-    #[tokio::test]
-    async fn serve_shutdown_trigger_resolves_waiters() {
-        // The watch lane is the graceful-shutdown trigger every serve task awaits:
-        // a plain `trigger()` (a SIGINT/SIGTERM or the flip's engine loop exiting)
-        // must resolve `wait_for_shutdown` WITHOUT recording any error, so a clean
-        // stop is not mistaken for a listener death.
-        let shutdown = ServeShutdown::new();
-        let waiter = shutdown.subscribe();
-        shutdown.trigger();
-        // Resolves promptly (bounded so a regression fails rather than hangs).
-        tokio::time::timeout(std::time::Duration::from_secs(1), wait_for_shutdown(waiter))
-            .await
-            .expect("a triggered shutdown must resolve waiters");
-        assert!(!shutdown.is_failed(), "a clean trigger is not a failure");
-        assert!(
-            shutdown.take_error().is_none(),
-            "a clean trigger records no error"
-        );
-    }
-
-    #[tokio::test]
-    async fn serve_shutdown_failure_winds_down_a_sibling_listener() {
-        // A genuine first-error wind-down end to end: a real bound listener serves
-        // a trivial app whose graceful-shutdown future awaits the shared watch.
-        // When a SIBLING records a failure, the watch trips and this listener's
-        // serve future resolves (Ok — graceful), proving one listener's death
-        // winds the others down. This is the run_plain_http first-error behavior
-        // exercised over a real accept loop (cheap, deterministic — no flaky
-        // mid-serve error injection needed: we trip the lane the sibling would).
-        let shutdown = ServeShutdown::new();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let app = axum::Router::new().route("/", axum::routing::get(|| async { "ok" }));
-        let task_shutdown = shutdown.subscribe();
-        let serve = tokio::spawn(async move {
-            axum::serve(listener, app)
-                .with_graceful_shutdown(wait_for_shutdown(task_shutdown))
-                .await
-        });
-
-        // A sibling listener died: record it. The watch trips, so the serving task
-        // above winds down gracefully.
-        let first = shutdown.record_failure(anyhow::anyhow!("sibling listener failed"));
-        assert!(first, "the first failure wins");
-
-        let joined = tokio::time::timeout(std::time::Duration::from_secs(2), serve)
-            .await
-            .expect("the sibling listener must wind down once the watch trips")
-            .expect("serve task joins");
-        assert!(
-            joined.is_ok(),
-            "a graceful shutdown returns Ok even though a sibling failed"
-        );
-        // The recorded error is still available for the caller to surface.
-        assert_eq!(
-            shutdown.take_error().unwrap().to_string(),
-            "sibling listener failed"
         );
     }
 

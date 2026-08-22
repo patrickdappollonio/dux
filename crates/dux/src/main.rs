@@ -52,7 +52,8 @@ fn run_tui_with_flip() -> Result<()> {
                 // successfully bound and the server is reachable on the tailnet.
                 let theme_name = engine.config.ui.theme.clone();
                 let paths = engine.paths.clone();
-                let safety_note = if urls.iter().any(|u| {
+                let tailscale = engine.config.server.tailscale_mode();
+                let tailnet_bound = urls.iter().any(|u| {
                     u.strip_prefix("http://")
                         .and_then(|rest| rest.rsplit_once(':'))
                         .map(|(host, _)| {
@@ -60,7 +61,14 @@ fn run_tui_with_flip() -> Result<()> {
                             ip != "127.0.0.1" && ip != "::1"
                         })
                         .unwrap_or(false)
-                }) {
+                });
+                // On the `auto` mode the Tailscale leg comes and goes while the
+                // status screen stays up, so the note has to cover the whole
+                // session rather than this instant. On `yes` and `no` what bound
+                // at the flip is what there will be.
+                let safety_note = if tailscale.watches_interface() {
+                    Some(dux_web::SAFETY_NOTE_TAILNET_WATCHED.to_string())
+                } else if tailnet_bound {
                     Some(dux_web::SAFETY_NOTE_TAILNET.to_string())
                 } else {
                     None

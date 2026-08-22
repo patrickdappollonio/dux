@@ -1,0 +1,783 @@
+//! Per-leg listener lifecycle: the shutdown primitive every serve path shares,
+//! the registry of live legs and their individual stop lanes, and the Tailscale
+//! interface watcher that adds and drops the Tailscale leg while dux keeps
+//! serving.
+//!
+//! ## Why a leg is a thing
+//!
+//! dux serves one router on several listeners: the REQUIRED one the operator
+//! named, and the BEST-EFFORT Tailscale one. Those two do not deserve the same
+//! treatment. The required listener dying means the server is over. The Tailscale
+//! listener dying is Tuesday: the laptop suspended, the daemon restarted, the
+//! user logged out of their tailnet. So each listener gets its own stop lane and
+//! its own failure verdict, and one leg can end without taking the server with
+//! it.
+//!
+//! ## The two directions
+//!
+//! - The PARENT trip (a signal, a required leg's death, the flip's engine loop
+//!   returning) fans out over every leg lane, so nothing is left holding a socket
+//!   after a teardown.
+//! - A LEG trip (the interface went away) stops exactly one listener and leaves
+//!   the parent alone.
+//!
+//! Every serve future therefore waits on both its own lane and the parent's.
+
+use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+use dux_core::config::TailscaleMode;
+use dux_core::tailscale::TailscaleUnavailable;
+
+/// How often the watcher asks whether the Tailscale address is there.
+///
+/// A constant, not a setting: this is an implementation cadence, not a
+/// preference. Ten seconds is well inside the time it takes a person to notice a
+/// laptop has come back and reach for a browser, and the probe it pays for is one
+/// bounded local call to a local daemon.
+///
+/// This period is also the flap debounce. There is deliberately no second
+/// hysteresis window on top of it: an interface that appears and disappears
+/// faster than this produces at most one transition per period, and one that
+/// flaps slower than this is not flapping, it is changing.
+pub(crate) const WATCH_PERIOD: Duration = Duration::from_secs(10);
+
+/// How long the watcher parks between checks of the stop flag. Small enough that
+/// serving can end promptly, large enough that waiting costs a wakeup a second
+/// and nothing else.
+const WATCH_SLICE: Duration = Duration::from_millis(250);
+
+/// The ONE serve-shutdown primitive shared by all serve paths. It bundles the
+/// first-error bookkeeping with the `watch<bool>` parent lane every listener
+/// awaits AND the registry of per-leg lanes, so a single dying listener winds the
+/// siblings down identically everywhere while a best-effort leg can be stopped on
+/// its own:
+///
+/// - `failed` is armed once (compare-exchange) so the FIRST failing REQUIRED
+///   listener is the one that records the returned error and is reported.
+/// - `error` holds that first error, surfaced to the caller after wind-down.
+/// - `shutdown_tx` is the parent lane, flipped on a required failure or a normal
+///   SIGINT/SIGTERM. Tripping it stops the whole server, legs included.
+/// - `legs` maps each live listener's address to its own stop lane.
+#[derive(Clone)]
+pub(crate) struct ServeShutdown {
+    failed: Arc<AtomicBool>,
+    error: Arc<std::sync::Mutex<Option<anyhow::Error>>>,
+    shutdown_tx: tokio::sync::watch::Sender<bool>,
+    legs: Arc<std::sync::Mutex<HashMap<SocketAddr, tokio::sync::watch::Sender<bool>>>>,
+}
+
+impl ServeShutdown {
+    pub(crate) fn new() -> Self {
+        let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(false);
+        Self {
+            failed: Arc::new(AtomicBool::new(false)),
+            error: Arc::new(std::sync::Mutex::new(None)),
+            shutdown_tx,
+            legs: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// A fresh receiver on the parent lane.
+    pub(crate) fn subscribe(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.shutdown_tx.subscribe()
+    }
+
+    /// Whether a REQUIRED serve task has recorded a failure (polled by the flip's
+    /// engine-loop control closure to exit the loop). A best-effort leg's death
+    /// never arms this.
+    pub(crate) fn is_failed(&self) -> bool {
+        self.failed.load(Ordering::SeqCst)
+    }
+
+    /// Register a leg and return its own stop lane receiver. Registering an
+    /// address that is somehow already registered replaces the old lane after
+    /// tripping it, so no listener is ever left with nothing able to stop it.
+    pub(crate) fn register_leg(&self, addr: SocketAddr) -> tokio::sync::watch::Receiver<bool> {
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        if let Ok(mut legs) = self.legs.lock()
+            && let Some(previous) = legs.insert(addr, tx)
+        {
+            let _ = previous.send(true);
+        }
+        rx
+    }
+
+    /// Stop ONE leg: trip its lane and forget it. Returns whether a live leg was
+    /// there to stop. The parent lane is untouched, which is the whole point.
+    pub(crate) fn stop_leg(&self, addr: SocketAddr) -> bool {
+        let Ok(mut legs) = self.legs.lock() else {
+            return false;
+        };
+        match legs.remove(&addr) {
+            Some(tx) => {
+                let _ = tx.send(true);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Forget a leg whose task has already ended, without tripping anything.
+    pub(crate) fn forget_leg(&self, addr: SocketAddr) {
+        if let Ok(mut legs) = self.legs.lock() {
+            legs.remove(&addr);
+        }
+    }
+
+    /// Trigger a graceful, non-error wind-down of the WHOLE server: the parent
+    /// lane plus every registered leg lane. Fanning out matters because a leg
+    /// added after the serve started (the Tailscale watcher's doing) waits on its
+    /// own lane, and a teardown that only tripped the parent would leave that
+    /// listener holding its socket into whatever came next. Idempotent.
+    pub(crate) fn trigger(&self) {
+        let _ = self.shutdown_tx.send(true);
+        if let Ok(mut legs) = self.legs.lock() {
+            for (_, tx) in legs.drain() {
+                let _ = tx.send(true);
+            }
+        }
+    }
+
+    /// Take the first recorded serve error, if any.
+    pub(crate) fn take_error(&self) -> Option<anyhow::Error> {
+        self.error.lock().ok().and_then(|mut slot| slot.take())
+    }
+
+    /// Record a REQUIRED serve task's failure exactly once and wind the whole
+    /// server down. The FIRST caller wins: it stores the error and is the one
+    /// reported; later callers no-op the error slot. Always trips the parent lane
+    /// (and therefore every leg) so the remaining listeners stop too. Returns
+    /// `true` when this call was the first-error winner.
+    pub(crate) fn record_failure(&self, err: anyhow::Error) -> bool {
+        let first = self
+            .failed
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok();
+        if first && let Ok(mut slot) = self.error.lock() {
+            *slot = Some(err);
+        }
+        self.trigger();
+        first
+    }
+
+    /// Record a BEST-EFFORT leg's death: log it, mark the leg down, and let the
+    /// server carry on. Deliberately NOT a parent trip and NOT an error: the
+    /// whole reason a leg is best-effort is that losing it is not losing the
+    /// server, and the Tailscale leg is the one users lose routinely.
+    pub(crate) fn record_best_effort_failure(&self, addr: SocketAddr, err: &anyhow::Error) {
+        dux_core::logger::warn(&format!(
+            "[server] the listener on the Tailscale address {addr} stopped serving: {err}. \
+             dux is still serving on its other address(es); the Tailscale leg will be bound \
+             again by itself if that interface comes back."
+        ));
+        self.forget_leg(addr);
+    }
+}
+
+/// Await either the parent lane or this leg's own lane, whichever trips first.
+/// Every serve future waits on both, so a per-leg stop and a whole-server
+/// teardown both reach it. A wakeup-driven await, no sleep-poll.
+pub(crate) async fn wait_for_leg_shutdown(
+    parent: tokio::sync::watch::Receiver<bool>,
+    leg: tokio::sync::watch::Receiver<bool>,
+) {
+    tokio::select! {
+        _ = wait_for_shutdown(parent) => {},
+        _ = wait_for_shutdown(leg) => {},
+    }
+}
+
+/// Await one shutdown lane: resolve once the watch flips to `true`. The receiver
+/// is consumed, so each caller passes its own handle.
+pub(crate) async fn wait_for_shutdown(mut rx: tokio::sync::watch::Receiver<bool>) {
+    while !*rx.borrow_and_update() {
+        if rx.changed().await.is_err() {
+            break;
+        }
+    }
+}
+
+// ── The Tailscale watcher ──────────────────────────────────────────────────
+
+/// What the watcher asks the serve loop to do. One command per detect period at
+/// most, except a genuine address CHANGE, which is an unbind and a bind of the
+/// same leg and is sent as both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LegCommand {
+    /// The Tailscale interface is there at this address: bind and serve it,
+    /// best-effort.
+    Bind(SocketAddr),
+    /// This Tailscale address is gone: stop that listener. Live sockets on it die
+    /// with the listener, and the browser's ordinary reconnect is the recovery.
+    Unbind(SocketAddr),
+}
+
+/// The step one detect period implies, given what is bound now and what was just
+/// detected. Pure, so every transition (including the ones that are hard to
+/// arrange with a real interface) is a unit test.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LegStep {
+    /// Nothing changed. The overwhelmingly common case.
+    Nothing,
+    Bind(SocketAddr),
+    Unbind(SocketAddr),
+    /// The Tailscale address itself changed. Both halves are sent in this one
+    /// period, because leaving a listener on an address the machine no longer has
+    /// is worse than doing two things at once.
+    Rebind {
+        old: SocketAddr,
+        new: SocketAddr,
+    },
+}
+
+/// Decide the step from the currently bound leg and the desired one.
+pub(crate) fn plan_leg_step(bound: Option<SocketAddr>, desired: Option<SocketAddr>) -> LegStep {
+    match (bound, desired) {
+        (None, None) => LegStep::Nothing,
+        (None, Some(new)) => LegStep::Bind(new),
+        (Some(old), None) => LegStep::Unbind(old),
+        (Some(old), Some(new)) if old == new => LegStep::Nothing,
+        (Some(old), Some(new)) => LegStep::Rebind { old, new },
+    }
+}
+
+/// The address the Tailscale leg WANTS to be at, given a detection result and the
+/// primary listener, or `None` when there should be no leg.
+///
+/// A detected address is refused as a leg when the primary listener already
+/// covers it: a wildcard primary (`0.0.0.0` / `::`) is listening on every
+/// interface including this one, and a primary bound to the Tailscale address
+/// itself plainly is it. Binding a second listener on the same address would just
+/// fail with EADDRINUSE once a period, forever.
+pub(crate) fn desired_leg(
+    primary: SocketAddr,
+    detected: Result<IpAddr, TailscaleUnavailable>,
+) -> Option<SocketAddr> {
+    let ip = detected.ok()?;
+    if primary.ip().is_unspecified() || primary.ip() == ip {
+        return None;
+    }
+    Some(SocketAddr::new(ip, primary.port()))
+}
+
+/// Run the watch loop: poll the detector, compare against what is bound, emit at
+/// most one transition per period, and stop when `stop` says serving is over.
+///
+/// Every collaborator is injected so the whole loop is testable with no Tailscale
+/// binary, no sockets and no clock: `detect` is the probe, `bound` reports what
+/// the serve loop currently has bound (so a FAILED bind is retried next period
+/// rather than being lost), `emit` hands a command to the serve loop and returns
+/// false when nobody is listening any more, and `stop` ends the loop.
+///
+/// The loop starts by SLEEPING. The startup bind has already happened by the time
+/// a watcher exists, so checking immediately would only re-ask a question that
+/// was answered a moment ago.
+pub(crate) fn watch_tailscale_leg(
+    primary: SocketAddr,
+    period: Duration,
+    detect: &dyn Fn() -> Result<IpAddr, TailscaleUnavailable>,
+    bound: &dyn Fn() -> Option<SocketAddr>,
+    emit: &dyn Fn(LegCommand) -> bool,
+    stop: &dyn Fn() -> bool,
+) {
+    while park(period, stop) {
+        let desired = desired_leg(primary, detect());
+        let step = plan_leg_step(bound(), desired);
+        let sent = match step {
+            LegStep::Nothing => true,
+            LegStep::Bind(addr) => emit(LegCommand::Bind(addr)),
+            LegStep::Unbind(addr) => emit(LegCommand::Unbind(addr)),
+            LegStep::Rebind { old, new } => {
+                emit(LegCommand::Unbind(old)) && emit(LegCommand::Bind(new))
+            }
+        };
+        if !sent {
+            // The serve loop is gone; there is nobody left to tell.
+            return;
+        }
+    }
+}
+
+/// Sleep for `period` in slices, returning false as soon as `stop` says to end.
+/// Slicing is what makes a ten-second period compatible with a prompt teardown.
+fn park(period: Duration, stop: &dyn Fn() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + period;
+    loop {
+        if stop() {
+            return false;
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return !stop();
+        }
+        std::thread::sleep(remaining.min(WATCH_SLICE));
+    }
+}
+
+/// The banner / status note for a serve that is on `auto` with no Tailscale
+/// address yet. Returns `None` for every other combination, so the caller can
+/// push it straight into a warnings list.
+///
+/// This is the third state the surfacing story learns: not "Tailscale is off" and
+/// not "Tailscale is bound", but "not yet, and dux is watching".
+pub(crate) fn waiting_note(mode: TailscaleMode, detected: bool) -> Option<String> {
+    if detected || !mode.watches_interface() {
+        return None;
+    }
+    Some(
+        "Tailscale: waiting for the interface (auto). dux is serving without it and will bind \
+         your Tailscale address by itself when it appears."
+            .to_string(),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    fn addr(s: &str) -> SocketAddr {
+        s.parse().unwrap()
+    }
+
+    // ── The pure step decision ────────────────────────────────────────────
+
+    #[test]
+    fn a_leg_is_bound_when_the_interface_appears_and_dropped_when_it_goes() {
+        let ts = addr("100.64.0.5:8080");
+        assert_eq!(plan_leg_step(None, Some(ts)), LegStep::Bind(ts));
+        assert_eq!(plan_leg_step(Some(ts), None), LegStep::Unbind(ts));
+        assert_eq!(plan_leg_step(None, None), LegStep::Nothing);
+        assert_eq!(plan_leg_step(Some(ts), Some(ts)), LegStep::Nothing);
+    }
+
+    #[test]
+    fn a_changed_tailscale_address_rebinds_rather_than_stacking_listeners() {
+        let old = addr("100.64.0.5:8080");
+        let new = addr("100.64.0.9:8080");
+        assert_eq!(
+            plan_leg_step(Some(old), Some(new)),
+            LegStep::Rebind { old, new }
+        );
+    }
+
+    #[test]
+    fn a_primary_that_already_covers_tailscale_never_grows_a_leg() {
+        let ip: IpAddr = "100.64.0.5".parse().unwrap();
+        // A wildcard primary is already listening on the Tailscale interface.
+        assert_eq!(desired_leg(addr("0.0.0.0:8080"), Ok(ip)), None);
+        assert_eq!(desired_leg(addr("[::]:8080"), Ok(ip)), None);
+        // And a primary bound to the Tailscale address itself IS the leg.
+        assert_eq!(desired_leg(addr("100.64.0.5:8080"), Ok(ip)), None);
+        // An ordinary loopback primary does want the leg, at the same port.
+        assert_eq!(
+            desired_leg(addr("127.0.0.1:9000"), Ok(ip)),
+            Some(addr("100.64.0.5:9000"))
+        );
+    }
+
+    #[test]
+    fn an_undetectable_address_wants_no_leg_whatever_the_reason() {
+        for reason in [
+            TailscaleUnavailable::CommandMissing,
+            TailscaleUnavailable::CommandFailed,
+            TailscaleUnavailable::NoAddress,
+        ] {
+            assert_eq!(desired_leg(addr("127.0.0.1:8080"), Err(reason)), None);
+        }
+    }
+
+    // ── The watch loop, with every collaborator faked ─────────────────────
+
+    /// A scripted detector plus the serve loop's bound state, driving the real
+    /// watch loop with no Tailscale binary, no sockets and no waiting.
+    struct Harness {
+        script: Mutex<Vec<Result<IpAddr, TailscaleUnavailable>>>,
+        bound: Mutex<Option<SocketAddr>>,
+        /// When set, a Bind command is NOT reflected into `bound`, standing in for
+        /// a best-effort bind that failed.
+        refuse_binds: bool,
+        sent: Mutex<Vec<LegCommand>>,
+    }
+
+    impl Harness {
+        fn new(script: Vec<Result<IpAddr, TailscaleUnavailable>>) -> Self {
+            Self {
+                script: Mutex::new(script),
+                bound: Mutex::new(None),
+                refuse_binds: false,
+                sent: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn run(&self, primary: SocketAddr) -> Vec<LegCommand> {
+            watch_tailscale_leg(
+                primary,
+                Duration::ZERO,
+                &|| {
+                    let mut script = self.script.lock().unwrap();
+                    if script.is_empty() {
+                        // Exhausted: the stop closure below ends the loop on the
+                        // same period, so this is never consulted for a decision.
+                        return Err(TailscaleUnavailable::NoAddress);
+                    }
+                    script.remove(0)
+                },
+                &|| *self.bound.lock().unwrap(),
+                &|cmd| {
+                    self.sent.lock().unwrap().push(cmd);
+                    match cmd {
+                        LegCommand::Bind(a) if !self.refuse_binds => {
+                            *self.bound.lock().unwrap() = Some(a);
+                        }
+                        LegCommand::Bind(_) => {}
+                        LegCommand::Unbind(_) => *self.bound.lock().unwrap() = None,
+                    }
+                    true
+                },
+                &|| self.script.lock().unwrap().is_empty(),
+            );
+            self.sent.lock().unwrap().clone()
+        }
+    }
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn the_watcher_binds_when_the_interface_appears() {
+        // Absent, absent, then present: exactly one Bind, on the period that saw
+        // it appear.
+        let h = Harness::new(vec![
+            Err(TailscaleUnavailable::CommandFailed),
+            Err(TailscaleUnavailable::CommandFailed),
+            Ok(ip("100.64.0.5")),
+        ]);
+        assert_eq!(
+            h.run(addr("127.0.0.1:8080")),
+            vec![LegCommand::Bind(addr("100.64.0.5:8080"))]
+        );
+    }
+
+    #[test]
+    fn the_watcher_unbinds_when_the_interface_goes_away() {
+        let h = Harness::new(vec![
+            Ok(ip("100.64.0.5")),
+            Ok(ip("100.64.0.5")),
+            Err(TailscaleUnavailable::CommandFailed),
+        ]);
+        assert_eq!(
+            h.run(addr("127.0.0.1:8080")),
+            vec![
+                LegCommand::Bind(addr("100.64.0.5:8080")),
+                LegCommand::Unbind(addr("100.64.0.5:8080")),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_steady_interface_produces_no_commands_at_all() {
+        // The common case must be silent: no churn, no log spam, no rebinding a
+        // listener that is fine.
+        let h = Harness::new(vec![Ok(ip("100.64.0.5")); 5]);
+        assert_eq!(
+            h.run(addr("127.0.0.1:8080")),
+            vec![LegCommand::Bind(addr("100.64.0.5:8080"))],
+            "one bind on the first period, then silence"
+        );
+    }
+
+    #[test]
+    fn a_flap_inside_one_period_costs_at_most_one_transition() {
+        // The detect period IS the debounce: the watcher only ever sees the state
+        // at the sample, so an interface that came and went between samples
+        // produces nothing.
+        let h = Harness::new(vec![
+            Ok(ip("100.64.0.5")),
+            // Away and back between these two samples is invisible by
+            // construction; the sample says present, and nothing is emitted.
+            Ok(ip("100.64.0.5")),
+        ]);
+        assert_eq!(h.run(addr("127.0.0.1:8080")).len(), 1);
+    }
+
+    #[test]
+    fn a_failed_bind_is_retried_on_the_next_period() {
+        // The watcher compares against what is actually BOUND, not against what
+        // it last asked for, so a best-effort bind that failed (a busy port, a
+        // half-configured interface) is asked for again rather than lost until
+        // the next flap.
+        let mut h = Harness::new(vec![Ok(ip("100.64.0.5")), Ok(ip("100.64.0.5"))]);
+        h.refuse_binds = true;
+        assert_eq!(
+            h.run(addr("127.0.0.1:8080")),
+            vec![
+                LegCommand::Bind(addr("100.64.0.5:8080")),
+                LegCommand::Bind(addr("100.64.0.5:8080")),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_watcher_stops_when_nobody_is_listening_to_it() {
+        // The serve loop has gone (teardown): the watcher must return rather than
+        // keep probing a dead server forever.
+        let calls = Mutex::new(0usize);
+        watch_tailscale_leg(
+            addr("127.0.0.1:8080"),
+            Duration::ZERO,
+            &|| {
+                *calls.lock().unwrap() += 1;
+                Ok(ip("100.64.0.5"))
+            },
+            &|| None,
+            &|_| false,
+            &|| false,
+        );
+        assert_eq!(
+            *calls.lock().unwrap(),
+            1,
+            "one probe, one refused send, then the loop ends"
+        );
+    }
+
+    #[test]
+    fn the_stop_flag_ends_the_watcher_before_it_probes() {
+        let calls = Mutex::new(0usize);
+        watch_tailscale_leg(
+            addr("127.0.0.1:8080"),
+            Duration::ZERO,
+            &|| {
+                *calls.lock().unwrap() += 1;
+                Ok(ip("100.64.0.5"))
+            },
+            &|| None,
+            &|_| true,
+            &|| true,
+        );
+        assert_eq!(*calls.lock().unwrap(), 0, "a stopped watcher never probes");
+    }
+
+    // ── The waiting note ──────────────────────────────────────────────────
+
+    #[test]
+    fn the_waiting_note_appears_only_on_auto_with_nothing_detected() {
+        let note = waiting_note(TailscaleMode::Auto, false).expect("auto with no address");
+        assert!(note.contains("waiting for the interface"), "{note}");
+        assert!(note.contains("auto"), "must name the mode: {note}");
+        assert_eq!(waiting_note(TailscaleMode::Auto, true), None, "it bound");
+        assert_eq!(
+            waiting_note(TailscaleMode::Yes, false),
+            None,
+            "yes gets the settled-for-this-run warning instead, not a waiting note"
+        );
+        assert_eq!(waiting_note(TailscaleMode::No, false), None, "not wanted");
+    }
+
+    // ── The parent lane ───────────────────────────────────────────────────
+
+    #[test]
+    fn record_serve_failure_first_caller_wins_and_triggers_shutdown() {
+        // The first serve task to die records its error, arms the flag, and trips
+        // the shutdown watch; a later caller (another listener winding down) does
+        // NOT overwrite the first error but STILL nudges shutdown. This is the F5
+        // load-bearing logic, tested directly because forcing a real axum accept
+        // loop to error mid-serve is inherently flaky. Exercised through the ONE
+        // shared [`ServeShutdown`] primitive every serve path uses.
+        let shutdown = ServeShutdown::new();
+        let mut shutdown_rx = shutdown.subscribe();
+
+        let first = shutdown.record_failure(anyhow::anyhow!("listener A died"));
+        assert!(first, "the first failure must win");
+        assert!(shutdown.is_failed(), "the flag must be armed");
+        assert!(
+            *shutdown_rx.borrow_and_update(),
+            "the shutdown watch must be tripped so other listeners wind down"
+        );
+
+        // A second listener failing afterwards must NOT clobber the first error,
+        // but still no-ops the shutdown send (idempotent).
+        let second = shutdown.record_failure(anyhow::anyhow!("listener B died"));
+        assert!(!second, "a later failure is not the first-error winner");
+        assert_eq!(
+            shutdown.take_error().unwrap().to_string(),
+            "listener A died",
+            "the first error is preserved"
+        );
+        // After taking it, the slot is empty.
+        assert!(
+            shutdown.take_error().is_none(),
+            "the error slot is drained by take_error"
+        );
+    }
+
+    #[tokio::test]
+    async fn serve_shutdown_trigger_resolves_waiters() {
+        // The watch lane is the graceful-shutdown trigger every serve task awaits:
+        // a plain `trigger()` (a SIGINT/SIGTERM or the flip's engine loop exiting)
+        // must resolve `wait_for_shutdown` WITHOUT recording any error, so a clean
+        // stop is not mistaken for a listener death.
+        let shutdown = ServeShutdown::new();
+        let waiter = shutdown.subscribe();
+        shutdown.trigger();
+        // Resolves promptly (bounded so a regression fails rather than hangs).
+        tokio::time::timeout(Duration::from_secs(1), wait_for_shutdown(waiter))
+            .await
+            .expect("a triggered shutdown must resolve waiters");
+        assert!(!shutdown.is_failed(), "a clean trigger is not a failure");
+        assert!(
+            shutdown.take_error().is_none(),
+            "a clean trigger records no error"
+        );
+    }
+
+    #[tokio::test]
+    async fn serve_shutdown_failure_winds_down_a_sibling_listener() {
+        // A genuine first-error wind-down end to end: a real bound listener serves
+        // a trivial app whose graceful-shutdown future awaits the shared watch.
+        // When a SIBLING records a failure, the watch trips and this listener's
+        // serve future resolves (Ok, graceful), proving one listener's death winds
+        // the others down. This is the run_plain_http first-error behavior
+        // exercised over a real accept loop (cheap, deterministic: no flaky
+        // mid-serve error injection needed, we trip the lane the sibling would).
+        let shutdown = ServeShutdown::new();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let app = axum::Router::new().route("/", axum::routing::get(|| async { "ok" }));
+        let task_shutdown = shutdown.subscribe();
+        let serve = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(wait_for_shutdown(task_shutdown))
+                .await
+        });
+
+        // A sibling listener died: record it. The watch trips, so the serving task
+        // above winds down gracefully.
+        let first = shutdown.record_failure(anyhow::anyhow!("sibling listener failed"));
+        assert!(first, "the first failure wins");
+
+        let joined = tokio::time::timeout(Duration::from_secs(2), serve)
+            .await
+            .expect("the sibling listener must wind down once the watch trips")
+            .expect("serve task joins");
+        assert!(
+            joined.is_ok(),
+            "a graceful shutdown returns Ok even though a sibling failed"
+        );
+        // The recorded error is still available for the caller to surface.
+        assert_eq!(
+            shutdown.take_error().unwrap().to_string(),
+            "sibling listener failed"
+        );
+    }
+
+    // ── Leg lanes ─────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn stopping_one_leg_leaves_the_parent_and_its_siblings_alone() {
+        let shutdown = ServeShutdown::new();
+        let ts = addr("100.64.0.5:8080");
+        let leg = shutdown.register_leg(ts);
+        let parent = shutdown.subscribe();
+
+        assert!(shutdown.stop_leg(ts), "a live leg is stopped");
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            wait_for_leg_shutdown(parent.clone(), leg),
+        )
+        .await
+        .expect("the stopped leg's waiter must resolve");
+
+        assert!(!*parent.clone().borrow_and_update(), "parent untouched");
+        assert!(!shutdown.is_failed(), "a leg stop is not a failure");
+        assert!(shutdown.take_error().is_none());
+        assert!(
+            !shutdown.stop_leg(ts),
+            "stopping a leg twice reports nothing to stop"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_parent_trip_fans_out_to_a_leg_that_only_waits_on_its_own_lane() {
+        // The flip-teardown-while-a-leg-is-parked case. The leg was added AFTER
+        // serving started, so it never saw the parent's initial state; if the
+        // trigger did not fan out, its listener would still be holding the socket
+        // when the TUI came back.
+        let shutdown = ServeShutdown::new();
+        let ts = addr("100.64.0.5:8080");
+        let leg = shutdown.register_leg(ts);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let app = axum::Router::new().route("/", axum::routing::get(|| async { "ok" }));
+        let parent = shutdown.subscribe();
+        let mut leg_state = leg.clone();
+        let serve = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(wait_for_leg_shutdown(parent, leg))
+                .await
+        });
+
+        shutdown.trigger();
+        let joined = tokio::time::timeout(Duration::from_secs(2), serve)
+            .await
+            .expect("a teardown must wind the parked leg down")
+            .expect("serve task joins");
+        // The serve future RESOLVED, which is axum's contract for "stopped
+        // accepting and dropped the listener", and it resolved through the leg's
+        // OWN lane, which is the fan-out this test is about.
+        assert!(joined.is_ok(), "a graceful shutdown returns Ok");
+        assert!(
+            *leg_state.borrow_and_update(),
+            "the parent trigger must have tripped the leg's own lane"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_best_effort_leg_death_is_isolated_but_a_required_one_is_fatal() {
+        let shutdown = ServeShutdown::new();
+        let ts = addr("100.64.0.5:8080");
+        let _leg = shutdown.register_leg(ts);
+        let parent = shutdown.subscribe();
+
+        shutdown.record_best_effort_failure(ts, &anyhow::anyhow!("tailscale listener died"));
+        assert!(
+            !*parent.clone().borrow_and_update(),
+            "a best-effort death must not trip the parent"
+        );
+        assert!(!shutdown.is_failed(), "and must not arm the failure flag");
+        assert!(
+            shutdown.take_error().is_none(),
+            "and must not become the serve's reported error"
+        );
+        assert!(
+            !shutdown.stop_leg(ts),
+            "the dead leg is no longer registered"
+        );
+
+        // A required leg's death still ends everything, with its error kept.
+        assert!(shutdown.record_failure(anyhow::anyhow!("loopback listener died")));
+        assert!(shutdown.is_failed());
+        assert!(*parent.clone().borrow_and_update());
+        assert_eq!(
+            shutdown.take_error().unwrap().to_string(),
+            "loopback listener died"
+        );
+    }
+
+    #[tokio::test]
+    async fn re_registering_an_address_trips_the_lane_it_replaces() {
+        // Defence in depth: if a leg were ever registered twice for one address,
+        // the listener behind the first lane must not be left unstoppable.
+        let shutdown = ServeShutdown::new();
+        let ts = addr("100.64.0.5:8080");
+        let first = shutdown.register_leg(ts);
+        let _second = shutdown.register_leg(ts);
+        tokio::time::timeout(Duration::from_secs(1), wait_for_shutdown(first))
+            .await
+            .expect("the replaced lane must be tripped");
+    }
+}
