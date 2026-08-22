@@ -175,6 +175,13 @@ pub enum Action {
     StartBackgroundServer,
     /// Palette-only: stop the background web server, leaving every agent running.
     StopBackgroundServer,
+    /// Palette-only: take over input for the terminal in the center pane, so this
+    /// device drives it and whichever device was driving becomes a watcher.
+    ///
+    /// Only ever meaningful while a background web server is serving: with nothing
+    /// serving there is no other device that could be driving anything, and the
+    /// action says so rather than pretending to act.
+    TakeOverTerminal,
     ToggleAlwaysShowTabs,
     /// Open the read-only Agent Info modal for the focused agent (name, provider,
     /// branch lineage, worktree, status).
@@ -325,6 +332,7 @@ impl Action {
             Action::StartWebServer => "start_web_server",
             Action::StartBackgroundServer => "start_background_server",
             Action::StopBackgroundServer => "stop_background_server",
+            Action::TakeOverTerminal => "take_over_terminal",
             Action::ToggleAlwaysShowTabs => "toggle_always_show_tabs",
             Action::OpenAgentInfo => "open_agent_info",
             Action::ShowWelcomeScreen => "show_welcome_screen",
@@ -545,6 +553,9 @@ impl Action {
             Action::StopBackgroundServer => {
                 "Stop serving the web UI in the background; agents keep running."
             }
+            Action::TakeOverTerminal => {
+                "Take over input for the center terminal from the device driving it."
+            }
             Action::ToggleAlwaysShowTabs => {
                 "Toggle always showing the agent tab strip, even with a single tab."
             }
@@ -699,6 +710,7 @@ impl Action {
             | Action::StartWebServer
             | Action::StartBackgroundServer
             | Action::StopBackgroundServer
+            | Action::TakeOverTerminal
             | Action::ToggleAlwaysShowTabs
             | Action::OpenAgentInfo
             | Action::ShowWelcomeScreen

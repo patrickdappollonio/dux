@@ -1431,6 +1431,12 @@ impl App {
     /// silently dropped, and a forwarded keystroke retires any terminal
     /// selection exactly as the raw path's forward flush does.
     fn forward_typing_key_to_center(&mut self, key: &KeyEvent) {
+        // Ownership first: while a background web server is serving, another
+        // device can be the one driving this pty, and then this keystroke is
+        // dropped rather than written. Nothing serving, no gate at all.
+        if !self.may_type_into_focused_pty() {
+            return;
+        }
         let Some(provider) = self.selected_terminal_surface_client() else {
             return;
         };
@@ -1684,6 +1690,10 @@ impl App {
     /// Stamped as typing (`note_pty_input`) so the echo the paste provokes is
     /// not read as the agent working.
     fn paste_to_center_pty(&mut self, text: &str) {
+        // A paste is a write, so it asks the same question a keystroke does.
+        if !self.may_type_into_focused_pty() {
+            return;
+        }
         let Some(provider) = self.selected_terminal_surface_client() else {
             return;
         };
@@ -2323,13 +2333,29 @@ impl App {
                     return Ok(false);
                 };
                 let filtered = self.filtered_macros(&query);
-                if let Some(&(name, text)) = filtered.get(selected) {
-                    if let Some(provider) = self.selected_terminal_surface_client() {
-                        let payload = dux_core::macros::macro_payload_bytes(text);
-                        let _ = provider.write_bytes(&payload);
+                if let Some((name, payload)) = filtered.get(selected).map(|(name, text)| {
+                    (
+                        name.to_string(),
+                        dux_core::macros::macro_payload_bytes(text),
+                    )
+                }) {
+                    // A macro is a write like any other, so it goes through the
+                    // ownership gate. A refusal must not then claim the macro was
+                    // sent: say what actually happened and name the device.
+                    match self.focused_pty_driven_elsewhere() {
+                        Some(device) => self.set_warning(format!(
+                            "Did not send macro \"{name}\": {device} is driving this terminal, so \
+                             keystrokes from here are not reaching it. Take it over first."
+                        )),
+                        None => {
+                            if self.may_type_into_focused_pty()
+                                && let Some(provider) = self.selected_terminal_surface_client()
+                            {
+                                let _ = provider.write_bytes(&payload);
+                            }
+                            self.set_info(format!("Sent macro \"{name}\"."));
+                        }
                     }
-                    let name = name.to_string();
-                    self.set_info(format!("Sent macro \"{name}\"."));
                 }
                 self.close_macro_bar();
             }
@@ -2961,6 +2987,26 @@ impl App {
         let is_scrolled_back = self.scroll_mode_active();
         self.reconcile_scroll_mode();
 
+        // THE OWNERSHIP GATE for this batch. While a background web server is
+        // serving, this surface holds a seat in the PTY-ownership registry and
+        // another device can be the one driving the focused pty; a keystroke of
+        // ours is then dropped rather than written, and the hint bar says why. An
+        // uncontested first keystroke claims the pty, exactly as a browser's does.
+        //
+        // Asked ONCE per batch rather than per byte, and only when the batch
+        // actually has something that could reach the child: a bare host focus
+        // report, or a wheel dux scrolls itself, is not this device claiming
+        // anything. Mouse actions are gated at their own two forward sites, which
+        // is where it is known whether the report is going to the child at all.
+        //
+        // Nothing serving means no registry and no gate: this is `true` before it
+        // touches anything.
+        let batch_can_reach_pty = actions.iter().any(|action| match action {
+            SeqAction::Forward(_) | SeqAction::Intercept(..) => true,
+            SeqAction::Mouse(..) => false,
+        });
+        let may_write_pty = !batch_can_reach_pty || self.may_type_into_focused_pty();
+
         // Process collected actions, batching consecutive forward sequences
         // into a single PTY write to avoid per-character lock/write/flush
         // overhead (critical for large pastes).
@@ -2972,6 +3018,10 @@ impl App {
         fn flush_forward_batch(
             batch: &mut Vec<u8>,
             is_scrolled_back: bool,
+            // False when another device owns this pty's input, in which case the
+            // batch is dropped exactly as scroll mode drops it: nothing reaches
+            // the child, and nothing is recorded as having been forwarded.
+            may_write_pty: bool,
             needs_selection_clear: &mut bool,
             forwarded: &mut ForwardedInput,
             provider: Option<&crate::pty::PtyClient>,
@@ -2980,7 +3030,10 @@ impl App {
                 return;
             }
             *needs_selection_clear = true;
-            if !is_scrolled_back && let Some(p) = provider {
+            if !is_scrolled_back
+                && may_write_pty
+                && let Some(p) = provider
+            {
                 let _ = p.write_bytes(batch);
                 forwarded.note(batch);
             }
@@ -3004,6 +3057,7 @@ impl App {
                     flush_forward_batch(
                         &mut forward_batch,
                         is_scrolled_back,
+                        may_write_pty,
                         &mut needs_selection_clear,
                         &mut forwarded_to_pty,
                         self.selected_terminal_surface_client(),
@@ -3025,6 +3079,7 @@ impl App {
                     flush_forward_batch(
                         &mut forward_batch,
                         is_scrolled_back,
+                        may_write_pty,
                         &mut needs_selection_clear,
                         &mut forwarded_to_pty,
                         self.selected_terminal_surface_client(),
@@ -3039,6 +3094,7 @@ impl App {
                     flush_forward_batch(
                         &mut forward_batch,
                         is_scrolled_back,
+                        may_write_pty,
                         &mut needs_selection_clear,
                         &mut forwarded_to_pty,
                         self.selected_terminal_surface_client(),
@@ -3048,7 +3104,12 @@ impl App {
                         .selected_terminal_surface_client()
                         .is_some_and(|p| p.is_alt_screen());
                     if should_forward_page(fs, alt) {
-                        if let Some(provider) = self.selected_terminal_surface_client() {
+                        // Gated by this batch's ownership verdict, like the
+                        // batched forwards: a page key is a keystroke aimed at
+                        // the child, and a demoted surface does not send one.
+                        if may_write_pty
+                            && let Some(provider) = self.selected_terminal_surface_client()
+                        {
                             let _ = provider.write_bytes(&raw);
                             forwarded_to_pty.note(&raw);
                         }
@@ -3060,6 +3121,7 @@ impl App {
                     flush_forward_batch(
                         &mut forward_batch,
                         is_scrolled_back,
+                        may_write_pty,
                         &mut needs_selection_clear,
                         &mut forwarded_to_pty,
                         self.selected_terminal_surface_client(),
@@ -3069,7 +3131,12 @@ impl App {
                         .selected_terminal_surface_client()
                         .is_some_and(|p| p.is_alt_screen());
                     if should_forward_page(fs, alt) {
-                        if let Some(provider) = self.selected_terminal_surface_client() {
+                        // Gated by this batch's ownership verdict, like the
+                        // batched forwards: a page key is a keystroke aimed at
+                        // the child, and a demoted surface does not send one.
+                        if may_write_pty
+                            && let Some(provider) = self.selected_terminal_surface_client()
+                        {
                             let _ = provider.write_bytes(&raw);
                             forwarded_to_pty.note(&raw);
                         }
@@ -3085,6 +3152,7 @@ impl App {
                         flush_forward_batch(
                             &mut forward_batch,
                             is_scrolled_back,
+                            may_write_pty,
                             &mut needs_selection_clear,
                             &mut forwarded_to_pty,
                             self.selected_terminal_surface_client(),
@@ -3102,6 +3170,7 @@ impl App {
                         flush_forward_batch(
                             &mut forward_batch,
                             is_scrolled_back,
+                            may_write_pty,
                             &mut needs_selection_clear,
                             &mut forwarded_to_pty,
                             self.selected_terminal_surface_client(),
@@ -3119,6 +3188,7 @@ impl App {
                         flush_forward_batch(
                             &mut forward_batch,
                             is_scrolled_back,
+                            may_write_pty,
                             &mut needs_selection_clear,
                             &mut forwarded_to_pty,
                             self.selected_terminal_surface_client(),
@@ -3136,6 +3206,7 @@ impl App {
                         flush_forward_batch(
                             &mut forward_batch,
                             is_scrolled_back,
+                            may_write_pty,
                             &mut needs_selection_clear,
                             &mut forwarded_to_pty,
                             self.selected_terminal_surface_client(),
@@ -3152,6 +3223,7 @@ impl App {
                     flush_forward_batch(
                         &mut forward_batch,
                         is_scrolled_back,
+                        may_write_pty,
                         &mut needs_selection_clear,
                         &mut forwarded_to_pty,
                         self.selected_terminal_surface_client(),
@@ -3183,7 +3255,15 @@ impl App {
                             // text is stable and `to_origin_row` follows it, so
                             // that branch deliberately keeps the selection.
                             self.terminal_selection = None;
-                            if let Some(provider) = self.selected_terminal_surface_client() {
+                            // A forwarded pointer report is still a write, so it
+                            // goes through the same gate a keystroke does: a
+                            // device that may not type may not make the child
+                            // repaint either. Asked here rather than with the
+                            // batch, because this is where it is known the report
+                            // is going to the child at all.
+                            if self.may_type_into_focused_pty()
+                                && let Some(provider) = self.selected_terminal_surface_client()
+                            {
                                 let _ = provider.write_bytes(&raw);
                                 forwarded_to_pty.note(&raw);
                             }
@@ -3217,6 +3297,7 @@ impl App {
                             self.handle_terminal_selection_mouse(mouse_ev);
                         } else if child_wants_mouse
                             && !is_scrolled_back
+                            && self.may_type_into_focused_pty()
                             && let Some(provider) = self.selected_terminal_surface_client()
                         {
                             // Translate screen-absolute coordinates to
@@ -3251,6 +3332,7 @@ impl App {
         flush_forward_batch(
             &mut forward_batch,
             is_scrolled_back,
+            may_write_pty,
             &mut needs_selection_clear,
             &mut forwarded_to_pty,
             self.selected_terminal_surface_client(),
@@ -8741,6 +8823,7 @@ impl App {
             let forwarded = if let Some(term_area) = self.mouse_layout.agent_term
                 && let Some(translated) =
                     crate::raw_input::translate_sgr_mouse(&screen_seq, term_area.x, term_area.y)
+                && self.may_type_into_focused_pty()
                 && let Some(provider) = self.selected_terminal_surface_client()
             {
                 let _ = provider.write_bytes(&translated);
@@ -8898,6 +8981,11 @@ impl App {
         else {
             return;
         };
+        // A pointer report is a write: a device that may not type may not make
+        // the child repaint either.
+        if !self.may_type_into_focused_pty() {
+            return;
+        }
         let Some(provider) = self.selected_terminal_surface_client() else {
             return;
         };

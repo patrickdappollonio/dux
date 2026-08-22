@@ -191,6 +191,19 @@ pub struct App {
     /// other surface (the web pane drives the same PTYs) and cannot be defeated
     /// by a new switch site forgetting to reset anything.
     pub(crate) last_pty_resize_target: Option<String>,
+    /// A pty this surface has been told to TAKE OVER, armed by the take-over
+    /// action and consumed by the next resize of that pty.
+    ///
+    /// Armed rather than acted on directly, so there is exactly one place that
+    /// claims a pty for sizing: the render site that measures the pane. That also
+    /// gives the take-over the surface's real geometry rather than a remembered
+    /// one. The action clears `last_pty_resize_target` alongside setting this, so
+    /// a take-over at a geometry that happens to match the last one still sends a
+    /// resize, which is what carries the claim.
+    ///
+    /// Only meaningful while a background server is serving; a pty id left here
+    /// when serving stops is cleared with the rest of the participation state.
+    pub(crate) pending_pty_takeover: Option<String>,
     /// How many times the selected surface's grid has been REBUILT (see
     /// `refresh_snapshot_buf`). Not a clock and not a line count: it only
     /// answers "has the grid moved since I looked?", which is the one question
@@ -3019,6 +3032,7 @@ mod first_load;
 mod input;
 pub(crate) mod modal;
 mod overlay_dismiss;
+mod pty_ownership;
 mod render;
 mod reorder;
 mod sessions;
@@ -3276,6 +3290,7 @@ impl App {
             terminal_return_to_list: false,
             last_pty_size: (0, 0),
             last_pty_resize_target: None,
+            pending_pty_takeover: None,
             grid_generation: 0,
             scroll_mode: std::collections::HashSet::new(),
             last_diff_height: 0,
@@ -4254,6 +4269,10 @@ impl App {
             }
             "stop-background-server" => {
                 self.stop_background_server();
+                Ok(())
+            }
+            "take-over-terminal" => {
+                self.take_over_focused_pty();
                 Ok(())
             }
             "toggle-project-auto-reopen-agents" => self.toggle_project_auto_reopen_agents(),

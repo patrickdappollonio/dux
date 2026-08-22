@@ -74,6 +74,10 @@ ansi_darkgray = "#808080"
 # alike: an identity tone, not a state color, so a soft slate blue that
 # stays quieter than the state cues.
 "dux.standalone_location_fg" = "#7d96a0"
+# The cue that another device is driving the terminal in the center pane. The
+# warning family, because the consequence is that this keyboard is not reaching
+# the child at all.
+"dux.remote_driver_fg"     = "#b4a050"
 "dux.session_active"       = "#d2d2d2"
 "dux.session_detached"     = "ansi_yellow"
 "dux.session_exited"       = "#646464"

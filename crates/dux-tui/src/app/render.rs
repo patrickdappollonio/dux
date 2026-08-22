@@ -2716,6 +2716,64 @@ impl App {
         )
     }
 
+    /// The hint line shown while ANOTHER DEVICE is driving the terminal in the
+    /// center pane, replacing the usual hints the way the scroll-mode cue does and
+    /// for the same reason: while it is up, this keyboard is not reaching the
+    /// child, so a line listing keys that go nowhere would be a lie.
+    ///
+    /// It carries its own way out (the palette, and the command to run there),
+    /// because that is the only gesture that takes the terminal back, and the
+    /// minimize key, because this line is the whole hint bar and in fullscreen it
+    /// would otherwise be the only thing on screen with no way back.
+    ///
+    /// Reads the registry live, on every frame, which is what makes it disappear
+    /// by itself the moment the other device lets go.
+    pub(crate) fn remote_driver_cue_line(&self, device: &str) -> Line<'static> {
+        let cue_style = Style::default().fg(self.theme.remote_driver_fg);
+        let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
+        let target = match self.session_surface {
+            SessionSurface::Agent => "agent",
+            SessionSurface::Terminal => "terminal",
+        };
+        let palette = self.bindings.label_for(Action::OpenPalette);
+        let exit_key = self.bindings.label_for(Action::ToggleFullscreen);
+
+        // Kept SHORT on purpose. This is one line inside the center pane, which is
+        // narrower than the window, and the whole point of the line is that both
+        // of its facts (who is driving, how to take it back) survive to the user.
+        // A fuller sentence measured longer than the pane and lost the command
+        // name off the right edge, which left the cue naming a problem and no way
+        // out of it.
+        let mut spans: Vec<Span> = vec![Span::styled(
+            format!("{device} is driving this {target}; your keys go nowhere. "),
+            cue_style,
+        )];
+        if palette.is_empty() {
+            // The palette has been unbound, so there is no key to name. Naming
+            // the command alone is still the honest answer.
+            spans.push(Span::styled(
+                "Run take-over-terminal to type here",
+                desc_style,
+            ));
+        } else {
+            spans.extend(self.theme.dim_key_badge_default(&palette));
+            spans.push(Span::styled(" then take-over-terminal", desc_style));
+        }
+        if !exit_key.is_empty() && self.fullscreen_overlay != FullscreenOverlay::None {
+            spans.push(Span::styled("  ", desc_style));
+            spans.extend(self.theme.dim_key_badge_default(&exit_key));
+            spans.push(Span::styled(" minimize", desc_style));
+        }
+        // The key badges borrow locals, so hand back owned spans (the same
+        // pattern `scroll_mode_cue_line` uses).
+        Line::from(
+            spans
+                .into_iter()
+                .map(|span| Span::styled(span.content.into_owned(), span.style))
+                .collect::<Vec<_>>(),
+        )
+    }
+
     fn render_agent_terminal(&mut self, frame: &mut Frame, area: Rect, title: &str, focused: bool) {
         let outer_block = self.themed_block(title, focused);
         let inner = outer_block.inner(area);
@@ -2783,6 +2841,27 @@ impl App {
         let target_changed = self.last_pty_resize_target != resize_target;
         let should_resize =
             (new_size != self.last_pty_size || target_changed) && new_size.0 > 0 && new_size.1 > 0;
+        // THE SIZING CLAIM. One PTY has one authoritative grid, the driver's, so
+        // while a background web server is serving this pane may only re-grid the
+        // child when it is the one driving. A refusal is not a failure: this pane
+        // renders the child's real grid (clipped when it is larger than the pane,
+        // which it already does safely) and the hint bar names the device whose
+        // geometry it is. A GRANTED resize publishes its grid through the seam, so
+        // web watchers adopt it.
+        //
+        // Asked only when a resize would actually be sent, so merely looking at a
+        // pane claims nothing, and asked BEFORE the dedupe state is written: an
+        // armed take-over is spent inside this call.
+        let resize_granted = should_resize
+            && match resize_target.as_deref() {
+                Some(pty_id) => {
+                    let pty_id = pty_id.to_string();
+                    self.may_resize_pty(&pty_id, new_size.0, new_size.1)
+                }
+                // Nothing running under the cursor: there is no child to size and
+                // no ownership question to ask.
+                None => true,
+            };
         if should_resize {
             self.last_pty_size = new_size;
             self.last_pty_resize_target = resize_target;
@@ -2790,8 +2869,8 @@ impl App {
 
         if let Some(provider) = self.selected_terminal_surface_client() {
             rendered_content = true;
-            // Resize PTY if needed.
-            if should_resize {
+            // Resize PTY if needed, and if this pane is allowed to.
+            if should_resize && resize_granted {
                 let _ = provider.resize(new_size.0, new_size.1);
             }
 
@@ -3110,6 +3189,9 @@ impl App {
             let next_pane = self.bindings.label_for(Action::FocusNext);
             let next_tab = self.bindings.label_for(Action::NextTab);
             let live_edge = self.bindings.labels_for(Action::ScrollToBottom);
+            // Resolved before the ladder so the branch below stays a plain
+            // condition, and asked of the live registry rather than a cached flag.
+            let driven_elsewhere = self.focused_pty_driven_elsewhere();
             let hint_line = if is_input && self.scroll_mode_active() {
                 // Scroll mode swallows every non-scroll key (see
                 // `process_raw_input_bytes`), so while it is on, this line says
@@ -3117,6 +3199,12 @@ impl App {
                 // signal is a pane that happens not to be moving, which stops
                 // being a signal the moment the pane is live again.
                 self.scroll_mode_cue_line()
+            } else if let Some(device) = driven_elsewhere.as_deref() {
+                // Ordered AFTER scroll mode, which the user turned on themselves
+                // and whose own line names the key that turns it off, and BEFORE
+                // every hint that names a key aimed at the child: while another
+                // device drives this pty, none of those keys reach it.
+                self.remote_driver_cue_line(device)
             } else if is_input {
                 // Fullscreen interactive: keys go to the child verbatim, so
                 // the line names the way back plus the scroll keys.

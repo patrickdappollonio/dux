@@ -408,6 +408,38 @@ impl PtySizeOwners {
         Some(owners.epoch)
     }
 
+    /// Release every pty `conn_id` still owns, and report each one with the epoch
+    /// its release was stamped with, so the caller can announce them all.
+    ///
+    /// A browser connection owns at most the one pty its socket is attached to, so
+    /// it never needed this. The terminal UI is a single participant that can end
+    /// up driving several ptys at once (it types into one agent, then another),
+    /// and it lets go of all of them at the same moment: the background server
+    /// stops, the terminal is handed to the flip, or dux quits. Doing that in one
+    /// critical section rather than a loop of `release` calls keeps the epochs
+    /// consecutive and means no browser can claim one of them halfway through the
+    /// sweep and have its claim silently released underneath it.
+    ///
+    /// The order of the returned pairs follows the epochs, which is the order the
+    /// announcements have to be published in.
+    pub fn release_all(&self, conn_id: u64) -> Vec<(String, u64)> {
+        let mut owners = self.owners.lock().unwrap();
+        let held: Vec<String> = owners
+            .map
+            .iter()
+            .filter(|(_, record)| record.conn_id == conn_id)
+            .map(|(pty_id, _)| pty_id.clone())
+            .collect();
+        let mut released = Vec::with_capacity(held.len());
+        for pty_id in held {
+            owners.map.remove(&pty_id);
+            owners.epoch += 1;
+            owners.generation += 1;
+            released.push((pty_id, owners.epoch));
+        }
+        released
+    }
+
     /// THE ONE APPLY ORDER: may a resize stamped with `seq` still reach the
     /// child of `pty_id`?
     ///
@@ -785,6 +817,47 @@ mod tests {
              retires, or the client's epoch dedup discards it as stale"
         );
         assert!(owners.current_owner("p").0.is_none());
+    }
+
+    /// The terminal UI drives several ptys over one seat, and lets go of all of
+    /// them at once: the background server stops, or dux quits. Every release is
+    /// reported with its own epoch, because each becomes its own owner-cleared
+    /// broadcast, and a pty somebody else has taken over in the meantime is left
+    /// exactly where it is.
+    #[test]
+    fn release_all_clears_only_this_participants_ptys_and_reports_each_epoch() {
+        let owners = PtySizeOwners::default();
+        let tui = owners.next_conn_id();
+        let browser = owners.next_conn_id();
+
+        owners.claim("agent-one", tui).expect("claimed");
+        owners.claim("agent-two", tui).expect("claimed");
+        owners.claim("agent-three", browser).expect("claimed");
+
+        let released = owners.release_all(tui);
+        assert_eq!(
+            released.len(),
+            2,
+            "both of this seat's ptys let go: {released:?}"
+        );
+        let mut names: Vec<&str> = released.iter().map(|(id, _)| id.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, vec!["agent-one", "agent-two"]);
+        let epochs: Vec<u64> = released.iter().map(|(_, epoch)| *epoch).collect();
+        assert!(
+            epochs.windows(2).all(|pair| pair[1] > pair[0]),
+            "each release needs its own strictly newer epoch, or the client's \
+             ordering discards the second one as stale: {epochs:?}"
+        );
+        assert!(
+            owners.is_owner("agent-three", browser),
+            "another participant's pty must be untouched by this sweep"
+        );
+
+        assert!(
+            owners.release_all(tui).is_empty(),
+            "a second sweep has nothing to release and must announce nothing"
+        );
     }
 
     /// The handshake read. It is the client's only way to learn it is joining a

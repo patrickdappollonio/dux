@@ -89,6 +89,17 @@ pub struct Theme {
     /// Defaults to the theme's own info hue, the one semantic family no row
     /// state uses, so the tone holds in every theme without shouting.
     pub standalone_location_fg: Color,
+    /// Foreground for the "another device is driving this terminal" cue in the
+    /// center pane's hint bar, shown while a background web server is serving and
+    /// a browser holds this PTY's input.
+    ///
+    /// A new field rather than a reused one because the meaning is new: it is not
+    /// an agent state (the agent is fine, and may well be working) and it is not
+    /// an identity (the same agent is yours again the moment you take it over). It
+    /// is a fact about who is at the keyboard. Defaults to the theme's warning
+    /// hue, because the consequence is that this keyboard is not reaching the
+    /// child, and a user who cannot see that is typing into nothing.
+    pub remote_driver_fg: Color,
     pub session_active: Color,
     pub session_detached: Color,
     pub session_exited: Color,
@@ -407,6 +418,7 @@ fn register_dux_defaults(theme: &mut OpalineTheme) {
     theme.register_default_token("dux.project_icon", accent_primary);
     theme.register_default_token("dux.project_missing_fg", warning);
     theme.register_default_token("dux.standalone_location_fg", info);
+    theme.register_default_token("dux.remote_driver_fg", warning);
     theme.register_default_token("dux.session_active", text_primary);
     theme.register_default_token("dux.session_detached", warning);
     theme.register_default_token("dux.session_exited", text_dim);
@@ -565,6 +577,7 @@ impl Theme {
             project_icon: pick("dux.project_icon"),
             project_missing_fg: pick("dux.project_missing_fg"),
             standalone_location_fg: pick("dux.standalone_location_fg"),
+            remote_driver_fg: pick("dux.remote_driver_fg"),
             session_active: pick("dux.session_active"),
             session_detached: pick("dux.session_detached"),
             session_exited: pick("dux.session_exited"),
@@ -927,6 +940,9 @@ mod tests {
             // The standalone agent's identity tone: a soft slate blue from the
             // info family, quiet beside the state colors on the same line.
             standalone_location_fg: Color::Rgb(125, 150, 160),
+            // Another device is driving: the warning family, because this
+            // keyboard is not reaching the child.
+            remote_driver_fg: Color::Rgb(180, 160, 80),
             session_active: Color::Rgb(210, 210, 210),
             session_detached: Color::Yellow,
             session_exited: Color::Rgb(100, 100, 100),
@@ -1043,6 +1059,7 @@ mod tests {
         assert_field!(project_icon);
         assert_field!(project_missing_fg);
         assert_field!(standalone_location_fg);
+        assert_field!(remote_driver_fg);
         assert_field!(session_active);
         assert_field!(session_detached);
         assert_field!(session_exited);
@@ -1299,6 +1316,36 @@ variant = "dark"
                 theme.standalone_location_fg,
                 Color::Rgb(128, 128, 128),
                 "theme {} left the standalone location tone at the FALLBACK gray",
+                listing.id
+            );
+        }
+    }
+
+    /// The "another device is driving this" tone must resolve in every theme dux
+    /// can load, for the same reason the standalone tone must: a cue that falls
+    /// back to the FALLBACK gray is a cue the user stops reading, and this one is
+    /// the only thing on screen explaining why their keystrokes are going nowhere.
+    #[test]
+    fn the_remote_driver_tone_resolves_in_every_loadable_theme() {
+        let dux_dark = load_from_str(DUX_DARK_TOML).expect("bundled dux-dark must parse");
+        assert_eq!(dux_dark.remote_driver_fg, Color::Rgb(180, 160, 80));
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+        let paths = DuxPaths {
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            worktrees_root: root.join("worktrees"),
+            lock_path: root.join("dux.lock"),
+            root,
+        };
+        for listing in discover_available(&paths) {
+            let theme = load(&listing.id, &paths)
+                .unwrap_or_else(|err| panic!("theme {} failed to load: {err}", listing.id));
+            assert_ne!(
+                theme.remote_driver_fg,
+                Color::Rgb(128, 128, 128),
+                "theme {} left the remote-driver tone at the FALLBACK gray",
                 listing.id
             );
         }

@@ -395,6 +395,14 @@ impl App {
         // without deciding anything about next time, and that distinction lives in
         // config, which this deliberately does not touch.
         self.background_server_wanted = false;
+        // Let go of every pty this surface is driving FIRST, while the serve's
+        // buses are still up to carry the news. After the stop there is nothing
+        // left to announce on, and every browser watching one of those ptys would
+        // keep showing a take-over card naming a terminal that stopped serving.
+        //
+        // This is also the flip's release and the quit's release: both leave the
+        // run loop, and both exits call through here.
+        self.release_owned_ptys();
         if let Some(companion) = self.companion.as_mut()
             && companion.is_serving()
         {
@@ -477,7 +485,7 @@ fn join_urls(urls: &[String]) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::sync::{Arc, Mutex};
 
     use dux_core::background_serve::{
@@ -492,7 +500,7 @@ mod tests {
     /// What a [`FakeCompanion`] saw and what it was told to do, shared with the
     /// test because the App owns the companion behind a trait object.
     #[derive(Default)]
-    struct Recorded {
+    pub(crate) struct Recorded {
         /// One entry per reaction the seam handed over, by variant name.
         reactions: Vec<String>,
         /// The apply counts the seam reported.
@@ -517,12 +525,12 @@ mod tests {
         fanout_consumes_ops: bool,
         /// Every ownership fact the seam published, in order, standing in for the
         /// `pty.owner` and grid broadcasts a real serve would have emitted.
-        published: Vec<PtyOwnershipEvent>,
+        pub(crate) published: Vec<PtyOwnershipEvent>,
     }
 
     /// A companion that records instead of serving. Serving is a real socket and a
     /// real runtime; none of that is what these tests are about.
-    struct FakeCompanion {
+    pub(crate) struct FakeCompanion {
         serving: bool,
         recorded: Arc<Mutex<Recorded>>,
         /// A REAL ownership registry, because the gate's whole job is to obey one
@@ -532,14 +540,14 @@ mod tests {
     }
 
     impl FakeCompanion {
-        fn serving() -> (Box<Self>, Arc<Mutex<Recorded>>) {
+        pub(crate) fn serving() -> (Box<Self>, Arc<Mutex<Recorded>>) {
             let (companion, recorded, _ownership) = Self::serving_with_ownership();
             (companion, recorded)
         }
 
         /// The same companion, handing back its ownership seat so a test can act
         /// as the other device in the registry.
-        fn serving_with_ownership() -> (Box<Self>, Arc<Mutex<Recorded>>, TuiOwnership) {
+        pub(crate) fn serving_with_ownership() -> (Box<Self>, Arc<Mutex<Recorded>>, TuiOwnership) {
             let recorded = Arc::new(Mutex::new(Recorded::default()));
             let owners = Arc::new(dux_core::pty_owners::PtySizeOwners::default());
             let ownership = TuiOwnership {
