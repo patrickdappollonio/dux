@@ -466,6 +466,12 @@ fn server_rebind_settings_changed(
         || prev.max_websocket_events_connections != next.max_websocket_events_connections
         || prev.max_websocket_agent_connections != next.max_websocket_agent_connections
         || prev.max_websocket_terminal_connections != next.max_websocket_terminal_connections
+        // The file-drop caps are frozen into RouterParams at bind time and the
+        // routes enforce that frozen copy, while the viewmodel projects the
+        // reloaded value live. Without this row a reload silently leaves the
+        // browser believing a cap the server no longer enforces.
+        || prev.file_drop_max_bytes != next.file_drop_max_bytes
+        || prev.file_drop_max_concurrency != next.file_drop_max_concurrency
 }
 
 /// Extract the reloaded `Config` from a reload follow-up reaction, consuming it.
@@ -4518,6 +4524,17 @@ mod tests {
     fn rebind_drift_is_false_for_identical_server_config() {
         let cfg = dux_core::config::ServerConfig::default();
         assert!(!server_rebind_settings_changed(&cfg, &cfg.clone()));
+    }
+
+    #[test]
+    fn rebind_drift_detects_a_file_drop_cap_change() {
+        let prev = dux_core::config::ServerConfig::default();
+        let mut next = prev.clone();
+        next.file_drop_max_bytes = prev.file_drop_max_bytes + 1;
+        assert!(server_rebind_settings_changed(&prev, &next));
+        let mut next2 = prev.clone();
+        next2.file_drop_max_concurrency = prev.file_drop_max_concurrency + 1;
+        assert!(server_rebind_settings_changed(&prev, &next2));
     }
 
     #[test]
