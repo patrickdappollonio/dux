@@ -1608,6 +1608,37 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn no_watcher_runs_unless_the_mode_is_auto() {
+        // `yes` is the pre-tri-state behavior and must stay exactly that: bind
+        // once, never look again. The observable difference is that no watcher
+        // exists, which shows up as a command channel that is already closed
+        // (nothing holds a sender), so the serve loop stops listening for good.
+        for mode in [TailscaleMode::Yes, TailscaleMode::No] {
+            let (mut commands, bound) = super::start_tailscale_watcher(
+                mode,
+                "127.0.0.1:8080".parse().unwrap(),
+                None,
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            );
+            assert!(
+                commands.recv().await.is_none(),
+                "{mode:?} must start no watcher"
+            );
+            assert_eq!(
+                *bound.lock().unwrap(),
+                None,
+                "and must report nothing bound of its own"
+            );
+        }
+
+        // The `auto` side is not asserted here on purpose: what it does is decided
+        // by the loop this function spawns, and that loop is tested directly in
+        // `serve_legs` with the detector, the clock and the channel all injected.
+        // Exercising it through this function would mean either probing the real
+        // `tailscale` CLI or waiting out a real watch period.
+    }
+
     #[test]
     fn dux_core_command_is_constructible() {
         let cmd = Command::OpenPath {
