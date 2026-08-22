@@ -463,6 +463,25 @@ fn ellipsize_field_highlighted(
     out
 }
 
+/// The line-two segment naming how many browsers have an agent open, or `None`
+/// when none do.
+///
+/// "Remote" rather than "viewers" or "watching", for two reasons: the reader is
+/// sitting at this terminal, so the interesting half is that somebody ELSEWHERE has
+/// the same agent open, and one of those somebodies may be the device currently
+/// driving it, which "watching" would deny. Absent at zero rather than "0 remote",
+/// which is the state almost every row is in almost all the time.
+///
+/// No singular form, deliberately: "remote" is not a countable noun here, so "1
+/// remote" and "4 remote" are the same shape and a singular arm would only imply a
+/// plural rule that does not exist.
+fn remote_viewers_segment(count: usize) -> Option<String> {
+    if count == 0 {
+        return None;
+    }
+    Some(format!("{count} remote"))
+}
+
 /// Assemble the agent row's second line (`<marker> project · State [· branch]
 /// [· trailing…]`) so it matches the web sidebar: the marker, the state word, and
 /// every `trailing` segment are FIXED and stay fully visible, while the project
@@ -483,21 +502,6 @@ fn ellipsize_field_highlighted(
 /// computed on the final fitted text). `None` (no filter, or the terminal row,
 /// whose fields the TUI search does not filter) renders byte-identically to
 /// the pre-highlight code.
-/// The line-two segment naming how many browsers are watching an agent, or `None`
-/// when nobody is.
-///
-/// "Remote" rather than "viewers" or "watching": the reader is sitting at this
-/// terminal, so the interesting half is that somebody ELSEWHERE has the same agent
-/// open. Absent at zero rather than "0 remote", which is the state almost every
-/// row is in almost all the time.
-fn remote_viewers_segment(count: usize) -> Option<String> {
-    match count {
-        0 => None,
-        1 => Some("1 remote".to_string()),
-        count => Some(format!("{count} remote")),
-    }
-}
-
 fn fit_agent_meta_line(
     total_w: u16,
     marker: Span<'static>,
@@ -1066,6 +1070,15 @@ impl App {
                 Style::default().fg(self.theme.branch_fg).bg(bg),
             ),
         ];
+        // FIRST crumb, and OUTSIDE the two selection arms below. Outside because a
+        // listener is a fact about the process rather than about whatever row is
+        // selected, so it has to be said with nothing selected at all. First
+        // because this header does not ellipsize: it is a plain paragraph, so a
+        // narrow terminal simply clips the tail, and appending it would make the
+        // one crumb that must never vanish silently the first one to go. Its
+        // siblings are recoverable from the panes; a running network listener is
+        // not visible anywhere else.
+        self.push_live_header_chip(&mut spans, self.serving_chip());
         // A STANDALONE agent has no project and no branch, so it gets the one
         // crumb that IS true of it: the folder it runs in, home-collapsed. It
         // takes the slot the project crumb occupies, which is the same fact
@@ -1197,10 +1210,6 @@ impl App {
             }
             self.push_live_header_chip(&mut spans, self.running_terminals_chip());
         }
-        // Last crumb, and OUTSIDE both arms: a listener is a fact about the
-        // process, not about whatever is selected, so it must still be said when
-        // nothing is selected at all.
-        self.push_live_header_chip(&mut spans, self.serving_chip());
         Paragraph::new(Line::from(spans))
             .style(self.theme.header_style())
             .render(area, frame.buffer_mut());
@@ -1415,7 +1424,10 @@ impl App {
         // never at all for an agent that has no branch.
         let branch_span = agent_row_branch_segment(session)
             .map(|branch| Span::styled(branch, Style::default().fg(muted)));
-        let tab_count = self.session_tab_ids(&session.id).len();
+        // Resolved once and shared with the remote-viewer count below: this is the
+        // render path, and `session_tab_ids` allocates.
+        let tab_ids = self.session_tab_ids(&session.id);
+        let tab_count = tab_ids.len();
         let tabs_span = (tab_count > 1)
             .then(|| Span::styled(format!("{tab_count} tabs"), Style::default().fg(muted)));
         // How many browsers are watching this agent's terminals. In the MUTED tone
@@ -1424,7 +1436,7 @@ impl App {
         // quieter than the state words beside it, which is exactly what muted is
         // for on this line. Absent at zero, and structurally zero when nothing is
         // serving, so a TUI on its own renders what it always did.
-        let remote_span = remote_viewers_segment(self.remote_viewer_count(&session.id))
+        let remote_span = remote_viewers_segment(self.remote_viewer_count(&session.id, &tab_ids))
             .map(|label| Span::styled(label, Style::default().fg(muted)));
 
         // Line one: right-align the PR badge (name ellipsized to the space left
@@ -11715,7 +11727,10 @@ mod tests {
             .expect("the seeded provider");
         let (one, _rx1) = provider.subscribe();
         let (two, _rx2) = provider.subscribe();
-        assert_eq!(app.remote_viewer_count(&session_id), 2);
+        assert_eq!(
+            app.remote_viewer_count(&session_id, &app.session_tab_ids(&session_id)),
+            2
+        );
         let rendered = row_line(&mut app);
         assert!(
             rendered.contains("· 2 remote"),
@@ -11767,6 +11782,72 @@ mod tests {
         );
     }
 
+    /// A browser watching one of the agent's COMPANION TERMINALS counts too.
+    ///
+    /// The agent's row is the only place this is shown at all (terminal rows carry
+    /// no count of their own), so leaving those watchers out would put "nobody is
+    /// watching" on a row while a second device demonstrably had one of its
+    /// terminals open. Project and standalone terminals belong to nobody's agent
+    /// and must not leak into anyone's row.
+    #[test]
+    fn a_browser_watching_an_agents_terminal_counts_toward_that_agent() {
+        let mut app = app_with_two_terminals();
+        let session_id = app.engine.sessions[0].id.clone();
+        assert_eq!(
+            app.remote_viewer_count(&session_id, &app.session_tab_ids(&session_id)),
+            0,
+            "nobody yet"
+        );
+
+        let watched = app
+            .engine
+            .companion_terminals
+            .get("term-1")
+            .expect("the seeded terminal");
+        let (guard, _rx) = watched.client.subscribe();
+        assert_eq!(
+            app.remote_viewer_count(&session_id, &app.session_tab_ids(&session_id)),
+            1,
+            "a watcher on the agent's own terminal is a watcher of the agent"
+        );
+
+        // A standalone terminal's watchers belong to no agent at all.
+        let standalone = PtyClient::spawn(
+            "/bin/sh",
+            &["-c".to_string(), "sleep 30".to_string()],
+            std::path::Path::new("."),
+            24,
+            80,
+            100,
+        )
+        .expect("spawn pty");
+        // Subscribed before the client moves into the map; the guard holds the
+        // shared subscriber list, not the client.
+        let (_lone, _lone_rx) = standalone.subscribe();
+        app.engine.companion_terminals.insert(
+            "standalone-1".to_string(),
+            CompanionTerminal {
+                owner: dux_core::model::TerminalOwner::Standalone,
+                label: "standalone".to_string(),
+                foreground_cmd: None,
+                client: standalone,
+                sort_order: 9,
+                created_at: chrono::Utc::now(),
+            },
+        );
+        assert_eq!(
+            app.remote_viewer_count(&session_id, &app.session_tab_ids(&session_id)),
+            1,
+            "a standalone terminal's watcher must not turn up on an agent's row"
+        );
+
+        drop(guard);
+        assert_eq!(
+            app.remote_viewer_count(&session_id, &app.session_tab_ids(&session_id)),
+            0
+        );
+    }
+
     /// The count is per agent and it is the SUM over the agent's tabs, the same way
     /// the row's liveness ORs over them: the row is about the agent.
     #[test]
@@ -11791,7 +11872,7 @@ mod tests {
         }
 
         assert_eq!(
-            app.remote_viewer_count(&session_id),
+            app.remote_viewer_count(&session_id, &app.session_tab_ids(&session_id)),
             2,
             "one watcher on each of the agent's two tabs is two watchers of the agent"
         );
@@ -12295,6 +12376,22 @@ mod tests {
         );
     }
 
+    /// The header's own row, so an assertion cannot be answered by a chip that
+    /// wrapped somewhere else or by the same word appearing in a pane.
+    fn header_row(app: &mut App, width: u16) -> String {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut terminal = Terminal::new(TestBackend::new(width, 40)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let buf = terminal.backend().buffer();
+        (0..buf.area.width)
+            .map(|x| buf[(x, 0)].symbol().to_string())
+            .collect()
+    }
+
     /// The header carries the serving chip while a background server is up, in the
     /// live tone, and nothing at all while none is.
     ///
@@ -12308,56 +12405,94 @@ mod tests {
 
         use crate::app::background_server::tests::FakeCompanion;
 
-        let render = |app: &mut App| -> String {
-            let mut terminal = Terminal::new(TestBackend::new(160, 40)).expect("terminal");
-            terminal
-                .draw(|frame| app.render(frame))
-                .expect("render frame");
-            terminal
-                .backend()
-                .buffer()
-                .content
-                .iter()
-                .map(|cell| cell.symbol())
-                .collect()
-        };
-
         let mut app = test_app(default_bindings());
         assert!(
-            !render(&mut app).contains("serving"),
-            "a TUI that is not serving must not claim a listener anywhere"
+            !header_row(&mut app, 160).contains("serving"),
+            "a TUI that is not serving must not claim a listener"
         );
 
         let (companion, recorded) = FakeCompanion::serving();
         app.companion = Some(companion);
         recorded.lock().expect("not poisoned").connections = 2;
-        let rendered = render(&mut app);
         assert!(
-            rendered.contains("serving :8080 · 2 connected"),
-            "the header must name the port and the connection count: {rendered}"
+            header_row(&mut app, 160).contains("serving :8080 · 2 connected"),
+            "the header must name the port and the connection count: {}",
+            header_row(&mut app, 160)
         );
 
-        // And in the live tone, like the terminal-count chip beside it.
+        // And in the live tone, like the terminal-count chip beside it. Located
+        // within the header row rather than the whole frame, so another "serving"
+        // somewhere on screen cannot retarget the probe.
         let mut terminal = Terminal::new(TestBackend::new(160, 40)).expect("terminal");
         terminal
             .draw(|frame| app.render(frame))
             .expect("render frame");
         let buf = terminal.backend().buffer();
-        let (x, y) = (0..buf.area.height)
-            .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
-            .find(|&(x, y)| {
-                buf[(x, y)].symbol() == "s"
-                    && (0..7).all(|i| {
-                        buf.area.width > x + i
-                            && "serving".chars().nth(i as usize).map(|c| c.to_string())
-                                == Some(buf[(x + i, y)].symbol().to_string())
-                    })
+        let x = (0..buf.area.width)
+            .find(|&x| {
+                "serving".char_indices().all(|(i, c)| {
+                    let x = x + i as u16;
+                    x < buf.area.width && buf[(x, 0)].symbol() == c.to_string()
+                })
             })
-            .expect("the serving chip is on screen");
+            .expect("the serving chip is on the header row");
         assert_eq!(
-            buf[(x, y)].fg,
+            buf[(x, 0)].fg,
             app.theme.session_active,
             "the serving chip wears the same live tone as the terminal-count chip"
+        );
+    }
+
+    /// A listener is a fact about the PROCESS, so the chip has to survive the two
+    /// things that would hide it: nothing being selected, and a narrow terminal.
+    ///
+    /// The header does not ellipsize (it is a plain paragraph, so a narrow width
+    /// clips the tail), which is exactly why the chip leads rather than trails. A
+    /// regression that moved it back inside a selection arm, or to the end of the
+    /// line, is caught here and nowhere else.
+    #[test]
+    fn the_serving_chip_survives_no_selection_and_a_narrow_terminal() {
+        use crate::app::background_server::tests::FakeCompanion;
+
+        let mut app = test_app(default_bindings());
+        let (companion, _recorded) = FakeCompanion::serving();
+        app.companion = Some(companion);
+
+        // No project and no agent: both of the header's selection arms are skipped
+        // entirely, and the chip must still be there.
+        app.engine.sessions.clear();
+        app.engine.projects.clear();
+        app.rebuild_left_items();
+        app.selected_left = 0;
+        assert!(
+            header_row(&mut app, 160).contains("serving :8080"),
+            "with nothing selected the header still has to say a listener is up: {}",
+            header_row(&mut app, 160)
+        );
+
+        // And on a narrow terminal, where the crumbs that CAN be recovered from the
+        // panes are the ones allowed to fall off the end.
+        let app_narrow = &mut test_app(default_bindings());
+        let (companion, _recorded) = FakeCompanion::serving();
+        app_narrow.companion = Some(companion);
+        let narrow = header_row(app_narrow, 40);
+        assert!(
+            narrow.contains("serving :8080"),
+            "the chip must not be the first crumb a narrow header clips: {narrow:?}"
+        );
+    }
+
+    /// The terminal-count chip still renders after being extracted out of the two
+    /// verbatim copies it used to live in. Nothing else in the crate pinned it to a
+    /// frame, so the extraction rested on inspection alone.
+    #[test]
+    fn the_header_still_counts_running_terminals() {
+        let mut app = app_with_two_terminals();
+        app.rebuild_left_items();
+        let header = header_row(&mut app, 160);
+        assert!(
+            header.contains("● 2 terminals"),
+            "the extracted terminal-count chip must still reach the header: {header:?}"
         );
     }
 

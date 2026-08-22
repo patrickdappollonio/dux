@@ -100,7 +100,19 @@ impl ConnectionRegistry {
 
     /// A registry that reports its live Events count into `gauge`, so a reader
     /// outside this crate can see it.
+    ///
+    /// One registry per gauge. Two registries sharing one would each subtract from
+    /// a total neither of them owns, and the reset below would zero a count the
+    /// other still has entries for, after which its next disconnect wraps the
+    /// `usize` and the chip reports a number with twenty digits. The assert says so
+    /// where a future caller would find out.
     pub fn with_events_gauge(gauge: Arc<AtomicUsize>) -> Self {
+        debug_assert_eq!(
+            gauge.load(Ordering::Relaxed),
+            0,
+            "a connection registry's events gauge must be its own: this one is already counting \
+             somebody else's connections"
+        );
         gauge.store(0, Ordering::Relaxed);
         Self {
             entries: Mutex::new(HashMap::new()),
@@ -515,6 +527,40 @@ mod tests {
         reg.remove("tab-2");
         assert_eq!(reg.events_count(), 0);
         assert_eq!(gauge.load(Ordering::Relaxed), 0);
+    }
+
+    /// The two arms that exist because a double count would be PERMANENT, unlike a
+    /// missed one: re-registering an id must not add a second time, and an id
+    /// changing class must move the count with it.
+    ///
+    /// Server-minted UUIDs mean neither should ever happen, which is exactly why
+    /// neither would be noticed without a test.
+    #[test]
+    fn re_registering_a_connection_id_neither_double_counts_nor_strands_a_count() {
+        let reg = ConnectionRegistry::default();
+        reg.insert("tab-1".into(), ConnClass::Events);
+        reg.insert("tab-1".into(), ConnClass::Events);
+        assert_eq!(
+            reg.events_count(),
+            1,
+            "the same id registered twice is still one connection"
+        );
+
+        reg.insert("tab-1".into(), ConnClass::AgentPty);
+        assert_eq!(
+            reg.events_count(),
+            0,
+            "an id that stopped being an Events connection must stop being counted"
+        );
+
+        reg.insert("tab-1".into(), ConnClass::Events);
+        assert_eq!(
+            reg.events_count(),
+            1,
+            "and counted again when it comes back"
+        );
+        reg.remove("tab-1");
+        assert_eq!(reg.events_count(), 0);
     }
 
     /// A registry nobody handed a gauge to still counts, so every existing serve

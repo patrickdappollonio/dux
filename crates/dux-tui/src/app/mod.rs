@@ -5528,23 +5528,44 @@ impl App {
         }
     }
 
-    /// How many browsers are watching this agent, summed over every one of its
-    /// tabs.
+    /// How many browsers have this agent open: every PTY the agent owns, summed.
     ///
-    /// Summed rather than per-tab because the SIDEBAR ROW is about the agent, the
-    /// same way its liveness ORs across tabs: somebody with any of the agent's tabs
-    /// open is somebody else looking at this agent. A browser watching two tabs of
-    /// one agent therefore counts twice, which is the honest reading of "how many
-    /// remote viewers are attached" and the only one this side can back up.
+    /// Summed over its provider tabs AND its companion terminals, because the
+    /// SIDEBAR ROW is about the agent the same way its liveness ORs across tabs:
+    /// somebody with any of the agent's terminals open is somebody else looking at
+    /// this agent, and the agent's row is the only place that fact is shown at all
+    /// (the terminal rows carry no count of their own). A browser watching two of
+    /// them counts twice, which is the honest reading of "how many remote viewers
+    /// are attached" and the only one this side can back up.
     ///
     /// Zero when nothing is serving, structurally: the subscriber lists are exactly
     /// the web PTY sockets, and without a serve there are none.
-    pub(crate) fn remote_viewer_count(&self, session_id: &str) -> usize {
-        self.session_tab_ids(session_id)
+    ///
+    /// Takes `tab_ids` rather than resolving them, because the only caller is the
+    /// agent row, which needs them anyway for its tab count, and `session_tab_ids`
+    /// allocates a `Vec<String>` with a clone per tab: this runs once per row per
+    /// frame, on the render path.
+    pub(crate) fn remote_viewer_count(&self, session_id: &str, tab_ids: &[String]) -> usize {
+        let tabs: usize = tab_ids
             .iter()
             .filter_map(|tab_id| self.engine.providers.get(tab_id))
             .map(|client| client.subscriber_count())
-            .sum()
+            .sum();
+        tabs + self
+            .engine
+            .companion_terminals
+            .values()
+            // Exhaustive rather than a `matches!`, like
+            // `session_terminal_count`: whether a new owner kind's watchers
+            // count toward an agent's row is a decision, not a default.
+            .filter(|t| match t.owner.as_ref() {
+                TerminalOwnerRef::Session(sid) => sid == session_id,
+                // A project terminal belongs to a project and a standalone one
+                // to nothing, so watchers of either are nobody's agent's.
+                TerminalOwnerRef::Project(_) | TerminalOwnerRef::Standalone => false,
+            })
+            .map(|t| t.client.subscriber_count())
+            .sum::<usize>()
     }
 
     pub(crate) fn running_companion_terminal_count(&self) -> usize {

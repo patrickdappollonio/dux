@@ -103,6 +103,10 @@ into that pane's PTY, so there is no confirmation toast; the macro text simply
 appears at the prompt. (The TUI's `Sent macro "<name>".` status line has no
 counterpart here.)
 
+The same ownership rule applies, and here it is quieter: if you are watching a
+terminal somebody else is driving, the macro is dropped and nothing tells you so.
+Take the terminal over first (the pane's own **Take over** button), then send it.
+
 If a pane has no macros for its surface, the popover says so and points you at
 the editor; if you have no macros at all, it links straight to **Edit macros**.
 

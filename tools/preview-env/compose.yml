@@ -3,8 +3,8 @@
 #
 # Isolation: the binary is the ONLY thing shared with the host, and read-only.
 # Config + sessions live in the dux-data volume (DUX_HOME=/data/dux); repos live
-# in dux-repos. Nothing here can reach the host's ~/.config/dux. The port is
-# published on loopback only.
+# in dux-repos. Nothing here can reach the host's ~/.config/dux. Every published
+# port is loopback only.
 services:
   dux:
     build:

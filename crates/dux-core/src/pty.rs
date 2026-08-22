@@ -1308,10 +1308,14 @@ impl PtyClient {
 
     /// How many live subscribers are on this PTY's byte stream.
     ///
-    /// Which is to say: how many browsers are watching it. The subscriber list is
+    /// Which is to say: how many browsers have it open. The subscriber list is
     /// exactly the web PTY sockets, because the terminal UI renders from the
     /// emulator grid and never subscribes, so this counts the OTHER people looking
     /// at the same terminal, and it is structurally zero when nothing is serving.
+    ///
+    /// Sockets, not watchers: the browser that currently holds input is one of
+    /// these too. That is why the indicator built on it says "remote" rather than
+    /// "watching".
     ///
     /// A count for a label, so a poisoned lock answers zero rather than taking the
     /// process down over an indicator.

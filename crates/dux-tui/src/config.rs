@@ -827,7 +827,8 @@ fn config_schema() -> Vec<ConfigEntry> {
                 "# Bind host for `dux server`. Must be an IP literal, not a hostname:\n\
                  #   \"127.0.0.1\": loopback only (the safe default; only this machine).\n\
                  #   \"0.0.0.0\":   every interface (reachable from the network).\n\
-                 # The in-app flip ignores this and always binds loopback (+ Tailscale).\n\
+                 # Serving from inside the TUI ignores this and always binds loopback\n\
+                 # (+ Tailscale), both the flip and `serve_while_tui`.\n\
                  # Override per run with `dux server --bind IP:port`.",
             )),
             value_fn: |c| FieldValue::Str(c.server.host.clone()),

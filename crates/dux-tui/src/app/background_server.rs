@@ -498,15 +498,18 @@ pub(crate) const SERVING_POLL_CAP_MS: u64 = 33;
 /// reported as what was actually bound. `None` when no URL carries a port, which
 /// leaves the chip saying "serving" and nothing it cannot back up.
 fn serving_port_label(urls: &[String]) -> Option<String> {
-    let port = urls
-        .first()?
-        .rsplit_once(':')
-        .map(|(_, port)| port)?
-        .trim_end_matches('/');
-    if port.is_empty() || !port.chars().all(|c| c.is_ascii_digit()) {
-        return None;
-    }
-    Some(format!(":{port}"))
+    // Every leg of a serve is on the same port, so the first URL that carries a
+    // readable one answers for all of them. Searching rather than taking the first
+    // URL only: if one ever arrives without a port, the answer is the port the
+    // others agree on, not silence.
+    urls.iter().find_map(|url| {
+        let port = url.rsplit_once(':').map(|(_, port)| port)?;
+        let port = port.trim_end_matches('/');
+        if port.is_empty() || !port.chars().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        Some(format!(":{port}"))
+    })
 }
 
 /// The serving chip's text: where it is serving, and how many browsers are on it.

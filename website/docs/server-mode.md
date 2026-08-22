@@ -162,12 +162,19 @@ a custom host. And it is the flip's alternative, not its companion, so
 **start-web-server** while this is serving is refused with a note saying so, rather
 than colliding with dux on its own port.
 
-While it serves, the top bar grows a crumb: `serving :8080 · 3 connected`. The
-address half is the standing reminder that a listener exists; the count is browser
-tabs, not people, so one laptop with two tabs open is two. It says nothing when the
-listener is off, which is how you can tell at a glance. Each agent's row picks up a
-quiet `2 remote` on its second line when browsers are watching that agent, and the
-center pane's caption says the same for the terminal you are looking at.
+While it serves, the top bar grows a crumb right after the version: `● serving
+:8080` on its own, becoming `● serving :8080 · 3 connected` once somebody is on it.
+The address half is the standing reminder that a listener exists, which is why it is
+the first crumb rather than the last: on a narrow terminal the things that fall off
+the end should be the ones you can find elsewhere. The count is browser tabs, not
+people, so one laptop with two tabs open is two, and a tab that vanished without
+saying goodbye (a closed lid, dropped Wi-Fi) keeps counting until dux notices the
+socket is dead.
+
+Each agent's row picks up a quiet `2 remote` on its second line when browsers have
+that agent open, counting every terminal it owns: its provider tabs and its
+companion terminals, since the row is the only place that number appears. The center
+pane's caption says the same for the provider tab it is showing.
 
 **One driver at a time.** The terminal UI is a participant in the same
 input-ownership model the browsers use, not a privileged owner of it. The first
@@ -185,9 +192,8 @@ terminal has one shape whoever is driving. Take-over works in both directions an
 is sticky either way: losing a terminal does not silently give it back to you, so
 nothing swaps under either device's fingers.
 
-Quitting the TUI stops the listener on the way out, and so does flipping. What it
-does not do is decide anything about next time: your saved setting is what decides
-that.
+Quitting the TUI stops the listener on the way out. What it does not do is decide
+anything about next time: your saved setting is what decides that.
 
 Which to reach for: `dux server` when nothing needs a terminal (a headless box, a
 tmux pane you will detach from), the flip when you are done with the terminal for
@@ -245,11 +251,12 @@ with defaults:
 
 ```toml
 [server]
-# LOCAL MODE bind host for `dux server`. An IP literal only (hostnames are not
-# resolved): 127.0.0.1 is the loopback default, 0.0.0.0 is all interfaces.
+# Bind host for `dux server`. An IP literal only (hostnames are not resolved):
+# 127.0.0.1 is the loopback default, 0.0.0.0 is all interfaces. Serving from
+# inside the TUI ignores this either way and always binds loopback (+ Tailscale).
 host = "127.0.0.1"
 
-# LOCAL MODE port for `dux server` and the palette flip.
+# Bind port. Every way of serving uses it.
 port = 8080
 
 # Whether dux also binds the machine's Tailscale address, so tailnet devices can
@@ -294,7 +301,8 @@ changing any of them needs a server restart and a config reload says so. That
 includes `tailscale`, even though `"auto"` binds and unbinds by itself: the mode
 decides whether dux watches the interface at all, and it is decided once.
 
-`serve_while_tui` is the exception, and deliberately so: it is a live switch. A
+`serve_while_tui` is the exception among the binding keys, and deliberately so: it
+is a live switch. A
 config reload that flips it acts on it there and then, in both directions, because
 someone who edits the file to turn a listener off has asked for the listener to go
 away, not to be told about it at the next restart.
