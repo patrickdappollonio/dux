@@ -15,6 +15,15 @@ services:
     container_name: dux-preview
     ports:
       - "127.0.0.1:${DUX_PORT:-8790}:8790"
+      # The concurrent-TUI journey's port. That journey runs the TUI in this
+      # container with `[server] serve_while_tui` on and its background server
+      # bound here, so the host harness can reach a TUI-hosted serve without
+      # touching the `dux server` one above (the two modes bind the same
+      # addresses, so they cannot share a port). Published now because a port
+      # mapping needs a container restart and a journey script cannot add one;
+      # nothing listens on it until a journey configures that port. Loopback
+      # only, exactly like its sibling.
+      - "127.0.0.1:${DUX_TUI_PORT:-8998}:8998"
     environment:
       - DUX_PORT=8790
     volumes:
