@@ -3078,9 +3078,24 @@ fn handle_request(
             // (the terminal UI applies the moment it claims), and letting this
             // one land now would size the pty for a connection that no longer
             // owns it. See `PtySizeOwners::accept_grid_apply`.
-            if input_owners.accept_grid_apply(&id, seq) {
+            if input_owners.accept_grid_apply(&id, seq, rows, cols) {
                 if let Some(client) = pty_for(engine, &id) {
                     let _ = client.resize(rows, cols);
+                    // The accept and the resize above are two critical sections,
+                    // deliberately: holding the owners lock across the child's
+                    // terminal lock was measured and rejected (see
+                    // `accept_grid_apply`). So a newer apply can have overtaken
+                    // this one while it sat inside TIOCSWINSZ, leaving the child
+                    // sized for a device that no longer drives it. Ask, and
+                    // re-apply the winner's geometry if so; the winner's own
+                    // check finds itself newest, so this converges.
+                    if let Some((rows, cols)) = input_owners.superseding_grid(&id, seq) {
+                        dux_core::logger::debug(&format!(
+                            "PTY resize seq {seq} for pty {id} was overtaken mid-apply, so the \
+                             newer {rows}x{cols} is being re-applied"
+                        ));
+                        let _ = client.resize(rows, cols);
+                    }
                 }
             } else {
                 dux_core::logger::debug(&format!(

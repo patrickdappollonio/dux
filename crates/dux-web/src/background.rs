@@ -219,7 +219,10 @@ impl BackgroundServer {
     /// A missing publisher is logged once per batch rather than swallowed: it
     /// means `build_app` never filled the slot, which is a wiring bug, and the
     /// visible symptom (browsers never learn the terminal UI took over) is one
-    /// nobody would trace back here.
+    /// nobody would trace back here. Near-dead in practice, because `build_app`
+    /// fills the slot synchronously before the terminal UI can reach this; it is
+    /// here so a future wiring change that stops doing that says so in the log
+    /// rather than going quiet.
     pub fn publish_ownership_events(
         &mut self,
         events: &[dux_core::background_serve::PtyOwnershipEvent],
@@ -230,7 +233,9 @@ impl BackgroundServer {
         match self.publisher.get() {
             Some(publisher) => publisher.publish(events),
             None => dux_core::logger::warn(
-                "[server] the background web server has no ownership publisher, so browsers were                  not told that the terminal UI took over a terminal. They will notice at their                  next reconnect.",
+                "[server] the background web server has no ownership publisher, so browsers were \
+                 not told that the terminal UI took over a terminal. They will notice at their \
+                 next reconnect.",
             ),
         }
     }

@@ -1575,16 +1575,23 @@ async fn handle_pty_socket(
     // so the handshake is the only frame that can name the driving device to a
     // watcher that simply opened the pane.
     let owner_snapshot = pty_size_owners.current_owner(target.pty_id());
-    // The per-pty grid sequence, read BEFORE the actor-queued grid read below,
-    // which makes it a valid LOWER bound for the grid the handshake carries: a
-    // resize stamped at or below this value was enqueued to the engine actor
-    // inside the same critical section that stamped it, and the actor drains in
-    // order, so the grid read already reflects it. Seeded into this socket's
+    // The seq of the last resize that actually REACHED the child, read BEFORE the
+    // actor-queued grid read below, which makes it a valid LOWER bound for the
+    // grid the handshake carries: the grid read is enqueued behind every resize
+    // already accepted, and the actor drains in order. Seeded into this socket's
     // forwarding filter and handed to the client on the handshake, so a stale
     // broadcast still in flight when the handshake was sent can never regress
     // the grid after it. Reading it early only errs towards forwarding a
     // redundant same-geometry change, which the client de-duplicates.
-    let handshake_grid_seq = pty_size_owners.grid_seq(target.pty_id());
+    //
+    // The APPLIED mark and not the STAMPED one, and that is a distinction with
+    // teeth. The terminal UI stamps its claim and applies in a second step, and a
+    // browser's resize is stamped and then queued, so a handshake that lands
+    // inside either window used to seed its filter at N while the grid it carries
+    // is still the pre-N geometry. The apply's own broadcast then arrived stamped
+    // N, was dropped as "not newer", and nothing ever re-announced it: that
+    // viewer sat on a stale grid for the life of the socket.
+    let handshake_grid_seq = pty_size_owners.applied_grid_seq(target.pty_id());
     // Hand the client this PTY socket's connection id as the first frame (a Text
     // frame, distinct from the Binary PTY-byte frames), mirroring how `/ws/events`
     // opens with a `connected` frame. The client records it and compares it against

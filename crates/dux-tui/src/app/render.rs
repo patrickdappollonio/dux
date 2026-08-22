@@ -2728,7 +2728,15 @@ impl App {
     ///
     /// Reads the registry live, on every frame, which is what makes it disappear
     /// by itself the moment the other device lets go.
-    pub(crate) fn remote_driver_cue_line(&self, device: &str) -> Line<'static> {
+    ///
+    /// `width` is the room the line actually has, which is the inner width of the
+    /// center pane and NOT the window's. The line is built to fit it: the fixed
+    /// half (the way out) is measured first and the DEVICE NAME is what gives way,
+    /// because a cue that names a problem with no way out of it is worse than one
+    /// that names the device approximately. The clause about the keys is the
+    /// second thing dropped, in the narrow panes where even a cut name would not
+    /// leave room for it.
+    pub(crate) fn remote_driver_cue_line(&self, device: &str, width: u16) -> Line<'static> {
         let cue_style = Style::default().fg(self.theme.remote_driver_fg);
         let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
         let target = match self.session_surface {
@@ -2738,32 +2746,64 @@ impl App {
         let palette = self.bindings.label_for(Action::OpenPalette);
         let exit_key = self.bindings.label_for(Action::ToggleFullscreen);
 
-        // Kept SHORT on purpose. This is one line inside the center pane, which is
-        // narrower than the window, and the whole point of the line is that both
-        // of its facts (who is driving, how to take it back) survive to the user.
-        // A fuller sentence measured longer than the pane and lost the command
-        // name off the right edge, which left the cue naming a problem and no way
-        // out of it.
-        let mut spans: Vec<Span> = vec![Span::styled(
-            format!("{device} is driving this {target}; your keys go nowhere. "),
-            cue_style,
-        )];
+        // The way out, built first because it is the half that must survive.
+        let mut tail: Vec<Span> = Vec::new();
         if palette.is_empty() {
             // The palette has been unbound, so there is no key to name. Naming
             // the command alone is still the honest answer.
-            spans.push(Span::styled(
+            tail.push(Span::styled(
                 "Run take-over-terminal to type here",
                 desc_style,
             ));
         } else {
-            spans.extend(self.theme.dim_key_badge_default(&palette));
-            spans.push(Span::styled(" then take-over-terminal", desc_style));
+            tail.extend(self.theme.dim_key_badge_default(&palette));
+            tail.push(Span::styled(" take-over-terminal", desc_style));
         }
         if !exit_key.is_empty() && self.fullscreen_overlay != FullscreenOverlay::None {
-            spans.push(Span::styled("  ", desc_style));
-            spans.extend(self.theme.dim_key_badge_default(&exit_key));
-            spans.push(Span::styled(" minimize", desc_style));
+            tail.push(Span::styled("  ", desc_style));
+            tail.extend(self.theme.dim_key_badge_default(&exit_key));
+            tail.push(Span::styled(" minimize", desc_style));
         }
+        let tail_width: usize = tail.iter().map(|span| span.content.chars().count()).sum();
+
+        // Two spellings of the sentence, the fuller one preferred. Both name who
+        // is driving; only the fuller one also says what that means for the keys,
+        // which is the part a user can work out from the pane not responding.
+        // The spellings, longest first, and the first one that FITS in what the
+        // tail left over is the one used. What they give up, in order, is the
+        // clause about the keys (which a user can infer from a pane that does not
+        // respond) and then the device's name.
+        let room = (width as usize).saturating_sub(tail_width);
+        // Fewer characters than this is not a name any more, so the next spelling
+        // is a better answer than cutting further into the device.
+        const MIN_DEVICE_CHARS: usize = 3;
+        let named = [
+            format!(" is driving this {target}; your keys go nowhere. "),
+            format!(" is driving this {target}. "),
+        ];
+        let mut prefix = String::new();
+        for prose in named {
+            if let Some(budget) = room.checked_sub(prose.chars().count())
+                && budget >= MIN_DEVICE_CHARS
+            {
+                prefix = format!(
+                    "{}{prose}",
+                    dux_core::device_label::truncate_chars(device, budget)
+                );
+                break;
+            }
+        }
+        if prefix.is_empty() {
+            // No room for a name at all. The fact still fits, and in a pane this
+            // narrow the way out matters more than which device took it.
+            let nameless = "Driving elsewhere. ";
+            if nameless.chars().count() <= room {
+                prefix = nameless.to_string();
+            }
+        }
+
+        let mut spans: Vec<Span> = vec![Span::styled(prefix, cue_style)];
+        spans.extend(tail);
         // The key badges borrow locals, so hand back owned spans (the same
         // pattern `scroll_mode_cue_line` uses).
         Line::from(
@@ -2856,23 +2896,31 @@ impl App {
             && match resize_target.as_deref() {
                 Some(pty_id) => {
                     let pty_id = pty_id.to_string();
-                    self.may_resize_pty(&pty_id, new_size.0, new_size.1)
+                    self.resize_pty_if_permitted(&pty_id, new_size.0, new_size.1)
                 }
                 // Nothing running under the cursor: there is no child to size and
                 // no ownership question to ask.
                 None => true,
             };
-        if should_resize {
+        // An armed take-over has to be spent or dropped by the FIRST render after
+        // it was armed, so it cannot fire later on a pane the user has moved away
+        // from. `resize_pty_if_permitted` spends it; this drops it on the frames where no
+        // resize is sent at all.
+        self.expire_stale_pty_takeover(resize_target.as_deref());
+        // Recorded only for a resize that was GRANTED. Recording a refused one
+        // was the trap: the pane remembers having sent a geometry it never sent,
+        // so when this surface later gets the pty back at the same pane size,
+        // nothing is sent and the child keeps the other device's grid for good.
+        if should_resize && resize_granted {
             self.last_pty_size = new_size;
             self.last_pty_resize_target = resize_target;
         }
 
         if let Some(provider) = self.selected_terminal_surface_client() {
             rendered_content = true;
-            // Resize PTY if needed, and if this pane is allowed to.
-            if should_resize && resize_granted {
-                let _ = provider.resize(new_size.0, new_size.1);
-            }
+            // The resize itself belongs to `resize_pty_if_permitted`, which owns the whole
+            // sizing decision: the claim, the apply order, the child, and the grid
+            // announcement that follows a resize which really happened.
 
             if !provider.has_output() {
                 // Show a centered loading card until the PTY produces output.
@@ -3204,7 +3252,10 @@ impl App {
                 // and whose own line names the key that turns it off, and BEFORE
                 // every hint that names a key aimed at the child: while another
                 // device drives this pty, none of those keys reach it.
-                self.remote_driver_cue_line(device)
+                // The width the line really has is this pane's, not the window's:
+                // the cue is built to fit it, and what gives way is the device
+                // name rather than the way out. See `remote_driver_cue_line`.
+                self.remote_driver_cue_line(device, hint_area.width)
             } else if is_input {
                 // Fullscreen interactive: keys go to the child verbatim, so
                 // the line names the way back plus the scroll keys.

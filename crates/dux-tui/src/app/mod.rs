@@ -204,6 +204,15 @@ pub struct App {
     /// Only meaningful while a background server is serving; a pty id left here
     /// when serving stops is cleared with the rest of the participation state.
     pub(crate) pending_pty_takeover: Option<String>,
+    /// The last resize this surface was REFUSED, as (pty id, rows, cols), so the
+    /// refusal is logged when it is news rather than on every frame.
+    ///
+    /// A refused resize deliberately does not record `last_pty_resize_target`: it
+    /// never reached the child, and recording it made a stale geometry permanent.
+    /// The cost is that the render pass asks again every tick for as long as the
+    /// demoted pane is on screen, which without this would be tens of identical
+    /// debug lines a second in the log.
+    pub(crate) last_refused_pty_resize: Option<(String, u16, u16)>,
     /// How many times the selected surface's grid has been REBUILT (see
     /// `refresh_snapshot_buf`). Not a clock and not a line count: it only
     /// answers "has the grid moved since I looked?", which is the one question
@@ -3291,6 +3300,7 @@ impl App {
             last_pty_size: (0, 0),
             last_pty_resize_target: None,
             pending_pty_takeover: None,
+            last_refused_pty_resize: None,
             grid_generation: 0,
             scroll_mode: std::collections::HashSet::new(),
             last_diff_height: 0,

@@ -78,12 +78,28 @@ pub struct OwnersState {
     /// `epoch` does for `pty.owner`. Keyed per pty because the broadcasts are
     /// filtered per pty; never decreases within a process.
     pub grid_seq: std::collections::HashMap<String, u64>,
-    /// Per-pty high-water mark of the seq that actually REACHED the child, the
+    /// Per-pty high-water mark of the resize that actually REACHED the child, the
     /// other half of [`PtySizeOwners::accept_grid_apply`]. Distinct from
     /// `grid_seq`, which counts what was stamped: the two differ for exactly as
     /// long as a stamped resize is still queued somewhere, and that window is
     /// where the inversion lives.
-    pub applied_seq: std::collections::HashMap<String, u64>,
+    ///
+    /// The GEOMETRY is kept beside the seq, not just the seq, because an apply
+    /// site that has been overtaken has to be able to ask what overtook it: the
+    /// accept and the `TIOCSWINSZ` are not one critical section (see
+    /// [`PtySizeOwners::accept_grid_apply`]), so the loser of that small race
+    /// re-applies the winner's geometry rather than leaving the child sized for
+    /// itself.
+    pub applied: std::collections::HashMap<String, AppliedGrid>,
+}
+
+/// The last resize that reached a pty's child: the seq it was stamped with and
+/// the geometry it carried. See [`OwnersState::applied`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AppliedGrid {
+    pub seq: u64,
+    pub rows: u16,
+    pub cols: u16,
 }
 
 /// Tracks which connection currently owns sizing+input for each PTY, keyed by
@@ -464,25 +480,62 @@ impl PtySizeOwners {
     /// In a web-only process this never refuses anything, because there is one
     /// apply site and the actor drains its queue in order. It earns its keep only
     /// while the terminal UI is a participant too.
-    pub fn accept_grid_apply(&self, pty_id: &str, seq: u64) -> bool {
+    ///
+    /// ## The window this does NOT close, and what closes it instead
+    ///
+    /// The accept and the resize of the child are two critical sections, not one.
+    /// The precedent from [`Self::claim_for_resize`] would say to pass the effect
+    /// in and run it under this lock, and that was measured and rejected:
+    /// `PtyClient::resize` takes the child's TERMINAL lock, which the reader
+    /// thread holds while it parses output and a reconnect replay build can hold
+    /// for tens of milliseconds (the reason `resize` takes that lock first is
+    /// documented on it). Holding this lock behind that one would stall every
+    /// keystroke gate on every socket for as long, and it would nest the owners
+    /// lock inside a lock the emulator owns.
+    ///
+    /// So the interleaving is real: A accepts seq 2, B accepts seq 3 and resizes
+    /// the child first, then A's `TIOCSWINSZ` lands and the child is left at A's
+    /// geometry with B recorded as the newest apply. The geometry recorded beside
+    /// the seq is what closes it. An apply site asks [`Self::superseding_grid`]
+    /// straight after resizing, and a site that was overtaken re-applies the
+    /// WINNER's geometry, which converges: the winner's own re-check finds
+    /// itself newest and stops.
+    ///
+    /// `rows` and `cols` are the geometry this apply is about to put on the
+    /// child, recorded here so a later loser can find it.
+    pub fn accept_grid_apply(&self, pty_id: &str, seq: u64, rows: u16, cols: u16) -> bool {
         let mut owners = self.owners.lock().unwrap();
-        let landed = owners.applied_seq.entry(pty_id.to_string()).or_insert(0);
-        if seq <= *landed {
+        let landed = owners.applied.entry(pty_id.to_string()).or_default();
+        if seq <= landed.seq {
             return false;
         }
-        *landed = seq;
+        *landed = AppliedGrid { seq, rows, cols };
         true
     }
 
-    /// The per-pty grid sequence as of now: the seq of the last APPLIED resize,
-    /// or 0 before any. Read once per PTY-socket handshake, BEFORE the
-    /// actor-queued grid read, which makes it a valid lower bound for the grid
-    /// that read returns: a resize stamped at or below this value was enqueued
-    /// (inside the same critical section that stamped it) before this call, and
-    /// the actor drains in order, so the handshake's grid already reflects it.
-    /// The client seeds its last-seen seq from this value, so a stale broadcast
-    /// that was still buffered on the socket when the handshake was sent can
-    /// never regress the grid after it.
+    /// The geometry of an apply that overtook `seq`, or `None` when `seq` is
+    /// still the newest one accepted for `pty_id`.
+    ///
+    /// Asked by an apply site immediately AFTER it resized the child, to close
+    /// the window described on [`Self::accept_grid_apply`]: `Some` means another
+    /// surface's newer geometry was accepted while this one was inside
+    /// `TIOCSWINSZ`, and the child is now sized for the loser. Re-applying the
+    /// returned geometry is the fix, and it terminates: the winner's own check
+    /// finds its own seq newest and returns `None`.
+    pub fn superseding_grid(&self, pty_id: &str, seq: u64) -> Option<(u16, u16)> {
+        let owners = self.owners.lock().unwrap();
+        let landed = owners.applied.get(pty_id)?;
+        (landed.seq > seq).then_some((landed.rows, landed.cols))
+    }
+
+    /// The per-pty STAMPED grid sequence as of now: the seq the last granted
+    /// claim was stamped with, or 0 before any.
+    ///
+    /// Deliberately not the last APPLIED seq, which is
+    /// [`Self::applied_grid_seq`]. The two differ for exactly as long as a
+    /// stamped resize is still sitting in the engine actor's queue, and reading
+    /// the wrong one seeds a handshake's drop filter above a broadcast that has
+    /// not been published yet, which then gets dropped forever.
     pub fn grid_seq(&self, pty_id: &str) -> u64 {
         self.owners
             .lock()
@@ -490,6 +543,27 @@ impl PtySizeOwners {
             .grid_seq
             .get(pty_id)
             .copied()
+            .unwrap_or(0)
+    }
+
+    /// The seq of the last resize that actually REACHED the child, or 0 before
+    /// any.
+    ///
+    /// This is what a PTY-socket handshake seeds its grid-drop filter from, and
+    /// it is a valid lower bound for the grid the handshake also carries: the
+    /// grid read is enqueued behind every resize already accepted, and the actor
+    /// drains in order. The STAMPED seq is not a valid bound, because a resize
+    /// stamped by the terminal UI (which stamps and applies in two steps) or
+    /// still queued for the actor has not reached the child yet: seeding the
+    /// filter at that value makes the socket, and the client, drop the very
+    /// broadcast that announces the apply, permanently.
+    pub fn applied_grid_seq(&self, pty_id: &str) -> u64 {
+        self.owners
+            .lock()
+            .unwrap()
+            .applied
+            .get(pty_id)
+            .map(|landed| landed.seq)
             .unwrap_or(0)
     }
 
@@ -708,7 +782,7 @@ mod tests {
         assert_eq!(
             owners.grid_seq("p"),
             3,
-            "the accessor reports the last APPLIED seq"
+            "the accessor reports the last STAMPED seq"
         );
 
         // Another pty counts on its own: the broadcasts are filtered per pty,
@@ -747,7 +821,7 @@ mod tests {
         let direct = owners.claim_for_resize("p", tui, true, None, |_| {});
         let direct_seq = direct.seq.expect("the take-over applied");
         assert!(
-            owners.accept_grid_apply("p", direct_seq),
+            owners.accept_grid_apply("p", direct_seq, 30, 100),
             "the newest stamped resize is the one that may reach the child"
         );
         applied.borrow_mut().push((tui, 100));
@@ -755,7 +829,7 @@ mod tests {
         // Now the browser's queued resize is drained. It must not land: the
         // terminal UI owns the pty and its geometry is already on the child.
         assert!(
-            !owners.accept_grid_apply("p", queued_seq),
+            !owners.accept_grid_apply("p", queued_seq, 24, 80),
             "a resize stamped before the winning claim must be dropped, not applied"
         );
         assert_eq!(
@@ -770,7 +844,7 @@ mod tests {
             .claim_for_resize("p", browser, true, None, |_| {})
             .seq
             .expect("the take-over applied");
-        assert!(owners.accept_grid_apply("p", again));
+        assert!(owners.accept_grid_apply("p", again, 24, 80));
     }
 
     /// The gate is per pty, and it never refuses the very first apply.
@@ -780,16 +854,107 @@ mod tests {
         let conn = owners.next_conn_id();
 
         let first = claim_resize(&owners, "p", conn, false).0.seq.unwrap();
-        assert!(owners.accept_grid_apply("p", first), "nothing applied yet");
         assert!(
-            !owners.accept_grid_apply("p", first),
+            owners.accept_grid_apply("p", first, 24, 80),
+            "nothing applied yet"
+        );
+        assert!(
+            !owners.accept_grid_apply("p", first, 24, 80),
             "the same seq offered twice is a duplicate, not a newer geometry"
         );
 
         // Another pty is stamped and gated on its own counter, exactly as the
         // broadcasts are filtered per pty.
         let other = claim_resize(&owners, "q", conn, false).0.seq.unwrap();
-        assert!(owners.accept_grid_apply("q", other));
+        assert!(owners.accept_grid_apply("q", other, 24, 80));
+    }
+
+    /// THE HANDSHAKE'S SEED. A PTY socket that opens while a resize is stamped
+    /// but not yet applied must seed its grid-drop filter from what REACHED the
+    /// child, never from what was stamped.
+    ///
+    /// The terminal UI stamps its claim and applies in two steps, and a browser's
+    /// resize is stamped and then queued for the engine actor, so the window is
+    /// ordinary rather than exotic. Seeding at the stamped value put the filter
+    /// above a broadcast that had not been published yet, so the socket and the
+    /// client both dropped the apply announcement when it finally came, and
+    /// nothing ever re-announced it: that viewer sat on the old grid for the life
+    /// of the socket.
+    #[test]
+    fn the_applied_seq_is_what_a_handshake_may_seed_a_drop_filter_from() {
+        let owners = PtySizeOwners::default();
+        let conn = owners.next_conn_id();
+
+        // A claim is granted and the resize is STAMPED, but nothing has applied
+        // it yet: this is the window a handshake can land in.
+        let stamped = claim_resize(&owners, "p", conn, false)
+            .0
+            .seq
+            .expect("the claim was granted");
+        assert_eq!(owners.grid_seq("p"), stamped, "the stamp moved");
+        assert_eq!(
+            owners.applied_grid_seq("p"),
+            0,
+            "nothing has reached the child yet, so the applied mark must not move"
+        );
+
+        // A socket opening here seeds from the APPLIED mark, so the apply's own
+        // broadcast still passes its filter when it arrives.
+        let seeded = owners.applied_grid_seq("p");
+        assert!(owners.accept_grid_apply("p", stamped, 24, 80));
+        assert!(
+            stamped > seeded,
+            "the apply broadcast must survive the filter this handshake seeded \
+             ({stamped} vs {seeded}); seeding from the stamped seq drops it forever"
+        );
+    }
+
+    /// THE WINDOW BETWEEN THE ACCEPT AND THE CHILD. The accept and the
+    /// `TIOCSWINSZ` are deliberately two critical sections (holding the owners
+    /// lock across the child's terminal lock was measured and rejected), so a
+    /// newer apply really can overtake an older one that is already past its
+    /// accept. The recorded geometry is what lets the loser notice and converge.
+    #[test]
+    fn an_overtaken_apply_site_can_find_the_geometry_that_overtook_it() {
+        let owners = PtySizeOwners::default();
+        let browser = owners.next_conn_id();
+        let tui = owners.next_conn_id();
+        // What the child is currently sized to, as the two apply sites see it.
+        let child = std::cell::Cell::new((0u16, 0u16));
+
+        // The browser's resize is accepted first, but the interleaving parks it
+        // before it reaches the child.
+        let queued = owners
+            .claim_for_resize("p", browser, false, None, |_| {})
+            .seq
+            .expect("granted");
+        assert!(owners.accept_grid_apply("p", queued, 24, 80));
+
+        // The terminal UI takes over, accepts, and reaches the child first.
+        let direct = owners
+            .claim_for_resize("p", tui, true, None, |_| {})
+            .seq
+            .expect("granted");
+        assert!(owners.accept_grid_apply("p", direct, 50, 150));
+        child.set((50, 150));
+
+        // Now the browser's `TIOCSWINSZ` finally lands, leaving the child sized
+        // for a device that no longer drives it.
+        child.set((24, 80));
+        let superseded = owners
+            .superseding_grid("p", queued)
+            .expect("a newer apply was accepted while this one was in flight");
+        assert_eq!(superseded, (50, 150));
+        child.set(superseded);
+
+        // The winner's own re-check finds itself newest, so the correction
+        // terminates rather than ping-ponging.
+        assert_eq!(owners.superseding_grid("p", direct), None);
+        assert_eq!(
+            child.get(),
+            (50, 150),
+            "the child must end up at the newest accepted geometry"
+        );
     }
 
     /// A release that really cleared an owner reports an epoch, so the caller can

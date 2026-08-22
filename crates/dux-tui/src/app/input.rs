@@ -2997,12 +2997,50 @@ impl App {
         // actually has something that could reach the child: a bare host focus
         // report, or a wheel dux scrolls itself, is not this device claiming
         // anything. Mouse actions are gated at their own two forward sites, which
-        // is where it is known whether the report is going to the child at all.
+        // is where it is known whether the report is going to the child at all,
+        // and so are the page keys (see their arms below).
+        //
+        // The write-capable actions are named EXPLICITLY rather than answered with
+        // "any intercept might write". Several of them write nothing at all: the
+        // macro bar and the fullscreen toggle are dux's own keys, and a page key
+        // dux answers by scrolling its own scrollback never reaches the child.
+        // Under the old blanket answer every one of those CLAIMED an unowned pty
+        // and broadcast the claim, which flips each watching browser onto a
+        // take-over card and starts dropping its keystrokes, all from a keypress
+        // the child never saw.
         //
         // Nothing serving means no registry and no gate: this is `true` before it
         // touches anything.
+        //
+        // The two live facts the conditional scroll arms branch on are sampled
+        // once, here, with the same predicates those arms use.
+        let has_scrollback = self
+            .selected_terminal_surface_client()
+            .is_some_and(|p| p.scrollback_offset() > 0);
+        let has_page_height = self.last_pty_size.0 > 0;
         let batch_can_reach_pty = actions.iter().any(|action| match action {
-            SeqAction::Forward(_) | SeqAction::Intercept(..) => true,
+            SeqAction::Forward(_) => true,
+            // dux's own keys. Both arms below flush whatever forward bytes the
+            // batch had already collected, and those bytes are counted by the
+            // `Forward` arm above; the key itself writes nothing.
+            SeqAction::Intercept(Action::OpenMacroBar | Action::ToggleFullscreen, _, _) => false,
+            // A page key either scrolls locally (no write) or is forwarded, and
+            // which one it is depends on the provider's `forward_scroll` and the
+            // child's live alt-screen state. Its arm consults the gate itself, at
+            // the forward site, so it is not counted here.
+            SeqAction::Intercept(Action::ScrollPageUp | Action::ScrollPageDown, _, _) => false,
+            // The conditional scroll keys fall THROUGH to the forward batch
+            // whenever they have no scrollback to move in, which makes them
+            // ordinary keystrokes aimed at the child.
+            SeqAction::Intercept(Action::ScrollLineUp | Action::ScrollLineDown, conditional, _) => {
+                !(*conditional && has_scrollback && has_page_height)
+            }
+            SeqAction::Intercept(Action::ScrollToBottom | Action::ScrollToTop, conditional, _) => {
+                !(*conditional && has_scrollback)
+            }
+            // Any other intercepted action lands in the forward batch (see the
+            // catch-all arm at the end of the loop), so it is a write.
+            SeqAction::Intercept(..) => true,
             SeqAction::Mouse(..) => false,
         });
         // Scroll mode is asked about first: while it is on nothing in this batch
@@ -3109,10 +3147,16 @@ impl App {
                         .selected_terminal_surface_client()
                         .is_some_and(|p| p.is_alt_screen());
                     if should_forward_page(fs, alt) {
-                        // Gated by this batch's ownership verdict, like the
-                        // batched forwards: a page key is a keystroke aimed at
-                        // the child, and a demoted surface does not send one.
-                        if may_write_pty
+                        // The gate is consulted HERE, not through the batch
+                        // verdict, and for two reasons. Only at this point is it
+                        // known that the key is going to the child at all (the
+                        // other branch scrolls dux's own scrollback and writes
+                        // nothing, so it must not claim). And the batch verdict
+                        // short-circuits to "allowed" while scrolled back, which
+                        // is true of the batched forwards and NOT of a page key
+                        // the provider says to forward: reusing it sent a demoted
+                        // surface's page keys into somebody else's terminal.
+                        if self.may_type_into_focused_pty()
                             && let Some(provider) = self.selected_terminal_surface_client()
                         {
                             let _ = provider.write_bytes(&raw);
@@ -3136,10 +3180,16 @@ impl App {
                         .selected_terminal_surface_client()
                         .is_some_and(|p| p.is_alt_screen());
                     if should_forward_page(fs, alt) {
-                        // Gated by this batch's ownership verdict, like the
-                        // batched forwards: a page key is a keystroke aimed at
-                        // the child, and a demoted surface does not send one.
-                        if may_write_pty
+                        // The gate is consulted HERE, not through the batch
+                        // verdict, and for two reasons. Only at this point is it
+                        // known that the key is going to the child at all (the
+                        // other branch scrolls dux's own scrollback and writes
+                        // nothing, so it must not claim). And the batch verdict
+                        // short-circuits to "allowed" while scrolled back, which
+                        // is true of the batched forwards and NOT of a page key
+                        // the provider says to forward: reusing it sent a demoted
+                        // surface's page keys into somebody else's terminal.
+                        if self.may_type_into_focused_pty()
                             && let Some(provider) = self.selected_terminal_surface_client()
                         {
                             let _ = provider.write_bytes(&raw);
