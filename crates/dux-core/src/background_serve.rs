@@ -29,10 +29,36 @@
 //! to be independent of it. The mode is opt-in and marked experimental for that
 //! reason among others.
 
-use crate::engine::{Engine, EventReaction};
+use crate::engine::{Engine, EventReaction, PrunedPty};
+
+/// The results of the shared maintenance sweeps the DRAINER ran this iteration,
+/// handed to the companion so browsers learn about them too.
+///
+/// The sweeps have exactly one runner per process, and while the background
+/// server is on that runner is the terminal UI. Everything the web layer's own
+/// maintenance would have emitted for them (an "Agent exited." status, a
+/// "Terminal closed." status, the spine bump each implies) therefore has to
+/// travel this way, or a browser watching an agent die never sees the message and
+/// waits for the ~2s fingerprint backstop to notice the row is gone.
+#[derive(Debug, Clone, Default)]
+pub struct DrainedMaintenance {
+    /// The PTYs the drainer's `prune_exited_ptys` reaped this iteration.
+    pub pruned: Vec<PrunedPty>,
+    /// Whether the drainer's terminal-foreground refresh actually changed a
+    /// `foreground_cmd`. A throttled or unchanged probe is `false` and must not
+    /// reopen the change gate.
+    pub foregrounds_changed: bool,
+}
+
+impl DrainedMaintenance {
+    /// Nothing swept, so nothing has to cross the seam.
+    pub fn is_empty(&self) -> bool {
+        self.pruned.is_empty() && !self.foregrounds_changed
+    }
+}
 
 /// What one turn of the companion's per-iteration servicing did.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ServiceOutcome {
     /// A request the companion handled this iteration can have changed shared
     /// workspace state: an agent renamed, a project reordered, a terminal closed.
@@ -46,6 +72,14 @@ pub struct ServiceOutcome {
     /// stop. Informational: the terminal UI keeps running either way, and the
     /// companion is the one that decides what to do about it.
     pub stopped: bool,
+    /// The companion RETIRED itself this iteration: a required listener died, or
+    /// its request channel closed, and it has stopped serving on its own.
+    ///
+    /// Carries the sentence to show the user, because only the companion knows
+    /// what died and how; the terminal UI puts it on the status line. Without
+    /// this the last thing the user was told is still "serving on ...", which by
+    /// then is a lie, and the truth only ever reached `dux.log`.
+    pub retirement: Option<String>,
 }
 
 /// A web server the terminal UI services once per loop iteration.
@@ -62,6 +96,15 @@ pub trait BackgroundServeCompanion {
     /// same reason, and because it mirrors the order the web layer's own loop has
     /// always fanned reactions out in.
     fn on_reaction(&mut self, engine: &mut Engine, reaction: &EventReaction);
+
+    /// Emit the companion's share of the shared maintenance sweeps the DRAINER
+    /// just ran: the exit and close notices, and the change gate they open.
+    ///
+    /// A narrow lane rather than a second sweep. The drainer already reaped these
+    /// PTYs and refreshed these foregrounds (doing it twice would reap twice), so
+    /// what crosses is the OUTCOME. Called once per iteration while serving, right
+    /// after the drainer's own sweeps.
+    fn note_maintenance(&mut self, maintenance: &DrainedMaintenance);
 
     /// Do the companion's per-iteration work, after the terminal UI has finished
     /// draining. Called once per TUI loop iteration while serving.

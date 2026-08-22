@@ -1681,6 +1681,34 @@ fn request_mutates_spine(req: &EngineRequest) -> bool {
     }
 }
 
+/// The browser-facing notice for one reaped PTY.
+///
+/// Shared by the web layer's own maintenance sweep and by
+/// [`EngineService::note_drained_maintenance`], which stands in for it when the
+/// terminal UI is the surface that swept. One builder so the two paths cannot
+/// drift into telling a browser different things about the same exit.
+fn prune_wire_status(pruned: &dux_core::engine::PrunedPty) -> WireStatus {
+    match pruned.kind {
+        // A last-tab exit detaches the whole agent, which is a workspace-level
+        // event worth a warning. A tab exit that leaves siblings running is
+        // routine and scoped: a quiet info notice naming the tab, never the loud
+        // "Agent exited" warning (which would falsely imply the agent died).
+        PrunedPtyKind::Agent if pruned.agent_detached => {
+            WireStatus::new("warning", format!("Agent \"{}\" exited.", pruned.label))
+        }
+        // A clean exit closed the tab itself (its row is gone), so say so:
+        // "exited" alone would imply a dormant tab is left behind.
+        PrunedPtyKind::Agent if pruned.tab_closed => WireStatus::new(
+            "info",
+            format!("Tab ({}) exited cleanly and was closed.", pruned.label),
+        ),
+        PrunedPtyKind::Agent => WireStatus::new("info", format!("Tab ({}) exited.", pruned.label)),
+        PrunedPtyKind::Terminal => {
+            WireStatus::new("info", format!("Terminal \"{}\" closed.", pruned.label))
+        }
+    }
+}
+
 /// How a drained reaction's web-side follow-ups are routed.
 ///
 /// The follow-up BODIES are identical either way; this only decides which of
@@ -1779,8 +1807,8 @@ pub(crate) struct EngineService {
     spine_check: SpineCheck,
     /// In-memory spine mutation version: bumped after each spine mutator (a wire
     /// apply or a `CreateTerminal` request, a worker-event drain, a changed
-    /// terminal-foreground refresh, a non-empty PTY prune, and — while the
-    /// background server runs — anything the terminal UI applied). The spine check
+    /// terminal-foreground refresh, a non-empty PTY prune, and, while the
+    /// background server runs, anything the terminal UI applied). The spine check
     /// runs the serialize only when this (or `streaming_version`) moved since its
     /// last pass, so idle ticks cost nothing.
     mutation_version: u64,
@@ -1865,6 +1893,12 @@ impl EngineService {
         for status in dux_core::wire::wire_statuses_from_reaction(reaction) {
             let _ = self.status.send(status);
         }
+        // NOT origin-routed, deliberately, and for the same reason as the launch
+        // follow-up further down: it looks its own session up in a web pending map
+        // first and does nothing when the delete was not web-started. It starts no
+        // work either way, it only resolves a keyed op the web itself opened,
+        // which is what makes self-guarding enough here where it is not enough for
+        // the routed arms below.
         for status in engine.drive_delete_followup(reaction) {
             let _ = self.status.send(status);
         }
@@ -1985,9 +2019,14 @@ impl EngineService {
         let server_settings_changed =
             server_rebind_settings_changed(&engine.config.server, &config.server);
         let _ = self.config_reload_tx.send(());
+        // Says what has actually happened at this point, and no more. The
+        // drainer has not adopted the config yet (the seam is pre-consume), so
+        // "new settings are active" would be a claim about a step that has not
+        // run and may still fail. What is true here is that the file was read and
+        // that browsers are being told to refetch.
         let _ = self.status.send(WireStatus::new(
             "info",
-            "Configuration reloaded. New settings are active.",
+            "Configuration reloaded; connected browsers are refreshing.",
         ));
         if server_settings_changed {
             let _ = self.status.send(WireStatus::new(
@@ -2019,9 +2058,13 @@ impl EngineService {
 
         // The two change-detection polls also run inside `check_spine`, which is
         // where they matter for a surface that does no sweeping. Keeping them here
-        // as well preserves this loop's original ordering; they are pure compares
-        // that update their own carried snapshots, so the second call in the same
-        // iteration finds nothing and bumps nothing.
+        // as well preserves this loop's original ordering. Precisely: they are
+        // pure compares against snapshots this struct carries, so calling them
+        // twice costs nothing, and the FIRST of the two calls is the one that can
+        // see a transition, which means a change is noticed one call earlier than
+        // it would be otherwise. That is consequence-free, because the fingerprint
+        // compare downstream is the emit gate and an early bump only buys it a
+        // serialize it was going to do anyway.
         self.poll_change_signals(engine);
 
         // Refresh companion-terminal foreground commands so the spine's
@@ -2078,29 +2121,31 @@ impl EngineService {
             self.note_mutation();
         }
         for pruned in pruned {
-            let status = match pruned.kind {
-                // A last-tab exit detaches the whole agent — a workspace-level
-                // event worth a warning. A tab exit that leaves siblings running is
-                // routine and scoped: a quiet info notice naming the tab, never the
-                // loud "Agent exited" warning (which would falsely imply the agent
-                // died).
-                PrunedPtyKind::Agent if pruned.agent_detached => {
-                    WireStatus::new("warning", format!("Agent \"{}\" exited.", pruned.label))
-                }
-                // A clean exit closed the tab itself (its row is gone), so say
-                // so — "exited" alone would imply a dormant tab is left behind.
-                PrunedPtyKind::Agent if pruned.tab_closed => WireStatus::new(
-                    "info",
-                    format!("Tab ({}) exited cleanly and was closed.", pruned.label),
-                ),
-                PrunedPtyKind::Agent => {
-                    WireStatus::new("info", format!("Tab ({}) exited.", pruned.label))
-                }
-                PrunedPtyKind::Terminal => {
-                    WireStatus::new("info", format!("Terminal \"{}\" closed.", pruned.label))
-                }
-            };
-            let _ = self.status.send(status);
+            let _ = self.status.send(prune_wire_status(&pruned));
+        }
+    }
+
+    /// Emit what [`Self::run_maintenance`] would have emitted for sweeps ANOTHER
+    /// surface ran, and open the change gate for them.
+    ///
+    /// The concurrent path's drainer is the terminal UI, so this function is the
+    /// only way a browser hears about an agent that exited or a terminal that
+    /// closed while the TUI is up. It runs the same status builder and the same
+    /// two bump rules as the sweep it stands in for, and does no sweeping of its
+    /// own: everything here has already happened.
+    pub(crate) fn note_drained_maintenance(
+        &mut self,
+        maintenance: &dux_core::background_serve::DrainedMaintenance,
+    ) {
+        if maintenance.foregrounds_changed {
+            self.note_mutation();
+        }
+        if maintenance.pruned.is_empty() {
+            return;
+        }
+        self.note_mutation();
+        for pruned in &maintenance.pruned {
+            let _ = self.status.send(prune_wire_status(pruned));
         }
     }
 
@@ -2122,6 +2167,9 @@ impl EngineService {
         dux_core::background_serve::ServiceOutcome {
             mutated: drained.mutated,
             stopped: drained.stopped,
+            // Retirement is the companion's own decision, made one level up in
+            // the `dux` binary: this type only reports what one iteration did.
+            retirement: None,
         }
     }
 
@@ -3633,6 +3681,88 @@ mod tests {
             .try_recv()
             .expect("a worker-completing final must reach clients through the seam");
         assert_eq!(emitted.message, "Pulled main.");
+        drop(handle);
+    }
+
+    /// A pruned agent whose exit detached it, as `prune_exited_ptys` would report.
+    fn pruned_agent(label: &str) -> dux_core::engine::PrunedPty {
+        dux_core::engine::PrunedPty {
+            kind: PrunedPtyKind::Agent,
+            id: "s1".to_string(),
+            owner: Some(dux_core::model::TerminalOwner::Session("s1".to_string())),
+            agent_detached: true,
+            label: label.to_string(),
+            tab_closed: false,
+            exit_success: Some(false),
+            is_minimal: false,
+            output_excerpt: String::new(),
+        }
+    }
+
+    /// An agent that exits while the TERMINAL UI is the sweeper still reaches
+    /// browsers, with the same notice and the same change gate the web layer's own
+    /// sweep would have produced.
+    ///
+    /// The sweeps have one runner per process, so in concurrent mode
+    /// `run_maintenance` does not run at all. Without this lane the "Agent exited."
+    /// status is emitted by nobody, and the row's disappearance waits for the slow
+    /// fingerprint backstop.
+    #[test]
+    fn a_prune_the_terminal_ui_swept_still_reaches_browsers() {
+        let (_tmp, paths) = temp_paths();
+        let engine = bootstrap_engine(&paths).expect("engine");
+        let (handle, ends) = build_actor_channels(&engine);
+        let mut statuses = handle.subscribe_status();
+        let mut svc = EngineService::new(&engine, ends, ShutdownEcho::Silent);
+
+        let before = svc.mutation_version;
+        svc.note_drained_maintenance(&dux_core::background_serve::DrainedMaintenance {
+            pruned: vec![pruned_agent("my-agent")],
+            foregrounds_changed: false,
+        });
+
+        let emitted = statuses
+            .try_recv()
+            .expect("a browser must be told the agent exited");
+        assert_eq!(emitted.message, "Agent \"my-agent\" exited.");
+        assert_eq!(emitted.tone, "warning");
+        // And the change gate is open, so the row's disappearance rides the NEXT
+        // check (the fingerprint compare, ~250ms) instead of the ~2s backstop.
+        assert_ne!(
+            svc.mutation_version, before,
+            "a prune must open the spine gate, or the vanished row waits for the backstop"
+        );
+        drop(handle);
+    }
+
+    /// A terminal-foreground change the terminal UI observed opens the gate too,
+    /// and an unchanged refresh does not: the flag is the throttled sweep's own
+    /// answer, not "the sweep ran".
+    #[test]
+    fn a_foreground_change_the_terminal_ui_observed_opens_the_gate() {
+        let (_tmp, paths) = temp_paths();
+        let engine = bootstrap_engine(&paths).expect("engine");
+        let (handle, ends) = build_actor_channels(&engine);
+        let mut svc = EngineService::new(&engine, ends, ShutdownEcho::Silent);
+
+        let before = svc.mutation_version;
+        svc.note_drained_maintenance(&dux_core::background_serve::DrainedMaintenance {
+            pruned: Vec::new(),
+            foregrounds_changed: false,
+        });
+        assert_eq!(
+            svc.mutation_version, before,
+            "a throttled or unchanged refresh must not reopen the gate every interval"
+        );
+
+        svc.note_drained_maintenance(&dux_core::background_serve::DrainedMaintenance {
+            pruned: Vec::new(),
+            foregrounds_changed: true,
+        });
+        assert_ne!(
+            svc.mutation_version, before,
+            "a changed foreground_cmd is spine state and must open the gate"
+        );
         drop(handle);
     }
 

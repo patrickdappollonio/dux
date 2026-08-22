@@ -10,7 +10,7 @@
 //! WHEN to serve (its palette commands, its config, its quit path) and binds the
 //! listeners; this decides nothing and only relays.
 
-use dux_core::background_serve::{BackgroundServeCompanion, ServiceOutcome};
+use dux_core::background_serve::{BackgroundServeCompanion, DrainedMaintenance, ServiceOutcome};
 use dux_core::engine::{Engine, EventReaction};
 use dux_web::background::BackgroundServer;
 
@@ -28,14 +28,17 @@ impl WebCompanion {
     /// Drop a serve whose required listener died, so the TUI stops servicing a
     /// server that has stopped answering and says so once rather than every
     /// iteration.
-    fn retire_if_failed(&mut self) {
+    ///
+    /// Returns the sentence for the user when it retired something. The log line
+    /// on its own was not enough: the last thing the status line said was
+    /// "serving on ...", and nobody reads `dux.log` to find out that stopped
+    /// being true.
+    fn retire_if_failed(&mut self) -> Option<String> {
         let failed = self.server.as_ref().is_some_and(|s| s.is_failed());
         if !failed {
-            return;
+            return None;
         }
-        let Some(server) = self.server.take() else {
-            return;
-        };
+        let server = self.server.take()?;
         let error = server.stop();
         let detail = error
             .map(|e| format!("{e:#}"))
@@ -44,6 +47,10 @@ impl WebCompanion {
             "[server] the background web server stopped serving: {detail}. The terminal UI and \
              every agent are unaffected; use start-background-server to serve again."
         ));
+        Some(format!(
+            "The web UI stopped serving in the background: {detail}. Your agents and terminals \
+             are untouched and still running here. Use start-background-server to serve again."
+        ))
     }
 }
 
@@ -54,8 +61,17 @@ impl BackgroundServeCompanion for WebCompanion {
         }
     }
 
+    fn note_maintenance(&mut self, maintenance: &DrainedMaintenance) {
+        if maintenance.is_empty() {
+            return;
+        }
+        if let Some(server) = self.server.as_mut() {
+            server.note_maintenance(maintenance);
+        }
+    }
+
     fn service(&mut self, engine: &mut Engine) -> ServiceOutcome {
-        let outcome = match self.server.as_mut() {
+        let mut outcome = match self.server.as_mut() {
             Some(server) => server.service(engine),
             None => ServiceOutcome::default(),
         };
@@ -71,11 +87,17 @@ impl BackgroundServeCompanion for WebCompanion {
                  start-background-server to serve again.",
             );
             self.stop(engine);
+            outcome.retirement = Some(
+                "The web UI stopped serving in the background: its request channel closed. Your \
+                 agents and terminals are untouched and still running here. Use \
+                 start-background-server to serve again."
+                    .to_string(),
+            );
             return outcome;
         }
         // Checked after servicing rather than before, so the iteration that
         // noticed the death still drained whatever was queued.
-        self.retire_if_failed();
+        outcome.retirement = self.retire_if_failed();
         outcome
     }
 

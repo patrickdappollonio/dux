@@ -35,19 +35,43 @@ impl App {
         }
     }
 
-    /// Whether the companion owns the follow-up for `reaction`, so this surface
-    /// must skip its own arm for it.
+    /// Snapshot the ownership verdict source for reactions about to be drained.
     ///
-    /// Gated on actually serving, not merely on the engine's answer. The engine's
-    /// web pending-op maps can still hold entries after a flip has come back (the
-    /// serve is over, the ops are not), and skipping then would leave a reaction
-    /// nobody handles at all.
-    pub(crate) fn companion_owns_followup(&self, reaction: &EventReaction) -> bool {
-        self.background_server_is_serving()
-            && matches!(
-                self.engine.followup_owner(reaction),
-                dux_core::engine::FollowupOwner::Web
-            )
+    /// Taken BEFORE `notify_companion` lends anything to the web layer, because
+    /// the web layer's own follow-ups REMOVE the pending-op entries the verdict is
+    /// read from: ask afterwards and a browser's PR create or project add answers
+    /// "the drainer owns this", and this surface runs its arm too. Empty when
+    /// nothing is serving, which routes every reaction here.
+    pub(crate) fn companion_routing(&self) -> CompanionRouting {
+        if self.background_server_is_serving() {
+            CompanionRouting::Serving(self.engine.web_followup_ops())
+        } else {
+            CompanionRouting::NotServing
+        }
+    }
+
+    /// Hand the companion the outcomes of the maintenance sweeps this surface just
+    /// ran, so browsers get the exit and close notices and the change gate they
+    /// open.
+    ///
+    /// The sweeps have exactly one runner per process and while serving that
+    /// runner is this surface, so without this lane a browser watching an agent
+    /// die is told nothing at all and only notices the row vanish when the
+    /// fingerprint backstop next fires.
+    ///
+    /// Handed over on every iteration while serving, empty sweeps included: the
+    /// companion is the one that decides an empty hand-off is nothing to do (it
+    /// does), and a caller-side skip would make "the drain reports its sweeps" a
+    /// claim no test can pin.
+    pub(crate) fn note_companion_maintenance(
+        &mut self,
+        maintenance: &dux_core::background_serve::DrainedMaintenance,
+    ) {
+        if let Some(companion) = self.companion.as_mut()
+            && companion.is_serving()
+        {
+            companion.note_maintenance(maintenance);
+        }
     }
 
     /// Lend the engine to the companion for its per-iteration work, and do this
@@ -56,18 +80,35 @@ impl App {
     /// Called once per run-loop iteration. A no-op when nothing is serving.
     pub(crate) fn service_companion(&mut self) {
         let applies = self.engine.command_applies;
-        let mutated = match self.companion.as_mut() {
+        // A web-owned follow-up ran during this iteration's drain, which can have
+        // mutated the workspace (the inline project add writes `engine.projects`
+        // from inside the fanout). This surface skipped its own arm for it, so
+        // nothing here has rebuilt: fold it in and clear it whether or not
+        // anything is serving, so the flag never survives into a later iteration.
+        let followup_ran = std::mem::take(&mut self.companion_followup_ran);
+        let outcome = match self.companion.as_mut() {
             Some(companion) if companion.is_serving() => {
                 // Tell it what this surface did BEFORE it services, so a keystroke
                 // here reaches a browser on the same iteration rather than waiting
                 // for the fingerprint backstop.
                 companion.note_engine_activity(applies);
-                companion.service(&mut self.engine).mutated
+                companion.service(&mut self.engine)
             }
             _ => return,
         };
-        if mutated {
+        if outcome.mutated || followup_ran {
             self.refresh_after_companion_mutation();
+        }
+        // The serve retired itself (a required listener died, or its request
+        // channel closed). Say so where the user is looking: the last thing the
+        // status line told them was the address it was serving on.
+        if let Some(message) = outcome.retirement {
+            self.status.set(
+                Instant::now(),
+                Some(BACKGROUND_SERVER_STATUS_KEY.to_string()),
+                StatusTone::Warning,
+                message,
+            );
         }
     }
 
@@ -171,7 +212,7 @@ impl App {
         }
 
         let op = dux_core::engine::status_op(
-            "Starting the web server in the background — the TUI stays right here.".to_string(),
+            "Starting the web server in the background; the TUI stays right here.".to_string(),
         )
         .resolve_in_handler(|o: &BackgroundServerOutcome| match o {
             BackgroundServerOutcome::Serving { urls, warning } => {
@@ -191,10 +232,17 @@ impl App {
             BackgroundServerOutcome::Failed(message) => dux_core::engine::Final::error(format!(
                 "{message} Nothing is serving and the TUI is untouched."
             )),
+            BackgroundServerOutcome::Cancelled => dux_core::engine::Final::info(
+                "Cancelled starting the web server in the background. Nothing is serving, the \
+                 addresses were released, and config.toml is untouched. Use \
+                 start-background-server to try again."
+                    .to_string(),
+            ),
         });
         self.apply_reaction(EventReaction::Status(op.pending_status()));
         self.pending_background_server_op = Some(op);
         self.background_server_preflight_pending = true;
+        self.background_server_wanted = true;
         self.spawn_background_server_preflight();
     }
 
@@ -251,6 +299,21 @@ impl App {
         warning: Option<String>,
     ) {
         self.background_server_preflight_pending = false;
+        // The user changed their mind while the bind was on its worker thread: a
+        // stop command, or a reload that turned the setting off. Starting now
+        // would serve a listener nobody wants and, worse, PERSIST
+        // `serve_while_tui = true` over the value they just chose. Drop the bound
+        // listeners (which releases the addresses), say so, and write nothing.
+        if !self.background_server_wanted {
+            drop(result);
+            if let Some(op) = self.pending_background_server_op.take() {
+                self.apply_reaction(
+                    op.resolve(&BackgroundServerOutcome::Cancelled)
+                        .into_reaction(),
+                );
+            }
+            return;
+        }
         let outcome = match result {
             Ok((listeners, urls)) => match self.companion.as_mut() {
                 Some(companion) => {
@@ -276,6 +339,9 @@ impl App {
             },
             Err(message) => BackgroundServerOutcome::Failed(message),
         };
+        // A start that failed leaves nothing wanted, so a later stop does not
+        // report on a listener that never came up.
+        self.background_server_wanted = self.background_server_is_serving();
         if let Some(op) = self.pending_background_server_op.take() {
             self.apply_reaction(op.resolve(&outcome).into_reaction());
         }
@@ -284,6 +350,20 @@ impl App {
     /// Palette action: stop the background web server, leaving every agent
     /// running.
     pub(crate) fn stop_background_server(&mut self) {
+        // A start whose bind pre-flight is still on its worker thread is not
+        // serving yet, so it cannot be stopped: it is CANCELLED. Clearing the
+        // wanted flag is what the pre-flight's apply consults when it lands, and
+        // config is deliberately left alone, because the start never got as far as
+        // writing it.
+        if !self.background_server_is_serving() && self.background_server_preflight_pending {
+            self.background_server_wanted = false;
+            self.set_info(
+                "Cancelling the background web server start that is still binding its addresses. \
+                 Nothing will serve and config.toml is untouched."
+                    .to_string(),
+            );
+            return;
+        }
         if !self.background_server_is_serving() {
             self.set_warning(
                 "The web UI is not serving in the background right now. Use \
@@ -311,6 +391,10 @@ impl App {
     /// shared half of the palette command, the config-reload transition and the
     /// quit path.
     pub(crate) fn stop_background_server_quietly(&mut self) {
+        // Runtime intent, not the saved setting: quitting stops the listener
+        // without deciding anything about next time, and that distinction lives in
+        // config, which this deliberately does not touch.
+        self.background_server_wanted = false;
         if let Some(companion) = self.companion.as_mut()
             && companion.is_serving()
         {
@@ -325,8 +409,11 @@ impl App {
     /// flips it has to act rather than wait for the next start: a user who edits
     /// the file to turn the listener off has asked for the listener to go away.
     pub(crate) fn apply_serve_while_tui_setting(&mut self, wanted: bool) {
-        let serving = self.background_server_is_serving();
-        match (serving, wanted) {
+        // A start still in its bind pre-flight counts as on: otherwise a reload
+        // that turns the setting off looks like it has nothing to do, and the
+        // pre-flight lands afterwards and starts serving anyway.
+        let on = self.background_server_is_serving() || self.background_server_preflight_pending;
+        match (on, wanted) {
             (false, true) => self.start_background_server(),
             (true, false) => self.stop_background_server(),
             // Already where the config asks for. Nothing to say: a reload that
@@ -335,6 +422,40 @@ impl App {
         }
     }
 }
+
+/// The verdict source for one drained batch's origin routing.
+///
+/// A snapshot rather than a live read, because the web layer's follow-ups consume
+/// the pending-op entries the verdict depends on and they run first. See
+/// [`dux_core::engine::WebFollowupOps`].
+pub(crate) enum CompanionRouting {
+    /// Nothing is serving, so every reaction belongs to this surface. Also the
+    /// answer when the engine's web pending-op maps still hold entries from a flip
+    /// that came back: the serve is over, the ops are not, and skipping then would
+    /// leave a reaction nobody handles at all.
+    NotServing,
+    /// Serving: route against the ids that were in flight when the batch was
+    /// drained.
+    Serving(dux_core::engine::WebFollowupOps),
+}
+
+impl CompanionRouting {
+    /// Whether the companion owns the follow-up for `reaction`, so this surface
+    /// must skip its own arm for it.
+    pub(crate) fn companion_owns(&self, reaction: &EventReaction) -> bool {
+        match self {
+            Self::NotServing => false,
+            Self::Serving(ops) => {
+                matches!(ops.owner_of(reaction), dux_core::engine::FollowupOwner::Web)
+            }
+        }
+    }
+}
+
+/// The status key the background server's own lifecycle messages ride on, so a
+/// self-retirement replaces whatever the last one said instead of queueing behind
+/// it.
+pub(crate) const BACKGROUND_SERVER_STATUS_KEY: &str = "background-server";
 
 /// The poll-interval cap while the background server is on, in milliseconds.
 ///
@@ -359,7 +480,9 @@ fn join_urls(urls: &[String]) -> String {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use dux_core::background_serve::{BackgroundServeCompanion, ServiceOutcome};
+    use dux_core::background_serve::{
+        BackgroundServeCompanion, DrainedMaintenance, ServiceOutcome,
+    };
     use dux_core::engine::EventReaction;
 
     use super::super::test_support::{default_bindings, test_app};
@@ -380,6 +503,17 @@ mod tests {
         /// A session to remove from the engine the next time `service` runs, so a
         /// test can stand in for a browser deleting an agent.
         remove_session: Option<String>,
+        /// What the next `service` call reports as a self-retirement, standing in
+        /// for a required listener dying.
+        retirement_next: Option<String>,
+        /// One entry per maintenance hand-off the seam made.
+        maintenance: Vec<DrainedMaintenance>,
+        /// Stand in for the REAL fanout's side effects: its `drive_*` follow-ups
+        /// take their pending op out of the engine's web map to resolve it, and
+        /// the add-project one performs the add inline while it is in there. Both
+        /// happen BEFORE this surface applies the reaction, which is exactly the
+        /// window the ownership snapshot exists to survive.
+        fanout_consumes_ops: bool,
     }
 
     /// A companion that records instead of serving. Serving is a real socket and a
@@ -403,12 +537,28 @@ mod tests {
     }
 
     impl BackgroundServeCompanion for FakeCompanion {
-        fn on_reaction(&mut self, _engine: &mut Engine, reaction: &EventReaction) {
-            self.recorded
-                .lock()
-                .expect("not poisoned")
-                .reactions
-                .push(reaction_kind(reaction).to_string());
+        fn on_reaction(&mut self, engine: &mut Engine, reaction: &EventReaction) {
+            let mut recorded = self.recorded.lock().expect("not poisoned");
+            recorded.reactions.push(reaction_kind(reaction).to_string());
+            if !recorded.fanout_consumes_ops {
+                return;
+            }
+            // What the real `drive_pr_lookup_followup` / `finish_web_project_add`
+            // do: resolve their keyed op, which means REMOVING it from the map the
+            // routing reads, and (for the add) write the project inline.
+            engine.pending_web_pr_lookup_ops.clear();
+            engine.pending_web_checkout_ops.clear();
+            engine.pending_web_add_project_ops.clear();
+            if matches!(
+                reaction,
+                EventReaction::AddProjectAfterBranchCheckout { .. }
+                    | EventReaction::AddProjectAfterInitialCommit { .. }
+            ) {
+                engine.projects.push(sample_project(
+                    "added-by-a-browser",
+                    "/tmp/added-by-a-browser",
+                ));
+            }
         }
 
         fn service(&mut self, engine: &mut Engine) -> ServiceOutcome {
@@ -420,7 +570,16 @@ mod tests {
             ServiceOutcome {
                 mutated: recorded.mutated_next,
                 stopped: false,
+                retirement: recorded.retirement_next.take(),
             }
+        }
+
+        fn note_maintenance(&mut self, maintenance: &DrainedMaintenance) {
+            self.recorded
+                .lock()
+                .expect("not poisoned")
+                .maintenance
+                .push(maintenance.clone());
         }
 
         fn note_engine_activity(&mut self, command_applies: u64) {
@@ -466,32 +625,40 @@ mod tests {
         }
     }
 
+    fn sample_project(id: &str, path: &str) -> crate::model::Project {
+        crate::model::Project {
+            id: id.to_string(),
+            name: id.to_string(),
+            path: path.to_string(),
+            explicit_default_provider: None,
+            default_provider: crate::model::ProviderKind::new("claude"),
+            leading_branch: Some("main".to_string()),
+            auto_reopen_agents: None,
+            startup_command: None,
+            env: Default::default(),
+            current_branch: "main".to_string(),
+            branch_status: crate::model::ProjectBranchStatus::Leading,
+            path_missing: false,
+            created_at: None,
+        }
+    }
+
+    fn resolved_pr() -> dux_core::worker::ResolvedPullRequest {
+        dux_core::worker::ResolvedPullRequest {
+            project: sample_project("p1", "/tmp/p1"),
+            host: "github.com".to_string(),
+            owner_repo: "octocat/Hello-World".to_string(),
+            number: 42,
+            title: "Fix bug".to_string(),
+            state: "OPEN".to_string(),
+            head_ref_name: "feature/pr-42".to_string(),
+            custom_name: None,
+        }
+    }
+
     fn pr_reaction(status_op_id: Option<String>) -> EventReaction {
         EventReaction::OpenNewAgentPromptForPr {
-            pr: Box::new(dux_core::worker::ResolvedPullRequest {
-                project: crate::model::Project {
-                    id: "p1".to_string(),
-                    name: "p1".to_string(),
-                    path: "/tmp/p1".to_string(),
-                    explicit_default_provider: None,
-                    default_provider: crate::model::ProviderKind::new("claude"),
-                    leading_branch: Some("main".to_string()),
-                    auto_reopen_agents: None,
-                    startup_command: None,
-                    env: Default::default(),
-                    current_branch: "main".to_string(),
-                    branch_status: crate::model::ProjectBranchStatus::Leading,
-                    path_missing: false,
-                    created_at: None,
-                },
-                host: "github.com".to_string(),
-                owner_repo: "octocat/Hello-World".to_string(),
-                number: 42,
-                title: "Fix bug".to_string(),
-                state: "OPEN".to_string(),
-                head_ref_name: "feature/pr-42".to_string(),
-                custom_name: None,
-            }),
+            pr: Box::new(resolved_pr()),
             status_op_id,
         }
     }
@@ -877,6 +1044,246 @@ mod tests {
         assert!(
             app.background_server_preflight_pending,
             "a reload that turned it on must dispatch the bind pre-flight"
+        );
+    }
+
+    /// THE REAL SHAPE OF THE DOUBLE-RUN. A browser's PR create must not pop a name
+    /// prompt here even though the web fanout, which runs FIRST, has already taken
+    /// its pending op out of the map the routing reads.
+    ///
+    /// The earlier routing test passed while the bug was live, because its fake
+    /// companion did nothing. Here the fake removes the entry exactly as
+    /// `drive_pr_lookup_followup` does, and the whole thing goes through the real
+    /// `drain_events` on a real worker event, so "the verdict is taken before the
+    /// fanout" is what is being asserted rather than "the helper works".
+    #[test]
+    fn a_web_pr_create_pops_no_prompt_even_after_the_fanout_consumed_its_op() {
+        let mut app = test_app(default_bindings());
+        let (companion, recorded) = FakeCompanion::serving();
+        app.companion = Some(companion);
+        recorded.lock().expect("not poisoned").fanout_consumes_ops = true;
+        let id = a_web_pr_lookup_op(&mut app);
+        app.engine
+            .worker_tx
+            .send(dux_core::worker::WorkerEvent::PullRequestResolved {
+                result: Ok(resolved_pr()),
+                purpose: dux_core::worker::PrLookupPurpose::CreateAgent,
+                status_op_id: Some(id.clone()),
+            })
+            .expect("the engine's worker channel is open");
+
+        app.drain_events();
+
+        assert!(
+            app.engine.pending_web_pr_lookup_ops.is_empty(),
+            "the fake stands in for the fanout, which resolves and removes the op"
+        );
+        assert!(
+            matches!(app.prompt, PromptState::None),
+            "a browser's PR create must not open the terminal's name prompt; the verdict has \
+             to be taken before the fanout can empty the map it is read from"
+        );
+    }
+
+    /// A web-owned follow-up mutated the workspace during the fanout, so this
+    /// surface has to rebuild even though it ran no arm of its own.
+    ///
+    /// The inline project add writes `engine.projects` from inside the fanout, and
+    /// the change never travels through this surface's own event stream. While the
+    /// duplicate arm existed it happened to rebuild the sidebar as a side effect of
+    /// the bug; with the duplicate gone something has to say so deliberately.
+    #[test]
+    fn a_web_owned_followup_that_mutated_the_workspace_refreshes_the_sidebar() {
+        let mut app = test_app(default_bindings());
+        let (companion, recorded) = FakeCompanion::serving();
+        app.companion = Some(companion);
+        {
+            let mut recorded = recorded.lock().expect("not poisoned");
+            recorded.fanout_consumes_ops = true;
+            // The service iteration itself reports NOTHING: the mutation happened
+            // during the drain, which is the case this test is about.
+            recorded.mutated_next = false;
+        }
+        let op = dux_core::engine::status_op("Adding…".to_string()).resolve_in_handler(
+            |_o: &dux_core::engine::WebAddProjectOutcome| dux_core::engine::Final::info("done"),
+        );
+        let id = op.id().to_string();
+        app.engine
+            .pending_web_add_project_ops
+            .insert(id.clone(), op);
+        app.rebuild_left_items();
+        // The observable for "the post-mutation refresh ran": it rebuilds the
+        // sidebar and then repairs the cursor. Park the cursor out of range so a
+        // refresh that did not happen leaves it there.
+        app.selected_left = 99;
+
+        let reaction = EventReaction::AddProjectAfterBranchCheckout {
+            path: "/tmp/added-by-a-browser".to_string(),
+            name: "added-by-a-browser".to_string(),
+            target_branch: "main".to_string(),
+            leading_branch: "main".to_string(),
+            status_op_id: Some(id),
+        };
+        let routing = app.companion_routing();
+        app.notify_companion(&reaction);
+        app.apply_routed_reaction(reaction, &routing);
+        app.service_companion();
+
+        assert!(
+            app.engine
+                .projects
+                .iter()
+                .any(|p| p.id == "added-by-a-browser"),
+            "the fake stands in for the web's inline add"
+        );
+        assert!(
+            app.selected_left < app.left_items_cache.len().max(1),
+            "a web-owned follow-up that mutated the workspace must trigger this surface's \
+             post-mutation refresh; the cursor is still at {}",
+            app.selected_left
+        );
+    }
+
+    /// An agent that exits while this surface is the sweeper still reaches the
+    /// companion, which is the only way a browser learns about it.
+    ///
+    /// The maintenance sweeps have one runner per process; while serving, that is
+    /// this surface, so the web layer's own prune loop (the sole emitter of "Agent
+    /// exited." and of the change gate a prune opens) never runs.
+    #[test]
+    fn the_maintenance_this_surface_swept_is_handed_to_the_companion() {
+        let mut app = test_app(default_bindings());
+        let (companion, recorded) = FakeCompanion::serving();
+        app.companion = Some(companion);
+
+        // The real drain, wired end to end. Staging an actual exit here would mean
+        // a real child process; what has to be pinned is that the drain REPORTS
+        // its sweeps at all, because the failure mode is a lane nobody calls.
+        app.drain_events();
+
+        assert_eq!(
+            recorded.lock().expect("not poisoned").maintenance.len(),
+            1,
+            "the drain must hand its sweep results to the companion once per pass"
+        );
+
+        // And the payload is carried rather than flattened on the way through.
+        app.note_companion_maintenance(&DrainedMaintenance {
+            pruned: Vec::new(),
+            foregrounds_changed: true,
+        });
+        let recorded = recorded.lock().expect("not poisoned");
+        assert!(
+            recorded.maintenance[1].foregrounds_changed,
+            "a foreground change must cross the seam, or a browser waits for the backstop"
+        );
+    }
+
+    /// Stopping while the bind pre-flight is still on its worker thread CANCELS
+    /// the start, and writes nothing.
+    ///
+    /// The old guard only asked whether a listener was up, so a stop in this window
+    /// was a no-op warning; the pre-flight then landed, started serving anyway, and
+    /// persisted `serve_while_tui = true` over the answer the user had just given.
+    #[test]
+    fn stopping_during_the_pre_flight_cancels_it_and_persists_nothing() {
+        let mut app = test_app(default_bindings());
+        let (companion, _recorded) = FakeCompanion::serving();
+        app.companion = Some(companion);
+        app.stop_background_server_quietly();
+        app.engine.config.server.serve_while_tui = false;
+        app.start_background_server();
+        assert!(app.background_server_preflight_pending);
+
+        app.stop_background_server();
+
+        // The pre-flight's own listeners land afterwards; they must be dropped.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("ephemeral bind");
+        app.apply_background_server_preflight(
+            Ok((vec![listener], vec!["http://127.0.0.1:0".to_string()])),
+            None,
+        );
+
+        assert!(
+            !app.background_server_is_serving(),
+            "a cancelled start must not serve"
+        );
+        assert!(
+            !app.engine.config.server.serve_while_tui,
+            "a cancelled start must not rewrite the setting the user just turned off"
+        );
+        let message = app
+            .status
+            .most_recent_tui()
+            .map(|(_, message)| message)
+            .unwrap_or_default();
+        assert!(
+            message.contains("Cancelled"),
+            "the keyed busy must resolve to an honest final: {message}"
+        );
+    }
+
+    /// The same, arriving as a config reload rather than the palette command: a
+    /// user who edits the file to turn the listener off while a start is in flight
+    /// has still asked for no listener.
+    #[test]
+    fn a_reload_that_turns_it_off_during_the_pre_flight_cancels_it_too() {
+        let mut app = test_app(default_bindings());
+        let (companion, _recorded) = FakeCompanion::serving();
+        app.companion = Some(companion);
+        app.stop_background_server_quietly();
+        app.engine.config.server.serve_while_tui = false;
+        app.start_background_server();
+        assert!(app.background_server_preflight_pending);
+
+        app.apply_serve_while_tui_setting(false);
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("ephemeral bind");
+        app.apply_background_server_preflight(
+            Ok((vec![listener], vec!["http://127.0.0.1:0".to_string()])),
+            None,
+        );
+
+        assert!(
+            !app.background_server_is_serving(),
+            "the reload asked for no listener, so the landing pre-flight must not start one"
+        );
+        assert!(
+            !app.engine.config.server.serve_while_tui,
+            "and it must not write the setting back on"
+        );
+    }
+
+    /// A serve that retired itself says so on the status line, not only in the log.
+    ///
+    /// The last thing the user was told is the address it was serving on. A
+    /// required leg dying while that sentence is still on screen makes it a lie,
+    /// and `dux.log` is not where anybody looks to find that out.
+    #[test]
+    fn a_self_retired_serve_warns_on_the_status_line() {
+        let mut app = test_app(default_bindings());
+        let (companion, recorded) = FakeCompanion::serving();
+        app.companion = Some(companion);
+        recorded.lock().expect("not poisoned").retirement_next = Some(
+            "The web UI stopped serving in the background: the listener stopped accepting \
+             connections. Use start-background-server to serve again."
+                .to_string(),
+        );
+
+        app.service_companion();
+
+        let (tone, message) = app
+            .status
+            .most_recent_tui()
+            .expect("a retirement must reach the status line");
+        assert_eq!(tone, StatusTone::Warning, "serving stopped is a warning");
+        assert!(
+            message.contains("stopped serving"),
+            "the message must say what happened: {message}"
+        );
+        assert!(
+            message.contains("start-background-server"),
+            "and name the way back: {message}"
         );
     }
 }

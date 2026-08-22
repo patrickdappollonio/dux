@@ -93,12 +93,21 @@ impl App {
                 reaction,
                 EventReaction::DispatchProjectDefaultBranchCheckout { .. }
             );
+            // Decide ownership BEFORE the companion runs, and route against that
+            // snapshot afterwards. The companion's fanout drives the web's own
+            // follow-ups, and those REMOVE the pending-op entry they were routed
+            // by, so a verdict read after the fanout answers "the drainer owns
+            // this" about work the web has already done: a browser's PR create
+            // would pop a name prompt here as well, and both add-project
+            // hand-offs would run twice. A snapshot cannot be flipped by the
+            // fanout's own cleanup.
+            let routing = self.companion_routing();
             // Lend the engine to the background web server for this reaction
             // BEFORE applying it. `apply_reaction` consumes the reaction and
             // `EventReaction` is not `Clone`, so a companion that ran afterwards
             // would have nothing to look at. A no-op when nothing is serving.
             self.notify_companion(&reaction);
-            self.apply_reaction(reaction);
+            self.apply_routed_reaction(reaction, &routing);
             if let Some((worktree, error)) = changed_files_answer {
                 self.apply_changed_files_refresh_outcome(&worktree, error);
             }
@@ -163,9 +172,12 @@ impl App {
         for reaction in self.engine.sweep_resume_fallbacks(sweep_size) {
             // Routed through the seam like any other drained reaction: a retry for
             // an agent a BROWSER launched has a pending web launch op waiting on
-            // it, and the actor loop's own sweep drives the same follow-up.
+            // it, and the actor loop's own sweep drives the same follow-up. The
+            // ownership snapshot is taken per reaction and for the same reason as
+            // in the drain above.
+            let routing = self.companion_routing();
             self.notify_companion(&reaction);
-            self.apply_reaction(reaction);
+            self.apply_routed_reaction(reaction, &routing);
         }
         // Reap PTYs that an individual delete/close SIGTERMed and that have now
         // exited or passed their grace deadline (force-killed + dropped) — the
@@ -201,6 +213,19 @@ impl App {
         // out on the value rather than a second read).
         let pruned = self.engine.prune_exited_ptys();
         let any_agent_pruned = pruned.iter().any(|p| p.kind == PrunedPtyKind::Agent);
+        // The results this surface's sweeps produced, carried to the companion at
+        // the end of the drain. The prune list is cloned because this surface goes
+        // on to consume it below, and the web layer needs the same rows to build
+        // the exit and close notices a browser would otherwise never see. Only
+        // while serving: nothing is listening otherwise and the clone is not free.
+        let mut maintenance = dux_core::background_serve::DrainedMaintenance {
+            pruned: if self.background_server_is_serving() {
+                pruned.clone()
+            } else {
+                Vec::new()
+            },
+            foregrounds_changed: false,
+        };
 
         // Per-tab UI reactions for each pruned agent tab. Core already tore the
         // tab down; this only surfaces the scoped message and moves focus off a
@@ -386,8 +411,14 @@ impl App {
 
         // Refresh companion-terminal foreground commands. The engine throttles
         // this by wall-clock (~2s), so calling it on every ~100ms tick keeps the
-        // cadence without coupling the refresh to the tick count.
-        self.engine.refresh_terminal_foregrounds();
+        // cadence without coupling the refresh to the tick count. The answer is
+        // kept: a changed `foreground_cmd` is spine state, and the web layer's own
+        // maintenance would have opened its change gate for it.
+        maintenance.foregrounds_changed = self.engine.refresh_terminal_foregrounds();
+
+        // Hand the companion what these sweeps produced, since this surface is the
+        // process's only runner of them while the background server is on.
+        self.note_companion_maintenance(&maintenance);
 
         // Spawn a background worker to refresh resource monitor stats when
         // the overlay is open and enough wall-clock time has elapsed (~2s).
@@ -405,17 +436,42 @@ impl App {
         self.engine.sync_has_active_processes();
     }
 
+    /// Apply a reaction this surface minted itself, or one nothing else has had a
+    /// chance to fan out yet.
+    ///
+    /// Routes against the LIVE pending-op maps, which is the right answer for
+    /// every caller outside the drain: a reaction built here and applied here
+    /// cannot have had its op consumed in between. The drain takes its verdict
+    /// first and calls [`Self::apply_routed_reaction`] instead.
     pub(super) fn apply_reaction(&mut self, reaction: EventReaction) {
+        let routing = self.companion_routing();
+        self.apply_routed_reaction(reaction, &routing);
+    }
+
+    pub(super) fn apply_routed_reaction(
+        &mut self,
+        reaction: EventReaction,
+        routing: &CompanionRouting,
+    ) {
         // ORIGIN ROUTING. While the background web server is on, both surfaces see
         // the same worker events, and a few reactions carry a follow-up that DOES
         // something: it spawns a git job, adds a project, or dispatches an agent
         // create. Those belong to whichever surface asked for them, and the engine
-        // is the one that knows (see `Engine::followup_owner`). A browser's
-        // PR-create must not also pop a name prompt here.
+        // is the one that knows (see `dux_core::engine::owner_of_reaction`). A
+        // browser's PR-create must not also pop a name prompt here.
         //
         // Checked here rather than per arm so a `Multi` routes leaf by leaf: this
-        // function is what recurses through one.
-        if self.companion_owns_followup(&reaction) {
+        // function is what recurses through one, carrying the same verdict source
+        // down so a leaf cannot be judged against a map the fanout has since
+        // emptied.
+        if routing.companion_owns(&reaction) {
+            // The web's follow-up for this ran during the fanout and can have
+            // mutated the workspace (the inline project add writes
+            // `engine.projects` from in there), so this surface has to re-derive
+            // its view even though it did no work itself. `service_companion`
+            // folds this into its own post-mutation refresh at the end of the
+            // iteration.
+            self.companion_followup_ran = true;
             return;
         }
         match reaction {
@@ -437,8 +493,11 @@ impl App {
             }
 
             EventReaction::Multi(reactions) => {
+                // The SAME verdict source for every leaf: a `Multi` routes leaf by
+                // leaf, and re-deriving it here would read maps the companion's
+                // fanout may already have emptied.
                 for r in reactions {
-                    self.apply_reaction(r);
+                    self.apply_routed_reaction(r, routing);
                 }
             }
             EventReaction::RebuildLeftItems => self.rebuild_left_items(),

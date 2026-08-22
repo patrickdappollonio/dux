@@ -17,11 +17,80 @@
 //! the TUI must not act. If nothing holds it, the operation came from whichever
 //! surface drained the event, and that surface owns it.
 //!
-//! The match in [`Engine::followup_owner`] is EXHAUSTIVE on purpose: a new
-//! reaction variant does not compile until somebody has said whether it needs
-//! routing.
+//! The match in [`owner_of_reaction`] is EXHAUSTIVE on purpose: a new reaction
+//! variant does not compile until somebody has said whether it needs routing.
+//!
+//! ## Why the answer can be SNAPSHOT
+//!
+//! The web layer's own follow-ups REMOVE the pending-op entry they were routed
+//! by: `drive_pr_lookup_followup` and `finish_web_project_add` both take their op
+//! out of the map to resolve it. On the concurrent path the web fanout runs
+//! BEFORE the drainer applies the reaction, so a verdict read from the live maps
+//! after the fanout answers `Drainer` for work the web has already done, and the
+//! terminal UI runs its arm too: a second name prompt, a second project add.
+//!
+//! So the concurrent drainer takes a [`WebFollowupOps`] snapshot BEFORE it lends
+//! the reaction to the web layer and routes against that. The live-map form
+//! ([`Engine::followup_owner`]) stays correct for `dux server` and the flip,
+//! which ask before they drive.
+
+use std::collections::HashSet;
 
 use super::{Engine, EventReaction};
+
+/// The web pending-op id sets the routing consults, read either live off the
+/// engine or from a snapshot.
+///
+/// One trait so the exhaustive match in [`owner_of_reaction`] exists exactly once
+/// and cannot drift between the live and snapshot forms.
+pub trait WebFollowupOpsView {
+    fn has_pr_lookup(&self, id: &str) -> bool;
+    fn has_add_project(&self, id: &str) -> bool;
+    fn has_checkout(&self, id: &str) -> bool;
+}
+
+impl WebFollowupOpsView for Engine {
+    fn has_pr_lookup(&self, id: &str) -> bool {
+        self.pending_web_pr_lookup_ops.contains_key(id)
+    }
+    fn has_add_project(&self, id: &str) -> bool {
+        self.pending_web_add_project_ops.contains_key(id)
+    }
+    fn has_checkout(&self, id: &str) -> bool {
+        self.pending_web_checkout_ops.contains_key(id)
+    }
+}
+
+/// A point-in-time copy of the web pending-op ids, so an ownership verdict can be
+/// decided before anything has had a chance to consume the entry it depends on.
+///
+/// Only the ids: the ops themselves are not `Clone` and nothing about routing
+/// needs them. Empty in the single-surface case, where the sets are never taken.
+#[derive(Debug, Clone, Default)]
+pub struct WebFollowupOps {
+    pr_lookup: HashSet<String>,
+    add_project: HashSet<String>,
+    checkout: HashSet<String>,
+}
+
+impl WebFollowupOps {
+    /// Which surface owns the follow-up for `reaction`, per this snapshot.
+    pub fn owner_of(&self, reaction: &EventReaction) -> FollowupOwner {
+        owner_of_reaction(self, reaction)
+    }
+}
+
+impl WebFollowupOpsView for WebFollowupOps {
+    fn has_pr_lookup(&self, id: &str) -> bool {
+        self.pr_lookup.contains(id)
+    }
+    fn has_add_project(&self, id: &str) -> bool {
+        self.add_project.contains(id)
+    }
+    fn has_checkout(&self, id: &str) -> bool {
+        self.checkout.contains(id)
+    }
+}
 
 /// The surface that owns the side-effecting follow-up for one reaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,42 +106,58 @@ pub enum FollowupOwner {
 }
 
 impl Engine {
-    /// Which surface owns the follow-up work for `reaction`.
+    /// Which surface owns the follow-up work for `reaction`, read from the LIVE
+    /// pending-op maps.
     ///
-    /// Only the reactions whose follow-up DOES something route; everything else
-    /// answers [`FollowupOwner::Drainer`], which in a single-surface process is
-    /// the only answer there has ever been. That is what keeps `dux server` and
-    /// the flip behaving exactly as before: their web pending-op maps hold the
-    /// ids of their own operations, so they get `Web` for their own work and
-    /// `Drainer` for anything a worker started on its own.
+    /// Correct for a surface that asks BEFORE it drives (`dux server` and the
+    /// flip both do). The concurrent drainer must use a [`WebFollowupOps`]
+    /// snapshot instead, because the web fanout it runs first removes the entries
+    /// this would have consulted.
     pub fn followup_owner(&self, reaction: &EventReaction) -> FollowupOwner {
-        match reaction {
+        owner_of_reaction(self, reaction)
+    }
+
+    /// Snapshot the web pending-op ids the routing consults, for a drainer that
+    /// has to decide ownership before it lends the reaction to the web layer.
+    pub fn web_followup_ops(&self) -> WebFollowupOps {
+        WebFollowupOps {
+            pr_lookup: self.pending_web_pr_lookup_ops.keys().cloned().collect(),
+            add_project: self.pending_web_add_project_ops.keys().cloned().collect(),
+            checkout: self.pending_web_checkout_ops.keys().cloned().collect(),
+        }
+    }
+}
+
+/// Which surface owns the follow-up work for `reaction`.
+///
+/// Only the reactions whose follow-up DOES something route; everything else
+/// answers [`FollowupOwner::Drainer`], which in a single-surface process is the
+/// only answer there has ever been. That is what keeps `dux server` and the flip
+/// behaving exactly as before: their web pending-op maps hold the ids of their own
+/// operations, so they get `Web` for their own work and `Drainer` for anything a
+/// worker started on its own.
+pub fn owner_of_reaction(ops: &impl WebFollowupOpsView, reaction: &EventReaction) -> FollowupOwner {
+    match reaction {
             // A PR lookup resolved. The web dispatches the create straight away
             // because the browser already sent the name; the TUI opens a name
             // prompt. Both at once is a prompt the user did not ask for on top of
             // an agent that is already being created.
             EventReaction::OpenNewAgentPromptForPr { status_op_id, .. } => {
-                self.owner_of(status_op_id, |id| {
-                    self.pending_web_pr_lookup_ops.contains_key(id)
-                })
+                owner_by_id(status_op_id, |id| ops.has_pr_lookup(id))
             }
 
             // Worker 2's `git switch` landed and the project is ready to add.
             // Adding it twice is two workspace entries for one directory.
             EventReaction::AddProjectAfterBranchCheckout { status_op_id, .. }
             | EventReaction::AddProjectAfterInitialCommit { status_op_id, .. } => {
-                self.owner_of(status_op_id, |id| {
-                    self.pending_web_add_project_ops.contains_key(id)
-                })
+                owner_by_id(status_op_id, |id| ops.has_add_project(id))
             }
 
             // Worker 1 inspected the default branch and the follow-up SPAWNS
             // worker 2. Two spawns are two concurrent `git switch` runs in one
             // repository.
             EventReaction::DispatchProjectDefaultBranchCheckout { status_op_id, .. } => {
-                self.owner_of(status_op_id, |id| {
-                    self.pending_web_checkout_ops.contains_key(id)
-                })
+                owner_by_id(status_op_id, |id| ops.has_checkout(id))
             }
 
             // A `Multi` is applied leaf by leaf (the TUI's `apply_reaction`
@@ -84,11 +169,15 @@ impl Engine {
             // Everything below is safe to handle on both surfaces at once, and
             // each line says why rather than leaning on a wildcard.
             //
-            // Statuses and clears: each surface renders its own copy. Web
-            // follow-ups that only RESOLVE a keyed op (delete, launch) are
-            // self-guarding for the same reason the routed arms are not: they
-            // look their id up in a web map first and do nothing when it is
-            // absent.
+            // Statuses and clears: each surface renders its own copy. Two web
+            // follow-ups are deliberately left UNROUTED and self-guard instead:
+            // `drive_delete_followup` and `drive_web_launch_followup` both look
+            // their session up in a web pending map first and do nothing when it
+            // is absent, so a TUI-started delete or launch runs its web half as a
+            // no-op. That is safe where a routed arm is not, because neither one
+            // starts new work: they resolve a keyed op the web itself opened. The
+            // routed arms above spawn a git job, add a project, or dispatch a
+            // create, which is why they cannot rely on the same trick.
             EventReaction::Nothing
             | EventReaction::Status(_)
             | EventReaction::ClearStatus(_)
@@ -138,25 +227,20 @@ impl Engine {
             // surface that can bind before it hands anything over.
             | EventReaction::ServerFlipPreflightReady { .. }
             | EventReaction::BackgroundServerPreflightReady { .. } => FollowupOwner::Drainer,
-        }
     }
+}
 
-    /// [`FollowupOwner::Web`] when the reaction carries an op id that `in_web_map`
-    /// finds, otherwise [`FollowupOwner::Drainer`].
-    ///
-    /// A missing id is deliberately `Drainer` rather than an error: the TUI paths
-    /// pass `None` for operations they never keyed, and a worker that started
-    /// something on its own (a resume-fallback retry, say) has no originating
-    /// request at all.
-    fn owner_of(
-        &self,
-        status_op_id: &Option<String>,
-        in_web_map: impl Fn(&str) -> bool,
-    ) -> FollowupOwner {
-        match status_op_id.as_deref() {
-            Some(id) if in_web_map(id) => FollowupOwner::Web,
-            _ => FollowupOwner::Drainer,
-        }
+/// [`FollowupOwner::Web`] when the reaction carries an op id that `in_web_map`
+/// finds, otherwise [`FollowupOwner::Drainer`].
+///
+/// A missing id is deliberately `Drainer` rather than an error: the TUI paths
+/// pass `None` for operations they never keyed, and a worker that started
+/// something on its own (a resume-fallback retry, say) has no originating
+/// request at all.
+fn owner_by_id(status_op_id: &Option<String>, in_web_map: impl Fn(&str) -> bool) -> FollowupOwner {
+    match status_op_id.as_deref() {
+        Some(id) if in_web_map(id) => FollowupOwner::Web,
+        _ => FollowupOwner::Drainer,
     }
 }
 
@@ -302,5 +386,88 @@ mod tests {
                 "this reaction is handled on both surfaces"
             );
         }
+    }
+
+    /// A snapshot keeps answering `Web` after the web layer's own follow-up has
+    /// consumed the pending-op entry.
+    ///
+    /// This is the whole reason the snapshot exists: `drive_pr_lookup_followup`
+    /// removes the op to resolve it, and the concurrent drainer asks AFTER that
+    /// has run. Reading the live maps at that point says `Drainer` and the
+    /// terminal UI pops a name prompt for an agent a browser already created.
+    #[test]
+    fn a_snapshot_survives_the_web_followup_consuming_its_op() {
+        let (mut engine, _tmp) = engine();
+        let op = status_op("Resolving PR…".to_string()).resolve_in_handler(
+            |_o: &crate::engine::WebPrLookupOutcome| crate::engine::Final::info("done"),
+        );
+        let id = op.id().to_string();
+        engine.pending_web_pr_lookup_ops.insert(id.clone(), op);
+        let snapshot = engine.web_followup_ops();
+        let reaction = pr_reaction(Some(id.clone()));
+
+        // Stand in for the web fanout: its follow-up takes the op out to resolve it.
+        engine.pending_web_pr_lookup_ops.remove(&id);
+
+        assert_eq!(
+            engine.followup_owner(&reaction),
+            FollowupOwner::Drainer,
+            "the live maps forget, which is exactly the trap"
+        );
+        assert_eq!(
+            snapshot.owner_of(&reaction),
+            FollowupOwner::Web,
+            "the snapshot must still name the web, or the drained reaction double-runs"
+        );
+    }
+
+    /// The snapshot covers all three routed maps, not just the PR one.
+    #[test]
+    fn a_snapshot_covers_every_routed_map() {
+        let (mut engine, _tmp) = engine();
+        let add_op = status_op("Adding…".to_string()).resolve_in_handler(
+            |_o: &crate::engine::WebAddProjectOutcome| crate::engine::Final::info("done"),
+        );
+        let add_id = add_op.id().to_string();
+        engine
+            .pending_web_add_project_ops
+            .insert(add_id.clone(), add_op);
+        let checkout_op = status_op("Checking out…".to_string()).resolve_in_handler(
+            |_o: &crate::engine::WebCheckoutOutcome| crate::engine::Final::info("done"),
+        );
+        let checkout_id = checkout_op.id().to_string();
+        engine
+            .pending_web_checkout_ops
+            .insert(checkout_id.clone(), checkout_op);
+        let snapshot = engine.web_followup_ops();
+        engine.pending_web_add_project_ops.remove(&add_id);
+        engine.pending_web_checkout_ops.remove(&checkout_id);
+
+        let add = EventReaction::AddProjectAfterBranchCheckout {
+            path: "/tmp/p".to_string(),
+            name: "p".to_string(),
+            target_branch: "main".to_string(),
+            leading_branch: "main".to_string(),
+            status_op_id: Some(add_id),
+        };
+        let checkout = EventReaction::DispatchProjectDefaultBranchCheckout {
+            project: sample_project("p1", "/tmp/p1"),
+            default_branch: "main".to_string(),
+            status_op_id: Some(checkout_id),
+        };
+        assert_eq!(snapshot.owner_of(&add), FollowupOwner::Web);
+        assert_eq!(snapshot.owner_of(&checkout), FollowupOwner::Web);
+    }
+
+    /// An empty snapshot (nothing web-originated in flight) routes everything to
+    /// the drainer, so a terminal-only workspace is unaffected by the mechanism.
+    #[test]
+    fn an_empty_snapshot_routes_everything_to_the_drainer() {
+        let (engine, _tmp) = engine();
+        let snapshot = engine.web_followup_ops();
+        assert_eq!(
+            snapshot.owner_of(&pr_reaction(Some("an-op".to_string()))),
+            FollowupOwner::Drainer
+        );
     }
 }

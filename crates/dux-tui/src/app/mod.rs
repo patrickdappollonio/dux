@@ -381,6 +381,24 @@ pub struct App {
     /// pre-flight races to bind the LOCAL MODE ports, so two quick invocations
     /// would have the second report a confusing EADDRINUSE.
     pub(crate) background_server_preflight_pending: bool,
+    /// Whether a background listener is currently WANTED.
+    ///
+    /// Distinct from `background_server_is_serving`, which cannot answer for the
+    /// window while the bind pre-flight is still on its worker thread. In that
+    /// window a stop command, or a reload that turns the setting off, would
+    /// otherwise be a no-op; the pre-flight would then land, start serving anyway,
+    /// and persist `serve_while_tui = true` over the value the user just chose.
+    /// The stop paths clear this and the pre-flight's apply consults it.
+    pub(crate) background_server_wanted: bool,
+    /// Set when a reaction drained this iteration was the COMPANION's to follow up
+    /// on, so this surface skipped its own arm for it.
+    ///
+    /// A web-owned follow-up mutates shared state this surface renders (the
+    /// inline project add writes `engine.projects` during the fanout), and the
+    /// change did not arrive through this surface's own event stream, so nothing
+    /// here would otherwise rebuild. Folded into the per-iteration mutated answer
+    /// and cleared there.
+    pub(crate) companion_followup_ran: bool,
     /// The keyed status op for a background-server start, held from the moment the
     /// pre-flight is dispatched until its result lands. `Option` rather than a map
     /// because the pre-flight is in-flight-guarded, so there is only ever one.
@@ -586,6 +604,10 @@ pub enum BackgroundServerOutcome {
     },
     /// Nothing is serving and the TUI is untouched.
     Failed(String),
+    /// The start was abandoned while its bind pre-flight was still running: a stop
+    /// command, or a config reload that turned the setting off. The bound
+    /// addresses are released and nothing was written to config.
+    Cancelled,
 }
 
 /// Handler-resolved outcome for the config-reload op (see
@@ -2991,6 +3013,7 @@ pub(crate) fn build_left_items(
 }
 
 mod background_server;
+pub(crate) use background_server::CompanionRouting;
 mod components;
 mod first_load;
 mod input;
@@ -3301,6 +3324,8 @@ impl App {
             pending_server_flip: None,
             companion: None,
             background_server_preflight_pending: false,
+            background_server_wanted: false,
+            companion_followup_ran: false,
             pending_background_server_op: None,
             server_flip_preflight_pending: false,
             pending_persist_ops: HashMap::new(),

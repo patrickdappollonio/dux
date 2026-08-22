@@ -166,6 +166,16 @@ impl BackgroundServer {
         self.service.note_mutation();
     }
 
+    /// Emit the browser-facing half of the maintenance sweeps the terminal UI ran
+    /// this iteration: the exit and close notices, and the change gate they open.
+    /// Nothing is swept here, because the drainer already swept it.
+    pub fn note_maintenance(
+        &mut self,
+        maintenance: &dux_core::background_serve::DrainedMaintenance,
+    ) {
+        self.service.note_drained_maintenance(maintenance);
+    }
+
     /// Do the web-only per-iteration work.
     pub fn service(&mut self, engine: &mut Engine) -> ServiceOutcome {
         self.service.service_engine_once(engine)

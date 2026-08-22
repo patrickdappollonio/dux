@@ -26,7 +26,7 @@ pub use events::{
     FinishDeleteSessionOutcome, FinishDeleteSessionView, ProjectPersistenceOutcome,
     ProjectPersistenceView, RemovedBranches, StatusUpdate, WorktreeRemoval,
 };
-pub use followup::FollowupOwner;
+pub use followup::{FollowupOwner, WebFollowupOps, WebFollowupOpsView, owner_of_reaction};
 pub use in_flight::{
     BranchRenameDispatch, BranchRenamePlan, BranchRenameRejection, InFlightKey, InFlightSet,
     RenameExpectation,
