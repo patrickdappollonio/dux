@@ -426,8 +426,18 @@ pub(crate) struct ActorLoopEnds {
 /// changes; a reload that only touched, say, `[ui]` theme settings leaves every
 /// compared field equal and triggers no warning.
 ///
-/// Compared fields: the bind `host` and `port`, the `tailscale_enabled` toggle,
-/// and the `allowed_hosts` host-guard list. The three per-class WebSocket caps
+/// Compared fields: the bind `host` and `port`, the `tailscale` mode, and the
+/// `allowed_hosts` host-guard list.
+///
+/// The `tailscale` MODE stays on this list even though `auto` now re-binds that
+/// leg by itself. What the watcher makes live is the interface coming and going,
+/// not the setting: the mode is read once when serving starts, and it decides
+/// whether a watcher was started at all. So switching `no` to `auto` starts no
+/// watcher and switching `auto` to `no` drops no listener, and the operator has
+/// to hear that from the restart warning rather than discover it by finding dux
+/// still answering on their tailnet.
+///
+/// The three per-class WebSocket caps
 /// (`max_websocket_events_connections`, `max_websocket_agent_connections`,
 /// `max_websocket_terminal_connections`) are also startup-bound (each
 /// connection-cap semaphore is built ONCE in `build_app` and never resized on
@@ -439,7 +449,7 @@ fn server_rebind_settings_changed(
 ) -> bool {
     prev.host != next.host
         || prev.port != next.port
-        || prev.tailscale_enabled != next.tailscale_enabled
+        || prev.tailscale != next.tailscale
         || prev.allowed_hosts != next.allowed_hosts
         || prev.max_websocket_events_connections != next.max_websocket_events_connections
         || prev.max_websocket_agent_connections != next.max_websocket_agent_connections
@@ -3954,11 +3964,20 @@ mod tests {
     }
 
     #[test]
-    fn rebind_drift_detects_tailscale_toggle() {
+    fn rebind_drift_detects_a_tailscale_mode_change() {
+        // The mode is read once at serve start (it decides whether a watcher runs
+        // at all), so changing it is still restart-bound even though `auto` binds
+        // and unbinds the leg by itself while serving.
         let prev = dux_core::config::ServerConfig::default();
-        let mut next = prev.clone();
-        next.tailscale_enabled = !prev.tailscale_enabled;
-        assert!(server_rebind_settings_changed(&prev, &next));
+        for mode in ["yes", "no"] {
+            let mut next = prev.clone();
+            next.tailscale = mode.to_string();
+            assert!(
+                server_rebind_settings_changed(&prev, &next),
+                "changing tailscale from {} to {mode} must warn",
+                prev.tailscale
+            );
+        }
     }
 
     #[test]

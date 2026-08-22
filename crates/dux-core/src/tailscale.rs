@@ -1,11 +1,17 @@
 //! Tailscale address detection for LOCAL MODE serving.
 //!
-//! When `[server] tailscale_enabled` is on (the opt-out default), local mode
-//! also binds the machine's Tailscale address so tailnet devices can reach dux
-//! over WireGuard-encrypted transit. Detection shells out to the `tailscale ip`
-//! CLI — the same tolerant pattern the `gh` integration uses: a missing CLI, a
-//! down daemon, or garbage output degrades to `None` (with a reason for the
-//! warning message), never an error that blocks loopback serving.
+//! Unless `[server] tailscale` is `"no"`, local mode also binds the machine's
+//! Tailscale address so tailnet devices can reach dux over WireGuard-encrypted
+//! transit. Detection shells out to the `tailscale ip` CLI — the same tolerant
+//! pattern the `gh` integration uses: a missing CLI, a down daemon, or garbage
+//! output degrades to `None` (with a reason for the warning message), never an
+//! error that blocks loopback serving.
+//!
+//! On `"auto"` this detection is not a one-shot at startup: the serve path polls
+//! it for the whole run so the Tailscale listener can come and go with the
+//! interface. That is why the call is BOUNDED (see [`detect_ip`]): a wedged
+//! `tailscaled` is exactly the situation the watcher exists to survive, so it
+//! must not be able to park the watcher forever.
 
 use std::net::IpAddr;
 
@@ -33,6 +39,48 @@ impl TailscaleUnavailable {
             }
             Self::NoAddress => "the tailscale CLI returned no usable address",
         }
+    }
+}
+
+/// The warning to show when the Tailscale address was wanted but not found at
+/// startup. `serving` names what dux is serving instead ("loopback" for the flip,
+/// "the configured host" for `dux server`), so both entry points read the same
+/// sentence from one place.
+///
+/// The two modes end differently and the message has to say which one the reader
+/// is in: on [`TailscaleMode::Auto`] this is a "not yet" and dux keeps looking,
+/// on [`TailscaleMode::Yes`] it is settled for the whole run. Telling an `auto`
+/// user their tailnet is unavailable, when dux is about to bind it the moment
+/// tailscaled connects, is the kind of stale warning people learn to ignore.
+///
+/// [`TailscaleMode::No`] never reaches here (nothing is detected), and the
+/// function stays exhaustive over the enum so a fourth mode is a compile error.
+pub fn undetected_warning(
+    mode: crate::config::TailscaleMode,
+    reason: TailscaleUnavailable,
+    serving: &str,
+) -> String {
+    use crate::config::TailscaleMode;
+    match mode {
+        TailscaleMode::Auto => format!(
+            "Tailscale not detected ({}), so dux is serving on {serving} only for now. \
+             It keeps watching and binds your Tailscale address by itself the moment the \
+             interface appears, with no restart. Set tailscale = \"no\" in [server] to stop \
+             looking and silence this.",
+            reason.reason()
+        ),
+        TailscaleMode::Yes => format!(
+            "Tailscale not detected ({}), so dux is serving on {serving} only for this whole \
+             run: [server] tailscale = \"yes\" looks exactly once, at startup. Set \
+             tailscale = \"auto\" to have dux bind it whenever the interface appears, or \
+             \"no\" to silence this.",
+            reason.reason()
+        ),
+        TailscaleMode::No => format!(
+            "Tailscale not detected ({}), and [server] tailscale = \"no\" means dux was not \
+             going to bind it anyway.",
+            reason.reason()
+        ),
     }
 }
 

@@ -440,12 +440,12 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
     // host/port shape only.
     patch_table_str(doc, "server", "host", &config.server.host);
     patch_table_u16(doc, "server", "port", config.server.port);
-    patch_table_bool(
-        doc,
-        "server",
-        "tailscale_enabled",
-        config.server.tailscale_enabled,
-    );
+    patch_table_str(doc, "server", "tailscale", &config.server.tailscale);
+    // The boolean `tailscale_enabled` became the tri-state `tailscale`. Load-time
+    // migration already rewrote it in memory; dropping it here is what takes it
+    // OUT of the file, so a save stops carrying a key dux no longer reads (the
+    // same one-line strip `max_websocket_connections` gets below).
+    remove_table_key(doc, "server", "tailscale_enabled");
     patch_table_string_array(doc, "server", "allowed_hosts", &config.server.allowed_hosts);
     patch_table_str(doc, "server", "color", &config.server.color);
     patch_table_bool(doc, "server", "access_log", config.server.access_log);
@@ -2803,7 +2803,7 @@ unknown_key = \"untouched\"
         let mut config = Config::default();
         config.server.host = "0.0.0.0".to_string();
         config.server.port = 9000;
-        config.server.tailscale_enabled = false;
+        config.server.tailscale = "no".to_string();
         config.server.allowed_hosts = vec!["box.tailnet.ts.net".to_string()];
         config.server.color = "never".to_string();
         config.server.access_log = false;
@@ -2819,7 +2819,7 @@ unknown_key = \"untouched\"
         let parsed: Config = toml::from_str(&saved).expect("reparse");
         assert_eq!(parsed.server.host, "0.0.0.0");
         assert_eq!(parsed.server.port, 9000);
-        assert!(!parsed.server.tailscale_enabled);
+        assert_eq!(parsed.server.tailscale, "no");
         assert_eq!(
             parsed.server.allowed_hosts,
             vec!["box.tailnet.ts.net".to_string()]
@@ -2835,6 +2835,36 @@ unknown_key = \"untouched\"
         assert!(
             !saved.contains("bind ="),
             "patcher must not emit bind: {saved}"
+        );
+    }
+
+    #[test]
+    fn a_save_migrates_the_legacy_tailscale_enabled_key_out_of_the_file() {
+        // A user upgrading from the boolean has `tailscale_enabled` on disk. The
+        // save writes the tri-state key and takes the boolean OUT, so the file
+        // stops carrying a key dux no longer reads. This is the on-disk half of
+        // the compat story; the in-memory half is `config_migrate`.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        fs::write(
+            &config_path,
+            "[server]\nport = 9000\ntailscale_enabled = false\n",
+        )
+        .expect("seed an old config");
+
+        let mut config = Config::default();
+        config.server.port = 9000;
+        config.server.tailscale = "no".to_string();
+        patch_config_file(&config_path, &config).expect("patch the existing config");
+
+        let saved = fs::read_to_string(&config_path).expect("read back");
+        assert!(
+            !saved.contains("tailscale_enabled"),
+            "the legacy key must be gone after a save: {saved}"
+        );
+        assert!(
+            saved.contains("tailscale = \"no\""),
+            "the tri-state key must be written: {saved}"
         );
     }
 

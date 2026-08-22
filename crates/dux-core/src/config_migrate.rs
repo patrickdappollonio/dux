@@ -76,6 +76,15 @@ const DEPRECATED_CONFIG_KEYS: &[DeprecatedConfigKeyRule] = &[
             migrate: migrate_server_bind,
         },
     },
+    DeprecatedConfigKeyRule {
+        old: DeprecatedConfigKey {
+            section: "server",
+            key: "tailscale_enabled",
+        },
+        action: DeprecatedConfigKeyAction::Replace {
+            migrate: migrate_tailscale_enabled,
+        },
+    },
 ];
 
 fn apply_config_deprecations(doc: &mut DocumentMut) -> Result<bool> {
@@ -181,6 +190,52 @@ fn migrate_server_bind(
          This server listens on a non-loopback address; only run it on a network you trust.",
         addr.ip(),
         addr.port()
+    ));
+    Ok(())
+}
+
+/// Migrate the deprecated boolean `[server] tailscale_enabled` to the tri-state
+/// `[server] tailscale` key. `true` becomes `"yes"` and `false` becomes `"no"`:
+/// a boolean says bind it or do not, and neither of them says "keep watching for
+/// the interface", so neither becomes `"auto"`.
+///
+/// The NEW key wins whenever both are present. That is the whole precedence
+/// rule: a user who has written the tri-state has said what they mean, and the
+/// leftover boolean is just an old line in the file. Either way the boolean is
+/// removed from the document, so the next canonical save stops carrying it.
+///
+/// A non-boolean value is dropped silently rather than failing the load: the key
+/// no longer exists, so there is nothing to be strict about, and the new key's
+/// own default (`auto`) is a safe answer.
+fn migrate_tailscale_enabled(
+    doc: &mut DocumentMut,
+    _old: DeprecatedConfigKey,
+    old_item: Item,
+) -> Result<()> {
+    let Some(enabled) = old_item.as_value().and_then(Value::as_bool) else {
+        return Ok(());
+    };
+    let mode = if enabled {
+        crate::config::TailscaleMode::Yes
+    } else {
+        crate::config::TailscaleMode::No
+    };
+    let table = ensure_table(doc, "server");
+    if table.contains_key("tailscale") {
+        crate::logger::warn(&format!(
+            "[server] tailscale_enabled = {enabled} is the retired boolean form of this \
+             setting and your file also sets [server] tailscale, so the tailscale value is \
+             what dux uses and the boolean is being dropped. Nothing else to do."
+        ));
+        return Ok(());
+    }
+    table["tailscale"] = toml_edit::value(mode.as_str());
+    crate::logger::warn(&format!(
+        "[server] tailscale_enabled = {enabled} has been replaced by the tri-state \
+         tailscale = \"auto\" | \"yes\" | \"no\", and is being read as \"{}\" for this run. \
+         Set [server] tailscale yourself to choose: \"auto\" binds your Tailscale address \
+         whenever it is there and drops that one listener when it is not.",
+        mode.as_str()
     ));
     Ok(())
 }
@@ -298,6 +353,58 @@ mod tests {
         // Loopback bind is dropped and NOT carried into host/port.
         assert!(d.get("server").and_then(|s| s.get("host")).is_none());
         assert!(d.get("server").and_then(|s| s.get("bind")).is_none());
+    }
+
+    #[test]
+    fn migrates_the_legacy_tailscale_boolean_to_the_tri_state() {
+        // true means "bind it" -> yes; false means "do not" -> no. Neither says
+        // "keep watching", so neither becomes auto.
+        let mut on = doc("[server]\ntailscale_enabled = true\n");
+        assert!(apply_load_migrations(&mut on).expect("migrate"));
+        assert_eq!(on["server"]["tailscale"].as_str(), Some("yes"));
+        assert!(
+            on.get("server")
+                .and_then(|s| s.get("tailscale_enabled"))
+                .is_none(),
+            "the legacy key must be removed"
+        );
+
+        let mut off = doc("[server]\ntailscale_enabled = false\n");
+        assert!(apply_load_migrations(&mut off).expect("migrate"));
+        assert_eq!(off["server"]["tailscale"].as_str(), Some("no"));
+    }
+
+    #[test]
+    fn the_new_tailscale_key_wins_when_both_keys_are_present() {
+        // A file carrying both has already said what it means with the tri-state;
+        // the leftover boolean is an old line, not a second opinion. It is
+        // removed, and the tri-state value is untouched.
+        let mut d = doc("[server]\ntailscale = \"auto\"\ntailscale_enabled = false\n");
+        assert!(apply_load_migrations(&mut d).expect("migrate"));
+        assert_eq!(d["server"]["tailscale"].as_str(), Some("auto"));
+        assert!(
+            d.get("server")
+                .and_then(|s| s.get("tailscale_enabled"))
+                .is_none(),
+            "the legacy key must be removed even when it lost"
+        );
+    }
+
+    #[test]
+    fn a_non_boolean_tailscale_enabled_is_dropped_without_failing_the_load() {
+        // The key no longer exists, so there is nothing to be strict about: drop
+        // it and let the new key's own default answer.
+        let mut d = doc("[server]\ntailscale_enabled = \"sure\"\n");
+        assert!(apply_load_migrations(&mut d).expect("migrate"));
+        assert!(
+            d.get("server").and_then(|s| s.get("tailscale")).is_none(),
+            "nothing is invented from a value dux cannot read"
+        );
+        assert!(
+            d.get("server")
+                .and_then(|s| s.get("tailscale_enabled"))
+                .is_none()
+        );
     }
 
     #[test]

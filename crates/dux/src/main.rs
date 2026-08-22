@@ -187,20 +187,26 @@ fn run_server(args: impl Iterator<Item = String>) -> Result<()> {
     dux_core::logger::init(&config.logging, &paths);
     dux_core::logger::info("bootstrapping dux server");
 
-    // Detect the Tailscale address up front (blocking is fine at CLI startup).
-    // It feeds the Tailscale leg of the bind plan. When detection fails but the
-    // user opted in (tailscale_enabled, no --no-tailscale), warn and proceed on
-    // the configured host only — never block.
-    let tailscale_wanted = config.server.tailscale_enabled && !overrides.no_tailscale;
-    let tailscale_ip = if tailscale_wanted {
+    // Detect the Tailscale address up front (blocking is fine at CLI startup, and
+    // the call is bounded). It feeds the Tailscale leg of the bind plan. When
+    // detection fails but the user wanted the leg, warn and proceed on the
+    // configured host only, never block. On the `auto` mode the serve path then
+    // keeps watching, so the warning says so rather than sounding final.
+    let tailscale_mode = dux_core::config::effective_tailscale_mode(
+        config.server.tailscale_mode(),
+        overrides.no_tailscale,
+    );
+    let tailscale_ip = if tailscale_mode.wants_tailscale() {
         match dux_core::tailscale::detect_ip() {
             Ok(ip) => Some(ip),
             Err(reason) => {
                 eprintln!(
-                    "WARNING: Tailscale not detected ({}) — serving on the configured host only. \
-                     Set tailscale_enabled = false in [server] (or pass --no-tailscale) to \
-                     silence this warning.",
-                    reason.reason()
+                    "WARNING: {}",
+                    dux_core::tailscale::undetected_warning(
+                        tailscale_mode,
+                        reason,
+                        "the configured host"
+                    )
                 );
                 None
             }

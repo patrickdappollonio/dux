@@ -162,6 +162,26 @@ fn a_deprecated_server_bind_still_decides_where_the_server_listens() {
 }
 
 #[test]
+fn a_deprecated_tailscale_boolean_still_decides_whether_the_tailscale_leg_binds() {
+    // The boolean `tailscale_enabled` became the tri-state `tailscale`. An
+    // operator who wrote `false` because they did not want dux on their tailnet
+    // must not silently get the new `auto` default, which would bind it.
+    let (_tmp, _paths, config) = load_old("[server]\nport = 9100\ntailscale_enabled = false\n");
+    assert_eq!(
+        config.server.tailscale_mode(),
+        dux_core::config::TailscaleMode::No
+    );
+
+    // And the other direction: an operator who wrote `true` keeps a bound leg,
+    // as `yes` (bind once at startup), not as `auto`.
+    let (_tmp, _paths, on) = load_old("[server]\ntailscale_enabled = true\n");
+    assert_eq!(
+        on.server.tailscale_mode(),
+        dux_core::config::TailscaleMode::Yes
+    );
+}
+
+#[test]
 fn a_deprecated_prompt_for_name_is_migrated_with_its_meaning_inverted() {
     let (_tmp, _paths, config) = load_old(OLD_CONFIG);
     // `prompt_for_name = false` means "do not ask me, just name it", which is
@@ -219,10 +239,7 @@ fn keys_added_since_the_old_config_was_written_fall_back_to_their_defaults() {
         fresh.ui.upload_write_gitignore
     );
     assert!(config.ui.upload_write_gitignore);
-    assert_eq!(
-        config.server.tailscale_enabled,
-        fresh.server.tailscale_enabled
-    );
+    assert_eq!(config.server.tailscale, fresh.server.tailscale);
     // `access_log` is deliberately NOT checked here: the fixture sets it, because
     // the retired-key test needs a user-set value inside `[server]` to notice that
     // section reverting. `color` is the untouched sibling that makes the point.

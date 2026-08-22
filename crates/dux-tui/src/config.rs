@@ -800,7 +800,7 @@ fn config_schema() -> Vec<ConfigEntry> {
         ConfigEntry::Section("server"),
         ConfigEntry::Comment(
             "# The dux web UI is a trusted-local tool: there is no login gate. It binds\n\
-             # host:port (loopback by default) and, when tailscale_enabled, also this\n\
+             # host:port (loopback by default) and, unless you turn it off, also this\n\
              # machine's Tailscale address so your other tailnet devices can reach it\n\
              # (traffic is WireGuard-encrypted in transit). The in-app \"start web\n\
              # server\" flip always serves on loopback (plus Tailscale) regardless of\n\
@@ -811,9 +811,11 @@ fn config_schema() -> Vec<ConfigEntry> {
              # this order:\n\
              #   1. host + port     — the one address dux binds. `dux server --bind\n\
              #                        IP:port` overrides both for that run.\n\
-             #   2. tailscale_enabled — binds an ADDITIONAL address (this machine's\n\
+             #   2. tailscale       — binds an ADDITIONAL address (this machine's\n\
              #                        Tailscale IP, same port). Never replaces host;\n\
-             #                        best-effort, so a failure only warns.\n\
+             #                        best-effort, so a failure only warns. On \"auto\"\n\
+             #                        dux keeps watching, so this leg comes and goes\n\
+             #                        with the interface while dux keeps serving.\n\
              #   3. allowed_hosts   — not an address at all. Once a request arrives\n\
              #                        at one of the addresses above, this is the\n\
              #                        guard on its Host header.\n\
@@ -834,24 +836,38 @@ fn config_schema() -> Vec<ConfigEntry> {
             key: "port",
             comment: Some(CommentSource::Static(
                 "# Bind port. dux binds host:port (and the Tailscale address:port when\n\
-                 # tailscale_enabled). The default is 8080.",
+                 # tailscale is not \"no\"). The default is 8080.",
             )),
             value_fn: |c| FieldValue::U16(c.server.port),
         },
         ConfigEntry::Field {
-            key: "tailscale_enabled",
+            key: "tailscale",
             comment: Some(CommentSource::Static(
-                "# Opt-out Tailscale binding for LOCAL MODE. When true (the default),\n\
-                 # dux detects this machine's Tailscale address (via the `tailscale ip`\n\
-                 # CLI) and also listens there, so tailnet devices can open the web UI.\n\
-                 # If the CLI is missing or the daemon is down, dux WARNS and serves on\n\
-                 # loopback only — it never blocks. Likewise, if the Tailscale port is\n\
-                 # already in use by another process, dux WARNS and serves on loopback\n\
-                 # only rather than failing to start. Set false to skip detection and\n\
-                 # silence that warning.\n\
-                 # NOTE: a shared tailnet means OTHER people's devices can reach dux.",
+                "# Whether dux also listens on this machine's Tailscale address, so your\n\
+                 # other tailnet devices can open the web UI. Detection is the `tailscale\n\
+                 # ip` CLI. This NEVER affects the host above: the Tailscale leg is an\n\
+                 # extra listener, and it is always best-effort.\n\
+                 #   \"auto\" (default): bind it whenever it exists, and keep looking. If\n\
+                 #                    Tailscale is up at startup, dux binds it. If it is\n\
+                 #                    not, dux says so and serves the configured host,\n\
+                 #                    then binds the Tailscale address by itself the\n\
+                 #                    moment it appears. When the interface goes away\n\
+                 #                    (you suspend, you log out of Tailscale, the daemon\n\
+                 #                    stops), dux drops that ONE listener and keeps\n\
+                 #                    serving; browsers connected over the tailnet\n\
+                 #                    reconnect on their own when it comes back.\n\
+                 #   \"yes\":           bind it once, at startup, and never look again. If\n\
+                 #                    it is not there then, dux warns and serves the\n\
+                 #                    configured host only for the whole run.\n\
+                 #   \"no\":            never bind it and never run the detection.\n\
+                 # If the CLI is missing, the daemon is down, or something else already\n\
+                 # holds that port, dux WARNS and keeps serving — a Tailscale problem\n\
+                 # never stops dux from starting. `dux server --no-tailscale` forces\n\
+                 # \"no\" for a single run.\n\
+                 # NOTE: a shared tailnet means OTHER people's devices can reach dux, and\n\
+                 # there is no login gate.",
             )),
-            value_fn: |c| FieldValue::Bool(c.server.tailscale_enabled),
+            value_fn: |c| FieldValue::Str(c.server.tailscale.clone()),
         },
         ConfigEntry::Field {
             key: "allowed_hosts",
@@ -2234,7 +2250,7 @@ mod tests {
         assert!(rendered.contains("[server]"));
         assert!(rendered.contains("host = \"127.0.0.1\""));
         assert!(rendered.contains("port = 8080"));
-        assert!(rendered.contains("tailscale_enabled = true"));
+        assert!(rendered.contains("tailscale = \"auto\""));
         assert!(rendered.contains("allowed_hosts = []"));
         assert!(
             !rendered.contains("bind = "),

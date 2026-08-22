@@ -4129,21 +4129,22 @@ impl App {
         self.pending_server_flip_op = Some(op);
         self.server_flip_preflight_pending = true;
         let port = self.engine.config.server.port;
-        let tailscale_enabled = self.engine.config.server.tailscale_enabled;
+        let tailscale = self.engine.config.server.tailscale_mode();
         let tx = self.engine.worker_tx.clone();
         std::thread::spawn(move || {
             // Detect the Tailscale address off the UI thread (the CLI call is the
             // reason this runs on a worker). When detection fails but the user
-            // opted in, carry a non-fatal warning naming the config key.
-            let (tailscale_ip, detect_warning) = if tailscale_enabled {
+            // opted in, carry a non-fatal warning that says what happens next,
+            // which differs by mode: on "auto" dux keeps watching and binds the
+            // leg by itself when the interface shows up, on "yes" this run is
+            // loopback-only for good.
+            let (tailscale_ip, detect_warning) = if tailscale.wants_tailscale() {
                 match dux_core::tailscale::detect_ip() {
                     Ok(ip) => (Some(ip), None),
                     Err(reason) => (
                         None,
-                        Some(format!(
-                            "Tailscale not detected ({}) — serving on loopback only. \
-                             Set tailscale_enabled = false in [server] to silence this warning.",
-                            reason.reason()
+                        Some(dux_core::tailscale::undetected_warning(
+                            tailscale, reason, "loopback",
                         )),
                     ),
                 }

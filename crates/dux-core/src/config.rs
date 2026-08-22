@@ -351,22 +351,174 @@ pub fn shutdown_grace(seconds: u16) -> std::time::Duration {
     std::time::Duration::from_secs(u64::from(seconds.min(MAX_SHUTDOWN_TIMEOUT_SECONDS)))
 }
 
+/// Whether the server binds this machine's Tailscale address alongside the
+/// configured host, and whether it keeps watching for that address to come and
+/// go.
+///
+/// A tri-state rather than a boolean because a laptop's tailnet address is not a
+/// property of the config, it is a property of the moment: it appears when
+/// tailscaled connects and vanishes when it does not, several times a day on a
+/// machine that suspends and roams. `Yes` and `No` are the two static answers;
+/// `Auto` is the answer that survives that churn.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TailscaleMode {
+    /// Bind the Tailscale address whenever it exists, and keep looking. dux
+    /// binds it at startup if it is there, binds it later if it appears, and
+    /// drops that one listener when it goes away. The configured host is never
+    /// affected either way. The default, and what the old
+    /// `tailscale_enabled = true` becomes.
+    #[default]
+    Auto,
+    /// Bind the Tailscale address once, at startup, and never look again. If it
+    /// is not there at startup dux warns and serves the configured host only,
+    /// for the whole run. This is the pre-tri-state behavior.
+    Yes,
+    /// Never bind it and never run the detection at all. What the old
+    /// `tailscale_enabled = false` becomes, and what `--no-tailscale` forces for
+    /// a single run.
+    No,
+}
+
+impl TailscaleMode {
+    /// Parse a config string into a mode, returning `None` for an unrecognized
+    /// value so the caller decides whether to warn. Never warns itself.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "yes" => Some(Self::Yes),
+            "no" => Some(Self::No),
+            _ => None,
+        }
+    }
+
+    /// The warning text for one unrecognized value, or `None` when the value is
+    /// a mode dux knows. Returned rather than logged so the message itself is
+    /// testable, the [`ComposeBarMode::unknown_value_warning`] precedent.
+    pub fn unknown_value_warning(s: &str) -> Option<String> {
+        if Self::parse(s).is_some() {
+            return None;
+        }
+        Some(format!(
+            "unknown [server] tailscale value {s:?}; falling back to \"auto\" \
+             (valid: auto, yes, no)"
+        ))
+    }
+
+    /// The canonical lowercase name, which is what goes in `config.toml`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Yes => "yes",
+            Self::No => "no",
+        }
+    }
+
+    /// Whether dux should bind the Tailscale address at all. False only for
+    /// [`Self::No`], which also skips detection entirely.
+    pub fn wants_tailscale(self) -> bool {
+        match self {
+            Self::Auto | Self::Yes => true,
+            Self::No => false,
+        }
+    }
+
+    /// Whether the Tailscale leg is watched for the whole run, so it can be
+    /// bound and dropped as the interface comes and goes. True only for
+    /// [`Self::Auto`].
+    pub fn watches_interface(self) -> bool {
+        match self {
+            Self::Auto => true,
+            Self::Yes | Self::No => false,
+        }
+    }
+}
+
+/// The mode a single run actually serves under: `--no-tailscale` forces
+/// [`TailscaleMode::No`], otherwise the configured mode stands. One place so the
+/// CLI flag cannot be honored on one code path and forgotten on another.
+pub fn effective_tailscale_mode(
+    configured: TailscaleMode,
+    no_tailscale_flag: bool,
+) -> TailscaleMode {
+    if no_tailscale_flag {
+        TailscaleMode::No
+    } else {
+        configured
+    }
+}
+
+/// Accept BOTH the current `[server] tailscale` string and a bare BOOLEAN, so a
+/// user who writes `tailscale = true` (the shape the setting had when it was
+/// named `tailscale_enabled`) gets the meaning-preserving mode instead of a
+/// failed config parse.
+///
+/// `true` becomes [`TailscaleMode::Yes`] and `false` becomes
+/// [`TailscaleMode::No`]: a boolean says "bind it" or "do not", and neither says
+/// "keep watching", so neither maps to `auto`. The RENAMED key is handled
+/// separately, at document level, by [`crate::config_migrate`].
+///
+/// An unrecognized STRING passes through untouched rather than being rejected
+/// here, exactly as `ui.compose_bar` does: the warn-once-and-degrade happens at
+/// load ([`tailscale_load_warning`]), so one typo does not take the whole config
+/// file down with it.
+fn deserialize_tailscale<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct TailscaleVisitor;
+
+    impl serde::de::Visitor<'_> for TailscaleVisitor {
+        type Value = String;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("\"auto\", \"yes\", \"no\", or a legacy boolean")
+        }
+
+        fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<String, E> {
+            Ok(if v {
+                TailscaleMode::Yes.as_str().to_string()
+            } else {
+                TailscaleMode::No.as_str().to_string()
+            })
+        }
+
+        fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<String, E> {
+            Ok(v.to_string())
+        }
+    }
+
+    deserializer.deserialize_any(TailscaleVisitor)
+}
+
+/// The one-line warning to log when `[server] tailscale` names a mode dux does
+/// not know, or `None` when it is fine. Emitted once per load, never per read.
+pub fn tailscale_load_warning(config: &Config) -> Option<String> {
+    TailscaleMode::unknown_value_warning(&config.server.tailscale)
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ServerConfig {
     /// LOCAL MODE bind host. `dux server` binds `host:port` (plus the machine's
-    /// Tailscale address when `tailscale_enabled`). Must be an IP literal such as
+    /// Tailscale address unless `tailscale` is `"no"`). Must be an IP literal such as
     /// `127.0.0.1` (loopback, the safe default) or `0.0.0.0` (all interfaces);
     /// hostnames are not resolved. Default `127.0.0.1`.
     pub host: String,
     /// LOCAL MODE port. `dux server` and the palette flip bind `host:port` (plus
-    /// the machine's Tailscale address when `tailscale_enabled`). Default 8080.
+    /// the machine's Tailscale address unless `tailscale` is `"no"`). Default 8080.
     pub port: u16,
-    /// OPT-OUT Tailscale binding. When true, the server also binds the machine's
-    /// Tailscale address (100.64.0.0/10) so tailnet devices reach dux over
-    /// WireGuard. Detection shells out to `tailscale ip`; when the CLI is missing
-    /// or the daemon is down, dux WARNS and serves the configured host only.
-    pub tailscale_enabled: bool,
+    /// Tailscale binding, a tri-state: `"auto"` (the default), `"yes"`, or
+    /// `"no"`. Read through [`ServerConfig::tailscale_mode`], never compared as a
+    /// string. An unrecognized value degrades to `"auto"` with one warning at
+    /// load ([`tailscale_load_warning`]), the `ui.compose_bar` precedent.
+    ///
+    /// The BOOLEAN this setting used to be (`tailscale_enabled`) keeps working:
+    /// it is rewritten to this key on load by
+    /// [`crate::config_migrate::apply_load_migrations`] (`true` to `"yes"`,
+    /// `false` to `"no"`), and this field also accepts a bare boolean of its own
+    /// so `tailscale = true` parses (see [`deserialize_tailscale`]).
+    #[serde(deserialize_with = "deserialize_tailscale")]
+    pub tailscale: String,
     /// Extra `Host` header values to accept when the request is NOT same-origin.
     /// dux is trusted-local: it always serves on `host:port` (loopback by default)
     /// and accepts same-origin requests. List any additional hostnames a reverse
@@ -494,6 +646,16 @@ pub struct ServerConfig {
     /// than disabling the bound: a zero-permit semaphore would stall every drop
     /// forever. Read at startup, so changing it needs a server restart.
     pub file_drop_max_concurrency: u32,
+}
+
+impl ServerConfig {
+    /// The configured Tailscale mode. Silent: an unrecognized value degrades to
+    /// [`TailscaleMode::Auto`] here, because `load_config` already warned about
+    /// it once and corrected the stored value in memory. Every reader goes
+    /// through this rather than comparing the string itself.
+    pub fn tailscale_mode(&self) -> TailscaleMode {
+        TailscaleMode::parse(&self.tailscale).unwrap_or_default()
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -1451,7 +1613,7 @@ impl Default for ServerConfig {
         Self {
             host: "127.0.0.1".to_string(),
             port: 8080,
-            tailscale_enabled: true,
+            tailscale: TailscaleMode::Auto.as_str().to_string(),
             allowed_hosts: Vec::new(),
             color: "auto".to_string(),
             access_log: true,
@@ -2287,6 +2449,13 @@ pub fn load_config(paths: &DuxPaths) -> Config {
         crate::logger::warn(&warning);
         config.ui.compose_bar = ComposeBarMode::Auto.as_str().to_string();
     }
+    // And once more for a `[server] tailscale` naming a mode dux does not know.
+    // Corrected in memory so the serve path reads a real mode rather than
+    // silently treating a typo as the default on every question it asks.
+    if let Some(warning) = tailscale_load_warning(&config) {
+        crate::logger::warn(&warning);
+        config.server.tailscale = TailscaleMode::Auto.as_str().to_string();
+    }
     config
 }
 
@@ -2490,6 +2659,15 @@ impl PlanAddr {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerPlan {
     pub addrs: Vec<PlanAddr>,
+    /// The one REQUIRED address (the configured `host:port` or `--bind`). Kept
+    /// beside `addrs` because the Tailscale watcher has to know what the primary
+    /// listener already covers: a wildcard primary, or a primary that IS the
+    /// Tailscale address, needs no separate leg and must never grow one later.
+    pub primary: std::net::SocketAddr,
+    /// The mode this run serves under, after `--no-tailscale` is applied. The
+    /// serve path reads it to decide whether to watch the interface at all, so
+    /// the flag cannot be honored at plan time and forgotten at serve time.
+    pub tailscale: TailscaleMode,
 }
 
 /// CLI overrides for the server plan. Every field is `None`/`false` when the
@@ -2559,13 +2737,16 @@ pub fn resolve_server_plan(
              a non-zero port."
         );
     }
-    let ts = if server.tailscale_enabled && !cli.no_tailscale {
+    let tailscale = effective_tailscale_mode(server.tailscale_mode(), cli.no_tailscale);
+    let ts = if tailscale.wants_tailscale() {
         tailscale_ip
     } else {
         None
     };
     Ok(ServerPlan {
         addrs: plan_addrs(bind, ts),
+        primary: bind,
+        tailscale,
     })
 }
 
@@ -3689,12 +3870,84 @@ github_integration = false
     #[test]
     fn server_config_defaults_when_section_absent() {
         // A config TOML with no [server] section must still parse and yield the
-        // safe local defaults (loopback host, port 8080, Tailscale opt-out on).
+        // safe local defaults (loopback host, port 8080, Tailscale on "auto").
         let config: Config = toml::from_str("").expect("empty config should parse");
         assert_eq!(config.server.host, "127.0.0.1");
         assert_eq!(config.server.port, 8080);
-        assert!(config.server.tailscale_enabled);
+        assert_eq!(config.server.tailscale_mode(), TailscaleMode::Auto);
         assert!(config.server.allowed_hosts.is_empty());
+    }
+
+    #[test]
+    fn tailscale_mode_parses_the_three_values_case_insensitively() {
+        assert_eq!(TailscaleMode::parse("auto"), Some(TailscaleMode::Auto));
+        assert_eq!(TailscaleMode::parse("yes"), Some(TailscaleMode::Yes));
+        assert_eq!(TailscaleMode::parse("no"), Some(TailscaleMode::No));
+        assert_eq!(TailscaleMode::parse("  YES  "), Some(TailscaleMode::Yes));
+        // A value dux does not know is None here; the caller decides to warn.
+        assert_eq!(TailscaleMode::parse("maybe"), None);
+        assert_eq!(TailscaleMode::parse("true"), None);
+    }
+
+    #[test]
+    fn an_unknown_tailscale_value_warns_and_degrades_to_auto() {
+        let warning = TailscaleMode::unknown_value_warning("maybe")
+            .expect("an unknown value must produce a warning");
+        assert!(warning.contains("maybe"), "must quote the value: {warning}");
+        assert!(
+            warning.contains("auto") && warning.contains("yes") && warning.contains("no"),
+            "must list the valid values: {warning}"
+        );
+        assert!(
+            TailscaleMode::unknown_value_warning("no").is_none(),
+            "a known value must not warn"
+        );
+
+        // And the degrade itself: a config carrying the typo still reads as auto
+        // rather than refusing to parse.
+        let config: Config = toml::from_str("[server]\ntailscale = \"maybe\"\n")
+            .expect("a typo must not fail the whole config parse");
+        assert_eq!(config.server.tailscale_mode(), TailscaleMode::Auto);
+    }
+
+    #[test]
+    fn tailscale_mode_answers_the_two_questions_the_serve_path_asks() {
+        // Whether to bind at all, and whether to keep watching. Every serve-path
+        // decision goes through these two, so they are pinned per variant.
+        assert!(TailscaleMode::Auto.wants_tailscale());
+        assert!(TailscaleMode::Yes.wants_tailscale());
+        assert!(!TailscaleMode::No.wants_tailscale());
+        assert!(TailscaleMode::Auto.watches_interface());
+        assert!(!TailscaleMode::Yes.watches_interface());
+        assert!(!TailscaleMode::No.watches_interface());
+    }
+
+    #[test]
+    fn no_tailscale_flag_forces_the_no_mode_whatever_the_config_says() {
+        for configured in [TailscaleMode::Auto, TailscaleMode::Yes, TailscaleMode::No] {
+            assert_eq!(
+                effective_tailscale_mode(configured, true),
+                TailscaleMode::No,
+                "--no-tailscale must win over {configured:?}"
+            );
+            assert_eq!(
+                effective_tailscale_mode(configured, false),
+                configured,
+                "without the flag the configured mode stands"
+            );
+        }
+    }
+
+    #[test]
+    fn the_legacy_boolean_form_of_the_tailscale_key_still_parses() {
+        // A user who writes the shape this setting used to have gets the
+        // meaning-preserving mode, not a failed parse. `true` is "bind it" (yes),
+        // `false` is "do not" (no); neither says "keep watching", so neither is
+        // auto.
+        let yes: Config = toml::from_str("[server]\ntailscale = true\n").expect("bool parses");
+        assert_eq!(yes.server.tailscale_mode(), TailscaleMode::Yes);
+        let no: Config = toml::from_str("[server]\ntailscale = false\n").expect("bool parses");
+        assert_eq!(no.server.tailscale_mode(), TailscaleMode::No);
     }
 
     #[test]
@@ -3739,14 +3992,14 @@ favicon = "violet"
 [server]
 host = "0.0.0.0"
 port = 9000
-tailscale_enabled = false
+tailscale = "no"
 allowed_hosts = ["box.tailnet.ts.net"]
 "#,
         )
         .expect("config with full [server] should parse");
         assert_eq!(config.server.host, "0.0.0.0");
         assert_eq!(config.server.port, 9000);
-        assert!(!config.server.tailscale_enabled);
+        assert_eq!(config.server.tailscale_mode(), TailscaleMode::No);
         assert_eq!(
             config.server.allowed_hosts,
             vec!["box.tailnet.ts.net".to_string()]
@@ -3765,7 +4018,7 @@ port = 9000
         .expect("config with partial [server] should parse");
         assert_eq!(config.server.host, "127.0.0.1");
         assert_eq!(config.server.port, 9000);
-        assert!(config.server.tailscale_enabled);
+        assert_eq!(config.server.tailscale_mode(), TailscaleMode::Auto);
         assert!(config.server.allowed_hosts.is_empty());
     }
 
