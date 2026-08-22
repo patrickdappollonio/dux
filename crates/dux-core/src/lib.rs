@@ -18,6 +18,7 @@ pub mod config_migrate;
 pub mod config_queue;
 pub mod config_sync;
 pub mod config_write;
+pub mod device_label;
 pub mod diff;
 pub mod editor;
 pub mod engine;
