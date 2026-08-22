@@ -221,22 +221,6 @@ async fn bind_plan_addrs(addrs: &[PlanAddr]) -> Result<(Vec<BoundListener>, Vec<
     Ok((bound, warnings))
 }
 
-/// The plain-HTTP serve path: one axum task per listener (loopback, Tailscale,
-/// LAN, or proxy-fronted), sharing the router/state. Shutdown rides the
-/// [`ServeShutdown`] watch lane: a SIGINT/SIGTERM trips the watch, and the FIRST
-/// listener to die records its error and trips the watch too, so the siblings get
-/// a graceful shutdown and the error propagates (genuine first-error wind-down —
-/// no longer a no-abort JoinSet wait).
-///
-/// A BEST-EFFORT (Tailscale) address whose bind fails (a third-party process
-/// already holds it) does NOT abort the serve: it warns loudly to `dux.log` and
-/// the server keeps serving the remaining (bound) addresses. The warning is NOT
-/// re-broadcast to web clients — the status broadcast has no replay, and clients
-/// only subscribe when their WS connects, which is always after this startup bind,
-/// so a startup broadcast would reach zero receivers. `dux.log` and the CLI
-/// startup banner (which flags a best-effort leg) are the delivery surfaces for
-/// the `dux server` path; the TUI palette flip delivers through its own status
-/// line, unchanged.
 /// Build the plain-HTTP startup banner from the BOUND legs (each an
 /// `(addr, required)` pair). Each leg is labeled by what it is:
 /// - loopback → "Local (loopback)"
@@ -391,6 +375,21 @@ pub fn safety_note(addrs: &[PlanAddr], tailscale: TailscaleMode) -> Option<Strin
     }
 }
 
+/// The plain-HTTP serve path: one leg per listener (loopback, Tailscale, LAN, or
+/// proxy-fronted), sharing the router/state, plus the Tailscale watcher on the
+/// `auto` mode. Shutdown rides the [`ServeShutdown`] lanes: a SIGINT/SIGTERM or a
+/// required leg's death trips the parent lane, which fans out over every leg, so
+/// the siblings get a graceful shutdown and the error propagates.
+///
+/// A BEST-EFFORT (Tailscale) address whose bind fails (a third-party process
+/// already holds it) does NOT abort the serve: it warns loudly to `dux.log` and
+/// the server keeps serving the remaining addresses. Startup bind warnings are NOT
+/// re-broadcast to web clients, because the status broadcast has no replay and
+/// clients only subscribe when their WS connects, which is always after this
+/// startup bind, so a startup broadcast would reach zero receivers. `dux.log` and
+/// the startup banner are the delivery surfaces here; MID-RUN leg changes (the
+/// watcher's doing) go to `dux.log` and the console, which is this terminal for
+/// `dux server` and the flip status screen's activity panel for the flip.
 fn run_plain_http(paths: DuxPaths, plan: ServerPlan, version: String) -> Result<()> {
     let ServerPlan {
         addrs,
@@ -750,7 +749,7 @@ async fn apply_leg_command(
                      Nothing else changed; your other address is untouched."
                 );
                 dux_core::logger::info(&format!("[server] {message}"));
-                console.bind_degraded(&message);
+                console.leg_changed(&message);
             }
             Err(err) => {
                 // Best-effort: say so and carry on. The watcher compares against
@@ -775,7 +774,7 @@ async fn apply_leg_command(
                      reconnect by themselves when it comes back."
                 );
                 dux_core::logger::info(&format!("[server] {message}"));
-                console.bind_degraded(&message);
+                console.leg_changed(&message);
             }
         }
     }

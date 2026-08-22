@@ -425,6 +425,14 @@ impl Console {
         self.emit(Tone::Warn, message);
     }
 
+    /// A listener the server ADDED or DROPPED while running: the Tailscale leg
+    /// following its interface. Deliberately not [`Self::bind_degraded`]: a leg
+    /// arriving is good news, and a leg leaving on `auto` is expected news, so
+    /// neither belongs under a ⚠ that means something went wrong.
+    pub fn leg_changed(&self, message: &str) {
+        self.emit(Tone::Info, message);
+    }
+
     /// One access-log line. Console-only; gated by the caller on the `access_log`
     /// config AND console activity. Early-returns on a no-op console BEFORE the
     /// timestamp/format work so a disabled console pays nothing per request.
