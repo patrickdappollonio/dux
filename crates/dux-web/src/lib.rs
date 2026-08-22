@@ -74,7 +74,7 @@ use dux_core::engine::Engine;
 use crate::console::{Banner, Console, ListenerRow};
 use crate::engine_actor::LoopControl;
 use crate::serve_legs::{
-    LegCommand, ServeShutdown, WATCH_PERIOD, wait_for_leg_shutdown, waiting_note,
+    LegCommand, ServeShutdown, StartupLeg, WATCH_PERIOD, wait_for_leg_shutdown, waiting_note,
     watch_tailscale_leg,
 };
 use crate::server::RouterParams;
@@ -446,11 +446,24 @@ fn run_plain_http(paths: DuxPaths, plan: ServerPlan, version: String) -> Result<
             .iter()
             .find(|b| !b.required && !b.addr.ip().is_loopback())
             .map(|b| b.addr);
+        // Detection outcome versus bind outcome: the PLAN carries the first (a
+        // best-effort address is only in it when an address was detected), `bound`
+        // carries the second. The note has to tell them apart, because "dux is
+        // waiting for the interface" is false when the interface is up and it was
+        // the bind that failed.
+        let startup_leg = match (
+            addrs.iter().any(|p| !p.is_required()),
+            initial_tailscale_leg,
+        ) {
+            (_, Some(_)) => StartupLeg::Bound,
+            (true, None) => StartupLeg::BindFailed,
+            (false, None) => StartupLeg::Undetected,
+        };
         let note = safety_note(&bound_plan_addrs, tailscale);
         // The third state the banner has to be able to say: on `auto` with no
         // address yet, dux is not "without Tailscale", it is waiting for it.
         let mut banner_warnings = bind_warnings.clone();
-        banner_warnings.extend(waiting_note(tailscale, initial_tailscale_leg.is_some()));
+        banner_warnings.extend(waiting_note(tailscale, startup_leg));
         console.banner(&plain_http_banner(
             &version,
             &banner_legs,
@@ -464,8 +477,10 @@ fn run_plain_http(paths: DuxPaths, plan: ServerPlan, version: String) -> Result<
         let (handle, _join) = engine_actor::spawn_engine_thread(engine);
 
         // The shared shutdown primitive: a SIGINT/SIGTERM or a first-listener
-        // failure flips its watch and every serve task awaits it.
-        let shutdown = ServeShutdown::new();
+        // failure flips its watch and every serve task awaits it. It carries the
+        // mode's watched-ness so a dying Tailscale leg can say truthfully whether
+        // anything is going to bind it again.
+        let shutdown = ServeShutdown::new(tailscale.watches_interface());
         // Collect the IPs the server actually bound to (for the host allowlist).
         // Uses the bound addresses captured above, BEFORE the listeners move into
         // the serve tasks. Together with `server.allowed_hosts` from config this
@@ -536,7 +551,7 @@ fn run_plain_http(paths: DuxPaths, plan: ServerPlan, version: String) -> Result<
         let watcher_stop = Arc::new(AtomicBool::new(false));
         let (leg_commands, bound_tailscale) = start_tailscale_watcher(
             tailscale,
-            primary,
+            Some(primary),
             initial_tailscale_leg,
             Arc::clone(&watcher_stop),
         );
@@ -688,15 +703,24 @@ async fn run_serve_loop(
                     // A task PANICKED and recorded nothing, so record it here and
                     // trip the lane: a panicking serve task is not a leg going
                     // quietly, it is a bug, and the server must not limp on
-                    // half-dead.
+                    // half-dead. So the other listeners are shut down too.
                     dux_core::logger::error(&format!(
-                        "[server] a serve task panicked: {join_err} — shutting the other \
+                        "[server] a serve task panicked: {join_err}. Shutting the other \
                          listeners down so the server does not limp on half-dead."
                     ));
                     shutdown.record_failure(anyhow::anyhow!(
                         "a serve task panicked: {join_err}"
                     ));
                 }
+                // A leg's task has ended. If it was the Tailscale leg dying on its
+                // own (its accept loop failed mid-run, or it panicked), it forgot
+                // itself from the registry but nothing cleared the watcher-facing
+                // "what is bound" cell, and a watcher that still believes the leg
+                // is bound plans Nothing forever: the leg would only come back
+                // after a full interface flap. Reconcile here, where the serve loop
+                // is the cell's ONE writer, rather than letting a dying task write
+                // it from underneath.
+                reconcile_bound_tailscale(&shutdown, &bound_tailscale, &mut last_bind_failure);
             }
             command = commands.recv(), if watcher_open => {
                 match command {
@@ -722,6 +746,45 @@ async fn run_serve_loop(
     // The lane is tripped and `trigger` has fanned out to every leg, so each task
     // is winding down. Reap them; the CALLER bounds how long it waits for this.
     while tasks.join_next().await.is_some() {}
+}
+
+/// Reconcile the watcher-facing "what is bound" cell against the leg registry,
+/// which is the one authority on what dux is actually serving.
+///
+/// The cell exists so the watcher compares against reality rather than against
+/// what it last asked for. A best-effort leg can leave that reality WITHOUT the
+/// serve loop having asked: its accept loop dies, `record_best_effort_failure`
+/// forgets it from the registry, and its task ends. Then the cell would still name
+/// the address, the watcher's plan would be `Nothing` on every period, and the leg
+/// would stay down until the interface itself flapped. So whenever a leg's task
+/// ends, an address the cell names but the registry does not is cleared.
+///
+/// The bind-failure streak is cleared with it: a bind attempt after the leg went
+/// away is a NEW streak, and its failure deserves the warning that the first one
+/// got rather than a debug line about a streak that ended.
+///
+/// This keeps the cell single-writer (the serve loop). Letting the dying task
+/// clear it would mean two writers racing over one `Option`, and a Rebind's
+/// unbind-then-bind pair could have the loser blank an address that had just been
+/// bound.
+fn reconcile_bound_tailscale(
+    shutdown: &ServeShutdown,
+    bound_tailscale: &Arc<std::sync::Mutex<Option<SocketAddr>>>,
+    last_bind_failure: &mut Option<SocketAddr>,
+) {
+    let Ok(mut slot) = bound_tailscale.lock() else {
+        return;
+    };
+    if let Some(addr) = *slot
+        && !shutdown.has_leg(addr)
+    {
+        *slot = None;
+        *last_bind_failure = None;
+        dux_core::logger::debug(&format!(
+            "[server] the Tailscale leg on {addr} is no longer serving; the watcher will \
+             bind it again on its next period while the interface is there."
+        ));
+    }
 }
 
 /// Act on one watcher command: bind and start serving the Tailscale leg, or stop
@@ -782,6 +845,11 @@ async fn apply_leg_command(
             if let Ok(mut slot) = bound_tailscale.lock() {
                 *slot = None;
             }
+            // The interface went away, so the once-per-streak suppression ends
+            // here: the next bind attempt is a fresh situation, and a port that is
+            // still busy after a flap deserves to be said out loud again rather
+            // than being silenced by a streak that predates the flap.
+            *last_bind_failure = None;
             if stopped {
                 let message = format!(
                     "Tailscale interface went away: dux stopped serving on {addr} and is still \
@@ -806,9 +874,14 @@ async fn apply_leg_command(
 ///
 /// For every other mode this still returns a receiver, one that simply never
 /// yields, so the serve loop has a single shape.
+/// `primary` is an `Option` because the flip derives it from a listener's
+/// `local_addr`, which can in principle fail. Without a primary there is nothing
+/// to derive the leg's port from, and inventing one would have the watcher bind
+/// the Tailscale address on a port nobody was told about, so that case starts no
+/// watcher and says why.
 fn start_tailscale_watcher(
     mode: TailscaleMode,
-    primary: SocketAddr,
+    primary: Option<SocketAddr>,
     initial: Option<SocketAddr>,
     stop: Arc<AtomicBool>,
 ) -> (
@@ -822,6 +895,15 @@ fn start_tailscale_watcher(
         // sender closes the channel so the serve loop stops listening for good.
         return (rx, bound);
     }
+    let Some(primary) = primary else {
+        dux_core::logger::warn(
+            "[server] not starting the Tailscale interface watcher: the address of the \
+             primary listener could not be read, so there is no port to serve the Tailscale \
+             leg on. dux is serving on the addresses it bound at startup; restart dux to pick \
+             up a Tailscale address that appears later.",
+        );
+        return (rx, bound);
+    };
     let watcher_bound = Arc::clone(&bound);
     std::thread::Builder::new()
         .name("dux-tailscale-watch".to_string())
@@ -974,7 +1056,7 @@ pub fn serve_with_engine(
     // `record_failure`. The control closure polls `is_failed()` so a listener
     // death also breaks the engine loop, and `take_error()` surfaces the death to
     // the caller.
-    let shutdown = ServeShutdown::new();
+    let shutdown = ServeShutdown::new(flip_tailscale.watches_interface());
     // Set by the signal task; polled by the control closure so a SIGINT/SIGTERM
     // received while serving breaks the engine loop too (not just axum). Distinct
     // from the failure flag because a signal means QuitProcess, a failure means
@@ -1024,7 +1106,9 @@ pub fn serve_with_engine(
         let _guard = runtime.enter();
         start_tailscale_watcher(
             flip_tailscale,
-            flip_primary.unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], 0))),
+            // No loopback listener address means no port to hang the leg on, so
+            // this deliberately starts no watcher rather than guessing one.
+            flip_primary,
             flip_tailscale_leg,
             Arc::clone(&watcher_stop),
         )
@@ -1036,12 +1120,25 @@ pub fn serve_with_engine(
         let mut legs = tokio::task::JoinSet::new();
         let guard = runtime.enter();
         for tokio_listener in tokio_listeners {
-            let addr = tokio_listener
-                .local_addr()
-                .unwrap_or_else(|_| SocketAddr::from(([127, 0, 0, 1], 0)));
             // Loopback is the flip's REQUIRED leg (it cannot serve without it);
-            // the Tailscale leg is best-effort, exactly as in the CLI path.
-            let required = addr.ip().is_loopback();
+            // the Tailscale leg is best-effort, exactly as in the CLI path. A
+            // listener whose own address cannot be read is served BEST-EFFORT: it
+            // cannot be identified as the loopback leg, and treating an unknown
+            // address as the one whose death ends the whole server is the wrong way
+            // to be wrong. Its placeholder address is a registry key and a log
+            // label only, never a bind target.
+            let (addr, required) = match tokio_listener.local_addr() {
+                Ok(addr) => (addr, addr.ip().is_loopback()),
+                Err(err) => {
+                    dux_core::logger::warn(&format!(
+                        "[server] serving a pre-bound flip listener whose address could not be \
+                         read ({err}); it is treated as best-effort, so its failure alone will \
+                         not stop the server. The web UI is still reachable on the addresses \
+                         the status screen lists."
+                    ));
+                    (SocketAddr::from(([127, 0, 0, 1], 0)), false)
+                }
+            };
             spawn_leg(
                 &mut legs,
                 app.clone(),
@@ -1290,6 +1387,128 @@ mod tests {
     };
     use dux_core::config::{PlanAddr, TailscaleMode};
     use dux_core::engine::Command;
+
+    #[test]
+    fn reconciling_leaves_a_cell_that_still_names_a_live_leg_alone() {
+        // The other half of the reconcile: a leg that is still serving must not be
+        // blanked, or every reaped sibling task would have the watcher rebind a
+        // healthy listener.
+        let ts: std::net::SocketAddr = "100.64.0.5:8080".parse().unwrap();
+        let shutdown = crate::serve_legs::ServeShutdown::new(true);
+        let _leg = shutdown.register_leg(ts);
+        let cell = std::sync::Arc::new(std::sync::Mutex::new(Some(ts)));
+        let mut streak = Some(ts);
+        super::reconcile_bound_tailscale(&shutdown, &cell, &mut streak);
+        assert_eq!(*cell.lock().unwrap(), Some(ts), "the leg is still serving");
+        assert_eq!(streak, Some(ts), "and its failure streak is untouched");
+    }
+
+    #[tokio::test]
+    async fn an_unbind_ends_the_bind_failure_streak_so_a_flap_warns_again() {
+        // The once-per-streak suppression exists for a port somebody else holds
+        // forever. An interface that went away and came back is a new situation,
+        // and its bind failure must be said out loud rather than swallowed by a
+        // streak that predates the flap.
+        let ts: std::net::SocketAddr = "100.64.0.5:8080".parse().unwrap();
+        let shutdown = crate::serve_legs::ServeShutdown::new(true);
+        let _leg = shutdown.register_leg(ts);
+        let console = crate::console::Console::capture(dux_core::activity::ActivityRing::new());
+        let cell = std::sync::Arc::new(std::sync::Mutex::new(Some(ts)));
+        let mut streak = Some(ts);
+        let mut tasks = tokio::task::JoinSet::new();
+
+        super::apply_leg_command(
+            crate::serve_legs::LegCommand::Unbind(ts),
+            &mut tasks,
+            &shutdown,
+            &axum::Router::new(),
+            &console,
+            &cell,
+            &mut streak,
+        )
+        .await;
+
+        assert_eq!(*cell.lock().unwrap(), None, "nothing is bound there now");
+        assert_eq!(
+            streak, None,
+            "the streak ends with the interface, so the next failure warns again"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_best_effort_leg_that_died_on_its_own_is_bound_again_on_the_next_period() {
+        // The uncovered twin of serve_legs' `a_failed_bind_is_retried_on_the_next_period`.
+        // There the BIND failed; here the bind succeeded and the accept loop died
+        // later, which is the routine case (the laptop suspended, tailscaled
+        // stopped). The watcher compares against the "what is bound" cell, so a
+        // death that leaves the cell naming the dead address makes every period
+        // plan Nothing and the leg stays down until the interface itself flaps.
+        let ts: std::net::SocketAddr = "100.64.0.5:8080".parse().unwrap();
+        let shutdown = crate::serve_legs::ServeShutdown::new(true);
+        let bound_tailscale = std::sync::Arc::new(std::sync::Mutex::new(Some(ts)));
+        let leg_lane = shutdown.register_leg(ts);
+        let console = crate::console::Console::capture(dux_core::activity::ActivityRing::new());
+
+        // The leg's accept loop dies mid-run: exactly what `spawn_leg`'s
+        // best-effort arm does, without the flakiness of forcing a real axum
+        // accept loop to error.
+        let mut legs = tokio::task::JoinSet::new();
+        {
+            let shutdown = shutdown.clone();
+            legs.spawn(async move {
+                shutdown.record_best_effort_failure(
+                    ts,
+                    &anyhow::anyhow!("the interface went away mid-serve"),
+                );
+            });
+        }
+
+        // A sender kept alive, so the loop's command arm stays pending rather than
+        // reporting the watcher gone.
+        let (_commands_tx, commands_rx) = tokio::sync::mpsc::channel(super::LEG_COMMAND_QUEUE);
+        let loop_task = tokio::spawn(super::run_serve_loop(
+            legs,
+            shutdown.clone(),
+            commands_rx,
+            axum::Router::new(),
+            console,
+            std::sync::Arc::clone(&bound_tailscale),
+        ));
+
+        let cleared = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if bound_tailscale
+                    .lock()
+                    .expect("the cell is not poisoned")
+                    .is_none()
+                {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        assert!(
+            cleared.is_ok(),
+            "a leg that died must stop looking bound, or the watcher never asks for it again"
+        );
+
+        // Which is the whole point: the very next watch period, with the interface
+        // still there, plans a fresh Bind rather than Nothing.
+        let bound_now = *bound_tailscale.lock().expect("the cell is not poisoned");
+        assert_eq!(
+            crate::serve_legs::plan_leg_step(bound_now, Some(ts)),
+            crate::serve_legs::LegStep::Bind(ts),
+            "the next period must plan a re-bind"
+        );
+
+        drop(leg_lane);
+        shutdown.trigger();
+        tokio::time::timeout(std::time::Duration::from_secs(2), loop_task)
+            .await
+            .expect("a tripped lane must end the serve loop")
+            .expect("the serve loop task joins");
+    }
 
     #[test]
     fn flip_console_captures_into_the_shared_ring() {
@@ -1617,7 +1836,7 @@ mod tests {
         for mode in [TailscaleMode::Yes, TailscaleMode::No] {
             let (mut commands, bound) = super::start_tailscale_watcher(
                 mode,
-                "127.0.0.1:8080".parse().unwrap(),
+                Some("127.0.0.1:8080".parse().unwrap()),
                 None,
                 std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             );

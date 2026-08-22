@@ -62,22 +62,30 @@ const WATCH_SLICE: Duration = Duration::from_millis(250);
 /// - `shutdown_tx` is the parent lane, flipped on a required failure or a normal
 ///   SIGINT/SIGTERM. Tripping it stops the whole server, legs included.
 /// - `legs` maps each live listener's address to its own stop lane.
+/// - `tailscale_watched` records whether an interface watcher is running for this
+///   serve, which is the one thing a dying best-effort leg needs to know to say
+///   truthfully whether it is coming back.
 #[derive(Clone)]
 pub(crate) struct ServeShutdown {
     failed: Arc<AtomicBool>,
     error: Arc<std::sync::Mutex<Option<anyhow::Error>>>,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
     legs: Arc<std::sync::Mutex<HashMap<SocketAddr, tokio::sync::watch::Sender<bool>>>>,
+    tailscale_watched: bool,
 }
 
 impl ServeShutdown {
-    pub(crate) fn new() -> Self {
+    /// `tailscale_watched` is [`TailscaleMode::watches_interface`] for this run.
+    /// The registry deliberately knows nothing about config modes, so the serve
+    /// path states the fact once here instead of every leg restating it.
+    pub(crate) fn new(tailscale_watched: bool) -> Self {
         let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(false);
         Self {
             failed: Arc::new(AtomicBool::new(false)),
             error: Arc::new(std::sync::Mutex::new(None)),
             shutdown_tx,
             legs: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            tailscale_watched,
         }
     }
 
@@ -128,6 +136,16 @@ impl ServeShutdown {
         }
     }
 
+    /// Whether a live leg is registered for `addr`. The registry is the ONE answer
+    /// to "is dux actually serving this address", so the serve loop reconciles its
+    /// watcher-facing bookkeeping against it rather than keeping a second truth.
+    pub(crate) fn has_leg(&self, addr: SocketAddr) -> bool {
+        self.legs
+            .lock()
+            .map(|legs| legs.contains_key(&addr))
+            .unwrap_or(false)
+    }
+
     /// Trigger a graceful, non-error wind-down of the WHOLE server: the parent
     /// lane plus every registered leg lane. Fanning out matters because a leg
     /// added after the serve started (the Tailscale watcher's doing) waits on its
@@ -170,12 +188,42 @@ impl ServeShutdown {
     /// server, and the Tailscale leg is the one users lose routinely.
     pub(crate) fn record_best_effort_failure(&self, addr: SocketAddr, err: &anyhow::Error) {
         dux_core::logger::warn(&format!(
-            "[server] the listener on the Tailscale address {addr} stopped serving: {err}. \
-             dux is still serving on its other address(es); the Tailscale leg will be bound \
-             again by itself if that interface comes back."
+            "[server] {}",
+            best_effort_death_warning(addr, err, self.tailscale_watched)
         ));
         self.forget_leg(addr);
     }
+}
+
+/// What to say when a BEST-EFFORT (Tailscale) leg's accept loop dies mid-run.
+///
+/// `watched` is what makes the second half honest. On `auto` a watcher is running
+/// and the serve loop clears its bound bookkeeping when the leg's task ends, so
+/// the next watch period really does bind it again; on `yes` nothing is watching
+/// and the leg is down for the rest of the run, so the message has to name the
+/// two ways out instead of promising a recovery that never arrives.
+pub(crate) fn best_effort_death_warning(
+    addr: SocketAddr,
+    err: &anyhow::Error,
+    watched: bool,
+) -> String {
+    let recovery = if watched {
+        format!(
+            "dux is watching the Tailscale interface, so it binds this address again by itself \
+             within about {}s of the interface being back; nothing to do.",
+            WATCH_PERIOD.as_secs()
+        )
+    } else {
+        "[server] tailscale = \"yes\" looks for the Tailscale address exactly once, at startup, \
+         so this leg stays down for the rest of this run: restart dux to bind it again, or set \
+         [server] tailscale to \"auto\" to have dux bind and drop it as the interface comes and \
+         goes."
+            .to_string()
+    };
+    format!(
+        "the listener on the Tailscale address {addr} stopped serving: {err}. dux is still \
+         serving on its other address(es). {recovery}"
+    )
 }
 
 /// Await either the parent lane or this leg's own lane, whichever trips first.
@@ -318,21 +366,47 @@ fn park(period: Duration, stop: &dyn Fn() -> bool) -> bool {
     }
 }
 
-/// The banner / status note for a serve that is on `auto` with no Tailscale
-/// address yet. Returns `None` for every other combination, so the caller can
-/// push it straight into a warnings list.
+/// What became of the Tailscale leg during startup. The banner's note has to tell
+/// these apart: "there is no address yet" and "the address is right there but
+/// would not bind" are different situations, and telling the second operator that
+/// dux is waiting for an interface they can plainly see is up reads as a bug in
+/// dux rather than as the port conflict it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StartupLeg {
+    /// An address was detected and its listener bound. Nothing to say.
+    Bound,
+    /// An address was detected, but binding it failed (something else holds that
+    /// port). The bind failure itself is already a warning row; this is about what
+    /// happens next.
+    BindFailed,
+    /// No Tailscale address was detected at all.
+    Undetected,
+}
+
+/// The banner / status note for a serve on `auto` whose Tailscale leg is not
+/// serving. Returns `None` when there is nothing to add: the leg is up, or the
+/// mode is a static answer and the bind warnings already say all there is to say.
 ///
 /// This is the third state the surfacing story learns: not "Tailscale is off" and
 /// not "Tailscale is bound", but "not yet, and dux is watching".
-pub(crate) fn waiting_note(mode: TailscaleMode, detected: bool) -> Option<String> {
-    if detected || !mode.watches_interface() {
+pub(crate) fn waiting_note(mode: TailscaleMode, leg: StartupLeg) -> Option<String> {
+    if !mode.watches_interface() {
         return None;
     }
-    Some(
-        "Tailscale: waiting for the interface (auto). dux is serving without it and will bind \
-         your Tailscale address by itself when it appears."
-            .to_string(),
-    )
+    match leg {
+        StartupLeg::Bound => None,
+        StartupLeg::Undetected => Some(
+            "Tailscale: waiting for the interface (auto). dux is serving without it and will \
+             bind your Tailscale address by itself when it appears."
+                .to_string(),
+        ),
+        StartupLeg::BindFailed => Some(format!(
+            "Tailscale: the interface is here, but its address would not bind (see the warning \
+             above and dux.log). dux is serving without it and tries again about every {}s \
+             (auto), so freeing that port is enough.",
+            WATCH_PERIOD.as_secs()
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -567,16 +641,84 @@ mod tests {
 
     #[test]
     fn the_waiting_note_appears_only_on_auto_with_nothing_detected() {
-        let note = waiting_note(TailscaleMode::Auto, false).expect("auto with no address");
+        let note =
+            waiting_note(TailscaleMode::Auto, StartupLeg::Undetected).expect("auto, no address");
         assert!(note.contains("waiting for the interface"), "{note}");
         assert!(note.contains("auto"), "must name the mode: {note}");
-        assert_eq!(waiting_note(TailscaleMode::Auto, true), None, "it bound");
         assert_eq!(
-            waiting_note(TailscaleMode::Yes, false),
+            waiting_note(TailscaleMode::Auto, StartupLeg::Bound),
+            None,
+            "it bound"
+        );
+        assert_eq!(
+            waiting_note(TailscaleMode::Yes, StartupLeg::Undetected),
             None,
             "yes gets the settled-for-this-run warning instead, not a waiting note"
         );
-        assert_eq!(waiting_note(TailscaleMode::No, false), None, "not wanted");
+        assert_eq!(
+            waiting_note(TailscaleMode::No, StartupLeg::Undetected),
+            None,
+            "not wanted"
+        );
+    }
+
+    #[test]
+    fn a_detected_address_that_would_not_bind_is_not_reported_as_waiting_for_it() {
+        // The interface is right there; saying dux is waiting for it would send the
+        // operator looking at Tailscale instead of at whatever holds the port.
+        let note =
+            waiting_note(TailscaleMode::Auto, StartupLeg::BindFailed).expect("auto, failed bind");
+        assert!(
+            !note.contains("waiting for the interface"),
+            "the interface is present, so this must not claim otherwise: {note}"
+        );
+        assert!(
+            note.contains("would not bind"),
+            "must name what actually happened: {note}"
+        );
+        assert!(
+            note.contains("tries again"),
+            "must say dux retries by itself: {note}"
+        );
+        // The static modes still say nothing here: the bind warning row already
+        // carries the failure, and nothing is going to retry it.
+        assert_eq!(
+            waiting_note(TailscaleMode::Yes, StartupLeg::BindFailed),
+            None
+        );
+        assert_eq!(
+            waiting_note(TailscaleMode::No, StartupLeg::BindFailed),
+            None
+        );
+    }
+
+    // ── A best-effort leg's death ─────────────────────────────────────────
+
+    #[test]
+    fn a_watched_leg_promises_a_re_bind_and_an_unwatched_one_does_not() {
+        // The message is the only thing the operator sees, so it must not promise a
+        // recovery that cannot happen: on `yes` nothing is watching the interface,
+        // so the leg is down until a restart or a mode change.
+        let ts = addr("100.64.0.5:8080");
+        let err = anyhow::anyhow!("connection reset by peer");
+
+        let watched = best_effort_death_warning(ts, &err, true);
+        assert!(watched.contains("100.64.0.5:8080"), "{watched}");
+        assert!(watched.contains("connection reset"), "{watched}");
+        assert!(
+            watched.contains("by itself"),
+            "an auto run really does re-bind it: {watched}"
+        );
+
+        let unwatched = best_effort_death_warning(ts, &err, false);
+        assert!(
+            !unwatched.contains("by itself"),
+            "nothing is watching, so nothing binds it back: {unwatched}"
+        );
+        assert!(
+            unwatched.contains("restart dux") && unwatched.contains("\"auto\""),
+            "must name both ways out: {unwatched}"
+        );
     }
 
     // ── The parent lane ───────────────────────────────────────────────────
@@ -589,7 +731,7 @@ mod tests {
         // load-bearing logic, tested directly because forcing a real axum accept
         // loop to error mid-serve is inherently flaky. Exercised through the ONE
         // shared [`ServeShutdown`] primitive every serve path uses.
-        let shutdown = ServeShutdown::new();
+        let shutdown = ServeShutdown::new(true);
         let mut shutdown_rx = shutdown.subscribe();
 
         let first = shutdown.record_failure(anyhow::anyhow!("listener A died"));
@@ -622,7 +764,7 @@ mod tests {
         // a plain `trigger()` (a SIGINT/SIGTERM or the flip's engine loop exiting)
         // must resolve `wait_for_shutdown` WITHOUT recording any error, so a clean
         // stop is not mistaken for a listener death.
-        let shutdown = ServeShutdown::new();
+        let shutdown = ServeShutdown::new(true);
         let waiter = shutdown.subscribe();
         shutdown.trigger();
         // Resolves promptly (bounded so a regression fails rather than hangs).
@@ -645,7 +787,7 @@ mod tests {
         // the others down. This is the run_plain_http first-error behavior
         // exercised over a real accept loop (cheap, deterministic: no flaky
         // mid-serve error injection needed, we trip the lane the sibling would).
-        let shutdown = ServeShutdown::new();
+        let shutdown = ServeShutdown::new(true);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let app = axum::Router::new().route("/", axum::routing::get(|| async { "ok" }));
         let task_shutdown = shutdown.subscribe();
@@ -679,7 +821,7 @@ mod tests {
 
     #[tokio::test]
     async fn stopping_one_leg_leaves_the_parent_and_its_siblings_alone() {
-        let shutdown = ServeShutdown::new();
+        let shutdown = ServeShutdown::new(true);
         let ts = addr("100.64.0.5:8080");
         let leg = shutdown.register_leg(ts);
         let parent = shutdown.subscribe();
@@ -707,7 +849,7 @@ mod tests {
         // serving started, so it never saw the parent's initial state; if the
         // trigger did not fan out, its listener would still be holding the socket
         // when the TUI came back.
-        let shutdown = ServeShutdown::new();
+        let shutdown = ServeShutdown::new(true);
         let ts = addr("100.64.0.5:8080");
         let leg = shutdown.register_leg(ts);
 
@@ -738,12 +880,18 @@ mod tests {
 
     #[tokio::test]
     async fn a_best_effort_leg_death_is_isolated_but_a_required_one_is_fatal() {
-        let shutdown = ServeShutdown::new();
+        let shutdown = ServeShutdown::new(true);
         let ts = addr("100.64.0.5:8080");
         let _leg = shutdown.register_leg(ts);
         let parent = shutdown.subscribe();
+        assert!(shutdown.has_leg(ts), "a registered leg is live");
 
         shutdown.record_best_effort_failure(ts, &anyhow::anyhow!("tailscale listener died"));
+        assert!(
+            !shutdown.has_leg(ts),
+            "the registry is what the serve loop reconciles against, so a leg that \
+             died must no longer look live"
+        );
         assert!(
             !*parent.clone().borrow_and_update(),
             "a best-effort death must not trip the parent"
@@ -772,7 +920,7 @@ mod tests {
     async fn re_registering_an_address_trips_the_lane_it_replaces() {
         // Defence in depth: if a leg were ever registered twice for one address,
         // the listener behind the first lane must not be left unstoppable.
-        let shutdown = ServeShutdown::new();
+        let shutdown = ServeShutdown::new(true);
         let ts = addr("100.64.0.5:8080");
         let first = shutdown.register_leg(ts);
         let _second = shutdown.register_leg(ts);
