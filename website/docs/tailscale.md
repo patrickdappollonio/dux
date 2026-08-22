@@ -1,6 +1,6 @@
 ---
 title: Reaching dux over Tailscale
-description: How dux finds and binds your Tailscale address, what happens when Tailscale isn't there, why a MagicDNS name needs allowed_hosts, what plain HTTP costs you in the browser, how to put Tailscale's HTTPS proxy in front, and the caveats worth knowing before you open your agents to a tailnet.
+description: How dux finds and binds your Tailscale address, how it follows the interface as you close your laptop and reopen it somewhere else, what happens when Tailscale isn't there, why a MagicDNS name needs allowed_hosts, what plain HTTP costs you in the browser, how to put Tailscale's HTTPS proxy in front, and the caveats worth knowing before you open your agents to a tailnet.
 group: Web UI
 order: 65
 ---
@@ -16,15 +16,28 @@ on it. There is no login.
 
 ## What dux actually does
 
-Tailscale binding is **on by default** and is a single opt-out switch:
+Tailscale binding is **on by default**, and the setting has three answers rather than
+two:
 
 ```toml
 [server]
-tailscale_enabled = true
+tailscale = "auto"   # or "yes", or "no"
 ```
 
-When it is on, and you have not passed `--no-tailscale`, dux runs the `tailscale ip`
-command and reads the address back. It takes the first IPv4 in Tailscale's
+- **`"auto"`** (the default) binds your Tailscale address whenever it exists, and
+  keeps looking. This is the one you want on a laptop; see
+  [it follows the interface](#it-follows-the-interface) below.
+- **`"yes"`** looks exactly once, at startup, and never again. If Tailscale is not up
+  at that moment, that run serves your configured host only.
+- **`"no"`** never binds it and never runs the detection at all.
+
+`dux server --no-tailscale` forces `"no"` for a single run. If you are upgrading, the
+old boolean `tailscale_enabled` keeps working and is rewritten for you: `true` becomes
+`"yes"` and `false` becomes `"no"`, because a boolean never said "keep watching". The
+next time dux saves your config the old line is gone.
+
+When the mode is not `"no"`, dux runs the `tailscale ip` command and reads the address
+back. It takes the first IPv4 in Tailscale's
 `100.64.0.0/10` range, falling back to the first IPv6 in Tailscale's own
 `fd7a:115c:a1e0::/48` block. A plain LAN address or a link-local one is ignored, so
 dux cannot accidentally bind something that merely looks similar.
@@ -42,6 +55,31 @@ address is **required** and a failure to bind it is fatal, while the Tailscale l
 dux warns and keeps serving the addresses that did bind rather than refusing to
 start.
 
+### It follows the interface
+
+A tailnet address is not a property of your config, it is a property of the moment. It
+appears when Tailscale connects and vanishes when it does not, which on a laptop that
+suspends and roams is several times a day. On `"auto"`, dux tracks that:
+
+- **The interface appears** and dux binds it, mid-run, with no restart. A new URL
+  starts answering and everything else is untouched.
+- **The interface goes away** and dux drops that one listener. Your configured address
+  keeps serving the whole time. Pages that were open over the tailnet lose their
+  connection, show the in-app *Reconnecting…* overlay, and pick up again by themselves
+  when the address comes back, in place, with their terminals still scrolled where you
+  left them.
+- **Your Tailscale address changes** and dux moves the listener to the new one.
+
+dux checks roughly every ten seconds, which is not configurable: it is an
+implementation cadence, not a preference. That interval is also the only debounce
+there is, so an interface that flaps faster than dux looks costs at most one bind or
+one unbind. Every bind and unbind is written to `dux.log`, printed by `dux server`,
+and listed in the flip's activity panel, so nothing about this happens quietly.
+
+One thing `"auto"` deliberately does not do is notice that you changed the *setting*.
+The mode is read when serving starts, so switching between `"auto"`, `"yes"` and
+`"no"` needs a restart of the server, and dux says so when you reload your config.
+
 ### When Tailscale isn't there
 
 Nothing breaks. Detection failing is a warning, never a fatal error, and dux serves
@@ -53,8 +91,14 @@ which one you hit:
   like
 - the CLI ran fine and returned nothing dux could use
 
-In every case you get one warning and a working server. If you do not use Tailscale
-and would rather not read about it every start, set `tailscale_enabled = false` (or
+A fourth, rarer one folds into the second: if the daemon stops answering entirely,
+dux's call is capped at a few seconds, killed, and reported as a failure rather than
+hanging around waiting for it.
+
+In every case you get one warning and a working server. The warning says what happens
+next, because that differs by mode: on `"auto"` it is a "not yet" and dux keeps
+looking, while on `"yes"` it is settled for the rest of the run. If you do not use
+Tailscale and would rather not read about it every start, set `tailscale = "no"` (or
 pass `--no-tailscale` for a single run) and the warning goes with it.
 
 ### The palette flip is loopback plus Tailscale, always
@@ -64,6 +108,10 @@ Worth filing away, because it surprises people: `dux server` honors your configu
 with the `start-web-server` command always serves loopback plus your Tailscale
 address, and never reaches for a custom host. If you need a specific interface, start
 with `dux server`.
+
+The `tailscale` mode applies to the flip exactly as it does to `dux server`, so on
+`"auto"` a flipped server picks up your tailnet address while its status screen is
+sitting there, and says so in the activity panel.
 
 ## The MagicDNS gotcha
 
@@ -76,9 +124,17 @@ but returns `403` until you allow it.**
 
 dux runs a Host-header allowlist in front of everything, which is what stops a
 malicious web page from DNS-rebinding your browser into your server. It accepts
-`localhost` and any loopback address, and it accepts a Host that is an IP literal it
-actually bound. Your tailnet `100.x` address is exactly that, so
+`localhost` and any loopback address, it accepts a Host that is an IP literal it
+actually bound, and, unless the mode is `"no"`, it accepts any IP literal inside
+Tailscale's own ranges. Your tailnet `100.x` address is exactly that, so
 `http://100.101.102.103:8080` just works.
+
+That last rule is not conditional on the leg being up at that instant, and it cannot
+be: the allowlist is built once, when serving starts, while the Tailscale listener
+comes and goes for the rest of the run. Accepting a *literal* is safe in a way that
+accepting a *name* is not, which is why the next paragraph still applies to MagicDNS:
+rebinding an address needs a name the attacker controls, and no browser can be made to
+send an IP literal for one.
 
 A MagicDNS name like `box.tailnet.ts.net` is a hostname, not an IP literal, and a
 hostname is never something dux bound, so it fails the check and you get a plain
@@ -143,6 +199,13 @@ add its hostname to `allowed_hosts`. Tailscale ships one, and
 [the recipe is below](#putting-the-tailscale-https-proxy-in-front).
 
 ## Caveats worth knowing
+
+**On `"auto"`, "reachable on my tailnet" is a standing fact, not a snapshot.** dux
+being loopback-only right now does not mean it will stay that way: the listener comes
+back with the interface, without asking. That is the point of the mode, and it is also
+the thing to keep in mind before leaving a server running on a machine you are about
+to reconnect somewhere else. If you want a run that can never grow that address, use
+`--no-tailscale`.
 
 **There is no login, so routing is your only access control.** Anyone who can reach
 the port has your whole workspace: every agent, every terminal, every worktree, and

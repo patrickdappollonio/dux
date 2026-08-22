@@ -142,11 +142,13 @@ Access control is delegated to where you bind and who can reach it.
 
 - **Loopback by default.** `127.0.0.1:8080` is reachable only from the machine
   dux runs on. Nothing leaves the box.
-- **Tailscale, opt-out.** When `tailscale_enabled` is on (it is by default), dux
-  also binds your machine's Tailscale address, so your own tailnet devices can
-  reach it over WireGuard. Anyone on your tailnet can drive your agents, with no
-  further gate, so treat your tailnet as trusted. See
-  [Reaching dux over Tailscale](/docs/tailscale).
+- **Tailscale, opt-out.** Unless `tailscale = "no"`, dux also binds your machine's
+  Tailscale address, so your own tailnet devices can reach it over WireGuard.
+  Anyone on your tailnet can drive your agents, with no further gate, so treat
+  your tailnet as trusted. On the default `"auto"` this is a standing fact rather
+  than a snapshot: dux binds that address whenever the interface is there, drops
+  the listener when it goes, and binds it again when it comes back, all without a
+  restart. See [Reaching dux over Tailscale](/docs/tailscale).
 - **Anything wider is on you.** Binding a LAN or public address (say
   `--bind 0.0.0.0:8080`) puts your agents and worktrees in reach of anyone who
   can hit that address, with no login in front. dux prints a loud warning before
@@ -158,9 +160,10 @@ Two automatic defenses always run, and they are about browser attacks, not user
 authentication: a **Host-header allowlist** (so a malicious page cannot
 DNS-rebind your browser into the server) and a **same-origin check** on every
 socket upgrade and every write request (so another site cannot ride your session).
-A Tailscale `100.x` IP is allowed automatically, but a MagicDNS name like
-`box.tailnet.ts.net` is not an IP literal, so if you reach dux by that name you
-must add it to `allowed_hosts` (below) or the host guard will answer `403`.
+A Tailscale `100.x` IP is allowed automatically, whether or not that leg happens
+to be bound at the moment, but a MagicDNS name like `box.tailnet.ts.net` is not an
+IP literal, so if you reach dux by that name you must add it to `allowed_hosts`
+(below) or the host guard will answer `403`.
 
 The short version: **everyone who can reach the server shares one workspace.**
 They can attach to any agent or terminal, browse the server's filesystem through
@@ -183,10 +186,13 @@ host = "127.0.0.1"
 # LOCAL MODE port for `dux server` and the palette flip.
 port = 8080
 
-# Opt-out Tailscale binding. When true, also bind the machine's Tailscale
-# address so tailnet devices can reach dux. If the tailscale CLI is missing or
-# the daemon is down, dux warns and serves the configured host only.
-tailscale_enabled = true
+# Whether dux also binds the machine's Tailscale address, so tailnet devices can
+# reach it. "auto" (the default) binds it whenever the interface exists and keeps
+# watching, so the listener comes and goes with your tailnet connection; "yes"
+# binds it once at startup and never looks again; "no" never binds it. If the
+# tailscale CLI is missing or the daemon is down, dux warns and serves the
+# configured host only.
+tailscale = "auto"
 
 # Extra Host header values to accept when a request is not same-origin. List a
 # reverse-proxy hostname or a tailnet MagicDNS name here so it is not rejected.
@@ -209,6 +215,11 @@ The rest tune presentation and limits:
 | `max_websocket_tabs_per_agent` | `8` | Per-agent fairness sub-quota on that tab pool. |
 | `file_drop_max_bytes` | `104857600` | Largest single file you can drag, or image you can paste, onto a terminal or agent pane in the browser (100 MiB). A bigger file is refused and nothing is written. `0` switches file drop and image paste off. |
 | `file_drop_max_concurrency` | `2` | How many dropped-file uploads are accepted at once. Bounds buffered upload memory, not just queued work. An upload beyond the limit waits up to 30 seconds for a slot, then is refused with a `503` rather than queueing indefinitely. `0` clamps to `1`. |
+
+`host`, `port`, `allowed_hosts` and `tailscale` are read when serving starts, so
+changing any of them needs a server restart and a config reload says so. That
+includes `tailscale`, even though `"auto"` binds and unbinds by itself: the mode
+decides whether dux watches the interface at all, and it is decided once.
 
 The two `file_drop_*` keys are read at startup like the connection caps, so
 changing either needs a server restart. The full story of what dropping or
