@@ -1,21 +1,30 @@
-//! The per-PTY input-ownership registry shared by every PTY socket handler and
-//! the engine actor's spine check.
+//! The per-PTY input-ownership registry: who currently holds the right to type
+//! into a PTY and to decide its grid.
 //!
-//! Input ownership is a WEB-layer concept: browser connections take and hand
-//! over the right to type into a PTY, arbitrated here between the per-PTY
-//! websockets. The engine knows nothing about it (the TUI writes through its
-//! own path with no ownership gate), which is why this lives in `dux-web` and
-//! why the spine's [`dux_core::viewmodel::AgentTabView::input_owner`] field is
-//! filled by the web layer as an overlay rather than by the engine.
+//! ## Why this is in `dux-core` and not in the web layer
 //!
-//! Two consumers read it outside the socket handlers, and both are
-//! deliberately narrow:
-//! - the file-drop route's courtesy check
-//!   ([`crate::server::AppState::input_held_by_someone_else`]), and
-//! - the engine actor's spine overlay ([`Self::input_owners_snapshot`] +
-//!   [`Self::ownership_generation`]), which publishes the owning connection id
-//!   on the shared spine so every client — including one with no PTY socket
-//!   attached — can tell that another connection is driving an agent.
+//! Ownership started as a WEB-layer concept, arbitrated between the per-PTY
+//! websockets, and lived in `dux-web`. It is not one any more: while the
+//! background web server runs behind a live terminal UI, the terminal UI is a
+//! registered participant too, so both surfaces have to ask the same table the
+//! same questions and get answers that agree. A rule that both surfaces obey
+//! belongs in the crate both surfaces can see, and this type is pure `std`
+//! (a mutex, two maps and some counters), so moving it costs the core crate no
+//! dependency at all.
+//!
+//! `dux-web` re-exports it, so every socket handler, route and test there keeps
+//! the path it always used.
+//!
+//! ## Who reads it
+//!
+//! The per-PTY socket handlers gate stdin and resizes through it. Two web-side
+//! consumers read it outside those handlers, and both are deliberately narrow:
+//! the file-drop route's courtesy check, and the engine actor's spine overlay
+//! ([`Self::input_owners_snapshot`] plus [`Self::ownership_generation`]), which
+//! publishes the owning connection id on the shared spine so every client,
+//! including one with no PTY socket attached, can tell that another connection
+//! is driving an agent. The terminal UI reads it through the background-serve
+//! seam, holding a connection id of its own.
 
 /// One recorded owner: the connection id that drives the pty, plus the raw
 /// `User-Agent` that connection presented at its upgrade. The device rides in
@@ -26,11 +35,11 @@
 /// task, so only the `pty.owner` broadcast could name the device, and a watcher
 /// that merely attached (which broadcasts nothing) could not.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct OwnerRecord {
-    pub(crate) conn_id: u64,
+pub struct OwnerRecord {
+    pub conn_id: u64,
     /// The owning connection's raw `User-Agent`, already length-bounded by the
     /// capture at the upgrade; `None` when it sent none.
-    pub(crate) device: Option<String>,
+    pub device: Option<String>,
 }
 
 /// The owner map plus the monotonic ownership epoch, guarded together by ONE std
@@ -41,14 +50,14 @@ pub(crate) struct OwnerRecord {
 /// therefore freely reorderable by the runtime) can be deduped by epoch on the
 /// client without confusing which claim actually won (see `ptyOwnership.ts`).
 #[derive(Default)]
-pub(crate) struct OwnersState {
+pub struct OwnersState {
     /// pty id -> the connection that currently owns sizing+input.
-    pub(crate) map: std::collections::HashMap<String, OwnerRecord>,
+    pub map: std::collections::HashMap<String, OwnerRecord>,
     /// Bumped on every ownership CHANGE, a release included; the value handed to
     /// the caller and stamped onto the emitted `pty.owner` so clients converge on
     /// the latest claim regardless of broadcast arrival order. Never decreases
     /// within a process.
-    pub(crate) epoch: u64,
+    pub epoch: u64,
     /// Bumped on every MUTATION of `map` — a claim handover, a first-writer
     /// claim, and a release that actually removed an entry. Distinct from
     /// `epoch` in what it FEEDS rather than in when it moves: this is the spine
@@ -56,7 +65,7 @@ pub(crate) struct OwnersState {
     /// [`PtySizeOwners::ownership_generation`], while the epoch travels on the
     /// wire to order client-side arrivals. The fingerprint compare downstream
     /// remains the precise emit gate.
-    pub(crate) generation: u64,
+    pub generation: u64,
     /// Per-pty grid sequence, bumped on every resize that APPLIES, inside the
     /// same critical section that enqueues the resize to the engine actor. The
     /// applies come out of the actor in claim order (see
@@ -68,15 +77,15 @@ pub(crate) struct OwnersState {
     /// receiver a total order to drop stale announcements by, exactly as
     /// `epoch` does for `pty.owner`. Keyed per pty because the broadcasts are
     /// filtered per pty; never decreases within a process.
-    pub(crate) grid_seq: std::collections::HashMap<String, u64>,
+    pub grid_seq: std::collections::HashMap<String, u64>,
 }
 
 /// Tracks which connection currently owns sizing+input for each PTY, keyed by
 /// pty id (the tab id for an agent PTY, which is the session id for the
-/// session-slot tab, and the terminal id for a companion). Shared between every per-PTY
-/// socket (via [`crate::server::AppState`]) and the engine actor loop (via
-/// [`crate::engine_actor::EngineHandle`]), which is why
-/// [`crate::engine_actor::build_actor_channels`] constructs it.
+/// session-slot tab, and the terminal id for a companion). Shared between every
+/// per-PTY socket, the engine actor loop and, while a background server runs
+/// behind the terminal UI, that terminal UI. The web layer's
+/// `build_actor_channels` is what constructs one, once per serve.
 ///
 /// ATTACHING NEVER STEALS. A plain resize claims only an UNOWNED pty; against a
 /// pty another connection already owns it is REFUSED whole, resize included (see
@@ -88,8 +97,8 @@ pub(crate) struct OwnersState {
 /// two devices then ping-ponged the pty's size at each other. A non-owner's
 /// stdin is dropped by [`Self::may_write`], which never steals either.
 #[derive(Default)]
-pub(crate) struct PtySizeOwners {
-    pub(crate) owners: std::sync::Mutex<OwnersState>,
+pub struct PtySizeOwners {
+    pub owners: std::sync::Mutex<OwnersState>,
 }
 
 /// The source of every connection id in the process.
@@ -111,10 +120,10 @@ static NEXT_CONN_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64
 /// uncontested first write, and the ownership `epoch` assigned for that new claim
 /// (`Some` iff `claimed_new`) so the emitted handover carries it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct WriteClaim {
-    pub(crate) allowed: bool,
-    pub(crate) claimed_new: bool,
-    pub(crate) epoch: Option<u64>,
+pub struct WriteClaim {
+    pub allowed: bool,
+    pub claimed_new: bool,
+    pub epoch: Option<u64>,
 }
 
 /// The outcome of [`PtySizeOwners::claim_for_resize`], decided in ONE critical
@@ -133,17 +142,17 @@ pub(crate) struct WriteClaim {
 /// grid broadcast so receivers can drop a stale announcement that the runtime
 /// reordered after the lock released (see [`OwnersState::grid_seq`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ResizeClaim {
-    pub(crate) apply: bool,
-    pub(crate) epoch: Option<u64>,
-    pub(crate) seq: Option<u64>,
+pub struct ResizeClaim {
+    pub apply: bool,
+    pub epoch: Option<u64>,
+    pub seq: Option<u64>,
 }
 
 impl PtySizeOwners {
     /// Allocate a process-unique id for a freshly attached PTY socket, used to
     /// compare against the recorded owner. Drawn from [`NEXT_CONN_ID`], so ids
     /// stay unique across serve cycles rather than only within one registry.
-    pub(crate) fn next_conn_id(&self) -> u64 {
+    pub fn next_conn_id(&self) -> u64 {
         NEXT_CONN_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
@@ -169,7 +178,7 @@ impl PtySizeOwners {
     /// snapshot, for the same reason the epoch does: it is what lets the
     /// take-over card of a client that merely attached name the driving device,
     /// because a mere attach emits no `pty.owner` for that client to hear.
-    pub(crate) fn current_owner(&self, pty_id: &str) -> (Option<u64>, u64, Option<String>) {
+    pub fn current_owner(&self, pty_id: &str) -> (Option<u64>, u64, Option<String>) {
         let owners = self.owners.lock().unwrap();
         let record = owners.map.get(pty_id);
         (
@@ -199,7 +208,7 @@ impl PtySizeOwners {
     /// nothing would ever correct it (B believes it already told the child its
     /// size). That race is real, not theoretical: every PTY socket is its own
     /// tokio task, claims serialize on this mutex, and
-    /// [`crate::engine_actor::EngineHandle::resize_pty`] is a separate `try_send`
+    /// the web layer's `EngineHandle::resize_pty` is a separate `try_send`
     /// into the engine actor's queue with nothing binding the two orders.
     /// Enqueuing the resize INSIDE this critical section binds them: `try_send`
     /// never blocks and the actor drains its queue in order, so the resizes come
@@ -212,7 +221,7 @@ impl PtySizeOwners {
     /// `device` is the claiming connection's captured `User-Agent`, recorded
     /// with the owner id on a claim so [`Self::current_owner`] can name the
     /// device on later handshakes; it is ignored on every non-claiming outcome.
-    pub(crate) fn claim_for_resize(
+    pub fn claim_for_resize(
         &self,
         pty_id: &str,
         conn_id: u64,
@@ -269,8 +278,11 @@ impl PtySizeOwners {
     /// resize to apply, so there is exactly one implementation of "record a new
     /// owner". Used by the test fixture that gives the file-drop courtesy check
     /// something to say, and by the claim-table tests.
-    #[cfg(test)]
-    pub(crate) fn claim(&self, pty_id: &str, conn_id: u64) -> Option<u64> {
+    ///
+    /// Not `#[cfg(test)]`, unlike the shape it had while this type lived in the
+    /// web crate: the tests that need it are now in three crates, and a cfg that
+    /// only sees this one's test build would hide it from all of them.
+    pub fn claim(&self, pty_id: &str, conn_id: u64) -> Option<u64> {
         self.claim_for_resize(pty_id, conn_id, true, None, || {})
             .epoch
     }
@@ -289,8 +301,7 @@ impl PtySizeOwners {
     /// [`may_write`]: PtySizeOwners::may_write
     /// [`release`]: PtySizeOwners::release
     /// [`current_owner`]: PtySizeOwners::current_owner
-    #[cfg(test)]
-    pub(crate) fn is_owner(&self, pty_id: &str, conn_id: u64) -> bool {
+    pub fn is_owner(&self, pty_id: &str, conn_id: u64) -> bool {
         self.owners
             .lock()
             .unwrap()
@@ -324,7 +335,7 @@ impl PtySizeOwners {
     /// the owner id when the write newly claims an unowned pty (so later
     /// handshakes can name the device, exactly as a resize claim records it);
     /// it is ignored on every other outcome.
-    pub(crate) fn may_write(&self, pty_id: &str, conn_id: u64, device: Option<&str>) -> WriteClaim {
+    pub fn may_write(&self, pty_id: &str, conn_id: u64, device: Option<&str>) -> WriteClaim {
         let mut owners = self.owners.lock().unwrap();
         match owners.map.get(pty_id) {
             Some(record) if record.conn_id == conn_id => WriteClaim {
@@ -369,7 +380,7 @@ impl PtySizeOwners {
     /// because the client orders `pty.owner` arrivals by epoch: an owner-cleared
     /// event stamped with a stale epoch would be discarded as an out-of-order
     /// duplicate and the lie would survive anyway.
-    pub(crate) fn release(&self, pty_id: &str, conn_id: u64) -> Option<u64> {
+    pub fn release(&self, pty_id: &str, conn_id: u64) -> Option<u64> {
         let mut owners = self.owners.lock().unwrap();
         if owners
             .map
@@ -393,7 +404,7 @@ impl PtySizeOwners {
     /// The client seeds its last-seen seq from this value, so a stale broadcast
     /// that was still buffered on the socket when the handshake was sent can
     /// never regress the grid after it.
-    pub(crate) fn grid_seq(&self, pty_id: &str) -> u64 {
+    pub fn grid_seq(&self, pty_id: &str) -> u64 {
         self.owners
             .lock()
             .unwrap()
@@ -407,7 +418,7 @@ impl PtySizeOwners {
     /// check as its cheap "ownership might have changed" gate signal, exactly
     /// like `mutation_version` and `streaming_version`. See
     /// [`OwnersState::generation`] for why this is not `epoch`.
-    pub(crate) fn ownership_generation(&self) -> u64 {
+    pub fn ownership_generation(&self) -> u64 {
         self.owners.lock().unwrap().generation
     }
 
@@ -416,7 +427,7 @@ impl PtySizeOwners {
     /// the overlay stamps a CONSISTENT set of owners onto one spine build. A
     /// clone rather than a borrow: the map is small (one entry per driven PTY)
     /// and the lock must not be held across the spine projection.
-    pub(crate) fn input_owners_snapshot(&self) -> std::collections::HashMap<String, u64> {
+    pub fn input_owners_snapshot(&self) -> std::collections::HashMap<String, u64> {
         self.owners
             .lock()
             .unwrap()

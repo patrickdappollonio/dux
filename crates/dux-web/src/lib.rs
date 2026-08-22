@@ -42,7 +42,20 @@ pub mod git_routes;
 pub mod host_guard;
 pub mod project_actions;
 pub mod project_reads;
-pub(crate) mod pty_owners;
+/// The PTY input-ownership registry, re-exported from `dux-core`.
+///
+/// It used to live here, and it moved the day the terminal UI became a
+/// participant in it rather than a bystander: a rule two surfaces obey belongs
+/// in the crate both can see. The re-export is deliberate rather than a
+/// transition step, so every call site and test in this crate keeps the path it
+/// has always used and nothing about the move shows up in a diff of the socket
+/// handlers.
+/// A glob rather than a named list because some of these names are used only by
+/// this crate's test modules, and a named re-export of those is an unused import
+/// in a normal build.
+pub(crate) mod pty_owners {
+    pub(crate) use dux_core::pty_owners::*;
+}
 pub(crate) mod pty_sizes;
 pub mod resource_routes;
 pub mod rest_common;

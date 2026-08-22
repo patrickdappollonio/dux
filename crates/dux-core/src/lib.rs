@@ -40,6 +40,7 @@ pub mod pr_reference;
 pub mod project_browser;
 pub mod provider;
 pub mod pty;
+pub mod pty_owners;
 pub mod quiet_tail;
 pub mod release_notes;
 pub mod resource_stats;
