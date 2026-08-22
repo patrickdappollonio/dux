@@ -336,6 +336,13 @@ pub struct RouterParams {
     /// one, which is the only one with a second surface to announce for.
     pub(crate) ownership_publisher:
         Option<Arc<std::sync::OnceLock<crate::ownership_publish::OwnershipPublisher>>>,
+    /// A counter for the connection registry to keep the live browser-tab count in.
+    ///
+    /// An in-parameter rather than an out one, unlike the publisher above: the
+    /// caller can make an `AtomicUsize` itself, and it needs the handle before
+    /// anything connects. `None` for every serve path but the background one,
+    /// which is the only one with a terminal UI beside it to show the count on.
+    pub(crate) connections_gauge: Option<Arc<std::sync::atomic::AtomicUsize>>,
 }
 
 impl RouterParams {
@@ -365,7 +372,22 @@ impl RouterParams {
             tailscale_host_literals: false,
             release_notes_api_base: dux_core::urls::GITHUB_API_BASE.to_string(),
             ownership_publisher: None,
+            connections_gauge: None,
         }
+    }
+
+    /// Ask `build_app`'s connection registry to keep its live browser-tab count in
+    /// `gauge`, so the terminal UI's serving chip can read it.
+    ///
+    /// Only the background serve calls this, for the same reason as
+    /// [`Self::with_ownership_publisher`]: it is the one path with a second surface
+    /// that has somewhere to show the number.
+    pub(crate) fn with_connections_gauge(
+        mut self,
+        gauge: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Self {
+        self.connections_gauge = Some(gauge);
+        self
     }
 
     /// Ask `build_app` to leave this serve's ownership publisher in `slot`.
@@ -648,7 +670,10 @@ pub fn build_app(
         // connection is driving each agent PTY without attaching to it.
         pty_size_owners: engine_pty_owners,
         pty_grid_bus: Arc::clone(&pty_grid_bus),
-        connections: Arc::new(crate::rest_common::ConnectionRegistry::new()),
+        connections: Arc::new(match params.connections_gauge {
+            Some(gauge) => crate::rest_common::ConnectionRegistry::with_events_gauge(gauge),
+            None => crate::rest_common::ConnectionRegistry::new(),
+        }),
         first_load,
     };
 

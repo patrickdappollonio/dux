@@ -120,6 +120,12 @@ impl BackgroundServeCompanion for WebCompanion {
             .unwrap_or_default()
     }
 
+    fn connections(&self) -> usize {
+        // No serve, no connections: the count is structurally zero rather than
+        // remembered from last time.
+        self.server.as_ref().map_or(0, |s| s.connections())
+    }
+
     fn start(
         &mut self,
         engine: &mut Engine,

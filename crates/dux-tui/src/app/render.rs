@@ -464,13 +464,18 @@ fn ellipsize_field_highlighted(
 }
 
 /// Assemble the agent row's second line (`<marker> project · State [· branch]
-/// [· tabs]`) so it matches the web sidebar: the marker, the state word, and the
-/// tab count are FIXED and stay fully visible, while the project name and the
-/// branch truncate (each ending in `…`) to share whatever width is left. This
-/// mirrors the web's per-field flex-shrink instead of ellipsizing the whole line
-/// from the right, which would drop the tab count first. `marker` already
-/// includes the leading indent (e.g. `"  ※ "`); `sep_style` styles the `" · "`
-/// separators.
+/// [· trailing…]`) so it matches the web sidebar: the marker, the state word, and
+/// every `trailing` segment are FIXED and stay fully visible, while the project
+/// name and the branch truncate (each ending in `…`) to share whatever width is
+/// left. This mirrors the web's per-field flex-shrink instead of ellipsizing the
+/// whole line from the right, which would drop the tab count first. `marker`
+/// already includes the leading indent (e.g. `"  ※ "`); `sep_style` styles the
+/// `" · "` separators.
+///
+/// `trailing` is the short fixed tail (the tab count, the remote-viewer count),
+/// each segment separated from the one before it. A list rather than one slot per
+/// fact: two adjacent `Option<Span>` parameters of the same type are a swap the
+/// compiler cannot catch.
 ///
 /// `style.highlight` is the live search query plus the match style: the
 /// project name and the branch are searched fields the line renders, so a hit
@@ -478,13 +483,28 @@ fn ellipsize_field_highlighted(
 /// computed on the final fitted text). `None` (no filter, or the terminal row,
 /// whose fields the TUI search does not filter) renders byte-identically to
 /// the pre-highlight code.
+/// The line-two segment naming how many browsers are watching an agent, or `None`
+/// when nobody is.
+///
+/// "Remote" rather than "viewers" or "watching": the reader is sitting at this
+/// terminal, so the interesting half is that somebody ELSEWHERE has the same agent
+/// open. Absent at zero rather than "0 remote", which is the state almost every
+/// row is in almost all the time.
+fn remote_viewers_segment(count: usize) -> Option<String> {
+    match count {
+        0 => None,
+        1 => Some("1 remote".to_string()),
+        count => Some(format!("{count} remote")),
+    }
+}
+
 fn fit_agent_meta_line(
     total_w: u16,
     marker: Span<'static>,
     name: Option<Span<'static>>,
     word: Span<'static>,
     branch: Option<Span<'static>>,
-    tabs: Option<Span<'static>>,
+    trailing: Vec<Span<'static>>,
     style: MetaLineStyle<'_>,
 ) -> Vec<Span<'static>> {
     let MetaLineStyle {
@@ -504,8 +524,8 @@ fn fit_agent_meta_line(
     if branch.is_some() {
         fixed = fixed.saturating_add(SEP_W);
     }
-    if let Some(t) = &tabs {
-        fixed = fixed.saturating_add(SEP_W).saturating_add(width(t));
+    for segment in &trailing {
+        fixed = fixed.saturating_add(SEP_W).saturating_add(width(segment));
     }
 
     let budget = total_w.saturating_sub(fixed);
@@ -543,9 +563,9 @@ fn fit_agent_meta_line(
         out.push(sep());
         out.extend(ellipsize_field_highlighted(branch, branch_alloc, highlight));
     }
-    if let Some(tabs) = tabs {
+    for segment in trailing {
         out.push(sep());
-        out.push(tabs);
+        out.push(segment);
     }
     // Safety net: when even the fixed parts overflow a very narrow pane, ellipsize
     // the whole line so nothing hard-clips mid-glyph at the right edge.
@@ -1080,19 +1100,7 @@ impl App {
                     Style::default().fg(self.theme.branch_fg).bg(bg),
                 ));
             }
-            let running_terminals = self.running_companion_terminal_count();
-            if running_terminals > 0 {
-                spans.push(Span::styled(" ╱ ", Style::default().fg(sep_fg).bg(bg)));
-                let label = if running_terminals == 1 {
-                    "● 1 terminal".to_string()
-                } else {
-                    format!("● {running_terminals} terminals")
-                };
-                spans.push(Span::styled(
-                    label,
-                    Style::default().fg(self.theme.session_active).bg(bg),
-                ));
-            }
+            self.push_live_header_chip(&mut spans, self.running_terminals_chip());
         } else if let Some(project) = self.selected_project() {
             spans.push(Span::styled(" ╱ ", Style::default().fg(sep_fg).bg(bg)));
             spans.push(Span::styled(
@@ -1187,23 +1195,44 @@ impl App {
                     Style::default().fg(self.theme.branch_fg).bg(bg),
                 ));
             }
-            let running_terminals = self.running_companion_terminal_count();
-            if running_terminals > 0 {
-                spans.push(Span::styled(" ╱ ", Style::default().fg(sep_fg).bg(bg)));
-                let label = if running_terminals == 1 {
-                    "● 1 terminal".to_string()
-                } else {
-                    format!("● {running_terminals} terminals")
-                };
-                spans.push(Span::styled(
-                    label,
-                    Style::default().fg(self.theme.session_active).bg(bg),
-                ));
-            }
+            self.push_live_header_chip(&mut spans, self.running_terminals_chip());
         }
+        // Last crumb, and OUTSIDE both arms: a listener is a fact about the
+        // process, not about whatever is selected, so it must still be said when
+        // nothing is selected at all.
+        self.push_live_header_chip(&mut spans, self.serving_chip());
         Paragraph::new(Line::from(spans))
             .style(self.theme.header_style())
             .render(area, frame.buffer_mut());
+    }
+
+    /// Append a live-state header crumb: the separator, then `label` in the
+    /// live tone. Nothing at all for `None`.
+    ///
+    /// One helper for every such chip because there are now two of them and the
+    /// terminal-count one already existed twice, verbatim, in the two arms above.
+    fn push_live_header_chip(&self, spans: &mut Vec<Span<'static>>, label: Option<String>) {
+        let Some(label) = label else {
+            return;
+        };
+        let bg = self.theme.header_bg;
+        spans.push(Span::styled(
+            " ╱ ",
+            Style::default().fg(self.theme.header_separator_fg).bg(bg),
+        ));
+        spans.push(Span::styled(
+            label,
+            Style::default().fg(self.theme.session_active).bg(bg),
+        ));
+    }
+
+    /// The live-terminal count chip's text, or `None` when none are running.
+    fn running_terminals_chip(&self) -> Option<String> {
+        match self.running_companion_terminal_count() {
+            0 => None,
+            1 => Some("● 1 terminal".to_string()),
+            count => Some(format!("● {count} terminals")),
+        }
     }
 
     /// Build the two-line flat agent row, mirroring the web sidebar row:
@@ -1389,6 +1418,14 @@ impl App {
         let tab_count = self.session_tab_ids(&session.id).len();
         let tabs_span = (tab_count > 1)
             .then(|| Span::styled(format!("{tab_count} tabs"), Style::default().fg(muted)));
+        // How many browsers are watching this agent's terminals. In the MUTED tone
+        // rather than the standalone identity tone: that tone says "this agent
+        // lives in your folder", a different fact, and this segment has to read
+        // quieter than the state words beside it, which is exactly what muted is
+        // for on this line. Absent at zero, and structurally zero when nothing is
+        // serving, so a TUI on its own renders what it always did.
+        let remote_span = remote_viewers_segment(self.remote_viewer_count(&session.id))
+            .map(|label| Span::styled(label, Style::default().fg(muted)));
 
         // Line one: right-align the PR badge (name ellipsized to the space left
         // over) when there is one, else just ellipsize the name. Line two keeps
@@ -1422,7 +1459,7 @@ impl App {
             name_span,
             Span::styled(word.to_string(), Style::default().fg(word_color)),
             branch_span,
-            tabs_span,
+            [tabs_span, remote_span].into_iter().flatten().collect(),
             MetaLineStyle {
                 sep: Style::default().fg(muted),
                 highlight: line2_highlight,
@@ -10081,6 +10118,19 @@ impl App {
             // Reflect the FOCUSED tab's provider, not just the Main one.
             let provider = capitalize(self.focused_tab_provider(session).as_str());
             let base = format!("{provider} agent");
+            // Who else is looking at the terminal this caption names. The FOCUSED
+            // tab's own count, not the agent's total: the caption titles one pane
+            // showing one tab, and the sidebar row is where the agent-wide number
+            // belongs.
+            let remote = self
+                .engine
+                .providers
+                .get(&self.focused_tab_id(&session.id))
+                .map(|client| client.subscriber_count())
+                .and_then(remote_viewers_segment)
+                .map(|segment| format!(" · {segment}"))
+                .unwrap_or_default();
+            let base = format!("{base}{remote}");
             let count = self.session_terminal_count(&session.id);
             if count == 1 {
                 return format!("{base} (+ 1 terminal)");
@@ -10467,7 +10517,7 @@ fn terminal_row_lines(
         )),
         Span::styled(word.to_string(), Style::default().fg(word_color)),
         None,
-        None,
+        Vec::new(),
         MetaLineStyle {
             sep: Style::default().fg(muted),
             highlight,
@@ -11610,6 +11660,143 @@ mod tests {
     /// Spawn two idle companion terminals owned by the first session so the left
     /// pane renders a two-row Terminals list. Returns the rendered terminal and
     /// the app so callers can inspect the post-render mouse map and buffer.
+    /// An agent watched from a browser says so on line two, and stops saying it
+    /// when the browser leaves. Nothing renders while nobody is watching, which is
+    /// also every row's state whenever nothing is serving.
+    #[test]
+    fn an_agent_row_names_how_many_browsers_are_watching_it() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        let client = PtyClient::spawn(
+            "/bin/sh",
+            &["-c".to_string(), "sleep 30".to_string()],
+            std::path::Path::new("."),
+            24,
+            80,
+            100,
+        )
+        .expect("spawn pty");
+        app.engine.providers.insert(session_id.clone(), client);
+        app.focus = FocusPane::Left;
+        app.rebuild_left_items();
+
+        // The SIDEBAR ROW's own line two, found by the project marker it carries.
+        // A whole-frame search would be answered by the center pane's caption,
+        // which names the same fact somewhere else entirely; that is exactly how
+        // the first version of this test passed with the row's segment deleted.
+        let row_line = |app: &mut App| -> String {
+            let mut terminal = Terminal::new(TestBackend::new(160, 40)).expect("terminal");
+            terminal
+                .draw(|frame| app.render(frame))
+                .expect("render frame");
+            let buf = terminal.backend().buffer();
+            (0..buf.area.height)
+                .map(|y| {
+                    (0..buf.area.width)
+                        .map(|x| buf[(x, y)].symbol().to_string())
+                        .collect::<String>()
+                })
+                .find(|line| line.contains('※'))
+                .expect("the agent row's line two is on screen")
+        };
+
+        assert!(
+            !row_line(&mut app).contains("remote"),
+            "an unwatched agent must render exactly what it always did"
+        );
+
+        let provider = app
+            .engine
+            .providers
+            .get(&session_id)
+            .expect("the seeded provider");
+        let (one, _rx1) = provider.subscribe();
+        let (two, _rx2) = provider.subscribe();
+        assert_eq!(app.remote_viewer_count(&session_id), 2);
+        let rendered = row_line(&mut app);
+        assert!(
+            rendered.contains("· 2 remote"),
+            "line two must name the watchers: {rendered}"
+        );
+
+        drop(two);
+        assert!(row_line(&mut app).contains("· 1 remote"), "singular at one");
+        drop(one);
+        assert!(
+            !row_line(&mut app).contains("remote"),
+            "the segment goes away with the last watcher"
+        );
+    }
+
+    /// The center pane's caption names the watchers of the terminal it is showing,
+    /// which is the FOCUSED tab's own count rather than the agent's total.
+    #[test]
+    fn the_center_pane_caption_names_the_watchers_of_the_tab_it_shows() {
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        app.rebuild_left_items();
+        app.selected_left = app
+            .left_items_cache
+            .iter()
+            .position(|item| matches!(item, LeftItem::Session(_)))
+            .expect("the test app has an agent row");
+        assert!(
+            !app.center_pane_agent_title().contains("remote"),
+            "an unwatched agent's caption says nothing about watchers"
+        );
+
+        let client = PtyClient::spawn(
+            "/bin/sh",
+            &["-c".to_string(), "sleep 30".to_string()],
+            std::path::Path::new("."),
+            24,
+            80,
+            100,
+        )
+        .expect("spawn pty");
+        let (_guard, _rx) = client.subscribe();
+        app.engine.providers.insert(session_id.clone(), client);
+
+        let title = app.center_pane_agent_title();
+        assert!(
+            title.contains("· 1 remote"),
+            "the caption must name the one browser watching this tab: {title}"
+        );
+    }
+
+    /// The count is per agent and it is the SUM over the agent's tabs, the same way
+    /// the row's liveness ORs over them: the row is about the agent.
+    #[test]
+    fn the_remote_count_sums_over_an_agents_tabs() {
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        seed_render_tab(&mut app, &session_id, "tab-2", "claude", 1);
+        let mut guards = Vec::new();
+        for tab_id in [session_id.clone(), "tab-2".to_string()] {
+            let client = PtyClient::spawn(
+                "/bin/sh",
+                &["-c".to_string(), "sleep 30".to_string()],
+                std::path::Path::new("."),
+                24,
+                80,
+                100,
+            )
+            .expect("spawn pty");
+            let (guard, _rx) = client.subscribe();
+            guards.push((guard, _rx));
+            app.engine.providers.insert(tab_id, client);
+        }
+
+        assert_eq!(
+            app.remote_viewer_count(&session_id),
+            2,
+            "one watcher on each of the agent's two tabs is two watchers of the agent"
+        );
+    }
+
     fn app_with_two_terminals() -> App {
         let mut app = test_app(default_bindings());
         let session_id = app.engine.sessions[0].id.clone();
@@ -12105,6 +12292,72 @@ mod tests {
             rendered.contains("orig:"),
             "header should show the drift crumb even when the agent sits on the project branch; \
              rendered header did not contain 'orig:'"
+        );
+    }
+
+    /// The header carries the serving chip while a background server is up, in the
+    /// live tone, and nothing at all while none is.
+    ///
+    /// Rendered rather than asserted on the pure label, because the chip lives
+    /// outside the header's two selection arms on purpose and the thing worth
+    /// pinning is that it reaches the frame.
+    #[test]
+    fn the_header_says_it_is_serving_and_how_many_browsers_are_on_it() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        use crate::app::background_server::tests::FakeCompanion;
+
+        let render = |app: &mut App| -> String {
+            let mut terminal = Terminal::new(TestBackend::new(160, 40)).expect("terminal");
+            terminal
+                .draw(|frame| app.render(frame))
+                .expect("render frame");
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect()
+        };
+
+        let mut app = test_app(default_bindings());
+        assert!(
+            !render(&mut app).contains("serving"),
+            "a TUI that is not serving must not claim a listener anywhere"
+        );
+
+        let (companion, recorded) = FakeCompanion::serving();
+        app.companion = Some(companion);
+        recorded.lock().expect("not poisoned").connections = 2;
+        let rendered = render(&mut app);
+        assert!(
+            rendered.contains("serving :8080 · 2 connected"),
+            "the header must name the port and the connection count: {rendered}"
+        );
+
+        // And in the live tone, like the terminal-count chip beside it.
+        let mut terminal = Terminal::new(TestBackend::new(160, 40)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let buf = terminal.backend().buffer();
+        let (x, y) = (0..buf.area.height)
+            .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
+            .find(|&(x, y)| {
+                buf[(x, y)].symbol() == "s"
+                    && (0..7).all(|i| {
+                        buf.area.width > x + i
+                            && "serving".chars().nth(i as usize).map(|c| c.to_string())
+                                == Some(buf[(x + i, y)].symbol().to_string())
+                    })
+            })
+            .expect("the serving chip is on screen");
+        assert_eq!(
+            buf[(x, y)].fg,
+            app.theme.session_active,
+            "the serving chip wears the same live tone as the terminal-count chip"
         );
     }
 
@@ -14560,7 +14813,7 @@ mod tests {
             Some(Span::raw("proj".to_string())),
             Span::raw("Idle".to_string()),
             None,
-            None,
+            Vec::new(),
             MetaLineStyle {
                 sep: Style::default(),
                 highlight: None,
@@ -14578,7 +14831,7 @@ mod tests {
             Some(Span::raw("a-very-long-project-name".to_string())),
             Span::raw("Idle".to_string()),
             None,
-            Some(Span::raw("3 tabs".to_string())),
+            vec![Span::raw("3 tabs".to_string())],
             MetaLineStyle {
                 sep: Style::default(),
                 highlight: None,
@@ -14603,7 +14856,7 @@ mod tests {
             Some(Span::raw("longproject".to_string())),
             Span::raw("Working".to_string()),
             Some(Span::raw("feature/some-long-branch".to_string())),
-            None,
+            Vec::new(),
             MetaLineStyle {
                 sep: Style::default(),
                 highlight: None,
@@ -14639,7 +14892,7 @@ mod tests {
                 Some(Span::raw(project.to_string())),
                 Span::raw("Idle".to_string()),
                 Some(Span::raw(branch.to_string())),
-                None,
+                Vec::new(),
                 MetaLineStyle {
                     sep: Style::default(),
                     highlight: hl,

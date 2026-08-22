@@ -42,7 +42,7 @@
 //! type is ever involved.
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 
 use anyhow::Result;
 use dux_core::background_serve::ServiceOutcome;
@@ -80,6 +80,14 @@ pub struct BackgroundServer {
     /// than fatal: nothing is announced, browsers fall back to the fingerprint
     /// backstop and the handshake, and the terminal UI keeps working.
     publisher: Arc<std::sync::OnceLock<crate::ownership_publish::OwnershipPublisher>>,
+    /// How many browser tabs are connected to this serve, kept up to date by the
+    /// connection registry inside the router.
+    ///
+    /// An atomic rather than a question asked of the actor: the terminal UI reads
+    /// it once per rendered frame, from the thread that is also servicing this
+    /// serve, so it has to be a load and nothing more. It dies with the serve,
+    /// which is why "not serving" reports zero without anybody deciding it.
+    connections: Arc<AtomicUsize>,
 }
 
 impl BackgroundServer {
@@ -125,6 +133,7 @@ impl BackgroundServer {
             owners,
         };
         let publisher = Arc::new(std::sync::OnceLock::new());
+        let connections = Arc::new(AtomicUsize::new(0));
         let service = EngineService::new(engine, ends, ShutdownEcho::Silent);
         let core = ServeCore::start(
             handle,
@@ -135,7 +144,10 @@ impl BackgroundServer {
             // is never wanted over a terminal UI's frame regardless.
             false,
             SignalPolicy::Inherited,
-            Some(Arc::clone(&publisher)),
+            crate::BackgroundHooks {
+                ownership_publisher: Some(Arc::clone(&publisher)),
+                connections_gauge: Some(Arc::clone(&connections)),
+            },
         )?;
         Ok(Self {
             core,
@@ -145,7 +157,16 @@ impl BackgroundServer {
             last_command_applies: engine.command_applies,
             ownership,
             publisher,
+            connections,
         })
+    }
+
+    /// How many browser tabs are connected to this serve right now.
+    ///
+    /// "Connections", not "devices": one browser with two tabs open is two, and
+    /// there is no honest way from here to tell that they are the same laptop.
+    pub fn connections(&self) -> usize {
+        self.connections.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// The addresses this serve is reachable on.

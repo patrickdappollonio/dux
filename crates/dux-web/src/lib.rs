@@ -945,6 +945,24 @@ fn start_tailscale_watcher(
     (rx, bound)
 }
 
+/// The hooks only the BACKGROUND serve wants, because it is the only serve with a
+/// terminal UI beside it: somewhere for `build_app` to leave this serve's
+/// ownership publisher, and a counter for its connection registry to keep the live
+/// browser-tab count in.
+///
+/// Bundled rather than passed side by side. They travel together through the same
+/// three functions, every other serve path passes the default, and two adjacent
+/// slots is the shape where a third one gets threaded into two callers out of
+/// three.
+#[derive(Default)]
+pub(crate) struct BackgroundHooks {
+    /// See [`RouterParams::with_ownership_publisher`].
+    pub(crate) ownership_publisher:
+        Option<Arc<std::sync::OnceLock<crate::ownership_publish::OwnershipPublisher>>>,
+    /// See [`RouterParams::with_connections_gauge`].
+    pub(crate) connections_gauge: Option<Arc<std::sync::atomic::AtomicUsize>>,
+}
+
 /// Build the router parameters every serve path derives from the same
 /// `[server]` fields.
 ///
@@ -956,12 +974,12 @@ fn router_params(
     console: Console,
     access_log: bool,
     bound_ips: Vec<std::net::IpAddr>,
-    // Set only by the background serve, the one path with a terminal UI beside it
-    // that can claim a pty and therefore has ownership changes to announce.
-    ownership_publisher: Option<
-        Arc<std::sync::OnceLock<crate::ownership_publish::OwnershipPublisher>>,
-    >,
+    hooks: BackgroundHooks,
 ) -> RouterParams {
+    let BackgroundHooks {
+        ownership_publisher,
+        connections_gauge,
+    } = hooks;
     let server = &config.server;
     let params = RouterParams::plain_http()
         .with_console(console, access_log)
@@ -981,8 +999,12 @@ fn router_params(
             server.allowed_hosts.clone(),
             server.tailscale_mode().wants_tailscale(),
         );
-    match ownership_publisher {
+    let params = match ownership_publisher {
         Some(slot) => params.with_ownership_publisher(slot),
+        None => params,
+    };
+    match connections_gauge {
+        Some(gauge) => params.with_connections_gauge(gauge),
         None => params,
     }
 }
@@ -1048,11 +1070,9 @@ impl ServeCore {
         console: Console,
         access_log: bool,
         signals: SignalPolicy,
-        // A slot for this serve's ownership publisher, passed straight through to
-        // `build_app`. Only the background serve wants one.
-        ownership_publisher: Option<
-            Arc<std::sync::OnceLock<crate::ownership_publish::OwnershipPublisher>>,
-        >,
+        // Passed straight through to `build_app`. Default for every serve but the
+        // background one, which is the only one with a terminal UI beside it.
+        hooks: BackgroundHooks,
     ) -> Result<Self> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -1127,13 +1147,7 @@ impl ServeCore {
             server::build_app(
                 handle.clone(),
                 axum::Router::new(),
-                router_params(
-                    config,
-                    console.clone(),
-                    access_log,
-                    bound_ips,
-                    ownership_publisher,
-                ),
+                router_params(config, console.clone(), access_log, bound_ips, hooks),
             )
         };
 
@@ -1358,8 +1372,9 @@ pub fn serve_with_engine(
         false,
         SignalPolicy::Adopt(Arc::clone(&signal_quit)),
         // The flip has no terminal UI beside it (it took the terminal over), so
-        // there is no second surface to announce ownership changes for.
-        None,
+        // there is no second surface to announce ownership changes for, and nowhere
+        // to show a connection count either.
+        BackgroundHooks::default(),
     )?;
 
     // Run the engine loop on the CURRENT thread. The control closure decides the

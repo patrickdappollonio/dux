@@ -21,6 +21,23 @@ impl App {
             .is_some_and(|companion| companion.is_serving())
     }
 
+    /// The header chip that says a listener is up, or `None` when none is.
+    ///
+    /// Present whenever serving, connections or not: the chip's first job is to be
+    /// the standing "you are running a listener" signal, and a chip that only
+    /// appeared once somebody connected would hide exactly the state worth knowing
+    /// about. The count is the second job.
+    pub(crate) fn serving_chip(&self) -> Option<String> {
+        let companion = self.companion.as_ref()?;
+        if !companion.is_serving() {
+            return None;
+        }
+        Some(serving_chip_label(
+            serving_port_label(&companion.urls()).as_deref(),
+            companion.connections(),
+        ))
+    }
+
     /// Lend the engine to the companion for ONE reaction, before this surface
     /// applies it.
     ///
@@ -473,6 +490,43 @@ pub(crate) const BACKGROUND_SERVER_STATUS_KEY: &str = "background-server";
 /// and it is under the dedicated actor loop's own 50ms tick.
 pub(crate) const SERVING_POLL_CAP_MS: u64 = 33;
 
+/// The port a serve is reachable on, rendered for the header chip as ":8080".
+///
+/// The port rather than a whole address, because every leg of a serve is on the
+/// same one and a header crumb has no room for two addresses. Read back from the
+/// URLs the serve reported rather than from config, so an ephemeral port is
+/// reported as what was actually bound. `None` when no URL carries a port, which
+/// leaves the chip saying "serving" and nothing it cannot back up.
+fn serving_port_label(urls: &[String]) -> Option<String> {
+    let port = urls
+        .first()?
+        .rsplit_once(':')
+        .map(|(_, port)| port)?
+        .trim_end_matches('/');
+    if port.is_empty() || !port.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    Some(format!(":{port}"))
+}
+
+/// The serving chip's text: where it is serving, and how many browsers are on it.
+///
+/// "Connected", not "devices": one browser with two tabs open counts twice, and
+/// nothing here can honestly tell that they are the same laptop. Zero says only
+/// that a listener exists, because "0 connected" is a number nobody needs and the
+/// chip is already carrying that fact by being there at all.
+fn serving_chip_label(port: Option<&str>, connections: usize) -> String {
+    let where_at = match port {
+        Some(port) => format!("serving {port}"),
+        None => "serving".to_string(),
+    };
+    if connections == 0 {
+        format!("● {where_at}")
+    } else {
+        format!("● {where_at} · {connections} connected")
+    }
+}
+
 /// Render a serve's addresses for a status line. Comma-separated, because there
 /// are at most two of them (loopback and the Tailscale leg).
 fn join_urls(urls: &[String]) -> String {
@@ -526,6 +580,9 @@ pub(crate) mod tests {
         /// Every ownership fact the seam published, in order, standing in for the
         /// `pty.owner` and grid broadcasts a real serve would have emitted.
         pub(crate) published: Vec<PtyOwnershipEvent>,
+        /// How many browser tabs the serve says are connected, standing in for the
+        /// connection registry's own count.
+        pub(crate) connections: usize,
     }
 
     /// A companion that records instead of serving. Serving is a real socket and a
@@ -626,6 +683,13 @@ pub(crate) mod tests {
 
         fn urls(&self) -> Vec<String> {
             vec!["http://127.0.0.1:8080".to_string()]
+        }
+
+        fn connections(&self) -> usize {
+            if !self.serving {
+                return 0;
+            }
+            self.recorded.lock().expect("not poisoned").connections
         }
 
         fn start(
@@ -1298,6 +1362,77 @@ pub(crate) mod tests {
         assert!(
             !app.engine.config.server.serve_while_tui,
             "and it must not write the setting back on"
+        );
+    }
+
+    /// The chip is the standing "there is a listener" signal first and a counter
+    /// second, so it is there with nobody connected and grows a count when
+    /// somebody is.
+    #[test]
+    fn the_serving_chip_says_where_it_serves_and_who_is_on_it() {
+        let mut app = test_app(default_bindings());
+        assert_eq!(
+            app.serving_chip(),
+            None,
+            "nothing serving, nothing to say about a listener"
+        );
+
+        let (companion, recorded) = FakeCompanion::serving();
+        app.companion = Some(companion);
+        assert_eq!(
+            app.serving_chip().as_deref(),
+            Some("● serving :8080"),
+            "serving with nobody on it still has to say a listener exists"
+        );
+
+        recorded.lock().expect("not poisoned").connections = 1;
+        assert_eq!(
+            app.serving_chip().as_deref(),
+            Some("● serving :8080 · 1 connected")
+        );
+        recorded.lock().expect("not poisoned").connections = 3;
+        assert_eq!(
+            app.serving_chip().as_deref(),
+            Some("● serving :8080 · 3 connected")
+        );
+
+        app.stop_background_server_quietly();
+        assert_eq!(
+            app.serving_chip(),
+            None,
+            "a stopped serve leaves no chip behind, whatever the last count was"
+        );
+    }
+
+    /// The port comes back from the addresses the serve actually bound, so an
+    /// ephemeral port is reported as what it became. Anything the parse cannot
+    /// vouch for leaves the chip saying only that it is serving.
+    #[test]
+    fn the_chips_port_is_read_back_from_the_served_addresses() {
+        assert_eq!(
+            serving_port_label(&["http://127.0.0.1:41337".to_string()]).as_deref(),
+            Some(":41337")
+        );
+        assert_eq!(
+            serving_port_label(&["http://[fd7a:115c:a1e0::1]:8080".to_string()]).as_deref(),
+            Some(":8080"),
+            "a bracketed IPv6 literal must not confuse the port off the end"
+        );
+        assert_eq!(
+            serving_port_label(&["http://127.0.0.1:8080/".to_string()]).as_deref(),
+            Some(":8080"),
+            "a trailing slash is not part of the port"
+        );
+        assert_eq!(serving_port_label(&[]), None, "no address, no port");
+        assert_eq!(
+            serving_port_label(&["http://dux.example".to_string()]),
+            None,
+            "an address with no port must not report the host as one"
+        );
+        assert_eq!(
+            serving_chip_label(None, 2),
+            "● serving · 2 connected",
+            "an unreadable port drops the address, never the count"
         );
     }
 

@@ -6,7 +6,8 @@
 //! mutation routes derive `StatusScope` and bound `:id` params identically.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::http::{HeaderMap, StatusCode};
@@ -81,6 +82,15 @@ pub enum ConnClass {
 #[derive(Default)]
 pub struct ConnectionRegistry {
     entries: Mutex<HashMap<String, ConnClass>>,
+    /// How many [`ConnClass::Events`] connections are live, maintained on every
+    /// insert and remove so the number can be read without the lock and, more to
+    /// the point, from a crate that cannot see this type at all.
+    ///
+    /// That is what it is for. The terminal UI's serving chip counts connected
+    /// browsers, `dux-tui` never sees `dux-web`, and the map itself cannot travel;
+    /// an `Arc<AtomicUsize>` can. Every registry has one, so the count is never a
+    /// special case, and the background serve shares its own clone in.
+    events_live: Arc<AtomicUsize>,
 }
 
 impl ConnectionRegistry {
@@ -88,14 +98,59 @@ impl ConnectionRegistry {
         Self::default()
     }
 
+    /// A registry that reports its live Events count into `gauge`, so a reader
+    /// outside this crate can see it.
+    pub fn with_events_gauge(gauge: Arc<AtomicUsize>) -> Self {
+        gauge.store(0, Ordering::Relaxed);
+        Self {
+            entries: Mutex::new(HashMap::new()),
+            events_live: gauge,
+        }
+    }
+
     /// Register a live connection id with its class (called on socket upgrade).
     pub fn insert(&self, id: String, class: ConnClass) {
-        self.entries.lock().unwrap().insert(id, class);
+        let mut entries = self.entries.lock().unwrap();
+        let previous = entries.insert(id, class);
+        self.adjust_events_count(previous, Some(class));
     }
 
     /// Deregister a connection id (called on socket disconnect), freeing its slot.
     pub fn remove(&self, id: &str) {
-        self.entries.lock().unwrap().remove(id);
+        let mut entries = self.entries.lock().unwrap();
+        let previous = entries.remove(id);
+        self.adjust_events_count(previous, None);
+    }
+
+    /// How many Events connections are live: one per open browser tab.
+    ///
+    /// Events sockets only, deliberately. A tab that is watching a terminal has a
+    /// PTY socket open beside its Events one, and counting those would report
+    /// three connections for one browser.
+    ///
+    /// Called with the entries lock held, so a concurrent insert and remove cannot
+    /// interleave into a count that drifts from the map.
+    fn adjust_events_count(&self, previous: Option<ConnClass>, current: Option<ConnClass>) {
+        let was = previous == Some(ConnClass::Events);
+        let is = current == Some(ConnClass::Events);
+        match (was, is) {
+            (false, true) => {
+                self.events_live.fetch_add(1, Ordering::Relaxed);
+            }
+            (true, false) => {
+                self.events_live.fetch_sub(1, Ordering::Relaxed);
+            }
+            // Unchanged, including the re-insert of an id that is already there.
+            // Ids are server-minted UUIDs so that should never happen, but a
+            // double count would be permanent and this costs nothing.
+            (false, false) | (true, true) => {}
+        }
+    }
+
+    /// How many browser tabs are connected right now: the live
+    /// [`ConnClass::Events`] count.
+    pub fn events_count(&self) -> usize {
+        self.events_live.load(Ordering::Relaxed)
     }
 
     /// Whether `id` is a currently-live connection.
@@ -419,6 +474,56 @@ mod tests {
             StatusScope::All,
             "an id exceeding MAX_ID_LEN must fall back to All"
         );
+    }
+
+    /// The gauge counts browser tabs, which means Events sockets and nothing
+    /// else: a PTY socket is a second connection from a tab that is already
+    /// counted, so counting those would report three connections for one browser.
+    #[test]
+    fn the_events_gauge_counts_only_events_connections() {
+        let gauge = Arc::new(AtomicUsize::new(0));
+        let reg = ConnectionRegistry::with_events_gauge(Arc::clone(&gauge));
+        assert_eq!(reg.events_count(), 0, "nothing connected yet");
+
+        reg.insert("tab-1".into(), ConnClass::Events);
+        reg.insert("tab-1-pty".into(), ConnClass::AgentPty);
+        reg.insert("tab-1-term".into(), ConnClass::TerminalPty);
+        assert_eq!(reg.events_count(), 1, "one browser tab, three sockets");
+        assert_eq!(
+            gauge.load(Ordering::Relaxed),
+            1,
+            "the shared gauge is what the terminal UI reads, so it must agree"
+        );
+
+        reg.insert("tab-2".into(), ConnClass::Events);
+        assert_eq!(reg.events_count(), 2);
+
+        reg.remove("tab-1-pty");
+        assert_eq!(
+            reg.events_count(),
+            2,
+            "a PTY socket closing changes nothing"
+        );
+        reg.remove("tab-1");
+        assert_eq!(reg.events_count(), 1, "the tab left");
+        reg.remove("tab-1");
+        assert_eq!(
+            reg.events_count(),
+            1,
+            "removing an id twice must not underflow the count"
+        );
+        reg.remove("tab-2");
+        assert_eq!(reg.events_count(), 0);
+        assert_eq!(gauge.load(Ordering::Relaxed), 0);
+    }
+
+    /// A registry nobody handed a gauge to still counts, so every existing serve
+    /// path keeps working and the count is never a special case.
+    #[test]
+    fn a_registry_without_a_shared_gauge_still_counts() {
+        let reg = ConnectionRegistry::default();
+        reg.insert("tab-1".into(), ConnClass::Events);
+        assert_eq!(reg.events_count(), 1);
     }
 
     #[test]

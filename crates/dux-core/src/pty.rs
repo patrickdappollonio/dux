@@ -1306,6 +1306,19 @@ impl PtyClient {
         terminal.snapshot()
     }
 
+    /// How many live subscribers are on this PTY's byte stream.
+    ///
+    /// Which is to say: how many browsers are watching it. The subscriber list is
+    /// exactly the web PTY sockets, because the terminal UI renders from the
+    /// emulator grid and never subscribes, so this counts the OTHER people looking
+    /// at the same terminal, and it is structurally zero when nothing is serving.
+    ///
+    /// A count for a label, so a poisoned lock answers zero rather than taking the
+    /// process down over an indicator.
+    pub fn subscriber_count(&self) -> usize {
+        self.subscribers.lock().map(|subs| subs.len()).unwrap_or(0)
+    }
+
     /// Subscribe to the live raw-byte stream. Returns a [`PtyViewerGuard`] and a
     /// `Receiver`. The receiver gets a clone of every chunk read from the PTY
     /// from now on. Dropping the guard immediately removes this subscriber from
@@ -5268,6 +5281,33 @@ mod tests {
             None,
             "a poll that found no exit must not stamp a reap instant"
         );
+    }
+
+    /// The subscriber count is what the terminal UI's "N remote" indicator is
+    /// made of, so it has to follow a viewer arriving and leaving, and a viewer
+    /// leaves when its guard drops rather than at the next byte of output.
+    #[test]
+    fn the_subscriber_count_follows_a_viewer_arriving_and_leaving() {
+        let client = PtyClient::spawn("cat", &[], Path::new("."), 5, 40, 100).expect("spawn pty");
+        assert_eq!(
+            client.subscriber_count(),
+            0,
+            "the terminal UI reads the grid and never subscribes, so an unwatched pty is zero"
+        );
+
+        let (guard, _rx) = client.subscribe();
+        assert_eq!(client.subscriber_count(), 1, "one browser is watching");
+        let (guard2, _rx2) = client.subscribe();
+        assert_eq!(client.subscriber_count(), 2);
+
+        drop(guard2);
+        assert_eq!(
+            client.subscriber_count(),
+            1,
+            "a viewer leaves when its guard drops, not at the next byte of output"
+        );
+        drop(guard);
+        assert_eq!(client.subscriber_count(), 0);
     }
 
     #[test]

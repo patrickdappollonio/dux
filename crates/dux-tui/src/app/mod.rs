@@ -5528,6 +5528,25 @@ impl App {
         }
     }
 
+    /// How many browsers are watching this agent, summed over every one of its
+    /// tabs.
+    ///
+    /// Summed rather than per-tab because the SIDEBAR ROW is about the agent, the
+    /// same way its liveness ORs across tabs: somebody with any of the agent's tabs
+    /// open is somebody else looking at this agent. A browser watching two tabs of
+    /// one agent therefore counts twice, which is the honest reading of "how many
+    /// remote viewers are attached" and the only one this side can back up.
+    ///
+    /// Zero when nothing is serving, structurally: the subscriber lists are exactly
+    /// the web PTY sockets, and without a serve there are none.
+    pub(crate) fn remote_viewer_count(&self, session_id: &str) -> usize {
+        self.session_tab_ids(session_id)
+            .iter()
+            .filter_map(|tab_id| self.engine.providers.get(tab_id))
+            .map(|client| client.subscriber_count())
+            .sum()
+    }
+
     pub(crate) fn running_companion_terminal_count(&self) -> usize {
         self.engine.companion_terminals.len()
     }
