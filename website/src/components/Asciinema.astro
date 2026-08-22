@@ -55,6 +55,14 @@ const scriptId = `asciicast-${castId}`;
         <span class="ml-auto pill text-[10px] !py-0.5">live recording</span>
       </div>
       <div class="bg-black p-2 sm:p-3">
+        {/* The sizer (see the style block below) reserves the player's final
+            height before anything loads. Without it the injected asciinema
+            player starts as a ~150px placeholder and grows several hundred
+            pixels once the cast loads, which happens mid-scroll on an anchor
+            click and makes every section below this one land short of its
+            heading. All three states (fallback poster, loading placeholder,
+            loaded player) live in the same reserved box, so the demo never
+            moves the rest of the page. */}
         <div class="asciinema-embed relative [&_.asciinema-player]:!mx-auto">
           {/* Local fallback: a real dux frame + play CTA. Shown by default and
               hidden once the official asciinema embed injects its player. This
@@ -90,6 +98,40 @@ const scriptId = `asciicast-${castId}`;
       </div>
     </div>
   </div>
+
+  <style>
+    /* Reserve the embed's final height so the loading player cannot shift the
+       page (the anchor-scroll bug described above). The asciinema iframe sizes
+       itself to width * (784 / 1609) plus a 58.3px control bar, measured at
+       six viewport widths (390 to 1440) within a pixel; the ratio is the
+       cast's terminal, the constant is the player chrome. An aspect-ratio
+       cannot express the constant term, so a padding-top sizer does (padding
+       percentages resolve against the width). The children stack on the sizer
+       in one grid cell; if a future cast is taller than the reservation, the
+       cell grows and the shift is back but small; a shorter one leaves a
+       quiet letterbox gap. Never a broken layout. */
+    .asciinema-embed {
+      display: grid;
+    }
+    .asciinema-embed::before {
+      content: "";
+      grid-area: 1 / 1;
+      padding-top: calc(48.725% + 58.3px);
+    }
+    .asciinema-embed > :global(*) {
+      grid-area: 1 / 1;
+      /* The embed script sets an inline vertical margin on its wrapper, which
+         would add to the grid row and break the reservation above; important
+         is the only way to beat an inline style. */
+      margin: 0 !important;
+    }
+    /* The fallback poster is the reservation minus the control bar, so center
+       it in the box instead of leaving the gap at the bottom. */
+    .asciinema-embed > a {
+      display: flex;
+      align-items: center;
+    }
+  </style>
 
   <script is:inline>
     (function () {
