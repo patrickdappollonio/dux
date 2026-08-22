@@ -1722,6 +1722,13 @@ struct DrainOutcome {
 /// should see the agents winding down. Every other serve path shares the terminal
 /// with a themed dux-tui screen, where a raw line lands wherever the cursor
 /// happens to sit; those paths stay silent and rely on `dux.log`.
+///
+/// This flag is about PRINTING, not about the `Shutdown` request itself, which
+/// SIGTERMs every agent wherever it arrives. Only `EngineHandle::shutdown` sends
+/// one and only `run_plain_http` calls it, so the flip and the background server
+/// cannot receive one today. Worth knowing if that ever changes: on the
+/// background-server path a `Shutdown` would wind down the agents of a terminal
+/// UI that never asked, so a new sender needs a reason and a gate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ShutdownEcho {
     Stderr,

@@ -3586,8 +3586,8 @@ impl App {
                     // Capped while the background server is on: this poll IS a
                     // browser's request latency, so the lazy idle cadence would
                     // put a remote keystroke behind it (see `App::max_poll_ms`).
-                    let poll_ms =
-                        if self.any_row_animating() { 33 } else { 100 }.min(self.max_poll_ms());
+                    let idle_poll_ms: u64 = if self.any_row_animating() { 33 } else { 100 };
+                    let poll_ms = idle_poll_ms.min(self.max_poll_ms());
                     let ready = match crate::io_retry::retry_on_interrupt(|| {
                         event::poll(Duration::from_millis(poll_ms))
                     }) {

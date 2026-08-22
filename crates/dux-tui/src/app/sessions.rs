@@ -4118,6 +4118,20 @@ impl App {
         // so with one already serving the flip's pre-flight would fail on its own
         // required loopback bind and report a port collision against dux itself.
         // Refuse with the honest reason instead, and point at the two ways out.
+        //
+        // A background start that is still in its own pre-flight counts: that
+        // worker has the ports, and the collision would be the same one with a
+        // more confusing message. This is the mirror of the guard
+        // `start_background_server` already applies to the flip.
+        if self.background_server_preflight_pending {
+            self.set_warning(
+                "dux is already starting the web server in the background. Wait for it to \
+                 report back, then run stop-background-server if you want the terminal handed \
+                 over instead."
+                    .to_string(),
+            );
+            return;
+        }
         if self.background_server_is_serving() {
             let urls = self
                 .companion

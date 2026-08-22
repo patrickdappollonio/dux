@@ -59,6 +59,20 @@ impl BackgroundServeCompanion for WebCompanion {
             Some(server) => server.service(engine),
             None => ServiceOutcome::default(),
         };
+        if outcome.stopped && self.server.is_some() {
+            // The serve's request channel closed, or something asked its loop to
+            // stop. Nothing routine does that while a serve is up, so retiring it
+            // is both the safe answer and the informative one: servicing a stopped
+            // server every iteration forever would be a silent lie about what the
+            // status line said.
+            dux_core::logger::warn(
+                "[server] the background web server's request channel closed, so it has stopped \
+                 serving. The terminal UI and every agent are unaffected; use \
+                 start-background-server to serve again.",
+            );
+            self.stop(engine);
+            return outcome;
+        }
         // Checked after servicing rather than before, so the iteration that
         // noticed the death still drained whatever was queued.
         self.retire_if_failed();

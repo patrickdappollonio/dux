@@ -746,6 +746,34 @@ mod tests {
         );
     }
 
+    /// The flip refusal covers a background start that is still in its bind
+    /// pre-flight, too: that worker holds the ports, so the flip would collide
+    /// with dux itself and say something less useful about it.
+    #[test]
+    fn flipping_while_a_background_start_is_in_flight_is_refused_too() {
+        let mut app = test_app(default_bindings());
+        let (companion, _recorded) = FakeCompanion::serving();
+        app.companion = Some(companion);
+        app.stop_background_server_quietly();
+        app.background_server_preflight_pending = true;
+
+        app.start_web_server();
+
+        let message = app
+            .status
+            .most_recent_tui()
+            .map(|(_, message)| message)
+            .unwrap_or_default();
+        assert!(
+            message.contains("already starting the web server in the background"),
+            "the refusal must name the start that is in flight: {message}"
+        );
+        assert!(
+            !app.server_flip_preflight_pending,
+            "no competing pre-flight may be dispatched"
+        );
+    }
+
     /// Asking to start while already serving says where it is rather than
     /// spawning a second pre-flight that would collide with the live listener.
     #[test]
@@ -795,6 +823,36 @@ mod tests {
         assert!(
             message.contains("agents"),
             "the message must say the agents are unaffected: {message}"
+        );
+    }
+
+    /// Leaving the terminal UI stops the serve, and it goes through the same
+    /// quiet stop the palette command and the config transition use.
+    ///
+    /// This matters for a reason that is not visible at the call site: stopping
+    /// trips the PTY forwarders' teardown flag BEFORE anything waits on the
+    /// serve's runtime, and the forwarders are parked on channels the engine still
+    /// owns. An implicit drop instead of this call would block on tasks that never
+    /// notice. The `App::run` teardown that calls this is not itself covered by a
+    /// test, because driving the run loop needs a real terminal; the two halves
+    /// either side of it are.
+    #[test]
+    fn a_quiet_stop_turns_the_listener_off_without_touching_config_or_status() {
+        let mut app = test_app(default_bindings());
+        let (companion, _recorded) = FakeCompanion::serving();
+        app.companion = Some(companion);
+        app.engine.config.server.serve_while_tui = true;
+
+        app.stop_background_server_quietly();
+
+        assert!(!app.background_server_is_serving(), "the listener is off");
+        assert!(
+            app.engine.config.server.serve_while_tui,
+            "quitting is not a decision to stop serving next time"
+        );
+        assert!(
+            app.status.most_recent_tui().is_none(),
+            "nothing to announce on a surface that is going away"
         );
     }
 

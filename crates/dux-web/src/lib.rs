@@ -989,8 +989,12 @@ pub(crate) enum SignalPolicy {
 /// accepted and stated: connection and PTY-ownership state resets across a
 /// cycle, and browsers reconnect in place (same process identity, so no reload).
 pub(crate) struct ServeCore {
-    /// Declared FIRST so it is dropped LAST: the supervisor handle and the
-    /// shutdown lanes must still be valid while the runtime winds down.
+    /// Torn down explicitly by [`Self::finish`], never by an implicit drop of this
+    /// struct if it can be helped: `Runtime::drop` blocks until every
+    /// `spawn_blocking` task returns and cannot abort them, so a parked PTY
+    /// forwarder would hang it forever. `finish` uses `shutdown_timeout`, which
+    /// detaches stragglers. An implicit drop is still reachable on a start-time
+    /// error path, where no forwarder is parked on this runtime yet.
     runtime: tokio::runtime::Runtime,
     shutdown: ServeShutdown,
     watcher_stop: Arc<AtomicBool>,
