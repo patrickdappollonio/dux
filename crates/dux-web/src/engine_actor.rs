@@ -71,7 +71,16 @@ pub enum EngineRequest {
     ClearStatus(String),
     SubscribePty(String, oneshot::Sender<Result<PtySubscription, String>>),
     WritePty(String, Vec<u8>),
-    ResizePty(String, u16, u16),
+    /// Resize a PTY: id, rows, cols, and the apply-order seq the owners lock
+    /// stamped for it.
+    ///
+    /// The seq travels with the request because this resize is applied LATER,
+    /// whenever this queue is drained, while another surface (the terminal UI,
+    /// when it is serving in the background) applies its own resizes the moment
+    /// it claims them. The apply site offers the seq to
+    /// `PtySizeOwners::accept_grid_apply`, which drops a resize that a newer
+    /// claim's geometry has already overtaken.
+    ResizePty(String, u16, u16, u64),
     /// Read a live PTY's current grid as `(rows, cols)`, replying `None` when the
     /// id names nothing running. The PTY socket asks once per attach so the
     /// `connected` handshake can tell an arriving viewer what geometry the child
@@ -823,12 +832,15 @@ impl EngineHandle {
             .try_send(EngineRequest::WritePty(session_id, bytes));
     }
 
-    pub fn resize_pty(&self, session_id: String, rows: u16, cols: u16) {
+    /// Enqueue a resize the owners lock has already stamped with `seq`, which
+    /// travels along so the apply site can drop it if a later claim's geometry
+    /// beat it to the child.
+    pub fn resize_pty(&self, session_id: String, rows: u16, cols: u16, seq: u64) {
         // `try_send`: a resize dropped under overload is self-correcting (the next
         // resize re-establishes the size); no need to backpressure a sync caller.
         let _ = self
             .req_tx
-            .try_send(EngineRequest::ResizePty(session_id, rows, cols));
+            .try_send(EngineRequest::ResizePty(session_id, rows, cols, seq));
     }
 
     /// The PTY's current grid as `(rows, cols)`, or `None` when the id names no
@@ -3059,9 +3071,22 @@ fn handle_request(
                 engine.note_pty_write(&id, &bytes);
             }
         }
-        EngineRequest::ResizePty(id, rows, cols) => {
-            if let Some(client) = pty_for(engine, &id) {
-                let _ = client.resize(rows, cols);
+        EngineRequest::ResizePty(id, rows, cols, seq) => {
+            // The one apply order. This resize was stamped when its claim was
+            // granted and has been sitting in the queue since; a claim granted
+            // afterwards may already have put its own geometry on the child
+            // (the terminal UI applies the moment it claims), and letting this
+            // one land now would size the pty for a connection that no longer
+            // owns it. See `PtySizeOwners::accept_grid_apply`.
+            if input_owners.accept_grid_apply(&id, seq) {
+                if let Some(client) = pty_for(engine, &id) {
+                    let _ = client.resize(rows, cols);
+                }
+            } else {
+                dux_core::logger::debug(&format!(
+                    "PTY resize seq {seq} for pty {id} dropped: a newer claim's geometry has \
+                     already reached the child"
+                ));
             }
         }
         EngineRequest::PtyGridSize(id, reply) => {
@@ -5507,7 +5532,7 @@ mod tests {
             ),
             (
                 "ResizePty",
-                EngineRequest::ResizePty("s1".into(), 24, 80),
+                EngineRequest::ResizePty("s1".into(), 24, 80, 1),
                 false,
             ),
             (

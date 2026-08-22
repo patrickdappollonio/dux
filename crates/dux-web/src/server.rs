@@ -1725,8 +1725,8 @@ async fn handle_pty_socket(
                         conn_id,
                         frame.takeover,
                         user_agent.as_deref(),
-                        || {
-                            engine.resize_pty(pty_id.to_string(), frame.rows, frame.cols);
+                        |seq| {
+                            engine.resize_pty(pty_id.to_string(), frame.rows, frame.cols, seq);
                         },
                     );
                     if let Some(epoch) = outcome.epoch {

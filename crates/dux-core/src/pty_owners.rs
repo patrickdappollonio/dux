@@ -78,6 +78,12 @@ pub struct OwnersState {
     /// `epoch` does for `pty.owner`. Keyed per pty because the broadcasts are
     /// filtered per pty; never decreases within a process.
     pub grid_seq: std::collections::HashMap<String, u64>,
+    /// Per-pty high-water mark of the seq that actually REACHED the child, the
+    /// other half of [`PtySizeOwners::accept_grid_apply`]. Distinct from
+    /// `grid_seq`, which counts what was stamped: the two differ for exactly as
+    /// long as a stamped resize is still queued somewhere, and that window is
+    /// where the inversion lives.
+    pub applied_seq: std::collections::HashMap<String, u64>,
 }
 
 /// Tracks which connection currently owns sizing+input for each PTY, keyed by
@@ -221,13 +227,19 @@ impl PtySizeOwners {
     /// `device` is the claiming connection's captured `User-Agent`, recorded
     /// with the owner id on a claim so [`Self::current_owner`] can name the
     /// device on later handshakes; it is ignored on every non-claiming outcome.
+    ///
+    /// `apply_resize` is handed the seq stamped for this resize, because a caller
+    /// that merely ENQUEUES the resize has to carry it to wherever the resize is
+    /// finally applied: that apply site offers the seq to
+    /// [`Self::accept_grid_apply`] and drops the resize if a later claim's
+    /// geometry has already reached the child.
     pub fn claim_for_resize(
         &self,
         pty_id: &str,
         conn_id: u64,
         takeover: bool,
         device: Option<&str>,
-        apply_resize: impl FnOnce(),
+        apply_resize: impl FnOnce(u64),
     ) -> ResizeClaim {
         let mut owners = self.owners.lock().unwrap();
         let mut outcome = match owners.map.get(pty_id) {
@@ -266,8 +278,9 @@ impl PtySizeOwners {
             // receiver drop an announcement that arrives behind a newer one.
             let seq = owners.grid_seq.entry(pty_id.to_string()).or_insert(0);
             *seq += 1;
-            outcome.seq = Some(*seq);
-            apply_resize();
+            let seq = *seq;
+            outcome.seq = Some(seq);
+            apply_resize(seq);
         }
         outcome
     }
@@ -283,7 +296,7 @@ impl PtySizeOwners {
     /// web crate: the tests that need it are now in three crates, and a cfg that
     /// only sees this one's test build would hide it from all of them.
     pub fn claim(&self, pty_id: &str, conn_id: u64) -> Option<u64> {
-        self.claim_for_resize(pty_id, conn_id, true, None, || {})
+        self.claim_for_resize(pty_id, conn_id, true, None, |_| {})
             .epoch
     }
 
@@ -395,6 +408,40 @@ impl PtySizeOwners {
         Some(owners.epoch)
     }
 
+    /// THE ONE APPLY ORDER: may a resize stamped with `seq` still reach the
+    /// child of `pty_id`?
+    ///
+    /// Every surface stamps its resize under this lock, in true claim order, but
+    /// the surfaces do not APPLY at the same moment. A browser's resize is
+    /// enqueued to the engine actor and lands whenever that queue is drained; the
+    /// terminal UI holds the engine and applies at once. So a resize stamped
+    /// FIRST can reach the child LAST, leaving the pty sized for a connection
+    /// that no longer owns it while the owner believes the child already knows
+    /// its geometry. Nothing corrects that afterwards: the owner has no reason to
+    /// resend a size it never changed.
+    ///
+    /// So each apply site offers its seq here immediately before touching the
+    /// child, and a seq that is not strictly newer than the last one that landed
+    /// is dropped. Two apply sites, one order, decided in one place.
+    ///
+    /// Dropping is the right answer rather than a loss: a dropped resize is by
+    /// definition superseded by one that already landed, and the viewer whose
+    /// resize was dropped learns the real grid from the handshake and the grid
+    /// broadcast, both of which report what the child was actually told.
+    ///
+    /// In a web-only process this never refuses anything, because there is one
+    /// apply site and the actor drains its queue in order. It earns its keep only
+    /// while the terminal UI is a participant too.
+    pub fn accept_grid_apply(&self, pty_id: &str, seq: u64) -> bool {
+        let mut owners = self.owners.lock().unwrap();
+        let landed = owners.applied_seq.entry(pty_id.to_string()).or_insert(0);
+        if seq <= *landed {
+            return false;
+        }
+        *landed = seq;
+        true
+    }
+
     /// The per-pty grid sequence as of now: the seq of the last APPLIED resize,
     /// or 0 before any. Read once per PTY-socket handshake, BEFORE the
     /// actor-queued grid read, which makes it a valid lower bound for the grid
@@ -452,7 +499,7 @@ mod tests {
         takeover: bool,
     ) -> (ResizeClaim, bool) {
         let applied = std::cell::Cell::new(false);
-        let outcome = owners.claim_for_resize(pty, conn, takeover, None, || applied.set(true));
+        let outcome = owners.claim_for_resize(pty, conn, takeover, None, |_| applied.set(true));
         (outcome, applied.get())
     }
 
@@ -578,10 +625,10 @@ mod tests {
         let applied: std::cell::RefCell<Vec<(u64, u64)>> = std::cell::RefCell::new(Vec::new());
 
         // A claims at 24x80, B takes over at 30x100.
-        let first = owners.claim_for_resize("p", a, false, None, || {
+        let first = owners.claim_for_resize("p", a, false, None, |_| {
             applied.borrow_mut().push((a, 80));
         });
-        let second = owners.claim_for_resize("p", b, true, None, || {
+        let second = owners.claim_for_resize("p", b, true, None, |_| {
             applied.borrow_mut().push((b, 100));
         });
 
@@ -637,6 +684,80 @@ mod tests {
         let (other, _) = claim_resize(&owners, "q", b, false);
         assert_eq!(other.seq, Some(1));
         assert_eq!(owners.grid_seq("p"), 3);
+    }
+
+    /// THE ONE APPLY ORDER, across surfaces that apply at different moments.
+    ///
+    /// A browser's resize is stamped under the owners lock and then ENQUEUED to
+    /// the engine actor, so it lands later. The terminal UI holds the engine and
+    /// applies straight away. So the earlier claim can reach the child after the
+    /// later one, which is exactly the inversion `grid_seq` was invented to stop
+    /// on the wire, happening this time to the child itself: the pty ends up
+    /// sized for the loser while the winner is recorded as its owner and believes
+    /// it has already told the child.
+    ///
+    /// The gate is the fix: every apply site, on either surface, offers its
+    /// stamped seq here first, and a seq that is not newer than the last applied
+    /// one is dropped.
+    #[test]
+    fn a_deferred_resize_is_dropped_when_a_later_claim_already_applied() {
+        let owners = PtySizeOwners::default();
+        let browser = owners.next_conn_id();
+        let tui = owners.next_conn_id();
+        let applied: std::cell::RefCell<Vec<(u64, u16)>> = std::cell::RefCell::new(Vec::new());
+
+        // The browser claims the unowned pty at 80 columns and ENQUEUES its
+        // resize: nothing has reached the child yet.
+        let queued = owners.claim_for_resize("p", browser, false, None, |_| {});
+        let queued_seq = queued.seq.expect("the claim applied, so it stamped a seq");
+
+        // The terminal UI takes over at 100 columns and applies immediately.
+        let direct = owners.claim_for_resize("p", tui, true, None, |_| {});
+        let direct_seq = direct.seq.expect("the take-over applied");
+        assert!(
+            owners.accept_grid_apply("p", direct_seq),
+            "the newest stamped resize is the one that may reach the child"
+        );
+        applied.borrow_mut().push((tui, 100));
+
+        // Now the browser's queued resize is drained. It must not land: the
+        // terminal UI owns the pty and its geometry is already on the child.
+        assert!(
+            !owners.accept_grid_apply("p", queued_seq),
+            "a resize stamped before the winning claim must be dropped, not applied"
+        );
+        assert_eq!(
+            applied.borrow().as_slice(),
+            &[(tui, 100)],
+            "the owner's geometry must be the last thing the child was told"
+        );
+
+        // A fresh claim by the demoted browser is newer, so it passes again: the
+        // gate drops stale applies, it does not wedge the pty.
+        let again = owners
+            .claim_for_resize("p", browser, true, None, |_| {})
+            .seq
+            .expect("the take-over applied");
+        assert!(owners.accept_grid_apply("p", again));
+    }
+
+    /// The gate is per pty, and it never refuses the very first apply.
+    #[test]
+    fn the_apply_gate_starts_open_and_counts_per_pty() {
+        let owners = PtySizeOwners::default();
+        let conn = owners.next_conn_id();
+
+        let first = claim_resize(&owners, "p", conn, false).0.seq.unwrap();
+        assert!(owners.accept_grid_apply("p", first), "nothing applied yet");
+        assert!(
+            !owners.accept_grid_apply("p", first),
+            "the same seq offered twice is a duplicate, not a newer geometry"
+        );
+
+        // Another pty is stamped and gated on its own counter, exactly as the
+        // broadcasts are filtered per pty.
+        let other = claim_resize(&owners, "q", conn, false).0.seq.unwrap();
+        assert!(owners.accept_grid_apply("q", other));
     }
 
     /// A release that really cleared an owner reports an epoch, so the caller can
@@ -699,7 +820,7 @@ mod tests {
         let b = owners.next_conn_id();
 
         // A resize claim records the claimer's device.
-        let claim = owners.claim_for_resize("p", a, false, Some("Desktop UA"), || {});
+        let claim = owners.claim_for_resize("p", a, false, Some("Desktop UA"), |_| {});
         assert!(claim.epoch.is_some(), "the unowned pty was claimed");
         let (owner, _, device) = owners.current_owner("p");
         assert_eq!(owner, Some(a));
@@ -711,7 +832,7 @@ mod tests {
 
         // A take-over replaces both halves together; a claimer that sent no
         // User-Agent leaves the device empty rather than inheriting the old one.
-        let takeover = owners.claim_for_resize("p", b, true, None, || {});
+        let takeover = owners.claim_for_resize("p", b, true, None, |_| {});
         assert!(takeover.epoch.is_some());
         assert_eq!(
             owners.current_owner("p"),
