@@ -1538,7 +1538,7 @@ pub fn spawn_engine_thread(mut engine: Engine) -> (EngineHandle, JoinHandle<()>)
         // The dedicated thread never asks the loop to exit; the loop stops only
         // on the `Shutdown` request handled inline. The returned engine is
         // dropped here (thread end), exactly as the previous implementation did.
-        let _engine = run_engine_loop(engine, ends, || LoopControl::Continue);
+        let _engine = run_engine_loop(engine, ends, ShutdownEcho::Stderr, || LoopControl::Continue);
     });
 
     (handle, join)
@@ -1670,84 +1670,635 @@ fn request_mutates_spine(req: &EngineRequest) -> bool {
     }
 }
 
+/// How a drained reaction's web-side follow-ups are routed.
+///
+/// The follow-up BODIES are identical either way; this only decides which of
+/// them are allowed to run. It exists because a process can now have two
+/// surfaces reading one worker-event stream, and roughly four reactions carry a
+/// follow-up that DOES something rather than merely reporting something.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FollowupRouting {
+    /// Run every follow-up that matches the reaction. What a process with one
+    /// surface wants: `dux server` and the flip are the only drainer, so every
+    /// reaction they see is theirs and there is nobody else to defer to.
+    RunEverything,
+    /// Run only the follow-ups [`Engine::followup_owner`] assigns to the web.
+    /// The terminal UI is the drainer in this mode and holds the other half of
+    /// those reactions, so an unrouted follow-up would run on both surfaces.
+    ///
+    /// Measured, so the difference is not mysterious: the two modes diverge only
+    /// for a routed reaction whose op id is absent from the web pending-op maps,
+    /// and every web dispatch site forwards a real op id into its worker, so
+    /// `dux server` and the flip cannot tell the two apart. `RunEverything` is
+    /// nonetheless what they pass, because their equivalence is a property of
+    /// today's call sites rather than of this function.
+    ByOrigin,
+}
+
+/// What one call to [`EngineService::drain_requests`] did.
+struct DrainOutcome {
+    /// At least one drained request could move the spine, per the exhaustive
+    /// [`request_mutates_spine`].
+    mutated: bool,
+    /// The request channel closed, or an inline `Shutdown` request asked the loop
+    /// to stop.
+    stopped: bool,
+}
+
+/// Whether the request drain may echo shutdown progress to stderr.
+///
+/// `dux server` owns its terminal and an operator running it in the foreground
+/// should see the agents winding down. Every other serve path shares the terminal
+/// with a themed dux-tui screen, where a raw line lands wherever the cursor
+/// happens to sit; those paths stay silent and rely on `dux.log`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShutdownEcho {
+    Stderr,
+    Silent,
+}
+
+/// Everything the engine loop keeps between iterations, so one iteration's worth
+/// of web-side work can also be driven from the terminal UI's own run loop.
+///
+/// The split follows one rule: the shared maintenance sweeps have exactly ONE
+/// runner per process, and that runner is whoever drains `worker_rx`. In
+/// `dux server` and the flip that is [`run_engine_loop`], which therefore calls
+/// [`Self::run_maintenance`]. While the background server runs behind a live TUI,
+/// the TUI drains and sweeps, and the only thing left for the web layer is
+/// [`Self::service_engine_once`]: resolve pending subscribes, check the spine,
+/// drain requests, retire timed-out statuses.
+pub(crate) struct EngineService {
+    req_rx: mpsc::Receiver<EngineRequest>,
+    /// Route every status through the shared `KeyedStatusController` so the web
+    /// gets the SAME auto-clear + pending→final behaviour as the TUI from one
+    /// place. The emitter upserts by key, broadcasts each status LIVE, and keeps
+    /// the Vec snapshot watch in sync so connecting clients see all open toasts
+    /// at once. [`Self::tick_statuses`] upgrades a stale Busy→Warning and drops
+    /// finals that have aged past `FINAL_REPLAY_WINDOW`. It takes no
+    /// `status_clear_seconds`: under `StatusRetention::Emit` how long a toast
+    /// stays on SCREEN belongs to the browser, and the only server-side lifetime
+    /// left is the fixed replay window.
+    status: StatusEmitter,
+    config_reload_tx: broadcast::Sender<()>,
+    spine_change_tx: broadcast::Sender<SpineChange>,
+    workspace_tx: watch::Sender<Option<Arc<WorkspaceDoc>>>,
+    shutdown_flag: Arc<AtomicBool>,
+    pty_input_owners: Arc<PtySizeOwners>,
+    /// Subscribes waiting for their provider to come up via the worker-event
+    /// drain.
+    pending: Vec<PendingSubscribe>,
+    /// The session most recently brought to the foreground via a PTY subscribe.
+    /// Workspace-global (single-tenant server), last-subscribe-wins across
+    /// browser clients — deliberately NOT the engine's `watched_session_id` (that
+    /// is the TUI's changed-files watch). Gates the tight foreground PR check so a
+    /// socket reconnect for an already-focused agent doesn't re-fire it (only a
+    /// real focus change does).
+    last_pr_foregrounded: Option<String>,
+    /// Change-gated spine check (fingerprints, cached `/spine` JSON, backstop
+    /// accumulator). Seeded from the current state so the first tick does not emit
+    /// a spurious change for an unchanged spine and a `/spine` read before the
+    /// first change still serves a valid body.
+    spine_check: SpineCheck,
+    /// In-memory spine mutation version: bumped after each spine mutator (a wire
+    /// apply or a `CreateTerminal` request, a worker-event drain, a changed
+    /// terminal-foreground refresh, a non-empty PTY prune, and — while the
+    /// background server runs — anything the terminal UI applied). The spine check
+    /// runs the serialize only when this (or `streaming_version`) moved since its
+    /// last pass, so idle ticks cost nothing.
+    mutation_version: u64,
+    /// In-memory streaming-transition version: bumped whenever any agent's
+    /// time-derived `is_agent_streaming()` flag flips (see
+    /// `poll_streaming_transitions`), which a mutation counter cannot observe.
+    streaming_version: u64,
+    /// Per-agent last-seen streaming flag, carried across ticks so transitions can
+    /// be detected O(1) without re-deriving history each tick.
+    prev_streaming: std::collections::HashMap<String, bool>,
+    /// Per-tick snapshot of the engine's needs-attention set, carried across ticks
+    /// so a set/clear can bump the spine-change gate promptly instead of waiting
+    /// for the ~2s backstop (see `poll_attention_transitions`).
+    prev_attention: std::collections::HashSet<String>,
+    /// Tick counter for throttling the spine fingerprint/cache check (see
+    /// `SPINE_CHECK_TICK_INTERVAL`) so it is evaluated ~every 250ms rather than
+    /// every tick.
+    tick_count: u64,
+    /// True between a raw `config.toml` "Save" (disk written, not yet adopted) and
+    /// the next reconcile (an explicit reload, or the reconcile a config-static
+    /// mutation performs). Drives the clobber-safe reconcile in `handle_request`.
+    config_disk_ahead: bool,
+    shutdown_echo: ShutdownEcho,
+}
+
+impl EngineService {
+    pub(crate) fn new(engine: &Engine, ends: ActorLoopEnds, shutdown_echo: ShutdownEcho) -> Self {
+        let ActorLoopEnds {
+            req_rx,
+            status_tx,
+            status_clear_tx,
+            status_snapshot_tx,
+            config_reload_tx,
+            spine_change_tx,
+            workspace_tx,
+            shutdown_flag,
+            pty_input_owners,
+        } = ends;
+        let spine_check = SpineCheck::new(engine, &pty_input_owners, &workspace_tx);
+        Self {
+            req_rx,
+            status: StatusEmitter::new(status_tx, status_clear_tx, status_snapshot_tx),
+            config_reload_tx,
+            spine_change_tx,
+            workspace_tx,
+            shutdown_flag,
+            pty_input_owners,
+            pending: Vec::new(),
+            last_pr_foregrounded: None,
+            spine_check,
+            mutation_version: 0,
+            streaming_version: 0,
+            prev_streaming: std::collections::HashMap::new(),
+            prev_attention: std::collections::HashSet::new(),
+            tick_count: 0,
+            config_disk_ahead: false,
+            shutdown_echo,
+        }
+    }
+
+    /// Open the spine-change gate for this iteration. The fingerprint compare in
+    /// [`SpineCheck::maybe_check`] stays the precise emit gate, so an over-broad
+    /// bump only costs a serialize.
+    pub(crate) fn note_mutation(&mut self) {
+        self.mutation_version = self.mutation_version.wrapping_add(1);
+    }
+
+    /// The web-side follow-ups for ONE drained reaction, in the order the actor
+    /// loop has always run them.
+    ///
+    /// Deliberately takes the reaction by reference and does NOT consume it: the
+    /// terminal UI applies the same reaction by value straight afterwards, so the
+    /// seam has to be pre-consume. The one follow-up that genuinely needs
+    /// ownership (adopting a reloaded config) is therefore not here; see
+    /// [`Self::announce_config_reload`] for the half the web needs.
+    pub(crate) fn fanout_reaction(
+        &mut self,
+        engine: &mut Engine,
+        reaction: &EventReaction,
+        routing: FollowupRouting,
+    ) {
+        for status in dux_core::wire::wire_statuses_from_reaction(reaction) {
+            let _ = self.status.send(status);
+        }
+        for status in engine.drive_delete_followup(reaction) {
+            let _ = self.status.send(status);
+        }
+        // The checkout-default-branch inspection (worker 1) just produced a
+        // Known-default reaction: spawn the switch (worker 2). Its completion
+        // posts NonDefaultBranchCheckoutCompleted, whose status flows through
+        // the wire_statuses_from_reaction drain above on the next iteration.
+        if self.web_owns(engine, reaction, routing) {
+            for status in engine.drive_checkout_followup(reaction) {
+                let _ = self.status.send(status);
+            }
+            // The add-project "Check Out & Add" switch (worker 2) just succeeded:
+            // AddProjectAfterBranchCheckout drives the actual project add here
+            // (the TUI does this in workers.rs). A switch FAILURE instead produced
+            // an error Status, already surfaced by the wire_statuses drain above.
+            for status in engine.drive_add_project_followup(reaction) {
+                let _ = self.status.send(status);
+            }
+            // A new-agent-from-PR lookup (gh pr view) just resolved: the TUI would
+            // open a name prompt here, but the web already sent the name, so
+            // OpenNewAgentPromptForPr drives the actual CreateAgentRequest::PullRequest
+            // dispatch. A lookup FAILURE instead produced a keyed error Status
+            // (resolving the PR-lookup op), already surfaced by the wire_statuses
+            // drain above. On SUCCESS the followup hands off to the create busy and
+            // returns the PR-lookup op's clear key so its spinner is dismissed.
+            let pr_followup = engine.drive_pr_lookup_followup(reaction);
+            for status in pr_followup.statuses {
+                let _ = self.status.send(status);
+            }
+            for key in pr_followup.clear_keys {
+                self.status.clear(key);
+            }
+        }
+
+        // A reconnect / force-restart launch reported back: resolve the web
+        // launch op (Engine::pending_web_launch_ops) so its "Launching…" /
+        // "Starting fresh…" busy is replaced by the same-key final (or cleared
+        // when the session vanished). Create-kind launch finals are resolved
+        // engine-side and ride the wire_statuses drain above.
+        //
+        // Not origin-routed: it looks its own session up in a web pending map
+        // first and does nothing when the launch was not web-started, which is
+        // the same guard `followup_owner` would apply.
+        let launch_followup = engine.drive_web_launch_followup(reaction);
+        for status in launch_followup.statuses {
+            let _ = self.status.send(status);
+        }
+        for key in launch_followup.clear_keys {
+            self.status.clear(key);
+        }
+        // A StatusOp resolved to `Final::Clear`: dismiss the keyed toast.
+        if let dux_core::engine::EventReaction::ClearStatus(key) = reaction {
+            self.status.clear(key.clone());
+        }
+
+        // A project mutation just updated SQLite + in-memory projects; mirror
+        // it into the portable config.toml so a later TUI start doesn't clobber it.
+        // Skip for `Added` — that arm already wrote config inline in command.rs,
+        // and Skip for `PersistenceFailed` — nothing was saved.
+        if let EventReaction::ProjectPersistenceOutcome(outcome) = reaction
+            && !matches!(
+                outcome.view,
+                ProjectPersistenceView::PersistenceFailed { .. }
+                    | ProjectPersistenceView::Added { .. }
+            )
+            && let Err(e) = engine.persist_projects_to_config()
+        {
+            // STICKY: SQLite and the portable config now disagree about
+            // the same project. That is textbook half-done, and dux treats
+            // config/DB divergence as a first-class hazard elsewhere (a
+            // later TUI start reads the config, not the database, so the
+            // change silently reverts). Fixing it means editing config.toml,
+            // outside anything the toast can offer.
+            let _ = self.status.send(
+                WireStatus::keyed(
+                    "config-write",
+                    "error",
+                    format!("Saved to the database, but config.toml could not be updated: {e:#}"),
+                )
+                .sticky(),
+            );
+        }
+    }
+
+    /// Whether the web owns the routable follow-ups for `reaction`.
+    fn web_owns(
+        &self,
+        engine: &Engine,
+        reaction: &EventReaction,
+        routing: FollowupRouting,
+    ) -> bool {
+        match routing {
+            FollowupRouting::RunEverything => true,
+            FollowupRouting::ByOrigin => {
+                matches!(
+                    engine.followup_owner(reaction),
+                    dux_core::engine::FollowupOwner::Web
+                )
+            }
+        }
+    }
+
+    /// Tell web clients that config-static state changed, WITHOUT adopting the
+    /// config: the reloaded config is applied by whoever drains the event, and
+    /// while the background server runs that is the terminal UI, whose own reload
+    /// arm has never had a reason to fire this.
+    ///
+    /// Called BEFORE the drainer applies the config, because the seam is
+    /// pre-consume. The cost, accepted and stated: if the drainer's apply then
+    /// FAILS, a browser has been told to refetch a config that did not take. It
+    /// refetches `/api/v1/bootstrap` and reads the config still in force, so the
+    /// browser ends up correct either way; what it loses is the news that the
+    /// reload failed, which the surface that failed it is the one showing.
+    pub(crate) fn announce_config_reload(&mut self, engine: &Engine, reaction: &EventReaction) {
+        let Some(config) = peek_apply_reloaded_config(reaction) else {
+            return;
+        };
+        let server_settings_changed =
+            server_rebind_settings_changed(&engine.config.server, &config.server);
+        let _ = self.config_reload_tx.send(());
+        let _ = self.status.send(WireStatus::new(
+            "info",
+            "Configuration reloaded. New settings are active.",
+        ));
+        if server_settings_changed {
+            let _ = self.status.send(WireStatus::new(
+                "warning",
+                "Server bind settings changed in config; restart the server to apply them. \
+                 With the background server, stopping and starting it again is the restart.",
+            ));
+        }
+    }
+
+    /// The shared maintenance sweeps, run by whoever drains `worker_rx`.
+    ///
+    /// EXACTLY ONE runner per process. The terminal UI runs its own equivalents
+    /// inside `drain_events`, so while the background server is on this function
+    /// is not called at all: calling it there would reap PTYs twice, sweep the
+    /// resume fallbacks twice, and dispatch a deferred worktree removal twice.
+    pub(crate) fn run_maintenance(&mut self, engine: &mut Engine) {
+        // Consume each provider's received-data flag once per tick and stamp
+        // the engine's activity map, so bytes that arrived this tick count
+        // toward the `working` projection in the spine read below. This is the
+        // single poll site for the web surface (the TUI run loop is the single
+        // poll site for the other surface).
+        engine.poll_pty_activity();
+
+        // Drain attention/progress signals right after activity so the progress
+        // report and any output it also produced land in the same tick. Keeps the
+        // "working" override truthful and maintains the per-tab attention flag.
+        engine.poll_agent_signals();
+
+        // The two change-detection polls also run inside `check_spine`, which is
+        // where they matter for a surface that does no sweeping. Keeping them here
+        // as well preserves this loop's original ordering; they are pure compares
+        // that update their own carried snapshots, so the second call in the same
+        // iteration finds nothing and bumps nothing.
+        self.poll_change_signals(engine);
+
+        // Refresh companion-terminal foreground commands so the spine's
+        // `foreground_cmd` tracks what's running. The engine throttles this by
+        // wall-clock (~2s), so calling it every tick is cheap.
+        //
+        // Bump #3: only when the refresh actually changed a `foreground_cmd` (a
+        // throttled no-op or an unchanged probe returns false), so a quiet terminal
+        // does not reopen the gate every interval.
+        if engine.refresh_terminal_foregrounds() {
+            self.note_mutation();
+        }
+
+        // Reap PTYs that an individual delete/close SIGTERMed and that have now
+        // exited or passed their grace deadline (force-killed + dropped) — the
+        // non-blocking background half of graceful close. For a reaped agent whose
+        // delete also removes its worktree, dispatch that removal now, only after
+        // the agent's process is actually gone (the existing
+        // `WorktreeRemoveCompleted` path then drives its status).
+        for removal in engine.reap_terminating_ptys() {
+            let _busy = engine.dispatch_deferred_worktree_removal(removal);
+        }
+
+        // Resume-fallback sweep (both detection windows), BEFORE the exit prune:
+        // a `--continue` that came up empty or a resume that hung past its
+        // timeout is relaunched fresh here, so `dux serve` gets the same
+        // continue-then-fresh behavior the TUI has instead of showing "Agent
+        // exited" (the prune below would otherwise reap the exited resume
+        // candidate and mark the agent Detached). Each retry's launch reaction
+        // is surfaced through the same web launch-followup path the drained
+        // reactions use, and a retry mutates the spine.
+        // The web launches at a fixed (24, 80) seed size (the real size arrives
+        // on the first client subscribe/resize), matching the other web launch
+        // sites in this file.
+        for reaction in engine.sweep_resume_fallbacks((24, 80)) {
+            self.note_mutation();
+            let followup = engine.drive_web_launch_followup(&reaction);
+            for status in followup.statuses {
+                let _ = self.status.send(status);
+            }
+            for key in followup.clear_keys {
+                self.status.clear(key);
+            }
+        }
+
+        // Reap agent/terminal PTYs whose child process exited so they stop
+        // lingering in `providers`/`companion_terminals` and disappear from the
+        // spine, broadcasting a status for each so web clients learn.
+        //
+        // Bump #4: only when something was actually pruned (the returned Vec is
+        // non-empty), since a prune that found nothing left the spine untouched.
+        let pruned = engine.prune_exited_ptys();
+        if !pruned.is_empty() {
+            self.note_mutation();
+        }
+        for pruned in pruned {
+            let status = match pruned.kind {
+                // A last-tab exit detaches the whole agent — a workspace-level
+                // event worth a warning. A tab exit that leaves siblings running is
+                // routine and scoped: a quiet info notice naming the tab, never the
+                // loud "Agent exited" warning (which would falsely imply the agent
+                // died).
+                PrunedPtyKind::Agent if pruned.agent_detached => {
+                    WireStatus::new("warning", format!("Agent \"{}\" exited.", pruned.label))
+                }
+                // A clean exit closed the tab itself (its row is gone), so say
+                // so — "exited" alone would imply a dormant tab is left behind.
+                PrunedPtyKind::Agent if pruned.tab_closed => WireStatus::new(
+                    "info",
+                    format!("Tab ({}) exited cleanly and was closed.", pruned.label),
+                ),
+                PrunedPtyKind::Agent => {
+                    WireStatus::new("info", format!("Tab ({}) exited.", pruned.label))
+                }
+                PrunedPtyKind::Terminal => {
+                    WireStatus::new("info", format!("Terminal \"{}\" closed.", pruned.label))
+                }
+            };
+            let _ = self.status.send(status);
+        }
+    }
+
+    /// One iteration of the web-only servicing: the whole of what the web layer
+    /// needs when it is NOT the surface draining worker events.
+    ///
+    /// `dux server` and the flip compose the same pieces individually (with the
+    /// has-active-processes sync in its original slot between the request drain
+    /// and the status tick), so the two paths run identical code in an identical
+    /// order.
+    pub(crate) fn service_engine_once(
+        &mut self,
+        engine: &mut Engine,
+    ) -> dux_core::background_serve::ServiceOutcome {
+        self.resolve_pending_subscribes(engine);
+        self.check_spine(engine);
+        let drained = self.drain_requests(engine);
+        self.tick_statuses();
+        dux_core::background_serve::ServiceOutcome {
+            mutated: drained.mutated,
+            stopped: drained.stopped,
+        }
+    }
+
+    /// Resolve or expire pending subscribes now that providers may have appeared.
+    fn resolve_pending_subscribes(&mut self, engine: &mut Engine) {
+        let now = Instant::now();
+        self.pending.retain_mut(|p| {
+            if let Some(client) = engine.providers.get(&p.session_id) {
+                if let Some(reply) = p.reply.take() {
+                    let _ = reply.send(Ok(client.subscribe_with_repaint()));
+                }
+                false
+            } else if !engine.is_in_flight(&InFlightKey::AgentLaunch(p.session_id.clone())) {
+                // The launch worker finished but no provider came up: it failed.
+                // Fail fast with a clear message instead of waiting for the timeout;
+                // the specific error was already broadcast on the status stream.
+                if let Some(reply) = p.reply.take() {
+                    let _ = reply.send(Err(format!(
+                        "Agent failed to launch for session {}. Check dux.log for details.",
+                        p.session_id
+                    )));
+                }
+                false
+            } else if now > p.deadline {
+                if let Some(reply) = p.reply.take() {
+                    let _ = reply.send(Err("timed out launching agent".to_string()));
+                }
+                false
+            } else {
+                true
+            }
+        });
+    }
+
+    /// The two change-detection polls that open the spine-change gate for state a
+    /// mutation counter cannot see. Pure reads: they compare the engine against
+    /// snapshots this struct carries and touch nothing else, which is why calling
+    /// them twice in one iteration is free.
+    fn poll_change_signals(&mut self, engine: &Engine) {
+        // Push attention set/clear promptly: the `needs_attention` projection is
+        // event-derived (a mutation counter can't see it flip), so this O(1)
+        // compare bumps `mutation_version` on any change to open the fingerprint
+        // gate. The fingerprint (which includes `needs_attention`) stays the
+        // precise emit gate.
+        poll_attention_transitions(engine, &mut self.prev_attention, &mut self.mutation_version);
+
+        // Track per-agent streaming transitions. The `working` flag is time-derived
+        // (it flips off once AGENT_STREAMING_WINDOW lapses), so a mutation counter
+        // cannot see it; this O(1) poll bumps `streaming_version` on any flip so the
+        // spine check opens on idle->working / working->idle.
+        poll_streaming_transitions(
+            engine,
+            &mut self.prev_streaming,
+            &mut self.streaming_version,
+        );
+    }
+
+    /// The projects/sessions/sidebar spine is signaled via coarse events.
+    /// Evaluated every Nth tick (see `SPINE_CHECK_TICK_INTERVAL`); the actual
+    /// fingerprint serialize runs only when a change signal moved or the
+    /// backstop fired (see `SpineCheck::maybe_check`), so idle ticks cost nothing.
+    /// A failed send means no web forwarder is listening (e.g. the TUI flip),
+    /// which is fine.
+    fn check_spine(&mut self, engine: &Engine) {
+        self.poll_change_signals(engine);
+        self.tick_count = self.tick_count.wrapping_add(1);
+        if self.tick_count.is_multiple_of(SPINE_CHECK_TICK_INTERVAL) {
+            self.spine_check.maybe_check(
+                engine,
+                self.mutation_version,
+                self.streaming_version,
+                &self.pty_input_owners,
+                &self.spine_change_tx,
+                &self.workspace_tx,
+            );
+        }
+    }
+
+    /// Drain every queued engine request.
+    fn drain_requests(&mut self, engine: &mut Engine) -> DrainOutcome {
+        let mut mutated = false;
+        let mut stopped = false;
+        loop {
+            let req = match self.req_rx.try_recv() {
+                Ok(req) => req,
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    stopped = true;
+                    break;
+                }
+            };
+            // Bump #1: every request that can move the spine, decided ONCE for
+            // the whole drain by the exhaustive `request_mutates_spine` (which
+            // covers the arms handled inline below as well as the ones
+            // `handle_request` takes). Decided before `req` is moved; the
+            // fingerprint compare downstream stays the precise emit gate, so an
+            // over-broad `true` only costs a serialize.
+            let mutates = request_mutates_spine(&req);
+            match req {
+                EngineRequest::SubscribePty(session_id, reply) => {
+                    handle_subscribe(
+                        engine,
+                        &mut self.pending,
+                        &mut self.last_pr_foregrounded,
+                        session_id,
+                        reply,
+                    );
+                }
+                EngineRequest::SpineJson(reply) => {
+                    // Serve the loop-local cache (handled here, not in
+                    // `handle_request`, which has no access to it).
+                    let _ = reply.send(self.spine_check.doc.json.to_string());
+                }
+                EngineRequest::Shutdown(reply) => {
+                    // Trip the teardown flag first so any PTY forwarders exit
+                    // promptly (symmetry with the flip; harmless here since the
+                    // engine drop will also disconnect their channels).
+                    self.shutdown_flag
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                    // SIGTERM children, wait up to the configured web grace for
+                    // them to flush state, then mark agent sessions Detached.
+                    // Handled here (not in `handle_request`) because it must stop
+                    // the loop. `shutdown_ptys` logs the start/result to dux.log;
+                    // on the `dux server` path we also echo to the console
+                    // (stderr) so an operator running it in the foreground sees
+                    // the shutdown progress, mirroring what the TUI prints on
+                    // quit. Every other path shares the terminal with a themed
+                    // dux-tui screen and stays silent.
+                    let echo = self.shutdown_echo == ShutdownEcho::Stderr;
+                    let agents = engine.providers.len();
+                    let terminals = engine.companion_terminals.len();
+                    let grace = dux_core::config::shutdown_grace(
+                        engine.config.server.shutdown_timeout_seconds,
+                    );
+                    if echo && agents + terminals > 0 {
+                        eprintln!(
+                            "{}",
+                            dux_core::engine::format_shutdown_start(agents, terminals, grace)
+                        );
+                    }
+                    let report = engine.shutdown_ptys(grace);
+                    if echo && report.agents_total + report.terminals_total > 0 {
+                        eprintln!("{}", dux_core::engine::format_shutdown_result(&report));
+                    }
+                    let _ = reply.send(());
+                    stopped = true;
+                    break;
+                }
+                other => {
+                    handle_request(
+                        engine,
+                        other,
+                        &mut self.status,
+                        &self.config_reload_tx,
+                        &mut self.config_disk_ahead,
+                        &self.pty_input_owners,
+                    );
+                }
+            }
+            if mutates {
+                mutated = true;
+                self.note_mutation();
+            }
+        }
+        DrainOutcome { mutated, stopped }
+    }
+
+    /// Expire a timed-out transient status and broadcast the cleared state to
+    /// every connected client. Busy/warning/error are left untouched.
+    fn tick_statuses(&mut self) {
+        self.status.tick(Instant::now());
+    }
+}
+
 /// The shared engine request/drain loop. Runs on the CALLER's thread (a spawned
 /// std thread for `dux server`, the main thread for the in-process flip) and
 /// owns `engine` for the loop's duration, returning it on exit so the flip can
 /// resume the TUI around the same live engine (PTYs intact).
 ///
+/// A thin composition of [`EngineService`]'s pieces, in the order this loop has
+/// always run them. It is also the process's ONE worker-event drainer while it
+/// runs, which is why it is the surface that calls
+/// [`EngineService::run_maintenance`].
+///
 /// `control` is consulted once at the top of each outer iteration: `Exit` stops
 /// the loop and returns the engine WITHOUT shutting down any PTYs (the flip's
 /// ReturnToTui path relies on this). The inline `Shutdown` request still stops
-/// the loop too — it SIGTERMs the children first (the CLI/quit teardown).
+/// the loop too — it SIGTERMs the children (the CLI/quit teardown).
 pub(crate) fn run_engine_loop(
     mut engine: Engine,
     ends: ActorLoopEnds,
+    shutdown_echo: ShutdownEcho,
     mut control: impl FnMut() -> LoopControl,
 ) -> Engine {
-    let ActorLoopEnds {
-        mut req_rx,
-        status_tx: thread_status_tx,
-        status_clear_tx,
-        status_snapshot_tx,
-        config_reload_tx,
-        spine_change_tx,
-        workspace_tx,
-        shutdown_flag,
-        pty_input_owners,
-    } = ends;
-    // Route every status through the shared KeyedStatusController so the web gets
-    // the SAME auto-clear + pending→final behaviour as the TUI from one place.
-    // The emitter upserts by key, broadcasts each status LIVE, and keeps the Vec
-    // snapshot watch in sync so connecting clients see all open toasts at once.
-    // Keeping the binding name `thread_status_tx` and a `send` method means the
-    // loop's existing call sites need no changes. `tick` (called once per
-    // iteration below) upgrades a stale Busy→Warning and drops finals that have
-    // aged past `FINAL_REPLAY_WINDOW`. It takes no `status_clear_seconds`: under
-    // `StatusRetention::Emit` how long a toast stays on SCREEN belongs to the
-    // browser, and the only server-side lifetime left is the fixed replay
-    // window.
-    let mut thread_status_tx =
-        StatusEmitter::new(thread_status_tx, status_clear_tx, status_snapshot_tx);
-    // Subscribes waiting for their provider to come up via the worker-event drain.
-    let mut pending: Vec<PendingSubscribe> = Vec::new();
-    // The session most recently brought to the foreground via a PTY subscribe.
-    // Workspace-global (single-tenant server), last-subscribe-wins across browser
-    // clients — deliberately NOT the engine's `watched_session_id` (that is the
-    // TUI's changed-files watch). Gates the tight foreground PR check so a socket
-    // reconnect for an already-focused agent doesn't re-fire it (only a real
-    // focus change does).
-    let mut last_pr_foregrounded: Option<String> = None;
-    // Change-gated spine check (fingerprints, cached `/spine` JSON, backstop
-    // accumulator). Seeded from the current state so the first tick does not emit
-    // a spurious change for an unchanged spine and a `/spine` read before the
-    // first change still serves a valid body.
-    let mut spine_check = SpineCheck::new(&engine, &pty_input_owners, &workspace_tx);
-    // In-memory spine mutation version: bumped after each loop-level spine mutator
-    // (apply_wire / a CreateTerminal request, worker-event drain, a changed
-    // terminal-foreground refresh, a non-empty PTY prune). The spine check runs
-    // the serialize only when this (or `streaming_version`) moved since its last
-    // pass, so idle ticks cost nothing.
-    let mut mutation_version: u64 = 0;
-    // In-memory streaming-transition version: bumped whenever any agent's
-    // time-derived `is_agent_streaming()` flag flips (see
-    // `poll_streaming_transitions`), which a mutation counter cannot observe.
-    let mut streaming_version: u64 = 0;
-    // Per-agent last-seen streaming flag, carried across ticks so transitions can
-    // be detected O(1) without re-deriving history each tick.
-    let mut prev_streaming: std::collections::HashMap<String, bool> =
-        std::collections::HashMap::new();
-    // Per-tick snapshot of the engine's needs-attention set, carried across ticks
-    // so a set/clear can bump the spine-change gate promptly instead of waiting
-    // for the ~2s backstop (see `poll_attention_transitions`).
-    let mut prev_attention: std::collections::HashSet<String> = std::collections::HashSet::new();
-    // Tick counter for throttling the spine fingerprint/cache check (see
-    // SPINE_CHECK_TICK_INTERVAL) so it is evaluated ~every 250ms rather than every
-    // tick.
-    let mut tick_count: u64 = 0;
-    // True between a raw `config.toml` "Save" (disk written, not yet adopted) and
-    // the next reconcile (an explicit reload, or the reconcile a config-static
-    // mutation performs). Drives the clobber-safe reconcile in `handle_request`.
-    let mut config_disk_ahead = false;
+    let mut svc = EngineService::new(&engine, ends, shutdown_echo);
     loop {
         // Caller-driven exit (the flip's status screen asked to stop). Checked
         // before any work so an exit takes effect on the next tick. PTYs are
@@ -1763,88 +2314,8 @@ pub(crate) fn run_engine_loop(
             // Bump #2: a worker event can insert/remove a provider, flip a session
             // status, or apply a project mutation — all spine state. Bump
             // unconditionally; the fingerprint compare stays the precise emit gate.
-            mutation_version = mutation_version.wrapping_add(1);
-            for status in dux_core::wire::wire_statuses_from_reaction(&reaction) {
-                let _ = thread_status_tx.send(status);
-            }
-            for status in engine.drive_delete_followup(&reaction) {
-                let _ = thread_status_tx.send(status);
-            }
-            // The checkout-default-branch inspection (worker 1) just produced a
-            // Known-default reaction: spawn the switch (worker 2). Its completion
-            // posts NonDefaultBranchCheckoutCompleted, whose status flows through
-            // the wire_statuses_from_reaction drain above on the next iteration.
-            for status in engine.drive_checkout_followup(&reaction) {
-                let _ = thread_status_tx.send(status);
-            }
-            // The add-project "Check Out & Add" switch (worker 2) just succeeded:
-            // AddProjectAfterBranchCheckout drives the actual project add here
-            // (the TUI does this in workers.rs). A switch FAILURE instead produced
-            // an error Status, already surfaced by the wire_statuses drain above.
-            for status in engine.drive_add_project_followup(&reaction) {
-                let _ = thread_status_tx.send(status);
-            }
-            // A new-agent-from-PR lookup (gh pr view) just resolved: the TUI would
-            // open a name prompt here, but the web already sent the name, so
-            // OpenNewAgentPromptForPr drives the actual CreateAgentRequest::PullRequest
-            // dispatch. A lookup FAILURE instead produced a keyed error Status
-            // (resolving the PR-lookup op), already surfaced by the wire_statuses
-            // drain above. On SUCCESS the followup hands off to the create busy and
-            // returns the PR-lookup op's clear key so its spinner is dismissed.
-            let pr_followup = engine.drive_pr_lookup_followup(&reaction);
-            for status in pr_followup.statuses {
-                let _ = thread_status_tx.send(status);
-            }
-            for key in pr_followup.clear_keys {
-                thread_status_tx.clear(key);
-            }
-
-            // A reconnect / force-restart launch reported back: resolve the web
-            // launch op (Engine::pending_web_launch_ops) so its "Launching…" /
-            // "Starting fresh…" busy is replaced by the same-key final (or cleared
-            // when the session vanished). Create-kind launch finals are resolved
-            // engine-side and ride the wire_statuses drain above.
-            let launch_followup = engine.drive_web_launch_followup(&reaction);
-            for status in launch_followup.statuses {
-                let _ = thread_status_tx.send(status);
-            }
-            for key in launch_followup.clear_keys {
-                thread_status_tx.clear(key);
-            }
-            // A StatusOp resolved to `Final::Clear`: dismiss the keyed toast.
-            if let dux_core::engine::EventReaction::ClearStatus(key) = &reaction {
-                thread_status_tx.clear(key.clone());
-            }
-
-            // A project mutation just updated SQLite + in-memory projects; mirror
-            // it into the portable config.toml so a later TUI start doesn't clobber it.
-            // Skip for `Added` — that arm already wrote config inline in command.rs,
-            // and Skip for `PersistenceFailed` — nothing was saved.
-            if let EventReaction::ProjectPersistenceOutcome(outcome) = &reaction
-                && !matches!(
-                    outcome.view,
-                    ProjectPersistenceView::PersistenceFailed { .. }
-                        | ProjectPersistenceView::Added { .. }
-                )
-                && let Err(e) = engine.persist_projects_to_config()
-            {
-                // STICKY: SQLite and the portable config now disagree about
-                // the same project. That is textbook half-done, and dux treats
-                // config/DB divergence as a first-class hazard elsewhere (a
-                // later TUI start reads the config, not the database, so the
-                // change silently reverts). Fixing it means editing config.toml,
-                // outside anything the toast can offer.
-                let _ = thread_status_tx.send(
-                    WireStatus::keyed(
-                        "config-write",
-                        "error",
-                        format!(
-                            "Saved to the database, but config.toml could not be updated: {e:#}"
-                        ),
-                    )
-                    .sticky(),
-                );
-            }
+            svc.note_mutation();
+            svc.fanout_reaction(&mut engine, &reaction, FollowupRouting::RunEverything);
 
             // A reload worker re-read config.toml; apply the new config to the
             // running engine. This consumes `reaction`, so it MUST be the last
@@ -1873,14 +2344,14 @@ pub(crate) fn run_engine_loop(
                     Ok(()) => {
                         // Memory now matches disk: any pending raw "Save" has been
                         // adopted, so disk is no longer ahead.
-                        config_disk_ahead = false;
+                        svc.config_disk_ahead = false;
                         // Signal the web layer that config-static state changed so
                         // it emits a `config.changed` event and clients refetch
                         // `/api/v1/bootstrap`. Fire-and-forget: an `Err` only means
                         // no forwarder is listening (e.g. the TUI flip), which is
                         // fine.
-                        let _ = config_reload_tx.send(());
-                        let _ = thread_status_tx.send(WireStatus::new(
+                        let _ = svc.config_reload_tx.send(());
+                        let _ = svc.status.send(WireStatus::new(
                             "info",
                             "Configuration reloaded. New settings are active.",
                         ));
@@ -1893,11 +2364,11 @@ pub(crate) fn run_engine_loop(
                         if server_settings_changed {
                             let drift = "Server bind settings changed in config; restart \
                                  the server to apply them.";
-                            let _ = thread_status_tx.send(WireStatus::new("warning", drift));
+                            let _ = svc.status.send(WireStatus::new("warning", drift));
                         }
                     }
                     Err(e) => {
-                        let _ = thread_status_tx.send(WireStatus::new(
+                        let _ = svc.status.send(WireStatus::new(
                             "error",
                             format!("Config reload failed to apply: {e:#}"),
                         ));
@@ -1906,236 +2377,11 @@ pub(crate) fn run_engine_loop(
             }
         }
 
-        // Consume each provider's received-data flag once per tick and stamp
-        // the engine's activity map, so bytes that arrived this tick count
-        // toward the `working` projection in the spine read below. This is the
-        // single poll site for the web surface (the TUI run loop is the single
-        // poll site for the other surface; the two never run at once).
-        engine.poll_pty_activity();
-
-        // Drain attention/progress signals right after activity so the progress
-        // report and any output it also produced land in the same tick. Keeps the
-        // "working" override truthful and maintains the per-tab attention flag.
-        engine.poll_agent_signals();
-
-        // Push attention set/clear promptly: the `needs_attention` projection is
-        // event-derived (a mutation counter can't see it flip), so this O(1)
-        // compare bumps `mutation_version` on any change to open the fingerprint
-        // gate. The fingerprint (which includes `needs_attention`) stays the
-        // precise emit gate.
-        poll_attention_transitions(&engine, &mut prev_attention, &mut mutation_version);
-
-        // Track per-agent streaming transitions. The `working` flag is time-derived
-        // (it flips off once AGENT_STREAMING_WINDOW lapses), so a mutation counter
-        // cannot see it; this O(1) poll bumps `streaming_version` on any flip so the
-        // spine check opens on idle->working / working->idle.
-        poll_streaming_transitions(&engine, &mut prev_streaming, &mut streaming_version);
-
-        // Refresh companion-terminal foreground commands so the spine's
-        // `foreground_cmd` tracks what's running. The engine throttles this by
-        // wall-clock (~2s), so calling it every tick is cheap.
-        //
-        // Bump #3: only when the refresh actually changed a `foreground_cmd` (a
-        // throttled no-op or an unchanged probe returns false), so a quiet terminal
-        // does not reopen the gate every interval.
-        if engine.refresh_terminal_foregrounds() {
-            mutation_version = mutation_version.wrapping_add(1);
-        }
-
-        // Reap PTYs that an individual delete/close SIGTERMed and that have now
-        // exited or passed their grace deadline (force-killed + dropped) — the
-        // non-blocking background half of graceful close. For a reaped agent whose
-        // delete also removes its worktree, dispatch that removal now, only after
-        // the agent's process is actually gone (the existing
-        // `WorktreeRemoveCompleted` path then drives its status).
-        for removal in engine.reap_terminating_ptys() {
-            let _busy = engine.dispatch_deferred_worktree_removal(removal);
-        }
-
-        // Resume-fallback sweep (both detection windows), BEFORE the exit prune:
-        // a `--continue` that came up empty or a resume that hung past its
-        // timeout is relaunched fresh here, so `dux serve` gets the same
-        // continue-then-fresh behavior the TUI has instead of showing "Agent
-        // exited" (the prune below would otherwise reap the exited resume
-        // candidate and mark the agent Detached). Each retry's launch reaction
-        // is surfaced through the same web launch-followup path the drained
-        // reactions use, and a retry mutates the spine.
-        // The web launches at a fixed (24, 80) seed size (the real size arrives
-        // on the first client subscribe/resize), matching the other web launch
-        // sites in this file.
-        for reaction in engine.sweep_resume_fallbacks((24, 80)) {
-            mutation_version = mutation_version.wrapping_add(1);
-            let followup = engine.drive_web_launch_followup(&reaction);
-            for status in followup.statuses {
-                let _ = thread_status_tx.send(status);
-            }
-            for key in followup.clear_keys {
-                thread_status_tx.clear(key);
-            }
-        }
-
-        // Reap agent/terminal PTYs whose child process exited so they stop
-        // lingering in `providers`/`companion_terminals` and disappear from the
-        // spine, broadcasting a status for each so web clients learn.
-        //
-        // Bump #4: only when something was actually pruned (the returned Vec is
-        // non-empty), since a prune that found nothing left the spine untouched.
-        let pruned = engine.prune_exited_ptys();
-        if !pruned.is_empty() {
-            mutation_version = mutation_version.wrapping_add(1);
-        }
-        for pruned in pruned {
-            let status = match pruned.kind {
-                // A last-tab exit detaches the whole agent — a workspace-level
-                // event worth a warning. A tab exit that leaves siblings running is
-                // routine and scoped: a quiet info notice naming the tab, never the
-                // loud "Agent exited" warning (which would falsely imply the agent
-                // died).
-                PrunedPtyKind::Agent if pruned.agent_detached => {
-                    WireStatus::new("warning", format!("Agent \"{}\" exited.", pruned.label))
-                }
-                // A clean exit closed the tab itself (its row is gone), so say
-                // so — "exited" alone would imply a dormant tab is left behind.
-                PrunedPtyKind::Agent if pruned.tab_closed => WireStatus::new(
-                    "info",
-                    format!("Tab ({}) exited cleanly and was closed.", pruned.label),
-                ),
-                PrunedPtyKind::Agent => {
-                    WireStatus::new("info", format!("Tab ({}) exited.", pruned.label))
-                }
-                PrunedPtyKind::Terminal => {
-                    WireStatus::new("info", format!("Terminal \"{}\" closed.", pruned.label))
-                }
-            };
-            let _ = thread_status_tx.send(status);
-        }
-
-        // Resolve or expire pending subscribes now that providers may have appeared.
-        let now = Instant::now();
-        pending.retain_mut(|p| {
-            if let Some(client) = engine.providers.get(&p.session_id) {
-                if let Some(reply) = p.reply.take() {
-                    let _ = reply.send(Ok(client.subscribe_with_repaint()));
-                }
-                false
-            } else if !engine.is_in_flight(&InFlightKey::AgentLaunch(p.session_id.clone())) {
-                // The launch worker finished but no provider came up: it failed.
-                // Fail fast with a clear message instead of waiting for the timeout;
-                // the specific error was already broadcast on the status stream.
-                if let Some(reply) = p.reply.take() {
-                    let _ = reply.send(Err(format!(
-                        "Agent failed to launch for session {}. Check dux.log for details.",
-                        p.session_id
-                    )));
-                }
-                false
-            } else if now > p.deadline {
-                if let Some(reply) = p.reply.take() {
-                    let _ = reply.send(Err("timed out launching agent".to_string()));
-                }
-                false
-            } else {
-                true
-            }
-        });
-
-        // The projects/sessions/sidebar spine is signaled via coarse events.
-        // Evaluated every Nth tick (see SPINE_CHECK_TICK_INTERVAL); the actual
-        // fingerprint serialize runs only when a change signal moved or the
-        // backstop fired (see SpineCheck::maybe_check), so idle ticks cost nothing.
-        // A failed send means no web forwarder is listening (e.g. the TUI flip),
-        // which is fine.
-        tick_count = tick_count.wrapping_add(1);
-        if tick_count.is_multiple_of(SPINE_CHECK_TICK_INTERVAL) {
-            spine_check.maybe_check(
-                &engine,
-                mutation_version,
-                streaming_version,
-                &pty_input_owners,
-                &spine_change_tx,
-                &workspace_tx,
-            );
-        }
-
-        let mut disconnected = false;
-        loop {
-            let req = match req_rx.try_recv() {
-                Ok(req) => req,
-                Err(mpsc::error::TryRecvError::Empty) => break,
-                Err(mpsc::error::TryRecvError::Disconnected) => {
-                    disconnected = true;
-                    break;
-                }
-            };
-            // Bump #1: every request that can move the spine, decided ONCE for
-            // the whole drain by the exhaustive `request_mutates_spine` (which
-            // covers the arms handled inline below as well as the ones
-            // `handle_request` takes). Decided before `req` is moved; the
-            // fingerprint compare downstream stays the precise emit gate, so an
-            // over-broad `true` only costs a serialize.
-            let mutates = request_mutates_spine(&req);
-            match req {
-                EngineRequest::SubscribePty(session_id, reply) => {
-                    handle_subscribe(
-                        &mut engine,
-                        &mut pending,
-                        &mut last_pr_foregrounded,
-                        session_id,
-                        reply,
-                    );
-                }
-                EngineRequest::SpineJson(reply) => {
-                    // Serve the loop-local cache (handled here, not in
-                    // `handle_request`, which has no access to it).
-                    let _ = reply.send(spine_check.doc.json.to_string());
-                }
-                EngineRequest::Shutdown(reply) => {
-                    // Trip the teardown flag first so any PTY forwarders exit
-                    // promptly (symmetry with the flip; harmless here since the
-                    // engine drop will also disconnect their channels).
-                    shutdown_flag.store(true, std::sync::atomic::Ordering::SeqCst);
-                    // SIGTERM children, wait up to the configured web grace for
-                    // them to flush state, then mark agent sessions Detached.
-                    // Handled here (not in `handle_request`) because it must stop
-                    // the loop. `shutdown_ptys` logs the start/result to dux.log;
-                    // we also echo to the `dux server` console (stderr) so an
-                    // operator running it in the foreground sees the shutdown
-                    // progress, mirroring what the TUI prints on quit.
-                    let agents = engine.providers.len();
-                    let terminals = engine.companion_terminals.len();
-                    let grace = dux_core::config::shutdown_grace(
-                        engine.config.server.shutdown_timeout_seconds,
-                    );
-                    if agents + terminals > 0 {
-                        eprintln!(
-                            "{}",
-                            dux_core::engine::format_shutdown_start(agents, terminals, grace)
-                        );
-                    }
-                    let report = engine.shutdown_ptys(grace);
-                    if report.agents_total + report.terminals_total > 0 {
-                        eprintln!("{}", dux_core::engine::format_shutdown_result(&report));
-                    }
-                    let _ = reply.send(());
-                    disconnected = true;
-                    break;
-                }
-                other => {
-                    handle_request(
-                        &mut engine,
-                        other,
-                        &mut thread_status_tx,
-                        &config_reload_tx,
-                        &mut config_disk_ahead,
-                        &pty_input_owners,
-                    );
-                }
-            }
-            if mutates {
-                mutation_version = mutation_version.wrapping_add(1);
-            }
-        }
-        if disconnected {
+        svc.run_maintenance(&mut engine);
+        svc.resolve_pending_subscribes(&mut engine);
+        svc.check_spine(&engine);
+        let drained = svc.drain_requests(&mut engine);
+        if drained.stopped {
             break;
         }
         // Keep the changed-files poller's cadence flag in step with the live PTY
@@ -2146,12 +2392,25 @@ pub(crate) fn run_engine_loop(
         // from its own run loop.
         engine.sync_has_active_processes();
 
-        // Expire a timed-out transient status and broadcast the cleared state to
-        // every connected client. Busy/warning/error are left untouched.
-        thread_status_tx.tick(Instant::now());
+        svc.tick_statuses();
         thread::sleep(TICK);
     }
     engine
+}
+
+/// Borrow the reloaded `Config` out of a reload follow-up reaction WITHOUT
+/// consuming it, the pre-consume twin of [`take_apply_reloaded_config`].
+///
+/// Needed because the background-server seam sees each reaction by reference,
+/// before the terminal UI applies it: the web half of a reload (announcing
+/// `config.changed`) has to read the incoming config to compare bind settings,
+/// while the drainer keeps the value to adopt.
+fn peek_apply_reloaded_config(reaction: &EventReaction) -> Option<&dux_core::config::Config> {
+    match reaction {
+        EventReaction::ApplyReloadedConfig(config) => Some(config),
+        EventReaction::Multi(reactions) => reactions.iter().find_map(peek_apply_reloaded_config),
+        _ => None,
+    }
 }
 
 /// Wraps the WS status channels so every status flows through one shared
@@ -5165,7 +5424,7 @@ mod tests {
     fn one_loop_iteration(engine: Engine) -> Engine {
         let (handle, ends) = build_actor_channels(&engine);
         let mut ran = false;
-        let engine = run_engine_loop(engine, ends, move || {
+        let engine = run_engine_loop(engine, ends, ShutdownEcho::Stderr, move || {
             if ran {
                 LoopControl::Exit
             } else {

@@ -23,6 +23,7 @@
 //! the `dep-isolation` CI job, which runs `cargo tree -p dux-web` and fails if
 //! any TUI-only crate appears.
 
+pub mod background;
 pub mod bootstrap;
 pub mod bootstrap_routes;
 pub mod browse_routes;
@@ -930,6 +931,329 @@ fn start_tailscale_watcher(
     (rx, bound)
 }
 
+/// Build the router parameters every serve path derives from the same
+/// `[server]` fields.
+///
+/// Existed as three near-identical blocks of `.with_*` calls before, which is
+/// exactly the shape where a new limit gets threaded into two of the three and
+/// nobody notices until the third one behaves differently.
+fn router_params(
+    config: &dux_core::config::Config,
+    console: Console,
+    access_log: bool,
+    bound_ips: Vec<std::net::IpAddr>,
+) -> RouterParams {
+    let server = &config.server;
+    RouterParams::plain_http()
+        .with_console(console, access_log)
+        .with_max_websocket_connections(
+            server.max_websocket_events_connections,
+            server.max_websocket_agent_connections,
+            server.max_websocket_terminal_connections,
+            server.max_websocket_tab_connections,
+            server.max_websocket_tabs_per_agent,
+        )
+        .with_search_index_max_files(server.search_index_max_files)
+        .with_tree_list_max_concurrency(server.tree_list_max_concurrency)
+        .with_release_notes_max_concurrency(server.release_notes_max_concurrency)
+        .with_file_drop_limits(server.file_drop_max_bytes, server.file_drop_max_concurrency)
+        .with_host_allowlist(
+            bound_ips,
+            server.allowed_hosts.clone(),
+            server.tailscale_mode().wants_tailscale(),
+        )
+}
+
+/// Whether a serve owns the process's stop signals.
+pub(crate) enum SignalPolicy {
+    /// Install the tokio SIGINT/SIGTERM handler and trip this flag when one
+    /// arrives. For a serve that is the only thing running: the flip, whose
+    /// status screen has taken the terminal over.
+    Adopt(Arc<AtomicBool>),
+    /// Install NOTHING. Another surface's handlers already own the process, and
+    /// two sets of handlers for one signal is a race over who tears down what.
+    /// The background server runs behind a live terminal UI whose own handlers
+    /// drive its quit, and the quit stops the serve on its way out.
+    Inherited,
+}
+
+/// One serving lifetime: the tokio runtime it all runs on, the shutdown lanes,
+/// the Tailscale watcher's stop flag, and the supervisor task holding the legs.
+///
+/// The runtime IS the reaper. Everything `build_app` spawns (the changed-files
+/// poller, the config-reload forwarder, the spine-change forwarder, the
+/// first-load resolver) plus every serve leg lives on this runtime and on no
+/// other, so dropping it ends all of them at once. That is what makes a
+/// stop/start cycle safe: the second serve builds a fresh app with fresh
+/// registries rather than adding a second poller beside the first. The cost,
+/// accepted and stated: connection and PTY-ownership state resets across a
+/// cycle, and browsers reconnect in place (same process identity, so no reload).
+pub(crate) struct ServeCore {
+    /// Declared FIRST so it is dropped LAST: the supervisor handle and the
+    /// shutdown lanes must still be valid while the runtime winds down.
+    runtime: tokio::runtime::Runtime,
+    shutdown: ServeShutdown,
+    watcher_stop: Arc<AtomicBool>,
+    /// Taken by [`Self::wind_down`], which joins it. `None` afterwards.
+    supervisor: Option<tokio::task::JoinHandle<()>>,
+    /// Which branch of [`SignalPolicy`] this serve actually took. Recorded so
+    /// "the background server installs no signal handlers" is a checkable fact
+    /// about the code path rather than a claim in a comment.
+    installed_signal_handlers: bool,
+}
+
+impl ServeCore {
+    /// Adopt pre-bound std listeners and start serving.
+    ///
+    /// STD-BIND-THEN-ADOPT is the whole point of taking bound listeners rather
+    /// than addresses: the caller binds while its own surface is still up and
+    /// fully functional, so a port collision is a message on a status line and
+    /// nothing has been torn down. By the time this runs, the addresses are
+    /// already ours and there is no rebind race.
+    ///
+    /// `handle` is consumed: the router keeps its own clones, so holding one here
+    /// would keep the request channel alive past the point where the serve is
+    /// meant to be over.
+    pub(crate) fn start(
+        handle: engine_actor::EngineHandle,
+        listeners: Vec<std::net::TcpListener>,
+        config: &dux_core::config::Config,
+        console: Console,
+        access_log: bool,
+        signals: SignalPolicy,
+    ) -> Result<Self> {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+
+        // Read everything the router and the watcher need from the std listeners
+        // BEFORE the conversion loop below moves them into the tokio set.
+        let bound_ips: Vec<std::net::IpAddr> = listeners
+            .iter()
+            .filter_map(|l| l.local_addr().ok())
+            .map(|a| a.ip())
+            .collect();
+        // Both of these serves are structurally LOCAL MODE: loopback plus, when
+        // wanted, the Tailscale leg. So the primary is the loopback listener and
+        // the watched port is whatever the caller's pre-flight bound it on (which
+        // may be ephemeral).
+        let tailscale = config.server.tailscale_mode();
+        let primary = listeners
+            .iter()
+            .filter_map(|l| l.local_addr().ok())
+            .find(|a| a.ip().is_loopback());
+        let tailscale_leg = listeners
+            .iter()
+            .filter_map(|l| l.local_addr().ok())
+            .find(|a| !a.ip().is_loopback());
+
+        // The std listeners travel here already bound, so there is no rebind race;
+        // tokio needs them non-blocking. Adoption failures are rare (the bind
+        // already succeeded in the caller's pre-flight), but log the failing
+        // address before propagating so a serve that cannot start leaves a
+        // forensic record in dux.log, not just a status line.
+        let tokio_listeners = {
+            let _guard = runtime.enter();
+            let mut out = Vec::with_capacity(listeners.len());
+            for listener in listeners {
+                let addr = listener
+                    .local_addr()
+                    .map(|a| a.to_string())
+                    .unwrap_or_else(|_| "<unknown address>".to_string());
+                if let Err(err) = listener.set_nonblocking(true) {
+                    dux_core::logger::error(&format!(
+                        "[server] could not adopt the pre-bound listener on {addr} \
+                         (set_nonblocking failed): {err}"
+                    ));
+                    return Err(err.into());
+                }
+                match tokio::net::TcpListener::from_std(listener) {
+                    Ok(l) => out.push(l),
+                    Err(err) => {
+                        dux_core::logger::error(&format!(
+                            "[server] could not adopt the pre-bound listener on {addr} \
+                             (tokio from_std failed): {err}"
+                        ));
+                        return Err(err.into());
+                    }
+                }
+            }
+            out
+        };
+
+        // The shared shutdown primitive — the SAME [`ServeShutdown`] the CLI serve
+        // path uses. Its watch is the graceful-shutdown lane every serve task and
+        // the sweep await; a dying listener flips it via `record_failure`.
+        let shutdown = ServeShutdown::new(tailscale.watches_interface());
+
+        // Build ONE app, shared across listeners (the router is a cheap
+        // `Arc`-backed service). `build_app` constructs the `ChangesService`,
+        // which spawns its supervised poller via `tokio::spawn` -- that needs an
+        // entered runtime.
+        let app = {
+            let _guard = runtime.enter();
+            server::build_app(
+                handle.clone(),
+                axum::Router::new(),
+                router_params(config, console.clone(), access_log, bound_ips),
+            )
+        };
+
+        // On `auto`, watch the Tailscale interface for the rest of the serve.
+        let watcher_stop = Arc::new(AtomicBool::new(false));
+        let (leg_commands, bound_tailscale) = {
+            let _guard = runtime.enter();
+            start_tailscale_watcher(
+                tailscale,
+                // No loopback listener address means no port to hang the leg on,
+                // so this deliberately starts no watcher rather than guessing one.
+                primary,
+                tailscale_leg,
+                Arc::clone(&watcher_stop),
+            )
+        };
+
+        // One serve leg per listener plus the loop that acts on the watcher, all
+        // as ONE supervisor task, so teardown is a single bounded join and a leg
+        // the watcher added later winds down through the same trigger.
+        let supervisor = {
+            let shutdown = shutdown.clone();
+            let app = app.clone();
+            let console = console.clone();
+            let mut legs = tokio::task::JoinSet::new();
+            let guard = runtime.enter();
+            for tokio_listener in tokio_listeners {
+                // Loopback is the REQUIRED leg (there is nothing to serve
+                // without it); the Tailscale leg is best-effort, exactly as in
+                // the CLI path. A listener whose own address cannot be read is
+                // served BEST-EFFORT: it cannot be identified as the loopback
+                // leg, and treating an unknown address as the one whose death
+                // ends the whole server is the wrong way to be wrong. Its
+                // placeholder address is a registry key and a log label only,
+                // never a bind target.
+                let (addr, required) = match tokio_listener.local_addr() {
+                    Ok(addr) => (addr, addr.ip().is_loopback()),
+                    Err(err) => {
+                        dux_core::logger::warn(&format!(
+                            "[server] serving a pre-bound listener whose address could not be \
+                             read ({err}); it is treated as best-effort, so its failure alone \
+                             will not stop the server. The web UI is still reachable on the \
+                             addresses dux reported."
+                        ));
+                        (SocketAddr::from(([127, 0, 0, 1], 0)), false)
+                    }
+                };
+                spawn_leg(
+                    &mut legs,
+                    app.clone(),
+                    tokio_listener,
+                    addr,
+                    required,
+                    &shutdown,
+                    console.clone(),
+                );
+            }
+            drop(guard);
+            runtime.spawn(run_serve_loop(
+                legs,
+                shutdown,
+                leg_commands,
+                app,
+                console,
+                bound_tailscale,
+            ))
+        };
+        // The router holds its own cloned handle(s); drop ours so only the serve
+        // tasks keep the request side alive.
+        drop(handle);
+
+        let installed_signal_handlers = match signals {
+            SignalPolicy::Adopt(flag) => {
+                runtime.spawn(async move {
+                    shutdown_signal().await;
+                    flag.store(true, Ordering::SeqCst);
+                });
+                true
+            }
+            // Nothing installed on purpose. See `SignalPolicy::Inherited`.
+            SignalPolicy::Inherited => false,
+        };
+
+        Ok(Self {
+            runtime,
+            shutdown,
+            watcher_stop,
+            supervisor: Some(supervisor),
+            installed_signal_handlers,
+        })
+    }
+
+    /// Whether a required leg's accept loop died, so the caller can stop serving
+    /// rather than limp on.
+    pub(crate) fn is_failed(&self) -> bool {
+        self.shutdown.is_failed()
+    }
+
+    /// Whether this serve installed the process's SIGINT/SIGTERM handlers.
+    pub(crate) fn installed_signal_handlers(&self) -> bool {
+        self.installed_signal_handlers
+    }
+
+    /// Stop the listeners and reap the supervisor, bounded, WITHOUT tearing the
+    /// runtime down yet.
+    ///
+    /// `shutdown_flag` is tripped FIRST, before anything waits. The PTY
+    /// forwarders are parked inside a blocking `recv_timeout` on channels the
+    /// engine still owns, so nothing disconnects them on its own; without the flag
+    /// the runtime teardown would block on tasks it cannot abort, and the caller
+    /// (a terminal UI, mid-keystroke) would freeze.
+    ///
+    /// Separate from [`Self::finish`] because the flip has work to do in between:
+    /// its quit path SIGTERMs the agents and waits out the grace window, and
+    /// `shutdown_signal`'s second-signal force-quit watcher is a task on this
+    /// still-alive runtime. Tearing the runtime down first would kill that
+    /// watcher and take the operator's escape hatch with it.
+    pub(crate) fn wind_down(&mut self, shutdown_flag: &Arc<AtomicBool>) {
+        shutdown_flag.store(true, Ordering::SeqCst);
+
+        // Serving is over: let the watcher thread finish its current park and
+        // exit rather than probing a server that has stopped (or, worse, handing
+        // a bind command to a loop that is winding down).
+        self.watcher_stop.store(true, Ordering::SeqCst);
+
+        // Trigger graceful axum shutdown and wait (bounded) for the supervisor to
+        // reap every leg. `trigger` fans out over the leg registry, so a Tailscale
+        // leg the watcher added mid-serve winds down here too rather than carrying
+        // its listener into the surface that resumes. The bound keeps a wedged
+        // client connection on any listener from hanging the caller.
+        self.shutdown.trigger();
+        if let Some(supervisor) = self.supervisor.take() {
+            self.runtime.block_on(async {
+                let _ = tokio::time::timeout(SERVER_JOIN_TIMEOUT, supervisor).await;
+            });
+        }
+    }
+
+    /// Tear the runtime down and report the first listener failure, if any.
+    ///
+    /// Bounded rather than an implicit `drop(runtime)`, which would block forever
+    /// on any parked `spawn_blocking` task (drop cannot abort them);
+    /// `shutdown_timeout` detaches stragglers instead. Dropping the runtime is
+    /// also what reaps everything `build_app` spawned, which is what makes the
+    /// next serve's registries genuinely fresh.
+    pub(crate) fn finish(self) -> Option<anyhow::Error> {
+        self.runtime.shutdown_timeout(RUNTIME_SHUTDOWN_TIMEOUT);
+        self.shutdown.take_error()
+    }
+
+    /// Wind down and tear down in one step, for a caller with nothing to do in
+    /// between.
+    pub(crate) fn stop(mut self, shutdown_flag: &Arc<AtomicBool>) -> Option<anyhow::Error> {
+        self.wind_down(shutdown_flag);
+        self.finish()
+    }
+}
+
 /// Serve the web UI over an EXISTING engine on the CALLER's thread, returning
 /// the engine when serving stops. This is the in-process TUI↔server flip's
 /// entry point: the TUI hands its live `Engine` (PTYs running, owned on the main
@@ -970,257 +1294,74 @@ pub fn serve_with_engine(
     let (handle, ends) = engine_actor::build_actor_channels(&engine);
     engine_actor::spawn_global_workers(&mut engine);
 
-    // Grab the teardown flag before the handle moves into the router. We trip it
-    // the instant the engine loop exits (before axum graceful shutdown) so any
+    // Grab the teardown flag before the handle moves into the router. `ServeCore`
+    // trips it the instant serving ends (before axum graceful shutdown) so any
     // PTY forwarders parked on their blocking `recv_timeout` exit within one poll
     // window — even on ReturnToTui, where the engine and its PtyClient senders
     // stay alive and the forwarders' channels would otherwise never disconnect.
     let shutdown_flag = handle.shutdown_flag();
 
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
-
-    // Collect the flip's bound IPs (for the host allowlist) and the operator's
-    // configured hosts. Read them HERE -- from the std TcpListeners -- before the
-    // conversion loop below moves `listeners` into the tokio listener set.
-    let flip_bound_ips: Vec<std::net::IpAddr> = listeners
-        .iter()
-        .filter_map(|l| l.local_addr().ok())
-        .map(|a| a.ip())
-        .collect();
-    let flip_allowed_hosts = engine.config.server.allowed_hosts.clone();
-    // The flip is structurally LOCAL MODE: loopback plus, when wanted, the
-    // Tailscale leg. So the primary is the loopback listener and the watched port
-    // is whatever the TUI's pre-flight bound it on (which may be ephemeral).
-    let flip_tailscale = engine.config.server.tailscale_mode();
-    let flip_primary = listeners
-        .iter()
-        .filter_map(|l| l.local_addr().ok())
-        .find(|a| a.ip().is_loopback());
-    let flip_tailscale_leg = listeners
-        .iter()
-        .filter_map(|l| l.local_addr().ok())
-        .find(|a| !a.ip().is_loopback());
-    let flip_max_ws = (
-        engine.config.server.max_websocket_events_connections,
-        engine.config.server.max_websocket_agent_connections,
-        engine.config.server.max_websocket_terminal_connections,
-        engine.config.server.max_websocket_tab_connections,
-        engine.config.server.max_websocket_tabs_per_agent,
-    );
-    let flip_search_index_max_files = engine.config.server.search_index_max_files;
-    let flip_tree_list_max_concurrency = engine.config.server.tree_list_max_concurrency;
-    let flip_release_notes_max_concurrency = engine.config.server.release_notes_max_concurrency;
-    let flip_file_drop_max_bytes = engine.config.server.file_drop_max_bytes;
-    let flip_file_drop_max_concurrency = engine.config.server.file_drop_max_concurrency;
-
-    // The std listeners travel through the flip (the TUI bound them BEFORE tearing
-    // down, so there is no rebind race); tokio needs them non-blocking. Adoption
-    // failures here are rare (the bind already succeeded in the preflight), but log
-    // the failing address before propagating so a flip that cannot start the server
-    // leaves a forensic record in dux.log, not just a TUI status line.
-    let tokio_listeners = {
-        let _guard = runtime.enter();
-        let mut out = Vec::with_capacity(listeners.len());
-        for listener in listeners {
-            let addr = listener
-                .local_addr()
-                .map(|a| a.to_string())
-                .unwrap_or_else(|_| "<unknown address>".to_string());
-            if let Err(err) = listener.set_nonblocking(true) {
-                dux_core::logger::error(&format!(
-                    "[server] could not adopt the pre-bound flip listener on {addr} \
-                     (set_nonblocking failed): {err}"
-                ));
-                return Err(err.into());
-            }
-            match tokio::net::TcpListener::from_std(listener) {
-                Ok(l) => out.push(l),
-                Err(err) => {
-                    dux_core::logger::error(&format!(
-                        "[server] could not adopt the pre-bound flip listener on {addr} \
-                         (tokio from_std failed): {err}"
-                    ));
-                    return Err(err.into());
-                }
-            }
-        }
-        out
-    };
-
-    // The shared shutdown primitive — the SAME [`ServeShutdown`] the CLI serve
-    // paths use. Its watch is the graceful-shutdown lane every serve task and the
-    // sweep await; the synchronous engine loop flips it on exit, a SIGINT/SIGTERM
-    // flips it via the signal task, and a dying listener flips it via
-    // `record_failure`. The control closure polls `is_failed()` so a listener
-    // death also breaks the engine loop, and `take_error()` surfaces the death to
-    // the caller.
-    let shutdown = ServeShutdown::new(flip_tailscale.watches_interface());
     // Set by the signal task; polled by the control closure so a SIGINT/SIGTERM
     // received while serving breaks the engine loop too (not just axum). Distinct
-    // from the failure flag because a signal means QuitProcess, a failure means
-    // ReturnToTui-with-error.
+    // from the serve's failure flag because a signal means QuitProcess, a failure
+    // means ReturnToTui-with-error.
     let signal_quit = Arc::new(AtomicBool::new(false));
 
-    // Build ONE app, shared across listeners (the router is a cheap `Arc`-backed
-    // service). `build_app` constructs the `ChangesService`, which spawns its
-    // supervised poller via `tokio::spawn` -- that needs an entered runtime, and
-    // the flip is not yet inside `block_on` here, so enter the runtime for the
-    // build.
-    let app = {
-        let _guard = runtime.enter();
-        server::build_app(
-            handle.clone(),
-            axum::Router::new(),
-            RouterParams::plain_http()
-                // The capture console keeps the access log OFF (it is never wanted
-                // in the panel, and access() never reaches emit() to be captured
-                // anyway) while the WS handlers feed lifecycle events into the ring.
-                .with_console(console.clone(), false)
-                .with_max_websocket_connections(
-                    flip_max_ws.0,
-                    flip_max_ws.1,
-                    flip_max_ws.2,
-                    flip_max_ws.3,
-                    flip_max_ws.4,
-                )
-                .with_search_index_max_files(flip_search_index_max_files)
-                .with_tree_list_max_concurrency(flip_tree_list_max_concurrency)
-                .with_release_notes_max_concurrency(flip_release_notes_max_concurrency)
-                .with_file_drop_limits(flip_file_drop_max_bytes, flip_file_drop_max_concurrency)
-                .with_host_allowlist(
-                    flip_bound_ips,
-                    flip_allowed_hosts,
-                    flip_tailscale.wants_tailscale(),
-                ),
-        )
-    };
-
-    // One serve leg per listener, plus (on `auto`) the Tailscale watcher and the
-    // loop that acts on it. The whole set runs as ONE supervisor task on the
-    // runtime, so the flip's teardown is a single bounded join, and a leg the
-    // watcher added later winds down through the same trigger as the rest.
-    let watcher_stop = Arc::new(AtomicBool::new(false));
-    let (leg_commands, bound_tailscale) = {
-        let _guard = runtime.enter();
-        start_tailscale_watcher(
-            flip_tailscale,
-            // No loopback listener address means no port to hang the leg on, so
-            // this deliberately starts no watcher rather than guessing one.
-            flip_primary,
-            flip_tailscale_leg,
-            Arc::clone(&watcher_stop),
-        )
-    };
-    let serve_supervisor = {
-        let shutdown = shutdown.clone();
-        let app = app.clone();
-        let console = console.clone();
-        let mut legs = tokio::task::JoinSet::new();
-        let guard = runtime.enter();
-        for tokio_listener in tokio_listeners {
-            // Loopback is the flip's REQUIRED leg (it cannot serve without it);
-            // the Tailscale leg is best-effort, exactly as in the CLI path. A
-            // listener whose own address cannot be read is served BEST-EFFORT: it
-            // cannot be identified as the loopback leg, and treating an unknown
-            // address as the one whose death ends the whole server is the wrong way
-            // to be wrong. Its placeholder address is a registry key and a log
-            // label only, never a bind target.
-            let (addr, required) = match tokio_listener.local_addr() {
-                Ok(addr) => (addr, addr.ip().is_loopback()),
-                Err(err) => {
-                    dux_core::logger::warn(&format!(
-                        "[server] serving a pre-bound flip listener whose address could not be \
-                         read ({err}); it is treated as best-effort, so its failure alone will \
-                         not stop the server. The web UI is still reachable on the addresses \
-                         the status screen lists."
-                    ));
-                    (SocketAddr::from(([127, 0, 0, 1], 0)), false)
-                }
-            };
-            spawn_leg(
-                &mut legs,
-                app.clone(),
-                tokio_listener,
-                addr,
-                required,
-                &shutdown,
-                console.clone(),
-            );
-        }
-        drop(guard);
-        runtime.spawn(run_serve_loop(
-            legs,
-            shutdown,
-            leg_commands,
-            app,
-            console,
-            bound_tailscale,
-        ))
-    };
-    // The router holds its own cloned handle(s); drop ours so only the serve
-    // tasks keep the request side alive (matches the pre-multi-listener move).
-    drop(handle);
-
-    // Signal task: trip the flag on SIGINT/SIGTERM so the control closure exits
-    // the loop with QuitProcess on the next tick.
-    let signal_flag = Arc::clone(&signal_quit);
-    runtime.spawn(async move {
-        shutdown_signal().await;
-        signal_flag.store(true, Ordering::SeqCst);
-    });
+    // The flip has taken the terminal over with its own status screen, so it OWNS
+    // the process's stop signals for as long as it serves.
+    let mut core = ServeCore::start(
+        handle,
+        listeners,
+        &engine.config,
+        console,
+        // The capture console keeps the access log OFF (it is never wanted in the
+        // panel, and access() never reaches emit() to be captured anyway) while
+        // the WS handlers feed lifecycle events into the ring.
+        false,
+        SignalPolicy::Adopt(Arc::clone(&signal_quit)),
+    )?;
 
     // Run the engine loop on the CURRENT thread. The control closure decides the
     // exit reason: a serve failure or a tripped signal flag wins (both exit the
     // loop), otherwise the caller's tick result maps straight through.
     let mut exit = ServerExit::ReturnToTui;
-    let mut engine = engine_actor::run_engine_loop(engine, ends, || {
-        if shutdown.is_failed() {
-            // A listener died: exit the loop. We RETURN to the TUI rather than
-            // quit the process (PTYs stay intact) and surface the captured error
-            // below so the caller knows the server could not keep serving.
-            exit = ServerExit::ReturnToTui;
-            return LoopControl::Exit;
-        }
-        if signal_quit.load(Ordering::SeqCst) {
-            exit = ServerExit::QuitProcess;
-            return LoopControl::Exit;
-        }
-        match on_tick() {
-            ServerTick::Continue => LoopControl::Continue,
-            ServerTick::ReturnToTui => {
+    let mut engine = engine_actor::run_engine_loop(
+        engine,
+        ends,
+        // The flip shares this terminal with a themed status screen, so shutdown
+        // progress goes to dux.log and the caller's status callback, never to
+        // stderr where it would land wherever the cursor happens to sit.
+        engine_actor::ShutdownEcho::Silent,
+        || {
+            if core.is_failed() {
+                // A listener died: exit the loop. We RETURN to the TUI rather than
+                // quit the process (PTYs stay intact) and surface the captured error
+                // below so the caller knows the server could not keep serving.
                 exit = ServerExit::ReturnToTui;
-                LoopControl::Exit
+                return LoopControl::Exit;
             }
-            ServerTick::QuitProcess => {
+            if signal_quit.load(Ordering::SeqCst) {
                 exit = ServerExit::QuitProcess;
-                LoopControl::Exit
+                return LoopControl::Exit;
             }
-        }
-    });
+            match on_tick() {
+                ServerTick::Continue => LoopControl::Continue,
+                ServerTick::ReturnToTui => {
+                    exit = ServerExit::ReturnToTui;
+                    LoopControl::Exit
+                }
+                ServerTick::QuitProcess => {
+                    exit = ServerExit::QuitProcess;
+                    LoopControl::Exit
+                }
+            }
+        },
+    );
 
-    // The engine loop has returned. Trip the teardown flag FIRST so any PTY
-    // forwarders parked on their blocking `recv_timeout` exit within one poll
-    // window — the engine (and its PtyClient senders) is still alive on
-    // ReturnToTui, so the forwarders' channels never disconnect on their own.
-    // Without this, `Runtime::shutdown_timeout` below would block until the flag
-    // window elapses (and an implicit drop would hang forever).
-    shutdown_flag.store(true, Ordering::SeqCst);
+    // Stop the listeners and reap the serve, bounded. The runtime stays alive
+    // past this point on purpose; see the quit block below.
+    core.wind_down(&shutdown_flag);
 
-    // Stop the Tailscale watcher: serving is over, and it must not keep probing
-    // (or, worse, hand a bind command to a loop that is winding down).
-    watcher_stop.store(true, Ordering::SeqCst);
-
-    // Trigger graceful axum shutdown and wait (bounded) for the serve supervisor
-    // to reap every leg. `trigger` fans out over the leg registry, so a Tailscale
-    // leg the watcher added mid-serve winds down here too rather than carrying its
-    // listener into the resumed TUI. The bound keeps a wedged client connection on
-    // any listener from hanging the flip back.
-    shutdown.trigger();
-    runtime.block_on(async {
-        let _ = tokio::time::timeout(SERVER_JOIN_TIMEOUT, serve_supervisor).await;
-    });
     if matches!(exit, ServerExit::QuitProcess) {
         // Quit teardown: SIGTERM the children so CLIs can save state for a later
         // resume, mark agent sessions Detached. We own the engine here, so we
@@ -1228,14 +1369,14 @@ pub fn serve_with_engine(
         // equivalent through the `Shutdown` request). The grace window is the
         // configured `[server].shutdown_timeout_seconds` (web mode, even though
         // this was flipped from the TUI); `shutdown_ptys` logs to dux.log and we
-        // also echo to the server console.
+        // also echo through the caller's status callback.
         //
-        // Crucially this runs BEFORE `runtime.shutdown_timeout` below: the wait
-        // can now last up to the configured grace, and `shutdown_signal`'s
-        // second-signal watcher is a task on this still-alive runtime, so a second
+        // Crucially this runs BEFORE the runtime teardown below: the wait can now
+        // last up to the configured grace, and `shutdown_signal`'s second-signal
+        // watcher is a task on this still-alive runtime, so a second
         // Ctrl-C/SIGTERM during the wait force-exits (130) instead of trapping the
         // operator behind a child that ignores SIGTERM. Tearing the runtime down
-        // first (as before) would kill that watcher and remove the escape hatch.
+        // first would kill that watcher and remove the escape hatch.
         let agents = engine.providers.len();
         let terminals = engine.companion_terminals.len();
         if agents + terminals > 0 {
@@ -1249,11 +1390,7 @@ pub fn serve_with_engine(
         }
     }
 
-    // Tear the runtime down with a bounded timeout. An implicit `drop(runtime)`
-    // would block forever on any parked `spawn_blocking` task (drop cannot abort
-    // them); `shutdown_timeout` detaches stragglers instead, so the flip cannot
-    // wedge even if a forwarder were somehow still blocked.
-    runtime.shutdown_timeout(RUNTIME_SHUTDOWN_TIMEOUT);
+    let serve_error = core.finish();
 
     // ReturnToTui intentionally leaves PTYs untouched so the resumed TUI finds
     // the same live agents.
@@ -1278,7 +1415,7 @@ pub fn serve_with_engine(
     // than reporting a clean exit. The engine has already been wound down above,
     // so the caller drops it; the TUI shows the failure instead of resuming onto
     // a server that silently stopped serving.
-    if let Some(err) = shutdown.take_error() {
+    if let Some(err) = serve_error {
         return Err(err);
     }
 
