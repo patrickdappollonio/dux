@@ -10,6 +10,7 @@ pub mod agent_job;
 pub mod agent_search;
 pub mod agent_tabs;
 pub mod attention;
+pub mod bounded_command;
 pub mod browser;
 pub mod config;
 pub mod config_migrate;

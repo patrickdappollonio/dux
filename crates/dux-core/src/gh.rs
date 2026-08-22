@@ -4,7 +4,6 @@
 
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
-use std::io::Read;
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::mpsc::Sender;
@@ -864,84 +863,19 @@ fn run_program_with_timeout(program: &OsStr, args: &[&str], timeout: Duration) -
     run_command_with_timeout(cmd, timeout)
 }
 
-/// Binary-agnostic core of [`run_gh_with_timeout`], split out so the
-/// timeout/kill/drain contract is unit-testable with `sleep`/`sh` instead of a
-/// live `gh`. (Distinct from `git::wait_child_or_kill`, which deliberately does
-/// NOT drain stdout/stderr — it pipes only a tiny stderr — so it can't be reused
-/// for the larger GraphQL responses this helper captures.)
-fn run_command_with_timeout(mut cmd: std::process::Command, timeout: Duration) -> GhCallOutcome {
-    let mut child = match cmd
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
-        Ok(child) => child,
-        Err(err) => return GhCallOutcome::Failed(err.to_string()),
-    };
-
-    // Drain the pipes on their own threads (so a full pipe buffer can't wedge the
-    // child) and hand each buffer back over a channel, so we can wait for them
-    // with a deadline and abandon them if a grandchild keeps the pipe open.
-    let (out_tx, out_rx) = std::sync::mpsc::channel();
-    let (err_tx, err_rx) = std::sync::mpsc::channel();
-    match (child.stdout.take(), child.stderr.take()) {
-        (Some(mut out), Some(mut err)) => {
-            std::thread::spawn(move || {
-                let mut buf = Vec::new();
-                let _ = out.read_to_end(&mut buf);
-                let _ = out_tx.send(buf);
-            });
-            std::thread::spawn(move || {
-                let mut buf = Vec::new();
-                let _ = err.read_to_end(&mut buf);
-                let _ = err_tx.send(buf);
-            });
+/// Map the shared bounded runner's outcome onto [`GhCallOutcome`], so every `gh`
+/// call site keeps its own vocabulary while the spawn / drain / kill contract
+/// lives in one place, [`crate::bounded_command`], shared with the Tailscale
+/// probe. (That module is deliberately not `git::wait_child_or_kill`, which
+/// pipes only a tiny stderr and never drains stdout, so it cannot be used where
+/// the output is the answer.)
+fn run_command_with_timeout(cmd: std::process::Command, timeout: Duration) -> GhCallOutcome {
+    match crate::bounded_command::run_command_with_timeout(cmd, timeout, GH_READER_DRAIN, "gh") {
+        crate::bounded_command::CommandOutcome::Completed(output) => {
+            GhCallOutcome::Completed(output)
         }
-        _ => {
-            // Should be unreachable (we just set piped stdio), but never leak the
-            // spawned child if a pipe handle is somehow missing.
-            let _ = child.kill();
-            let _ = child.wait();
-            return GhCallOutcome::Failed("gh stdout/stderr pipe unavailable".to_string());
-        }
-    }
-
-    // Read the readers with a deadline, then abandon them.
-    let drain = |rx: &std::sync::mpsc::Receiver<Vec<u8>>| {
-        rx.recv_timeout(GH_READER_DRAIN).unwrap_or_default()
-    };
-
-    let start = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                return GhCallOutcome::Completed(std::process::Output {
-                    status,
-                    stdout: drain(&out_rx),
-                    stderr: drain(&err_rx),
-                });
-            }
-            Ok(None) => {
-                if start.elapsed() >= timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    // Best-effort drain; the readers unblock once the killed
-                    // child's pipes close.
-                    let _ = drain(&out_rx);
-                    let _ = drain(&err_rx);
-                    return GhCallOutcome::TimedOut;
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Err(err) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = drain(&out_rx);
-                let _ = drain(&err_rx);
-                return GhCallOutcome::Failed(format!("waiting for gh failed: {err}"));
-            }
-        }
+        crate::bounded_command::CommandOutcome::TimedOut => GhCallOutcome::TimedOut,
+        crate::bounded_command::CommandOutcome::Failed(msg) => GhCallOutcome::Failed(msg),
     }
 }
 

@@ -92,19 +92,58 @@ pub fn undetected_warning(
 /// precedent: any failure to spawn maps to `CommandMissing`, a non-zero exit to
 /// `CommandFailed`, and unparseable output to `NoAddress`.
 pub fn detect_ip() -> Result<IpAddr, TailscaleUnavailable> {
+    detect_ip_with("tailscale", DETECT_TIMEOUT)
+}
+
+/// Hard wall-clock cap on one `tailscale ip` call.
+///
+/// A few seconds, because this is a local query to a local daemon: it either
+/// answers immediately or it is not going to. The cap matters because on the
+/// `auto` mode this call is repeated for the whole life of the server, and a
+/// `tailscaled` wedged by a suspend and resume must cost one skipped period
+/// rather than a watcher that never checks again.
+pub const DETECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// [`detect_ip`] with the program and the cap named, so the bounded behavior can
+/// be exercised against a stand-in binary without touching the test process's
+/// `PATH` (which is shared, and unsafe to mutate under a test runner). This is
+/// the `gh` host-probe precedent.
+///
+/// A TIMEOUT maps to [`TailscaleUnavailable::CommandFailed`] rather than to a
+/// variant of its own: from the caller's point of view a daemon that does not
+/// answer and a daemon that answers with an error are the same situation, and
+/// `CommandFailed`'s reason already asks the right question.
+pub fn detect_ip_with(
+    program: &str,
+    timeout: std::time::Duration,
+) -> Result<IpAddr, TailscaleUnavailable> {
     // `tailscale ip` (no args) prints one address per line: the IPv4 (100.64/10)
     // first, then the IPv6, when available.
-    let output = match std::process::Command::new("tailscale").arg("ip").output() {
-        Ok(output) => output,
-        Err(err) => {
-            logger::debug(&format!("[tailscale] could not run `tailscale ip`: {err}"));
+    let mut cmd = std::process::Command::new(program);
+    cmd.arg("ip");
+    let output = match crate::bounded_command::run_command_with_timeout(
+        cmd,
+        timeout,
+        crate::bounded_command::DEFAULT_READER_DRAIN,
+        "tailscale",
+    ) {
+        crate::bounded_command::CommandOutcome::Completed(output) => output,
+        crate::bounded_command::CommandOutcome::TimedOut => {
+            logger::debug(&format!(
+                "[tailscale] `{program} ip` did not answer within {:?} and was killed",
+                timeout
+            ));
+            return Err(TailscaleUnavailable::CommandFailed);
+        }
+        crate::bounded_command::CommandOutcome::Failed(err) => {
+            logger::debug(&format!("[tailscale] could not run `{program} ip`: {err}"));
             return Err(TailscaleUnavailable::CommandMissing);
         }
     };
 
     if !output.status.success() {
         logger::debug(&format!(
-            "[tailscale] `tailscale ip` exited non-zero: {}",
+            "[tailscale] `{program} ip` exited non-zero: {}",
             String::from_utf8_lossy(&output.stderr).trim(),
         ));
         return Err(TailscaleUnavailable::CommandFailed);
@@ -255,6 +294,43 @@ mod tests {
         assert_eq!(
             parse_tailscale_ip(out),
             Some("100.100.100.100".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn a_wedged_tailscale_cli_times_out_and_reports_a_failure() {
+        // The whole reason the call is bounded. On "auto" this runs for the life
+        // of the server, so a tailscaled that stopped answering (a suspend and
+        // resume, which is exactly the case the watcher serves) must cost one
+        // timeout and not the watcher itself.
+        let start = std::time::Instant::now();
+        let result = detect_ip_with("sleep", std::time::Duration::from_millis(200));
+        assert_eq!(result, Err(TailscaleUnavailable::CommandFailed));
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "a wedged CLI must not park the caller, took {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_missing_tailscale_cli_is_reported_as_missing_not_as_a_failure() {
+        assert_eq!(
+            detect_ip_with("dux-no-such-tailscale-9f3a", DETECT_TIMEOUT),
+            Err(TailscaleUnavailable::CommandMissing),
+            "the operator needs to know it is not installed, not that it failed"
+        );
+    }
+
+    #[test]
+    fn a_stand_in_cli_that_prints_an_address_is_parsed() {
+        // Proves the bounded path really reads stdout, not just that it exits.
+        // `echo` ignores the `ip` argument and prints it back, which is a valid
+        // enough answer for the parser to reject; `printf` would need a format.
+        assert_eq!(
+            detect_ip_with("true", DETECT_TIMEOUT),
+            Err(TailscaleUnavailable::NoAddress),
+            "a CLI that succeeds with no output has no address to give"
         );
     }
 
