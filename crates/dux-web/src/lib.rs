@@ -40,6 +40,7 @@ pub mod file_routes;
 pub mod first_load_routes;
 pub mod git_routes;
 pub mod host_guard;
+pub(crate) mod ownership_publish;
 pub mod project_actions;
 pub mod project_reads;
 /// The PTY input-ownership registry, re-exported from `dux-core`.
@@ -955,9 +956,14 @@ fn router_params(
     console: Console,
     access_log: bool,
     bound_ips: Vec<std::net::IpAddr>,
+    // Set only by the background serve, the one path with a terminal UI beside it
+    // that can claim a pty and therefore has ownership changes to announce.
+    ownership_publisher: Option<
+        Arc<std::sync::OnceLock<crate::ownership_publish::OwnershipPublisher>>,
+    >,
 ) -> RouterParams {
     let server = &config.server;
-    RouterParams::plain_http()
+    let params = RouterParams::plain_http()
         .with_console(console, access_log)
         .with_max_websocket_connections(
             server.max_websocket_events_connections,
@@ -974,7 +980,11 @@ fn router_params(
             bound_ips,
             server.allowed_hosts.clone(),
             server.tailscale_mode().wants_tailscale(),
-        )
+        );
+    match ownership_publisher {
+        Some(slot) => params.with_ownership_publisher(slot),
+        None => params,
+    }
 }
 
 /// Whether a serve owns the process's stop signals.
@@ -1038,6 +1048,11 @@ impl ServeCore {
         console: Console,
         access_log: bool,
         signals: SignalPolicy,
+        // A slot for this serve's ownership publisher, passed straight through to
+        // `build_app`. Only the background serve wants one.
+        ownership_publisher: Option<
+            Arc<std::sync::OnceLock<crate::ownership_publish::OwnershipPublisher>>,
+        >,
     ) -> Result<Self> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -1112,7 +1127,13 @@ impl ServeCore {
             server::build_app(
                 handle.clone(),
                 axum::Router::new(),
-                router_params(config, console.clone(), access_log, bound_ips),
+                router_params(
+                    config,
+                    console.clone(),
+                    access_log,
+                    bound_ips,
+                    ownership_publisher,
+                ),
             )
         };
 
@@ -1336,6 +1357,9 @@ pub fn serve_with_engine(
         // the WS handlers feed lifecycle events into the ring.
         false,
         SignalPolicy::Adopt(Arc::clone(&signal_quit)),
+        // The flip has no terminal UI beside it (it took the terminal over), so
+        // there is no second surface to announce ownership changes for.
+        None,
     )?;
 
     // Run the engine loop on the CURRENT thread. The control closure decides the

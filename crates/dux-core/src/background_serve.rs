@@ -29,7 +29,78 @@
 //! to be independent of it. The mode is opt-in and marked experimental for that
 //! reason among others.
 
+use std::sync::Arc;
+
 use crate::engine::{Engine, EventReaction, PrunedPty};
+use crate::pty_owners::PtySizeOwners;
+
+/// What the terminal UI calls itself when it holds a PTY's input.
+///
+/// Every other participant in the ownership registry is a browser connection and
+/// records its raw `User-Agent`; this one is not a browser and has no such thing,
+/// so it presents a fixed label instead. It exists to be READ: it is what a
+/// watching browser's take-over card names as the device that is driving, so it
+/// is written as the copy it becomes rather than as an identifier.
+///
+/// One label for the whole terminal UI, not one per agent: a pty is driven by a
+/// device, and this process is one device.
+pub const TUI_DEVICE_LABEL: &str = "the dux TUI";
+
+/// The terminal UI's seat in the PTY-ownership registry, handed to it by the
+/// companion for as long as a background server is serving.
+///
+/// Cheap to hand out (an `Arc` clone and an integer), so the terminal UI asks for
+/// it per gesture rather than caching it. That is what makes the toggle-off world
+/// byte-identical: nothing is serving, there is no seat, and every gate answers
+/// "allowed" without a registry existing at all.
+#[derive(Clone)]
+pub struct TuiOwnership {
+    /// The registry this serve built. One per serve: a stop/start cycle makes a
+    /// new one, which is exactly why connection ids are process-global.
+    pub owners: Arc<PtySizeOwners>,
+    /// The terminal UI's connection id for this serve, drawn from the same
+    /// process-global counter every browser socket draws from, so the two are
+    /// comparable and can never collide.
+    pub conn_id: u64,
+}
+
+/// An ownership fact the terminal UI produced, on its way to the browsers.
+///
+/// The terminal UI can decide these (it holds a seat in the registry) but cannot
+/// announce them: the event bus and the per-PTY grid bus are web-layer types on a
+/// tokio runtime, and `dux-tui` never sees the web layer at all. So a claim, a
+/// release and an applied resize cross the seam as plain data and the binary's
+/// companion turns them into the same broadcasts a browser's own claim would have
+/// produced. Without that a browser watching a pty the terminal UI just took over
+/// would sit on a take-over card naming a device that let go minutes ago.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PtyOwnershipEvent {
+    /// The terminal UI took (or was handed) input ownership of a pty: the
+    /// `pty.owner` handover a browser's claim emits, with the same epoch.
+    Claimed {
+        pty_id: String,
+        conn_id: u64,
+        epoch: u64,
+        /// The claimer's device label, which for this participant is always
+        /// [`TUI_DEVICE_LABEL`]. Carried rather than assumed so the translation
+        /// on the other side of the seam stays a dumb relay.
+        device: String,
+    },
+    /// The terminal UI let a pty go, and nobody has taken it: the owner-cleared
+    /// `pty.owner`. Without it a watcher's card is a permanent lie about a
+    /// terminal that stopped serving.
+    Released { pty_id: String, epoch: u64 },
+    /// A resize the terminal UI owned and APPLIED, stamped with the seq the
+    /// owners lock gave it. Web watchers adopt this grid, which is the whole
+    /// point of the terminal UI joining the registry: one pty, one authoritative
+    /// geometry, whoever is driving.
+    GridApplied {
+        pty_id: String,
+        rows: u16,
+        cols: u16,
+        seq: u64,
+    },
+}
 
 /// The results of the shared maintenance sweeps the DRAINER ran this iteration,
 /// handed to the companion so browsers learn about them too.
@@ -137,4 +208,21 @@ pub trait BackgroundServeCompanion {
     /// Stop serving and release everything the serve owned. A no-op when not
     /// serving, so a caller never has to check first.
     fn stop(&mut self, engine: &mut Engine);
+
+    /// The terminal UI's seat in this serve's PTY-ownership registry, or `None`
+    /// when nothing is serving.
+    ///
+    /// `None` is the whole toggle-off contract in one value: no seat, no registry
+    /// consulted, no gate, and the terminal UI types and resizes exactly the way
+    /// it did before any of this existed.
+    fn ownership(&self) -> Option<TuiOwnership>;
+
+    /// Announce ownership facts the terminal UI produced: a claim, a release, an
+    /// applied resize.
+    ///
+    /// A relay, not a decision. The registry has already been mutated by the time
+    /// these arrive; what is left is telling the browsers, which only the web
+    /// layer can do. A no-op when nothing is serving, and cheap to call with an
+    /// empty slice.
+    fn publish_ownership_events(&mut self, events: &[PtyOwnershipEvent]);
 }

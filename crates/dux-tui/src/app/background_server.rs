@@ -481,7 +481,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use dux_core::background_serve::{
-        BackgroundServeCompanion, DrainedMaintenance, ServiceOutcome,
+        BackgroundServeCompanion, DrainedMaintenance, PtyOwnershipEvent, ServiceOutcome,
+        TuiOwnership,
     };
     use dux_core::engine::EventReaction;
 
@@ -514,6 +515,9 @@ mod tests {
         /// happen BEFORE this surface applies the reaction, which is exactly the
         /// window the ownership snapshot exists to survive.
         fanout_consumes_ops: bool,
+        /// Every ownership fact the seam published, in order, standing in for the
+        /// `pty.owner` and grid broadcasts a real serve would have emitted.
+        published: Vec<PtyOwnershipEvent>,
     }
 
     /// A companion that records instead of serving. Serving is a real socket and a
@@ -521,17 +525,35 @@ mod tests {
     struct FakeCompanion {
         serving: bool,
         recorded: Arc<Mutex<Recorded>>,
+        /// A REAL ownership registry, because the gate's whole job is to obey one
+        /// and a fake verdict would test nothing. Shared with the test so it can
+        /// stand in for a browser connection claiming a pty.
+        ownership: TuiOwnership,
     }
 
     impl FakeCompanion {
         fn serving() -> (Box<Self>, Arc<Mutex<Recorded>>) {
+            let (companion, recorded, _ownership) = Self::serving_with_ownership();
+            (companion, recorded)
+        }
+
+        /// The same companion, handing back its ownership seat so a test can act
+        /// as the other device in the registry.
+        fn serving_with_ownership() -> (Box<Self>, Arc<Mutex<Recorded>>, TuiOwnership) {
             let recorded = Arc::new(Mutex::new(Recorded::default()));
+            let owners = Arc::new(dux_core::pty_owners::PtySizeOwners::default());
+            let ownership = TuiOwnership {
+                conn_id: owners.next_conn_id(),
+                owners,
+            };
             (
                 Box::new(Self {
                     serving: true,
                     recorded: Arc::clone(&recorded),
+                    ownership: ownership.clone(),
                 }),
                 recorded,
+                ownership,
             )
         }
     }
@@ -610,6 +632,18 @@ mod tests {
 
         fn stop(&mut self, _engine: &mut Engine) {
             self.serving = false;
+        }
+
+        fn ownership(&self) -> Option<TuiOwnership> {
+            self.serving.then(|| self.ownership.clone())
+        }
+
+        fn publish_ownership_events(&mut self, events: &[PtyOwnershipEvent]) {
+            self.recorded
+                .lock()
+                .expect("not poisoned")
+                .published
+                .extend_from_slice(events);
         }
     }
 
@@ -844,9 +878,14 @@ mod tests {
     fn a_companion_that_is_not_serving_is_never_lent_the_engine() {
         let mut app = test_app(default_bindings());
         let recorded = Arc::new(Mutex::new(Recorded::default()));
+        let owners = Arc::new(dux_core::pty_owners::PtySizeOwners::default());
         app.companion = Some(Box::new(FakeCompanion {
             serving: false,
             recorded: Arc::clone(&recorded),
+            ownership: TuiOwnership {
+                conn_id: owners.next_conn_id(),
+                owners,
+            },
         }));
 
         app.notify_companion(&EventReaction::Nothing);

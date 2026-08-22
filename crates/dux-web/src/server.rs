@@ -326,6 +326,16 @@ pub struct RouterParams {
     /// `dux_core::urls::GITHUB_API_BASE`; overridden only by tests (see
     /// [`RouterParams::with_release_notes_api_base`]).
     pub release_notes_api_base: String,
+    /// A slot for `build_app` to leave this serve's ownership publisher in, so a
+    /// caller outside the router can announce ownership changes on the same two
+    /// buses the socket handlers use.
+    ///
+    /// An out-parameter rather than a return value because the router swallows
+    /// the app state whole: both buses are born inside `build_app` and there is
+    /// no other way back to them. `None` for every serve path but the background
+    /// one, which is the only one with a second surface to announce for.
+    pub(crate) ownership_publisher:
+        Option<Arc<std::sync::OnceLock<crate::ownership_publish::OwnershipPublisher>>>,
 }
 
 impl RouterParams {
@@ -354,7 +364,21 @@ impl RouterParams {
             configured_hosts: Vec::new(),
             tailscale_host_literals: false,
             release_notes_api_base: dux_core::urls::GITHUB_API_BASE.to_string(),
+            ownership_publisher: None,
         }
+    }
+
+    /// Ask `build_app` to leave this serve's ownership publisher in `slot`.
+    ///
+    /// Only the background serve calls this: it is the one path with a second
+    /// surface (a live terminal UI) that can claim a pty and therefore has
+    /// something to announce.
+    pub(crate) fn with_ownership_publisher(
+        mut self,
+        slot: Arc<std::sync::OnceLock<crate::ownership_publish::OwnershipPublisher>>,
+    ) -> Self {
+        self.ownership_publisher = Some(slot);
+        self
     }
 
     /// Point release-notes fetches at `base` instead of the real GitHub API.
@@ -557,6 +581,18 @@ pub fn build_app(
     // Clone the shared input-ownership registry out of the handle before the
     // handle itself moves into the state literal below.
     let engine_pty_owners = engine.pty_input_owners();
+    // Both buses exist by now, so a caller that asked for the ownership publisher
+    // can have it. Built here rather than returned, because the state literal
+    // below moves everything into the router. `set` rather than an assignment:
+    // one publisher per serve, and a second `build_app` on the same slot is a bug
+    // worth ignoring rather than one worth overwriting silently.
+    let pty_grid_bus = Arc::new(crate::pty_sizes::PtyGridBus::default());
+    if let Some(slot) = params.ownership_publisher.as_ref() {
+        let _ = slot.set(crate::ownership_publish::OwnershipPublisher::new(
+            Arc::clone(&event_bus),
+            Arc::clone(&pty_grid_bus),
+        ));
+    }
     let state = AppState {
         engine,
         console: params.console,
@@ -611,7 +647,7 @@ pub fn build_app(
         // overlays the owner map onto the spine so every client learns which
         // connection is driving each agent PTY without attaching to it.
         pty_size_owners: engine_pty_owners,
-        pty_grid_bus: Arc::new(crate::pty_sizes::PtyGridBus::default()),
+        pty_grid_bus: Arc::clone(&pty_grid_bus),
         connections: Arc::new(crate::rest_common::ConnectionRegistry::new()),
         first_load,
     };
@@ -1813,7 +1849,12 @@ async fn handle_pty_socket(
 /// `device` is the claimer's raw `User-Agent` (captured at its PTY upgrade), which
 /// the client parses into a human label ("Chrome on macOS") for the take-over
 /// placeholder; it is `None` when the claimer sent no `User-Agent`.
-fn pty_owner_event(pty_id: &str, owner_conn_id: u64, epoch: u64, device: Option<&str>) -> Event {
+pub(crate) fn pty_owner_event(
+    pty_id: &str,
+    owner_conn_id: u64,
+    epoch: u64,
+    device: Option<&str>,
+) -> Event {
     Event::Resource {
         event: "pty.owner".to_string(),
         id: Some(pty_id.to_string()),
@@ -1838,7 +1879,7 @@ fn pty_owner_event(pty_id: &str, owner_conn_id: u64, epoch: u64, device: Option<
 /// under the owners lock by the release itself, so the client's epoch ordering
 /// places it correctly against the claim it retires, and no `device` (there is
 /// no claimer to name).
-fn pty_owner_cleared_event(pty_id: &str, epoch: u64) -> Event {
+pub(crate) fn pty_owner_cleared_event(pty_id: &str, epoch: u64) -> Event {
     Event::Resource {
         event: "pty.owner".to_string(),
         id: Some(pty_id.to_string()),

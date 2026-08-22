@@ -65,6 +65,21 @@ pub struct BackgroundServer {
     /// be spotted without every one of the terminal UI's apply sites having to
     /// announce itself.
     last_command_applies: u64,
+    /// This serve's PTY-ownership registry and the terminal UI's seat in it.
+    ///
+    /// The seat is taken at START rather than at the terminal UI's first
+    /// keystroke, because it must exist before anything can be gated by it and
+    /// because taking an id costs an atomic increment. It dies with the serve,
+    /// which is what makes "the terminal UI releases everything on stop" true by
+    /// construction: the registry itself is gone.
+    ownership: dux_core::background_serve::TuiOwnership,
+    /// The two buses this serve announces the terminal UI's ownership changes on.
+    ///
+    /// A `OnceLock` because `build_app` is what can fill it (both buses are born
+    /// in there) and it runs inside this constructor. Empty is survivable rather
+    /// than fatal: nothing is announced, browsers fall back to the fingerprint
+    /// backstop and the handshake, and the terminal UI keeps working.
+    publisher: Arc<std::sync::OnceLock<crate::ownership_publish::OwnershipPublisher>>,
 }
 
 impl BackgroundServer {
@@ -101,6 +116,15 @@ impl BackgroundServer {
 
         let (handle, ends) = build_actor_channels(engine);
         let shutdown_flag = handle.shutdown_flag();
+        // The terminal UI's seat in this serve's registry. Its connection id comes
+        // from the same process-global counter every browser socket draws from, so
+        // the two can be compared and can never collide.
+        let owners = handle.pty_input_owners();
+        let ownership = dux_core::background_serve::TuiOwnership {
+            conn_id: owners.next_conn_id(),
+            owners,
+        };
+        let publisher = Arc::new(std::sync::OnceLock::new());
         let service = EngineService::new(engine, ends, ShutdownEcho::Silent);
         let core = ServeCore::start(
             handle,
@@ -111,6 +135,7 @@ impl BackgroundServer {
             // is never wanted over a terminal UI's frame regardless.
             false,
             SignalPolicy::Inherited,
+            Some(Arc::clone(&publisher)),
         )?;
         Ok(Self {
             core,
@@ -118,6 +143,8 @@ impl BackgroundServer {
             shutdown_flag,
             urls,
             last_command_applies: engine.command_applies,
+            ownership,
+            publisher,
         })
     }
 
@@ -179,6 +206,33 @@ impl BackgroundServer {
     /// Do the web-only per-iteration work.
     pub fn service(&mut self, engine: &mut Engine) -> ServiceOutcome {
         self.service.service_engine_once(engine)
+    }
+
+    /// The terminal UI's seat in this serve's PTY-ownership registry.
+    pub fn ownership(&self) -> dux_core::background_serve::TuiOwnership {
+        self.ownership.clone()
+    }
+
+    /// Announce ownership facts the terminal UI produced, on the same two buses a
+    /// browser's own claim announces on.
+    ///
+    /// A missing publisher is logged once per batch rather than swallowed: it
+    /// means `build_app` never filled the slot, which is a wiring bug, and the
+    /// visible symptom (browsers never learn the terminal UI took over) is one
+    /// nobody would trace back here.
+    pub fn publish_ownership_events(
+        &mut self,
+        events: &[dux_core::background_serve::PtyOwnershipEvent],
+    ) {
+        if events.is_empty() {
+            return;
+        }
+        match self.publisher.get() {
+            Some(publisher) => publisher.publish(events),
+            None => dux_core::logger::warn(
+                "[server] the background web server has no ownership publisher, so browsers were                  not told that the terminal UI took over a terminal. They will notice at their                  next reconnect.",
+            ),
+        }
     }
 
     /// Open the spine-change gate when the terminal UI applied anything since the

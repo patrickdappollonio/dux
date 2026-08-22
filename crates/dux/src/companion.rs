@@ -10,7 +10,9 @@
 //! WHEN to serve (its palette commands, its config, its quit path) and binds the
 //! listeners; this decides nothing and only relays.
 
-use dux_core::background_serve::{BackgroundServeCompanion, DrainedMaintenance, ServiceOutcome};
+use dux_core::background_serve::{
+    BackgroundServeCompanion, DrainedMaintenance, PtyOwnershipEvent, ServiceOutcome, TuiOwnership,
+};
 use dux_core::engine::{Engine, EventReaction};
 use dux_web::background::BackgroundServer;
 
@@ -138,6 +140,16 @@ impl BackgroundServeCompanion for WebCompanion {
                 Ok(urls)
             }
             Err(err) => Err(format!("Could not start the web server: {err:#}")),
+        }
+    }
+
+    fn ownership(&self) -> Option<TuiOwnership> {
+        self.server.as_ref().map(|server| server.ownership())
+    }
+
+    fn publish_ownership_events(&mut self, events: &[PtyOwnershipEvent]) {
+        if let Some(server) = self.server.as_mut() {
+            server.publish_ownership_events(events);
         }
     }
 
