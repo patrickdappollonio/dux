@@ -93,6 +93,11 @@ impl App {
                 reaction,
                 EventReaction::DispatchProjectDefaultBranchCheckout { .. }
             );
+            // Lend the engine to the background web server for this reaction
+            // BEFORE applying it. `apply_reaction` consumes the reaction and
+            // `EventReaction` is not `Clone`, so a companion that ran afterwards
+            // would have nothing to look at. A no-op when nothing is serving.
+            self.notify_companion(&reaction);
             self.apply_reaction(reaction);
             if let Some((worktree, error)) = changed_files_answer {
                 self.apply_changed_files_refresh_outcome(&worktree, error);
@@ -156,6 +161,10 @@ impl App {
         // reactions each retry produced.
         let sweep_size = self.pty_size_for_launch();
         for reaction in self.engine.sweep_resume_fallbacks(sweep_size) {
+            // Routed through the seam like any other drained reaction: a retry for
+            // an agent a BROWSER launched has a pending web launch op waiting on
+            // it, and the actor loop's own sweep drives the same follow-up.
+            self.notify_companion(&reaction);
             self.apply_reaction(reaction);
         }
         // Reap PTYs that an individual delete/close SIGTERMed and that have now
@@ -397,6 +406,18 @@ impl App {
     }
 
     pub(super) fn apply_reaction(&mut self, reaction: EventReaction) {
+        // ORIGIN ROUTING. While the background web server is on, both surfaces see
+        // the same worker events, and a few reactions carry a follow-up that DOES
+        // something: it spawns a git job, adds a project, or dispatches an agent
+        // create. Those belong to whichever surface asked for them, and the engine
+        // is the one that knows (see `Engine::followup_owner`). A browser's
+        // PR-create must not also pop a name prompt here.
+        //
+        // Checked here rather than per arm so a `Multi` routes leaf by leaf: this
+        // function is what recurses through one.
+        if self.companion_owns_followup(&reaction) {
+            return;
+        }
         match reaction {
             EventReaction::Nothing => {}
             EventReaction::Status(StatusUpdate {
@@ -1022,6 +1043,10 @@ impl App {
                         }
                     }
                 }
+            }
+
+            EventReaction::BackgroundServerPreflightReady { result, warning } => {
+                self.apply_background_server_preflight(result, warning);
             }
         }
     }

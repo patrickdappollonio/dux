@@ -1,3 +1,5 @@
+mod companion;
+
 use anyhow::Result;
 
 const SERVER_USAGE: &str = "\
@@ -34,7 +36,7 @@ fn main() -> Result<()> {
 /// returns to the TUI, `Ctrl-C` quits the process — alongside SIGINT/SIGTERM
 /// (→ `QuitProcess`) handled inside `serve_with_engine`.
 fn run_tui_with_flip() -> Result<()> {
-    let mut next = dux_tui::run()?;
+    let mut next = dux_tui::run(Box::new(companion::WebCompanion::new()))?;
     loop {
         match next {
             dux_tui::TuiExit::Done => break,
@@ -155,7 +157,13 @@ fn run_tui_with_flip() -> Result<()> {
                 match exit {
                     dux_web::ServerExit::QuitProcess => break,
                     dux_web::ServerExit::ReturnToTui => {
-                        next = dux_tui::resume_after_server(Box::new(engine))?;
+                        next = dux_tui::resume_after_server(
+                            Box::new(engine),
+                            // A fresh companion per resumed TUI: the previous
+                            // serve's runtime is gone, and so is anything that
+                            // was holding it.
+                            Box::new(companion::WebCompanion::new()),
+                        )?;
                     }
                 }
             }

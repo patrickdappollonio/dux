@@ -165,6 +165,21 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         // you are already in the web UI.
     },
     PaletteCommand {
+        action: Action::StartBackgroundServer,
+        name: "start-background-server",
+        description: "Serve the dux web UI in the background and keep using the TUI",
+        // TUI-only, and for the same reason as start-web-server: it is a way INTO
+        // the web UI. Named distinctly from it on purpose, because the two do
+        // different things to this terminal, and the flip is unaffected by it.
+    },
+    PaletteCommand {
+        action: Action::StopBackgroundServer,
+        name: "stop-background-server",
+        description: "Stop serving the web UI in the background; your agents keep running",
+        // TUI-only: stopping the server from inside the server would be sawing
+        // off the branch. Closing the browser tab is the web-side equivalent.
+    },
+    PaletteCommand {
         action: Action::ToggleProjectAutoReopenAgents,
         name: "toggle-project-auto-reopen-agents",
         description: "Opt the selected project in or out of startup agent reopening",

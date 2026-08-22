@@ -60,7 +60,14 @@ pub enum TuiExit {
 
 /// Run dux (TUI mode or a `config` subcommand). Called by the `dux` binary
 /// crate.
-pub fn run() -> Result<TuiExit> {
+///
+/// `companion` is the background web server this TUI may serve through. It is a
+/// `dux-core` trait object because this crate never sees `dux-web`: the binary
+/// implements it and is the only place the two surfaces meet. A `config`
+/// subcommand drops it unused.
+pub fn run(
+    companion: Box<dyn dux_core::background_serve::BackgroundServeCompanion>,
+) -> Result<TuiExit> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
 
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
@@ -109,14 +116,17 @@ pub fn run() -> Result<TuiExit> {
     std::fs::create_dir_all(&paths.root)?;
     let lock = acquire_lock_or_exit(&paths.lock_path);
     let app = app::App::bootstrap_with_lock(paths, lock)?;
-    run_app(app)
+    run_app(app, companion)
 }
 
 /// Resume the TUI after the web server hands the engine back. The engine still
 /// owns the live providers and the single-instance lock, so this rebuilds the
 /// App view state around it (no session relaunch) and runs the loop. A resumed
 /// TUI can flip to the server again, so the flip↔serve cycle repeats.
-pub fn resume_after_server(mut engine: Box<Engine>) -> Result<TuiExit> {
+pub fn resume_after_server(
+    mut engine: Box<Engine>,
+    companion: Box<dyn dux_core::background_serve::BackgroundServeCompanion>,
+) -> Result<TuiExit> {
     // Back under the TUI: `auto`/`mirror` identity resolves against the real host
     // terminal again. Already-running PTYs keep their spawn-time env until they
     // are relaunched.
@@ -126,7 +136,7 @@ pub fn resume_after_server(mut engine: Box<Engine>) -> Result<TuiExit> {
     // terminal it is only now taking back.
     engine.discard_passthrough_backlog();
     let app = app::App::resume(*engine)?;
-    run_app(app)
+    run_app(app, companion)
 }
 
 /// Run an App's event loop and translate its [`app::RunExit`] into a
@@ -134,7 +144,13 @@ pub fn resume_after_server(mut engine: Box<Engine>) -> Result<TuiExit> {
 /// moved out of the App (no `Drop` runs on the providers — neither `App` nor
 /// `Engine` has a `Drop` impl, so this is a plain move) and boxed for the
 /// caller; the single-instance lock rides along inside the engine.
-fn run_app(mut app: app::App) -> Result<TuiExit> {
+fn run_app(
+    mut app: app::App,
+    companion: Box<dyn dux_core::background_serve::BackgroundServeCompanion>,
+) -> Result<TuiExit> {
+    // Installed here, before the loop, so `App::run` can honor
+    // `[server] serve_while_tui` on its very first iteration.
+    app.companion = Some(companion);
     match app.run()? {
         app::RunExit::Quit => Ok(TuiExit::Done),
         app::RunExit::FlipToServer { listeners, urls } => {

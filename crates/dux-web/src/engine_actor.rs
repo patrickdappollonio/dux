@@ -3522,6 +3522,53 @@ mod tests {
         (tmp, paths)
     }
 
+    /// A change made by the OTHER surface reaches a browser inside one spine-check
+    /// period, and it is the mutation bump that carries it.
+    ///
+    /// The terminal UI applies commands straight to the engine, over channels this
+    /// crate never observes, so the request drain's own `request_mutates_spine`
+    /// answers cannot see them. Without the bump the change waits for the slow
+    /// self-healing backstop, which at the TUI's stretched cadence is seconds. Both
+    /// halves are asserted here, because "the bump helps" is only interesting next
+    /// to "without it, nothing happens".
+    #[test]
+    fn an_engine_change_the_web_cannot_see_needs_the_mutation_bump_to_reach_clients() {
+        let (_tmp, paths) = temp_paths();
+        let mut engine = bootstrap_engine(&paths).expect("engine");
+        let (handle, ends) = build_actor_channels(&engine);
+        let mut spine_changes = handle.subscribe_spine_changes();
+        let mut svc = EngineService::new(&engine, ends, ShutdownEcho::Silent);
+
+        // Stand in for the terminal UI mutating shared state behind the web
+        // layer's back: no request was drained, so nothing here knows.
+        engine.sessions.push(sample_session(
+            "from-the-terminal",
+            "project-1",
+            "a-new-agent",
+            "/tmp/a-new-agent",
+        ));
+
+        // One whole check period with no bump: the gate stays shut.
+        for _ in 0..SPINE_CHECK_TICK_INTERVAL {
+            svc.check_spine(&engine);
+        }
+        assert!(
+            spine_changes.try_recv().is_err(),
+            "without the bump the web layer has no signal, so nothing is emitted yet"
+        );
+
+        // The bump is what the terminal UI's apply count buys.
+        svc.note_mutation();
+        for _ in 0..SPINE_CHECK_TICK_INTERVAL {
+            svc.check_spine(&engine);
+        }
+        assert!(
+            spine_changes.try_recv().is_ok(),
+            "the bump must carry a terminal-side change to clients within one check period"
+        );
+        drop(handle);
+    }
+
     fn sample_session(
         id: &str,
         project_id: &str,

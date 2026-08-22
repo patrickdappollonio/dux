@@ -363,6 +363,29 @@ pub struct App {
     /// invocation is refused with an actionable status instead of spawning a
     /// second worker.
     pub(crate) server_flip_preflight_pending: bool,
+    /// The web server serving in this TUI's background, when one is installed.
+    ///
+    /// A trait object, and deliberately opaque: this crate depends only on
+    /// `dux-core`, so it never learns that a web layer exists. The `dux` binary
+    /// installs an implementation over `dux-web`'s serving machinery, and is the
+    /// only place the two surfaces meet. `None` means nobody installed one (a
+    /// dux-tui-only build, or a test), and every call site short-circuits.
+    ///
+    /// Whether a listener is actually up is the companion's own question
+    /// ([`dux_core::background_serve::BackgroundServeCompanion::is_serving`]):
+    /// installed and serving are different states, because the mode is toggled at
+    /// runtime.
+    pub(crate) companion: Option<Box<dyn dux_core::background_serve::BackgroundServeCompanion>>,
+    /// In-flight guard for the background server's bind pre-flight, the same
+    /// shape and for the same reason as `server_flip_preflight_pending`: the
+    /// pre-flight races to bind the LOCAL MODE ports, so two quick invocations
+    /// would have the second report a confusing EADDRINUSE.
+    pub(crate) background_server_preflight_pending: bool,
+    /// The keyed status op for a background-server start, held from the moment the
+    /// pre-flight is dispatched until its result lands. `Option` rather than a map
+    /// because the pre-flight is in-flight-guarded, so there is only ever one.
+    pub(crate) pending_background_server_op:
+        Option<dux_core::engine::HandlerStatusOp<BackgroundServerOutcome>>,
     /// In-flight project-persistence status ops whose final is decided in the
     /// completion handler. Each non-`Add` persistence dispatch mints a
     /// [`dux_core::engine::HandlerStatusOp`] (its own opaque id), shows its
@@ -542,6 +565,26 @@ pub enum TuiServerFlipOutcome {
     Warned(String),
     /// Pre-flight failed; resolves to an error final whose text is byte-identical
     /// to the legacy `set_error`.
+    Failed(String),
+}
+
+/// Handler-resolved outcome for a background-server start (see
+/// [`App::pending_background_server_op`]).
+///
+/// Every arm is terminal, unlike the flip's: the flip's busy rides on until the
+/// process changes surface, while this one has an answer either way and the TUI
+/// stays exactly where it was.
+pub enum BackgroundServerOutcome {
+    /// Serving, on these addresses.
+    Serving {
+        urls: Vec<String>,
+        /// A non-fatal degradation from the pre-flight (Tailscale not detected, or
+        /// its port already taken), appended so the user learns that serving is
+        /// loopback-only rather than discovering it from a phone that cannot
+        /// connect.
+        warning: Option<String>,
+    },
+    /// Nothing is serving and the TUI is untouched.
     Failed(String),
 }
 
@@ -2947,6 +2990,7 @@ pub(crate) fn build_left_items(
     items
 }
 
+mod background_server;
 mod components;
 mod first_load;
 mod input;
@@ -3255,6 +3299,9 @@ impl App {
             terminal_selection: None,
             startup_log_selection: None,
             pending_server_flip: None,
+            companion: None,
+            background_server_preflight_pending: false,
+            pending_background_server_op: None,
             server_flip_preflight_pending: false,
             pending_persist_ops: HashMap::new(),
             pending_worktree_ops: HashMap::new(),
@@ -3359,6 +3406,13 @@ impl App {
         self.engine.spawn_branch_sync_worker();
         self.engine.spawn_project_branch_status_checks();
         self.engine.spawn_gh_status_check();
+        // `[server] serve_while_tui` decides whether dux comes up serving. Started
+        // AFTER the global workers, because the background server asserts they are
+        // already running rather than spawning them itself: one runner per
+        // process, and this surface is it.
+        if self.engine.config.server.serve_while_tui && !self.background_server_is_serving() {
+            self.start_background_server();
+        }
         let mut terminal = ratatui::init();
         // EnableFocusChange (DEC mode 1004) so the host reports window focus,
         // gating the per-tick "viewed" stamp. EnableBracketedPaste (DEC mode
@@ -3384,6 +3438,14 @@ impl App {
                 }
 
                 self.drain_events();
+                // Lend the engine to the background web server, if one is
+                // serving: resolve its pending subscribes, check the spine, drain
+                // its queued requests. This loop is its engine servicer, which is
+                // why the poll interval below is capped while it runs. Placed
+                // after `drain_events` so a request it handles sees this
+                // iteration's worker results, and before the render so a browser
+                // mutation shows up in the same frame.
+                self.service_companion();
                 self.engine.poll_pty_activity();
                 // Drain attention/progress signals: keeps the "working" override
                 // truthful and maintains the per-tab attention flag. Must run
@@ -3521,7 +3583,11 @@ impl App {
                     // Poll faster while a row animates (spinner + name shimmer +
                     // attention blink) so those render smoothly (~30fps); stay on
                     // the lazy 100ms cadence otherwise to keep idle CPU low.
-                    let poll_ms = if self.any_row_animating() { 33 } else { 100 };
+                    // Capped while the background server is on: this poll IS a
+                    // browser's request latency, so the lazy idle cadence would
+                    // put a remote keystroke behind it (see `App::max_poll_ms`).
+                    let poll_ms =
+                        if self.any_row_animating() { 33 } else { 100 }.min(self.max_poll_ms());
                     let ready = match crate::io_retry::retry_on_interrupt(|| {
                         event::poll(Duration::from_millis(poll_ms))
                     }) {
@@ -3601,6 +3667,14 @@ impl App {
                 }
             }
         };
+
+        // Leaving the terminal UI ends the background serve, whichever way we are
+        // leaving. Explicit rather than left to drop: stopping trips the PTY
+        // forwarders' teardown flag FIRST, and the forwarders are parked on
+        // channels the engine still owns, so an implicit drop of the serve's
+        // runtime would block on tasks that never notice. Done before the terminal
+        // is restored so the wind-down happens while dux still owns the screen.
+        self.stop_background_server_quietly();
 
         let _ = execute!(
             stdout(),
@@ -4149,6 +4223,14 @@ impl App {
                 self.start_web_server();
                 Ok(())
             }
+            "start-background-server" => {
+                self.start_background_server();
+                Ok(())
+            }
+            "stop-background-server" => {
+                self.stop_background_server();
+                Ok(())
+            }
             "toggle-project-auto-reopen-agents" => self.toggle_project_auto_reopen_agents(),
             "toggle-agent-auto-reopen" => self.toggle_agent_auto_reopen(),
             "configure-startup-command" => self.open_configure_startup_command(),
@@ -4490,6 +4572,13 @@ impl App {
         }
         self.reload_changed_files();
         self.refresh_current_diff()?;
+        // `[server] serve_while_tui` is both the startup default and a live
+        // switch, so a reload that flipped it acts now rather than at the next
+        // start: a user who edited the file to turn the listener off has asked for
+        // the listener to go away. Done last, after `engine.config` holds the
+        // reloaded values, so the start path reads the new port and Tailscale mode.
+        let wanted = self.engine.config.server.serve_while_tui;
+        self.apply_serve_while_tui_setting(wanted);
         if let Some(message) = theme_warning {
             self.set_warning(message);
         }

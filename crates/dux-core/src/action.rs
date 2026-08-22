@@ -169,6 +169,12 @@ pub enum Action {
     ChangeTheme,
     ReloadConfig,
     StartWebServer,
+    /// Palette-only: start serving the web UI in the BACKGROUND, with the
+    /// terminal UI still running. Distinct from `StartWebServer`, which hands the
+    /// terminal over to the server instead.
+    StartBackgroundServer,
+    /// Palette-only: stop the background web server, leaving every agent running.
+    StopBackgroundServer,
     ToggleAlwaysShowTabs,
     /// Open the read-only Agent Info modal for the focused agent (name, provider,
     /// branch lineage, worktree, status).
@@ -317,6 +323,8 @@ impl Action {
             Action::ChangeTheme => "change_theme",
             Action::ReloadConfig => "reload_config",
             Action::StartWebServer => "start_web_server",
+            Action::StartBackgroundServer => "start_background_server",
+            Action::StopBackgroundServer => "stop_background_server",
             Action::ToggleAlwaysShowTabs => "toggle_always_show_tabs",
             Action::OpenAgentInfo => "open_agent_info",
             Action::ShowWelcomeScreen => "show_welcome_screen",
@@ -531,6 +539,12 @@ impl Action {
             Action::StartWebServer => {
                 "Tear down the TUI and serve the dux web UI over the same agents."
             }
+            Action::StartBackgroundServer => {
+                "Serve the dux web UI in the background while the TUI keeps running."
+            }
+            Action::StopBackgroundServer => {
+                "Stop serving the web UI in the background; agents keep running."
+            }
             Action::ToggleAlwaysShowTabs => {
                 "Toggle always showing the agent tab strip, even with a single tab."
             }
@@ -683,6 +697,8 @@ impl Action {
             | Action::ChangeTheme
             | Action::ReloadConfig
             | Action::StartWebServer
+            | Action::StartBackgroundServer
+            | Action::StopBackgroundServer
             | Action::ToggleAlwaysShowTabs
             | Action::OpenAgentInfo
             | Action::ShowWelcomeScreen

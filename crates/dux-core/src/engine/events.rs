@@ -337,6 +337,14 @@ pub enum EventReaction {
         result: Result<(Vec<std::net::TcpListener>, Vec<String>), String>,
         warning: Option<String>,
     },
+    /// The BACKGROUND web server's bind pre-flight finished. Same shape and same
+    /// pass-through as `ServerFlipPreflightReady`: the listeners are the App's,
+    /// and the engine has nothing to mutate. Distinct from it because the flip
+    /// ends a TUI session and this starts a serve beside one.
+    BackgroundServerPreflightReady {
+        result: Result<(Vec<std::net::TcpListener>, Vec<String>), String>,
+        warning: Option<String>,
+    },
 }
 
 /// Result of `Engine::detach_conflicting_worktree_session` — the App caller
@@ -3084,6 +3092,10 @@ impl Engine {
                 // are TUI concerns. Hand them straight to the App.
                 EventReaction::ServerFlipPreflightReady { result, warning }
             }
+            WorkerEvent::BackgroundServerPreflightReady { result, warning } => {
+                // Same story: the listeners belong to whoever asked to serve.
+                EventReaction::BackgroundServerPreflightReady { result, warning }
+            }
         }
     }
 }
@@ -3896,6 +3908,9 @@ mod tests {
             EventReaction::DispatchAgentLaunchView(_) => "DispatchAgentLaunchView",
             EventReaction::DeleteTerminalView(_) => "DeleteTerminalView",
             EventReaction::ServerFlipPreflightReady { .. } => "ServerFlipPreflightReady",
+            EventReaction::BackgroundServerPreflightReady { .. } => {
+                "BackgroundServerPreflightReady"
+            }
         }
     }
 

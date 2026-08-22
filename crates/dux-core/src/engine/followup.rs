@@ -133,9 +133,11 @@ impl Engine {
             // describe it to their own surface.
             | EventReaction::DispatchAgentLaunchView(_)
             | EventReaction::DeleteTerminalView(_)
-            // The flip pre-flight's listeners are the TUI's to stash; the web has
-            // no arm for it.
-            | EventReaction::ServerFlipPreflightReady { .. } => FollowupOwner::Drainer,
+            // Both pre-flights' listeners are the TUI's to stash; the web has no
+            // arm for either, and by construction it cannot: they only exist on a
+            // surface that can bind before it hands anything over.
+            | EventReaction::ServerFlipPreflightReady { .. }
+            | EventReaction::BackgroundServerPreflightReady { .. } => FollowupOwner::Drainer,
         }
     }
 

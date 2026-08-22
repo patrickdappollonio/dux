@@ -4114,6 +4114,24 @@ impl App {
             self.set_warning("Web server start already in progress.".to_string());
             return;
         }
+        // The flip and the background server bind the same LOCAL MODE addresses,
+        // so with one already serving the flip's pre-flight would fail on its own
+        // required loopback bind and report a port collision against dux itself.
+        // Refuse with the honest reason instead, and point at the two ways out.
+        if self.background_server_is_serving() {
+            let urls = self
+                .companion
+                .as_ref()
+                .map(|companion| companion.urls())
+                .unwrap_or_default();
+            self.set_warning(format!(
+                "The web UI is already serving in the background on {}, so just open it. If you \
+                 want the terminal handed over to it instead, run stop-background-server first \
+                 and then this command again.",
+                urls.join(", ")
+            ));
+            return;
+        }
         // Mint the flip's keyed busy op. The plain-success arm re-emits this op's
         // busy text (with the serve URLs) via `progress` and lets the spinner ride
         // until the flip; the warning/error arms resolve it. The resolver covers
@@ -4181,7 +4199,7 @@ impl App {
 /// bind-failure warnings the pre-flight produced into the single `warning` the
 /// flip event carries. Both describe the same degraded-to-loopback outcome, so
 /// they are joined with a space; returns `None` when there is nothing to say.
-fn combine_flip_warnings(detect: Option<String>, binds: Vec<String>) -> Option<String> {
+pub(super) fn combine_flip_warnings(detect: Option<String>, binds: Vec<String>) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
     parts.extend(detect);
     parts.extend(binds);
@@ -4411,6 +4429,9 @@ mod tests {
             terminal_selection: None,
             startup_log_selection: None,
             pending_server_flip: None,
+            companion: None,
+            background_server_preflight_pending: false,
+            pending_background_server_op: None,
             server_flip_preflight_pending: false,
             pending_persist_ops: std::collections::HashMap::new(),
             pending_worktree_ops: std::collections::HashMap::new(),

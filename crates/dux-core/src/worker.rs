@@ -650,6 +650,17 @@ pub enum WorkerEvent {
         result: Result<(Vec<std::net::TcpListener>, Vec<String>), String>,
         warning: Option<String>,
     },
+    /// The BACKGROUND web server's bind pre-flight finished on a worker thread.
+    ///
+    /// Same payload and same reason as `ServerFlipPreflightReady` (Tailscale
+    /// detection shells out, so it cannot run on the UI thread), and a separate
+    /// variant rather than a flag on that one because the two go to different
+    /// places: the flip's listeners end a TUI session, and these start a serve
+    /// alongside one. Keeping the flip's event untouched is deliberate.
+    BackgroundServerPreflightReady {
+        result: Result<(Vec<std::net::TcpListener>, Vec<String>), String>,
+        warning: Option<String>,
+    },
 }
 
 /// How a successful (non-erroring) pull worker run ended. `current_branch` is

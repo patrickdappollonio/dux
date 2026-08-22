@@ -2659,12 +2659,17 @@ impl App {
             return Ok(false);
         }
 
-        // Poll stdin with 100ms timeout (matches the crossterm poll interval).
+        // Poll stdin with a 100ms timeout (matching the crossterm poll interval),
+        // capped while the background web server is on: this run loop is that
+        // server's engine servicer, so the wait here is a browser's request
+        // latency. The cap is the same one the structured-event branch applies;
+        // see `App::max_poll_ms`.
         let stdin_handle = std::io::stdin();
         let mut buf = [0u8; 4096];
+        let poll_ms = 100u64.min(self.max_poll_ms());
         let timeout = rustix::time::Timespec {
             tv_sec: 0,
-            tv_nsec: 100_000_000, // 100ms
+            tv_nsec: (poll_ms * 1_000_000) as i64,
         };
         let stdin_borrow = stdin_handle.as_fd();
         let ready = crate::io_retry::retry_on_interrupt_errno(|| {
