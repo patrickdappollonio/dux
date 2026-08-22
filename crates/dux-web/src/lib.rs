@@ -675,6 +675,11 @@ async fn run_serve_loop(
 ) {
     let mut parent = shutdown.subscribe();
     let mut watcher_open = true;
+    // The address whose bind failed on the previous attempt, so a permanently
+    // occupied Tailscale port is reported once instead of once every period. The
+    // retry itself is deliberate (a port frees up, an interface finishes coming
+    // up); saying the same sentence forever is not.
+    let mut last_bind_failure: Option<SocketAddr> = None;
     while !*parent.borrow_and_update() {
         tokio::select! {
             _ = parent.changed() => {}
@@ -703,6 +708,7 @@ async fn run_serve_loop(
                             &app,
                             &console,
                             &bound_tailscale,
+                            &mut last_bind_failure,
                         )
                         .await;
                     }
@@ -728,10 +734,12 @@ async fn apply_leg_command(
     app: &Router,
     console: &Console,
     bound_tailscale: &Arc<std::sync::Mutex<Option<SocketAddr>>>,
+    last_bind_failure: &mut Option<SocketAddr>,
 ) {
     match command {
         LegCommand::Bind(addr) => match tokio::net::TcpListener::bind(addr).await {
             Ok(listener) => {
+                *last_bind_failure = None;
                 spawn_leg(
                     tasks,
                     app.clone(),
@@ -753,10 +761,17 @@ async fn apply_leg_command(
             }
             Err(err) => {
                 // Best-effort: say so and carry on. The watcher compares against
-                // what is BOUND, so it asks again next period.
+                // what is BOUND, so it asks again next period. Say it ONCE per
+                // streak, though: a port somebody else holds permanently would
+                // otherwise repeat the same sentence for as long as dux runs.
                 let warning = tailscale_bind_warning(addr, &err);
-                dux_core::logger::warn(&format!("[server] {warning}"));
-                console.bind_degraded(&warning);
+                if *last_bind_failure == Some(addr) {
+                    dux_core::logger::debug(&format!("[server] still {warning}"));
+                } else {
+                    dux_core::logger::warn(&format!("[server] {warning}"));
+                    console.bind_degraded(&warning);
+                }
+                *last_bind_failure = Some(addr);
                 if let Ok(mut slot) = bound_tailscale.lock() {
                     *slot = None;
                 }

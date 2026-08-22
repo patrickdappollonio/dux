@@ -1254,6 +1254,21 @@ mod tests {
     }
 
     #[test]
+    fn config_diff_reports_the_tailscale_mode() {
+        // The exhaustiveness walk below covers this structurally, but the walk
+        // mutates a string by appending to it, and this particular setting has a
+        // lenient deserializer that also accepts a boolean. Naming it here proves
+        // the leaf is genuinely reachable and reported as a value change rather
+        // than being quietly rejected on the way in.
+        let mut config = Config::default();
+        config.server.tailscale = "no".to_string();
+        assert_eq!(
+            collect_config_changes(&config),
+            vec!["server.tailscale: auto -> no".to_string()]
+        );
+    }
+
+    #[test]
     fn config_diff_reports_every_leaf_of_the_default_config() {
         let mut unreported = Vec::new();
         for (dotted, config) in mutated_leaf_fixtures() {
