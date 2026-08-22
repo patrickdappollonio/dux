@@ -39,17 +39,30 @@ function detectBrowser(ua: string): string | null {
   return null
 }
 
+// The one participant in PTY ownership that is not a browser: the dux terminal
+// UI, which records a fixed label instead of a `User-Agent` because it has none.
+// Matched EXACTLY, and only this one string, rather than passing unrecognized
+// input through: the `User-Agent` is attacker-controllable and this value is
+// rendered as copy, so "anything I cannot parse is a device name" would turn the
+// take-over card into an echo of whatever a client sent. Kept in step with
+// `TUI_DEVICE_LABEL` in `dux-core`'s `background_serve` module.
+const TUI_DEVICE_LABEL = "the dux TUI"
+
 // Compose the take-over label from a raw `User-Agent`.
 //   - Empty/null/whitespace input, or an unrecognized OS → `null` (the caller shows
 //     a generic "another device" fallback).
 //   - Known OS + known browser → "{Browser} on {OS}" (e.g. "Chrome on macOS").
 //   - Known OS + unknown browser → just the OS (e.g. "Windows").
+//   - The dux terminal UI's own fixed label → itself, verbatim. It parses as no
+//     OS at all, so without this the one non-browser driver dux has would show
+//     up on every watcher's card as the generic "another device".
 export function deviceLabel(
   userAgent: string | null | undefined,
 ): string | null {
   if (!userAgent) return null
   const ua = userAgent.trim()
   if (ua === "") return null
+  if (ua === TUI_DEVICE_LABEL) return ua
 
   const os = detectOs(ua)
   if (os === null) return null

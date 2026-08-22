@@ -4387,6 +4387,57 @@ mod tests {
         );
     }
 
+    /// A WATCHER OF A TERMINAL-UI-DRIVEN PTY learns which device is driving it,
+    /// and that device is the dux terminal UI.
+    ///
+    /// The terminal UI is a participant in the ownership registry while a
+    /// background server is serving, and it records a fixed label rather than a
+    /// `User-Agent` because it is not a browser. Nothing about the handshake had
+    /// to change for that to work, which is exactly the claim under test: the
+    /// label travels the same field a browser's does, so a watcher that merely
+    /// attached (and therefore hears no `pty.owner` broadcast at all) can still
+    /// name the terminal on its take-over card.
+    #[test]
+    fn the_handshake_names_the_terminal_ui_as_the_driving_device() {
+        let owners = PtySizeOwners::default();
+        let tui = owners.next_conn_id();
+        let epoch = owners
+            .claim_for_resize(
+                "s1",
+                tui,
+                false,
+                Some(dux_core::background_serve::TUI_DEVICE_LABEL),
+                |_| {},
+            )
+            .epoch
+            .expect("the terminal UI claimed the unowned pty");
+
+        // The watcher's handshake read, verbatim, and the frame built from it.
+        let snapshot = owners.current_owner("s1");
+        assert_eq!(snapshot.0, Some(tui));
+        assert_eq!(snapshot.1, epoch);
+        let (owner, owner_epoch, owner_device) = snapshot;
+        let frame = PtyConnectedFrame {
+            event: "connected",
+            id: "watcher-1".into(),
+            generation: 1,
+            owner: owner.map(|id| id.to_string()),
+            owner_epoch,
+            owner_device,
+            rows: Some(24),
+            cols: Some(80),
+            grid_seq: owners.grid_seq("s1"),
+        };
+        let wire = serde_json::to_string(&frame).expect("the frame serializes");
+        assert!(
+            wire.contains(&format!(
+                "\"owner_device\":\"{}\"",
+                dux_core::background_serve::TUI_DEVICE_LABEL
+            )),
+            "a watcher must be told the dux terminal UI is driving: {wire}"
+        );
+    }
+
     /// The handshake's grid is what makes a viewer's own divergence knowable at
     /// all, and an unreadable pty spells it as an explicit null rather than
     /// inventing a size. Both keys are always present, for the same reason

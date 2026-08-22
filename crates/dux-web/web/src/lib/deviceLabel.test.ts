@@ -32,6 +32,22 @@ const UA = {
 }
 
 describe("deviceLabel", () => {
+  // The dux terminal UI drives PTYs too while a background server is serving,
+  // and it is not a browser: it records a fixed label rather than a User-Agent.
+  // That label parses as no OS, so without the exact-match rule the one
+  // non-browser driver dux has would show on every card as "another device".
+  it("names the dux terminal UI as itself", () => {
+    expect(deviceLabel("the dux TUI")).toBe("the dux TUI")
+  })
+
+  // The exact match is exact on purpose: the User-Agent is attacker-controllable
+  // and this value becomes copy, so nothing else unrecognized may pass through.
+  it("still refuses every other unrecognized string", () => {
+    expect(deviceLabel("the dux TUI and also this")).toBeNull()
+    expect(deviceLabel("The Dux Tui")).toBeNull()
+    expect(deviceLabel("<script>alert(1)</script>")).toBeNull()
+  })
+
   it("names browser + OS for the common pairs", () => {
     expect(deviceLabel(UA.chromeMac)).toBe("Chrome on macOS")
     expect(deviceLabel(UA.chromeLinux)).toBe("Chrome on Linux")
