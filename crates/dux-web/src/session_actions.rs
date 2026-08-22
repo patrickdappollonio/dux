@@ -1029,7 +1029,7 @@ mod tests {
     /// use), so the pull-request routes can be exercised against a session
     /// that exists without creating a worktree or spawning a provider.
     fn router_with_seeded_session(id: &str) -> (TempDir, axum::Router) {
-        router_with_seeded_session_prepared(id, |_| {})
+        router_with_seeded_session_prepared(id, |_, _| {})
     }
 
     /// The same seeded router, with one last chance to touch the engine before
@@ -1038,7 +1038,7 @@ mod tests {
     /// needs an authenticated `gh`), so the tests mark it here.
     fn router_with_seeded_session_prepared(
         id: &str,
-        prepare: impl FnOnce(&mut dux_core::engine::Engine),
+        prepare: impl FnOnce(&mut dux_core::engine::Engine, &std::path::Path),
     ) -> (TempDir, axum::Router) {
         let tmp = tempfile::tempdir().unwrap();
         let paths = dux_core::config::DuxPaths {
@@ -1078,7 +1078,7 @@ mod tests {
             .unwrap();
         drop(store);
         let mut engine = crate::bootstrap::bootstrap_engine(&paths).unwrap();
-        prepare(&mut engine);
+        prepare(&mut engine, tmp.path());
         let (handle, _join) = crate::engine_actor::spawn_engine_thread(engine);
         (tmp, crate::server::router(handle))
     }
@@ -1305,9 +1305,17 @@ mod tests {
             ("POST", "/api/v1/sessions/s1/pull-request/autodetect"),
         ];
         for (method, uri) in cases {
-            let (_tmp, app) = router_with_seeded_session_prepared("s1", |engine| {
+            let (_tmp, app) = router_with_seeded_session_prepared("s1", |engine, dir| {
                 engine.github_integration_enabled = true;
                 engine.gh_status = dux_core::model::GhStatus::Available;
+                // The actor's global workers re-probe gh at startup; on a
+                // runner with no gh binary that probe would overwrite the
+                // Available above and the gh gate would answer before the
+                // busy guard (a 400-vs-409 flake). The stand-in makes the
+                // probe itself report a serving gh, deterministically.
+                engine.gh_probe.program =
+                    dux_core::gh::probe_test_support::stand_in_gh_serving(dir, &["github.com"])
+                        .into();
                 engine.mark_in_flight(dux_core::engine::InFlightKey::PrAttach("s1".to_string()));
             });
             let body = (method == "PUT").then(|| serde_json::json!({ "pr": "#12" }));
@@ -1337,9 +1345,17 @@ mod tests {
             ("POST", "/api/v1/sessions/ghost/pull-request/autodetect"),
         ];
         for (method, uri) in cases {
-            let (_tmp, app) = router_with_seeded_session_prepared("s1", |engine| {
+            let (_tmp, app) = router_with_seeded_session_prepared("s1", |engine, dir| {
                 engine.github_integration_enabled = true;
                 engine.gh_status = dux_core::model::GhStatus::Available;
+                // The actor's global workers re-probe gh at startup; on a
+                // runner with no gh binary that probe would overwrite the
+                // Available above and the gh gate would answer before the
+                // busy guard (a 400-vs-409 flake). The stand-in makes the
+                // probe itself report a serving gh, deterministically.
+                engine.gh_probe.program =
+                    dux_core::gh::probe_test_support::stand_in_gh_serving(dir, &["github.com"])
+                        .into();
                 engine.mark_in_flight(dux_core::engine::InFlightKey::PrAttach("s1".to_string()));
             });
             let body = (method == "PUT").then(|| serde_json::json!({ "pr": "#12" }));
