@@ -3125,17 +3125,36 @@ fn handle_request(
             let _ = reply.send(owner);
         }
         EngineRequest::CreateAgentBranchPlan(project_id, name, reply) => {
-            let plan = engine
+            // The pre-flight shells out to git (up to two `rev-parse` calls), so
+            // it does not run here. On the concurrent path this thread is the
+            // terminal UI's own run loop, and a slow filesystem or a held index
+            // lock would stall a frame; even on the dedicated actor loop it blocks
+            // every other queued request. Only the project lookup needs the
+            // engine, so that part stays and a one-shot thread answers the waiting
+            // request directly with the subprocess result. No deferred-reply
+            // bookkeeping is needed because the reply channel is already a
+            // oneshot the caller is awaiting.
+            let repo_path = engine
                 .projects
                 .iter()
                 .find(|p| p.id == project_id)
-                .map(|p| {
-                    dux_core::git::create_agent_branch_preflight(
-                        std::path::Path::new(&p.path),
-                        &name,
-                    )
-                });
-            let _ = reply.send(plan);
+                .map(|p| p.path.clone());
+            match repo_path {
+                Some(repo_path) => {
+                    std::thread::spawn(move || {
+                        let plan = dux_core::git::create_agent_branch_preflight(
+                            std::path::Path::new(&repo_path),
+                            &name,
+                        );
+                        let _ = reply.send(Some(plan));
+                    });
+                }
+                // No such project: the same `None` the caller has always read,
+                // answered on the spot because there is nothing to go and ask git.
+                None => {
+                    let _ = reply.send(None);
+                }
+            }
         }
         EngineRequest::FileDropDestination(pty_id, reply) => {
             let _ = reply.send(engine.file_drop_destination(&pty_id));
