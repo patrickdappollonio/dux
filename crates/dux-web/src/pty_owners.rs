@@ -90,8 +90,20 @@ pub(crate) struct OwnersState {
 #[derive(Default)]
 pub(crate) struct PtySizeOwners {
     pub(crate) owners: std::sync::Mutex<OwnersState>,
-    pub(crate) next_conn_id: std::sync::atomic::AtomicU64,
 }
+
+/// The source of every connection id in the process.
+///
+/// PROCESS-global, not registry-global, and that distinction is the whole point.
+/// A registry is built once per serve (`build_actor_channels` constructs it), and
+/// the background-server toggle can build several of them in one run. A
+/// per-registry counter therefore started again at zero on every cycle, and the
+/// ghost self-succession rule (a returning owner recognising "this pane's
+/// previous, dead connection id was mine") compares raw ids: a second cycle's
+/// connection 0 would answer to a first cycle's connection 0 and take a pty away
+/// from whichever device is actually driving it. Ids never repeat while the
+/// process lives, so nothing can be mistaken for a stale self.
+static NEXT_CONN_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Outcome of [`PtySizeOwners::may_write`]: whether the connection may forward its
 /// stdin to the PTY (`allowed`), whether the check itself NEWLY claimed an unowned
@@ -129,10 +141,10 @@ pub(crate) struct ResizeClaim {
 
 impl PtySizeOwners {
     /// Allocate a process-unique id for a freshly attached PTY socket, used to
-    /// compare against the recorded owner.
+    /// compare against the recorded owner. Drawn from [`NEXT_CONN_ID`], so ids
+    /// stay unique across serve cycles rather than only within one registry.
     pub(crate) fn next_conn_id(&self) -> u64 {
-        self.next_conn_id
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        NEXT_CONN_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Who owns `pty_id` right now, if anyone, PLUS the ownership epoch as of
@@ -431,6 +443,31 @@ mod tests {
         let applied = std::cell::Cell::new(false);
         let outcome = owners.claim_for_resize(pty, conn, takeover, None, || applied.set(true));
         (outcome, applied.get())
+    }
+
+    /// Two serve cycles must not reuse connection ids.
+    ///
+    /// A registry is built per serve (`build_actor_channels` constructs it), and
+    /// the background-server toggle can build several in one process. When the
+    /// counter lived on the registry, cycle two handed out 0, 1, 2 again, so the
+    /// ghost self-succession rule ("this pane's previous, dead connection id was
+    /// mine") could recognise a DIFFERENT device's id as its own ghost and
+    /// transfer ownership to the wrong browser. The ids are therefore drawn from
+    /// one process-global counter.
+    #[test]
+    fn conn_ids_are_disjoint_across_two_serve_cycles() {
+        let first = PtySizeOwners::default();
+        let cycle_one = [first.next_conn_id(), first.next_conn_id()];
+        drop(first);
+        let second = PtySizeOwners::default();
+        let cycle_two = [second.next_conn_id(), second.next_conn_id()];
+        for id in cycle_one {
+            assert!(
+                !cycle_two.contains(&id),
+                "a second serve cycle reissued connection id {id} from the first: \
+                 {cycle_one:?} vs {cycle_two:?}"
+            );
+        }
     }
 
     /// THE CLAIM TABLE: {unowned, owned-by-other, owned-by-self} x {plain,
