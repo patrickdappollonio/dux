@@ -6,6 +6,7 @@ pub mod command;
 mod companion;
 pub mod config_saver;
 mod events;
+mod followup;
 mod in_flight;
 mod lifecycle;
 mod pr_sync_control;
@@ -25,6 +26,7 @@ pub use events::{
     FinishDeleteSessionOutcome, FinishDeleteSessionView, ProjectPersistenceOutcome,
     ProjectPersistenceView, RemovedBranches, StatusUpdate, WorktreeRemoval,
 };
+pub use followup::FollowupOwner;
 pub use in_flight::{
     BranchRenameDispatch, BranchRenamePlan, BranchRenameRejection, InFlightKey, InFlightSet,
     RenameExpectation,
@@ -179,6 +181,18 @@ pub struct Engine {
     /// Config-mutating commands that arrived while `reloading` was set. Drained
     /// (re-applied) when the reload completes. Constructed empty.
     pub deferred_commands: Vec<Command>,
+    /// How many commands [`Engine::apply`] has taken since the engine was built.
+    ///
+    /// Read, never interpreted: the only consumer compares it against the value
+    /// it saw last time to answer "did this surface change anything?". That
+    /// question exists because the web layer's spine gate is driven by mutations
+    /// IT can see, and the terminal UI applies commands straight to the engine
+    /// through channels the web layer never observes. Counting centrally here is
+    /// what lets a single call site answer for all of the TUI's apply sites at
+    /// once, instead of each of them remembering to announce itself.
+    ///
+    /// Wraps rather than saturating, because a difference is all anyone asks for.
+    pub command_applies: u64,
     /// Holds the config-writer quiesce barrier open for the lifetime of a
     /// reload. Dropped (resuming the writer) when `ConfigReloadReady` lands.
     /// Constructed as `None`.

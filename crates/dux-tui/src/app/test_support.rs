@@ -146,6 +146,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         config_writer,
         surface: Box::new(crate::TuiConfigSurface),
         reloading: false,
+        command_applies: 0,
         deferred_commands: Vec::new(),
         reload_guard: None,
         providers: std::collections::HashMap::new(),

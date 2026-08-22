@@ -294,6 +294,11 @@ impl Engine {
     /// the caller routes through its view-applier.
     #[allow(deprecated)] // blessed sync-direct: Command::RecoverConfig quiesces the writer and writes directly
     pub fn apply(&mut self, command: Command) -> anyhow::Result<EventReaction> {
+        // Count every command taken, deferred ones included: a deferral is still
+        // a caller having asked for something, and the counter's only reader is
+        // asking "did anything happen on this iteration?". Counted at the top so
+        // an early return cannot skip it.
+        self.command_applies = self.command_applies.wrapping_add(1);
         // While a config reload barrier is open, hold any config-mutating
         // command until the reload lands so it re-applies against the
         // freshly-reloaded config instead of racing it (see
@@ -1436,6 +1441,30 @@ mod tests {
             .filter(|s| s.project_id() == Some(project_id))
             .map(|s| s.id.clone())
             .collect()
+    }
+
+    /// The counter behind "did this surface change anything on this iteration?".
+    /// It has to move for EVERY apply, including one the reload barrier defers,
+    /// because the caller is asking about activity, not about success.
+    #[test]
+    fn every_applied_command_moves_the_apply_counter() {
+        let (mut engine, _tmp) = test_engine();
+        let before = engine.command_applies;
+        let _ = engine.apply(Command::RecoverConfig);
+        assert_eq!(
+            engine.command_applies,
+            before.wrapping_add(1),
+            "an ordinary apply must be counted"
+        );
+
+        engine.reloading = true;
+        let deferred_before = engine.command_applies;
+        let _ = engine.apply(Command::ReloadConfig);
+        assert_eq!(
+            engine.command_applies,
+            deferred_before.wrapping_add(1),
+            "a deferred apply is still a caller asking for something"
+        );
     }
 
     #[test]

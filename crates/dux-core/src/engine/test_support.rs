@@ -54,6 +54,7 @@ pub(crate) fn test_engine() -> (Engine, TempDir) {
         config_writer,
         surface: Box::new(crate::engine::NoopConfigSurface),
         reloading: false,
+        command_applies: 0,
         deferred_commands: Vec::new(),
         reload_guard: None,
         providers: HashMap::new(),

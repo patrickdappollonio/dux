@@ -135,6 +135,7 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
         config_writer,
         surface: Box::new(WebConfigSurface),
         reloading: false,
+        command_applies: 0,
         deferred_commands: Vec::new(),
         reload_guard: None,
         pending_web_checkout_ops: HashMap::new(),
