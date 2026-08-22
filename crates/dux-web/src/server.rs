@@ -318,6 +318,10 @@ pub struct RouterParams {
     /// (lowercased, port-stripped) inside the allowlist; raw strings here. Only
     /// meaningful when the host guard is active (see [`bound_ips`]).
     pub configured_hosts: Vec<String>,
+    /// Whether the allowlist accepts IP literals in Tailscale's own ranges
+    /// (`[server] tailscale` is not `"no"`). Only meaningful when the host guard
+    /// is active (see [`bound_ips`]).
+    pub tailscale_host_literals: bool,
     /// Base URL for release-notes fetches. Defaults to
     /// `dux_core::urls::GITHUB_API_BASE`; overridden only by tests (see
     /// [`RouterParams::with_release_notes_api_base`]).
@@ -348,6 +352,7 @@ impl RouterParams {
             file_drop_max_concurrency: dux_core::config::DEFAULT_FILE_DROP_MAX_CONCURRENCY,
             bound_ips: Vec::new(),
             configured_hosts: Vec::new(),
+            tailscale_host_literals: false,
             release_notes_api_base: dux_core::urls::GITHUB_API_BASE.to_string(),
         }
     }
@@ -432,9 +437,20 @@ impl RouterParams {
     /// this is set, `build_app` wraps the whole router with the host allowlist
     /// middleware, which runs OUTSIDE the access-log layer so foreign-Host probes
     /// are not access-logged.
-    pub fn with_host_allowlist(mut self, bound_ips: Vec<IpAddr>, configured: Vec<String>) -> Self {
+    /// `tailscale_host_literals` activates the allowlist's structural
+    /// Tailscale-range rule (rule 5). It comes from the serve MODE, not from what
+    /// bound: on `auto` the Tailscale leg comes and goes behind this one
+    /// immutable allowlist, and a rule derived from the startup bind set would
+    /// 403 every tailnet device the moment the leg was re-bound.
+    pub fn with_host_allowlist(
+        mut self,
+        bound_ips: Vec<IpAddr>,
+        configured: Vec<String>,
+        tailscale_host_literals: bool,
+    ) -> Self {
         self.bound_ips = bound_ips;
         self.configured_hosts = configured;
+        self.tailscale_host_literals = tailscale_host_literals;
         self
     }
 }
@@ -663,7 +679,12 @@ pub fn build_app(
     // the access log. Active when bound_ips is non-empty; tests that do not
     // exercise the host guard leave bound_ips empty, keeping the guard off.
     if !params.bound_ips.is_empty() || !params.configured_hosts.is_empty() {
-        crate::host_guard::host_allowlist_layer(router, params.bound_ips, params.configured_hosts)
+        crate::host_guard::host_allowlist_layer(
+            router,
+            params.bound_ips,
+            params.configured_hosts,
+            params.tailscale_host_literals,
+        )
     } else {
         router
     }
@@ -4698,8 +4719,11 @@ mod tests {
         let app = build_app(
             handle,
             Router::new(),
-            RouterParams::plain_http()
-                .with_host_allowlist(vec!["127.0.0.1".parse().unwrap()], vec![]),
+            RouterParams::plain_http().with_host_allowlist(
+                vec!["127.0.0.1".parse().unwrap()],
+                vec![],
+                false,
+            ),
         );
 
         // An unknown hostname gets 403 (DNS-rebinding defense).
@@ -4734,6 +4758,61 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(good.status(), StatusCode::OK, "localhost must be allowed");
+    }
+
+    /// Rule 5 end to end: with the Tailscale mode on, a request carrying a `100.x`
+    /// Host is served even though only loopback is bound. That combination is the
+    /// normal state on `auto` (the interface is away, or it just came back and the
+    /// router was built long before), and it must not be a 403. An unknown NAME is
+    /// still refused, which is the property the guard exists for.
+    #[tokio::test]
+    async fn host_guard_serves_a_tailnet_host_while_only_loopback_is_bound() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = test_engine_handle(tmp.path());
+        let app = build_app(
+            handle,
+            Router::new(),
+            RouterParams::plain_http().with_host_allowlist(
+                vec!["127.0.0.1".parse().unwrap()],
+                vec![],
+                true,
+            ),
+        );
+
+        let tailnet = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/healthz")
+                    .header("Host", "100.101.102.103:8080")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            tailnet.status(),
+            StatusCode::OK,
+            "a tailnet IP literal must be served even with the leg unbound"
+        );
+
+        let name = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/healthz")
+                    .header("Host", "evil.example.com")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            name.status(),
+            StatusCode::FORBIDDEN,
+            "widening literals must not widen names"
+        );
     }
 
     // ── REST same-origin serve-level tests ────────────────────────────────

@@ -182,7 +182,7 @@ pub fn parse_tailscale_ip(output: &str) -> Option<IpAddr> {
 }
 
 /// Whether `addr` is in Tailscale's CGNAT range 100.64.0.0/10 (RFC 6598).
-fn is_tailscale_cgnat(addr: std::net::Ipv4Addr) -> bool {
+pub fn is_tailscale_cgnat(addr: std::net::Ipv4Addr) -> bool {
     let [a, b, ..] = addr.octets();
     a == 100 && (64..=127).contains(&b)
 }
@@ -197,7 +197,7 @@ fn is_tailscale_cgnat(addr: std::net::Ipv4Addr) -> bool {
 /// In practice this leg is effectively unreachable: the IPv4 CGNAT line is
 /// preferred and is present on every normal tailnet, so [`parse_tailscale_ip`]
 /// only consults this fallback on an IPv6-only tailnet.
-fn is_tailscale_ipv6(addr: std::net::Ipv6Addr) -> bool {
+pub fn is_tailscale_ipv6(addr: std::net::Ipv6Addr) -> bool {
     let [a, b, c, ..] = addr.segments();
     a == 0xfd7a && b == 0x115c && c == 0xa1e0
 }

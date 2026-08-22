@@ -21,11 +21,25 @@
 //! 3. The Host parses as an `IpAddr` that is in `bound_ips` (covers Tailscale
 //!    `100.x` literals and any explicit `--bind` IP).
 //! 4. The Host case-insensitively equals a (port-stripped) entry in `configured`.
+//! 5. **`[server] tailscale` is not `"no"` and the Host is a literal IP inside
+//!    Tailscale's own ranges** (CGNAT `100.64.0.0/10` or the `fd7a:115c:a1e0::/48`
+//!    ULA). This is what makes the `auto` mode usable: the Tailscale listener
+//!    comes and goes with the interface, and the router (with this allowlist
+//!    inside it) is built ONCE at startup, so a rule derived from what happened
+//!    to be bound at that moment would 403 every tailnet device whenever dux
+//!    re-bound the leg later. The rule is therefore STRUCTURAL: it is evaluated
+//!    on every listener including loopback, and it fires even while the Tailscale
+//!    leg is unbound. That is harmless under dux's trust model, because it admits
+//!    a Host value and nothing else: reaching a listener at all is still the
+//!    operator's network's business.
 //!
-//! A Tailscale MagicDNS name (`box.tailnet.ts.net`) is NOT an IP literal and is
-//! NOT in `bound_ips` by default, so it only works when the user adds it to
-//! `[server] allowed_hosts`. The `100.x` Tailscale IP works without configuration
-//! via rule 3.
+//! A Tailscale MagicDNS name (`box.tailnet.ts.net`) is NOT an IP literal, so
+//! rule 5 does not cover it and it still only works when the user adds it to
+//! `[server] allowed_hosts`. Widening literals is safe where widening names is
+//! not: DNS rebinding needs an attacker-controlled NAME, and no browser can be
+//! made to send an IP-literal Host for a name the attacker owns. A local reverse
+//! proxy that forwards a spoofed Host is the operator's own configuration and is
+//! out of scope here, exactly as it already is for rule 2.
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -101,10 +115,21 @@ fn parse_normalized_host_as_ip(host: &str) -> Option<IpAddr> {
     None
 }
 
+/// Whether `ip` is one of Tailscale's own addresses: the CGNAT `100.64.0.0/10`
+/// v4 range or the `fd7a:115c:a1e0::/48` v6 ULA. Reuses the SAME predicates the
+/// address detector parses with, so the guard and the detector can never disagree
+/// about what a Tailscale address is.
+fn is_tailscale_range(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => dux_core::tailscale::is_tailscale_cgnat(v4),
+        IpAddr::V6(v6) => dux_core::tailscale::is_tailscale_ipv6(v6),
+    }
+}
+
 // ── HostAllowlist ──────────────────────────────────────────────────────────
 
 /// The Host allowlist built from the server's bound IPs and the operator's
-/// configured hostname list. Implements the four DNS-rebinding allow rules
+/// configured hostname list. Implements the five DNS-rebinding allow rules
 /// described in the module doc. Thread-safe via interior immutability: clone the
 /// `Arc` for each request, never mutate after construction.
 ///
@@ -121,6 +146,10 @@ pub struct HostAllowlist {
     /// stripped, no trailing dot) so per-request comparison is a simple
     /// `contains`. Rule 4.
     configured: Vec<String>,
+    /// True when `[server] tailscale` is not `"no"`, so an IP literal in
+    /// Tailscale's own ranges is accepted whether or not that leg is bound right
+    /// now. Rule 5; see the module doc for why it is structural.
+    tailscale_literals: bool,
 }
 
 impl HostAllowlist {
@@ -128,7 +157,11 @@ impl HostAllowlist {
     /// `[server] allowed_hosts` list. `bound_ips` is typically derived from the
     /// bound listeners' local addresses; `configured` is the raw string list from
     /// config (port suffixes are stripped and entries are lowercased here).
-    pub fn new(bound_ips: &[IpAddr], configured: &[String]) -> Self {
+    ///
+    /// `tailscale_literals` comes from the serve mode (`[server] tailscale` not
+    /// being `"no"`) rather than from what bound, because the Tailscale leg may
+    /// be bound and unbound many times behind this one immutable allowlist.
+    pub fn new(bound_ips: &[IpAddr], configured: &[String], tailscale_literals: bool) -> Self {
         let has_unspecified = bound_ips.iter().any(|ip| ip.is_unspecified());
         let configured = configured
             .iter()
@@ -138,10 +171,11 @@ impl HostAllowlist {
             bound_ips: bound_ips.to_vec(),
             has_unspecified,
             configured,
+            tailscale_literals,
         }
     }
 
-    /// Whether a raw `Host` header value is allowed by any of the four rules.
+    /// Whether a raw `Host` header value is allowed by any of the five rules.
     ///
     /// Normalizes the host (strip port, lowercase) before every comparison.
     /// A malformed or empty `Host` returns `false`.
@@ -169,7 +203,13 @@ impl HostAllowlist {
                 return true;
             }
             // Rule 3: the exact IP is one we bound to (e.g. the Tailscale 100.x).
-            return self.bound_ips.contains(&ip);
+            if self.bound_ips.contains(&ip) {
+                return true;
+            }
+            // Rule 5: a literal in Tailscale's own ranges, while this server is
+            // willing to serve the tailnet at all. Deliberately independent of
+            // whether that leg is bound at this instant.
+            return self.tailscale_literals && is_tailscale_range(ip);
         }
 
         // Rule 4: operator-configured hostname (case-insensitive, port-stripped).
@@ -210,8 +250,13 @@ pub fn host_allowlist_layer(
     router: Router,
     bound_ips: Vec<IpAddr>,
     configured: Vec<String>,
+    tailscale_literals: bool,
 ) -> Router {
-    let allowlist = Arc::new(HostAllowlist::new(&bound_ips, &configured));
+    let allowlist = Arc::new(HostAllowlist::new(
+        &bound_ips,
+        &configured,
+        tailscale_literals,
+    ));
     router.layer(axum::middleware::from_fn_with_state(
         allowlist,
         host_allowlist_middleware,
@@ -259,7 +304,7 @@ mod tests {
     #[test]
     fn loopback_always_allowed() {
         // No bound IPs, no configured hosts -- still allows loopback.
-        let al = HostAllowlist::new(&[], &[]);
+        let al = HostAllowlist::new(&[], &[], false);
         assert!(al.allows_host("localhost"), "localhost");
         assert!(al.allows_host("localhost:8080"), "localhost with port");
         assert!(al.allows_host("127.0.0.1"), "ipv4 loopback");
@@ -274,7 +319,7 @@ mod tests {
     /// Tailscale 100.x literal and any explicit --bind address).
     #[test]
     fn bound_ip_literal_allowed() {
-        let al = HostAllowlist::new(&ips(&["100.64.0.1", "10.0.0.5"]), &[]);
+        let al = HostAllowlist::new(&ips(&["100.64.0.1", "10.0.0.5"]), &[], false);
         assert!(al.allows_host("100.64.0.1"), "tailscale ip");
         assert!(al.allows_host("100.64.0.1:8080"), "tailscale ip with port");
         assert!(al.allows_host("10.0.0.5"), "lan ip");
@@ -286,7 +331,7 @@ mod tests {
     /// port suffixes are stripped before comparison.
     #[test]
     fn configured_hostname_case_insensitive_with_and_without_port() {
-        let al = HostAllowlist::new(&[], &["box.tailnet.ts.net".to_string()]);
+        let al = HostAllowlist::new(&[], &["box.tailnet.ts.net".to_string()], false);
         assert!(al.allows_host("box.tailnet.ts.net"), "exact match");
         assert!(al.allows_host("BOX.TAILNET.TS.NET"), "uppercase");
         assert!(al.allows_host("Box.Tailnet.Ts.Net"), "mixed case");
@@ -305,7 +350,7 @@ mod tests {
     #[test]
     fn unspecified_bind_accepts_any_ip_literal() {
         // 0.0.0.0 bind -- any IP literal allowed.
-        let al = HostAllowlist::new(&ips(&["0.0.0.0"]), &[]);
+        let al = HostAllowlist::new(&ips(&["0.0.0.0"]), &[], false);
         assert!(
             al.allows_host("192.168.1.5"),
             "lan ip allowed via 0.0.0.0 bind"
@@ -319,7 +364,7 @@ mod tests {
         );
 
         // :: bind (IPv6 wildcard) -- same rule applies.
-        let al6 = HostAllowlist::new(&ips(&["::"]), &[]);
+        let al6 = HostAllowlist::new(&ips(&["::"]), &[], false);
         assert!(al6.allows_host("192.168.1.5"), "lan ip via :: bind");
     }
 
@@ -328,7 +373,7 @@ mod tests {
     #[test]
     fn non_unspecified_bind_does_not_accept_arbitrary_ip() {
         // Bound to 127.0.0.1 only.
-        let al = HostAllowlist::new(&ips(&["127.0.0.1"]), &[]);
+        let al = HostAllowlist::new(&ips(&["127.0.0.1"]), &[], false);
         // Loopback still passes (rule 1), but a foreign IP is rejected.
         assert!(al.allows_host("127.0.0.1"), "loopback bound ip");
         assert!(!al.allows_host("192.168.1.5"), "arbitrary lan ip rejected");
@@ -339,7 +384,11 @@ mod tests {
     /// rejected.
     #[test]
     fn unknown_hostname_rejected() {
-        let al = HostAllowlist::new(&ips(&["127.0.0.1"]), &["good.example.com".to_string()]);
+        let al = HostAllowlist::new(
+            &ips(&["127.0.0.1"]),
+            &["good.example.com".to_string()],
+            false,
+        );
         assert!(!al.allows_host("evil.example.com"), "unknown hostname");
         assert!(
             !al.allows_host("good.example.com.evil.com"),
@@ -355,7 +404,7 @@ mod tests {
     /// it (which no browser or legitimate client sends).
     #[test]
     fn no_wildcard_behavior() {
-        let al = HostAllowlist::new(&[], &["*".to_string()]);
+        let al = HostAllowlist::new(&[], &["*".to_string()], false);
         // `"*"` does not match any real hostname -- no wildcard expansion.
         assert!(
             !al.allows_host("anything.example.com"),
@@ -368,10 +417,63 @@ mod tests {
         // Only the literal string `"*"` would match, which is not a real Host.
     }
 
+    // ── Rule 5: Tailscale-range IP literals ────────────────────────────────
+
+    /// The laptop-roam case this rule exists for: the Tailscale leg is not bound
+    /// right now (dux is loopback-only because the interface is away), a tailnet
+    /// device's request arrives with a `100.x` Host, and it must not be a 403.
+    /// The rule is structural, so it fires whether or not the leg happens to be
+    /// up at this instant.
+    #[test]
+    fn a_tailscale_cgnat_literal_is_allowed_while_the_leg_is_unbound() {
+        let al = HostAllowlist::new(&ips(&["127.0.0.1"]), &[], true);
+        assert!(
+            al.allows_host("100.101.102.103"),
+            "a CGNAT literal must pass even though only loopback is bound"
+        );
+        assert!(al.allows_host("100.101.102.103:8080"), "with a port");
+        // The range boundaries, so the rule is the same 100.64.0.0/10 the
+        // detector uses and not a looser "starts with 100".
+        assert!(al.allows_host("100.64.0.0"), "first address in range");
+        assert!(al.allows_host("100.127.255.255"), "last address in range");
+        assert!(!al.allows_host("100.63.255.255"), "just below the range");
+        assert!(!al.allows_host("100.128.0.0"), "just above the range");
+    }
+
+    /// The IPv6 half, including the bracketed form a browser actually sends.
+    #[test]
+    fn a_tailscale_ula_literal_is_allowed_bracketed_or_bare() {
+        let al = HostAllowlist::new(&ips(&["127.0.0.1"]), &[], true);
+        assert!(al.allows_host("[fd7a:115c:a1e0::1234]"), "bracketed");
+        assert!(al.allows_host("[fd7a:115c:a1e0::1234]:8080"), "with a port");
+        // One past the /48, and a plain ULA, are not Tailscale addresses.
+        assert!(!al.allows_host("[fd7a:115c:a1e1::1]"), "outside the /48");
+        assert!(!al.allows_host("[fc00::1]"), "an ordinary ULA");
+    }
+
+    /// The rule is off when the mode is `no`: a deployment that told dux to stay
+    /// off the tailnet does not get a tailnet-shaped exemption.
+    #[test]
+    fn tailscale_literals_are_refused_when_the_mode_is_no() {
+        let al = HostAllowlist::new(&ips(&["127.0.0.1"]), &[], false);
+        assert!(!al.allows_host("100.101.102.103"));
+        assert!(!al.allows_host("[fd7a:115c:a1e0::1234]"));
+    }
+
+    /// The rule widens IP literals only. Names are still the DNS-rebinding
+    /// surface, and a MagicDNS name still needs `allowed_hosts`.
+    #[test]
+    fn the_tailscale_rule_does_not_admit_any_hostname() {
+        let al = HostAllowlist::new(&ips(&["127.0.0.1"]), &[], true);
+        assert!(!al.allows_host("box.tailnet.ts.net"), "magicdns name");
+        assert!(!al.allows_host("evil.example.com"), "unknown name");
+        assert!(!al.allows_host("192.168.1.5"), "an unrelated LAN literal");
+    }
+
     /// A Host with a trailing dot (FQDN notation) is normalized before comparison.
     #[test]
     fn trailing_dot_normalized() {
-        let al = HostAllowlist::new(&[], &["dux.example.com".to_string()]);
+        let al = HostAllowlist::new(&[], &["dux.example.com".to_string()], false);
         assert!(al.allows_host("dux.example.com."), "trailing dot stripped");
     }
 }
