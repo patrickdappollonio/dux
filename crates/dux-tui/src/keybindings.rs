@@ -468,13 +468,11 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         ],
     },
     // ── Agent tabs (Center-scope; never in fullscreen) ────────────
-    // The plain horizontal arrows used to be defaults alongside the Ctrl ones,
-    // justified by Center scope being unreachable while keys flowed to a PTY.
-    // That premise died with minimized typing: the focused center pane now
-    // types into a live agent, so a plain arrow must reach the agent as a
-    // caret move ([`center_typing_owns_key`]), not switch tabs. Only the Ctrl
-    // arrows (and Ctrl-1..9) remain tab keys; a terminal that cannot deliver a
-    // modified arrow can rebind these actions to any deliverable chord.
+    // Only the Ctrl arrows (and Ctrl-1..9) are tab keys: the focused center
+    // pane types into a live agent, so a plain arrow must reach the agent as a
+    // caret move ([`center_typing_owns_key`]), not switch tabs. A terminal that
+    // cannot deliver a modified arrow can rebind these actions to any
+    // deliverable chord.
     BindingDef {
         action: Action::NextTab,
         default_keys: &[key!(ctrl - Right)],
@@ -524,7 +522,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         // Ctrl-\ (both arrive as byte 0x1c, and `normalize_ctrl_punct` folds
         // them together), and that key belongs to the macro bar
         // (`OpenMacroBar`), which gained Center scope for the minimized
-        // typeable pane (decision 4). Tab 4 stays reachable via
+        // typeable pane. Tab 4 stays reachable via
         // NextTab/PrevTab or a custom rebind; a user who rebinds the macro
         // bar off Ctrl-\ can give `select_tab_4` the key back.
         action: Action::SelectTab4,
@@ -615,7 +613,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         hint_contexts: &[],
     },
     BindingDef {
-        // Center scope (decision 4): the chord also opens the bar over the
+        // Center scope: the chord also opens the bar over the
         // minimized typeable pane; being a chord, the typing bypass never
         // swallows it.
         action: Action::OpenMacroBar,
@@ -2571,12 +2569,6 @@ mod tests {
     // commands, no more and no less. This makes name/description parity true by
     // construction: adding or renaming a palette command in the core registry
     // without a matching action fails this gate.
-    //
-    // This is now a STRICTER invariant than it used to be. The registry once
-    // carried per-row `PaletteSurface` metadata and this test only required the
-    // `Tui`/`Both` rows to be listed, with an allowlist tolerating `Web`-only
-    // rows that the TUI deliberately hid. With the web projection gone, every
-    // row is a TUI row, so the listing must cover the registry exactly.
     #[test]
     fn palette_listing_matches_core_registry() {
         use dux_core::palette;
@@ -3288,7 +3280,7 @@ mod tests {
 
     #[test]
     fn empty_keys_config_resolves_all_default_bindings() {
-        // KeysConfig::default() now carries no bindings (Phase E1 option A);
+        // KeysConfig::default() carries no bindings;
         // RuntimeBindings must still resolve defaults from BINDING_DEFS so runtime
         // keybindings are unchanged.
         let rb = RuntimeBindings::from_keys_config(&dux_core::config::KeysConfig::default());

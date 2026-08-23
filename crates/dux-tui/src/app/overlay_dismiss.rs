@@ -130,10 +130,9 @@ pub(super) fn outside_click_policy(prompt: &PromptState) -> OutsideClickPolicy {
         // ways. Its nested delete-confirm is a confirmation like any other and
         // dismisses. Its LIST is a Picker over saved rows, holding no unsaved
         // text and no built-up selection, so it dismisses too, like every
-        // other picker above; it used to blink, alone among them, on a
-        // justification ("unsaved free text, or a multi-step selection") that
-        // is true of the EDITOR and not of the list. The editor itself, below,
-        // is the half that really does hold unsaved text.
+        // other picker above; the blink justification ("unsaved free text, or a
+        // multi-step selection") is true of the EDITOR and not of the list. The
+        // editor itself, below, is the half that really does hold unsaved text.
         PromptState::EditMacros {
             pending_delete: Some(_),
             ..
@@ -815,8 +814,7 @@ mod tests {
 
     /// The macro LIST is a Picker over saved rows. It holds no unsaved text and
     /// no multi-step selection, so it must cancel on an outside click like
-    /// every other picker. It used to blink, alone among them, on a
-    /// justification that was true of the editor and not of the list.
+    /// every other picker.
     #[test]
     fn the_macro_list_cancels_on_an_outside_click_like_every_other_picker() {
         let mut app = test_app(default_bindings());

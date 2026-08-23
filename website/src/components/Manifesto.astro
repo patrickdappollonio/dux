@@ -82,9 +82,7 @@ const tab =
   "surface-tab relative -mb-px inline-flex min-h-11 flex-1 cursor-pointer items-center justify-center rounded-t-lg border border-transparent px-3 text-[13px] font-medium text-[color:var(--color-muted)] transition-colors hover:bg-[color:var(--color-panel)] hover:text-[color:var(--color-text)] sm:flex-none sm:px-5 sm:text-sm";
 ---
 
-{/* `id="surfaces"` is new and nothing links to it yet. It exists so anything
-    that wants to point at the two front ends themselves has a target, rather
-    than borrowing `#web`, which belonged to a section that no longer exists. */}
+{/* Anchor for the two front ends themselves; the what's-new badge links here. */}
 <section id="surfaces" class="anchor-offset py-16 sm:py-24">
   <div class="container-app">
     {/* Full width, deliberately. This intro is not a narrow reading column
@@ -403,14 +401,7 @@ const tab =
     outline-offset: -2px;
   }
 
-  /* The web figure's frame is laid out at its own logical desktop size and then
-     scaled to whatever width it is given, with no JavaScript measuring anything.
-     Container query units do the arithmetic: `100cqw` is the wrapper's width, so
-     the scale factor is simply "how much of 1440px do we have". Because that is
-     resolved during layout, it is resolved afresh the moment the panel stops
-     being `display: none`, which is what makes it safe to hide behind a tab.
-
-     `--figure-w` / `--figure-h` are set inline on `.webui-figure` from the
+  /* `--figure-w` / `--figure-h` are set inline on `.webui-figure` from the
      single pair of constants in the frontmatter, so the iframe's own width and
      height attributes and this scaling can never disagree.
 
@@ -419,23 +410,6 @@ const tab =
 
      Presentation only: the frame is sandboxed and aria-hidden, and these two
      rules make sure a pointer or a caret cannot get into it either. */
-  /* The frame is simply the width it is given, and the app inside lays itself
-     out for that width. There is no scaling.
-     
-     It used to scale a fixed 1440px render down with
-     `transform: scale(calc(100cqw / var(--figure-w)))`, which is invalid CSS:
-     `100cqw` is a length and `var(--figure-w)` is a number, so the result is a
-     length and `scale()` takes a number. Browsers dropped the whole transform,
-     the iframe kept its full 1440px layout width, and the window's `overflow:
-     hidden` cropped it. On a wide screen that looks fine, which is why it
-     survived; narrow the page and you are looking at the left third of a
-     desktop app.
-     
-     Not scaling is better than fixing the arithmetic. The web UI is genuinely
-     responsive, with its own phone shell, so at a phone width the figure now
-     shows the REAL mobile layout rather than a shrunken desktop one. The figure
-     is built from the actual components, and this keeps that true at every
-     width instead of only at one. */
   /* The frame is a PICTURE of the app, not a small viewport it lays out into.
      The iframe is given the app's real desktop size and then scaled down to
      whatever room the box has, so a phone shows the whole desktop UI shrunk,
@@ -444,7 +418,11 @@ const tab =
      `--figure-scale` is set by the script below, because the factor is a ratio
      of two widths and CSS cannot divide one length by another. The media-query
      values are the no-JavaScript floor: roughly right at each size, replaced by
-     the exact value the moment the script runs. */
+     the exact value the moment the script runs.
+
+     Never scale it with `transform: scale(calc(100cqw / var(--figure-w)))`: that
+     calc mixes a length into `scale()`'s number slot, browsers drop the whole
+     transform silently, and `overflow: hidden` crops the full-width layout. */
   .webui-figure {
     aspect-ratio: var(--figure-w) / var(--figure-h);
     background: var(--color-ink);

@@ -244,7 +244,7 @@ impl<O> HandlerStatusOp<O> {
     /// An UPDATED keyed busy on the same id, for operations that report progress
     /// mid-flight (e.g. agent creation streaming "Creating worktree…", "Launching
     /// session…"). Does not consume the op — the eventual [`Self::resolve`] still
-    /// replaces it. Replaces the old hand-keyed progress re-emit.
+    /// replaces it.
     pub fn progress(&self, message: impl Into<String>) -> StatusUpdate {
         StatusUpdate::busy(message)
             .with_key(self.key.clone())

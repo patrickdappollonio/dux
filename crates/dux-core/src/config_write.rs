@@ -751,9 +751,9 @@ fn patch_macros(doc: &mut DocumentMut, macros: &MacrosConfig) {
     // (the macro bar, the web quick-picker, and the editor list all render in
     // declaration order, and the web editor reorders by drag-and-drop through
     // this same wholesale save), and `table[name] = ...` on an existing key
-    // keeps its OLD toml_edit position — so a pure reorder used to round-trip
-    // through the in-memory config while the file kept the old order, and a
-    // dux restart silently undid it. Removing each key first and re-inserting
+    // keeps its OLD toml_edit position, so an in-place write would round-trip a
+    // pure reorder while the file kept the old order, and a dux restart would
+    // silently undo the drag. Removing each key first and re-inserting
     // with `insert_formatted` appends in iteration order while carrying the
     // key's own decor (a comment the user wrote above a macro line) with it.
     for (name, entry) in &macros.entries {
@@ -804,9 +804,9 @@ const PROJECT_KEYS_DROPPED_ON_WRITE: &[&str] = &["leading_branch"];
 struct CarriedProject {
     /// The entry's `id`, when it wrote one. A hand-written entry may legally leave
     /// it out: `ProjectConfig::id` carries `#[serde(default = "new_project_id")]`,
-    /// so the loader mints an identifier and the file works. Such an entry used to
-    /// be SKIPPED here, which deleted both its unmanaged keys and its comment on
-    /// the next save (measured on the file in
+    /// so the loader mints an identifier and the file works. The carry must
+    /// include such an entry: skipping it deletes both its unmanaged keys and its
+    /// comment on the next save (pinned by
     /// `patch_keeps_the_keys_and_comment_of_an_entry_that_carries_no_id`).
     id: Option<String>,
     /// The entry's `path` AS SPELLED IN THE FILE. It is the fallback identity for

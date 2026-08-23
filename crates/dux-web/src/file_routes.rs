@@ -1533,8 +1533,8 @@ mod tests {
         }
 
         /// The save route must accept a file the read route was willing to open.
-        /// The default limit is 2 MB and the read cap is 5 MB, so a 3 MB file
-        /// used to open and then fail to save.
+        /// The default limit is 2 MB and the read cap is 5 MB, so without a
+        /// raised limit a 3 MB file opens and then fails to save.
         #[tokio::test]
         async fn a_file_larger_than_the_framework_default_still_saves() {
             let (_tmp, wt, app) = router_with_session().await;

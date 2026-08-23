@@ -1975,18 +1975,12 @@ mod tests {
     /// `config.toml` `0600`, and SQLite's `-wal`/`-shm` sidecars carry the same
     /// content.
     ///
-    /// Be precise about what this proves, because the name it used to carry
-    /// promised more than it delivered. On a FIRST open the sidecars do not yet
-    /// exist when the tightening loop runs, so the loop cannot be what makes
-    /// them owner-only: SQLite creates them afterwards and they INHERIT the
-    /// database file's mode. Removing `-wal` and `-shm` from that loop left the
-    /// old test green, which is why it is named for inheritance now. The loop
-    /// entries are covered by the reopen test below, which is where they are
-    /// actually load-bearing.
-    ///
-    /// The `if let Ok(meta)` this used to wrap each check in is gone: a sidecar
-    /// that was not there passed silently, so the test could prove nothing at
-    /// all and still succeed.
+    /// On a FIRST open the sidecars do not yet exist when the tightening loop
+    /// runs, so the loop cannot be what makes them owner-only: SQLite creates
+    /// them afterwards and they INHERIT the database file's mode. The loop
+    /// entries are load-bearing in the reopen test below, not here. Every
+    /// metadata read is unwrapped: a sidecar that is not there must fail the
+    /// test, not pass silently.
     #[test]
     fn sidecars_created_after_the_open_inherit_the_databases_owner_only_mode() {
         use std::os::unix::fs::PermissionsExt;
@@ -2972,7 +2966,7 @@ mod tests {
 
     #[test]
     fn reopening_same_db_file_remigrates_cleanly() {
-        // F3 regression: with the initial_branch ALTER moved to autocommit,
+        // With the initial_branch ALTER moved to autocommit,
         // re-opening the same on-disk DB re-runs migrate() and every
         // ensure_column hits already-present without hard-failing open().
         let tmp = tempfile::tempdir().unwrap();
@@ -2987,7 +2981,7 @@ mod tests {
 
     #[test]
     fn migrate_reheals_stranded_all_zero_sort_order() {
-        // F4 regression: a crash between the (autocommitted) sort_order ALTER and
+        // A crash between the (autocommitted) sort_order ALTER and
         // its backfill strands every row at 0. The previous gating (only when
         // ensure_column just added the column) skipped the backfill forever on
         // the next boot. Now migrate() detects the stranded fingerprint (a

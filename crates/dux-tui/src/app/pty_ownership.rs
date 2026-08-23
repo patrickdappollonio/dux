@@ -225,10 +225,10 @@ impl App {
         }
         if !outcome.apply {
             // Logged only when the refusal is NEW information. This is asked from
-            // the render pass, which runs every tick, and a refused resize no
-            // longer records the dedupe (that record is what let a stale geometry
-            // become permanent), so an unchanged refusal repeats for as long as
-            // the pane is on screen.
+            // the render pass, which runs every tick, and a refused resize must
+            // not record the resize dedupe (recording it makes a stale geometry
+            // permanent), so an unchanged refusal repeats for as long as the pane
+            // is on screen.
             let refusal = (pty_id.to_string(), rows, cols);
             if self.last_refused_pty_resize.as_ref() != Some(&refusal) {
                 dux_core::logger::debug(&format!(

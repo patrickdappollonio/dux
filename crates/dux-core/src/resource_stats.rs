@@ -327,7 +327,7 @@ mod tests {
     /// immediate follow-up, and true again after a gap longer than
     /// `STALE_BASELINE` with no sampling in between (the monitor was closed
     /// and reopened later). This is the fact the TUI's `~` short-window
-    /// marker is built on (finding 3).
+    /// marker is built on.
     #[test]
     fn sample_reports_was_baseline_accurately() {
         let mut collector = ResourceCollector::new();

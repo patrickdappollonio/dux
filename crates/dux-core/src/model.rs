@@ -413,10 +413,10 @@ impl AgentWorkspace {
     pub fn project_id(&self) -> Option<&str> {
         match self {
             Self::Managed(managed) => Some(managed.project_id.as_str()),
-            // Structurally project-less, forever. The review proved a faked
-            // empty project id would let the sidebar drop the row, collapse
-            // per-agent logs into one directory, and let a project removal
-            // mass-delete every standalone agent.
+            // Structurally project-less, forever: a faked empty project id
+            // would let the sidebar drop the row, collapse per-agent logs into
+            // one directory, and let a project removal mass-delete every
+            // standalone agent.
             Self::Folder(_) => None,
         }
     }

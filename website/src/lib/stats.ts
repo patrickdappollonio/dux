@@ -65,8 +65,8 @@ async function getNpmFirstPublish(pkg: string): Promise<string> {
 // when no window yields data, so the caller hides the counter just as it would
 // on a failed lookup.
 //
-// A PARTIAL result is the interesting case, and it is the one that used to be
-// invisible: if some windows answer and others do not, the figure is a real
+// A PARTIAL result is the hazard: if some windows answer and others do not,
+// the figure is a real
 // number that is quietly too small, which is worse than a missing counter
 // because it looks trustworthy. `fetchJson` warns once for the endpoint, and
 // this adds a second line saying how much of the lifetime is actually counted.

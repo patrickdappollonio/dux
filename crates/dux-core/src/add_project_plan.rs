@@ -1,7 +1,7 @@
 //! The add-project preflight DECISION, core-owned so the TUI and the web can
 //! never disagree on WHICH action + warning fires for a given inspection.
 //!
-//! Split of responsibility (per the CLAUDE.md tenets and the wave-4 decision):
+//! Split of responsibility (per the CLAUDE.md tenets):
 //! core owns the DECISION and returns a STABLE TYPED code carrying its
 //! structured data (path, default-branch name); each surface keeps its OWN
 //! rendered strings, mapping the code to its own copy however it sees fit. The

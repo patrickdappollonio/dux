@@ -153,7 +153,7 @@ impl Engine {
             pty_size,
             scrollback_lines: self.config.ui.agent_scrollback_lines,
             kind,
-            // Landing is minimized by default (decision 10). The TUI flips
+            // Landing is minimized by default. The TUI flips
             // this on the returned request for fullscreen-seeking gestures;
             // web-originated launches never touch it.
             wants_fullscreen: false,
@@ -777,12 +777,9 @@ mod tests {
         // added there does not have to remember this site too.
         //
         // EVERY map that function clears is SEEDED below, and every one is
-        // asserted empty afterwards. An earlier version of this test seeded five
-        // of them and asserted on a sixth it had never filled, so that assertion
-        // was true before the code under test ran and could not have failed; the
-        // two it neither seeded nor asserted were not covered at all. A test of
-        // a teardown that leaves maps out is exactly the shape of leak it is
-        // supposed to catch.
+        // asserted empty afterwards: an assertion on a map never seeded is
+        // vacuously true, and a map neither seeded nor asserted is not covered
+        // at all.
         //
         // The one entry that CANNOT be seeded is the in-flight `AgentLaunch` key:
         // step 1 of the retry returns `InFlight` and touches nothing when that

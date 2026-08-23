@@ -339,8 +339,7 @@ what you do in it.
 One thing worth knowing if you keep a tab open on a flaky connection: when the
 browser reconnects, dux tells it about work that is **still running**, plus any
 result from the last thirty seconds, so an outcome that landed while you were
-offline still reaches you. Older results are not repeated. Before this, every
-page load replayed every warning and error since the server started.
+offline still reaches you. Older results are not repeated.
 
 ## Macros
 
@@ -399,8 +398,8 @@ Direct typing surface is one tap away.
 Whether the compose bar appears is the `ui.compose_bar` setting, a Preferences
 row with three values. **Automatic** (the default) asks your browser whether you
 point at the screen with a finger. That is a question about your *input*, not
-about your screen size, which matters because rotating a tablet used to cross a
-width threshold and swap your typing surface out from under you mid-session.
+about your screen size, so rotating a tablet never swaps your typing surface out
+from under you mid-session.
 What it genuinely cannot see is a keyboard case: an Android tablet with one
 attached and the same tablet without report the browser exactly the same
 capabilities. So **Always** and **Never** are there for the device dux guesses

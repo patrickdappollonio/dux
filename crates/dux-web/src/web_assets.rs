@@ -376,9 +376,10 @@ mod tests {
 
     #[test]
     fn reusing_an_existing_dist_is_a_marked_state_not_a_normal_build() {
-        // THE FINDING. build.rs used to emit nothing on the reuse path, so a
-        // binary serving an arbitrarily old UI was indistinguishable from a fresh
-        // one: no banner row, no log line, and every real-build test passing.
+        // Reuse of an existing dist is its own marked state: otherwise a
+        // binary serving an arbitrarily old UI is indistinguishable from a
+        // fresh build (no banner row, no log line, every real-build test
+        // passing).
         assert_eq!(state_from(Some("stale")), UiBuildState::StaleReuse);
         assert_eq!(state_from(Some("not_built")), UiBuildState::NotBuilt);
         assert_eq!(state_from(Some("built")), UiBuildState::Built);

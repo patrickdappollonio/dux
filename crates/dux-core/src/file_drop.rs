@@ -3123,8 +3123,8 @@ mod independent_path_safety_check {
         }
     }
 
-    /// The shapes the review confirmed are SAFE must keep working, or the fix
-    /// has over-corrected into refusing ordinary directories.
+    /// Awkward but SAFE directory shapes must keep working, or the refusal has
+    /// over-corrected into refusing ordinary directories.
     #[test]
     fn ordinary_awkward_directories_still_work() {
         let root = tempfile::tempdir().expect("tempdir");

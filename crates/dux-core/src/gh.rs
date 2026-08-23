@@ -363,11 +363,11 @@ fn live_remote_resolver(worktree_path: &Path, policy: &GithubHostPolicy) -> git:
 /// thing and shells out; a test supplies the answer directly. This is what stops
 /// a planning test from being decided by the DEVELOPER's git configuration: the
 /// resolver shells out with no isolation (deliberately, since dux wants
-/// `url.*.insteadOf` applied for real), so an inherited rewrite used to reach
-/// straight into these tests. It was measured, not supposed: with a rewrite
-/// mapping the fixture's GitLab address onto github.com the negative test
-/// FAILED, and with one mapping github.com onto gitlab.com the positive test
-/// failed, so neither was testing the remote spelling it named.
+/// `url.*.insteadOf` applied for real), so an inherited rewrite reaches
+/// straight into any test that uses it (measured, not supposed: a rewrite
+/// mapping the fixture's GitLab address onto github.com fails the negative
+/// test, and one mapping github.com onto gitlab.com fails the positive one;
+/// neither would be testing the remote spelling it names).
 fn plan_entries(
     entries: &[PrSyncEntry],
     resolve_remote: &dyn Fn(&Path) -> git::RemoteResolution,
@@ -709,8 +709,8 @@ pub(crate) fn parse_auth_status_hosts(stdout: &str) -> Option<BTreeSet<String>> 
 /// $ gh auth bogus                            stderr: unknown command "bogus" …   exit 1
 /// ```
 ///
-/// In each case stdout is EMPTY, which is why "it did not parse" used to look
-/// like a good enough signal on its own. It is not: `gh` exits non-zero in JSON
+/// In each case stdout is EMPTY, so "it did not parse" looks like a good enough
+/// signal on its own. It is not: `gh` exits non-zero in JSON
 /// mode for ordinary fatal errors too, so a modern failure was indistinguishable
 /// from an old CLI and either widened the eligible hosts to the name rule or
 /// replaced the last known good policy on what was really a transient fault.
@@ -762,10 +762,11 @@ pub(crate) fn decide_gh_probe(
     // JSON mode `gh` exits zero even when a known host is broken.
     if let Some(eligible) = parse_auth_status_hosts(&String::from_utf8_lossy(&output.stdout)) {
         return GhProbe::Decided {
-            // GitHub is available when at least one host reports success. This
-            // is the behaviour change: plain `gh auth status` exits non-zero
-            // when ANY known host has a problem, so one stale token used to
-            // disable every GitHub feature on every host.
+            // GitHub is available when at least one host reports success,
+            // deliberately not keyed off the exit status: plain `gh auth
+            // status` exits non-zero when ANY known host has a problem, which
+            // would let one stale token disable every GitHub feature on every
+            // host.
             available: !eligible.is_empty(),
             policy: GithubHostPolicy::Hosts(eligible),
         };

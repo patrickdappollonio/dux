@@ -138,7 +138,7 @@ setting off and on again and dux picks it up without a restart. If `gh` is missi
 or none of the hosts it is logged in to are working, the path is hidden outright on
 both front ends: no palette command, no menu entry.
 
-dux asks `gh` for its per-host login status, so one expired login no longer takes
+dux asks `gh` for its per-host login status, so one expired login cannot take
 the rest down with it. Signed in to two hosts with a stale token on one of them,
 the working host still counts and the GitHub features stay on. On an older `gh`
 that cannot report its hosts, dux falls back to a single yes-or-no authentication

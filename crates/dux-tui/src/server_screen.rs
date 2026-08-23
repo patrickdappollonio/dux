@@ -203,10 +203,9 @@ impl ServerStatusScreen {
 
     /// Show a persistent shutdown status line (e.g. "Stopping 2 agents...")
     /// under the exit hints, styled muted like the uptime line, and redraw
-    /// immediately so it appears without waiting for the next tick. This
-    /// replaces the old raw `eprintln!` teardown message, which landed
-    /// wherever the cursor happened to sit (next to the uptime line) because
-    /// it bypassed ratatui entirely while the alt screen was still active.
+    /// immediately so it appears without waiting for the next tick. Rendered
+    /// through ratatui, never a raw `eprintln!`: raw output while the alt screen
+    /// is active lands wherever the cursor happens to sit.
     /// Render errors are swallowed like `tick`'s redraw: the process is about
     /// to exit either way and a failed final frame must not crash teardown.
     pub fn show_shutdown_message(&mut self, message: impl Into<String>) {

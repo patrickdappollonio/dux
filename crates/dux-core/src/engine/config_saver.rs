@@ -27,7 +27,7 @@ use crate::worker::WorkerEvent;
 /// A reload opens a barrier on the engine (quiesces the config writer and defers
 /// config-mutating commands); the barrier only closes when `ConfigReloadReady`
 /// lands. If a panicking reload worker never posted a completion, the writer
-/// would stay paused and saves would be frozen forever (F5). Every
+/// would stay paused and saves would be frozen forever. Every
 /// [`ConfigSurface::reload`] implementation must drive its completion through
 /// this guard: call [`ReloadCompletionGuard::complete`] with the real result on
 /// the success/error path, and the guard's `Drop` posts an `Err` completion if

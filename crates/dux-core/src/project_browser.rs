@@ -989,9 +989,9 @@ mod tests {
 
     #[test]
     fn init_repo_and_commit_downgrades_a_seed_failure_to_a_warning() {
-        // Catches both the old self-defeating abort and a regression to
-        // silent seed loss: a .gitignore DIRECTORY makes the seed fail, but
-        // the job continues, the commit lands, and seed_warning is populated.
+        // A .gitignore DIRECTORY makes the seed fail, but the job continues,
+        // the commit lands, and seed_warning is populated: neither an abort nor
+        // silent seed loss.
         let dir = tempdir().unwrap();
         fs::create_dir(dir.path().join("node_modules")).unwrap();
         fs::create_dir(dir.path().join(".gitignore")).unwrap();

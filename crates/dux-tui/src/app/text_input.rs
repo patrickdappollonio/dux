@@ -637,8 +637,7 @@ fn next_word_boundary(text: &str, index: usize) -> usize {
 //
 // These functions wrap text preferring to break at word boundaries (spaces).
 // When a word is longer than the available width, it falls back to hard
-// character-level splitting. They replace the naive `chars.chunks(w)`
-// approach used previously.
+// character-level splitting.
 
 /// Split a single logical line (no `\n`) into visual rows, preferring
 /// breaks at the last space within `width`. Returns a vec of

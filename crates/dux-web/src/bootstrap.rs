@@ -32,7 +32,7 @@ impl ConfigSurface for WebConfigSurface {
         std::thread::spawn(move || {
             // The guard guarantees a `ConfigReloadReady` is posted even if the
             // read-only load below panics — otherwise the engine's reload barrier
-            // would never close and config saves would freeze (F5).
+            // would never close and config saves would freeze.
             let guard = ReloadCompletionGuard::new(worker_tx);
             // Re-read config from disk (read-only load — same as bootstrap). Returns the
             // REAL config, not Config::default().
@@ -279,7 +279,7 @@ mod tests {
     /// The server bootstrap runs the core project reconciliation: a config-only
     /// `[[projects]]` entry (present in config.toml, absent from SQLite) is
     /// adopted into the store and appears in the spine, so `dux serve` honors
-    /// config-declared projects (previously it read SQLite only).
+    /// config-declared projects.
     #[test]
     fn bootstrap_engine_adopts_a_config_only_project() {
         let (_tmp, paths) = temp_paths();

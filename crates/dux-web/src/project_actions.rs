@@ -1,8 +1,7 @@
-//! REST write verbs for projects (Phase 4 of the REST-first migration). Same
+//! REST write verbs for projects. Same
 //! pattern as [`crate::session_actions`]: each handler derives a per-connection
 //! [`StatusScope`] from the optional `X-Connection-Id` header and dispatches the
-//! matching [`WireCommand`] via [`EngineHandle::apply_wire_scoped`]. The legacy
-//! `/ws` `Command` path keeps working in parallel during the migration.
+//! matching [`WireCommand`] via [`EngineHandle::apply_wire_scoped`].
 //!
 //! Every route is served plainly: dux has NO authentication, so none of these
 //! ever 401s. The open access is deliberate (the single-tenant trusted-access

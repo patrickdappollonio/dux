@@ -46,7 +46,7 @@ use tokio::sync::broadcast;
 /// log-and-continue and synthesizes its own catch-up (see `server.rs`).
 pub const EVENT_BUS_CAPACITY: usize = 1024;
 
-/// A server -> client change signal. Phase 1 carries resource-change events only.
+/// A server -> client change signal carrying resource-change events only.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
     /// A named resource changed. `id` scopes it to one resource instance and
@@ -61,7 +61,7 @@ pub enum Event {
         /// A client viewing that PTY compares it against its own PTY-socket
         /// connection id to decide definitively whether the handover is its own
         /// claim (stay owner) or a foreign takeover (show the read-only
-        /// placeholder), replacing the old timing heuristic.
+        /// placeholder).
         owner: Option<String>,
         /// The monotonic ownership epoch for a `pty.owner` handover, assigned
         /// UNDER the [`PtySizeOwners`](crate::server) owners lock at the instant a

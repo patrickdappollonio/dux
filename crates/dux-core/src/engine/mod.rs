@@ -6009,8 +6009,8 @@ mod tests {
         // Gate readiness on the passthrough RING being non-empty, not on the
         // progress report. The reader loop sets the progress slot earlier in the
         // same scan pass than it pushes captures into the ring, so a progress-based
-        // wait can observe a half-applied pass where the ring is still empty
-        // (FIX-F15). A non-empty ring proves the capture push completed.
+        // wait can observe a half-applied pass where the ring is still empty.
+        // A non-empty ring proves the capture push completed.
         for _ in 0..200 {
             if engine
                 .providers
@@ -6708,7 +6708,7 @@ mod tests {
         let (mut engine, _tmp) = test_engine();
         // Drive a REAL reload so the barrier is opened by the engine itself
         // (quiesce + `reloading`), not hand-set — a missing-quiesce or
-        // wiring regression would then be visible (F13). The surface's reload
+        // wiring regression would then be visible. The surface's reload
         // posts immediately, but the engine only drains on the next
         // `process_worker_event`, so the command dispatched here still defers.
         engine.surface = Box::new(MarkerReloadSurface {
@@ -6737,11 +6737,11 @@ mod tests {
     fn config_reload_ready_drains_deferred_commands() {
         let (mut engine, _tmp) = test_engine();
         // Baseline provider differs from the value the reload will deliver, so we
-        // can prove the reloaded config actually landed (F12: the reloaded config
+        // can prove the reloaded config actually landed (the reloaded config
         // must DIFFER from the initial one, not both be `Config::default()`).
         engine.config.defaults.provider = "claude".to_string();
 
-        // Drive a REAL `ReloadConfig` (F13): the engine opens the barrier and the
+        // Drive a REAL `ReloadConfig`: the engine opens the barrier and the
         // surface posts a `ConfigReloadReady` carrying the codex-marked config.
         engine.surface = Box::new(MarkerReloadSurface {
             provider: "codex".to_string(),
@@ -6774,10 +6774,11 @@ mod tests {
             "the reloaded config must be applied"
         );
 
-        // The deferred env change survives IN MEMORY after the reload — this is
-        // the F1 regression guard. Simulate the surface re-applying the reaction
-        // it was handed: under the F1 bug that reaction carried the BARE reloaded
-        // config (no env), so re-applying would wipe the env back out of memory.
+        // The deferred env change survives IN MEMORY after the reload; this is
+        // the regression guard. Simulate the surface re-applying the reaction it
+        // was handed: under the bug this pins, the reaction carried the BARE
+        // reloaded config (no env), so re-applying would wipe the env back out
+        // of memory.
         let EventReaction::Multi(reactions) = reaction else {
             panic!("expected Multi");
         };
@@ -6914,7 +6915,7 @@ mod tests {
         assert!(engine.reload_guard.is_some());
 
         // A second reload while one is in flight must be refused — it must NOT
-        // drop the live guard or spawn a second worker (F4).
+        // drop the live guard or spawn a second worker.
         let reaction = engine.apply(Command::ReloadConfig).expect("second reload");
         match reaction {
             EventReaction::Status(update) => {
@@ -6941,7 +6942,7 @@ mod tests {
 
         // Recovery during an open reload would, on its own quiesce-guard drop,
         // resume the writer while the reload still holds it. It must be refused
-        // instead (F7), and the reload barrier must stay open.
+        // instead, and the reload barrier must stay open.
         let reaction = engine.apply(Command::RecoverConfig).expect("recover");
         match reaction {
             EventReaction::Status(update) => {
@@ -6959,7 +6960,7 @@ mod tests {
 
     #[test]
     fn reload_worker_panic_still_closes_the_barrier() {
-        // F5: the reload completion guard guarantees a `ConfigReloadReady` is
+        // The reload completion guard guarantees a `ConfigReloadReady` is
         // posted even when the reload worker drops without calling `complete`.
         // Build the guard and drop it without completing (the panic/early-return
         // shape) — it must post an Err completion.

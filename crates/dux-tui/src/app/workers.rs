@@ -201,11 +201,11 @@ impl App {
             .map(|(id, tab)| (id.clone(), tab.provider.as_str().to_string()))
             .collect();
 
-        // Core owns the exit teardown now: reap exited agent tabs and companion
+        // Core owns the exit teardown: reap exited agent tabs and companion
         // terminals, clear their runtime maps, detach agents whose last tab is
         // gone, close clean-exit extra-tab rows, and fire the session-slot PR
-        // re-check — the SAME `prune_exited_ptys` the web actor consumes, so the
-        // teardown no longer forks per surface. The sweep above already pulled
+        // re-check, the SAME `prune_exited_ptys` the web actor consumes, so the
+        // teardown does not fork per surface. The sweep above already pulled
         // every retried resume candidate out of `providers`, so a retried
         // candidate never appears in the result. Each pruned agent carries the
         // reaped exit-success plus the minimal-output excerpt this surface folds
@@ -378,9 +378,9 @@ impl App {
                     ));
                 }
             }
-            // The PR re-check for an exited session-slot tab is now fired inside
-            // `prune_exited_ptys` (the shared exit trigger both surfaces get), so
-            // the TUI no longer fires its own — the redundancy is collapsed.
+            // The PR re-check for an exited session-slot tab fires inside
+            // `prune_exited_ptys` (the shared exit trigger both surfaces get);
+            // the TUI must not fire its own.
         }
 
         // Companion-terminal UI reactions (core already removed the terminals and
@@ -648,8 +648,7 @@ impl App {
                 let op = self.pending_delete_ops.remove(&session_id);
                 if self.engine.sessions.iter().any(|s| s.id == session_id) {
                     // Cleanup still runs (in-memory + view side); pass
-                    // `update_status=false` so it no longer authors the success
-                    // line — the op owns the final message now.
+                    // `update_status=false`: the op owns the final message.
                     if let Err(e) = self.finish_delete_session(
                         &session_id,
                         WorktreeRemoval::Performed {
@@ -1419,7 +1418,7 @@ impl App {
         self.last_pty_size = outcome.pty_size;
         // The engine's `detach_conflicting_worktree_session` already cleared every
         // runtime map (incl. pty_activity/pty_input) for the detached agent's
-        // tabs, so `detached_session_id` no longer needs a follow-up clear here.
+        // tabs, so no follow-up clear is needed here.
         match outcome.view {
             AgentLaunchReadyView::CreatePersistFailed { .. } => {
                 // The create op's keyed error final is resolved ENGINE-SIDE and
@@ -1443,7 +1442,7 @@ impl App {
                 self.project_chooser_context = None;
                 self.reload_changed_files();
                 self.show_agent_surface();
-                // Decision 10: a launched agent lands focused-but-minimized
+                // A launched agent lands focused-but-minimized
                 // (Center focused, typeable); only a fullscreen-seeking launch
                 // lands fullscreen. A create is never fullscreen-seeking, but
                 // the shared landing helper keeps the rule in one place.
@@ -1470,7 +1469,7 @@ impl App {
             }
             AgentLaunchReadyView::Reconnect { status_message } => {
                 self.show_agent_surface();
-                // Decision 10: land minimized unless the launch sought
+                // Land minimized unless the launch sought
                 // fullscreen (see CreateCommitted above).
                 self.land_completed_launch(outcome.wants_fullscreen);
                 // Resolve the keyed reconnect op so its success replaces exactly
@@ -1504,7 +1503,7 @@ impl App {
                     == Some(session_id.as_str());
                 let status_message = if landed_here {
                     self.show_agent_surface();
-                    // Decision 10: the fallback relaunch is engine-initiated
+                    // The fallback relaunch is engine-initiated
                     // and never fullscreen-seeking, so it lands minimized (see
                     // CreateCommitted above). The landing note is appended only
                     // when the landing actually happened: a fallback for an
@@ -1843,7 +1842,7 @@ mod tests {
         )
         .expect("spawn pty");
         app.engine.providers.insert(session_id.clone(), client);
-        // Seed the three maps the hand-rolled teardown used to leak.
+        // Seed the three runtime maps the teardown must clear.
         app.engine.needs_attention.insert(session_id.clone());
         app.engine.pty_progress.insert(
             session_id.clone(),
@@ -2009,7 +2008,7 @@ mod tests {
         );
     }
 
-    /// Decision 10: a completed launch lands focused-but-minimized. The
+    /// A completed launch lands focused-but-minimized. The
     /// Reconnect ready with `wants_fullscreen: false` must put focus on the
     /// Center pane with NO fullscreen overlay and NO interactive input
     /// target, leaving the pane typeable (the derived predicate).
@@ -2060,7 +2059,7 @@ mod tests {
         );
     }
 
-    /// Decision 10's exception: a fullscreen-seeking launch (the request's
+    /// The one exception to minimized landings: a fullscreen-seeking launch (the request's
     /// `wants_fullscreen` bit) still lands fullscreen-interactive.
     #[test]
     fn fullscreen_seeking_reconnect_ready_lands_fullscreen() {
@@ -2441,10 +2440,9 @@ mod tests {
         assert!(worker_rx.try_recv().is_err());
     }
 
-    /// The pull is best-effort: a broken checkout no longer aborts creation at
-    /// the pull stage. The job proceeds and fails later, on the real problem
-    /// (here: the leading branch cannot exist in a directory that is not a
-    /// repo), never with the old pull-abort message.
+    /// The pull is best-effort: a broken checkout does not abort creation at the
+    /// pull stage; the job proceeds and fails later, on the real problem (here:
+    /// the leading branch cannot exist in a directory that is not a repo).
     #[test]
     fn fresh_worker_survives_pull_failure_and_fails_on_the_missing_repo_instead() {
         let tmp = tempdir().expect("tempdir");

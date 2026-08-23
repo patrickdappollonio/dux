@@ -230,9 +230,8 @@ const sessions: SessionView[] = [
 ]
 
 // Terminals travel as ONE flat list, each carrying its owner, which is what the
-// browser reads. They used to be nested inside the project or session that owns
-// them, and this figure kept seeding them that way after the wire changed, so
-// the sidebar's terminals section rendered empty and `verify-figure` caught it.
+// browser reads; nested under their owners the sidebar's terminals section
+// renders empty.
 const terminals: TerminalView[] = [
   { ...devServer, owner: { kind: "project", project_id: STOREFRONT } },
   {

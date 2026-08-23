@@ -409,10 +409,10 @@ async fn commit(
         Err(r) => return r.into_response(),
     };
     // The empty-message and nothing-staged refusals are the shared core decision
-    // (`commit_preflight`), read against LIVE git status. This adds the
-    // nothing-staged gate the web previously lacked: a stale commit with nothing
-    // staged used to reach `git commit` and 500 with raw stderr; it now returns a
-    // clean 400. Each surface renders its own copy for these refusals.
+    // (`commit_preflight`), read against LIVE git status. The nothing-staged gate
+    // turns a stale commit with nothing staged into a clean 400 instead of letting
+    // it reach `git commit` and 500 with raw stderr. Each surface renders its own
+    // copy for these refusals.
     let wt = worktree.clone();
     let msg = op.message.clone();
     let preflight =

@@ -4,7 +4,6 @@
 //
 // WHY THIS IS DERIVED AND NOT A CONSTANT
 //
-// The hero pill used to hardcode `v0.5`, which was already two releases stale.
 // Every hardcoded alternative has the same failure mode: it goes wrong silently,
 // because nothing breaks when a number is merely out of date.
 //
@@ -86,11 +85,10 @@ export async function getLatestVersion(repo: string): Promise<string | null> {
  *   - set this to `null`, which removes the badge from every place it renders
  *     with no markup changes.
  *
- * IT ANNOUNCES THE SURFACE, NOT THE TRAVEL. This used to read "now with remote
- * work", which sold the web UI as a thing you use when you are away from the
- * terminal. It is not: dux has two front ends over one engine and both are first
- * class. Reaching the workspace from a phone is a consequence of the web UI
- * existing, and it is a nice one, but it is not what the release added.
+ * IT ANNOUNCES THE SURFACE, NOT THE TRAVEL. dux has two front ends over one
+ * engine, both first class; reaching the workspace from a phone is a consequence
+ * of the web UI existing, not what the release added, so the badge names the
+ * surface.
  */
 export const WHATS_NEW_BADGE: string | null = "now with a web UI";
 

@@ -516,12 +516,11 @@ const CHROME_ROWS: u16 = 6;
 
 /// Rows the BODY wants, and what actually sets the modal's height.
 ///
-/// The duck used to set it, at 15 rows, which left the prose pane 17 rows. Both
-/// screens carry more than that — the welcome has a wrapped tagline, four
-/// paragraphs and three numbered steps; a release has a headline, its intro and
-/// its feature titles — so both opened already scrolled, and on the welcome that
-/// meant step 3 of a three-step "how to start" guide was below the fold on the
-/// first screen a new user ever sees.
+/// The duck (15 rows) must not set the height: the resulting 17-row prose pane
+/// opens both screens already scrolled. The welcome carries a wrapped tagline,
+/// four paragraphs and three numbered steps (step 3 of a three-step "how to
+/// start" guide below the fold on the first screen a new user ever sees), and a
+/// release carries a headline, its intro and its feature titles.
 ///
 /// 24 rows shows appreciably more of both before any scrolling. It is a target,
 /// not a demand: [`centered_rect_exact`] clamps to the terminal, so a short
@@ -1375,10 +1374,9 @@ mod tests {
         );
     }
 
-    /// REGRESSION. The empty-body guard used to be `lines.is_empty()`, which is
-    /// FALSE the moment a headline exists, so a release body that parsed to a
-    /// headline and nothing else rendered a title above a blank pane with no
-    /// explanation. That shape is very reachable: GitHub APPENDS
+    /// REGRESSION. A `lines.is_empty()` guard is FALSE the moment a headline
+    /// exists, so a release body that parsed to a headline and nothing else
+    /// renders a title above a blank pane with no explanation. That shape is very reachable: GitHub APPENDS
     /// `## What's Changed` and the release workflow APPENDS `## Installation`
     /// after it, so a one-line human headline is all the parser is left with.
     #[test]

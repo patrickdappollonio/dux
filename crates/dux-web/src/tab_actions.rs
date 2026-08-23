@@ -128,8 +128,8 @@ async fn delete_tab(
 ) -> Response {
     // Check the session id and the tab id separately: an out-of-bound `:id` is an
     // unknown SESSION (matches `resolve_worktree`'s 404 below), not a tab-worded
-    // error — collapsing both into `unknown_tab()` used to blame the tab even
-    // when the session id itself was the bad one.
+    // error: collapsing both into `unknown_tab()` blames the tab even when the
+    // session id itself is the bad one.
     if !id_within_bound(&id) {
         return unknown_session();
     }

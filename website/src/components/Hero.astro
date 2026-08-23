@@ -34,14 +34,9 @@ const version = await getLatestVersion("patrickdappollonio/dux");
             <span class="h-1.5 w-1.5 rounded-full bg-[color:var(--color-success)] animate-pulse"></span>
             {version && <>{version} · </>}macOS + Linux + WSL
           </span>
-          {/* The what's-new stamp sits beside the version pill at EVERY width,
-              in normal flow. It used to float at the top right of the heading
-              box above `lg`, which cost the headline a `lg:pr-44` reservation
-              to keep the text clear of it. That padding applies to the whole
-              block rather than the first line, so it squeezed "deserve a
-              proper office." as well and the wrap read as broken. In flow the
-              badge cannot collide with anything, needs no reserved gutter, and
-              behaves identically at every breakpoint. */}
+          {/* The what's-new stamp sits beside the version pill at every width,
+              in normal flow: in flow it cannot collide with the headline and
+              needs no reserved gutter above `lg`. */}
           <span><WhatsNewBadge /></span>
         </div>
 

@@ -1,9 +1,7 @@
 // The site-wide title and meta description, in one place.
 //
-// These were previously duplicated verbatim between Layout.astro's prop
-// defaults and index.astro's local constants, which is exactly how a site ends
-// up describing its own product two different ways. Both now import from here,
-// so the homepage and every fallback page say the same thing.
+// Layout.astro's prop defaults and index.astro both import from here, so the
+// homepage and every fallback page describe the product one way.
 //
 // What the description has to get right, in this order: what dux does, that it
 // has TWO front ends over one engine (a terminal UI and a web UI, both first

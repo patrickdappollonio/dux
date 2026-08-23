@@ -1,5 +1,5 @@
-//! REST verbs for companion terminals (Phase 5 of the REST-first migration):
-//! create and delete a terminal for either owner. Live terminal byte I/O rides
+//! REST verbs for companion terminals: create and delete a terminal for
+//! either owner. Live terminal byte I/O rides
 //! the nested PTY sockets `/ws/sessions/:id/terminals/:tid/pty` and
 //! `/ws/projects/:id/terminals/:tid/pty` (see `server.rs`); these routes manage
 //! only the terminal's lifecycle.

@@ -39,9 +39,9 @@ impl ParsedBody {
     /// predicate exists to detect. See [`ReleaseNotes::has_renderable_body`],
     /// which is the one the screens actually call.
     ///
-    /// Delegates rather than repeating the rule: this and
-    /// [`ReleaseNotes::has_renderable_body`] used to be byte-identical copies of
-    /// the same three lines, free to drift apart with only one of them under test.
+    /// Delegates rather than repeating the rule, so this and
+    /// [`ReleaseNotes::has_renderable_body`] cannot drift apart with only one of
+    /// them under test.
     pub fn has_renderable_body(&self) -> bool {
         body_is_renderable(&self.paragraphs, &self.sections)
     }

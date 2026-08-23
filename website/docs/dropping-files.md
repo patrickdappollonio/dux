@@ -7,10 +7,11 @@ order: 67
 
 You have a screenshot. Your agent is running on a machine somewhere else, and
 you are looking at it through a browser tab. Getting that image in front of the
-agent used to mean copying it to the server by hand and typing out the path.
+agent would mean copying it to the server by hand and typing out the path.
 
-Now you drag it onto the terminal and let go. dux saves the file on the server
-and pastes its path into the prompt, ready for you to finish the sentence.
+Instead, you drag it onto the terminal and let go. dux saves the file on the
+server and pastes its path into the prompt, ready for you to finish the
+sentence.
 
 ## Or pick it from a menu
 
@@ -188,11 +189,6 @@ practical reason: some agent CLIs will not read a file outside the workspace
 they were started in, so a folder next door would be a path the agent cannot
 open.
 
-> **This changed.** Files dropped on an agent used to land at the root of the
-> worktree, visible to git, and every screenshot left an untracked file to
-> discard by hand. They now go to `.dux/uploads` instead. Dropping on a terminal
-> is unchanged. If you liked the old behavior, see the two settings below.
-
 **On a terminal**, in the folder that terminal is *actually* in right now. Not
 the folder it was opened in. If you opened a terminal at your repo root and then
 typed `cd docs/images`, a file dropped on it lands in `docs/images`, because
@@ -327,9 +323,9 @@ with an empty upload folder. Turn `upload_write_gitignore` off and they are
 ordinary untracked files again, which a fork does carry across. If you want a
 particular screenshot in both, drop it onto both.
 
-Want the old behavior back? The nearest thing is
-`upload_write_gitignore = false`, which keeps the folder but hands the files
-back to git, so they appear in Changes and can be committed. There is
+If you want uploads visible to git, set `upload_write_gitignore = false`: the
+folder stays but the files become ordinary untracked files, so they appear in
+Changes and can be committed. There is
 deliberately no way to point uploads at the worktree root itself: the folder is
 what makes them easy to ignore, easy to find, and easy to throw away.
 
@@ -454,8 +450,7 @@ from its side. dux sends the correct bytes; the receiving tool rewrites them.
   quoting writes an embedded apostrophe by closing the quote, escaping it and
   reopening, and Claude Code's own unescaping step then collapses that into three
   apostrophes in a row. A file in a folder called `Bob's app` comes out naming
-  nothing. This is why Claude's value is `bare` and why an earlier version of dux
-  that quoted everything was wrong.
+  nothing. This is why Claude's value is `bare`.
 - **Any form carrying a backslash is mangled by Claude Code's unescaping step.**
   That covers `backslash_escaped` outright, and it also covers a path that simply
   has a backslash in its name, whatever form you send it in. Backslashes in file

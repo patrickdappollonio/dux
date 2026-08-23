@@ -818,7 +818,7 @@ mod tests {
 
     #[test]
     fn slow_drip_long_osc_fires_once() {
-        // A long OSC dripped one byte at a time (R1): the resume offset means the
+        // A long OSC dripped one byte at a time: the resume offset means the
         // terminator search never rescans the carried prefix, and the event still
         // fires exactly once, at the end. Kept under MAX_CARRY so it is never
         // dropped.

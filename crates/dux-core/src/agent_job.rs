@@ -1093,7 +1093,7 @@ pub fn run_create_agent_job(
             startup_result,
             status_op_id: create_key.clone(),
         },
-        // A freshly created agent lands focused-but-minimized (decision 10);
+        // A freshly created agent lands focused-but-minimized;
         // only fullscreen-seeking gestures set this, and create is never one.
         wants_fullscreen: false,
     };
@@ -2062,8 +2062,7 @@ mod tests {
         assert!(!worktree.join("note.txt").exists());
     }
 
-    /// Kills the old hard abort: a failed pull is a warning note, not a
-    /// creation failure.
+    /// A failed pull is a warning note, not a creation failure.
     #[test]
     fn fresh_agent_creation_survives_pull_failure() {
         let repo = init_test_repo();
@@ -2081,8 +2080,8 @@ mod tests {
         );
     }
 
-    /// Kills the blanket dirty abort: a dirty checkout no longer blocks the
-    /// pull, and git itself fast-forwards when nothing conflicts.
+    /// A dirty checkout does not block the pull, and git itself fast-forwards
+    /// when nothing conflicts.
     #[test]
     fn fresh_agent_creation_survives_dirty_checkout_and_still_pulls() {
         let repo = init_test_repo();
@@ -2201,7 +2200,7 @@ mod tests {
         );
     }
 
-    /// The fork rule change: gitignored files no longer travel on forks.
+    /// Gitignored files do not travel on forks.
     #[test]
     fn fork_copy_excludes_gitignored_files() {
         let repo = init_test_repo();

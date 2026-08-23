@@ -1,7 +1,4 @@
-//! REST reads scoped to a single project (Phase 6 of the REST-first migration).
-//! These used to ride the retired `/ws` request/reply pairs
-//! (`list_project_worktrees` → `project_worktrees`, `inspect_project_path` →
-//! `project_path_inspection`); they are now plain unauthenticated GETs.
+//! REST reads scoped to a single project. Plain unauthenticated GETs.
 //!
 //! - `GET /api/v1/projects/:id/worktrees`: the project's managed worktrees for
 //!   the Worktrees manager: adoptable candidates and the ones an agent already
@@ -232,10 +229,10 @@ struct DeleteWorktreeQuery {
 /// request did not ask, or the worktree is detached), so the client must not
 /// claim one either way.
 ///
-/// This exists because the route used to answer a bare 204 and the client then
-/// toasted "and deleted its branch" off its own CHECKBOX, which says what was
-/// requested and not what happened: `git branch -D` refuses a branch checked
-/// out in another worktree, and the toast asserted the opposite.
+/// A bare 204 would leave the client to toast "and deleted its branch" off its
+/// own CHECKBOX, which says what was requested and not what happened: `git
+/// branch -D` refuses a branch checked out in another worktree, and the toast
+/// would assert the opposite.
 #[derive(Serialize)]
 struct BranchOutcomeReply {
     /// The branch the removal targeted.
@@ -330,7 +327,7 @@ async fn delete_worktree(
              standalone agent leaves its directory in place)",
         )
             .into_response(),
-        // 200 with a body rather than the old bare 204: the client has to be
+        // 200 with a body rather than a bare 204: the client has to be
         // told what happened to the branch, because it cannot infer it from the
         // checkbox it sent.
         Ok(Ok(dux_core::worktree_manager::RemovalOutcome::Removed { branch, .. })) => {

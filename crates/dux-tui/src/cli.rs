@@ -183,8 +183,7 @@ fn run_diff_summary(current: &Config) -> Result<()> {
 /// deliberately does not call `load_config` or `ProvidersConfig::ensure_defaults`,
 /// so the summary reports what the file says rather than what dux normalizes it
 /// into: no value clamping, and no shipped provider injected into a config that
-/// does not name it. That was the old behavior too; it is stated here so it is a
-/// decision rather than an accident.
+/// does not name it.
 fn collect_config_changes(current: &Config) -> Vec<String> {
     let (Ok(default_json), Ok(current_json)) = (
         serde_json::to_value(Config::default()),

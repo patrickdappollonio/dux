@@ -1,6 +1,4 @@
-//! The REST reads for the projects/sessions/sidebar "spine" that used to ride
-//! inside every per-tick `ViewModel` broadcast (Phase 3 of the REST-first
-//! migration).
+//! The REST reads for the projects/sessions/sidebar "spine".
 //!
 //! - `GET /api/v1/workspace`, the whole document `{ rev, projects, sessions,
 //!   terminals, sidebar }`. Terminals ride here as ONE flat collection, each
@@ -26,9 +24,9 @@
 //!
 //! ## The one shape change, stated plainly
 //!
-//! A nested terminal entry now carries an `owner` field it did not carry before,
-//! a tagged `{"kind":"session","session_id":…}` or
-//! `{"kind":"project","project_id":…}`. That is ADDITIVE and it is kept: adding a
+//! A nested terminal entry carries a tagged `owner` field, a
+//! `{"kind":"session","session_id":…}` or `{"kind":"project","project_id":…}`.
+//! That is ADDITIVE and it is kept: adding a
 //! field is the ordinary way an API grows, a consumer that breaks on an unknown
 //! field is already fragile, and the tag says out loud what the nesting only
 //! implied. It is NOT hidden behind a parallel stripped-down type.
@@ -43,9 +41,8 @@
 //! empty rather than missing. Note the 201 has TWO shapes, this full view and a
 //! minimal id-only fallback for when the view is unavailable, so its terminal
 //! entry shape follows the replay's only on the full branch, which is the one
-//! the test exercises. Add or remove a field and those
-//! fail, which is the point: the previous tests checked only ids and lengths, so
-//! `owner` appearing was invisible to the suite.
+//! the test exercises. Add or remove a field and those fail, which is the
+//! point.
 //!
 //! `POST /api/v1/sessions` and its idempotent replay also reuse
 //! [`SessionWithTerminals`] (see `session_actions.rs`). The replay always does,

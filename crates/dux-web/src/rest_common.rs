@@ -1,5 +1,4 @@
-//! Shared helpers for the REST action routes (Phase 4 of the REST-first
-//! migration): connection-scoped status, id length-bounding, awaiting an
+//! Shared helpers for the REST action routes: connection-scoped status, id length-bounding, awaiting an
 //! asynchronously-created resource's id, and the create idempotency cache.
 //!
 //! These live in one place so the session/project action modules and the git

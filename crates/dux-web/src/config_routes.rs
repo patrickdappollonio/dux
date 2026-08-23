@@ -1,10 +1,10 @@
 //! REST write verbs for the config-mutating operations the palette / dialogs
-//! trigger (Phase 6 of the REST-first migration). These used to ride the retired
-//! `/ws` `command` channel (`update_macros`, `persist_global_env`,
-//! `set_changes_pane_visible`, `reload_config`); they are now scoped REST verbs,
-//! each dispatching the matching [`WireCommand`] via
+//! trigger. Each is a scoped REST verb dispatching the matching
+//! [`WireCommand`] (`update_macros`, `persist_global_env`,
+//! `set_changes_pane_visible`, `reload_config`) via
 //! [`EngineHandle::apply_wire_scoped`] with a per-connection [`StatusScope`]
-//! derived from the optional `X-Connection-Id` header (the Phase 4 pattern).
+//! derived from the optional `X-Connection-Id` header (the same pattern as
+//! `session_actions`).
 //!
 //! Every route is served plainly: dux has NO authentication, so none of these
 //! ever 401s. The open access is deliberate (the single-tenant trusted-access
@@ -34,7 +34,7 @@
 //!   `crates/dux-web/web/src/lib/settingsDescriptors.ts`).
 //!
 //! On a successful config change the engine emits a `config.changed` event (via
-//! the Phase 2 forwarder in `server.rs`), so subscribed clients refetch
+//! the event forwarder in `server.rs`), so subscribed clients refetch
 //! `/api/v1/bootstrap` — these handlers do not echo the new state in their reply.
 
 use std::collections::BTreeMap;

@@ -415,7 +415,7 @@ fn is_scheme_token(scheme: &str) -> bool {
 fn parse_url_form(input: &str, kind: SchemeKind) -> Result<Parts, String> {
     refuse_authority_git_reads_differently(input, kind)?;
     // A malformed authority (`https://[::1/...`, a space in the host, an empty
-    // host) fails here, where it used to be read as a host called `[::1`.
+    // host) fails here rather than being read as a host called `[::1`.
     let url = url::Url::parse(input).map_err(|_| UNPARSEABLE.to_string())?;
     let Some(host) = url.host_str() else {
         return Err(UNPARSEABLE.to_string());
@@ -628,12 +628,10 @@ enum ColonForm<'a> {
 /// every other web address does. Read as scp it answered with the host
 /// `github.com` and the repository `8443/acme`.
 ///
-/// **An all-digit run is not enough on its own to mean a port**, which is what
-/// this used to test, and that refused a real repository: `123` is a GitHub
-/// account and it owns `scriptaculous`, so `github.com:123/scriptaculous` is an
-/// ordinary scp address. Nor is "the port reading leaves an owner and a
-/// repository" enough, which is what it tested next, because a text can satisfy
-/// both readings and that one answered "port" for all of them. The rule is:
+/// **An all-digit run is not enough on its own to mean a port**: `123` is a
+/// GitHub account and it owns `scriptaculous`, so `github.com:123/scriptaculous`
+/// is an ordinary scp address. Nor is "the port reading leaves an owner and a
+/// repository" enough, because a text can satisfy both readings. The rule is:
 ///
 /// * The port reading leaves **fewer than two** segments, so it names no
 ///   repository at all. `github.com:123/scriptaculous` leaves `scriptaculous`,

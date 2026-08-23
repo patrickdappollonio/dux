@@ -113,7 +113,8 @@ attention_on_bell = true
 # window regains focus (TUI). Gives you time to see which agent(s) wanted you
 # before the indicator vanishes. Set to 0 to clear the indicator immediately.
 # TUI note: requires a terminal that reports focus; under tmux, set
-# `focus-events on`. Terminals that never report focus keep the old behavior.
+# `focus-events on`. Without focus reports the grace never applies: the
+# focused agent's indicator clears right away.
 attention_grace_seconds = 3
 ```
 

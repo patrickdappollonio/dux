@@ -44,11 +44,6 @@ pub struct CommandWorkerSpec {
     pub panic_event: Option<Box<dyn FnOnce(String) -> WorkerEvent + Send>>,
 }
 
-// TODO: synchronous spawn-failure test pending #[cfg(test)] hook — the
-// failure path is exercised in production but not yet covered by a unit
-// test because exercising it cleanly would require a test-only hook into
-// `thread::Builder::spawn`.
-
 /// Format a `Box<dyn Any + Send>` panic payload as a human-readable
 /// string, matching the `&str` / `String` cases stdlib normally surfaces
 /// through the default panic hook.

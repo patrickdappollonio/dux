@@ -290,7 +290,7 @@ pub struct App {
     pub(crate) overlay_layout: OverlayMouseLayoutState,
     pub(crate) mouse_drag: Option<ResizeDragState>,
     /// A mouse button pressed inside the WINDOWED center pane that is being
-    /// forwarded to a mouse-aware child (decision 9): holds the SGR button
+    /// forwarded to a mouse-aware child: holds the SGR button
     /// code of the pressed button (0 left, 1 middle, 2 right) from press to
     /// release, so the drag's motion reports and the final release reach the
     /// child even when the pointer leaves the pane. `None` when no forwarded
@@ -1413,10 +1413,9 @@ pub(crate) struct ProjectChooserEntry {
 ///
 /// The ONE Escape semantics every filterable modal in dux shares: the close key
 /// leaves search mode and clears the query in the SAME press, so the list comes
-/// back whole and the next close key shuts the modal. There used to be a middle
-/// state (leave search but keep filtering, then a second press to unfilter,
-/// then a third to close), which meant a user who typed a query had to press
-/// the close key three times to get out of a two-line dialog.
+/// back whole and the next close key shuts the modal. A middle state (leave
+/// search but keep filtering) would cost a user who typed a query three presses
+/// to get out of a two-line dialog.
 ///
 /// Returns `true` when there was something to leave, which is exactly the
 /// caller's "stay open" signal; `false` means the search row was already empty
@@ -1683,13 +1682,12 @@ pub(crate) enum RenameSessionFocus {
 
 /// Which control has focus in the Create-Agent-From-PR modal.
 ///
-/// The modal used to have exactly one control, so it needed no focus concept.
-/// Opened from the palette it now has two: the reference field, and the
+/// Opened from the palette it has two controls: the reference field, and the
 /// secondary "or choose an existing project" action that drops it into
 /// project-first mode. Two controls means an explicit focus enum and a focus
 /// that RENDERS, per the movement-keys tenet. Opened from a project's own menu
 /// the project is already chosen, the secondary action is not offered, and the
-/// ring has a single enabled stop, so the modal behaves exactly as it did.
+/// ring has a single enabled stop.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PullRequestInputFocus {
     Input,
@@ -2462,9 +2460,8 @@ impl TerminalSelection {
     /// into history and moves everything up by one. So `scrollback_total`
     /// stands in for `bottom`.
     ///
-    /// The two deltas are NOT equal in general, and this comment used to claim
-    /// they were. See KNOWN LIMITS below for the two measured cases where they
-    /// part company.
+    /// The two deltas are NOT equal in general; see KNOWN LIMITS below for the
+    /// two measured cases where they part company.
     ///
     /// That covers both ways the numbers move. A user scroll changes `offset`
     /// while history holds still, so the text moves down the screen by the

@@ -23,7 +23,7 @@ impl ConfigSurface for TuiConfigSurface {
         thread::spawn(move || {
             // The guard guarantees a `ConfigReloadReady` is posted even if the
             // load/validate/sync work below panics — otherwise the engine's
-            // reload barrier would never close and config saves would freeze (F5).
+            // reload barrier would never close and config saves would freeze.
             let guard = ReloadCompletionGuard::new(worker_tx);
             let result = crate::config::ensure_config(&paths)
                 .map_err(|err| format!("{err:#}"))

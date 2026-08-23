@@ -1612,18 +1612,18 @@ async fn handle_pty_socket(
     // The APPLIED mark and not the STAMPED one, and that is a distinction with
     // teeth. The terminal UI stamps its claim and applies in a second step, and a
     // browser's resize is stamped and then queued, so a handshake that lands
-    // inside either window used to seed its filter at N while the grid it carries
-    // is still the pre-N geometry. The apply's own broadcast then arrived stamped
-    // N, was dropped as "not newer", and nothing ever re-announced it: that
-    // viewer sat on a stale grid for the life of the socket.
+    // inside either window WOULD seed its filter at N while the grid it carries
+    // is still the pre-N geometry; the apply's own broadcast then arrives stamped
+    // N, is dropped as "not newer", and nothing ever re-announces it: that viewer
+    // sits on a stale grid for the life of the socket.
     let handshake_grid_seq = pty_size_owners.applied_grid_seq(target.pty_id());
     // Hand the client this PTY socket's connection id as the first frame (a Text
     // frame, distinct from the Binary PTY-byte frames), mirroring how `/ws/events`
     // opens with a `connected` frame. The client records it and compares it against
     // the `owner` field of every `pty.owner` event: an equal id means this client
     // is the (new) owner, a different id means another device took over. This
-    // definitive comparison replaces the old timing/echo-counting heuristic and
-    // fixes the two-device simultaneous-claim race. A fresh id is allocated per
+    // comparison is definitive: two devices claiming at once cannot both conclude
+    // they lost. A fresh id is allocated per
     // socket open, so a reconnect re-issues one.
     // Stamp this (re)open's scrollback replay with a process-monotonic generation
     // id and hand it to the client on the `connected` handshake, immediately before
@@ -1871,9 +1871,9 @@ async fn handle_pty_socket(
 /// `sessions` topic (every client holds it), so any other client currently viewing
 /// that PTY compares `owner` against its own PTY-socket connection id: an equal id
 /// means this client is the owner; a different id flips it to the read-only
-/// take-over placeholder. The explicit id replaces the old timing/echo-counting
-/// heuristic, fixing the race where two devices claiming at once could both end up
-/// showing the placeholder while the server held a real owner. `epoch` is the
+/// take-over placeholder. The explicit id is definitive: without it, two devices
+/// claiming at once could both end up showing the placeholder while the server
+/// held a real owner. `epoch` is the
 /// monotonic ownership epoch assigned under the owners lock (see [`OwnersState`]);
 /// it orders concurrent handovers so a client can ignore an out-of-order broadcast
 /// and keep only the latest claim, since this event is emitted AFTER the lock
@@ -1983,7 +1983,7 @@ fn projects_changed_event() -> Event {
 /// A coarse `sessions.changed` signal: no `id`/`rev`, just "refetch the sessions
 /// read" (`/api/v1/sessions` or `/api/v1/workspace`), delivered on the `sessions`
 /// topic. Covers session lifecycle/status, the `working` flag, and the terminal
-/// list in Phase 3 (they all live in the sessions/sidebar projection). Like
+/// list (they all live in the sessions/sidebar projection). Like
 /// `projects.changed`, it now travels alongside the pushed document rather than
 /// being the only way a client learns of the change.
 fn sessions_changed_event() -> Event {
@@ -2015,9 +2015,9 @@ fn workspace_frame_text(doc: &WorkspaceDoc) -> String {
 }
 
 /// Whether this connection asked for the workspace document. It rides the two
-/// coarse topics that used to carry the value-less `projects.changed` /
-/// `sessions.changed` pings, because it is the document those pings told the
-/// client to refetch. Either topic is enough: the document is not split in half.
+/// coarse topics that carry the `projects.changed` / `sessions.changed` pings,
+/// because it is the document those pings tell the client to refetch. Either
+/// topic is enough: the document is not split in half.
 fn holds_workspace_topic(subscribed: &std::collections::HashSet<String>) -> bool {
     subscribed.contains("sessions") || subscribed.contains("projects")
 }
@@ -2771,7 +2771,7 @@ async fn apply_events_frame(
                 }
             }
             // A coarse topic (sessions/projects/config): tracked for forwarding,
-            // but it carries no poll interest in Phase 1.
+            // but it carries no poll interest.
             None => {
                 if subscribed.insert(topic.clone()) && (topic == "sessions" || topic == "projects")
                 {
@@ -3449,8 +3449,7 @@ mod tests {
     }
 
     /// `GET /api/v1/workspace` returns the projects, sessions, and sidebar projection
-    /// (auth off → the gate passes). Proves the spine read serves the same spine
-    /// the ViewModel used to carry.
+    /// (auth off → the gate passes).
     #[tokio::test]
     async fn spine_route_returns_projects_sessions_and_sidebar() {
         let tmp = tempfile::tempdir().unwrap();
@@ -3674,10 +3673,9 @@ mod tests {
     }
 
     /// The session-nested git/file routes reach their handlers: an unknown session
-    /// resolves to 404 (auth off so the gate passes). The old body-keyed
-    /// `/api/v1/git/*` and `/api/v1/file/*` paths were re-pathed under the session,
-    /// so they no longer reach the git/file handler (they fall through to the SPA
-    /// fallback, which never returns the handler's 404).
+    /// resolves to 404 (auth off so the gate passes). Body-keyed
+    /// `/api/v1/git/*` and `/api/v1/file/*` paths do not exist: they fall through
+    /// to the SPA fallback, which never returns the handler's 404.
     #[tokio::test]
     async fn nested_git_and_file_routes_reach_handlers() {
         let tmp = tempfile::tempdir().unwrap();
@@ -3706,7 +3704,7 @@ mod tests {
             StatusCode::NOT_FOUND,
             "the nested file route must reach the file handler and 404 the unknown session"
         );
-        // The retired body-keyed paths no longer reach the handler (no 404 from it).
+        // Body-keyed paths must not reach the handler (no 404 from it).
         assert_ne!(
             oneshot_status(
                 &app,

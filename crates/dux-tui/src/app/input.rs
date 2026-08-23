@@ -1231,7 +1231,7 @@ impl App {
                     } else {
                         // Dormant or exited: the explicit activate action
                         // launches, landing focused-but-minimized on
-                        // completion (decision 10).
+                        // completion.
                         self.activate_center_agent(true, false)?;
                     }
                 }
@@ -1243,13 +1243,13 @@ impl App {
                         self.close_top_overlay();
                     } else {
                         // The up half: maximize a live tab, or launch a
-                        // dormant one seeking fullscreen (decision 10 keeps
-                        // fullscreen-seeking launches landing fullscreen).
+                        // dormant one seeking fullscreen (fullscreen-seeking
+                        // launches land fullscreen).
                         self.activate_center_agent(true, true)?;
                     }
                 }
                 Action::OpenMacroBar if !in_diff => {
-                    // Decision 4: the macro chord works over the minimized
+                    // The macro chord works over the minimized
                     // pane too. Mirror the fullscreen intercept's gates: no
                     // bar while scrolled back (the scroll vocabulary owns the
                     // pane), and no bar without a live surface, because the
@@ -1301,7 +1301,7 @@ impl App {
                         *scroll = scroll.saturating_sub(page);
                     } else if self.center_typeable() && self.should_forward_center_page() {
                         // Typeable pane, page-owning child: forward the page
-                        // key's bytes exactly as fullscreen does (decision 8);
+                        // key's bytes exactly as fullscreen does;
                         // an alt-screen child has no host scrollback to move.
                         self.forward_typing_key_to_center(&key);
                     } else if self.last_pty_size.0 > 0 {
@@ -8612,12 +8612,12 @@ impl App {
     /// `allow_launch` is false and the target agent is dormant, this either
     /// minimizes a (defensively possible) fullscreen overlay or is a no-op.
     ///
-    /// The two callers also part ways on a LIVE agent (decision 9): the
+    /// The two callers also part ways on a LIVE agent: the
     /// explicit activate action (`allow_launch`, i.e. Enter and the sidebar
     /// double-click) focuses the windowed TYPEABLE center pane, while the
     /// fullscreen toggle reopens fullscreen, matching its meaning everywhere
     /// else. `InteractAgent` keeps its own jump-straight-to-fullscreen path
-    /// in `handle_left_key` (decision 11).
+    /// in `handle_left_key`.
     fn activate_selected_left_item(&mut self, allow_launch: bool) -> Result<()> {
         match self.left_items().get(self.selected_left) {
             Some(LeftItem::Session(_)) => {
@@ -8645,7 +8645,7 @@ impl App {
                 } else if self.selected_session().is_some() {
                     if allow_launch {
                         // Enter from the sidebar focuses the minimized
-                        // typeable center (decision 9), so its dormant-agent
+                        // typeable center, so its dormant-agent
                         // launch is minimized-seeking.
                         self.reconnect_selected_session(false)?;
                     } else {
@@ -8673,7 +8673,7 @@ impl App {
     /// never launch a dormant tab per the Agent Tabs tenet. See
     /// `activate_selected_left_item` for the same distinction in the
     /// Projects pane.
-    /// `seek_fullscreen` marks a fullscreen-seeking activation (decision 10):
+    /// `seek_fullscreen` marks a fullscreen-seeking activation:
     /// when it launches a dormant tab, the completed launch lands fullscreen
     /// instead of focused-but-minimized. Only the fullscreen toggle (and the
     /// double-click maximize gesture) pass `true`.
@@ -8740,10 +8740,10 @@ impl App {
 
     fn activate_center_agent_from_mouse(&mut self) {
         // A double click maximizes only when the child has no mouse tracking
-        // or the tab is dormant (decision 9): a mouse-aware child owns its
+        // or the tab is dormant: a mouse-aware child owns its
         // clicks, so dux must never steal a rapid pair of them to fullscreen
-        // itself. (Forwarding the click to the child is stage 3; until then a
-        // double click on a mouse-mode child is just two focus events.)
+        // itself. (The press itself is forwarded by `begin_center_mouse_forward`;
+        // a double click on a mouse-mode child is just two forwarded clicks.)
         if self
             .selected_terminal_surface_client()
             .is_some_and(|p| p.has_mouse_mode())
@@ -8751,7 +8751,7 @@ impl App {
             return;
         }
         // Double-click is the maximize gesture, so a dormant tab launched by
-        // it is fullscreen-seeking (decision 9/10).
+        // it is fullscreen-seeking.
         if let Err(err) = self.activate_center_agent(true, true) {
             self.set_error(format!("Mouse activation failed: {err}"));
         }
@@ -8911,8 +8911,8 @@ impl App {
         self.note_user_scroll();
     }
 
-    /// Begin forwarding a pressed mouse button to the WINDOWED center child
-    /// (decision 9). Returns `true` when the press was forwarded: focus moves
+    /// Begin forwarding a pressed mouse button to the WINDOWED center child.
+    /// Returns `true` when the press was forwarded: focus moves
     /// to Center, the translated SGR press is written to the focused
     /// surface's PTY, and the button is held in `center_mouse_forward` so the
     /// drag's motion reports and the eventual release follow it. Returns
@@ -9322,7 +9322,7 @@ impl App {
                 // After the divider and tab-strip short-circuits (the mouse
                 // "dux wins" rule): a plain click inside the windowed agent
                 // surface of a mouse-aware child is the child's, so it is
-                // focused AND forwarded (decision 9). Skipping the
+                // focused AND forwarded. Skipping the
                 // double-click bookkeeping below is deliberate: with a
                 // mouse-mode child a double click is just two forwarded
                 // clicks, never a maximize.
@@ -15091,8 +15091,8 @@ not_a_real_action = ["x"]
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Agent);
     }
 
-    /// A double click never steals clicks from a mouse-aware child (decision
-    /// 9): with mouse tracking on, both clicks are just focus events and the
+    /// A double click never steals clicks from a mouse-aware child: with
+    /// mouse tracking on, both clicks are forwarded to the child and the
     /// pane stays minimized.
     #[test]
     fn mouse_double_click_does_not_maximize_a_mouse_mode_child() {
@@ -15149,7 +15149,7 @@ not_a_real_action = ["x"]
         assert_eq!(app.input_target, InputTarget::None);
     }
 
-    // -- Windowed click forwarding to a mouse-aware child (decision 9) --
+    // -- Windowed click forwarding to a mouse-aware child --
 
     /// Wire a `cat -v` child that first enables the given DECSET modes as the
     /// selected session's provider, install the synthetic layout, and wait
@@ -15244,7 +15244,7 @@ not_a_real_action = ["x"]
         assert_eq!(app.center_mouse_forward, None);
         wait_for_forwarded_echo(&app, "[<0;10;5m");
 
-        // The rapid second click: forwarded again, no maximize (decision 9).
+        // The rapid second click: forwarded again, no maximize.
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
         app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 30, 5));
         let rendered = wait_for_forwarded_echo(&app, "[<0;10;5m^[[<0;10;5M");
@@ -15677,17 +15677,12 @@ not_a_real_action = ["x"]
     /// scrollback offset to `lines`.
     ///
     /// Waiting is the whole point. `seq` is line buffered on a terminal, so its
-    /// 200 lines arrive as many small writes, and the previous version of this
-    /// helper polled mid-stream: it seeded as soon as
-    /// `scrollback_offset() >= lines` succeeded, which it can while history is
-    /// still only 10, 11 or 12 rows deep. Both `set_scrollback` and `scroll`
-    /// CLAMP to the history that exists at the instant they run, so a seed
-    /// taken mid-stream and the wheel step the caller makes right after it both
-    /// clamp against a history far shallower than the finished 200 rows: the
-    /// seed succeeded at 10 while a 3-line step could only reach 12, and the
-    /// caller's `assert_eq!(offset, 13)` failed. Measured at roughly 1 run in
-    /// 40. Seeding after the stream is over removes the race, because the
-    /// history both calls clamp against is then the same and it is final.
+    /// 200 lines arrive as many small writes, and both `set_scrollback` and
+    /// `scroll` CLAMP to the history that exists at the instant they run: a seed
+    /// taken mid-stream and the wheel step the caller makes right after it clamp
+    /// against different, still-growing histories and disagree. Seeding after
+    /// the stream is over means both calls clamp against the same, final
+    /// history.
     ///
     /// The child therefore prints a sentinel with NO trailing newline after the
     /// numbers, so its cursor parks at a position no earlier write can produce
@@ -20161,9 +20156,8 @@ cyan = "#00ffff"
     }
 
     /// The fullscreen toggle is an EXPLICIT action, so on a dormant tab it
-    /// launches, seeking fullscreen (decision 10 keeps fullscreen-seeking
-    /// launches landing fullscreen). This replaces the old exit-interactive
-    /// no-op: Ctrl-g now belongs to `ToggleFullscreen`.
+    /// launches, seeking fullscreen (fullscreen-seeking launches land
+    /// fullscreen). Ctrl-g belongs to `ToggleFullscreen`.
     #[test]
     fn ctrl_g_on_a_dormant_tab_windowed_launches_seeking_fullscreen() {
         let mut app = test_app(default_bindings());
@@ -20270,7 +20264,7 @@ cyan = "#00ffff"
     }
 
     /// Enter from the sidebar on a LIVE agent focuses the windowed TYPEABLE
-    /// center pane (decision 9): no fullscreen, no raw-input target, snapped
+    /// center pane: no fullscreen, no raw-input target, snapped
     /// to the live edge, typeable through the derived predicate.
     #[test]
     fn enter_from_left_on_a_live_agent_focuses_the_windowed_typeable_pane() {
@@ -22626,7 +22620,7 @@ cyan = "#00ffff"
             "provider should still be present after fallback retry"
         );
         assert_eq!(app.engine.sessions[0].status, SessionStatus::Active);
-        // Decision 10: the engine-initiated fallback relaunch is never
+        // The engine-initiated fallback relaunch is never
         // fullscreen-seeking, so it lands focused-but-minimized.
         assert_eq!(app.input_target, InputTarget::None);
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
@@ -23325,7 +23319,7 @@ cyan = "#00ffff"
         );
     }
 
-    /// The hazard step 2 exists for: the CHILD can pull the grid back to the
+    /// The hazard: the CHILD can pull the grid back to the
     /// live edge (measured: entering the alternate screen, erasing scrollback,
     /// or a full reset each leave `scrollback_offset()` at 0). The mode must end
     /// on that, and it must end LOUDLY, because the user is still looking at a
@@ -24166,7 +24160,7 @@ cyan = "#00ffff"
         );
     }
 
-    /// Esc with nothing to close forwards to the agent (decision 2). Before
+    /// Esc with nothing to close forwards to the agent. Before
     /// this, the Global CloseOverlay lookup swallowed Esc even when no overlay
     /// closed, so agent TUIs never saw their menu-dismiss key minimized.
     #[test]
@@ -26771,7 +26765,7 @@ cyan = "#00ffff"
         app
     }
 
-    /// Decision 4: the macro bar's chord gains Center scope, so it opens
+    /// The macro bar's chord has Center scope, so it opens
     /// while typing into the MINIMIZED pane (the chord is dux's; the typing
     /// bypass never swallows it).
     #[test]
@@ -29656,13 +29650,10 @@ cyan = "#00ffff"
     }
 
     // ══════════════════════════════════════════════════════════════════════
-    // Change B4: the three provider pickers are ONE handler
+    // The three provider pickers are ONE handler
     //
-    // A previous phase removed their Cancel/Apply buttons but left three
-    // byte-identical key handlers behind. This pins that the three answer the
-    // same vocabulary identically, so the next edit cannot land on two of the
-    // three. (It PASSED before the consolidation: the duplication was a
-    // maintainability defect, not a behavioural one.)
+    // This pins that the three answer the same key vocabulary identically, so
+    // an edit cannot land on two of the three.
     // ══════════════════════════════════════════════════════════════════════
 
     #[test]

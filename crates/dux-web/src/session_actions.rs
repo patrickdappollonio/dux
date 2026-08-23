@@ -1,4 +1,4 @@
-//! REST write verbs for sessions/agents (Phase 4 of the REST-first migration).
+//! REST write verbs for sessions/agents.
 //! Each handler reads the optional `X-Connection-Id` header → a per-connection
 //! [`StatusScope`] so the operation's toasts reach only the originating client,
 //! then dispatches the matching [`WireCommand`] through
@@ -736,8 +736,8 @@ async fn attach_pull_request(
 /// Detach a session's pull request: this agent has no PR, as of now. Removes
 /// a pin if there is one, clears the badge immediately, and stops
 /// autodetection for the session until it is attached by hand or detection is
-/// resumed. Applies to an autodetected association too, so it is no longer a
-/// no-op on an unpinned session. Synchronous; the info status rides the stream
+/// resumed. Applies to an autodetected association too, not only a pinned one.
+/// Synchronous; the info status rides the stream
 /// like the sibling handlers' outcomes (the `ApplyWire` arm broadcasts it).
 async fn detach_pull_request(
     State(state): State<AppState>,

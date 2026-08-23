@@ -43,17 +43,13 @@ pub mod host_guard;
 pub(crate) mod ownership_publish;
 pub mod project_actions;
 pub mod project_reads;
-/// The PTY input-ownership registry, re-exported from `dux-core`.
+/// The PTY input-ownership registry, re-exported from `dux-core`: a rule two
+/// surfaces obey belongs in the crate both can see, and the re-export keeps
+/// every call site and test in this crate on the path it already uses.
 ///
-/// It used to live here, and it moved the day the terminal UI became a
-/// participant in it rather than a bystander: a rule two surfaces obey belongs
-/// in the crate both can see. The re-export is deliberate rather than a
-/// transition step, so every call site and test in this crate keeps the path it
-/// has always used and nothing about the move shows up in a diff of the socket
-/// handlers.
-/// A glob rather than a named list because some of these names are used only by
-/// this crate's test modules, and a named re-export of those is an unused import
-/// in a normal build.
+/// A glob rather than a named list because some names are used only by this
+/// crate's test modules, and a named re-export of those is an unused import in
+/// a normal build.
 pub(crate) mod pty_owners {
     pub(crate) use dux_core::pty_owners::*;
 }
@@ -1467,7 +1463,7 @@ pub fn serve_with_engine(
     // terminating handler on resume. (tokio's stale per-runtime action lingers in
     // the registry across flips but is a harmless no-op once its runtime drops.)
 
-    // If a listener's accept loop died (F5), surface the captured error rather
+    // If a listener's accept loop died, surface the captured error rather
     // than reporting a clean exit. The engine has already been wound down above,
     // so the caller drops it; the TUI shows the failure instead of resuming onto
     // a server that silently stopped serving.
@@ -1755,13 +1751,11 @@ mod tests {
         let held_addr = held.local_addr().expect("held addr");
 
         // The required leg asks for port 0 and lets the KERNEL pick a free port
-        // at bind time. It previously probe-bound `127.0.0.1:0`, read the port
-        // back and dropped the listener so `bind_plan_addrs` could re-take it,
-        // which hands the port to the whole machine for the length of that gap
-        // and races anything else that wants an ephemeral port. That is the same
-        // pattern removed from `dead_base_url()` in
-        // `crates/dux-core/tests/release_notes_fetch.rs` for causing a real race,
-        // and this one flaked too. Port 0 closes the window entirely: there is no
+        // at bind time. Probe-binding, reading the port back and dropping the
+        // listener would hand the port to the whole machine for the length of
+        // the gap and race anything else wanting an ephemeral port
+        // (`dead_base_url()` in `crates/dux-core/tests/release_notes_fetch.rs`
+        // avoids the same race). Port 0 closes the window entirely: there is no
         // moment where the port is free and unclaimed.
         let required_addr: std::net::SocketAddr =
             "127.0.0.1:0".parse().expect("a literal loopback addr");
@@ -2083,7 +2077,7 @@ mod config_surface_tests {
     impl ConfigSurface for WebConfigSurface {
         fn reload(&self, _paths: DuxPaths, worker_tx: Sender<WorkerEvent>) {
             // Drive completion through the guard, matching the production surfaces
-            // so the test exercises the F5-safe path rather than a bare send.
+            // so the test exercises the guarded completion path rather than a bare send.
             ReloadCompletionGuard::new(worker_tx).complete(Ok(Config::default()));
         }
 

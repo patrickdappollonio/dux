@@ -47,7 +47,7 @@ pub fn ensure_config(paths: &DuxPaths) -> Result<Config> {
     validate_project_envs(&config)?;
     // Warn once here (TUI startup and reload both funnel through ensure_config) on
     // an unrecognized clipboard_passthrough so the per-tick host forward can parse
-    // silently (FIX-F5). The warning is from_config_str's side effect.
+    // silently. The warning is from_config_str's side effect.
     let _ = ClipboardPassthroughMode::from_config_str(&config.capabilities.clipboard_passthrough);
     Ok(config)
 }
@@ -641,7 +641,7 @@ fn config_schema() -> Vec<ConfigEntry> {
         ConfigEntry::Field {
             key: "attention_grace_seconds",
             comment: Some(CommentSource::Static(
-                "# Seconds the attention indicators stay visible after dux regains your\n# attention, before the focused agent's needs-attention flag clears. Applies\n# when you return to the dux browser tab (web UI) and when your terminal\n# window regains focus (TUI). Gives you time to see which agent(s) wanted you\n# before the indicator vanishes. Set to 0 to clear the indicator immediately.\n# TUI note: requires a terminal that reports focus; under tmux, set\n# `focus-events on`. Terminals that never report focus keep the old behavior.",
+                "# Seconds the attention indicators stay visible after dux regains your\n# attention, before the focused agent's needs-attention flag clears. Applies\n# when you return to the dux browser tab (web UI) and when your terminal\n# window regains focus (TUI). Gives you time to see which agent(s) wanted you\n# before the indicator vanishes. Set to 0 to clear the indicator immediately.\n# TUI note: requires a terminal that reports focus; under tmux, set\n# `focus-events on`. Without focus reports the grace never applies: the\n# focused agent's indicator clears right away.",
             )),
             value_fn: |c| FieldValue::Usize(c.ui.attention_grace_seconds as usize),
         },
@@ -2053,10 +2053,10 @@ mod tests {
 
     #[test]
     fn a_config_created_through_the_core_writer_is_born_documented() {
-        // The regression this pins: `save_config_with` is the path the WEB uses
-        // (`dux serve` bootstrap project-sync). It used to write a bare document
-        // when the file was missing, and because the later patch path preserves
-        // comments but never ADDS them, such a config stayed bare forever.
+        // `save_config_with` is the path the WEB uses (`dux serve` bootstrap
+        // project-sync). A bare document written when the file is missing stays
+        // bare forever, because the later patch path preserves comments but
+        // never ADDS them.
         install_canonical_renderer();
 
         let dir = tempfile::TempDir::new().expect("tempdir");
@@ -2204,10 +2204,9 @@ mod tests {
     /// what happens when two devices want the same terminal, and how to turn it
     /// off again.
     ///
-    /// The experimental marker this used to require is deliberately GONE: it was
-    /// there because the TUI did not take part in the ownership model, and it now
-    /// does, so the comment describes one driver at a time instead of warning
-    /// about a redraw fight that can no longer happen.
+    /// There is deliberately NO experimental marker to require: the TUI takes
+    /// part in the ownership model, so the comment describes one driver at a time
+    /// rather than warning about a redraw fight.
     #[test]
     fn serve_while_tui_comment_states_what_trust_ownership_and_how_to_stop() {
         let toml = render_default_config();

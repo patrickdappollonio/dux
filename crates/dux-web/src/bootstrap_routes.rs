@@ -3,8 +3,7 @@
 //! macros, palette commands, the relevant `ui.*` flags, GitHub availability, and
 //! the global env.
 //!
-//! These fields used to ride inside every per-tick `ViewModel` broadcast even
-//! though they change only on a config reload. They now live on
+//! These fields change only on a config reload, so they live on
 //! [`dux_core::viewmodel::BootstrapView`], served once here and refetched by the
 //! client when a `config.changed` event fires (emitted by the web layer on a
 //! successful reload — see `server.rs`).

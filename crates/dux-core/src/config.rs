@@ -1159,8 +1159,9 @@ pub struct UiConfig {
     /// terminal window regains focus (TUI). Gives you time to see which
     /// agent(s) wanted you before the indicator vanishes. `0` clears
     /// immediately (the pre-grace behavior). TUI note: requires a terminal
-    /// that reports focus; under tmux, set `focus-events on`. Terminals that
-    /// never report focus keep the old behavior.
+    /// that reports focus; under tmux, set `focus-events on`. Without focus
+    /// reports the grace never applies: the focused agent's indicator clears
+    /// right away.
     pub attention_grace_seconds: u64,
     pub auto_reopen_agents: bool,
     /// Show the right-hand Changes pane (the changed-files list) by default.
@@ -2430,7 +2431,7 @@ pub fn load_config(paths: &DuxPaths) -> Config {
         ));
     }
     // Surface an unrecognized clipboard_passthrough here, once at load, so the
-    // per-tick forward path can parse without warning (see FIX-F5). from_config_str
+    // per-tick forward path can parse without warning. from_config_str
     // logs the warning as a side effect and returns the fallback we discard.
     let _ = ClipboardPassthroughMode::from_config_str(&config.capabilities.clipboard_passthrough);
     // Same idea for a misspelled provider drag-and-drop paste form: warn ONCE here

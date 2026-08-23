@@ -1359,7 +1359,7 @@ impl App {
     }
 
     /// Whether a launch dispatched right now should land fullscreen on
-    /// completion (decision 10). `seek_fullscreen` is the caller's explicit
+    /// completion. `seek_fullscreen` is the caller's explicit
     /// intent (the fullscreen toggle on a dormant tab); on top of that, any
     /// launch initiated while the fullscreen relaunch screen is up (e.g.
     /// ReconnectAgent pressed on the dormant fullscreen surface) keeps the
@@ -1446,7 +1446,7 @@ impl App {
         self.fullscreen_overlay = FullscreenOverlay::None;
     }
 
-    /// Landing for a COMPLETED agent launch (decision 10): fullscreen only
+    /// Landing for a COMPLETED agent launch: fullscreen only
     /// when the launch was fullscreen-seeking (the request's
     /// `wants_fullscreen` bit, stamped at dispatch); every other launch lands
     /// focused-but-minimized so the center pane is immediately typeable.
@@ -1497,9 +1497,8 @@ impl App {
 
         // Route through the shared core creator so the id mint, the "Terminal N"
         // identity label, and the monotonic `sort_order` stamp are single-sourced
-        // with the web. The TUI used to hand-insert here with `sort_order: 1`,
-        // which made the default drag order nondeterministic (HashMap iteration
-        // order) and never assigned the identity label.
+        // with the web. A hand-rolled insert misses the identity label and makes
+        // the default drag order nondeterministic (HashMap iteration order).
         let (rows, cols) = self.pty_size_for_launch();
         let terminal_id = match self
             .engine
@@ -2106,8 +2105,8 @@ impl App {
                             "Deleted agent (branch \"{}\" was already removed).",
                             branch_name,
                         ),
-                        // Refused means the branch SURVIVED, which is the
-                        // opposite of what this line used to claim.
+                        // Refused means the branch SURVIVED; the message must
+                        // say so.
                         dux_core::git::BranchDeletion::Refused { reason } => format!(
                             "Deleted agent, but its branch \"{}\" is still there. {}",
                             branch_name,
@@ -3430,7 +3429,7 @@ impl App {
         self.dispatch_reconnect_plan(&session_id, true, false)
     }
 
-    /// `seek_fullscreen` marks a fullscreen-seeking relaunch (decision 10):
+    /// `seek_fullscreen` marks a fullscreen-seeking relaunch:
     /// only the fullscreen toggle passes `true`; every other caller lands the
     /// completed launch focused-but-minimized (a relaunch initiated FROM the
     /// fullscreen relaunch screen still lands fullscreen; see
@@ -3449,9 +3448,8 @@ impl App {
     /// message, and the pre-dispatch mutations all in core) and render each
     /// variant. `reconnect_selected_session` (`force == false`) and
     /// `force_reconnect_agent` (`force == true`) both route here so neither
-    /// recomputes the resume decision (which used to be announced via the
-    /// collision-blind `should_resume_session` while the dispatch re-gated,
-    /// promising a resume that launched fresh).
+    /// recomputes the resume decision (a second, collision-blind computation can
+    /// promise a resume that launches fresh).
     fn dispatch_reconnect_plan(
         &mut self,
         session_id: &str,
@@ -4027,7 +4025,7 @@ impl App {
                 // Both the session-slot tab (Agent) and an extra tab (Tab) tear
                 // down through the single-source `Engine::kill_tab_runtime`: it
                 // SIGKILLs the provider, clears every runtime map (including the
-                // in-flight `AgentLaunch` key a hand-rolled list used to miss),
+                // in-flight `AgentLaunch` key),
                 // detaches the agent only when this was its last live tab, and
                 // clears `desired_running` on detach so the startup auto-reopen
                 // pass does not relaunch the agent the user just killed. Killing
@@ -6258,8 +6256,8 @@ mod tests {
 
     /// Graceful delete vanishes the session immediately: its PTY is SIGTERMed and
     /// held for a background reap, and the worktree is removed in the background
-    /// only after the agent exits. The session no longer lingers until the worker
-    /// reports — the user-chosen tradeoff for a snappy, non-blocking delete.
+    /// only after the agent exits. The session never lingers until the worker
+    /// reports, the user-chosen tradeoff for a snappy, non-blocking delete.
     #[test]
     fn begin_delete_session_vanishes_session_immediately() {
         let project_dir = tempdir().expect("project tempdir");
@@ -6954,11 +6952,10 @@ mod tests {
 
     #[test]
     fn kill_runtime_targets_agent_clears_in_flight_launch_key() {
-        // G3 regression: the Agent branch of `kill_runtime_targets` used to
-        // hand-roll the tab-runtime clear and missed the in-flight
-        // `AgentLaunch` key, leaving a stale marker that made a later
-        // `DispatchAgentLaunch` report "already launching" forever. Now
-        // routed through the shared `clear_tab_runtime`.
+        // The Agent branch of `kill_runtime_targets` must route through the
+        // shared `clear_tab_runtime`: a hand-rolled clear that misses the
+        // in-flight `AgentLaunch` key leaves a stale marker that makes a later
+        // `DispatchAgentLaunch` report "already launching" forever.
         let session = make_session("s1", "claude", "/tmp/wt");
         let project = make_project("project-1", "claude");
         let mut app = test_app_with_sessions(vec![session], vec![project]);
@@ -6985,7 +6982,7 @@ mod tests {
 
     #[test]
     fn kill_runtime_targets_tab_clears_in_flight_launch_key() {
-        // Same G3 regression as the Agent branch above, for an extra tab.
+        // The same routing as the Agent branch above, for an extra tab.
         let session = make_session("s1", "claude", "/tmp/wt");
         let project = make_project("project-1", "claude");
         let mut app = test_app_with_sessions(vec![session], vec![project]);
@@ -7022,11 +7019,10 @@ mod tests {
 
     #[test]
     fn force_reconnect_agent_clears_in_flight_launch_key() {
-        // G3 regression: `force_reconnect_agent` used to hand-roll the
-        // tab-runtime clear and missed the in-flight `AgentLaunch` key, so a
-        // stale marker from a prior launch would make the relaunch dispatch
-        // refuse with "already launching". Now routed through
-        // `clear_tab_runtime`, so the relaunch proceeds.
+        // `force_reconnect_agent` must route through the shared
+        // `clear_tab_runtime`: a hand-rolled clear that misses the in-flight
+        // `AgentLaunch` key leaves a stale marker, so the relaunch dispatch is
+        // refused with "already launching".
         let mut session = make_session("s1", "claude", "");
         let wt = tempdir().expect("worktree tempdir");
         session
@@ -7051,7 +7047,7 @@ mod tests {
         );
     }
 
-    // ---- terminal_items sort-mode coverage (Phase 4b) --------------------------
+    // ---- terminal_items sort-mode coverage ------------------------------------
     //
     // These mirror the agent-list sort tests above but over the flat Terminals
     // section, and must stay in lockstep with the web `sortFlatTerminals` tests.

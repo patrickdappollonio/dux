@@ -256,11 +256,9 @@ pub(crate) fn modal_spec(prompt: &PromptState) -> Option<ModalSpec> {
         //
         // **A picker gets no Cancel and no Apply.** Its footer already names
         // the keys, resolved through the bindings, and a button LABEL cannot
-        // stay truthful once a user rebinds. The three provider pickers used to
-        // carry a pair and no longer do; the cue their Apply button carried (it
-        // greyed out when the highlighted row was already the active provider)
-        // moved onto the row itself, see `render::ACTIVE_PROVIDER_MARKER`.
-        // The three near-identical handlers they left behind are now one,
+        // stay truthful once a user rebinds. The provider pickers'
+        // active-provider cue lives on the row itself (see
+        // `render::ACTIVE_PROVIDER_MARKER`), and their keys share one handler,
         // `App::handle_provider_picker_key`, reached through
         // `super::input::provider_picker_kind`.
         PromptState::Command { .. }

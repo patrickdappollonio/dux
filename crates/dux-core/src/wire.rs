@@ -6041,12 +6041,11 @@ mod tests {
 
     #[test]
     fn apply_wire_kill_session_pty_clears_in_flight_launch_key() {
-        // F8 regression: kill_session_pty used to hand-roll the tab-runtime
-        // clear (providers/pins/pty_activity/pty_input/resume_fallback), which
-        // missed the in-flight `AgentLaunch` key. A KillSessionPty racing an
-        // in-flight launch for that tab left the key set, so a subsequent
-        // DispatchAgentLaunch for the same tab id kept reporting "already
-        // launching" forever. Routing through `clear_tab_runtime` fixes it.
+        // kill_session_pty must route through `clear_tab_runtime`: a
+        // hand-rolled tab-runtime clear
+        // (providers/pins/pty_activity/pty_input/resume_fallback) misses the
+        // in-flight `AgentLaunch` key, so a KillSessionPty racing an in-flight
+        // launch leaves "already launching" reported forever.
         let (mut engine, _tmp) = test_engine();
         let worktree = tempfile::tempdir().expect("worktree dir");
         engine.projects.push(sample_project(

@@ -78,7 +78,7 @@ pub enum Command {
     /// Delete a project AND cascade-delete its agents' records + runtime,
     /// REMOVING their worktrees from disk (the destructive counterpart to
     /// `RemoveProject`, which keeps worktrees). Each session goes through the
-    /// Wave-1 `do_delete_session` path (`delete_worktree == true`), so the kill,
+    /// shared `do_delete_session` path (`delete_worktree == true`), so the kill,
     /// worktree removal, and record cleanup stay single-source. Guards the whole
     /// project up front against an in-flight async worktree removal or a
     /// launching tab, so a partial delete can never report success while
@@ -562,7 +562,7 @@ impl Engine {
                 // A ghost id (orphaned sessions, no config-backed project) was never
                 // written to config, so it needs no config rewrite below.
                 let was_real = self.projects.iter().any(|p| p.id == project_id);
-                // Cascade every session through the Wave-1 delete path with worktree
+                // Cascade every session through the shared delete path with worktree
                 // removal. A git failure (a worktree that cannot be removed) aborts
                 // the whole delete via `?`, leaving the rest of the project intact
                 // rather than half-deleted.
@@ -1524,7 +1524,7 @@ mod tests {
     #[test]
     fn delete_project_removes_its_sessions_worktrees_and_project() {
         // The worktree-deleting project delete (distinct from RemoveProject, which
-        // keeps worktrees) cascades every session through the Wave-1
+        // keeps worktrees) cascades every session through the shared
         // `do_delete_session` path, then drops the project row + memory. We use a
         // non-existent worktree path so `git::remove_worktree` takes its
         // already-gone Ok branch without needing a real git checkout (the worktree
@@ -1630,7 +1630,7 @@ mod tests {
 
     #[test]
     fn dispatch_agent_launch_refuses_a_closing_session() {
-        // F2 regression: the shared launch chokepoint must refuse a launch into
+        // The shared launch chokepoint must refuse a launch into
         // a session that is mid-deletion (`closing_sessions`), covering every
         // launch path (reconnect, resume-fallback, web-dormant-relaunch,
         // session-slot reconnect) that funnels through DispatchAgentLaunch.

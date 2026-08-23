@@ -829,9 +829,8 @@ mod tests {
     /// two happen to be the same colour, so assert the difference across every
     /// theme dux can actually load rather than assuming it.
     ///
-    /// This is not hypothetical. The cue originally reused `warning_fg`, and
-    /// this test is what caught that all three `ayu` themes give `warning_fg`
-    /// and `overlay_border` the same value — the refusal would have been
+    /// Real, not hypothetical: all three `ayu` themes give `warning_fg` and
+    /// `overlay_border` the same value, so a cue drawn in `warning_fg` is
     /// invisible for those users.
     #[test]
     fn the_modal_refusal_flash_is_visible_in_every_loadable_theme() {

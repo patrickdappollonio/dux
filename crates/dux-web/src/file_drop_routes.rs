@@ -1349,11 +1349,9 @@ mod tests {
         #[tokio::test]
         async fn a_missing_directory_is_refused_rather_than_created() {
             // The wording is asserted, not only the status. The browser's tree
-            // is a lazy cache, so this is the ordinary stale-tree journey, and
-            // it used to answer with a raw `No such file or directory (os error
-            // 2)` while every other refusal on this path is a sentence. A test
-            // that checks the status alone passes with any wording at all,
-            // which is exactly how that one survived.
+            // is a lazy cache, so this is the ordinary stale-tree journey: a raw
+            // `No such file or directory (os error 2)` would pass a status-only
+            // assertion, while every other refusal on this path is a sentence.
             let (_tmp, wt, app) = router().await;
             let resp = app
                 .oneshot(tree_drop("s1", "logo.png", "nope"))
@@ -1627,11 +1625,10 @@ mod tests {
     /// so the runtime fast-forwards past the permit wait the moment every task
     /// is idle, which is what makes this instant rather than a 30-second test.
     ///
-    /// That fast-forward is also the trap this test used to fall into, and both
-    /// halves of it were measured. Asking only "did the call return" passes with
-    /// `PERMIT_WAIT` set to 30 DAYS, in under two seconds, because a paused
+    /// Both halves of the bound are measured: asking only "did the call return"
+    /// passes with `PERMIT_WAIT` set to 30 DAYS, in under two seconds, because a paused
     /// clock skips any finite duration just as cheaply. And deleting the timeout
-    /// altogether made the test HANG rather than fail, which in CI is a job
+    /// altogether makes the test HANG rather than fail, which in CI is a job
     /// timeout nobody reads rather than a red test.
     ///
     /// So the wait is measured on the virtual clock and bounded from both sides.

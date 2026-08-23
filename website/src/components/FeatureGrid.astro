@@ -599,7 +599,8 @@
   }
 
   /* Movement is decoration here: the filter is what matters and it still works
-     instantly. Anyone who asked for less motion gets the old behaviour. */
+     instantly. Anyone who asked for less motion gets an instant swap with no
+     transition. */
   @media (prefers-reduced-motion: reduce) {
     .feature-tile {
       transition: none;

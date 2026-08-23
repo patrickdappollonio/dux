@@ -37,7 +37,7 @@ pub type PtySubscription = (PtyViewerGuard, Vec<u8>, std::sync::mpsc::Receiver<V
 /// socket (see [`WorkspaceDoc`]), that event is a nudge for a client too old to
 /// read the push, and a pointer at the thin per-resource reads.
 ///
-/// A single coarse signal per side is intentional for Phase 3: the sessions side
+/// A single coarse signal per side is intentional: the sessions side
 /// also covers session lifecycle/status, the `working` hysteresis flag, and the
 /// per-session terminal list (they all live in the sessions/sidebar projection).
 /// The spec's finer `session.status` / `session.working` / `terminals.changed`
@@ -495,8 +495,8 @@ fn take_apply_reloaded_config(reaction: EventReaction) -> Option<Box<dux_core::c
 /// Bound on the engine request channel. A burst buffer, not a steady-state
 /// queue: the engine drains the WHOLE channel every `TICK` (50ms), so under
 /// normal use it holds only a handful of in-flight requests. The cap exists so a
-/// flooding or buggy client cannot grow the queue without limit (the old channel
-/// was unbounded). Reply-bearing sends apply backpressure when full (`.send().await`
+/// flooding or buggy client cannot grow the queue without limit. Reply-bearing
+/// sends apply backpressure when full (`.send().await`
 /// waits for the next drain); fire-and-forget sends (`write_pty`, `resize_pty`,
 /// `refresh_changed_files`, `emit_status`) use `try_send` and drop on a full
 /// channel — acceptable overload shedding, since reaching this depth means the
@@ -702,8 +702,8 @@ impl EngineHandle {
 
     /// A receiver for the pushed workspace document. Each `/ws/events`
     /// connection clones one and forwards every new document to the client that
-    /// asked for the coarse topics, which is what removes the N-clients-pull-
-    /// the-same-document traffic the coarse ping used to cause. The current
+    /// asked for the coarse topics, which is what keeps N clients from each
+    /// pulling the same document on every coarse ping. The current
     /// value doubles as the replay a newly-subscribed connection is handed.
     pub(crate) fn workspace_docs(&self) -> watch::Receiver<Option<Arc<WorkspaceDoc>>> {
         self.workspace_rx.clone()
@@ -1577,12 +1577,11 @@ pub fn spawn_engine_thread(mut engine: Engine) -> (EngineHandle, JoinHandle<()>)
 /// sessions / sidebar snapshot that [`fingerprint_halves`] serializes), and so
 /// must bump `mutation_version` to open the change-gated spine check.
 ///
-/// EXHAUSTIVE ON PURPOSE, with no wildcard arm. This used to be a `matches!`
-/// naming five variants, which compiled no matter what was added to
-/// [`EngineRequest`] and silently answered "changed nothing" for everything
-/// else — so a new request kind's change reached the browser only when the ~2s
-/// self-healing backstop happened to notice it. Now a new variant does not
-/// build until somebody says which answer it deserves.
+/// EXHAUSTIVE ON PURPOSE, with no wildcard arm. A wildcard arm would compile no
+/// matter what is added to [`EngineRequest`] and silently answer "changed
+/// nothing" for everything new, so a new kind's change would reach the browser
+/// only when the ~2s self-healing backstop noticed. With no wildcard, a new
+/// variant does not build until somebody says which answer it deserves.
 ///
 /// The two errors are not symmetric, so lean one way. Answering `false` for a
 /// real mutator is the BUG this shape exists to prevent (the browser is told
@@ -2619,17 +2618,14 @@ impl StatusEmitter {
 /// rebuilt and republished, the sidebar still reaches the client on whichever
 /// side fired.
 ///
-/// Terminals ARE included, folded into the half that matches their owner. They
-/// used to ride inside the nested `projects[].terminals` / `sessions[].terminals`
-/// and so moved the corresponding half for free; now that they arrive as one
-/// flat collection, leaving them out of both halves would mean a terminal's
-/// label, foreground command, working flag or drag order changing WITHOUT any
-/// coarse event firing, and no client would ever refetch. Partitioning by owner
-/// keeps exactly the event that fired before firing now: a session-owned
-/// terminal moves the sessions half, a project terminal moves the projects half.
+/// Terminals ARE included, folded into the half that matches their owner: left
+/// out of both halves, a terminal's label, foreground command, working flag or
+/// drag order could change WITHOUT any coarse event firing, and no client would
+/// ever refetch. A session-owned terminal moves the sessions half, a project
+/// terminal the projects half.
 ///
-/// A STANDALONE terminal never rode in either container, so there is no event to
-/// preserve and one has to be chosen. It moves the SESSIONS half, because that
+/// A STANDALONE terminal belongs to neither naturally, so one has to be
+/// chosen. It moves the SESSIONS half, because that
 /// is the event the flat sidebar list's churn already fires on and because
 /// either event carries the whole document regardless. What matters
 /// is that it fires on ONE of them: firing on neither is the silent-omission bug
@@ -2647,8 +2643,8 @@ fn fingerprint_halves(spine: &dux_core::viewmodel::SpineView) -> (String, String
         spine.terminals.iter().partition(|t| match &t.owner {
             dux_core::viewmodel::TerminalOwnerView::Session { .. } => true,
             dux_core::viewmodel::TerminalOwnerView::Project { .. } => false,
-            // Owned by nothing, so it rode in neither container and there is no
-            // previous event to preserve. It fires the sessions event, which is
+            // Owned by nothing, so it belongs to neither half naturally and one
+            // has to be chosen. It fires the sessions event, which is
             // where the flat sidebar list's churn already goes; see the note on
             // `fingerprint_halves`.
             dux_core::viewmodel::TerminalOwnerView::Standalone { .. } => true,
@@ -3567,9 +3563,9 @@ fn launch_agent(engine: &mut Engine, subscribed_id: &str) -> Result<(), String> 
         // The chokepoint (`Command::DispatchAgentLaunch`) refuses a launch for a
         // closing session (or an in-flight collision) by returning
         // `Ok(view { launched: false, .. })`, not an `Err`. Ignoring `view.launched`
-        // used to swallow that refusal silently: never logged, never surfaced to the
-        // caller, leaving `PendingSubscribe` to fail-fast later with a generic
-        // "check dux.log" message and nothing in the log to check. Surface the
+        // swallows that refusal silently: never logged, never surfaced, leaving
+        // `PendingSubscribe` to fail-fast later with a generic "check dux.log"
+        // message and nothing in the log to check. Surface the
         // refusal as an `Err` here so it is logged and reported like the extra-tab
         // branch below.
         if let EventReaction::DispatchAgentLaunchView(view) = &reaction
@@ -3936,12 +3932,11 @@ mod tests {
 
     #[test]
     fn launch_agent_surfaces_closing_session_refusal_as_err() {
-        // G4 regression: the session-slot branch of `launch_agent` used to
-        // dispatch `DispatchAgentLaunch` and ignore the returned view's
-        // `launched` flag, so the chokepoint's closing-session refusal (which
-        // comes back as `Ok(view { launched: false, .. })`, not an `Err`) was
-        // silently swallowed. It must now surface as an `Err` carrying the
-        // refusal's status message.
+        // The chokepoint's closing-session refusal comes back as
+        // `Ok(view { launched: false, .. })`, not an `Err`; the session-slot
+        // branch of `launch_agent` must surface it as an `Err` carrying the
+        // refusal's status message rather than reading only the dispatch
+        // result.
         let (_tmp, paths) = temp_paths();
         {
             let store = dux_core::storage::SessionStore::open(&paths.sessions_db_path).unwrap();
@@ -4320,9 +4315,8 @@ mod tests {
 
     #[test]
     fn the_published_snapshot_always_matches_the_controller_and_is_never_spuriously_empty() {
-        // Answers, deterministically, the question a container harness raised:
-        // can a connection's connect-time replay ever observe an EMPTY snapshot
-        // while an operation's status is open?
+        // Answers, deterministically: can a connection's connect-time replay
+        // ever observe an EMPTY snapshot while an operation's status is open?
         //
         // No. The watch has no intermediate state (a `send` swaps the value
         // atomically and `borrow` returns a whole value), and the only empty
@@ -4457,7 +4451,7 @@ mod tests {
         // A Busy that outlives LAUNCH_TIMEOUT is upgraded to Warning and
         // broadcast live so the client sees the spinner stop. Both slots are
         // covered: a KEYED busy and the ANONYMOUS one, whose upgrade path is a
-        // separate branch in `tick` and was previously pinned only in core.
+        // separate branch in `tick`.
         let (tx, mut rx) = broadcast::channel::<WireStatus>(16);
         let (clear_tx, _crx) = broadcast::channel::<Option<String>>(16);
         let (snap_tx, snap_rx) = watch::channel::<Vec<KeyedWireStatus>>(vec![]);
@@ -4658,13 +4652,11 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Terminals moved out of `sessions[].terminals` / `projects[].terminals`
-    // into one flat, owner-tagged collection. They used to move the coarse
-    // fingerprint of whichever half they were nested in, purely by being nested
-    // there; these pin that the SAME half still moves now that the split is an
-    // explicit partition by owner. Without it a terminal's label, foreground
-    // command, working flag or drag order could change with no coarse event
-    // firing at all, and no client would ever refetch.
+    // Terminals are one flat, owner-tagged collection; these pin that a
+    // terminal change moves the coarse fingerprint of its OWNER's half. Without
+    // that, a terminal's label, foreground command, working flag or drag order
+    // could change with no coarse event firing at all, and no client would ever
+    // refetch.
     // -----------------------------------------------------------------------
 
     fn empty_spine() -> dux_core::viewmodel::SpineView {
@@ -5444,10 +5436,9 @@ mod tests {
         (tmp, engine, id)
     }
 
-    /// The browser forwards a wheel notch to a child that owns the mouse. The
-    /// handler used to drop it on the floor (it only stamped writes that count
-    /// as typing), so the repaint the child answered with read as the agent
-    /// working, and an idle agent showed Working for as long as you scrolled.
+    /// A forwarded wheel notch must stamp the pointer window: unstamped, the
+    /// repaint the child answers with reads as the agent working, and an idle
+    /// agent shows Working for as long as you scroll.
     #[test]
     fn a_forwarded_wheel_stamps_the_pointer_window() {
         let (_tmp, mut engine, id) = engine_with_terminal();
@@ -5528,9 +5519,8 @@ mod tests {
     ///
     /// This list is NOT what makes the gate exhaustive (the wildcard-free `match`
     /// in `request_mutates_spine` is, and adding a variant breaks the build until
-    /// somebody answers for it). What it pins is the ANSWERS: a silent revert to
-    /// the old five-name `matches!` would flip the mutators below back to `false`
-    /// and fail here.
+    /// somebody answers for it). What it pins is the ANSWERS: an arm that
+    /// silently answers `false` for a mutator below fails here.
     fn request_kind_answers() -> Vec<(&'static str, EngineRequest, bool)> {
         vec![
             (

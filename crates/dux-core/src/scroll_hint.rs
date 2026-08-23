@@ -28,9 +28,9 @@
 /// The furthest offset that still fills the viewport: everything below is
 /// already on screen at this offset.
 ///
-/// The `total.saturating_sub(viewport)` every surface used to hand-roll, in one
-/// place. Saturating, so a viewport taller than the content clamps to 0 instead
-/// of underflowing.
+/// The one shared home for `total.saturating_sub(viewport)`, so no surface
+/// hand-rolls it. Saturating, so a viewport taller than the content clamps to 0
+/// instead of underflowing.
 #[must_use]
 pub fn max_scroll_offset(viewport: usize, total: usize) -> usize {
     total.saturating_sub(viewport)

@@ -1,7 +1,5 @@
 //! Two stateless "utility" reads the add-project / new-agent dialogs need
-//! (Phase 6 of the REST-first migration). These used to ride the retired `/ws`
-//! request/reply pairs (`browse_dir` → `dir_entries`, `generate_agent_name` →
-//! `agent_name`); they are now plain unauthenticated GETs.
+//! Plain unauthenticated GETs.
 //!
 //! - `GET /api/v1/browse?path=` — directory listing for the add-project picker.
 //!   An absent (or empty) `path` resolves the configured `defaults.start_directory`
@@ -91,7 +89,7 @@ async fn browse(State(state): State<AppState>, Query(query): Query<BrowseQuery>)
     // configured default": resolve `defaults.start_directory` (with the shared
     // fallback chain) from the LIVE engine config, so the picker honors the
     // setting and reflects an explicit reload. If the engine is gone, fall back to
-    // `$HOME` (then `/`), exactly as the old `BrowseDir` handler did.
+    // `$HOME` (then `/`).
     let dir = match query.path.filter(|p| !p.is_empty()) {
         Some(p) => p,
         None => match state.engine.browse_start_dir().await {
@@ -246,7 +244,7 @@ struct AgentNameReply {
 
 async fn agent_name(State(_state): State<AppState>) -> Response {
     // Pure, fast, and self-contained: answer directly without round-tripping
-    // through the engine thread (the old `GenerateAgentName` precedent).
+    // through the engine thread.
     let name = dux_core::git::docker_style_name();
     Json(AgentNameReply { name }).into_response()
 }

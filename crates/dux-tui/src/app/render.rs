@@ -161,7 +161,6 @@ pub(crate) fn agent_row_branch_segment(session: &AgentSession) -> Option<String>
 /// so the two surfaces never disagree): `needs_attention` -> "Needs you", else
 /// `typing` -> "Typing", else `working` -> "Working", else "Idle". Typing and
 /// working never apply to a non-Active session, so Detached/Exited win outright.
-/// When the web phase lands, mirror this exact ordering there.
 pub(crate) fn agent_state_word(
     status: crate::model::SessionStatus,
     working: bool,
@@ -3060,39 +3059,25 @@ impl App {
                 self.drop_drifted_selection();
                 scrollback_offset = self.snapshot_buf.scrollback_offset;
 
-                // Deliberately NO `Clear.render(term_area, ..)` here. This used
-                // to clear the pane whenever the offset differed from the
-                // previous frame's, to stop stale cells lingering in ratatui's
-                // diff buffer. Measured against ratatui 0.30: it cannot linger
-                // and the clear cannot help.
-                //
-                // `Terminal::swap_buffers` calls `reset()` on the buffer the
+                // Deliberately NO `Clear.render(term_area, ..)` here.
+                // `Terminal::swap_buffers` (measured against ratatui 0.30)
+                // calls `reset()` on the buffer the
                 // next frame draws into, and `Clear` is exactly `Cell::reset()`
-                // per cell, so the clear only redid work the frame start had
-                // already done. What it did NOT redo is the frame-wide `app_bg`
-                // fill, which runs before this: a reset cell's background is
-                // `Color::Reset` (the host terminal's default). The loop below
-                // paints every snapshot cell's colors verbatim, but it skips
-                // `WIDE_CHAR_SPACER` cells and anything outside the child's
-                // grid, and those skipped cells rely on the frame-wide fill.
-                // The clear stripped the theme colour off exactly those cells,
-                // and only on the frames where it fired, so the pane flickered.
-                //
-                // It used to fire on a single frame per user scroll, which
-                // nobody could see. Now output always flows and the terminal
-                // library holds a scrolled-back view still by incrementing the
-                // offset per arriving line, so it fired on nearly every frame
-                // and the pane background visibly flipped while the agent
-                // talked. Measured at 1800 of 1815 pane cells falling to the
-                // terminal default, pinned by
+                // per cell, so a clear is redundant, and harmful: a reset cell's
+                // background is `Color::Reset` (the host default), the loop
+                // below skips `WIDE_CHAR_SPACER` cells and anything outside the
+                // child's grid, and those skipped cells rely on the frame-wide
+                // `app_bg` fill that runs before this. A clear strips the theme
+                // colour off exactly those cells; while scrolled back the offset
+                // moves on nearly every frame, so the pane visibly flickers.
+                // Pinned by
                 // `agent_pane_background_survives_a_scrollback_offset_change`.
                 //
-                // Wide-character spacers do not need it either: the snapshot
-                // skips `WIDE_CHAR_SPACER` cells, but a skipped cell is already
-                // blank from the frame reset, and `Buffer::diff` widens its
-                // invalidation window by `max(current, previous)` symbol width,
-                // so a wide glyph replaced by a narrow one still repaints its
-                // trailing cell.
+                // Wide-character spacers need no clear either: a skipped cell is
+                // already blank from the frame reset, and `Buffer::diff` widens
+                // its invalidation window by `max(current, previous)` symbol
+                // width, so a wide glyph replaced by a narrow one still repaints
+                // its trailing cell.
 
                 // Read once, from the same snapshot the cells below come from,
                 // so every cell in this frame is translated against one scroll
@@ -3371,7 +3356,7 @@ impl App {
                 spans.push(Span::styled(" fullscreen  ", desc_style));
                 spans.extend(self.theme.dim_key_badge_default(&next_pane));
                 spans.push(Span::styled(" next pane", desc_style));
-                // Decision 6 says the surviving tab-switch chords are loud in
+                // The surviving tab-switch chords are loud in
                 // HINTS, not only docs: with plain arrows now typing into the
                 // agent, the chords are the only tab keys left, so an agent
                 // with something to switch to names the next-tab chord here.
@@ -12301,7 +12286,7 @@ mod tests {
         assert_ne!(osc8_link_id(uri), osc8_link_id("https://other.example"));
     }
 
-    /// F6 regression: closing the session-slot tab (`is_main`) while other
+    /// Closing the session-slot tab (`is_main`) while other
     /// tabs are live must show the non-destructive copy, not the "can't
     /// reopen this exact conversation" destructive copy meant for extra tabs.
     #[test]
@@ -12778,7 +12763,7 @@ mod tests {
         );
     }
 
-    /// Decision 7: every pill leads with its strip ordinal — the visible
+    /// Every pill leads with its strip ordinal, the visible
     /// address the tab switch keys count against — and the ordinal is a
     /// POSITION, never a stable id: closing a tab renumbers every pill after
     /// it. Position 4 renders like any other (its Ctrl-4 default is absent
@@ -12929,7 +12914,7 @@ mod tests {
         }
     }
 
-    /// F1 regression: a custom provider label made of double-width CJK glyphs
+    /// A custom provider label made of double-width CJK glyphs
     /// must be measured by real display columns (unicode-width), not
     /// `chars().count()`. A char-count-based width undercounts "克劳德" (3
     /// chars, 6 display columns) by half, so the label would overflow its
@@ -12977,12 +12962,10 @@ mod tests {
         );
     }
 
-    /// F2 regression: in a narrow pane with long labels, the focused tab must
-    /// always be at least partially visible (dot or truncated label
-    /// rendered), regardless of which tab index is focused. Previously an
-    /// over-wide focused segment starved the scroll-into-view loop, walking
-    /// `start` straight past `focused_idx` and leaving the focused tab
-    /// entirely off-screen.
+    /// In a narrow pane with long labels, the focused tab must always be at
+    /// least partially visible (dot or truncated label rendered), regardless of
+    /// which tab index is focused. An over-wide focused segment must not starve
+    /// the scroll-into-view loop into walking `start` past `focused_idx`.
     #[test]
     fn tab_strip_keeps_focused_tab_visible_for_every_focus_index_in_narrow_pane() {
         use ratatui::Terminal;
@@ -13150,7 +13133,7 @@ mod tests {
         );
     }
 
-    /// F3 regression: the active-tab dot must come from the one shared glyph
+    /// The active-tab dot must come from the one shared glyph
     /// source in `theme.rs`, not a re-literaled `"●"` in render.rs.
     #[test]
     fn tab_active_dot_reuses_shared_theme_glyph() {
@@ -13158,10 +13141,9 @@ mod tests {
         assert_eq!(crate::theme::DOT_GLYPH, "●");
     }
 
-    /// F4 regression: a tab's rendered width must not depend on whether it is
-    /// focused. Previously only the focused tab carried the dot glyph, making
-    /// it 2 columns wider than an unfocused tab and causing the strip to
-    /// reflow/jitter as focus moved between tabs.
+    /// A tab's rendered width must not depend on whether it is focused. A dot
+    /// carried only by the focused tab makes it 2 columns wider than an
+    /// unfocused one, so the strip reflows/jitters as focus moves.
     #[test]
     fn tab_strip_segment_width_is_focus_independent() {
         use ratatui::Terminal;
@@ -13431,7 +13413,7 @@ mod tests {
     }
 
     /// With two or more tabs the typeable hint names the tab-switch chord
-    /// (decision 6: the surviving chords are loud in HINTS, not only docs).
+    /// (the surviving chords are loud in HINTS, not only docs).
     #[test]
     fn typeable_pane_hint_names_the_tab_switch_chord_with_two_tabs() {
         use ratatui::Terminal;

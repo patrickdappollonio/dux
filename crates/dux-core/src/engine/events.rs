@@ -371,8 +371,8 @@ pub struct AgentLaunchReadyOutcome {
     pub pty_size: (u16, u16),
     pub detached_session_id: Option<String>,
     /// Copied from `AgentLaunchRequest::wants_fullscreen`: the TUI lands this
-    /// completion fullscreen when `true` and focused-but-minimized otherwise
-    /// (decision 10). The web never reads it.
+    /// completion fullscreen when `true` and focused-but-minimized otherwise.
+    /// The web never reads it.
     pub wants_fullscreen: bool,
     pub view: AgentLaunchReadyView,
 }
@@ -2000,8 +2000,8 @@ impl Engine {
     ///
     /// On failure (the reload could not be parsed, OR it parsed but could not be
     /// applied to engine state) the in-memory config is unchanged (still current),
-    /// so the deferred user commands are re-applied against it rather than dropped
-    /// (F6). The reload-failed reaction is placed LAST in the returned `Multi` so
+    /// so the deferred user commands are re-applied against it rather than dropped.
+    /// The reload-failed reaction is placed LAST in the returned `Multi` so
     /// its error status wins the surface's status line instead of being overwritten
     /// by a deferred save's success message.
     fn process_config_reload_ready(&mut self, result: Result<Config, String>) -> EventReaction {
@@ -2067,8 +2067,8 @@ impl Engine {
         // Step 3: re-apply each deferred command now that the barrier is closed.
         // Each re-mutates the current config and eager-writes — the deferred write
         // is therefore the LAST write to disk. On a failed reload the config is
-        // unchanged/current, so re-applying against it is still correct (F6:
-        // deferred commands are never dropped). Collect status reactions so the
+        // unchanged/current, so re-applying against it is still correct: deferred
+        // commands are never dropped. Collect status reactions so the
         // surface still reports each save's success/failure.
         let mut deferred_reactions = Vec::new();
         for command in deferred {
@@ -4304,7 +4304,7 @@ mod tests {
 
     #[test]
     fn revert_optimistic_rename_unwinds_title_marker_and_expectation() {
-        // F1: on a synchronous worker-spawn failure no `BranchRenameCompleted`
+        // On a synchronous worker-spawn failure no `BranchRenameCompleted`
         // fires, so the call site must unwind the optimistic state itself.
         // `revert_optimistic_rename` restores the title, clears the in-flight
         // marker, and drops the expected-branch stash — otherwise the Busy would
@@ -4838,7 +4838,7 @@ mod tests {
         );
     }
 
-    /// The full detach cycle from the review: pin a FORK PR, accept one pinned
+    /// The full detach cycle: pin a FORK PR, accept one pinned
     /// sync result, detach, and check what the next cycle would do. Under the
     /// detach-suppresses-everything rule the session is simply absent from the
     /// snapshot, so there is no cycle to smuggle the fork into; the residue
@@ -5421,7 +5421,7 @@ mod tests {
 
     #[test]
     fn process_agent_launch_failed_tab_is_silent_for_a_ghost_tab() {
-        // F10 regression: an extra tab whose row was deleted (closed by the
+        // An extra tab whose row was deleted (closed by the
         // user) while its launch was in flight must not be treated as a real
         // failure — no ERROR log's worth of user-facing warning, and no
         // redundant `delete_agent_tab` call against a row that is already
